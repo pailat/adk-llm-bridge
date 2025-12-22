@@ -7,7 +7,7 @@ Examples of using `adk-llm-bridge` with Google ADK and Vercel AI Gateway.
 | Example                           | Description                                      |
 | --------------------------------- | ------------------------------------------------ |
 | [basic-agent](./basic-agent)      | ADK DevTools with FunctionTool                   |
-| [express-server](./express-server)| HTTP API Server with Express                     |
+| [express-server](./express-server)| Full-featured HTTP API with tools, state & streaming |
 
 ## Quick Start
 
@@ -25,7 +25,14 @@ bun run web
 
 ### express-server
 
-HTTP API server exposing agent as REST endpoints (production pattern):
+Full-featured HTTP API server demonstrating ADK best practices:
+
+**Features:**
+- Session management with state persistence
+- FunctionTool with ToolContext (state access)
+- Artifact and memory services
+- Token-level streaming
+- Session history endpoints
 
 ```bash
 cd examples/express-server
@@ -38,20 +45,36 @@ bun run start
 Then test with curl:
 
 ```bash
-# Run agent (JSON response)
+# Basic chat
 curl -X POST http://localhost:3000/run \
   -H "Content-Type: application/json" \
   -d '{"userId": "user-1", "message": "Hello!"}'
 
-# Run agent with SSE streaming (event-level)
+# Use the notepad tool to save notes (persists in state)
+curl -X POST http://localhost:3000/run \
+  -H "Content-Type: application/json" \
+  -d '{"userId": "user-1", "message": "Save a note that my favorite color is blue"}'
+
+# Ask what time it is (uses get_current_time tool)
+curl -X POST http://localhost:3000/run \
+  -H "Content-Type: application/json" \
+  -d '{"userId": "user-1", "message": "What time is it?"}'
+
+# SSE streaming (event-level)
 curl -X POST http://localhost:3000/run_sse \
   -H "Content-Type: application/json" \
   -d '{"userId": "user-1", "message": "Tell me a story"}'
 
-# Run agent with token-level streaming (real-time tokens)
+# Token-level streaming (real-time tokens)
 curl -X POST http://localhost:3000/run_sse \
   -H "Content-Type: application/json" \
   -d '{"userId": "user-1", "message": "Tell me a story", "streaming": true}'
+
+# List user sessions
+curl http://localhost:3000/sessions/user-1
+
+# Get session history
+curl "http://localhost:3000/session/SESSION_ID?userId=user-1"
 ```
 
 ## Important: adk-devtools Bundling
@@ -74,18 +97,7 @@ export const rootAgent = new LlmAgent({
 });
 ```
 
-For programmatic usage (without adk-devtools), you can use `AIGateway()` directly:
-
-```typescript
-import { LlmAgent } from "@google/adk";
-import { AIGateway } from "adk-llm-bridge";
-
-const agent = new LlmAgent({
-  name: "my_agent",
-  model: AIGateway("anthropic/claude-sonnet-4"), // Works in programmatic usage
-  instruction: "You are helpful.",
-});
-```
+**Note:** This bundling issue also affects programmatic usage with `Runner`. Always use `LLMRegistry.register()` + string model names when using ADK's `Runner` class. See `express-server/index.ts` for the recommended pattern.
 
 ## Important: Run from example directory
 
