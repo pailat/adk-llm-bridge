@@ -1,5 +1,5 @@
 import { FunctionTool, LlmAgent, LLMRegistry } from "@google/adk";
-import { AIGatewayLlm } from "../../src";
+import { AIGatewayLlm } from "adk-llm-bridge";
 import { z } from "zod";
 
 // Register AIGatewayLlm with the LLMRegistry from this bundle

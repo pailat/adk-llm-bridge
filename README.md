@@ -7,7 +7,7 @@ Connect [Google ADK](https://github.com/google/adk-typescript) to [Vercel AI Gat
 
 ## Why?
 
-Google ADK is great for building AI agents, but it only supports Gemini models natively. This package lets you use **any model** from Vercel AI Gateway (Claude, GPT-4, Llama, Mistral, etc.) while keeping all ADK features like multi-agent orchestration, tool calling, and streaming.
+[Google ADK TypeScript](https://github.com/google/adk-typescript) only supports Gemini models natively (unlike the Python version which has LiteLLM integration). This package bridges that gap, letting you use **any model** from Vercel AI Gateway (Claude, GPT-4, Llama, Mistral, etc.) while keeping all ADK features like multi-agent orchestration, tool calling, and streaming.
 
 ## Installation
 

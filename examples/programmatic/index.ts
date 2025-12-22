@@ -4,7 +4,7 @@
  * Run from project root: bun run examples/programmatic/index.ts
  */
 import { LlmAgent, Runner, InMemorySessionService } from "@google/adk";
-import { AIGatewayLlm } from "../../src";
+import { AIGatewayLlm } from "adk-llm-bridge";
 
 // Create the LLM instance directly
 const llm = new AIGatewayLlm({
