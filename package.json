@@ -1,0 +1,65 @@
+{
+  "name": "adk-llm-bridge",
+  "version": "0.1.0",
+  "description": "Connect Google ADK TypeScript to Vercel AI Gateway and 100+ LLM models",
+  "keywords": [
+    "adk",
+    "google-adk",
+    "ai-gateway",
+    "vercel",
+    "llm",
+    "agents"
+  ],
+  "license": "MIT",
+  "author": "PAI",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pailat/adk-llm-bridge"
+  },
+  "homepage": "https://github.com/pailat/adk-llm-bridge#readme",
+  "bugs": {
+    "url": "https://github.com/pailat/adk-llm-bridge/issues"
+  },
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "build": "bun build ./src/index.ts --outdir ./dist --target node --external '@google/adk' --external '@google/genai' --external 'openai' && bun run build:types",
+    "build:types": "tsc --emitDeclarationOnly --outDir dist",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "typecheck:all": "tsc --noEmit -p tsconfig.test.json",
+    "lint": "biome lint ./src ./tests",
+    "lint:fix": "biome lint --write ./src ./tests",
+    "format": "biome format ./src ./tests",
+    "format:fix": "biome format --write ./src ./tests",
+    "check": "biome check ./src ./tests",
+    "check:fix": "biome check --write ./src ./tests",
+    "ci": "bun run typecheck:all && bun run lint && bun test && bun run build",
+    "prepublishOnly": "bun run build"
+  },
+  "peerDependencies": {
+    "@google/adk": ">=0.2.0"
+  },
+  "dependencies": {
+    "openai": "^4.73.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.3.10",
+    "@google/adk": "^0.2.1",
+    "@types/bun": "latest",
+    "typescript": "^5.3.0"
+  }
+}
