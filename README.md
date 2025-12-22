@@ -182,22 +182,23 @@ deepseek/deepseek-chat
 zai/glm-4.6
 ```
 
-**Any model available in [Vercel AI Gateway](https://sdk.vercel.ai/docs/ai-sdk-core/ai-gateway#supported-models) will work.**
+**Any model available in [Vercel AI Gateway](https://vercel.com/ai-gateway/models) will work.**
 
 ### Popular Providers
 
 | Provider | Examples |
 |----------|----------|
-| Anthropic | `anthropic/claude-sonnet-4`, `anthropic/claude-haiku` |
-| OpenAI | `openai/gpt-4o`, `openai/gpt-4o-mini` |
-| Google | `google/gemini-2.0-flash` |
-| Meta | `meta/llama-3.1-70b-instruct` |
-| Mistral | `mistral/mistral-large` |
-| xAI | `xai/grok-2` |
-| DeepSeek | `deepseek/deepseek-chat` |
-| Zhipu AI | `zai/glm-4.6`, `zai/glm-4.5` |
-| Groq | `groq/llama-3.1-70b` |
+| Anthropic | `anthropic/claude-opus-4`, `anthropic/claude-sonnet-4` |
+| OpenAI | `openai/gpt-4.1`, `openai/o3`, `openai/gpt-4o` |
+| Google | `google/gemini-2.5-pro`, `google/gemini-2.5-flash` |
+| Meta | `meta/llama-4-scout`, `meta/llama-4-maverick` |
+| Mistral | `mistral/mistral-large-2411`, `mistral/pixtral-large` |
+| xAI | `xai/grok-3`, `xai/grok-3-mini` |
+| DeepSeek | `deepseek/deepseek-v3`, `deepseek/deepseek-r1` |
+| Groq | `groq/llama-3.3-70b` |
 | Perplexity | `perplexity/sonar-pro` |
+
+Browse all available models at [Vercel AI Gateway Models](https://vercel.com/ai-gateway/models).
 
 ## Features
 
