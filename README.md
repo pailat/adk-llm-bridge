@@ -26,7 +26,7 @@ npm install adk-llm-bridge @google/adk
 ## Quick Start
 
 ```typescript
-import { LlmAgent } from '@google/adk';
+import { LlmAgent, Runner, InMemorySessionService } from '@google/adk';
 import { AIGateway } from 'adk-llm-bridge';
 
 const agent = new LlmAgent({
@@ -35,7 +35,19 @@ const agent = new LlmAgent({
   instruction: 'You are a helpful assistant.',
 });
 
-const response = await agent.run('Hello!');
+// Run with Runner (programmatic usage)
+const sessionService = new InMemorySessionService();
+const runner = new Runner({ agent, appName: 'my-app', sessionService });
+
+const session = await sessionService.createSession({ appName: 'my-app', userId: 'user-1' });
+
+for await (const event of runner.runAsync({
+  userId: 'user-1',
+  sessionId: session.id,
+  newMessage: { role: 'user', parts: [{ text: 'Hello!' }] },
+})) {
+  console.log(event);
+}
 ```
 
 ## Configuration
@@ -166,23 +178,72 @@ Browse all models at [Vercel AI Gateway Models](https://sdk.vercel.ai/docs/ai-sd
 - **Multi-turn** - Full conversation history support
 - **Usage metadata** - Token counts for monitoring
 
+## Production Usage (HTTP API Server)
+
+ADK doesn't include an HTTP server. For production, create your own API server using Express or similar:
+
+```typescript
+import express from "express";
+import { LlmAgent, Runner, InMemorySessionService } from "@google/adk";
+import { AIGateway } from "adk-llm-bridge";
+
+const agent = new LlmAgent({
+  name: "assistant",
+  model: AIGateway("anthropic/claude-sonnet-4"),
+  instruction: "You are a helpful assistant.",
+});
+
+const sessionService = new InMemorySessionService();
+const runner = new Runner({ agent, appName: "my-app", sessionService });
+
+const app = express();
+app.use(express.json());
+
+app.post("/run", async (req, res) => {
+  const { userId, sessionId, message } = req.body;
+  
+  let session = sessionId 
+    ? await sessionService.getSession({ appName: "my-app", userId, sessionId }).catch(() => null)
+    : null;
+  
+  if (!session) {
+    session = await sessionService.createSession({ appName: "my-app", userId });
+  }
+
+  const events = [];
+  for await (const event of runner.runAsync({
+    userId,
+    sessionId: session.id,
+    newMessage: { role: "user", parts: [{ text: message }] },
+  })) {
+    events.push(event);
+  }
+
+  res.json({ sessionId: session.id, events });
+});
+
+app.listen(3000);
+```
+
+See [examples/express-server](./examples/express-server) for a complete example with SSE streaming and token-level streaming support.
+
 ## Tool Calling Example
 
 ```typescript
-import { LlmAgent } from '@google/adk';
+import { FunctionTool, LlmAgent } from '@google/adk';
 import { AIGateway } from 'adk-llm-bridge';
+import { z } from 'zod';
 
-const getWeather = {
+const getWeather = new FunctionTool({
   name: 'get_weather',
   description: 'Get current weather for a city',
-  parameters: {
-    type: 'object',
-    properties: {
-      city: { type: 'string', description: 'City name' },
-    },
-    required: ['city'],
+  parameters: z.object({
+    city: z.string().describe('City name'),
+  }),
+  execute: ({ city }) => {
+    return { status: 'success', weather: 'sunny', city };
   },
-};
+});
 
 const agent = new LlmAgent({
   name: 'weather-assistant',

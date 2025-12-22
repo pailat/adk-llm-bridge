@@ -52,14 +52,30 @@ bun run ci
 - Use `bun:test` for testing
 - Run `bun test` before submitting a PR
 
+## Branch Strategy
+
+We use a multi-branch workflow:
+
+```
+feature/* → develop → staging → main
+```
+
+| Branch | Purpose |
+|--------|---------|
+| `main` | Production-ready code |
+| `staging` | Pre-production testing |
+| `develop` | Integration branch for features |
+| `feature/*` | Individual feature development |
+
 ## Pull Request Process
 
-1. **Fork the repository** and create your branch from `main`
+1. **Fork the repository** and create your branch from `develop`
 2. **Make your changes** following the code style guidelines
 3. **Add tests** for any new functionality
 4. **Run the CI pipeline** (`bun run ci`) and ensure it passes
 5. **Update documentation** if needed
-6. **Submit a pull request** with a clear description
+6. **Submit a pull request** to `develop` with a clear description
+7. After review and merge to `develop`, changes flow: `develop → staging → main`
 
 ### PR Title Format
 

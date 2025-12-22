@@ -1,0 +1,15 @@
+{
+  "name": "express-server-example",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "bun run index.ts",
+    "dev": "bun run --watch index.ts"
+  },
+  "dependencies": {
+    "@google/adk": "^0.2.0",
+    "@types/express": "^5.0.0",
+    "adk-llm-bridge": "^0.1.0",
+    "express": "^5.0.0"
+  }
+}
