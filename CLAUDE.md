@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-adk-llm-bridge connects [Google ADK](https://github.com/google/adk-typescript) to [Vercel AI Gateway](https://vercel.com/ai-gateway), enabling 100+ LLM models (Claude, GPT-4, Llama, etc.) with ADK agents while preserving features like multi-agent orchestration, tool calling, and streaming.
+adk-llm-bridge connects [Google ADK](https://google.github.io/adk-docs/) ([GitHub](https://github.com/google/adk-js)) to [Vercel AI Gateway](https://vercel.com/ai-gateway), enabling 100+ LLM models (Claude, GPT-4, Llama, etc.) with ADK agents while preserving features like multi-agent orchestration, tool calling, and streaming.
 
 ## Commands
 
