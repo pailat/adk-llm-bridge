@@ -3,11 +3,11 @@
 [![npm version](https://img.shields.io/npm/v/adk-llm-bridge.svg)](https://www.npmjs.com/package/adk-llm-bridge)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Connect [Google ADK](https://github.com/google/adk-typescript) to [Vercel AI Gateway](https://vercel.com/ai-gateway) and 100+ LLM models.
+Connect [Google ADK](https://google.github.io/adk-docs/) to [Vercel AI Gateway](https://vercel.com/ai-gateway) and 100+ LLM models.
 
 ## Why?
 
-[Google ADK TypeScript](https://github.com/google/adk-typescript) only supports Gemini models natively (unlike the Python version which has LiteLLM integration). This package bridges that gap, letting you use **any model** from Vercel AI Gateway (Claude, GPT-4, Llama, Mistral, etc.) while keeping all ADK features like multi-agent orchestration, tool calling, and streaming.
+[Google ADK TypeScript](https://github.com/google/adk-js) only supports Gemini models natively (unlike the Python version which has LiteLLM integration). This package bridges that gap, letting you use **any model** from Vercel AI Gateway (Claude, GPT-4, Llama, Mistral, etc.) while keeping all ADK features like multi-agent orchestration, tool calling, and streaming.
 
 ## Installation
 
