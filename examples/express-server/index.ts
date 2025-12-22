@@ -60,8 +60,12 @@ const notepadTool = new FunctionTool({
   }),
   execute: async (
     { action, content },
-    context: ToolContext,
+    context?: ToolContext,
   ): Promise<Record<string, unknown>> => {
+    if (!context) {
+      return { status: "error", message: "ToolContext is required" };
+    }
+
     const notesKey = "user:notes"; // User-scoped state (persists across sessions)
 
     switch (action) {
@@ -187,13 +191,13 @@ app.get("/", (_req, res) => {
 app.get("/sessions/:userId", async (req, res) => {
   try {
     const { userId } = req.params;
-    const sessions = await sessionService.listSessions({
+    const response = await sessionService.listSessions({
       appName: APP_NAME,
       userId,
     });
     res.json({
       userId,
-      sessions: sessions.map((s) => ({
+      sessions: response.sessions.map((s) => ({
         id: s.id,
         createdAt: s.events?.[0]?.timestamp,
         eventCount: s.events?.length || 0,
