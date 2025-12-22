@@ -9,6 +9,67 @@ Connect [Google ADK](https://google.github.io/adk-docs/) to [Vercel AI Gateway](
 
 [Google ADK TypeScript](https://github.com/google/adk-js) only supports Gemini models natively (unlike the Python version which has LiteLLM integration). This package bridges that gap, letting you use **any model** from Vercel AI Gateway (Claude, GPT-4, Llama, Mistral, etc.) while keeping all ADK features like multi-agent orchestration, tool calling, and streaming.
 
+## How It Works
+
+```mermaid
+flowchart LR
+    subgraph Your App
+        A[LlmAgent] --> B[adk-llm-bridge]
+    end
+    
+    subgraph adk-llm-bridge
+        B --> C[Request Converter]
+        C --> D[OpenAI Client]
+        F[Response Converter] --> B
+    end
+    
+    subgraph Vercel AI Gateway
+        D --> E[AI Gateway API]
+        E --> D
+    end
+    
+    D --> F
+    
+    subgraph LLM Providers
+        E --> G[Anthropic]
+        E --> H[OpenAI]
+        E --> I[Google]
+        E --> J[100+ more...]
+    end
+```
+
+The package converts ADK's internal request format to OpenAI-compatible format, sends it through Vercel AI Gateway, and converts the response back to ADK format.
+
+### Data Conversion
+
+```mermaid
+flowchart TB
+    subgraph ADK Format
+        A1[LlmRequest]
+        A2[systemInstruction]
+        A3["contents[ ]"]
+        A4["tools[ ]"]
+    end
+    
+    subgraph OpenAI Format
+        O1[ChatCompletion Request]
+        O2["messages[ ]"]
+        O3["tools[ ]"]
+    end
+    
+    A1 --> |"convertRequest()"| O1
+    A2 --> |"role: system"| O2
+    A3 --> |"role: user/assistant"| O2
+    A4 --> |"type: function"| O3
+    
+    subgraph Response
+        R1[ChatCompletion Response]
+        R2[LlmResponse]
+    end
+    
+    R1 --> |"convertResponse()"| R2
+```
+
 ## Installation
 
 ```bash
@@ -131,17 +192,31 @@ However, this fails with `Error: No model found for assistant` in bundled enviro
 
 ADK's `LlmAgent` uses `instanceof BaseLlm` to check if the model is valid. When code is bundled:
 
-1. The bundler creates a copy of `BaseLlm` inside the bundle
-2. Your external package (`adk-llm-bridge`) imports `BaseLlm` from `node_modules`
+```mermaid
+flowchart TB
+    subgraph Bundle ["Bundled Code (adk-devtools, webpack, etc.)"]
+        BA[BaseLlm A]
+        LA[LlmAgent]
+        LA --> |"instanceof check"| BA
+    end
+    
+    subgraph NM ["node_modules (external)"]
+        BB[BaseLlm B]
+        AG[AIGatewayLlm]
+        AG --> |"extends"| BB
+    end
+    
+    AG -.-> |"instanceof BaseLlm A?"| BA
+    
+    style BA fill:#ffcccc
+    style BB fill:#ccffcc
+    style AG fill:#ccffcc
+```
+
+1. The bundler creates a copy of `BaseLlm` inside the bundle (BaseLlm A)
+2. Your external package (`adk-llm-bridge`) imports `BaseLlm` from `node_modules` (BaseLlm B)
 3. These are two different class identities in memory
 4. `instanceof` returns `false` even though `AIGatewayLlm` correctly extends `BaseLlm`
-
-```
-Bundled code:     BaseLlm[A] ← LlmAgent checks against this
-External package: BaseLlm[B] ← AIGatewayLlm extends this
-
-AIGatewayLlm instanceof BaseLlm[A] → false ❌
-```
 
 ### The Fix
 
@@ -152,6 +227,24 @@ We've submitted a PR to ADK that adds a duck typing fallback: [google/adk-js#35]
 ### Workaround (Use This)
 
 Use `LLMRegistry.register()` with string model names instead of instances:
+
+```mermaid
+flowchart LR
+    subgraph Setup
+        R[LLMRegistry.register]
+        AG[AIGatewayLlm]
+        R --> |"registers"| AG
+    end
+    
+    subgraph Runtime
+        LA[LlmAgent]
+        S["model: 'anthropic/...'"]
+        LA --> |"resolves string"| LR[LLMRegistry]
+        LR --> |"creates instance"| AG2[AIGatewayLlm instance]
+    end
+    
+    style S fill:#ccffcc
+```
 
 ```typescript
 import { LlmAgent, LLMRegistry } from '@google/adk';
