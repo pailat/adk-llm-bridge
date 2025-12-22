@@ -26,12 +26,15 @@ npm install adk-llm-bridge @google/adk
 ## Quick Start
 
 ```typescript
-import { LlmAgent, Runner, InMemorySessionService } from '@google/adk';
-import { AIGateway } from 'adk-llm-bridge';
+import { LlmAgent, LLMRegistry, Runner, InMemorySessionService } from '@google/adk';
+import { AIGatewayLlm } from 'adk-llm-bridge';
+
+// Register once at startup
+LLMRegistry.register(AIGatewayLlm);
 
 const agent = new LlmAgent({
   name: 'assistant',
-  model: AIGateway('anthropic/claude-sonnet-4'),
+  model: 'anthropic/claude-sonnet-4', // String model name
   instruction: 'You are a helpful assistant.',
 });
 
@@ -59,99 +62,127 @@ AI_GATEWAY_API_KEY=your-api-key
 AI_GATEWAY_URL=https://ai-gateway.vercel.sh/v1  # optional
 ```
 
-### With Options
+### Global Configuration
+
+Configure defaults when registering:
 
 ```typescript
-import { AIGateway } from 'adk-llm-bridge';
+import { LlmAgent, LLMRegistry } from '@google/adk';
+import { AIGatewayLlm, registerAIGateway } from 'adk-llm-bridge';
+
+// Option 1: Register with defaults from env vars
+LLMRegistry.register(AIGatewayLlm);
+
+// Option 2: Register with custom config
+registerAIGateway({
+  apiKey: process.env.MY_API_KEY,
+  baseURL: 'https://my-gateway.example.com/v1',
+});
 
 const agent = new LlmAgent({
   name: 'assistant',
-  model: AIGateway('openai/gpt-4o', {
-    apiKey: process.env.OPENAI_API_KEY,
-    timeout: 30000,
-    maxRetries: 3,
-  }),
+  model: 'anthropic/claude-sonnet-4',
   instruction: 'You are helpful.',
-});
-```
-
-### Multiple Agents with Different Configs
-
-Each agent can have its own API key or configuration:
-
-```typescript
-import { LlmAgent } from '@google/adk';
-import { AIGateway } from 'adk-llm-bridge';
-
-// Agent with production API key
-const prodAgent = new LlmAgent({
-  name: 'prod-assistant',
-  model: AIGateway('anthropic/claude-sonnet-4', { 
-    apiKey: process.env.PROD_API_KEY 
-  }),
-  instruction: 'You are a production assistant.',
-});
-
-// Agent with development API key
-const devAgent = new LlmAgent({
-  name: 'dev-assistant',
-  model: AIGateway('openai/gpt-4o', { 
-    apiKey: process.env.DEV_API_KEY 
-  }),
-  instruction: 'You are a development assistant.',
 });
 ```
 
 ### Using with adk-devtools
 
-When using `adk-devtools` (CLI or web interface), you must register with `LLMRegistry` due to how the tool bundles dependencies:
+Works out of the box with `adk-devtools` (CLI or web interface):
 
 ```typescript
 import { LlmAgent, LLMRegistry } from '@google/adk';
 import { AIGatewayLlm } from 'adk-llm-bridge';
 
-// Required for adk-devtools
 LLMRegistry.register(AIGatewayLlm);
 
 export const rootAgent = new LlmAgent({
   name: 'assistant',
-  model: 'anthropic/claude-sonnet-4', // Use string, not AIGateway()
+  model: 'anthropic/claude-sonnet-4',
   instruction: 'You are helpful.',
 });
 ```
 
-### Using String Model Names (Alternative)
+Then run:
+```bash
+bunx @google/adk-devtools dev agent.ts
+```
 
-If you prefer string-based model names, register once at startup:
+## Known Issue: Direct Instance Usage
+
+### The Problem
+
+Ideally, you should be able to pass an LLM instance directly:
 
 ```typescript
 import { LlmAgent } from '@google/adk';
-import { registerAIGateway } from 'adk-llm-bridge';
+import { AIGateway } from 'adk-llm-bridge';
 
-// Register once (uses AI_GATEWAY_API_KEY from env)
-registerAIGateway();
+// ⚠️ This may fail in bundled environments
+const agent = new LlmAgent({
+  name: 'assistant',
+  model: AIGateway('anthropic/claude-sonnet-4'),
+});
+```
+
+However, this fails with `Error: No model found for assistant` in bundled environments (like `adk-devtools`, webpack, esbuild).
+
+### Why It Happens
+
+ADK's `LlmAgent` uses `instanceof BaseLlm` to check if the model is valid. When code is bundled:
+
+1. The bundler creates a copy of `BaseLlm` inside the bundle
+2. Your external package (`adk-llm-bridge`) imports `BaseLlm` from `node_modules`
+3. These are two different class identities in memory
+4. `instanceof` returns `false` even though `AIGatewayLlm` correctly extends `BaseLlm`
+
+```
+Bundled code:     BaseLlm[A] ← LlmAgent checks against this
+External package: BaseLlm[B] ← AIGatewayLlm extends this
+
+AIGatewayLlm instanceof BaseLlm[A] → false ❌
+```
+
+### The Fix
+
+We've submitted a PR to ADK that adds a duck typing fallback: [google/adk-js#35](https://github.com/google/adk-js/pull/35)
+
+**Current status:** Waiting for review
+
+### Workaround (Use This)
+
+Use `LLMRegistry.register()` with string model names instead of instances:
+
+```typescript
+import { LlmAgent, LLMRegistry } from '@google/adk';
+import { AIGatewayLlm } from 'adk-llm-bridge';
+
+// ✅ This works everywhere
+LLMRegistry.register(AIGatewayLlm);
 
 const agent = new LlmAgent({
   name: 'assistant',
-  model: 'anthropic/claude-sonnet-4', // String works after registration
+  model: 'anthropic/claude-sonnet-4', // String, not AIGateway()
   instruction: 'You are helpful.',
 });
 ```
 
+Once the PR is merged, `AIGateway()` direct instances will work and become the recommended approach.
+
 ## Model Format
 
-Use the `provider/model` format supported by AI Gateway:
+Use the `provider/model` format:
 
-```typescript
-AIGateway('anthropic/claude-sonnet-4')
-AIGateway('openai/gpt-4o')
-AIGateway('google/gemini-2.0-flash')
-AIGateway('zai/glm-4.6')
-AIGateway('xai/grok-2')
-AIGateway('deepseek/deepseek-chat')
+```
+anthropic/claude-sonnet-4
+openai/gpt-4o
+google/gemini-2.0-flash
+xai/grok-2
+deepseek/deepseek-chat
+zai/glm-4.6
 ```
 
-**Any model available in [Vercel AI Gateway](https://sdk.vercel.ai/docs/ai-sdk-core/ai-gateway#supported-models) will work** - no code changes needed when new providers are added.
+**Any model available in [Vercel AI Gateway](https://sdk.vercel.ai/docs/ai-sdk-core/ai-gateway#supported-models) will work.**
 
 ### Popular Providers
 
@@ -168,8 +199,6 @@ AIGateway('deepseek/deepseek-chat')
 | Groq | `groq/llama-3.1-70b` |
 | Perplexity | `perplexity/sonar-pro` |
 
-Browse all models at [Vercel AI Gateway Models](https://sdk.vercel.ai/docs/ai-sdk-core/ai-gateway#supported-models).
-
 ## Features
 
 - **Text generation** - Simple prompt/response
@@ -178,18 +207,53 @@ Browse all models at [Vercel AI Gateway Models](https://sdk.vercel.ai/docs/ai-sd
 - **Multi-turn** - Full conversation history support
 - **Usage metadata** - Token counts for monitoring
 
+## Tool Calling Example
+
+```typescript
+import { FunctionTool, LlmAgent, LLMRegistry } from '@google/adk';
+import { AIGatewayLlm } from 'adk-llm-bridge';
+import { z } from 'zod';
+
+LLMRegistry.register(AIGatewayLlm);
+
+const getWeather = new FunctionTool({
+  name: 'get_weather',
+  description: 'Get current weather for a city',
+  parameters: z.object({
+    city: z.string().describe('City name'),
+  }),
+  execute: ({ city }) => {
+    return { status: 'success', weather: 'sunny', city };
+  },
+});
+
+const agent = new LlmAgent({
+  name: 'weather-assistant',
+  model: 'anthropic/claude-sonnet-4',
+  instruction: 'You help users check the weather.',
+  tools: [getWeather],
+});
+```
+
 ## Production Usage (HTTP API Server)
 
-ADK doesn't include an HTTP server. For production, create your own API server using Express or similar:
+See [examples/express-server](./examples/express-server) for a complete example with:
+- Session management with state persistence
+- Artifact storage
+- Memory service
+- FunctionTool with ToolContext
+- Token-level streaming (SSE)
 
 ```typescript
 import express from "express";
-import { LlmAgent, Runner, InMemorySessionService } from "@google/adk";
-import { AIGateway } from "adk-llm-bridge";
+import { LlmAgent, LLMRegistry, Runner, InMemorySessionService } from "@google/adk";
+import { AIGatewayLlm } from "adk-llm-bridge";
+
+LLMRegistry.register(AIGatewayLlm);
 
 const agent = new LlmAgent({
   name: "assistant",
-  model: AIGateway("anthropic/claude-sonnet-4"),
+  model: "anthropic/claude-sonnet-4",
   instruction: "You are a helpful assistant.",
 });
 
@@ -225,41 +289,36 @@ app.post("/run", async (req, res) => {
 app.listen(3000);
 ```
 
-See [examples/express-server](./examples/express-server) for a complete example with SSE streaming and token-level streaming support.
+## API Reference
 
-## Tool Calling Example
+### `AIGatewayLlm`
+
+The main LLM class for use with `LLMRegistry`:
 
 ```typescript
-import { FunctionTool, LlmAgent } from '@google/adk';
-import { AIGateway } from 'adk-llm-bridge';
-import { z } from 'zod';
+import { LLMRegistry } from '@google/adk';
+import { AIGatewayLlm } from 'adk-llm-bridge';
 
-const getWeather = new FunctionTool({
-  name: 'get_weather',
-  description: 'Get current weather for a city',
-  parameters: z.object({
-    city: z.string().describe('City name'),
-  }),
-  execute: ({ city }) => {
-    return { status: 'success', weather: 'sunny', city };
-  },
-});
-
-const agent = new LlmAgent({
-  name: 'weather-assistant',
-  model: AIGateway('anthropic/claude-sonnet-4'),
-  instruction: 'You help users check the weather.',
-  tools: [getWeather],
-});
+LLMRegistry.register(AIGatewayLlm);
 ```
 
-## API Reference
+### `registerAIGateway(options?)`
+
+Helper to register with custom configuration:
+
+```typescript
+import { registerAIGateway } from 'adk-llm-bridge';
+
+registerAIGateway({ apiKey: 'sk-...' });
+```
 
 ### `AIGateway(model, options?)`
 
-Creates an LLM instance for use with ADK agents.
+Creates an LLM instance directly. See [Known Issue](#known-issue-direct-instance-usage) above.
 
 ```typescript
+import { AIGateway } from 'adk-llm-bridge';
+
 AIGateway('anthropic/claude-sonnet-4')
 AIGateway('openai/gpt-4o', { apiKey: 'sk-...' })
 ```
@@ -271,28 +330,6 @@ AIGateway('openai/gpt-4o', { apiKey: 'sk-...' })
 | `options.baseURL` | `string` | Gateway URL (default: `https://ai-gateway.vercel.sh/v1`) |
 | `options.timeout` | `number` | Request timeout in ms (default: `60000`) |
 | `options.maxRetries` | `number` | Max retry attempts (default: `2`) |
-
-### `registerAIGateway(options?)`
-
-Registers AI Gateway with ADK's LLM registry for string-based model names.
-
-```typescript
-registerAIGateway()
-registerAIGateway({ apiKey: 'sk-...' })
-```
-
-### `AIGatewayLlm`
-
-Direct LLM class for advanced usage (same options as `AIGateway`).
-
-```typescript
-import { AIGatewayLlm } from 'adk-llm-bridge';
-
-const llm = new AIGatewayLlm({
-  model: 'anthropic/claude-sonnet-4',
-  apiKey: 'sk-...',
-});
-```
 
 ## Requirements
 
