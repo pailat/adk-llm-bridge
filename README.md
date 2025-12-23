@@ -11,7 +11,7 @@ Google ADK TypeScript comes with built-in Gemini support. This lightweight bridg
 
 ### Key Benefits
 
-- **Minimal** — ~13KB bundle, single dependency (`openai`)
+- **Minimal** — ~10KB bundle (~3KB gzipped), single dependency (`openai`)
 - **Simple** — 3 lines to integrate any model
 - **Secure** — No complex dependency tree, just the battle-tested OpenAI SDK
 - **Compatible** — Works with any OpenAI-compatible API (AI Gateway, OpenRouter, etc.)
