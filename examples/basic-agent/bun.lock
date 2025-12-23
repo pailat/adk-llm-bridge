@@ -6,7 +6,7 @@
       "name": "basic-agent-example",
       "dependencies": {
         "@google/adk": "^0.2.0",
-        "adk-llm-bridge": "^0.1.0",
+        "adk-llm-bridge": "^0.1.1",
       },
     },
   },
@@ -113,7 +113,7 @@
 
     "accepts": ["accepts@2.0.0", "", { "dependencies": { "mime-types": "^3.0.0", "negotiator": "^1.0.0" } }, "sha512-5cvg6CtKwfgdmVqY1WIiXKc3Q1bkRqGLi+2W/6ao+6Y7gu/RCwRuAhGEzh5B4KlszSuTLgZYuqFqo5bImjNKng=="],
 
-    "adk-llm-bridge": ["adk-llm-bridge@0.1.0", "", { "dependencies": { "openai": "^4.73.0" }, "peerDependencies": { "@google/adk": ">=0.2.0" } }, "sha512-WxWX5hl5SeR85eYK5pXo+ujKhQvr/6Ofj7IsuAozXybienoXxoHiToxTYP4KPVo2r1Z8gL5PgvcJ8JNJeKxjlA=="],
+    "adk-llm-bridge": ["adk-llm-bridge@0.1.1", "", { "dependencies": { "openai": "^4.73.0" }, "peerDependencies": { "@google/adk": ">=0.2.0" } }, "sha512-83LM68ADUeWebvDKADBi6O34yWMg/pY7W+H+gf8leH08/tJ0K7QQNj5iDIHb2OtiYGAUqYUCuNZjndsFqI8CJQ=="],
 
     "agent-base": ["agent-base@7.1.4", "", {}, "sha512-MnA+YT8fwfJPgBx3m60MNqakm30XOkyIoH1y6huTQvC0PwZG7ki8NacLBcrPbNoo8vEZy7Jpuk7+jMO+CUovTQ=="],
 

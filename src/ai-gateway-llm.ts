@@ -17,7 +17,15 @@ import {
 } from "./constants";
 import type { AIGatewayConfig } from "./types";
 
+// Compatibility with @google/adk's BASE_MODEL_SYMBOL (added in adk-js main)
+// The symbol is inherited from BaseLlm at runtime, but TypeScript can't verify it
+// because the symbol is not exported. This declaration satisfies the type checker.
+declare const BASE_MODEL_SYMBOL: unique symbol;
+
 export class AIGatewayLlm extends BaseLlm {
+  // Inherited from BaseLlm - declared for TypeScript compatibility
+  declare readonly [BASE_MODEL_SYMBOL]: true;
+
   private readonly client: OpenAI;
   static readonly supportedModels = MODEL_PATTERNS;
 

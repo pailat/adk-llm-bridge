@@ -14,7 +14,7 @@
         "typescript": "^5.3.0",
       },
       "peerDependencies": {
-        "@google/adk": ">=0.2.0",
+        "@google/adk": "^0.2.1",
       },
     },
   },
