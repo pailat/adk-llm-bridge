@@ -1,5 +1,5 @@
 {
-  "name": "basic-agent-example",
+  "name": "basic-agent-ai-gateway",
   "private": true,
   "type": "module",
   "main": "agent.ts",
@@ -9,6 +9,6 @@
   },
   "dependencies": {
     "@google/adk": "^0.2.0",
-    "adk-llm-bridge": "^0.1.0"
+    "adk-llm-bridge": "link:../.."
   }
 }

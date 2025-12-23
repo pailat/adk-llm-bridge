@@ -2,13 +2,13 @@ import { describe, it, expect, beforeEach, spyOn } from "bun:test";
 import {
   registerAIGateway,
   isAIGatewayRegistered,
-  _resetRegistration,
-} from "../src/register";
-import { getConfig } from "../src/config";
+  _resetAIGatewayRegistration,
+} from "../../../src/providers/ai-gateway/register";
+import { getConfig } from "../../../src/config";
 
 describe("registerAIGateway", () => {
   beforeEach(() => {
-    _resetRegistration();
+    _resetAIGatewayRegistration();
   });
 
   it("sets isAIGatewayRegistered to true after registration", () => {
@@ -54,7 +54,7 @@ describe("registerAIGateway", () => {
 
 describe("isAIGatewayRegistered", () => {
   beforeEach(() => {
-    _resetRegistration();
+    _resetAIGatewayRegistration();
   });
 
   it("returns false before registration", () => {
@@ -67,9 +67,9 @@ describe("isAIGatewayRegistered", () => {
   });
 });
 
-describe("_resetRegistration", () => {
+describe("_resetAIGatewayRegistration", () => {
   beforeEach(() => {
-    _resetRegistration();
+    _resetAIGatewayRegistration();
   });
 
   it("resets registration state and config", () => {
@@ -77,7 +77,7 @@ describe("_resetRegistration", () => {
     expect(isAIGatewayRegistered()).toBe(true);
     expect(getConfig().baseURL).toBe("https://test.com");
 
-    _resetRegistration();
+    _resetAIGatewayRegistration();
     expect(isAIGatewayRegistered()).toBe(false);
     expect(getConfig()).toEqual({});
   });

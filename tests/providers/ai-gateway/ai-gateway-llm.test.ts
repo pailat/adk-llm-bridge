@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from "bun:test";
-import { AIGatewayLlm } from "../src/ai-gateway-llm";
-import { MODEL_PATTERNS } from "../src/constants";
-import { resetConfig } from "../src/config";
+import { AIGatewayLlm } from "../../../src/providers/ai-gateway/ai-gateway-llm";
+import { MODEL_PATTERNS } from "../../../src/constants";
+import { resetConfig } from "../../../src/config";
 
 describe("AIGatewayLlm", () => {
   beforeEach(() => {
@@ -47,7 +47,6 @@ describe("AIGatewayLlm", () => {
   describe("constructor", () => {
     it("uses default base URL when no env vars", () => {
       const llm = new AIGatewayLlm({ model: "anthropic/claude-sonnet-4" });
-      // Just verify it doesn't throw
       expect(llm.model).toBe("anthropic/claude-sonnet-4");
     });
 
