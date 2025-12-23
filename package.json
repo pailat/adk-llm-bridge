@@ -1,6 +1,6 @@
 {
   "name": "adk-llm-bridge",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Connect Google ADK TypeScript to Vercel AI Gateway and 100+ LLM models",
   "keywords": [
     "adk",
