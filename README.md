@@ -11,18 +11,16 @@ Google ADK TypeScript [only supports Gemini models natively](https://github.com/
 
 ### Key Benefits
 
-| | |
-|---|---|
-| **Minimal** | ~13KB bundle, single dependency (`openai`) |
-| **Simple** | 3 lines to integrate any model |
-| **Secure** | No complex dependency tree, just the battle-tested OpenAI SDK |
-| **Compatible** | Works with any OpenAI-compatible API (AI Gateway, OpenRouter, etc.) |
+- **Minimal** — ~13KB bundle, single dependency (`openai`)
+- **Simple** — 3 lines to integrate any model
+- **Secure** — No complex dependency tree, just the battle-tested OpenAI SDK
+- **Compatible** — Works with any OpenAI-compatible API (AI Gateway, OpenRouter, etc.)
 
 ## Supported Providers
 
 | Provider | Models | Features |
 |----------|--------|----------|
-| **[Vercel AI Gateway](https://vercel.com/ai-gateway)** | 100+ models (Claude, GPT-4, Llama, Mistral, etc.) | Simple, fast |
+| **[Vercel AI Gateway](https://vercel.com/ai-gateway)** | 100+ models (Claude, GPT, Llama, Gemini, etc.) | Simple, fast |
 | **[OpenRouter](https://openrouter.ai/)** | 100+ models | Provider routing, fallbacks, price optimization |
 
 ## How It Works
@@ -63,7 +61,7 @@ npm install adk-llm-bridge @google/adk
 
 ## Quick Start
 
-Just 3 lines to use Claude, GPT-4, or any model with ADK:
+Just 3 lines to use Claude, GPT, Gemini, or any model with ADK:
 
 ```typescript
 import { LlmAgent, LLMRegistry } from '@google/adk';
