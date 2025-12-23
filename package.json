@@ -61,6 +61,7 @@
   "devDependencies": {
     "@biomejs/biome": "^2.3.10",
     "@google/adk": "^0.2.1",
+    "@google/genai": "^1.0.0",
     "@types/bun": "latest",
     "typescript": "^5.3.0"
   }
