@@ -7,7 +7,7 @@ Use **any LLM** with [Google ADK TypeScript](https://github.com/google/adk-js) i
 
 ## Why?
 
-Google ADK TypeScript [only supports Gemini models natively](https://github.com/google/adk-js/blob/main/core/src/models/registry.ts#L113) (unlike the Python version which has LiteLLM integration). This lightweight bridge lets you use **any model** from providers like Anthropic, OpenAI, Meta, and more—while keeping all ADK features like multi-agent orchestration, tool calling, and streaming.
+Google ADK TypeScript comes with built-in Gemini support. This lightweight bridge extends it to work with **any model** from providers like Anthropic, OpenAI, Meta, and more—while keeping all ADK features like multi-agent orchestration, tool calling, and streaming.
 
 ### Key Benefits
 
