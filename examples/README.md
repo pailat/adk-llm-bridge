@@ -1,24 +1,37 @@
 # Examples
 
-Examples of using `adk-llm-bridge` with Google ADK and Vercel AI Gateway.
+Examples of using `adk-llm-bridge` with Google ADK and multiple LLM providers.
 
 ## Available Examples
 
-| Example                           | Description                                      |
-| --------------------------------- | ------------------------------------------------ |
-| [basic-agent](./basic-agent)      | ADK DevTools with FunctionTool                   |
-| [express-server](./express-server)| Full-featured HTTP API with tools, state & streaming |
+| Example | Provider | Description |
+|---------|----------|-------------|
+| [basic-agent-ai-gateway](./basic-agent-ai-gateway) | Vercel AI Gateway | Multi-agent HelpDesk with AI Gateway |
+| [basic-agent-openrouter](./basic-agent-openrouter) | OpenRouter | Multi-agent HelpDesk with OpenRouter |
+| [express-server](./express-server) | AI Gateway | Full HTTP API with tools, state & streaming |
 
 ## Quick Start
 
-### basic-agent
+### basic-agent-ai-gateway
 
-Uses ADK DevTools web interface (for development/testing):
+Uses ADK DevTools with Vercel AI Gateway:
 
 ```bash
-cd examples/basic-agent
+cd examples/basic-agent-ai-gateway
 cp .env.example .env
 # Edit .env with your AI_GATEWAY_API_KEY
+bun install
+bun run web
+```
+
+### basic-agent-openrouter
+
+Uses ADK DevTools with OpenRouter:
+
+```bash
+cd examples/basic-agent-openrouter
+cp .env.example .env
+# Edit .env with your OPENROUTER_API_KEY
 bun install
 bun run web
 ```
@@ -79,25 +92,51 @@ curl "http://localhost:3000/session/SESSION_ID?userId=user-1"
 
 ## Important: adk-devtools Bundling
 
-When using `adk-devtools` (CLI or web interface), you **must** register `AIGatewayLlm` with `LLMRegistry` and use string model names instead of `AIGateway()` instances.
+When using `adk-devtools`, you **must** import `LLMRegistry` from `@google/adk` directly and register the LLM class manually. This is because `adk-devtools` bundles its own copy of `@google/adk`.
 
-This is because `adk-devtools` bundles `@google/adk` separately, which causes `instanceof BaseLlm` checks to fail when passing instances directly.
+### AI Gateway
 
 ```typescript
-// Required for adk-devtools
 import { LlmAgent, LLMRegistry } from "@google/adk";
 import { AIGatewayLlm } from "adk-llm-bridge";
 
+// Register with LLMRegistry from YOUR @google/adk import
 LLMRegistry.register(AIGatewayLlm);
 
 export const rootAgent = new LlmAgent({
   name: "my_agent",
-  model: "anthropic/claude-sonnet-4", // Use string, NOT AIGateway()
+  model: "anthropic/claude-sonnet-4",
   instruction: "You are helpful.",
 });
 ```
 
-**Note:** This bundling issue also affects programmatic usage with `Runner`. Always use `LLMRegistry.register()` + string model names when using ADK's `Runner` class. See `express-server/index.ts` for the recommended pattern.
+### OpenRouter
+
+```typescript
+import { LlmAgent, LLMRegistry } from "@google/adk";
+import { OpenRouterLlm } from "adk-llm-bridge";
+
+// Register with LLMRegistry from YOUR @google/adk import
+LLMRegistry.register(OpenRouterLlm);
+
+export const rootAgent = new LlmAgent({
+  name: "my_agent",
+  model: "anthropic/claude-sonnet-4",
+  instruction: "You are helpful.",
+});
+```
+
+### Programmatic Usage (without adk-devtools)
+
+For programmatic usage with ADK's `Runner` class (not using adk-devtools), you can use the convenience functions:
+
+```typescript
+import { registerAIGateway, registerOpenRouter } from "adk-llm-bridge";
+
+// These work when not using adk-devtools bundling
+registerAIGateway();
+registerOpenRouter();
+```
 
 ## Important: Run from example directory
 
@@ -105,15 +144,18 @@ Bun loads `.env` files from the current working directory. Always `cd` into the 
 
 ```bash
 # Correct
-cd examples/basic-agent && bun run web
+cd examples/basic-agent-ai-gateway && bun run web
 
 # Wrong - .env won't be loaded
-bun run examples/basic-agent/agent.ts
+bun run examples/basic-agent-ai-gateway/agent.ts
 ```
 
 ## Environment Variables
 
-| Variable | Description |
-|----------|-------------|
-| `AI_GATEWAY_API_KEY` | Vercel AI Gateway API key |
-| `OPENAI_API_KEY` | OpenAI API key (alternative) |
+| Variable | Provider | Description |
+|----------|----------|-------------|
+| `AI_GATEWAY_API_KEY` | AI Gateway | Vercel AI Gateway API key |
+| `OPENAI_API_KEY` | AI Gateway | OpenAI API key (alternative) |
+| `OPENROUTER_API_KEY` | OpenRouter | OpenRouter API key |
+| `OPENROUTER_SITE_URL` | OpenRouter | Your site URL (for ranking) |
+| `OPENROUTER_APP_NAME` | OpenRouter | Your app name (for ranking) |
