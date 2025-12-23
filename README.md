@@ -169,99 +169,6 @@ Then run:
 bunx @google/adk-devtools dev agent.ts
 ```
 
-## Known Issue: Direct Instance Usage
-
-### The Problem
-
-Ideally, you should be able to pass an LLM instance directly:
-
-```typescript
-import { LlmAgent } from '@google/adk';
-import { AIGateway } from 'adk-llm-bridge';
-
-// ⚠️ This may fail in bundled environments
-const agent = new LlmAgent({
-  name: 'assistant',
-  model: AIGateway('anthropic/claude-sonnet-4'),
-});
-```
-
-However, this fails with `Error: No model found for assistant` in bundled environments (like `adk-devtools`, webpack, esbuild).
-
-### Why It Happens
-
-ADK's `LlmAgent` uses `instanceof BaseLlm` to check if the model is valid. When code is bundled:
-
-```mermaid
-flowchart TB
-    subgraph Bundle ["Bundled Code (adk-devtools, webpack, etc.)"]
-        BA[BaseLlm A]
-        LA[LlmAgent]
-        LA --> |"instanceof check"| BA
-    end
-    
-    subgraph NM ["node_modules (external)"]
-        BB[BaseLlm B]
-        AG[AIGatewayLlm]
-        AG --> |"extends"| BB
-    end
-    
-    AG -.-> |"instanceof BaseLlm A?"| BA
-    
-    style BA fill:#ffcccc
-    style BB fill:#ccffcc
-    style AG fill:#ccffcc
-```
-
-1. The bundler creates a copy of `BaseLlm` inside the bundle (BaseLlm A)
-2. Your external package (`adk-llm-bridge`) imports `BaseLlm` from `node_modules` (BaseLlm B)
-3. These are two different class identities in memory
-4. `instanceof` returns `false` even though `AIGatewayLlm` correctly extends `BaseLlm`
-
-### The Fix
-
-We've submitted a PR to ADK that adds a duck typing fallback: [google/adk-js#35](https://github.com/google/adk-js/pull/35)
-
-**Current status:** Waiting for review
-
-### Workaround (Use This)
-
-Use `LLMRegistry.register()` with string model names instead of instances:
-
-```mermaid
-flowchart LR
-    subgraph Setup
-        R[LLMRegistry.register]
-        AG[AIGatewayLlm]
-        R --> |"registers"| AG
-    end
-    
-    subgraph Runtime
-        LA[LlmAgent]
-        S["model: 'anthropic/...'"]
-        LA --> |"resolves string"| LR[LLMRegistry]
-        LR --> |"creates instance"| AG2[AIGatewayLlm instance]
-    end
-    
-    style S fill:#ccffcc
-```
-
-```typescript
-import { LlmAgent, LLMRegistry } from '@google/adk';
-import { AIGatewayLlm } from 'adk-llm-bridge';
-
-// ✅ This works everywhere
-LLMRegistry.register(AIGatewayLlm);
-
-const agent = new LlmAgent({
-  name: 'assistant',
-  model: 'anthropic/claude-sonnet-4', // String, not AIGateway()
-  instruction: 'You are helpful.',
-});
-```
-
-Once the PR is merged, `AIGateway()` direct instances will work and become the recommended approach.
-
 ## Model Format
 
 Use the `provider/model` format:
@@ -408,13 +315,24 @@ registerAIGateway({ apiKey: 'sk-...' });
 
 ### `AIGateway(model, options?)`
 
-Creates an LLM instance directly. See [Known Issue](#known-issue-direct-instance-usage) above.
+Creates an LLM instance directly for per-agent configuration:
 
 ```typescript
+import { LlmAgent } from '@google/adk';
 import { AIGateway } from 'adk-llm-bridge';
 
-AIGateway('anthropic/claude-sonnet-4')
-AIGateway('openai/gpt-4o', { apiKey: 'sk-...' })
+const agent = new LlmAgent({
+  name: 'assistant',
+  model: AIGateway('anthropic/claude-sonnet-4'),
+  instruction: 'You are helpful.',
+});
+
+// With custom options per agent
+const customAgent = new LlmAgent({
+  name: 'custom',
+  model: AIGateway('openai/gpt-4o', { apiKey: 'sk-...', timeout: 30000 }),
+  instruction: 'You are helpful.',
+});
 ```
 
 | Parameter | Type | Description |
