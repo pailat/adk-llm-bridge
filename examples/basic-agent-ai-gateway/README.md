@@ -156,4 +156,4 @@ const billingAgent = new LlmAgent({
 });
 ```
 
-Supported model formats: `provider/model-name` (e.g., `anthropic/claude-sonnet-4`, `openai/gpt-4o`, `google/gemini-2.0-flash`)
+Supported model formats: `provider/model-name` (e.g., `anthropic/claude-sonnet-4.5`, `openai/gpt-4.1`, `google/gemini-2.5-flash`)

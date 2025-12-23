@@ -51,7 +51,7 @@ You can configure provider preferences programmatically:
 ```typescript
 import { OpenRouter } from "adk-llm-bridge";
 
-const llm = OpenRouter("anthropic/claude-sonnet-4", {
+const llm = OpenRouter("anthropic/claude-sonnet-4.5", {
   provider: {
     sort: "latency",        // or "price", "throughput"
     allow_fallbacks: true,
