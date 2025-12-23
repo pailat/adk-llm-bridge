@@ -2,8 +2,6 @@ import { FunctionTool, LlmAgent, LLMRegistry } from "@google/adk";
 import { AIGatewayLlm } from "adk-llm-bridge";
 import { z } from "zod";
 
-// Register AIGatewayLlm with the LLMRegistry from this bundle
-// This is required for adk-devtools which bundles @google/adk separately
 LLMRegistry.register(AIGatewayLlm);
 
 const getCurrentTime = new FunctionTool({
@@ -22,7 +20,7 @@ const getCurrentTime = new FunctionTool({
 
 export const rootAgent = new LlmAgent({
   name: "time_agent",
-  model: "zai/glm-4.6", // Uses registered AIGatewayLlm
+  model: "anthropic/claude-sonnet-4",
   description: "An agent that tells the current time in any city.",
   instruction: `You are a helpful assistant that tells the current time.
 Use the 'get_current_time' tool when asked about time in a city.`,

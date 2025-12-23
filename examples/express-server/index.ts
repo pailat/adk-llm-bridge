@@ -34,9 +34,6 @@ import {
 import { AIGatewayLlm } from "adk-llm-bridge";
 import { z } from "zod";
 
-// Register AIGatewayLlm with ADK's LLMRegistry
-// This is required because of how module bundling works -
-// instanceof BaseLlm fails when passing instances directly
 LLMRegistry.register(AIGatewayLlm);
 
 const APP_NAME = "express-api";
@@ -141,7 +138,7 @@ const memoryService = new InMemoryMemoryService();
  */
 const agent = new LlmAgent({
   name: "assistant",
-  model: "anthropic/claude-sonnet-4", // Use string model name (resolved via LLMRegistry)
+  model: "anthropic/claude-sonnet-4",
   description: "A helpful assistant that can take notes and tell the time.",
   instruction: `You are a helpful assistant. Be concise in your responses.
 
