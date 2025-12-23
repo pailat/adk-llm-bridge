@@ -138,7 +138,7 @@ const memoryService = new InMemoryMemoryService();
  */
 const agent = new LlmAgent({
   name: "assistant",
-  model: "anthropic/claude-sonnet-4",
+  model: "anthropic/claude-sonnet-4.5",
   description: "A helpful assistant that can take notes and tell the time.",
   instruction: `You are a helpful assistant. Be concise in your responses.
 
@@ -172,7 +172,7 @@ app.get("/", (_req, res) => {
   res.json({
     status: "ok",
     agent: agent.name,
-    model: "anthropic/claude-sonnet-4",
+    model: "anthropic/claude-sonnet-4.5",
     features: [
       "session-management",
       "state-persistence",
@@ -392,7 +392,7 @@ app.listen(port, () => {
 ║                   ADK Agent API Server                       ║
 ╠══════════════════════════════════════════════════════════════╣
 ║  Agent: ${agent.name.padEnd(52)}║
-║  Model: anthropic/claude-sonnet-4                            ║
+║  Model: anthropic/claude-sonnet-4.5                          ║
 ║                                                              ║
 ║  Features:                                                   ║
 ║    ✓ Session management with state                           ║

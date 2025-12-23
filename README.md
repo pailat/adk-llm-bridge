@@ -73,7 +73,7 @@ LLMRegistry.register(AIGatewayLlm);              // 2. Register
 
 const agent = new LlmAgent({                     // 3. Use any model
   name: 'assistant',
-  model: 'anthropic/claude-sonnet-4',            // Claude, GPT-4, Llama, etc.
+  model: 'anthropic/claude-sonnet-4.5',          // Claude, GPT, Llama, etc.
   instruction: 'You are a helpful assistant.',
 });
 ```
@@ -90,7 +90,7 @@ LLMRegistry.register(OpenRouterLlm);
 
 const agent = new LlmAgent({
   name: 'assistant',
-  model: 'anthropic/claude-sonnet-4',
+  model: 'anthropic/claude-sonnet-4.5',
   instruction: 'You are a helpful assistant.',
 });
 ```
@@ -140,14 +140,14 @@ import { AIGateway, OpenRouter } from 'adk-llm-bridge';
 // AI Gateway
 const agent1 = new LlmAgent({
   name: 'assistant',
-  model: AIGateway('anthropic/claude-sonnet-4', { timeout: 30000 }),
+  model: AIGateway('anthropic/claude-sonnet-4.5', { timeout: 30000 }),
   instruction: 'You are helpful.',
 });
 
 // OpenRouter with provider routing
 const agent2 = new LlmAgent({
   name: 'fast-assistant',
-  model: OpenRouter('anthropic/claude-sonnet-4', {
+  model: OpenRouter('anthropic/claude-sonnet-4.5', {
     provider: {
       sort: 'latency',
       allow_fallbacks: true,
@@ -164,7 +164,7 @@ OpenRouter provides additional features not available in AI Gateway:
 ```typescript
 import { OpenRouter } from 'adk-llm-bridge';
 
-const llm = OpenRouter('anthropic/claude-sonnet-4', {
+const llm = OpenRouter('anthropic/claude-sonnet-4.5', {
   // Ranking headers (improves your rate limits)
   siteUrl: 'https://your-site.com',
   appName: 'Your App',
@@ -184,26 +184,26 @@ const llm = OpenRouter('anthropic/claude-sonnet-4', {
 Use the `provider/model` format:
 
 ```
-anthropic/claude-sonnet-4
-openai/gpt-4o
-google/gemini-2.0-flash
-meta/llama-3.1-70b
-mistral/mistral-large
-xai/grok-2
-deepseek/deepseek-chat
+anthropic/claude-opus-4.5
+openai/gpt-5.2-pro
+google/gemini-3-pro
+meta/llama-3.3-70b-instruct
+mistral/mistral-large-3
+xai/grok-4.1
+deepseek/deepseek-r1
 ```
 
 ### Popular Models
 
 | Provider | Models |
 |----------|--------|
-| Anthropic | `anthropic/claude-opus-4`, `anthropic/claude-sonnet-4` |
-| OpenAI | `openai/gpt-4.1`, `openai/o3`, `openai/gpt-4o` |
-| Google | `google/gemini-2.5-pro`, `google/gemini-2.5-flash` |
-| Meta | `meta/llama-4-scout`, `meta/llama-4-maverick` |
-| Mistral | `mistral/mistral-large-2411`, `mistral/pixtral-large` |
-| xAI | `xai/grok-3`, `xai/grok-3-mini` |
-| DeepSeek | `deepseek/deepseek-v3`, `deepseek/deepseek-r1` |
+| Anthropic | `anthropic/claude-sonnet-4.5`, `anthropic/claude-opus-4.5` |
+| OpenAI | `openai/gpt-5.2-pro`, `openai/gpt-4.1`, `openai/o3-mini` |
+| Google | `google/gemini-3-pro`, `google/gemini-3-flash`, `google/gemini-2.5-pro` |
+| Meta | `meta/llama-3.3-70b-instruct`, `meta/llama-3.1-405b-instruct` |
+| Mistral | `mistral/mistral-large-3`, `mistral/mistral-large-2411` |
+| xAI | `xai/grok-4.1`, `xai/grok-4-fast`, `xai/grok-3` |
+| DeepSeek | `deepseek/deepseek-v3.2`, `deepseek/deepseek-r1` |
 
 Browse all models:
 - [Vercel AI Gateway Models](https://vercel.com/ai-gateway/models)
@@ -240,7 +240,7 @@ const getWeather = new FunctionTool({
 
 const agent = new LlmAgent({
   name: 'weather-assistant',
-  model: 'anthropic/claude-sonnet-4',
+  model: 'anthropic/claude-sonnet-4.5',
   instruction: 'You help users check the weather.',
   tools: [getWeather],
 });
@@ -261,7 +261,7 @@ LLMRegistry.register(OpenRouterLlm);
 
 export const rootAgent = new LlmAgent({
   name: 'assistant',
-  model: 'anthropic/claude-sonnet-4',
+  model: 'anthropic/claude-sonnet-4.5',
   instruction: 'You are helpful.',
 });
 ```
