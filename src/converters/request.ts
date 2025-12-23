@@ -1,12 +1,94 @@
+/**
+ * @license
+ * Copyright 2025 PAI
+ * SPDX-License-Identifier: MIT
+ */
+
+/**
+ * Request converter for ADK to OpenAI format.
+ *
+ * This module handles the conversion of ADK LlmRequest objects to
+ * OpenAI-compatible chat completion request format.
+ *
+ * @module converters/request
+ */
+
 import type { LlmRequest } from "@google/adk";
 import type { Content, Part } from "@google/genai";
 import type OpenAI from "openai";
 
+/**
+ * Result of converting an ADK LlmRequest to OpenAI format.
+ *
+ * Contains the converted messages array and optional tools array
+ * ready for use with the OpenAI chat completions API.
+ */
 export interface ConvertedRequest {
+  /**
+   * Array of OpenAI-format chat messages.
+   *
+   * Includes system, user, assistant, and tool messages
+   * converted from ADK Content objects.
+   */
   messages: OpenAI.ChatCompletionMessageParam[];
+
+  /**
+   * Array of OpenAI-format tool definitions.
+   *
+   * Converted from ADK function declarations with schema normalization.
+   */
   tools?: OpenAI.ChatCompletionTool[];
 }
 
+/**
+ * Converts an ADK LlmRequest to OpenAI chat completion format.
+ *
+ * This function handles:
+ * - System instruction extraction
+ * - User and model message conversion
+ * - Function call and response handling
+ * - Tool/function declaration conversion
+ * - Schema normalization (Gemini UPPERCASE to OpenAI lowercase types)
+ *
+ * @param llmRequest - The ADK LlmRequest to convert
+ * @returns The converted request with messages and optional tools
+ *
+ * @example
+ * ```typescript
+ * import { convertRequest } from "adk-llm-bridge";
+ *
+ * const adkRequest: LlmRequest = {
+ *   contents: [{ role: "user", parts: [{ text: "Hello!" }] }],
+ *   config: { systemInstruction: "You are a helpful assistant." }
+ * };
+ *
+ * const { messages, tools } = convertRequest(adkRequest);
+ * // messages = [
+ * //   { role: "system", content: "You are a helpful assistant." },
+ * //   { role: "user", content: "Hello!" }
+ * // ]
+ * ```
+ *
+ * @example
+ * ```typescript
+ * // With tools/functions
+ * const adkRequest: LlmRequest = {
+ *   contents: [...],
+ *   config: {
+ *     tools: [{
+ *       functionDeclarations: [{
+ *         name: "get_weather",
+ *         description: "Get current weather",
+ *         parameters: { type: "OBJECT", properties: { city: { type: "STRING" } } }
+ *       }]
+ *     }]
+ *   }
+ * };
+ *
+ * const { messages, tools } = convertRequest(adkRequest);
+ * // tools[0].function.parameters.type = "object" (normalized from "OBJECT")
+ * ```
+ */
 export function convertRequest(llmRequest: LlmRequest): ConvertedRequest {
   const messages: OpenAI.ChatCompletionMessageParam[] = [];
 
@@ -22,6 +104,16 @@ export function convertRequest(llmRequest: LlmRequest): ConvertedRequest {
   return { messages, tools: convertTools(llmRequest) };
 }
 
+/**
+ * Extracts the system instruction from an LlmRequest.
+ *
+ * Handles both string and Content object formats.
+ *
+ * @param req - The LLM request
+ * @returns The system instruction text, or null if not present
+ *
+ * @internal
+ */
 function extractSystemInstruction(req: LlmRequest): string | null {
   const sys = req.config?.systemInstruction;
   if (!sys) return null;
@@ -30,6 +122,14 @@ function extractSystemInstruction(req: LlmRequest): string | null {
   return null;
 }
 
+/**
+ * Extracts text from an array of Parts.
+ *
+ * @param parts - Array of Part objects
+ * @returns Concatenated text from all text parts
+ *
+ * @internal
+ */
 function extractText(parts: Part[]): string {
   return parts
     .map((p) => p.text)
@@ -37,6 +137,16 @@ function extractText(parts: Part[]): string {
     .join("\n");
 }
 
+/**
+ * Processes a Content object and adds appropriate messages.
+ *
+ * Handles user messages, model responses, function calls, and function responses.
+ *
+ * @param content - The ADK Content object
+ * @param messages - The messages array to append to
+ *
+ * @internal
+ */
 function processContent(
   content: Content,
   messages: OpenAI.ChatCompletionMessageParam[],
@@ -88,6 +198,14 @@ function processContent(
   }
 }
 
+/**
+ * Converts ADK tool declarations to OpenAI format.
+ *
+ * @param req - The LLM request containing tool definitions
+ * @returns Array of OpenAI tool objects, or undefined if no tools
+ *
+ * @internal
+ */
 function convertTools(
   req: LlmRequest,
 ): OpenAI.ChatCompletionTool[] | undefined {
@@ -121,7 +239,21 @@ function convertTools(
 }
 
 /**
- * Normalizes Gemini-style schema (UPPERCASE types) to OpenAI-style (lowercase types)
+ * Normalizes Gemini-style schema to OpenAI-style schema.
+ *
+ * Converts UPPERCASE type names (Gemini format) to lowercase (OpenAI format).
+ * For example: "OBJECT" → "object", "STRING" → "string".
+ *
+ * @param schema - The schema object to normalize
+ * @returns The normalized schema, or undefined if input is invalid
+ *
+ * @internal
+ *
+ * @example
+ * ```typescript
+ * normalizeSchema({ type: "OBJECT", properties: { name: { type: "STRING" } } });
+ * // Returns: { type: "object", properties: { name: { type: "string" } } }
+ * ```
  */
 function normalizeSchema(schema: unknown): Record<string, unknown> | undefined {
   if (!schema || typeof schema !== "object") return undefined;

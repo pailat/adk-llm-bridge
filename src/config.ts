@@ -1,26 +1,95 @@
+/**
+ * @license
+ * Copyright 2025 PAI
+ * SPDX-License-Identifier: MIT
+ */
+
+/**
+ * Global configuration management for LLM providers.
+ *
+ * This module provides functions to set, get, and reset global configuration
+ * that applies to all instances of a provider. Configuration set here acts
+ * as a fallback when instance-specific configuration is not provided.
+ *
+ * Configuration priority (highest to lowest):
+ * 1. Instance configuration (passed to constructor or factory)
+ * 2. Global configuration (set via this module)
+ * 3. Environment variables
+ * 4. Default values
+ *
+ * @module config
+ *
+ * @example
+ * ```typescript
+ * import { setProviderConfig } from "adk-llm-bridge";
+ *
+ * // Set global config for AI Gateway
+ * setProviderConfig("ai-gateway", {
+ *   apiKey: process.env.AI_GATEWAY_API_KEY
+ * });
+ *
+ * // Set global config for OpenRouter
+ * setProviderConfig("openrouter", {
+ *   apiKey: process.env.OPENROUTER_API_KEY,
+ *   siteUrl: "https://myapp.com"
+ * });
+ * ```
+ */
+
 import type { RegisterOptions, OpenRouterRegisterOptions } from "./types";
 
+/**
+ * Mapping of provider identifiers to their configuration types.
+ *
+ * @internal
+ */
 type ProviderConfigMap = {
   "ai-gateway": RegisterOptions;
   openrouter: OpenRouterRegisterOptions;
 };
 
+/**
+ * Valid provider type identifiers.
+ *
+ * @internal
+ */
 type ProviderType = keyof ProviderConfigMap;
 
+/** Internal storage for provider configurations */
 const configs: Partial<Record<ProviderType, ProviderConfigMap[ProviderType]>> =
   {};
 
 // =============================================================================
-// Multi-provider configuration API
+// Multi-provider Configuration API
 // =============================================================================
 
 /**
- * Sets configuration for a specific provider.
+ * Sets global configuration for a specific provider.
+ *
+ * This configuration is used as a fallback when creating LLM instances
+ * without explicit configuration. Instance configuration always takes
+ * precedence over global configuration.
+ *
+ * @param provider - The provider identifier ("ai-gateway" or "openrouter")
+ * @param options - Configuration options for the provider
  *
  * @example
  * ```typescript
- * setProviderConfig("ai-gateway", { apiKey: "..." });
- * setProviderConfig("openrouter", { apiKey: "...", siteUrl: "https://myapp.com" });
+ * // Configure AI Gateway globally
+ * setProviderConfig("ai-gateway", {
+ *   apiKey: "your-api-key",
+ *   baseURL: "https://custom-gateway.example.com/v1"
+ * });
+ * ```
+ *
+ * @example
+ * ```typescript
+ * // Configure OpenRouter with site attribution
+ * setProviderConfig("openrouter", {
+ *   apiKey: "your-api-key",
+ *   siteUrl: "https://myapp.com",
+ *   appName: "My Application"
+ * });
  * ```
  */
 export function setProviderConfig<T extends ProviderType>(
@@ -31,7 +100,18 @@ export function setProviderConfig<T extends ProviderType>(
 }
 
 /**
- * Gets configuration for a specific provider.
+ * Gets the current global configuration for a specific provider.
+ *
+ * @param provider - The provider identifier ("ai-gateway" or "openrouter")
+ * @returns The current configuration, or `undefined` if not set
+ *
+ * @example
+ * ```typescript
+ * const config = getProviderConfig("ai-gateway");
+ * if (config?.apiKey) {
+ *   console.log("AI Gateway is configured");
+ * }
+ * ```
  */
 export function getProviderConfig<T extends ProviderType>(
   provider: T,
@@ -40,7 +120,17 @@ export function getProviderConfig<T extends ProviderType>(
 }
 
 /**
- * Resets configuration for a specific provider.
+ * Resets the global configuration for a specific provider.
+ *
+ * After calling this, the provider will fall back to environment variables
+ * or default values.
+ *
+ * @param provider - The provider identifier ("ai-gateway" or "openrouter")
+ *
+ * @example
+ * ```typescript
+ * resetProviderConfig("ai-gateway");
+ * ```
  */
 export function resetProviderConfig(provider: ProviderType): void {
   delete configs[provider];
@@ -48,6 +138,16 @@ export function resetProviderConfig(provider: ProviderType): void {
 
 /**
  * Resets all provider configurations.
+ *
+ * Useful for testing or when you need to clear all global state.
+ *
+ * @example
+ * ```typescript
+ * // In test teardown
+ * afterEach(() => {
+ *   resetAllConfigs();
+ * });
+ * ```
  */
 export function resetAllConfigs(): void {
   for (const key of Object.keys(configs) as ProviderType[]) {
@@ -61,7 +161,20 @@ export function resetAllConfigs(): void {
 
 /**
  * Sets global configuration for AI Gateway.
- * @deprecated Use `setProviderConfig("ai-gateway", options)` instead.
+ *
+ * @param options - Configuration options
+ *
+ * @deprecated Use {@link setProviderConfig | setProviderConfig("ai-gateway", options)} instead.
+ * This function will be removed in a future major version.
+ *
+ * @example
+ * ```typescript
+ * // Old way (deprecated)
+ * setConfig({ apiKey: "..." });
+ *
+ * // New way
+ * setProviderConfig("ai-gateway", { apiKey: "..." });
+ * ```
  */
 export function setConfig(options: RegisterOptions): void {
   setProviderConfig("ai-gateway", options);
@@ -69,7 +182,11 @@ export function setConfig(options: RegisterOptions): void {
 
 /**
  * Gets global configuration for AI Gateway.
- * @deprecated Use `getProviderConfig("ai-gateway")` instead.
+ *
+ * @returns The current AI Gateway configuration
+ *
+ * @deprecated Use {@link getProviderConfig | getProviderConfig("ai-gateway")} instead.
+ * This function will be removed in a future major version.
  */
 export function getConfig(): Readonly<RegisterOptions> {
   return getProviderConfig("ai-gateway") ?? {};
@@ -77,7 +194,9 @@ export function getConfig(): Readonly<RegisterOptions> {
 
 /**
  * Resets global configuration for AI Gateway.
- * @deprecated Use `resetProviderConfig("ai-gateway")` instead.
+ *
+ * @deprecated Use {@link resetProviderConfig | resetProviderConfig("ai-gateway")} instead.
+ * This function will be removed in a future major version.
  */
 export function resetConfig(): void {
   resetProviderConfig("ai-gateway");
