@@ -3,11 +3,27 @@
 [![npm version](https://img.shields.io/npm/v/adk-llm-bridge.svg)](https://www.npmjs.com/package/adk-llm-bridge)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Connect [Google ADK](https://google.github.io/adk-docs/) to [Vercel AI Gateway](https://vercel.com/ai-gateway) and 100+ LLM models.
+Use **any LLM** with [Google ADK TypeScript](https://github.com/google/adk-js) in just a few lines of code.
 
 ## Why?
 
-[Google ADK TypeScript](https://github.com/google/adk-js) only supports Gemini models natively (unlike the Python version which has LiteLLM integration). This package bridges that gap, letting you use **any model** from Vercel AI Gateway (Claude, GPT-4, Llama, Mistral, etc.) while keeping all ADK features like multi-agent orchestration, tool calling, and streaming.
+Google ADK TypeScript [only supports Gemini models natively](https://github.com/google/adk-js/blob/main/core/src/models/registry.ts#L113) (unlike the Python version which has LiteLLM integration). This lightweight bridge lets you use **any model** from providers like Anthropic, OpenAI, Meta, and more—while keeping all ADK features like multi-agent orchestration, tool calling, and streaming.
+
+### Key Benefits
+
+| | |
+|---|---|
+| **Minimal** | ~13KB bundle, single dependency (`openai`) |
+| **Simple** | 3 lines to integrate any model |
+| **Secure** | No complex dependency tree, just the battle-tested OpenAI SDK |
+| **Compatible** | Works with any OpenAI-compatible API (AI Gateway, OpenRouter, etc.) |
+
+## Supported Providers
+
+| Provider | Models | Features |
+|----------|--------|----------|
+| **[Vercel AI Gateway](https://vercel.com/ai-gateway)** | 100+ models (Claude, GPT-4, Llama, Mistral, etc.) | Simple, fast |
+| **[OpenRouter](https://openrouter.ai/)** | 100+ models | Provider routing, fallbacks, price optimization |
 
 ## How It Works
 
@@ -18,57 +34,18 @@ flowchart LR
     end
     
     subgraph adk-llm-bridge
-        B --> C[Request Converter]
-        C --> D[OpenAI Client]
-        F[Response Converter] --> B
+        B --> C[AIGatewayLlm]
+        B --> D[OpenRouterLlm]
     end
     
-    subgraph Vercel AI Gateway
-        D --> E[AI Gateway API]
-        E --> D
-    end
+    C --> E[Vercel AI Gateway]
+    D --> F[OpenRouter]
     
-    D --> F
-    
-    subgraph LLM Providers
-        E --> G[Anthropic]
-        E --> H[OpenAI]
-        E --> I[Google]
-        E --> J[100+ more...]
-    end
+    E --> G[Anthropic / OpenAI / Google / ...]
+    F --> G
 ```
 
-The package converts ADK's internal request format to OpenAI-compatible format, sends it through Vercel AI Gateway, and converts the response back to ADK format.
-
-### Data Conversion
-
-```mermaid
-flowchart TB
-    subgraph ADK Format
-        A1[LlmRequest]
-        A2[systemInstruction]
-        A3["contents[ ]"]
-        A4["tools[ ]"]
-    end
-    
-    subgraph OpenAI Format
-        O1[ChatCompletion Request]
-        O2["messages[ ]"]
-        O3["tools[ ]"]
-    end
-    
-    A1 --> |"convertRequest()"| O1
-    A2 --> |"role: system"| O2
-    A3 --> |"role: user/assistant"| O2
-    A4 --> |"type: function"| O3
-    
-    subgraph Response
-        R1[ChatCompletion Response]
-        R2[LlmResponse]
-    end
-    
-    R1 --> |"convertResponse()"| R2
-```
+The package converts ADK's internal request format to OpenAI-compatible format, sends it through your chosen gateway, and converts the response back to ADK format.
 
 ## Installation
 
@@ -86,87 +63,120 @@ npm install adk-llm-bridge @google/adk
 
 ## Quick Start
 
-```typescript
-import { LlmAgent, LLMRegistry, Runner, InMemorySessionService } from '@google/adk';
-import { AIGatewayLlm } from 'adk-llm-bridge';
+Just 3 lines to use Claude, GPT-4, or any model with ADK:
 
-// Register once at startup
-LLMRegistry.register(AIGatewayLlm);
+```typescript
+import { LlmAgent, LLMRegistry } from '@google/adk';
+import { AIGatewayLlm } from 'adk-llm-bridge';  // 1. Import
+
+LLMRegistry.register(AIGatewayLlm);              // 2. Register
+
+const agent = new LlmAgent({                     // 3. Use any model
+  name: 'assistant',
+  model: 'anthropic/claude-sonnet-4',            // Claude, GPT-4, Llama, etc.
+  instruction: 'You are a helpful assistant.',
+});
+```
+
+That's it. All ADK features work: tools, streaming, multi-agent, etc.
+
+### With OpenRouter
+
+```typescript
+import { LlmAgent, LLMRegistry } from '@google/adk';
+import { OpenRouterLlm } from 'adk-llm-bridge';
+
+LLMRegistry.register(OpenRouterLlm);
 
 const agent = new LlmAgent({
   name: 'assistant',
-  model: 'anthropic/claude-sonnet-4', // String model name
+  model: 'anthropic/claude-sonnet-4',
   instruction: 'You are a helpful assistant.',
 });
-
-// Run with Runner (programmatic usage)
-const sessionService = new InMemorySessionService();
-const runner = new Runner({ agent, appName: 'my-app', sessionService });
-
-const session = await sessionService.createSession({ appName: 'my-app', userId: 'user-1' });
-
-for await (const event of runner.runAsync({
-  userId: 'user-1',
-  sessionId: session.id,
-  newMessage: { role: 'user', parts: [{ text: 'Hello!' }] },
-})) {
-  console.log(event);
-}
 ```
 
 ## Configuration
 
-### Environment Variables (Recommended)
+### Environment Variables
 
+**AI Gateway:**
 ```bash
 AI_GATEWAY_API_KEY=your-api-key
 AI_GATEWAY_URL=https://ai-gateway.vercel.sh/v1  # optional
 ```
 
-### Global Configuration
+**OpenRouter:**
+```bash
+OPENROUTER_API_KEY=your-api-key
+OPENROUTER_SITE_URL=https://your-site.com  # optional, for ranking
+OPENROUTER_APP_NAME=Your App Name          # optional, for ranking
+```
 
-Configure defaults when registering:
+### Programmatic Configuration
 
 ```typescript
-import { LlmAgent, LLMRegistry } from '@google/adk';
-import { AIGatewayLlm, registerAIGateway } from 'adk-llm-bridge';
+import { registerAIGateway, registerOpenRouter } from 'adk-llm-bridge';
 
-// Option 1: Register with defaults from env vars
-LLMRegistry.register(AIGatewayLlm);
-
-// Option 2: Register with custom config
+// AI Gateway
 registerAIGateway({
   apiKey: process.env.MY_API_KEY,
   baseURL: 'https://my-gateway.example.com/v1',
 });
 
-const agent = new LlmAgent({
-  name: 'assistant',
-  model: 'anthropic/claude-sonnet-4',
-  instruction: 'You are helpful.',
+// OpenRouter
+registerOpenRouter({
+  apiKey: process.env.OPENROUTER_API_KEY,
+  siteUrl: 'https://your-site.com',
+  appName: 'Your App',
 });
 ```
 
-### Using with adk-devtools
-
-Works out of the box with `adk-devtools` (CLI or web interface):
+### Factory Functions (Per-Agent Config)
 
 ```typescript
-import { LlmAgent, LLMRegistry } from '@google/adk';
-import { AIGatewayLlm } from 'adk-llm-bridge';
+import { LlmAgent } from '@google/adk';
+import { AIGateway, OpenRouter } from 'adk-llm-bridge';
 
-LLMRegistry.register(AIGatewayLlm);
-
-export const rootAgent = new LlmAgent({
+// AI Gateway
+const agent1 = new LlmAgent({
   name: 'assistant',
-  model: 'anthropic/claude-sonnet-4',
+  model: AIGateway('anthropic/claude-sonnet-4', { timeout: 30000 }),
+  instruction: 'You are helpful.',
+});
+
+// OpenRouter with provider routing
+const agent2 = new LlmAgent({
+  name: 'fast-assistant',
+  model: OpenRouter('anthropic/claude-sonnet-4', {
+    provider: {
+      sort: 'latency',
+      allow_fallbacks: true,
+    },
+  }),
   instruction: 'You are helpful.',
 });
 ```
 
-Then run:
-```bash
-bunx @google/adk-devtools dev agent.ts
+## OpenRouter Features
+
+OpenRouter provides additional features not available in AI Gateway:
+
+```typescript
+import { OpenRouter } from 'adk-llm-bridge';
+
+const llm = OpenRouter('anthropic/claude-sonnet-4', {
+  // Ranking headers (improves your rate limits)
+  siteUrl: 'https://your-site.com',
+  appName: 'Your App',
+  
+  // Provider routing
+  provider: {
+    order: ['Anthropic', 'Google'],  // Prefer specific providers
+    sort: 'latency',                  // or 'price', 'throughput'
+    allow_fallbacks: true,            // Fallback if primary fails
+    data_collection: 'deny',          // Opt-out of data collection
+  },
+});
 ```
 
 ## Model Format
@@ -177,17 +187,16 @@ Use the `provider/model` format:
 anthropic/claude-sonnet-4
 openai/gpt-4o
 google/gemini-2.0-flash
+meta/llama-3.1-70b
+mistral/mistral-large
 xai/grok-2
 deepseek/deepseek-chat
-zai/glm-4.6
 ```
 
-**Any model available in [Vercel AI Gateway](https://vercel.com/ai-gateway/models) will work.**
+### Popular Models
 
-### Popular Providers
-
-| Provider | Examples |
-|----------|----------|
+| Provider | Models |
+|----------|--------|
 | Anthropic | `anthropic/claude-opus-4`, `anthropic/claude-sonnet-4` |
 | OpenAI | `openai/gpt-4.1`, `openai/o3`, `openai/gpt-4o` |
 | Google | `google/gemini-2.5-pro`, `google/gemini-2.5-flash` |
@@ -195,10 +204,10 @@ zai/glm-4.6
 | Mistral | `mistral/mistral-large-2411`, `mistral/pixtral-large` |
 | xAI | `xai/grok-3`, `xai/grok-3-mini` |
 | DeepSeek | `deepseek/deepseek-v3`, `deepseek/deepseek-r1` |
-| Groq | `groq/llama-3.3-70b` |
-| Perplexity | `perplexity/sonar-pro` |
 
-Browse all available models at [Vercel AI Gateway Models](https://vercel.com/ai-gateway/models).
+Browse all models:
+- [Vercel AI Gateway Models](https://vercel.com/ai-gateway/models)
+- [OpenRouter Models](https://openrouter.ai/models)
 
 ## Features
 
@@ -206,6 +215,7 @@ Browse all available models at [Vercel AI Gateway Models](https://vercel.com/ai-
 - **Streaming** - Real-time token streaming
 - **Tool calling** - Function calling with automatic conversion
 - **Multi-turn** - Full conversation history support
+- **Multi-agent** - Sub-agents and agent transfer
 - **Usage metadata** - Token counts for monitoring
 
 ## Tool Calling Example
@@ -236,112 +246,84 @@ const agent = new LlmAgent({
 });
 ```
 
-## Production Usage (HTTP API Server)
+## Using with adk-devtools
 
-See [examples/express-server](./examples/express-server) for a complete example with:
-- Session management with state persistence
-- Artifact storage
-- Memory service
-- FunctionTool with ToolContext
-- Token-level streaming (SSE)
+When using `adk-devtools`, import `LLMRegistry` from `@google/adk` directly:
 
 ```typescript
-import express from "express";
-import { LlmAgent, LLMRegistry, Runner, InMemorySessionService } from "@google/adk";
-import { AIGatewayLlm } from "adk-llm-bridge";
+import { LlmAgent, LLMRegistry } from '@google/adk';
+import { AIGatewayLlm, OpenRouterLlm } from 'adk-llm-bridge';
 
+// Register the provider you want to use
 LLMRegistry.register(AIGatewayLlm);
+// or
+LLMRegistry.register(OpenRouterLlm);
 
-const agent = new LlmAgent({
-  name: "assistant",
-  model: "anthropic/claude-sonnet-4",
-  instruction: "You are a helpful assistant.",
+export const rootAgent = new LlmAgent({
+  name: 'assistant',
+  model: 'anthropic/claude-sonnet-4',
+  instruction: 'You are helpful.',
 });
+```
 
-const sessionService = new InMemorySessionService();
-const runner = new Runner({ agent, appName: "my-app", sessionService });
-
-const app = express();
-app.use(express.json());
-
-app.post("/run", async (req, res) => {
-  const { userId, sessionId, message } = req.body;
-  
-  let session = sessionId 
-    ? await sessionService.getSession({ appName: "my-app", userId, sessionId }).catch(() => null)
-    : null;
-  
-  if (!session) {
-    session = await sessionService.createSession({ appName: "my-app", userId });
-  }
-
-  const events = [];
-  for await (const event of runner.runAsync({
-    userId,
-    sessionId: session.id,
-    newMessage: { role: "user", parts: [{ text: message }] },
-  })) {
-    events.push(event);
-  }
-
-  res.json({ sessionId: session.id, events });
-});
-
-app.listen(3000);
+Then run:
+```bash
+bunx @google/adk-devtools web
 ```
 
 ## API Reference
 
-### `AIGatewayLlm`
+### Classes
 
-The main LLM class for use with `LLMRegistry`:
+| Class | Description |
+|-------|-------------|
+| `AIGatewayLlm` | LLM class for Vercel AI Gateway |
+| `OpenRouterLlm` | LLM class for OpenRouter |
 
-```typescript
-import { LLMRegistry } from '@google/adk';
-import { AIGatewayLlm } from 'adk-llm-bridge';
+### Factory Functions
 
-LLMRegistry.register(AIGatewayLlm);
-```
+| Function | Description |
+|----------|-------------|
+| `AIGateway(model, options?)` | Create AI Gateway LLM instance |
+| `OpenRouter(model, options?)` | Create OpenRouter LLM instance |
 
-### `registerAIGateway(options?)`
+### Registration Functions
 
-Helper to register with custom configuration:
+| Function | Description |
+|----------|-------------|
+| `registerAIGateway(options?)` | Register AIGatewayLlm with LLMRegistry |
+| `registerOpenRouter(options?)` | Register OpenRouterLlm with LLMRegistry |
 
-```typescript
-import { registerAIGateway } from 'adk-llm-bridge';
+### Configuration Options
 
-registerAIGateway({ apiKey: 'sk-...' });
-```
+**AIGateway / AIGatewayLlm:**
 
-### `AIGateway(model, options?)`
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `apiKey` | `string` | `process.env.AI_GATEWAY_API_KEY` | API key |
+| `baseURL` | `string` | `https://ai-gateway.vercel.sh/v1` | Gateway URL |
+| `timeout` | `number` | `60000` | Request timeout (ms) |
+| `maxRetries` | `number` | `2` | Max retry attempts |
 
-Creates an LLM instance directly for per-agent configuration:
+**OpenRouter / OpenRouterLlm:**
 
-```typescript
-import { LlmAgent } from '@google/adk';
-import { AIGateway } from 'adk-llm-bridge';
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `apiKey` | `string` | `process.env.OPENROUTER_API_KEY` | API key |
+| `baseURL` | `string` | `https://openrouter.ai/api/v1` | API URL |
+| `siteUrl` | `string` | `process.env.OPENROUTER_SITE_URL` | Your site URL (for ranking) |
+| `appName` | `string` | `process.env.OPENROUTER_APP_NAME` | Your app name (for ranking) |
+| `provider` | `object` | - | Provider routing preferences |
+| `timeout` | `number` | `60000` | Request timeout (ms) |
+| `maxRetries` | `number` | `2` | Max retry attempts |
 
-const agent = new LlmAgent({
-  name: 'assistant',
-  model: AIGateway('anthropic/claude-sonnet-4'),
-  instruction: 'You are helpful.',
-});
+## Examples
 
-// With custom options per agent
-const customAgent = new LlmAgent({
-  name: 'custom',
-  model: AIGateway('openai/gpt-4o', { apiKey: 'sk-...', timeout: 30000 }),
-  instruction: 'You are helpful.',
-});
-```
+See the [examples](./examples) directory:
 
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `model` | `string` | Model identifier (e.g., `anthropic/claude-sonnet-4`) |
-| `options.apiKey` | `string` | API key (default: `process.env.AI_GATEWAY_API_KEY`) |
-| `options.baseURL` | `string` | Gateway URL (default: `https://ai-gateway.vercel.sh/v1`) |
-| `options.timeout` | `number` | Request timeout in ms (default: `60000`) |
-| `options.maxRetries` | `number` | Max retry attempts (default: `2`) |
+- **[basic-agent-ai-gateway](./examples/basic-agent-ai-gateway)** - Multi-agent HelpDesk with AI Gateway
+- **[basic-agent-openrouter](./examples/basic-agent-openrouter)** - Multi-agent HelpDesk with OpenRouter
+- **[express-server](./examples/express-server)** - Production HTTP API with sessions, streaming, tools
 
 ## Requirements
 

@@ -1,9 +1,9 @@
 import { describe, it, expect, beforeEach } from "bun:test";
-import { AIGateway } from "../src/ai-gateway";
-import { AIGatewayLlm } from "../src/ai-gateway-llm";
-import { resetConfig } from "../src/config";
+import { AIGateway } from "../../../src/providers/ai-gateway/factory";
+import { AIGatewayLlm } from "../../../src/providers/ai-gateway/ai-gateway-llm";
+import { resetConfig } from "../../../src/config";
 
-describe("AIGateway", () => {
+describe("AIGateway factory", () => {
   beforeEach(() => {
     resetConfig();
     delete process.env.AI_GATEWAY_URL;
