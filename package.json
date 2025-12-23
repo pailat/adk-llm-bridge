@@ -39,7 +39,7 @@
   },
   "scripts": {
     "build": "bun build ./src/index.ts --outdir ./dist --target node --external '@google/adk' --external '@google/genai' --external 'openai' && bun run build:types",
-    "build:types": "tsc --emitDeclarationOnly --outDir dist",
+    "build:types": "tsc --project tsconfig.build.json",
     "test": "bun test",
     "typecheck": "tsc --noEmit",
     "typecheck:all": "tsc --noEmit -p tsconfig.test.json",
