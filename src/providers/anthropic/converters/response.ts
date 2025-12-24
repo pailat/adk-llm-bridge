@@ -36,6 +36,12 @@ export interface AnthropicStreamAccumulator {
 
   /** Current content block index being processed */
   currentBlockIndex: number;
+
+  /** Input tokens from message_start event */
+  inputTokens?: number;
+
+  /** Output tokens accumulated during streaming */
+  outputTokens?: number;
 }
 
 /**
@@ -98,6 +104,8 @@ export function createAnthropicStreamAccumulator(): AnthropicStreamAccumulator {
     text: "",
     toolUses: new Map(),
     currentBlockIndex: -1,
+    inputTokens: undefined,
+    outputTokens: undefined,
   };
 }
 
@@ -113,6 +121,22 @@ export function convertAnthropicStreamEvent(
   acc: AnthropicStreamAccumulator,
 ): AnthropicStreamResult {
   switch (event.type) {
+    case "message_start": {
+      // Capture input tokens from message_start event
+      if (event.message?.usage?.input_tokens) {
+        acc.inputTokens = event.message.usage.input_tokens;
+      }
+      return { isComplete: false };
+    }
+
+    case "message_delta": {
+      // Capture output tokens from message_delta event
+      if (event.usage?.output_tokens) {
+        acc.outputTokens = event.usage.output_tokens;
+      }
+      return { isComplete: false };
+    }
+
     case "content_block_start": {
       acc.currentBlockIndex = event.index;
 
@@ -171,15 +195,29 @@ export function convertAnthropicStreamEvent(
         }
       }
 
+      // Build usage metadata if available
+      const hasUsage =
+        acc.inputTokens !== undefined || acc.outputTokens !== undefined;
+      const usageMetadata = hasUsage
+        ? {
+            promptTokenCount: acc.inputTokens ?? 0,
+            candidatesTokenCount: acc.outputTokens ?? 0,
+            totalTokenCount: (acc.inputTokens ?? 0) + (acc.outputTokens ?? 0),
+          }
+        : undefined;
+
       // Reset accumulator
       acc.text = "";
       acc.toolUses.clear();
       acc.currentBlockIndex = -1;
+      acc.inputTokens = undefined;
+      acc.outputTokens = undefined;
 
       return {
         response: {
           content: parts.length ? { role: "model", parts } : undefined,
           turnComplete: true,
+          usageMetadata,
         },
         isComplete: true,
       };

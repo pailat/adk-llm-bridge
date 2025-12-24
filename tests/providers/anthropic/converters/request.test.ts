@@ -260,6 +260,9 @@ describe("convertAnthropicRequest", () => {
 
       expect(result.messages).toHaveLength(2);
       expect(result.messages[0].role).toBe("user");
+      expect(result.messages[0].content).toBe(
+        "[System: Continue conversation]",
+      );
       expect(result.messages[1].role).toBe("assistant");
     });
 
