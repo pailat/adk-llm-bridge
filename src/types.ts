@@ -392,6 +392,129 @@ export interface CustomLlmConfig extends BaseProviderConfig {
 }
 
 // =============================================================================
+// OpenAI Provider Types
+// =============================================================================
+
+/**
+ * Configuration options for the OpenAI provider.
+ *
+ * Extends {@link BaseProviderConfig} with OpenAI-specific options
+ * for organization and project identification.
+ *
+ * @example
+ * ```typescript
+ * const config: OpenAIProviderConfig = {
+ *   model: "gpt-4.1",
+ *   apiKey: process.env.OPENAI_API_KEY,
+ *   organization: "org-xxx",
+ *   project: "proj-xxx"
+ * };
+ * ```
+ *
+ * @see {@link BaseProviderConfig} for inherited options
+ * @see {@link OpenAI} for the factory function
+ */
+export interface OpenAIProviderConfig extends BaseProviderConfig {
+  /**
+   * OpenAI organization ID.
+   *
+   * Sent as the `OpenAI-Organization` header for organization-scoped requests.
+   *
+   * @example "org-xxx"
+   */
+  organization?: string;
+
+  /**
+   * OpenAI project ID.
+   *
+   * Sent as the `OpenAI-Project` header for project-scoped requests.
+   *
+   * @example "proj-xxx"
+   */
+  project?: string;
+}
+
+/**
+ * Options for registering OpenAI with ADK's LLMRegistry.
+ *
+ * These options apply to all models created through the registry.
+ *
+ * @example
+ * ```typescript
+ * registerOpenAI({
+ *   apiKey: process.env.OPENAI_API_KEY,
+ *   organization: "org-xxx"
+ * });
+ * ```
+ */
+export interface OpenAIRegisterOptions {
+  /**
+   * API key for authentication.
+   *
+   * @defaultValue process.env.OPENAI_API_KEY
+   */
+  apiKey?: string;
+
+  /**
+   * OpenAI organization ID.
+   *
+   * @example "org-xxx"
+   */
+  organization?: string;
+
+  /**
+   * OpenAI project ID.
+   *
+   * @example "proj-xxx"
+   */
+  project?: string;
+}
+
+// =============================================================================
+// xAI Provider Types
+// =============================================================================
+
+/**
+ * Configuration options for the xAI (Grok) provider.
+ *
+ * Extends {@link BaseProviderConfig} with no additional options.
+ * xAI uses standard OpenAI-compatible configuration.
+ *
+ * @example
+ * ```typescript
+ * const config: XAIProviderConfig = {
+ *   model: "grok-4",
+ *   apiKey: process.env.XAI_API_KEY
+ * };
+ * ```
+ *
+ * @see {@link BaseProviderConfig} for inherited options
+ * @see {@link XAI} for the factory function
+ */
+export interface XAIProviderConfig extends BaseProviderConfig {}
+
+/**
+ * Options for registering xAI with ADK's LLMRegistry.
+ *
+ * These options apply to all models created through the registry.
+ *
+ * @example
+ * ```typescript
+ * registerXAI({
+ *   apiKey: process.env.XAI_API_KEY
+ * });
+ * ```
+ */
+export interface XAIRegisterOptions {
+  /**
+   * API key for authentication.
+   *
+   * @defaultValue process.env.XAI_API_KEY
+   */
+  apiKey?: string;
+}
+
+// =============================================================================
 // Streaming Types (shared)
 // =============================================================================
 

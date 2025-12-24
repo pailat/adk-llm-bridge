@@ -36,7 +36,12 @@
  * ```
  */
 
-import type { RegisterOptions, OpenRouterRegisterOptions } from "./types";
+import type {
+  RegisterOptions,
+  OpenRouterRegisterOptions,
+  OpenAIRegisterOptions,
+  XAIRegisterOptions,
+} from "./types";
 
 /**
  * Mapping of provider identifiers to their configuration types.
@@ -46,6 +51,8 @@ import type { RegisterOptions, OpenRouterRegisterOptions } from "./types";
 type ProviderConfigMap = {
   "ai-gateway": RegisterOptions;
   openrouter: OpenRouterRegisterOptions;
+  openai: OpenAIRegisterOptions;
+  xai: XAIRegisterOptions;
 };
 
 /**
