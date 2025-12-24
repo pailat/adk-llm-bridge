@@ -10,6 +10,8 @@
  * This module exports all supported LLM providers:
  * - **AI Gateway**: Vercel's unified gateway for 100+ models
  * - **OpenRouter**: Multi-provider routing with fallbacks and optimization
+ * - **OpenAI**: Direct access to OpenAI's API (GPT-4, o1, etc.)
+ * - **xAI**: Direct access to xAI's API (Grok models)
  * - **Custom**: Connect to any compatible API (Ollama, vLLM, Azure, etc.)
  *
  * @module providers
@@ -19,14 +21,20 @@
  * import {
  *   AIGateway,
  *   OpenRouter,
+ *   OpenAI,
+ *   XAI,
  *   createCustomLlm,
  *   Custom,
  *   registerAIGateway,
- *   registerOpenRouter
+ *   registerOpenRouter,
+ *   registerOpenAI,
+ *   registerXAI
  * } from "adk-llm-bridge";
  * ```
  */
 
 export * from "./ai-gateway";
 export * from "./openrouter";
+export * from "./openai";
+export * from "./xai";
 export * from "./custom";

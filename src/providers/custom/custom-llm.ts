@@ -117,9 +117,19 @@ export class CustomLlm extends OpenAICompatibleLlm {
     // Build final URL with query params if provided
     let finalBaseURL = config.baseURL;
     if (config.queryParams && Object.keys(config.queryParams).length > 0) {
-      const params = new URLSearchParams(config.queryParams);
-      const separator = config.baseURL.includes("?") ? "&" : "?";
-      finalBaseURL = `${config.baseURL}${separator}${params.toString()}`;
+      try {
+        // Use URL API for proper URL construction
+        const url = new URL(config.baseURL);
+        for (const [key, value] of Object.entries(config.queryParams)) {
+          url.searchParams.append(key, value);
+        }
+        finalBaseURL = url.toString();
+      } catch {
+        // Fallback for non-standard URLs (e.g., localhost without protocol)
+        const params = new URLSearchParams(config.queryParams);
+        const separator = config.baseURL.includes("?") ? "&" : "?";
+        finalBaseURL = `${config.baseURL}${separator}${params.toString()}`;
+      }
     }
 
     super(config, {
@@ -144,7 +154,10 @@ export class CustomLlm extends OpenAICompatibleLlm {
    * @protected
    */
   protected getErrorPrefix(): string {
-    return this.providerName.toUpperCase().replace(/[^A-Z0-9]/g, "_");
+    const sanitized = this.providerName
+      .toUpperCase()
+      .replace(/[^A-Z0-9]/g, "_");
+    return sanitized || "CUSTOM";
   }
 
   /**

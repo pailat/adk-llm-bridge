@@ -90,6 +90,22 @@ export {
 } from "./providers/openrouter";
 
 // =============================================================================
+// OpenAI Provider
+// =============================================================================
+
+export { OpenAILlm } from "./providers/openai";
+export { OpenAI } from "./providers/openai";
+export { registerOpenAI, isOpenAIRegistered } from "./providers/openai";
+
+// =============================================================================
+// xAI Provider
+// =============================================================================
+
+export { XAILlm } from "./providers/xai";
+export { XAI } from "./providers/xai";
+export { registerXAI, isXAIRegistered } from "./providers/xai";
+
+// =============================================================================
 // Custom LLM Provider (Any Compatible API)
 // =============================================================================
 
@@ -110,6 +126,12 @@ export type {
   OpenRouterConfig,
   OpenRouterProviderPreferences,
   OpenRouterRegisterOptions,
+  // OpenAI types
+  OpenAIProviderConfig,
+  OpenAIRegisterOptions,
+  // xAI types
+  XAIProviderConfig,
+  XAIRegisterOptions,
   // Custom LLM types
   CustomLlmConfig,
   // Streaming types
