@@ -106,6 +106,17 @@ export { XAI } from "./providers/xai";
 export { registerXAI, isXAIRegistered } from "./providers/xai";
 
 // =============================================================================
+// Anthropic Provider
+// =============================================================================
+
+export { AnthropicLlm } from "./providers/anthropic";
+export { Anthropic } from "./providers/anthropic";
+export {
+  registerAnthropic,
+  isAnthropicRegistered,
+} from "./providers/anthropic";
+
+// =============================================================================
 // Custom LLM Provider (Any Compatible API)
 // =============================================================================
 
@@ -132,6 +143,9 @@ export type {
   // xAI types
   XAIProviderConfig,
   XAIRegisterOptions,
+  // Anthropic types
+  AnthropicProviderConfig,
+  AnthropicRegisterOptions,
   // Custom LLM types
   CustomLlmConfig,
   // Streaming types

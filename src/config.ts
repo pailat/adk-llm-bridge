@@ -41,6 +41,7 @@ import type {
   OpenRouterRegisterOptions,
   OpenAIRegisterOptions,
   XAIRegisterOptions,
+  AnthropicRegisterOptions,
 } from "./types";
 
 /**
@@ -53,6 +54,7 @@ type ProviderConfigMap = {
   openrouter: OpenRouterRegisterOptions;
   openai: OpenAIRegisterOptions;
   xai: XAIRegisterOptions;
+  anthropic: AnthropicRegisterOptions;
 };
 
 /**

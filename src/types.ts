@@ -515,6 +515,67 @@ export interface XAIRegisterOptions {
 }
 
 // =============================================================================
+// Anthropic Provider Types
+// =============================================================================
+
+/**
+ * Configuration options for the Anthropic (Claude) provider.
+ *
+ * Extends {@link BaseProviderConfig} with Anthropic-specific options.
+ *
+ * @example
+ * ```typescript
+ * const config: AnthropicProviderConfig = {
+ *   model: "claude-sonnet-4-5-20250929",
+ *   apiKey: process.env.ANTHROPIC_API_KEY,
+ *   maxTokens: 4096
+ * };
+ * ```
+ *
+ * @see {@link BaseProviderConfig} for inherited options
+ * @see {@link Anthropic} for the factory function
+ */
+export interface AnthropicProviderConfig extends BaseProviderConfig {
+  /**
+   * Maximum number of tokens to generate.
+   *
+   * Required by Anthropic API. If not provided, defaults to 4096.
+   *
+   * @defaultValue 4096
+   */
+  maxTokens?: number;
+}
+
+/**
+ * Options for registering Anthropic with ADK's LLMRegistry.
+ *
+ * These options apply to all models created through the registry.
+ *
+ * @example
+ * ```typescript
+ * registerAnthropic({
+ *   apiKey: process.env.ANTHROPIC_API_KEY,
+ *   maxTokens: 8192
+ * });
+ * ```
+ */
+export interface AnthropicRegisterOptions {
+  /**
+   * API key for authentication.
+   *
+   * @defaultValue process.env.ANTHROPIC_API_KEY
+   */
+  apiKey?: string;
+
+  /**
+   * Maximum number of tokens to generate.
+   *
+   * @defaultValue 4096
+   */
+  maxTokens?: number;
+}
+
+// =============================================================================
 // Streaming Types (shared)
 // =============================================================================
 
