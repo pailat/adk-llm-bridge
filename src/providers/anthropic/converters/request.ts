@@ -74,7 +74,7 @@ export function convertAnthropicRequest(
   if (messages.length > 0 && messages[0].role !== "user") {
     messages.unshift({
       role: "user",
-      content: "Continue from where you left off.",
+      content: "[System: Continue conversation]",
     });
   }
 
@@ -122,16 +122,21 @@ function processContent(content: Content): Anthropic.MessageParam | null {
     if (part.functionCall) {
       contentBlocks.push({
         type: "tool_use",
-        id: part.functionCall.id ?? `call_${Date.now()}`,
+        id: part.functionCall.id ?? crypto.randomUUID(),
         name: part.functionCall.name ?? "",
         input: part.functionCall.args ?? {},
       });
     }
 
     if (part.functionResponse) {
+      if (!part.functionResponse.id) {
+        console.warn(
+          "[adk-llm-bridge] functionResponse missing id, using generated ID",
+        );
+      }
       contentBlocks.push({
         type: "tool_result",
-        tool_use_id: part.functionResponse.id ?? "",
+        tool_use_id: part.functionResponse.id ?? crypto.randomUUID(),
         content: JSON.stringify(part.functionResponse.response ?? {}),
       });
     }
@@ -163,8 +168,12 @@ function convertTools(req: LlmRequest): Anthropic.Tool[] | undefined {
       Array.isArray(group.functionDeclarations)
     ) {
       for (const fn of group.functionDeclarations) {
+        if (!fn.name) {
+          console.warn("[adk-llm-bridge] Tool function missing name, skipping");
+          continue;
+        }
         tools.push({
-          name: fn.name ?? "",
+          name: fn.name,
           description: fn.description ?? "",
           input_schema: normalizeSchema(fn.parameters) ?? {
             type: "object",

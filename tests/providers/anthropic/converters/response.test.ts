@@ -152,6 +152,8 @@ describe("createAnthropicStreamAccumulator", () => {
     expect(acc.text).toBe("");
     expect(acc.toolUses.size).toBe(0);
     expect(acc.currentBlockIndex).toBe(-1);
+    expect(acc.inputTokens).toBeUndefined();
+    expect(acc.outputTokens).toBeUndefined();
   });
 });
 
@@ -309,8 +311,8 @@ describe("convertAnthropicStreamEvent", () => {
     });
   });
 
-  describe("unhandled events", () => {
-    it("returns isComplete: false for unhandled events", () => {
+  describe("message_start handling", () => {
+    it("captures input_tokens from message_start event", () => {
       const acc = createAnthropicStreamAccumulator();
       const event: Anthropic.MessageStreamEvent = {
         type: "message_start",
@@ -322,7 +324,7 @@ describe("convertAnthropicStreamEvent", () => {
           model: "claude-sonnet-4-5-20250929",
           stop_reason: null,
           stop_sequence: null,
-          usage: { input_tokens: 10, output_tokens: 0 },
+          usage: { input_tokens: 100, output_tokens: 0 },
         },
       };
 
@@ -330,6 +332,71 @@ describe("convertAnthropicStreamEvent", () => {
 
       expect(result.isComplete).toBe(false);
       expect(result.response).toBeUndefined();
+      expect(acc.inputTokens).toBe(100);
+    });
+  });
+
+  describe("message_delta handling", () => {
+    it("captures output_tokens from message_delta event", () => {
+      const acc = createAnthropicStreamAccumulator();
+      const event: Anthropic.MessageStreamEvent = {
+        type: "message_delta",
+        delta: {
+          stop_reason: "end_turn",
+          stop_sequence: null,
+        },
+        usage: { output_tokens: 50 },
+      };
+
+      const result = convertAnthropicStreamEvent(event, acc);
+
+      expect(result.isComplete).toBe(false);
+      expect(acc.outputTokens).toBe(50);
+    });
+  });
+
+  describe("usage metadata in final response", () => {
+    it("includes usage metadata in message_stop response", () => {
+      const acc = createAnthropicStreamAccumulator();
+      acc.text = "Hello";
+      acc.inputTokens = 100;
+      acc.outputTokens = 50;
+
+      const event: Anthropic.MessageStreamEvent = {
+        type: "message_stop",
+      };
+
+      const result = convertAnthropicStreamEvent(event, acc);
+
+      expect(result.isComplete).toBe(true);
+      expect(result.response?.usageMetadata).toBeDefined();
+      expect(result.response?.usageMetadata?.promptTokenCount).toBe(100);
+      expect(result.response?.usageMetadata?.candidatesTokenCount).toBe(50);
+      expect(result.response?.usageMetadata?.totalTokenCount).toBe(150);
+    });
+
+    it("resets usage tokens after message_stop", () => {
+      const acc = createAnthropicStreamAccumulator();
+      acc.inputTokens = 100;
+      acc.outputTokens = 50;
+
+      convertAnthropicStreamEvent({ type: "message_stop" }, acc);
+
+      expect(acc.inputTokens).toBeUndefined();
+      expect(acc.outputTokens).toBeUndefined();
+    });
+
+    it("omits usage metadata when no tokens captured", () => {
+      const acc = createAnthropicStreamAccumulator();
+      acc.text = "Hello";
+
+      const event: Anthropic.MessageStreamEvent = {
+        type: "message_stop",
+      };
+
+      const result = convertAnthropicStreamEvent(event, acc);
+
+      expect(result.response?.usageMetadata).toBeUndefined();
     });
   });
 });
