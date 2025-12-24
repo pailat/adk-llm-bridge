@@ -298,6 +298,100 @@ export interface OpenRouterRegisterOptions {
 }
 
 // =============================================================================
+// Custom LLM Provider Types
+// =============================================================================
+
+/**
+ * Configuration options for custom LLM providers.
+ *
+ * Use this to connect any API that implements the OpenAI chat completions
+ * interface, such as Ollama, LM Studio, vLLM, Azure OpenAI, or self-hosted models.
+ *
+ * @example
+ * ```typescript
+ * // Ollama
+ * const config: CustomLlmConfig = {
+ *   name: "ollama",
+ *   model: "llama3",
+ *   baseURL: "http://localhost:11434/v1"
+ * };
+ * ```
+ *
+ * @example
+ * ```typescript
+ * // Azure OpenAI
+ * const config: CustomLlmConfig = {
+ *   name: "azure",
+ *   model: "gpt-4",
+ *   baseURL: "https://my-resource.openai.azure.com/openai/deployments/gpt-4",
+ *   headers: { "api-key": process.env.AZURE_API_KEY },
+ *   queryParams: { "api-version": "2024-02-01" }
+ * };
+ * ```
+ *
+ * @see {@link BaseProviderConfig} for inherited options
+ * @see {@link createCustomLlm} for the factory function
+ */
+export interface CustomLlmConfig extends BaseProviderConfig {
+  /**
+   * Provider name for identification in logs and error messages.
+   *
+   * Used to generate error codes like `OLLAMA_ERROR` or `AZURE_ERROR`.
+   *
+   * @defaultValue "CUSTOM"
+   * @example "ollama"
+   * @example "azure"
+   * @example "vllm"
+   */
+  name?: string;
+
+  /**
+   * Additional HTTP headers to include in all requests.
+   *
+   * Useful for custom authentication schemes or provider-specific headers.
+   *
+   * @example
+   * ```typescript
+   * headers: {
+   *   "api-key": process.env.AZURE_API_KEY,
+   *   "X-Custom-Header": "value"
+   * }
+   * ```
+   */
+  headers?: Record<string, string>;
+
+  /**
+   * Query parameters to append to all API requests.
+   *
+   * Required by some providers like Azure OpenAI for API versioning.
+   *
+   * @example
+   * ```typescript
+   * queryParams: {
+   *   "api-version": "2024-02-01"
+   * }
+   * ```
+   */
+  queryParams?: Record<string, string>;
+
+  /**
+   * Additional options to include in the request body.
+   *
+   * These are spread into the chat completion request, allowing
+   * provider-specific parameters beyond the standard OpenAI API.
+   *
+   * @example
+   * ```typescript
+   * providerOptions: {
+   *   temperature: 0.7,
+   *   custom_field: "value"
+   * }
+   * ```
+   */
+  providerOptions?: Record<string, unknown>;
+}
+
+// =============================================================================
 // Streaming Types (shared)
 // =============================================================================
 

@@ -22,6 +22,7 @@ Google ADK TypeScript comes with built-in Gemini support. This lightweight bridg
 |----------|--------|----------|
 | **[Vercel AI Gateway](https://vercel.com/ai-gateway)** | 100+ models (Claude, GPT, Llama, Gemini, etc.) | Simple, fast |
 | **[OpenRouter](https://openrouter.ai/)** | 100+ models | Provider routing, fallbacks, price optimization |
+| **Custom (OpenAI-compatible)** | Any model | Ollama, vLLM, Azure OpenAI, LM Studio, etc. |
 
 ## How It Works
 
@@ -34,13 +35,16 @@ flowchart LR
     subgraph adk-llm-bridge
         B --> C[AIGatewayLlm]
         B --> D[OpenRouterLlm]
+        B --> E[CustomLlm]
     end
     
-    C --> E[Vercel AI Gateway]
-    D --> F[OpenRouter]
+    C --> F[Vercel AI Gateway]
+    D --> G[OpenRouter]
+    E --> H[Any OpenAI-compatible API]
     
-    E --> G[Anthropic / OpenAI / Google / ...]
-    F --> G
+    F --> I[Anthropic / OpenAI / Google / ...]
+    G --> I
+    H --> I
 ```
 
 The package converts ADK's internal request format to OpenAI-compatible format, sends it through your chosen gateway, and converts the response back to ADK format.
@@ -71,7 +75,7 @@ LLMRegistry.register(AIGatewayLlm);              // 2. Register
 
 const agent = new LlmAgent({                     // 3. Use any model
   name: 'assistant',
-  model: 'anthropic/claude-sonnet-4.5',          // Claude, GPT, Llama, etc.
+  model: 'anthropic/claude-sonnet-4',            // Claude, GPT, Llama, etc.
   instruction: 'You are a helpful assistant.',
 });
 ```
@@ -88,7 +92,24 @@ LLMRegistry.register(OpenRouterLlm);
 
 const agent = new LlmAgent({
   name: 'assistant',
-  model: 'anthropic/claude-sonnet-4.5',
+  model: 'anthropic/claude-sonnet-4',
+  instruction: 'You are a helpful assistant.',
+});
+```
+
+### With Custom Provider (Ollama, vLLM, Azure, etc.)
+
+```typescript
+import { LlmAgent } from '@google/adk';
+import { createCustomLlm } from 'adk-llm-bridge';
+
+const agent = new LlmAgent({
+  name: 'assistant',
+  model: createCustomLlm({
+    name: 'ollama',
+    model: 'llama3',
+    baseURL: 'http://localhost:11434/v1',
+  }),
   instruction: 'You are a helpful assistant.',
 });
 ```
@@ -133,24 +154,31 @@ registerOpenRouter({
 
 ```typescript
 import { LlmAgent } from '@google/adk';
-import { AIGateway, OpenRouter } from 'adk-llm-bridge';
+import { AIGateway, OpenRouter, Custom } from 'adk-llm-bridge';
 
 // AI Gateway
 const agent1 = new LlmAgent({
   name: 'assistant',
-  model: AIGateway('anthropic/claude-sonnet-4.5', { timeout: 30000 }),
+  model: AIGateway('anthropic/claude-sonnet-4', { timeout: 30000 }),
   instruction: 'You are helpful.',
 });
 
 // OpenRouter with provider routing
 const agent2 = new LlmAgent({
   name: 'fast-assistant',
-  model: OpenRouter('anthropic/claude-sonnet-4.5', {
+  model: OpenRouter('anthropic/claude-sonnet-4', {
     provider: {
       sort: 'latency',
       allow_fallbacks: true,
     },
   }),
+  instruction: 'You are helpful.',
+});
+
+// Custom provider (Ollama, vLLM, etc.)
+const agent3 = new LlmAgent({
+  name: 'local-assistant',
+  model: Custom('llama3', { baseURL: 'http://localhost:11434/v1' }),
   instruction: 'You are helpful.',
 });
 ```
@@ -162,7 +190,7 @@ OpenRouter provides additional features not available in AI Gateway:
 ```typescript
 import { OpenRouter } from 'adk-llm-bridge';
 
-const llm = OpenRouter('anthropic/claude-sonnet-4.5', {
+const llm = OpenRouter('anthropic/claude-sonnet-4', {
   // Ranking headers (improves your rate limits)
   siteUrl: 'https://your-site.com',
   appName: 'Your App',
@@ -182,26 +210,26 @@ const llm = OpenRouter('anthropic/claude-sonnet-4.5', {
 Use the `provider/model` format:
 
 ```
-anthropic/claude-opus-4.5
-openai/gpt-5.2-pro
-google/gemini-3-pro
-meta/llama-3.3-70b-instruct
+anthropic/claude-sonnet-4
+openai/gpt-5
+google/gemini-3-flash
+meta/llama-4-maverick
 mistral/mistral-large-3
 xai/grok-4.1
-deepseek/deepseek-r1
+deepseek/deepseek-chat
 ```
 
 ### Popular Models
 
 | Provider | Models |
 |----------|--------|
-| Anthropic | `anthropic/claude-sonnet-4.5`, `anthropic/claude-opus-4.5` |
-| OpenAI | `openai/gpt-5.2-pro`, `openai/gpt-4.1`, `openai/o3-mini` |
-| Google | `google/gemini-3-pro`, `google/gemini-3-flash`, `google/gemini-2.5-pro` |
-| Meta | `meta/llama-3.3-70b-instruct`, `meta/llama-3.1-405b-instruct` |
-| Mistral | `mistral/mistral-large-3`, `mistral/mistral-large-2411` |
-| xAI | `xai/grok-4.1`, `xai/grok-4-fast`, `xai/grok-3` |
-| DeepSeek | `deepseek/deepseek-v3.2`, `deepseek/deepseek-r1` |
+| Anthropic | `anthropic/claude-sonnet-4`, `anthropic/claude-opus-4.5` |
+| OpenAI | `openai/gpt-5`, `openai/gpt-5-mini`, `openai/o3` |
+| Google | `google/gemini-3-flash`, `google/gemini-3-pro`, `google/gemini-2.5-pro` |
+| Meta | `meta/llama-4-maverick`, `meta/llama-4-scout`, `meta/llama-3.3-70b-instruct` |
+| Mistral | `mistral/mistral-large-3`, `mistral/ministral-3-14b` |
+| xAI | `xai/grok-4.1`, `xai/grok-4`, `xai/grok-3` |
+| DeepSeek | `deepseek/deepseek-chat`, `deepseek/deepseek-reasoner` |
 
 Browse all models:
 - [Vercel AI Gateway Models](https://vercel.com/ai-gateway/models)
@@ -238,7 +266,7 @@ const getWeather = new FunctionTool({
 
 const agent = new LlmAgent({
   name: 'weather-assistant',
-  model: 'anthropic/claude-sonnet-4.5',
+  model: 'anthropic/claude-sonnet-4',
   instruction: 'You help users check the weather.',
   tools: [getWeather],
 });
@@ -259,7 +287,7 @@ LLMRegistry.register(OpenRouterLlm);
 
 export const rootAgent = new LlmAgent({
   name: 'assistant',
-  model: 'anthropic/claude-sonnet-4.5',
+  model: 'anthropic/claude-sonnet-4',
   instruction: 'You are helpful.',
 });
 ```
@@ -277,6 +305,7 @@ bunx @google/adk-devtools web
 |-------|-------------|
 | `AIGatewayLlm` | LLM class for Vercel AI Gateway |
 | `OpenRouterLlm` | LLM class for OpenRouter |
+| `CustomLlm` | LLM class for any compatible API |
 
 ### Factory Functions
 
@@ -284,6 +313,8 @@ bunx @google/adk-devtools web
 |----------|-------------|
 | `AIGateway(model, options?)` | Create AI Gateway LLM instance |
 | `OpenRouter(model, options?)` | Create OpenRouter LLM instance |
+| `createCustomLlm(config)` | Create custom LLM instance |
+| `Custom(model, options)` | Shorthand for `createCustomLlm` |
 
 ### Registration Functions
 
@@ -314,6 +345,50 @@ bunx @google/adk-devtools web
 | `provider` | `object` | - | Provider routing preferences |
 | `timeout` | `number` | `60000` | Request timeout (ms) |
 | `maxRetries` | `number` | `2` | Max retry attempts |
+
+**createCustomLlm / Custom:**
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `model` | `string` | - | Model name (required) |
+| `baseURL` | `string` | - | API base URL (required) |
+| `name` | `string` | `"custom"` | Provider name for logs/errors |
+| `apiKey` | `string` | - | API key for authentication |
+| `headers` | `Record<string, string>` | - | Additional HTTP headers |
+| `queryParams` | `Record<string, string>` | - | Query parameters for all requests |
+| `providerOptions` | `Record<string, unknown>` | - | Additional options for request body |
+| `timeout` | `number` | `60000` | Request timeout (ms) |
+| `maxRetries` | `number` | `2` | Max retry attempts |
+
+### Custom Provider Examples
+
+**Ollama (local):**
+```typescript
+const llm = createCustomLlm({
+  name: 'ollama',
+  baseURL: 'http://localhost:11434/v1',
+  model: 'llama3',
+});
+```
+
+**Azure OpenAI:**
+```typescript
+const llm = createCustomLlm({
+  name: 'azure',
+  baseURL: 'https://{resource}.openai.azure.com/openai/deployments/{deployment}',
+  model: 'gpt-4',
+  headers: { 'api-key': process.env.AZURE_API_KEY },
+  queryParams: { 'api-version': '2024-02-01' },
+});
+```
+
+**vLLM / LM Studio:**
+```typescript
+const llm = createCustomLlm({
+  baseURL: 'http://localhost:8000/v1',
+  model: 'meta-llama/Llama-3-8b',
+});
+```
 
 ## Examples
 
