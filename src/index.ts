@@ -90,6 +90,13 @@ export {
 } from "./providers/openrouter";
 
 // =============================================================================
+// Custom LLM Provider (Any Compatible API)
+// =============================================================================
+
+export { CustomLlm, type CustomLlmProviderConfig } from "./providers/custom";
+export { createCustomLlm, Custom } from "./providers/custom";
+
+// =============================================================================
 // Types
 // =============================================================================
 
@@ -103,6 +110,8 @@ export type {
   OpenRouterConfig,
   OpenRouterProviderPreferences,
   OpenRouterRegisterOptions,
+  // Custom LLM types
+  CustomLlmConfig,
   // Streaming types
   ToolCallAccumulator,
   StreamAccumulator,
