@@ -11,9 +11,9 @@
  */
 
 import { LLMRegistry } from "@google/adk";
-import { OpenRouterLlm } from "./openrouter-llm";
-import { setProviderConfig, resetProviderConfig } from "../../config";
+import { resetProviderConfig, setProviderConfig } from "../../config";
 import type { OpenRouterRegisterOptions } from "../../types";
+import { OpenRouterLlm } from "./openrouter-llm";
 
 /** Tracks whether OpenRouter has been registered */
 let registered = false;

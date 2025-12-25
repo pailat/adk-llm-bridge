@@ -13,8 +13,8 @@
  * @module core/base-provider-llm
  */
 
+import type { BaseLlmConnection, LlmRequest, LlmResponse } from "@google/adk";
 import { BaseLlm } from "@google/adk";
-import type { LlmRequest, LlmResponse, BaseLlmConnection } from "@google/adk";
 import type { BaseProviderConfig } from "../types";
 
 // Compatibility with @google/adk's BASE_MODEL_SYMBOL (added in adk-js main)

@@ -14,7 +14,7 @@
  */
 
 import { LLMRegistry } from "@google/adk";
-import { setProviderConfig, resetProviderConfig } from "../../config";
+import { resetProviderConfig, setProviderConfig } from "../../config";
 import type { XAIRegisterOptions } from "../../types";
 import { XAILlm } from "./xai-llm";
 

@@ -18,9 +18,9 @@
  * @module providers/anthropic/converters/request
  */
 
+import type Anthropic from "@anthropic-ai/sdk";
 import type { LlmRequest } from "@google/adk";
 import type { Content, Part } from "@google/genai";
-import type Anthropic from "@anthropic-ai/sdk";
 
 /**
  * Result of converting an ADK LlmRequest to Anthropic format.

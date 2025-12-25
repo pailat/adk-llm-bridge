@@ -1,7 +1,7 @@
-import { describe, it, expect, beforeEach } from "bun:test";
-import { AIGatewayLlm } from "../../../src/providers/ai-gateway/ai-gateway-llm";
-import { MODEL_PATTERNS } from "../../../src/constants";
+import { beforeEach, describe, expect, it } from "bun:test";
 import { resetConfig } from "../../../src/config";
+import { MODEL_PATTERNS } from "../../../src/constants";
+import { AIGatewayLlm } from "../../../src/providers/ai-gateway/ai-gateway-llm";
 
 describe("AIGatewayLlm", () => {
   beforeEach(() => {

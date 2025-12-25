@@ -13,11 +13,15 @@
  * @module providers/openai/openai-llm
  */
 
-import { OpenAICompatibleLlm } from "../../core/openai-compatible-llm";
 import { getProviderConfig } from "../../config";
 import { DEFAULT_MAX_RETRIES, DEFAULT_TIMEOUT } from "../../constants";
+import { OpenAICompatibleLlm } from "../../core/openai-compatible-llm";
 import type { OpenAIProviderConfig } from "../../types";
-import { OPENAI_BASE_URL, OPENAI_ENV, OPENAI_MODEL_PATTERNS } from "./constants";
+import {
+  OPENAI_BASE_URL,
+  OPENAI_ENV,
+  OPENAI_MODEL_PATTERNS,
+} from "./constants";
 
 /**
  * OpenAI LLM provider.
@@ -87,9 +91,7 @@ export class OpenAILlm extends OpenAICompatibleLlm {
       process.env[OPENAI_ENV.ORGANIZATION];
 
     const project =
-      config.project ??
-      globalConfig.project ??
-      process.env[OPENAI_ENV.PROJECT];
+      config.project ?? globalConfig.project ?? process.env[OPENAI_ENV.PROJECT];
 
     // Build headers for organization/project
     const defaultHeaders: Record<string, string> = {};

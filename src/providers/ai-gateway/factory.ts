@@ -10,8 +10,8 @@
  * @module providers/ai-gateway/factory
  */
 
-import { AIGatewayLlm } from "./ai-gateway-llm";
 import type { AIGatewayConfig } from "../../types";
+import { AIGatewayLlm } from "./ai-gateway-llm";
 
 /**
  * Configuration options for the AIGateway factory (model is specified separately).

@@ -1,7 +1,7 @@
-import { describe, it, expect, beforeEach } from "bun:test";
-import { OpenRouterLlm } from "../../../src/providers/openrouter/openrouter-llm";
-import { OPENROUTER_MODEL_PATTERNS } from "../../../src/constants";
+import { beforeEach, describe, expect, it } from "bun:test";
 import { resetAllConfigs } from "../../../src/config";
+import { OPENROUTER_MODEL_PATTERNS } from "../../../src/constants";
+import { OpenRouterLlm } from "../../../src/providers/openrouter/openrouter-llm";
 
 describe("OpenRouterLlm", () => {
   beforeEach(() => {

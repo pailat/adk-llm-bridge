@@ -12,15 +12,15 @@
  * @module providers/ai-gateway/ai-gateway-llm
  */
 
-import { OpenAICompatibleLlm } from "../../core/openai-compatible-llm";
 import { getProviderConfig } from "../../config";
 import {
-  MODEL_PATTERNS,
   DEFAULT_BASE_URL,
-  DEFAULT_TIMEOUT,
   DEFAULT_MAX_RETRIES,
+  DEFAULT_TIMEOUT,
   ENV,
+  MODEL_PATTERNS,
 } from "../../constants";
+import { OpenAICompatibleLlm } from "../../core/openai-compatible-llm";
 import type { AIGatewayConfig } from "../../types";
 
 /**

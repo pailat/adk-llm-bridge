@@ -1,7 +1,7 @@
-import { describe, it, expect, beforeEach } from "bun:test";
+import { beforeEach, describe, expect, it } from "bun:test";
+import { resetAllConfigs } from "../../../src/config";
 import { AnthropicLlm } from "../../../src/providers/anthropic/anthropic-llm";
 import { ANTHROPIC_MODEL_PATTERNS } from "../../../src/providers/anthropic/constants";
-import { resetAllConfigs } from "../../../src/config";
 
 describe("AnthropicLlm", () => {
   beforeEach(() => {

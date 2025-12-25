@@ -1,10 +1,10 @@
-import { describe, it, expect, beforeEach, spyOn } from "bun:test";
-import {
-  registerXAI,
-  isXAIRegistered,
-  _resetXAIRegistration,
-} from "../../../src/providers/xai/register";
+import { beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { getProviderConfig } from "../../../src/config";
+import {
+  _resetXAIRegistration,
+  isXAIRegistered,
+  registerXAI,
+} from "../../../src/providers/xai/register";
 
 describe("registerXAI", () => {
   beforeEach(() => {

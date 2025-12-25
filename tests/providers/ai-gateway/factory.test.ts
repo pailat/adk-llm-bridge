@@ -1,7 +1,7 @@
-import { describe, it, expect, beforeEach } from "bun:test";
-import { AIGateway } from "../../../src/providers/ai-gateway/factory";
-import { AIGatewayLlm } from "../../../src/providers/ai-gateway/ai-gateway-llm";
+import { beforeEach, describe, expect, it } from "bun:test";
 import { resetConfig } from "../../../src/config";
+import { AIGatewayLlm } from "../../../src/providers/ai-gateway/ai-gateway-llm";
+import { AIGateway } from "../../../src/providers/ai-gateway/factory";
 
 describe("AIGateway factory", () => {
   beforeEach(() => {

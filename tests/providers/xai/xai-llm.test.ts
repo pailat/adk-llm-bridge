@@ -1,7 +1,7 @@
-import { describe, it, expect, beforeEach } from "bun:test";
-import { XAILlm } from "../../../src/providers/xai/xai-llm";
-import { XAI_MODEL_PATTERNS } from "../../../src/providers/xai/constants";
+import { beforeEach, describe, expect, it } from "bun:test";
 import { resetAllConfigs } from "../../../src/config";
+import { XAI_MODEL_PATTERNS } from "../../../src/providers/xai/constants";
+import { XAILlm } from "../../../src/providers/xai/xai-llm";
 
 describe("XAILlm", () => {
   beforeEach(() => {

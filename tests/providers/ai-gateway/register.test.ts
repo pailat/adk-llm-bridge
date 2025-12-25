@@ -1,10 +1,10 @@
-import { describe, it, expect, beforeEach, spyOn } from "bun:test";
-import {
-  registerAIGateway,
-  isAIGatewayRegistered,
-  _resetAIGatewayRegistration,
-} from "../../../src/providers/ai-gateway/register";
+import { beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { getConfig } from "../../../src/config";
+import {
+  _resetAIGatewayRegistration,
+  isAIGatewayRegistered,
+  registerAIGateway,
+} from "../../../src/providers/ai-gateway/register";
 
 describe("registerAIGateway", () => {
   beforeEach(() => {

@@ -13,9 +13,8 @@
  * @module core/openai-compatible-llm
  */
 
-import OpenAI from "openai";
 import type { LlmRequest, LlmResponse } from "@google/adk";
-import { BaseProviderLlm } from "./base-provider-llm";
+import OpenAI from "openai";
 import { convertRequest } from "../converters/request";
 import {
   convertResponse,
@@ -23,6 +22,7 @@ import {
   createStreamAccumulator,
 } from "../converters/response";
 import type { BaseProviderConfig } from "../types";
+import { BaseProviderLlm } from "./base-provider-llm";
 
 /**
  * Configuration for the underlying OpenAI client.

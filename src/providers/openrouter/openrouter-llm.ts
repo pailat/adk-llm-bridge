@@ -12,15 +12,15 @@
  * @module providers/openrouter/openrouter-llm
  */
 
-import { OpenAICompatibleLlm } from "../../core/openai-compatible-llm";
 import { getProviderConfig } from "../../config";
 import {
-  OPENROUTER_BASE_URL,
-  OPENROUTER_MODEL_PATTERNS,
-  DEFAULT_TIMEOUT,
   DEFAULT_MAX_RETRIES,
+  DEFAULT_TIMEOUT,
+  OPENROUTER_BASE_URL,
   OPENROUTER_ENV,
+  OPENROUTER_MODEL_PATTERNS,
 } from "../../constants";
+import { OpenAICompatibleLlm } from "../../core/openai-compatible-llm";
 import type { OpenRouterConfig } from "../../types";
 
 /**

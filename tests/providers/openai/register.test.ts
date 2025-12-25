@@ -1,10 +1,10 @@
-import { describe, it, expect, beforeEach, spyOn } from "bun:test";
-import {
-  registerOpenAI,
-  isOpenAIRegistered,
-  _resetOpenAIRegistration,
-} from "../../../src/providers/openai/register";
+import { beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { getProviderConfig } from "../../../src/config";
+import {
+  _resetOpenAIRegistration,
+  isOpenAIRegistered,
+  registerOpenAI,
+} from "../../../src/providers/openai/register";
 
 describe("registerOpenAI", () => {
   beforeEach(() => {

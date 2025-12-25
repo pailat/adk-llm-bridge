@@ -1,10 +1,10 @@
-import { describe, it, expect } from "bun:test";
+import { describe, expect, it } from "bun:test";
+import type OpenAI from "openai";
 import {
   convertResponse,
   convertStreamChunk,
   createStreamAccumulator,
 } from "../../src/converters/response";
-import type OpenAI from "openai";
 
 type ChatCompletion = OpenAI.ChatCompletion;
 type ChatCompletionChunk = OpenAI.ChatCompletionChunk;

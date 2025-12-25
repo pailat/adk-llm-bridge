@@ -1,7 +1,7 @@
-import { describe, it, expect, beforeEach } from "bun:test";
-import { OpenAILlm } from "../../../src/providers/openai/openai-llm";
-import { OPENAI_MODEL_PATTERNS } from "../../../src/providers/openai/constants";
+import { beforeEach, describe, expect, it } from "bun:test";
 import { resetAllConfigs } from "../../../src/config";
+import { OPENAI_MODEL_PATTERNS } from "../../../src/providers/openai/constants";
+import { OpenAILlm } from "../../../src/providers/openai/openai-llm";
 
 describe("OpenAILlm", () => {
   beforeEach(() => {

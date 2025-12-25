@@ -14,8 +14,8 @@
  * @module providers/custom/custom-llm
  */
 
+import { DEFAULT_MAX_RETRIES, DEFAULT_TIMEOUT } from "../../constants";
 import { OpenAICompatibleLlm } from "../../core/openai-compatible-llm";
-import { DEFAULT_TIMEOUT, DEFAULT_MAX_RETRIES } from "../../constants";
 import type { CustomLlmConfig } from "../../types";
 
 /**

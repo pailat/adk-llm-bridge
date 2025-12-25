@@ -13,9 +13,9 @@
  * @module providers/xai/xai-llm
  */
 
-import { OpenAICompatibleLlm } from "../../core/openai-compatible-llm";
 import { getProviderConfig } from "../../config";
 import { DEFAULT_MAX_RETRIES, DEFAULT_TIMEOUT } from "../../constants";
+import { OpenAICompatibleLlm } from "../../core/openai-compatible-llm";
 import type { XAIProviderConfig } from "../../types";
 import { XAI_BASE_URL, XAI_ENV, XAI_MODEL_PATTERNS } from "./constants";
 

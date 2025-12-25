@@ -13,9 +13,9 @@
  * @module providers/anthropic/converters/response
  */
 
+import type Anthropic from "@anthropic-ai/sdk";
 import type { LlmResponse } from "@google/adk";
 import type { Part } from "@google/genai";
-import type Anthropic from "@anthropic-ai/sdk";
 
 /**
  * Accumulator for Anthropic streaming responses.

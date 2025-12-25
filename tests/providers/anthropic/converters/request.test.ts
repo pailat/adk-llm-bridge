@@ -1,6 +1,6 @@
-import { describe, it, expect } from "bun:test";
-import { convertAnthropicRequest } from "../../../../src/providers/anthropic/converters/request";
+import { describe, expect, it } from "bun:test";
 import type { LlmRequest } from "@google/adk";
+import { convertAnthropicRequest } from "../../../../src/providers/anthropic/converters/request";
 
 describe("convertAnthropicRequest", () => {
   describe("basic message conversion", () => {

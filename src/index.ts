@@ -64,94 +64,99 @@
 // =============================================================================
 
 export { BaseProviderLlm } from "./core/base-provider-llm";
-export { OpenAICompatibleLlm } from "./core/openai-compatible-llm";
 export type { OpenAIClientConfig } from "./core/openai-compatible-llm";
+export { OpenAICompatibleLlm } from "./core/openai-compatible-llm";
 
 // =============================================================================
 // AI Gateway Provider
 // =============================================================================
 
-export { AIGatewayLlm } from "./providers/ai-gateway";
-export { AIGateway } from "./providers/ai-gateway";
 export {
-  registerAIGateway,
+  AIGateway,
+  AIGatewayLlm,
   isAIGatewayRegistered,
+  registerAIGateway,
 } from "./providers/ai-gateway";
 
 // =============================================================================
 // OpenRouter Provider
 // =============================================================================
 
-export { OpenRouterLlm } from "./providers/openrouter";
-export { OpenRouter } from "./providers/openrouter";
 export {
-  registerOpenRouter,
   isOpenRouterRegistered,
+  OpenRouter,
+  OpenRouterLlm,
+  registerOpenRouter,
 } from "./providers/openrouter";
 
 // =============================================================================
 // OpenAI Provider
 // =============================================================================
 
-export { OpenAILlm } from "./providers/openai";
-export { OpenAI } from "./providers/openai";
-export { registerOpenAI, isOpenAIRegistered } from "./providers/openai";
+export {
+  isOpenAIRegistered,
+  OpenAI,
+  OpenAILlm,
+  registerOpenAI,
+} from "./providers/openai";
 
 // =============================================================================
 // xAI Provider
 // =============================================================================
 
-export { XAILlm } from "./providers/xai";
-export { XAI } from "./providers/xai";
-export { registerXAI, isXAIRegistered } from "./providers/xai";
+export { isXAIRegistered, registerXAI, XAI, XAILlm } from "./providers/xai";
 
 // =============================================================================
 // Anthropic Provider
 // =============================================================================
 
-export { AnthropicLlm } from "./providers/anthropic";
-export { Anthropic } from "./providers/anthropic";
 export {
-  registerAnthropic,
+  Anthropic,
+  AnthropicLlm,
   isAnthropicRegistered,
+  registerAnthropic,
 } from "./providers/anthropic";
 
 // =============================================================================
 // Custom LLM Provider (Any Compatible API)
 // =============================================================================
 
-export { CustomLlm, type CustomLlmProviderConfig } from "./providers/custom";
-export { createCustomLlm, Custom } from "./providers/custom";
+export {
+  Custom,
+  CustomLlm,
+  type CustomLlmProviderConfig,
+  createCustomLlm,
+} from "./providers/custom";
 
 // =============================================================================
 // Types
 // =============================================================================
 
 export type {
-  // Base types
-  BaseProviderConfig,
   // AI Gateway types
   AIGatewayConfig,
-  RegisterOptions,
+  // Anthropic types
+  AnthropicProviderConfig,
+  AnthropicRegisterOptions,
+  // Base types
+  BaseProviderConfig,
+  // Custom LLM types
+  CustomLlmConfig,
+  // OpenAI types
+  OpenAIProviderConfig,
+  OpenAIRegisterOptions,
   // OpenRouter types
   OpenRouterConfig,
   OpenRouterProviderPreferences,
   OpenRouterRegisterOptions,
-  // OpenAI types
-  OpenAIProviderConfig,
-  OpenAIRegisterOptions,
+  RegisterOptions,
+  StreamAccumulator,
+  StreamChunkResult,
+  // Streaming types
+  ToolCallAccumulator,
   // xAI types
   XAIProviderConfig,
   XAIRegisterOptions,
-  // Anthropic types
-  AnthropicProviderConfig,
-  AnthropicRegisterOptions,
-  // Custom LLM types
-  CustomLlmConfig,
-  // Streaming types
-  ToolCallAccumulator,
-  StreamAccumulator,
-  StreamChunkResult,
 } from "./types";
 
 // =============================================================================
@@ -159,8 +164,8 @@ export type {
 // =============================================================================
 
 export {
-  MODEL_PATTERNS,
   DEFAULT_BASE_URL,
+  MODEL_PATTERNS,
   OPENROUTER_BASE_URL,
   OPENROUTER_MODEL_PATTERNS,
   PROVIDER_IDS,
@@ -171,15 +176,15 @@ export {
 // =============================================================================
 
 export {
-  // Multi-provider API
-  setProviderConfig,
+  getConfig,
   getProviderConfig,
-  resetProviderConfig,
   resetAllConfigs,
+  resetConfig,
+  resetProviderConfig,
   // Legacy API (deprecated but still exported for backward compatibility)
   setConfig,
-  getConfig,
-  resetConfig,
+  // Multi-provider API
+  setProviderConfig,
 } from "./config";
 
 // =============================================================================

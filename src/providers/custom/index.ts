@@ -33,4 +33,4 @@
  */
 
 export { CustomLlm, type CustomLlmProviderConfig } from "./custom-llm";
-export { createCustomLlm, Custom } from "./factory";
+export { Custom, createCustomLlm } from "./factory";

@@ -11,9 +11,9 @@
  */
 
 import { LLMRegistry } from "@google/adk";
-import { AIGatewayLlm } from "./ai-gateway-llm";
-import { setProviderConfig, resetProviderConfig } from "../../config";
+import { resetProviderConfig, setProviderConfig } from "../../config";
 import type { RegisterOptions } from "../../types";
+import { AIGatewayLlm } from "./ai-gateway-llm";
 
 /** Tracks whether AI Gateway has been registered */
 let registered = false;

@@ -24,11 +24,15 @@
  * ```
  */
 
-export { OpenAILlm } from "./openai-llm";
-export { OpenAI } from "./factory";
 export {
-  registerOpenAI,
-  isOpenAIRegistered,
+  OPENAI_BASE_URL,
+  OPENAI_ENV,
+  OPENAI_MODEL_PATTERNS,
+} from "./constants";
+export { OpenAI } from "./factory";
+export { OpenAILlm } from "./openai-llm";
+export {
   _resetOpenAIRegistration,
+  isOpenAIRegistered,
+  registerOpenAI,
 } from "./register";
-export { OPENAI_BASE_URL, OPENAI_ENV, OPENAI_MODEL_PATTERNS } from "./constants";

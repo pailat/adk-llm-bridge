@@ -1,10 +1,10 @@
-import { describe, it, expect, beforeEach, spyOn } from "bun:test";
-import {
-  registerOpenRouter,
-  isOpenRouterRegistered,
-  _resetOpenRouterRegistration,
-} from "../../../src/providers/openrouter/register";
+import { beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { getProviderConfig } from "../../../src/config";
+import {
+  _resetOpenRouterRegistration,
+  isOpenRouterRegistered,
+  registerOpenRouter,
+} from "../../../src/providers/openrouter/register";
 
 describe("registerOpenRouter", () => {
   beforeEach(() => {

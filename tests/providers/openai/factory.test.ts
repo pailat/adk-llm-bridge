@@ -1,7 +1,7 @@
-import { describe, it, expect, beforeEach } from "bun:test";
+import { beforeEach, describe, expect, it } from "bun:test";
+import { resetAllConfigs } from "../../../src/config";
 import { OpenAI } from "../../../src/providers/openai/factory";
 import { OpenAILlm } from "../../../src/providers/openai/openai-llm";
-import { resetAllConfigs } from "../../../src/config";
 
 describe("OpenAI factory", () => {
   beforeEach(() => {
