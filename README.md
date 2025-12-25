@@ -507,6 +507,10 @@ See the [examples](./examples) directory:
 
 - **[basic-agent-ai-gateway](./examples/basic-agent-ai-gateway)** - Multi-agent HelpDesk with AI Gateway
 - **[basic-agent-openrouter](./examples/basic-agent-openrouter)** - Multi-agent HelpDesk with OpenRouter
+- **[basic-agent-openai](./examples/basic-agent-openai)** - Multi-agent HelpDesk with OpenAI
+- **[basic-agent-anthropic](./examples/basic-agent-anthropic)** - Multi-agent HelpDesk with Anthropic
+- **[basic-agent-xai](./examples/basic-agent-xai)** - Multi-agent HelpDesk with xAI
+- **[basic-agent-lmstudio](./examples/basic-agent-lmstudio)** - Multi-agent HelpDesk with LM Studio
 - **[express-server](./examples/express-server)** - Production HTTP API with sessions, streaming, tools
 
 ## Requirements
