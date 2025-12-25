@@ -6,46 +6,57 @@ import {
   createAnthropicStreamAccumulator,
 } from "../../../../src/providers/anthropic/converters/response";
 
+// Helper to create Anthropic Message with required fields
+function createMessage(overrides: {
+  content: Anthropic.Message["content"];
+  usage: { input_tokens: number; output_tokens: number };
+  id?: string;
+  stop_reason?: Anthropic.Message["stop_reason"];
+  stop_sequence?: string | null;
+  model?: string;
+}): Anthropic.Message {
+  return {
+    id: overrides.id ?? "msg_123",
+    type: "message",
+    role: "assistant",
+    model: overrides.model ?? "claude-sonnet-4-5-20250929",
+    stop_reason: overrides.stop_reason ?? "end_turn",
+    stop_sequence: overrides.stop_sequence ?? null,
+    content: overrides.content,
+    usage: {
+      input_tokens: overrides.usage.input_tokens,
+      output_tokens: overrides.usage.output_tokens,
+      cache_creation: null,
+      cache_creation_input_tokens: null,
+      cache_read_input_tokens: null,
+      server_tool_use: null,
+      service_tier: null,
+    },
+  };
+}
+
 describe("convertAnthropicResponse", () => {
   describe("text response handling", () => {
     it("converts text block to ADK response", () => {
-      const message: Anthropic.Message = {
-        id: "msg_123",
-        type: "message",
-        role: "assistant",
-        content: [{ type: "text", text: "Hello, world!" }],
-        model: "claude-sonnet-4-5-20250929",
-        stop_reason: "end_turn",
-        stop_sequence: null,
-        usage: {
-          input_tokens: 10,
-          output_tokens: 5,
-        },
-      };
+      const message = createMessage({
+        content: [{ type: "text", text: "Hello, world!", citations: null }],
+        usage: { input_tokens: 10, output_tokens: 5 },
+      });
 
       const result = convertAnthropicResponse(message);
 
       expect(result.content).toBeDefined();
       expect(result.content?.role).toBe("model");
       expect(result.content?.parts).toHaveLength(1);
-      expect(result.content?.parts[0].text).toBe("Hello, world!");
+      expect(result.content?.parts?.[0].text).toBe("Hello, world!");
       expect(result.turnComplete).toBe(true);
     });
 
     it("includes usage metadata", () => {
-      const message: Anthropic.Message = {
-        id: "msg_123",
-        type: "message",
-        role: "assistant",
-        content: [{ type: "text", text: "Hi" }],
-        model: "claude-sonnet-4-5-20250929",
-        stop_reason: "end_turn",
-        stop_sequence: null,
-        usage: {
-          input_tokens: 100,
-          output_tokens: 50,
-        },
-      };
+      const message = createMessage({
+        content: [{ type: "text", text: "Hi", citations: null }],
+        usage: { input_tokens: 100, output_tokens: 50 },
+      });
 
       const result = convertAnthropicResponse(message);
 
@@ -58,10 +69,7 @@ describe("convertAnthropicResponse", () => {
 
   describe("tool use handling", () => {
     it("converts tool_use block to function call", () => {
-      const message: Anthropic.Message = {
-        id: "msg_123",
-        type: "message",
-        role: "assistant",
+      const message = createMessage({
         content: [
           {
             type: "tool_use",
@@ -70,33 +78,25 @@ describe("convertAnthropicResponse", () => {
             input: { city: "Tokyo" },
           },
         ],
-        model: "claude-sonnet-4-5-20250929",
         stop_reason: "tool_use",
-        stop_sequence: null,
-        usage: {
-          input_tokens: 10,
-          output_tokens: 20,
-        },
-      };
+        usage: { input_tokens: 10, output_tokens: 20 },
+      });
 
       const result = convertAnthropicResponse(message);
 
       expect(result.content?.parts).toHaveLength(1);
-      expect(result.content?.parts[0].functionCall).toBeDefined();
-      expect(result.content?.parts[0].functionCall?.id).toBe("call_456");
-      expect(result.content?.parts[0].functionCall?.name).toBe("get_weather");
-      expect(result.content?.parts[0].functionCall?.args).toEqual({
+      expect(result.content?.parts?.[0].functionCall).toBeDefined();
+      expect(result.content?.parts?.[0].functionCall?.id).toBe("call_456");
+      expect(result.content?.parts?.[0].functionCall?.name).toBe("get_weather");
+      expect(result.content?.parts?.[0].functionCall?.args).toEqual({
         city: "Tokyo",
       });
     });
 
     it("handles mixed text and tool_use blocks", () => {
-      const message: Anthropic.Message = {
-        id: "msg_123",
-        type: "message",
-        role: "assistant",
+      const message = createMessage({
         content: [
-          { type: "text", text: "Let me check the weather." },
+          { type: "text", text: "Let me check the weather.", citations: null },
           {
             type: "tool_use",
             id: "call_456",
@@ -104,38 +104,24 @@ describe("convertAnthropicResponse", () => {
             input: { city: "Tokyo" },
           },
         ],
-        model: "claude-sonnet-4-5-20250929",
         stop_reason: "tool_use",
-        stop_sequence: null,
-        usage: {
-          input_tokens: 10,
-          output_tokens: 30,
-        },
-      };
+        usage: { input_tokens: 10, output_tokens: 30 },
+      });
 
       const result = convertAnthropicResponse(message);
 
       expect(result.content?.parts).toHaveLength(2);
-      expect(result.content?.parts[0].text).toBe("Let me check the weather.");
-      expect(result.content?.parts[1].functionCall?.name).toBe("get_weather");
+      expect(result.content?.parts?.[0].text).toBe("Let me check the weather.");
+      expect(result.content?.parts?.[1].functionCall?.name).toBe("get_weather");
     });
   });
 
   describe("edge cases", () => {
     it("handles empty content", () => {
-      const message: Anthropic.Message = {
-        id: "msg_123",
-        type: "message",
-        role: "assistant",
+      const message = createMessage({
         content: [],
-        model: "claude-sonnet-4-5-20250929",
-        stop_reason: "end_turn",
-        stop_sequence: null,
-        usage: {
-          input_tokens: 10,
-          output_tokens: 0,
-        },
-      };
+        usage: { input_tokens: 10, output_tokens: 0 },
+      });
 
       const result = convertAnthropicResponse(message);
 
@@ -173,7 +159,7 @@ describe("convertAnthropicStreamEvent", () => {
       const result = convertAnthropicStreamEvent(event, acc);
 
       expect(result.isComplete).toBe(false);
-      expect(result.response?.content?.parts[0].text).toBe("Hello");
+      expect(result.response?.content?.parts?.[0].text).toBe("Hello");
       expect(result.response?.partial).toBe(true);
       expect(acc.text).toBe("Hello");
     });
@@ -272,7 +258,7 @@ describe("convertAnthropicStreamEvent", () => {
 
       expect(result.isComplete).toBe(true);
       expect(result.response?.turnComplete).toBe(true);
-      expect(result.response?.content?.parts[0].text).toBe("Hello, world!");
+      expect(result.response?.content?.parts?.[0].text).toBe("Hello, world!");
     });
 
     it("returns complete response with accumulated tool calls", () => {
@@ -290,11 +276,11 @@ describe("convertAnthropicStreamEvent", () => {
       const result = convertAnthropicStreamEvent(event, acc);
 
       expect(result.isComplete).toBe(true);
-      expect(result.response?.content?.parts[0].functionCall).toBeDefined();
-      expect(result.response?.content?.parts[0].functionCall?.name).toBe(
+      expect(result.response?.content?.parts?.[0].functionCall).toBeDefined();
+      expect(result.response?.content?.parts?.[0].functionCall?.name).toBe(
         "get_weather",
       );
-      expect(result.response?.content?.parts[0].functionCall?.args).toEqual({
+      expect(result.response?.content?.parts?.[0].functionCall?.args).toEqual({
         city: "Tokyo",
       });
     });
@@ -316,16 +302,11 @@ describe("convertAnthropicStreamEvent", () => {
       const acc = createAnthropicStreamAccumulator();
       const event: Anthropic.MessageStreamEvent = {
         type: "message_start",
-        message: {
-          id: "msg_123",
-          type: "message",
-          role: "assistant",
+        message: createMessage({
           content: [],
-          model: "claude-sonnet-4-5-20250929",
           stop_reason: null,
-          stop_sequence: null,
           usage: { input_tokens: 100, output_tokens: 0 },
-        },
+        }),
       };
 
       const result = convertAnthropicStreamEvent(event, acc);
@@ -345,7 +326,13 @@ describe("convertAnthropicStreamEvent", () => {
           stop_reason: "end_turn",
           stop_sequence: null,
         },
-        usage: { output_tokens: 50 },
+        usage: {
+          output_tokens: 50,
+          input_tokens: null,
+          cache_creation_input_tokens: null,
+          cache_read_input_tokens: null,
+          server_tool_use: null,
+        },
       };
 
       const result = convertAnthropicStreamEvent(event, acc);

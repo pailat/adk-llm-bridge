@@ -1,18 +1,28 @@
 import { describe, expect, it } from "bun:test";
 import type { LlmRequest } from "@google/adk";
+import type { Schema } from "@google/genai";
 import { convertAnthropicRequest } from "../../../../src/providers/anthropic/converters/request";
+
+function createLlmRequest(overrides: Partial<LlmRequest> = {}): LlmRequest {
+  return {
+    contents: [],
+    liveConnectConfig: {},
+    toolsDict: {},
+    ...overrides,
+  } as LlmRequest;
+}
 
 describe("convertAnthropicRequest", () => {
   describe("basic message conversion", () => {
     it("converts simple user message", () => {
-      const request: LlmRequest = {
+      const request = createLlmRequest({
         contents: [
           {
             role: "user",
             parts: [{ text: "Hello, Claude!" }],
           },
         ],
-      };
+      });
 
       const result = convertAnthropicRequest(request);
 
@@ -24,7 +34,7 @@ describe("convertAnthropicRequest", () => {
     });
 
     it("converts model response to assistant role", () => {
-      const request: LlmRequest = {
+      const request = createLlmRequest({
         contents: [
           {
             role: "user",
@@ -35,7 +45,7 @@ describe("convertAnthropicRequest", () => {
             parts: [{ text: "Hi there!" }],
           },
         ],
-      };
+      });
 
       const result = convertAnthropicRequest(request);
 
@@ -46,7 +56,7 @@ describe("convertAnthropicRequest", () => {
 
   describe("system instruction handling", () => {
     it("extracts system instruction as separate field", () => {
-      const request: LlmRequest = {
+      const request = createLlmRequest({
         contents: [
           {
             role: "user",
@@ -56,7 +66,7 @@ describe("convertAnthropicRequest", () => {
         config: {
           systemInstruction: "You are a helpful assistant.",
         },
-      };
+      });
 
       const result = convertAnthropicRequest(request);
 
@@ -65,7 +75,7 @@ describe("convertAnthropicRequest", () => {
     });
 
     it("handles system instruction as Content object", () => {
-      const request: LlmRequest = {
+      const request = createLlmRequest({
         contents: [
           {
             role: "user",
@@ -78,7 +88,7 @@ describe("convertAnthropicRequest", () => {
             parts: [{ text: "You are helpful." }, { text: "Be concise." }],
           },
         },
-      };
+      });
 
       const result = convertAnthropicRequest(request);
 
@@ -88,7 +98,7 @@ describe("convertAnthropicRequest", () => {
 
   describe("tool handling", () => {
     it("converts function declarations to Anthropic tools", () => {
-      const request: LlmRequest = {
+      const request = createLlmRequest({
         contents: [
           {
             role: "user",
@@ -108,13 +118,13 @@ describe("convertAnthropicRequest", () => {
                       city: { type: "STRING" },
                     },
                     required: ["city"],
-                  },
+                  } as Schema,
                 },
               ],
             },
           ],
         },
-      };
+      });
 
       const result = convertAnthropicRequest(request);
 
@@ -132,7 +142,7 @@ describe("convertAnthropicRequest", () => {
     });
 
     it("normalizes UPPERCASE types to lowercase", () => {
-      const request: LlmRequest = {
+      const request = createLlmRequest({
         contents: [{ role: "user", parts: [{ text: "test" }] }],
         config: {
           tools: [
@@ -149,13 +159,13 @@ describe("convertAnthropicRequest", () => {
                       active: { type: "BOOLEAN" },
                       items: { type: "ARRAY" },
                     },
-                  },
+                  } as Schema,
                 },
               ],
             },
           ],
         },
-      };
+      });
 
       const result = convertAnthropicRequest(request);
 
@@ -171,7 +181,7 @@ describe("convertAnthropicRequest", () => {
 
   describe("function call handling", () => {
     it("converts function calls to tool_use blocks", () => {
-      const request: LlmRequest = {
+      const request = createLlmRequest({
         contents: [
           {
             role: "user",
@@ -190,7 +200,7 @@ describe("convertAnthropicRequest", () => {
             ],
           },
         ],
-      };
+      });
 
       const result = convertAnthropicRequest(request);
 
@@ -207,7 +217,7 @@ describe("convertAnthropicRequest", () => {
     });
 
     it("converts function responses to tool_result blocks", () => {
-      const request: LlmRequest = {
+      const request = createLlmRequest({
         contents: [
           {
             role: "user",
@@ -221,7 +231,7 @@ describe("convertAnthropicRequest", () => {
             ],
           },
         ],
-      };
+      });
 
       const result = convertAnthropicRequest(request);
 
@@ -237,9 +247,9 @@ describe("convertAnthropicRequest", () => {
 
   describe("edge cases", () => {
     it("handles empty contents", () => {
-      const request: LlmRequest = {
+      const request = createLlmRequest({
         contents: [],
-      };
+      });
 
       const result = convertAnthropicRequest(request);
 
@@ -247,14 +257,14 @@ describe("convertAnthropicRequest", () => {
     });
 
     it("adds placeholder user message if first message is assistant", () => {
-      const request: LlmRequest = {
+      const request = createLlmRequest({
         contents: [
           {
             role: "model",
             parts: [{ text: "Hello!" }],
           },
         ],
-      };
+      });
 
       const result = convertAnthropicRequest(request);
 
@@ -267,9 +277,9 @@ describe("convertAnthropicRequest", () => {
     });
 
     it("returns undefined for tools when none provided", () => {
-      const request: LlmRequest = {
+      const request = createLlmRequest({
         contents: [{ role: "user", parts: [{ text: "Hello" }] }],
-      };
+      });
 
       const result = convertAnthropicRequest(request);
 
