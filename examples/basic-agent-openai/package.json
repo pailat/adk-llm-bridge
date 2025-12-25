@@ -1,0 +1,14 @@
+{
+  "name": "basic-agent-openai",
+  "private": true,
+  "type": "module",
+  "main": "agent.ts",
+  "scripts": {
+    "dev": "bunx @google/adk-devtools run agent.ts",
+    "web": "bunx @google/adk-devtools web"
+  },
+  "dependencies": {
+    "@google/adk": "^0.2.1",
+    "adk-llm-bridge": "^0.3.2"
+  }
+}

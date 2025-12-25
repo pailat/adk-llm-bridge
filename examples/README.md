@@ -8,6 +8,10 @@ Examples of using `adk-llm-bridge` with Google ADK and multiple LLM providers.
 |---------|----------|-------------|
 | [basic-agent-ai-gateway](./basic-agent-ai-gateway) | Vercel AI Gateway | Multi-agent HelpDesk with AI Gateway |
 | [basic-agent-openrouter](./basic-agent-openrouter) | OpenRouter | Multi-agent HelpDesk with OpenRouter |
+| [basic-agent-openai](./basic-agent-openai) | OpenAI | Weather assistant with OpenAI GPT models |
+| [basic-agent-anthropic](./basic-agent-anthropic) | Anthropic | Weather assistant with Claude models |
+| [basic-agent-xai](./basic-agent-xai) | xAI | Weather assistant with Grok models |
+| [basic-agent-lmstudio](./basic-agent-lmstudio) | LM Studio | Weather assistant with local models |
 | [express-server](./express-server) | AI Gateway | Full HTTP API with tools, state & streaming |
 
 ## Quick Start
@@ -32,6 +36,53 @@ Uses ADK DevTools with OpenRouter:
 cd examples/basic-agent-openrouter
 cp .env.example .env
 # Edit .env with your OPENROUTER_API_KEY
+bun install
+bun run web
+```
+
+### basic-agent-openai
+
+Direct OpenAI API access with GPT models:
+
+```bash
+cd examples/basic-agent-openai
+cp .env.example .env
+# Edit .env with your OPENAI_API_KEY
+bun install
+bun run web
+```
+
+### basic-agent-anthropic
+
+Direct Anthropic API access with Claude models:
+
+```bash
+cd examples/basic-agent-anthropic
+cp .env.example .env
+# Edit .env with your ANTHROPIC_API_KEY
+bun install
+bun run web
+```
+
+### basic-agent-xai
+
+Direct xAI API access with Grok models:
+
+```bash
+cd examples/basic-agent-xai
+cp .env.example .env
+# Edit .env with your XAI_API_KEY
+bun install
+bun run web
+```
+
+### basic-agent-lmstudio
+
+Local models via LM Studio (no API key required):
+
+```bash
+# First, start LM Studio and load a model
+cd examples/basic-agent-lmstudio
 bun install
 bun run web
 ```
@@ -126,6 +177,72 @@ export const rootAgent = new LlmAgent({
 });
 ```
 
+### OpenAI
+
+```typescript
+import { LlmAgent, LLMRegistry } from "@google/adk";
+import { OpenAILlm } from "adk-llm-bridge";
+
+// Register with LLMRegistry from YOUR @google/adk import
+LLMRegistry.register(OpenAILlm);
+
+export const rootAgent = new LlmAgent({
+  name: "assistant",
+  model: "gpt-4.1",
+  instruction: "You are helpful.",
+});
+```
+
+### Anthropic
+
+```typescript
+import { LlmAgent, LLMRegistry } from "@google/adk";
+import { AnthropicLlm } from "adk-llm-bridge";
+
+// Register with LLMRegistry from YOUR @google/adk import
+LLMRegistry.register(AnthropicLlm);
+
+export const rootAgent = new LlmAgent({
+  name: "assistant",
+  model: "claude-sonnet-4-5-20250929",
+  instruction: "You are helpful.",
+});
+```
+
+### xAI (Grok)
+
+```typescript
+import { LlmAgent, LLMRegistry } from "@google/adk";
+import { XAILlm } from "adk-llm-bridge";
+
+// Register with LLMRegistry from YOUR @google/adk import
+LLMRegistry.register(XAILlm);
+
+export const rootAgent = new LlmAgent({
+  name: "assistant",
+  model: "grok-3-beta",
+  instruction: "You are helpful.",
+});
+```
+
+### Local Models (LM Studio, Ollama)
+
+Use the Custom provider for any OpenAI-compatible API:
+
+```typescript
+import { LlmAgent } from "@google/adk";
+import { Custom } from "adk-llm-bridge";
+
+export const localAgent = new LlmAgent({
+  name: "assistant",
+  model: Custom("local-model", {
+    baseURL: "http://localhost:1234/v1", // LM Studio
+    // baseURL: "http://localhost:11434/v1", // Ollama
+  }),
+  instruction: "You are helpful.",
+});
+```
+
 ### Programmatic Usage (without adk-devtools)
 
 For programmatic usage with ADK's `Runner` class (not using adk-devtools), you can use the convenience functions:
@@ -155,7 +272,10 @@ bun run examples/basic-agent-ai-gateway/agent.ts
 | Variable | Provider | Description |
 |----------|----------|-------------|
 | `AI_GATEWAY_API_KEY` | AI Gateway | Vercel AI Gateway API key |
-| `OPENAI_API_KEY` | AI Gateway | OpenAI API key (alternative) |
+| `OPENAI_API_KEY` | OpenAI / AI Gateway | OpenAI API key |
+| `ANTHROPIC_API_KEY` | Anthropic | Anthropic API key |
+| `XAI_API_KEY` | xAI | xAI API key |
 | `OPENROUTER_API_KEY` | OpenRouter | OpenRouter API key |
 | `OPENROUTER_SITE_URL` | OpenRouter | Your site URL (for ranking) |
 | `OPENROUTER_APP_NAME` | OpenRouter | Your app name (for ranking) |
+| `LMSTUDIO_BASE_URL` | LM Studio | Local server URL (default: http://localhost:1234/v1) |
