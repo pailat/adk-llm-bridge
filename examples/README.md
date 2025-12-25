@@ -8,10 +8,10 @@ Examples of using `adk-llm-bridge` with Google ADK and multiple LLM providers.
 |---------|----------|-------------|
 | [basic-agent-ai-gateway](./basic-agent-ai-gateway) | Vercel AI Gateway | Multi-agent HelpDesk with AI Gateway |
 | [basic-agent-openrouter](./basic-agent-openrouter) | OpenRouter | Multi-agent HelpDesk with OpenRouter |
-| [basic-agent-openai](./basic-agent-openai) | OpenAI | Weather assistant with OpenAI GPT models |
-| [basic-agent-anthropic](./basic-agent-anthropic) | Anthropic | Weather assistant with Claude models |
-| [basic-agent-xai](./basic-agent-xai) | xAI | Weather assistant with Grok models |
-| [basic-agent-lmstudio](./basic-agent-lmstudio) | LM Studio | Weather assistant with local models |
+| [basic-agent-openai](./basic-agent-openai) | OpenAI | Multi-agent HelpDesk with GPT models |
+| [basic-agent-anthropic](./basic-agent-anthropic) | Anthropic | Multi-agent HelpDesk with Claude models |
+| [basic-agent-xai](./basic-agent-xai) | xAI | Multi-agent HelpDesk with Grok models |
+| [basic-agent-lmstudio](./basic-agent-lmstudio) | LM Studio | Multi-agent HelpDesk with local models |
 | [express-server](./express-server) | AI Gateway | Full HTTP API with tools, state & streaming |
 
 ## Quick Start
