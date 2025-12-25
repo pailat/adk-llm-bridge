@@ -1,10 +1,10 @@
-import { describe, it, expect, beforeEach, spyOn } from "bun:test";
-import {
-  registerAnthropic,
-  isAnthropicRegistered,
-  _resetAnthropicRegistration,
-} from "../../../src/providers/anthropic/register";
+import { beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { getProviderConfig } from "../../../src/config";
+import {
+  _resetAnthropicRegistration,
+  isAnthropicRegistered,
+  registerAnthropic,
+} from "../../../src/providers/anthropic/register";
 
 describe("registerAnthropic", () => {
   beforeEach(() => {

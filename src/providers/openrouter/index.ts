@@ -27,10 +27,10 @@
  * ```
  */
 
-export { OpenRouterLlm } from "./openrouter-llm";
 export { OpenRouter } from "./factory";
+export { OpenRouterLlm } from "./openrouter-llm";
 export {
-  registerOpenRouter,
-  isOpenRouterRegistered,
   _resetOpenRouterRegistration,
+  isOpenRouterRegistered,
+  registerOpenRouter,
 } from "./register";

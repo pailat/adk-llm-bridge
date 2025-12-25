@@ -1,7 +1,7 @@
-import { describe, it, expect, beforeEach } from "bun:test";
+import { beforeEach, describe, expect, it } from "bun:test";
+import { resetAllConfigs } from "../../../src/config";
 import { XAI } from "../../../src/providers/xai/factory";
 import { XAILlm } from "../../../src/providers/xai/xai-llm";
-import { resetAllConfigs } from "../../../src/config";
 
 describe("XAI factory", () => {
   beforeEach(() => {

@@ -1,10 +1,10 @@
-import { describe, it, expect } from "bun:test";
+import { describe, expect, it } from "bun:test";
+import type Anthropic from "@anthropic-ai/sdk";
 import {
   convertAnthropicResponse,
   convertAnthropicStreamEvent,
   createAnthropicStreamAccumulator,
 } from "../../../../src/providers/anthropic/converters/response";
-import type Anthropic from "@anthropic-ai/sdk";
 
 describe("convertAnthropicResponse", () => {
   describe("text response handling", () => {

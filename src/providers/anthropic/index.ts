@@ -25,28 +25,27 @@
  */
 
 export { AnthropicLlm } from "./anthropic-llm";
-export { Anthropic } from "./factory";
-export {
-  registerAnthropic,
-  isAnthropicRegistered,
-  _resetAnthropicRegistration,
-} from "./register";
 export {
   ANTHROPIC_BASE_URL,
   ANTHROPIC_ENV,
   ANTHROPIC_MODEL_PATTERNS,
   DEFAULT_ANTHROPIC_MAX_TOKENS,
 } from "./constants";
-
+export type { ConvertedAnthropicRequest } from "./converters/request";
 // Export converters for potential custom implementations
 export { convertAnthropicRequest } from "./converters/request";
-export type { ConvertedAnthropicRequest } from "./converters/request";
+export type {
+  AnthropicStreamAccumulator,
+  AnthropicStreamResult,
+} from "./converters/response";
 export {
   convertAnthropicResponse,
   convertAnthropicStreamEvent,
   createAnthropicStreamAccumulator,
 } from "./converters/response";
-export type {
-  AnthropicStreamAccumulator,
-  AnthropicStreamResult,
-} from "./converters/response";
+export { Anthropic } from "./factory";
+export {
+  _resetAnthropicRegistration,
+  isAnthropicRegistered,
+  registerAnthropic,
+} from "./register";

@@ -37,11 +37,11 @@
  */
 
 import type {
-  RegisterOptions,
-  OpenRouterRegisterOptions,
-  OpenAIRegisterOptions,
-  XAIRegisterOptions,
   AnthropicRegisterOptions,
+  OpenAIRegisterOptions,
+  OpenRouterRegisterOptions,
+  RegisterOptions,
+  XAIRegisterOptions,
 } from "./types";
 
 /**

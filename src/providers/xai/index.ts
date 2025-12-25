@@ -24,7 +24,11 @@
  * ```
  */
 
-export { XAILlm } from "./xai-llm";
-export { XAI } from "./factory";
-export { registerXAI, isXAIRegistered, _resetXAIRegistration } from "./register";
 export { XAI_BASE_URL, XAI_ENV, XAI_MODEL_PATTERNS } from "./constants";
+export { XAI } from "./factory";
+export {
+  _resetXAIRegistration,
+  isXAIRegistered,
+  registerXAI,
+} from "./register";
+export { XAILlm } from "./xai-llm";

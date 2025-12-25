@@ -10,8 +10,8 @@
  * @module providers/openrouter/factory
  */
 
-import { OpenRouterLlm } from "./openrouter-llm";
 import type { OpenRouterConfig } from "../../types";
+import { OpenRouterLlm } from "./openrouter-llm";
 
 /**
  * Configuration options for the OpenRouter factory (model is specified separately).
