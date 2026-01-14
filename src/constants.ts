@@ -47,6 +47,8 @@ export const DEFAULT_MAX_RETRIES = 2;
  * Matches any model identifier with the format "provider/model".
  * AI Gateway validates actual model availability at runtime.
  *
+ * Note: Do not include ^ or $ anchors - ADK's LLMRegistry adds them automatically.
+ *
  * @constant
  * @example
  * ```typescript
@@ -54,7 +56,7 @@ export const DEFAULT_MAX_RETRIES = 2;
  * MODEL_PATTERNS[0].test("invalid"); // false
  * ```
  */
-export const MODEL_PATTERNS: (string | RegExp)[] = [/^.+\/.+$/];
+export const MODEL_PATTERNS: (string | RegExp)[] = [/.+\/.+/];
 
 /**
  * Environment variable names for AI Gateway configuration.
@@ -101,13 +103,15 @@ export const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
  *
  * Uses the same "provider/model" format as AI Gateway.
  *
+ * Note: Do not include ^ or $ anchors - ADK's LLMRegistry adds them automatically.
+ *
  * @constant
  * @example
  * ```typescript
  * OPENROUTER_MODEL_PATTERNS[0].test("anthropic/claude-sonnet-4"); // true
  * ```
  */
-export const OPENROUTER_MODEL_PATTERNS: (string | RegExp)[] = [/^.+\/.+$/];
+export const OPENROUTER_MODEL_PATTERNS: (string | RegExp)[] = [/.+\/.+/];
 
 /**
  * Environment variable names for OpenRouter configuration.

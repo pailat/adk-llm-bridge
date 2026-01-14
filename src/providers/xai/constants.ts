@@ -27,5 +27,7 @@ export const XAI_ENV = {
  *
  * Matches:
  * - grok-* (grok-4, grok-3-beta, grok-code-fast-1, etc.)
+ *
+ * Note: Do not include ^ or $ anchors - ADK's LLMRegistry adds them automatically.
  */
-export const XAI_MODEL_PATTERNS = [/^grok-/];
+export const XAI_MODEL_PATTERNS = [/grok-.*/];

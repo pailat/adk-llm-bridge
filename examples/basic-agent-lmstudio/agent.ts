@@ -1,28 +1,14 @@
-import { FunctionTool, LlmAgent, LLMRegistry } from "@google/adk";
-import { CustomLlm } from "adk-llm-bridge";
+import { FunctionTool, LlmAgent } from "@google/adk";
+import { Custom } from "adk-llm-bridge";
 import { z } from "zod";
 
 // LM Studio URL (can be overridden via env var)
 const LMSTUDIO_URL =
   process.env.LMSTUDIO_BASE_URL || "http://localhost:1234/v1";
 
-// Create a custom LM Studio provider class
-class LMStudioLlm extends CustomLlm {
-  static override readonly supportedModels = [/.*/];
-
-  constructor(config: { model: string }) {
-    super({
-      ...config,
-      name: "lmstudio",
-      baseURL: LMSTUDIO_URL,
-    });
-  }
-}
-
-// Register LMStudioLlm with ADK's LLMRegistry
-// NOTE: We import LLMRegistry from @google/adk directly to ensure
-// we register with the same instance that adk-devtools uses
-LLMRegistry.register(LMStudioLlm);
+// Factory function for LM Studio models
+const LMStudio = (model: string) =>
+  Custom(model, { name: "lmstudio", baseURL: LMSTUDIO_URL });
 
 // =============================================================================
 // Billing Agent Tools
@@ -150,11 +136,9 @@ const resetPassword = new FunctionTool({
 // Sub-Agents
 // =============================================================================
 
-// Use the model identifier from LM Studio
-// This matches the model loaded in LM Studio: zai-org/glm-4.6v-flash
 const billingAgent = new LlmAgent({
   name: "Billing",
-  model: "zai-org/glm-4.6v-flash",
+  model: LMStudio("zai-org/glm-4.6v-flash"),
   description:
     "Handles billing inquiries, invoice lookups, and refund requests.",
   instruction: `You are a billing specialist assistant. Help customers with:
@@ -168,7 +152,7 @@ Be professional, empathetic, and efficient. Always verify the invoice/account be
 
 const supportAgent = new LlmAgent({
   name: "Support",
-  model: "zai-org/glm-4.6v-flash",
+  model: LMStudio("zai-org/glm-4.6v-flash"),
   description:
     "Handles technical support requests, login issues, and system status.",
   instruction: `You are a technical support specialist. Help customers with:
@@ -187,7 +171,7 @@ Be patient and guide users step by step. Check system status when relevant to is
 
 export const rootAgent = new LlmAgent({
   name: "HelpDeskCoordinator",
-  model: "zai-org/glm-4.6v-flash",
+  model: LMStudio("zai-org/glm-4.6v-flash"),
   description:
     "Main help desk router that directs users to the appropriate specialist.",
   instruction: `You are a help desk coordinator. Your job is to:

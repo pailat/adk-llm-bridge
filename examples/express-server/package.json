@@ -7,9 +7,9 @@
     "dev": "bun run --watch index.ts"
   },
   "dependencies": {
-    "@google/adk": "^0.2.1",
+    "@google/adk": "^0.2.2",
     "@types/express": "^5.0.0",
-    "adk-llm-bridge": "^0.3.2",
+    "adk-llm-bridge": "^0.3.3",
     "express": "^5.0.0",
     "zod": "^3.24.0"
   }

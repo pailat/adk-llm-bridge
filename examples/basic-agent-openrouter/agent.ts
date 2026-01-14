@@ -1,11 +1,6 @@
-import { FunctionTool, LlmAgent, LLMRegistry } from "@google/adk";
-import { OpenRouterLlm } from "adk-llm-bridge";
+import { FunctionTool, LlmAgent } from "@google/adk";
+import { OpenRouter } from "adk-llm-bridge";
 import { z } from "zod";
-
-// Register OpenRouterLlm with ADK's LLMRegistry
-// NOTE: We import LLMRegistry from @google/adk directly to ensure
-// we register with the same instance that adk-devtools uses
-LLMRegistry.register(OpenRouterLlm);
 
 // =============================================================================
 // Billing Agent Tools
@@ -135,7 +130,7 @@ const resetPassword = new FunctionTool({
 
 const billingAgent = new LlmAgent({
   name: "Billing",
-  model: "xiaomi/mimo-v2-flash:free",
+  model: OpenRouter("xiaomi/mimo-v2-flash:free"),
   description:
     "Handles billing inquiries, invoice lookups, and refund requests.",
   instruction: `You are a billing specialist assistant. Help customers with:
@@ -149,7 +144,7 @@ Be professional, empathetic, and efficient. Always verify the invoice/account be
 
 const supportAgent = new LlmAgent({
   name: "Support",
-  model: "arcee-ai/trinity-mini:free",
+  model: OpenRouter("arcee-ai/trinity-mini:free"),
   description:
     "Handles technical support requests, login issues, and system status.",
   instruction: `You are a technical support specialist. Help customers with:
@@ -168,7 +163,7 @@ Be patient and guide users step by step. Check system status when relevant to is
 
 export const rootAgent = new LlmAgent({
   name: "HelpDeskCoordinator",
-  model: "nvidia/nemotron-3-nano-30b-a3b:free",
+  model: OpenRouter("nvidia/nemotron-3-nano-30b-a3b:free"),
   description:
     "Main help desk router that directs users to the appropriate specialist.",
   instruction: `You are a help desk coordinator. Your job is to:

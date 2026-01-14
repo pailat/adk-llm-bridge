@@ -1,11 +1,6 @@
-import { FunctionTool, LlmAgent, LLMRegistry } from "@google/adk";
-import { AIGatewayLlm } from "adk-llm-bridge";
+import { FunctionTool, LlmAgent } from "@google/adk";
+import { AIGateway } from "adk-llm-bridge";
 import { z } from "zod";
-
-// Register AIGatewayLlm with ADK's LLMRegistry
-// NOTE: We import LLMRegistry from @google/adk directly to ensure
-// we register with the same instance that adk-devtools uses
-LLMRegistry.register(AIGatewayLlm);
 
 // =============================================================================
 // Billing Agent Tools
@@ -135,7 +130,7 @@ const resetPassword = new FunctionTool({
 
 const billingAgent = new LlmAgent({
   name: "Billing",
-  model: "anthropic/claude-sonnet-4.5",
+  model: AIGateway("anthropic/claude-sonnet-4.5"),
   description:
     "Handles billing inquiries, invoice lookups, and refund requests.",
   instruction: `You are a billing specialist assistant. Help customers with:
@@ -149,7 +144,7 @@ Be professional, empathetic, and efficient. Always verify the invoice/account be
 
 const supportAgent = new LlmAgent({
   name: "Support",
-  model: "anthropic/claude-sonnet-4.5",
+  model: AIGateway("anthropic/claude-sonnet-4.5"),
   description:
     "Handles technical support requests, login issues, and system status.",
   instruction: `You are a technical support specialist. Help customers with:
@@ -168,7 +163,7 @@ Be patient and guide users step by step. Check system status when relevant to is
 
 export const rootAgent = new LlmAgent({
   name: "HelpDeskCoordinator",
-  model: "anthropic/claude-sonnet-4.5",
+  model: AIGateway("anthropic/claude-sonnet-4.5"),
   description:
     "Main help desk router that directs users to the appropriate specialist.",
   instruction: `You are a help desk coordinator. Your job is to:

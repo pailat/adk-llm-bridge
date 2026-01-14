@@ -33,3 +33,6 @@ Thumbs.db
 
 # Agent logs
 .agent_logs/
+
+# npm pack tarballs
+*.tgz
