@@ -31,5 +31,7 @@ export const OPENAI_ENV = {
  * - gpt-* (gpt-4, gpt-4o, gpt-4.1, etc.)
  * - o* followed by number (o1, o3, o4-mini, etc.)
  * - chatgpt-* (chatgpt-4o-latest, etc.)
+ *
+ * Note: Do not include ^ or $ anchors - ADK's LLMRegistry adds them automatically.
  */
-export const OPENAI_MODEL_PATTERNS = [/^gpt-/, /^o[0-9]/, /^chatgpt-/];
+export const OPENAI_MODEL_PATTERNS = [/gpt-.*/, /o[0-9].*/, /chatgpt-.*/];

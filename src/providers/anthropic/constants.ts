@@ -34,5 +34,7 @@ export const DEFAULT_ANTHROPIC_MAX_TOKENS = 4096;
  *
  * Matches:
  * - claude-* (claude-sonnet-4, claude-opus-4-5, claude-3-5-haiku, etc.)
+ *
+ * Note: Do not include ^ or $ anchors - ADK's LLMRegistry adds them automatically.
  */
-export const ANTHROPIC_MODEL_PATTERNS = [/^claude-/];
+export const ANTHROPIC_MODEL_PATTERNS = [/claude-.*/];

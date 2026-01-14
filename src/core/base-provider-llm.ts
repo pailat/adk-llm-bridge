@@ -17,11 +17,6 @@ import type { BaseLlmConnection, LlmRequest, LlmResponse } from "@google/adk";
 import { BaseLlm } from "@google/adk";
 import type { BaseProviderConfig } from "../types";
 
-// Compatibility with @google/adk's BASE_MODEL_SYMBOL (added in adk-js main)
-// The symbol is inherited from BaseLlm at runtime, but TypeScript can't verify it
-// because the symbol is not exported. This declaration satisfies the type checker.
-declare const BASE_MODEL_SYMBOL: unique symbol;
-
 /**
  * Abstract base class for all LLM providers in adk-llm-bridge.
  *
@@ -53,9 +48,6 @@ declare const BASE_MODEL_SYMBOL: unique symbol;
  * @see {@link OpenAICompatibleLlm} for OpenAI-compatible API implementations
  */
 export abstract class BaseProviderLlm extends BaseLlm {
-  // Inherited from BaseLlm - declared for TypeScript compatibility
-  declare readonly [BASE_MODEL_SYMBOL]: true;
-
   /**
    * Provider configuration.
    *

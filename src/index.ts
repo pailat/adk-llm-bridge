@@ -60,6 +60,14 @@
  */
 
 // =============================================================================
+// Re-exports from @google/adk (for type consistency)
+// =============================================================================
+
+// Re-export BaseLlm to ensure consumers use the same instance
+// This prevents TypeScript errors from duplicate @google/adk installations
+export { BaseLlm } from "@google/adk";
+
+// =============================================================================
 // Core (for building custom providers)
 // =============================================================================
 

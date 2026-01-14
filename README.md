@@ -7,13 +7,12 @@ Use **any LLM** with [Google ADK TypeScript](https://github.com/google/adk-js) i
 
 ## Why?
 
-Google ADK TypeScript comes with built-in Gemini support. This lightweight bridge extends it to work with **any model** from providers like Anthropic, OpenAI, Meta, and more—while keeping all ADK features like multi-agent orchestration, tool calling, and streaming.
+Google ADK TypeScript comes with built-in Gemini support. This bridge extends it to work with **any model** from providers like Anthropic, OpenAI, Meta, and more—while keeping all ADK features like multi-agent orchestration, tool calling, and streaming.
 
 ### Key Benefits
 
-- **Minimal** — ~10KB bundle (~3KB gzipped), single dependency (`openai`)
 - **Simple** — 3 lines to integrate any model
-- **Secure** — No complex dependency tree, just the battle-tested OpenAI SDK
+- **Battle-tested** — Built on the official OpenAI and Anthropic SDKs
 - **Compatible** — Works with any OpenAI-compatible API (AI Gateway, OpenRouter, etc.)
 
 ## Supported Providers
@@ -43,54 +42,45 @@ npm install adk-llm-bridge @google/adk
 
 ## Quick Start
 
-Just 3 lines to use Claude, GPT, Gemini, or any model with ADK:
-
 ```typescript
-import { LlmAgent, LLMRegistry } from '@google/adk';
-import { AIGatewayLlm } from 'adk-llm-bridge';  // 1. Import
+import { LlmAgent } from '@google/adk';
+import { AIGateway } from 'adk-llm-bridge';
 
-LLMRegistry.register(AIGatewayLlm);              // 2. Register
-
-const agent = new LlmAgent({                     // 3. Use any model
+const agent = new LlmAgent({
   name: 'assistant',
-  model: 'anthropic/claude-sonnet-4',            // Claude, GPT, Llama, etc.
+  model: AIGateway('anthropic/claude-sonnet-4'),
   instruction: 'You are a helpful assistant.',
 });
 ```
 
 That's it. All ADK features work: tools, streaming, multi-agent, etc.
 
-### With OpenRouter
+### Other Providers
 
 ```typescript
-import { LlmAgent, LLMRegistry } from '@google/adk';
-import { OpenRouterLlm } from 'adk-llm-bridge';
+import { OpenRouter, OpenAI, Anthropic, XAI, Custom } from 'adk-llm-bridge';
 
-LLMRegistry.register(OpenRouterLlm);
+// OpenRouter - 100+ models with routing
+model: OpenRouter('anthropic/claude-sonnet-4')
 
-const agent = new LlmAgent({
-  name: 'assistant',
-  model: 'anthropic/claude-sonnet-4',
-  instruction: 'You are a helpful assistant.',
-});
+// OpenAI - Direct API
+model: OpenAI('gpt-4.1')
+
+// Anthropic - Direct API  
+model: Anthropic('claude-sonnet-4-5')
+
+// xAI - Direct API
+model: XAI('grok-3-beta')
+
+// Local models (LM Studio, Ollama, etc.)
+model: Custom('your-model', { baseURL: 'http://localhost:1234/v1' })
 ```
 
-### With OpenAI
+See the [examples](./examples) directory for complete implementations.
 
-```typescript
-import { LlmAgent, LLMRegistry } from '@google/adk';
-import { OpenAILlm } from 'adk-llm-bridge';
+### Using LLMRegistry (Alternative)
 
-LLMRegistry.register(OpenAILlm);
-
-const agent = new LlmAgent({
-  name: 'assistant',
-  model: 'gpt-4.1',  // or gpt-4o, o1, o3, etc.
-  instruction: 'You are a helpful assistant.',
-});
-```
-
-### With Anthropic
+You can also register providers with ADK's LLMRegistry to use string-based model names:
 
 ```typescript
 import { LlmAgent, LLMRegistry } from '@google/adk';
@@ -100,75 +90,10 @@ LLMRegistry.register(AnthropicLlm);
 
 const agent = new LlmAgent({
   name: 'assistant',
-  model: 'claude-sonnet-4-5-20250929',
+  model: 'claude-sonnet-4-5',  // String-based model name
   instruction: 'You are a helpful assistant.',
 });
 ```
-
-### With xAI (Grok)
-
-```typescript
-import { LlmAgent, LLMRegistry } from '@google/adk';
-import { XAILlm } from 'adk-llm-bridge';
-
-LLMRegistry.register(XAILlm);
-
-const agent = new LlmAgent({
-  name: 'assistant',
-  model: 'grok-3-beta',
-  instruction: 'You are a helpful assistant.',
-});
-```
-
-### With Local Models (LM Studio, Ollama)
-
-Run models locally without API keys by extending `CustomLlm`:
-
-```typescript
-import { LlmAgent, LLMRegistry } from '@google/adk';
-import { CustomLlm } from 'adk-llm-bridge';
-
-// Create a custom provider for LM Studio
-class LMStudioLlm extends CustomLlm {
-  static override readonly supportedModels = [/.*/]; // Match any model
-
-  constructor(config: { model: string }) {
-    super({
-      ...config,
-      name: 'lmstudio',
-      baseURL: process.env.LMSTUDIO_BASE_URL || 'http://localhost:1234/v1',
-    });
-  }
-}
-
-LLMRegistry.register(LMStudioLlm);
-
-const agent = new LlmAgent({
-  name: 'assistant',
-  model: 'your-loaded-model-name',  // The model loaded in LM Studio
-  instruction: 'You are a helpful assistant.',
-});
-```
-
-For **Ollama**, just change the `baseURL`:
-
-```typescript
-class OllamaLlm extends CustomLlm {
-  static override readonly supportedModels = [/.*/];
-
-  constructor(config: { model: string }) {
-    super({
-      ...config,
-      name: 'ollama',
-      baseURL: 'http://localhost:11434/v1',
-    });
-  }
-}
-
-LLMRegistry.register(OllamaLlm);
-```
-
-See the [basic-agent-lmstudio](./examples/basic-agent-lmstudio) example for a complete implementation.
 
 ## Configuration
 
@@ -196,32 +121,29 @@ XAI_API_KEY=your-xai-key
 
 ### Programmatic Configuration
 
-```typescript
-import { 
-  registerAIGateway, 
-  registerOpenRouter,
-  registerOpenAI,
-  registerAnthropic,
-  registerXAI,
-} from 'adk-llm-bridge';
+Pass options directly to the factory functions:
 
-// AI Gateway
-registerAIGateway({
+```typescript
+import { AIGateway, OpenRouter, Anthropic } from 'adk-llm-bridge';
+
+// AI Gateway with custom URL
+model: AIGateway('anthropic/claude-sonnet-4', {
   apiKey: process.env.MY_API_KEY,
   baseURL: 'https://my-gateway.example.com/v1',
-});
+})
 
-// OpenRouter
-registerOpenRouter({
+// OpenRouter with site info
+model: OpenRouter('anthropic/claude-sonnet-4', {
   apiKey: process.env.OPENROUTER_API_KEY,
   siteUrl: 'https://your-site.com',
   appName: 'Your App',
-});
+})
 
-// Direct providers
-registerOpenAI({ apiKey: process.env.OPENAI_API_KEY });
-registerAnthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-registerXAI({ apiKey: process.env.XAI_API_KEY });
+// Anthropic with custom max tokens
+model: Anthropic('claude-sonnet-4-5', {
+  apiKey: process.env.ANTHROPIC_API_KEY,
+  maxTokens: 8192,
+})
 ```
 
 ## Model Format
@@ -266,11 +188,9 @@ Browse all models:
 ## Tool Calling Example
 
 ```typescript
-import { FunctionTool, LlmAgent, LLMRegistry } from '@google/adk';
-import { AIGatewayLlm } from 'adk-llm-bridge';
+import { FunctionTool, LlmAgent } from '@google/adk';
+import { Anthropic } from 'adk-llm-bridge';
 import { z } from 'zod';
-
-LLMRegistry.register(AIGatewayLlm);
 
 const getWeather = new FunctionTool({
   name: 'get_weather',
@@ -285,63 +205,28 @@ const getWeather = new FunctionTool({
 
 const agent = new LlmAgent({
   name: 'weather-assistant',
-  model: 'anthropic/claude-sonnet-4',
+  model: Anthropic('claude-sonnet-4-5'),
   instruction: 'You help users check the weather.',
   tools: [getWeather],
 });
 ```
 
-## Using with adk-devtools
-
-When using `adk-devtools`, import `LLMRegistry` from `@google/adk` directly:
-
-```typescript
-import { LlmAgent, LLMRegistry } from '@google/adk';
-import { AIGatewayLlm, OpenRouterLlm } from 'adk-llm-bridge';
-
-// Register the provider you want to use
-LLMRegistry.register(AIGatewayLlm);
-// or
-LLMRegistry.register(OpenRouterLlm);
-
-export const rootAgent = new LlmAgent({
-  name: 'assistant',
-  model: 'anthropic/claude-sonnet-4',
-  instruction: 'You are helpful.',
-});
-```
-
-Then run:
-```bash
-bunx @google/adk-devtools web
-```
-
 ## API Reference
 
-### Classes
-
-| Class | Description |
-|-------|-------------|
-| `AIGatewayLlm` | LLM class for Vercel AI Gateway |
-| `OpenRouterLlm` | LLM class for OpenRouter |
-| `OpenAILlm` | LLM class for OpenAI API (gpt-*, o1-*, o3-*) |
-| `AnthropicLlm` | LLM class for Anthropic API (claude-*) |
-| `XAILlm` | LLM class for xAI API (grok-*) |
-| `CustomLlm` | LLM class for any compatible API |
-
-### Registration Functions
+### Factory Functions
 
 | Function | Description |
 |----------|-------------|
-| `registerAIGateway(options?)` | Register AIGatewayLlm with LLMRegistry |
-| `registerOpenRouter(options?)` | Register OpenRouterLlm with LLMRegistry |
-| `registerOpenAI(options?)` | Register OpenAILlm with LLMRegistry |
-| `registerAnthropic(options?)` | Register AnthropicLlm with LLMRegistry |
-| `registerXAI(options?)` | Register XAILlm with LLMRegistry |
+| `AIGateway(model, options?)` | Vercel AI Gateway (100+ models) |
+| `OpenRouter(model, options?)` | OpenRouter (100+ models) |
+| `OpenAI(model, options?)` | OpenAI direct API |
+| `Anthropic(model, options?)` | Anthropic direct API |
+| `XAI(model, options?)` | xAI direct API |
+| `Custom(model, options)` | Any OpenAI-compatible API |
 
 ### Configuration Options
 
-**AIGateway / AIGatewayLlm:**
+**AIGateway:**
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
@@ -350,7 +235,7 @@ bunx @google/adk-devtools web
 | `timeout` | `number` | `60000` | Request timeout (ms) |
 | `maxRetries` | `number` | `2` | Max retry attempts |
 
-**OpenRouter / OpenRouterLlm:**
+**OpenRouter:
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
@@ -362,7 +247,7 @@ bunx @google/adk-devtools web
 | `timeout` | `number` | `60000` | Request timeout (ms) |
 | `maxRetries` | `number` | `2` | Max retry attempts |
 
-**OpenAI / OpenAILlm:**
+**OpenAI:
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
@@ -372,7 +257,7 @@ bunx @google/adk-devtools web
 | `timeout` | `number` | `60000` | Request timeout (ms) |
 | `maxRetries` | `number` | `2` | Max retry attempts |
 
-**Anthropic / AnthropicLlm:**
+**Anthropic:
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
@@ -381,7 +266,7 @@ bunx @google/adk-devtools web
 | `timeout` | `number` | `60000` | Request timeout (ms) |
 | `maxRetries` | `number` | `2` | Max retry attempts |
 
-**XAI / XAILlm:**
+**XAI:
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
@@ -389,7 +274,7 @@ bunx @google/adk-devtools web
 | `timeout` | `number` | `60000` | Request timeout (ms) |
 | `maxRetries` | `number` | `2` | Max retry attempts |
 
-**createCustomLlm / Custom:**
+**Custom:
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
@@ -418,7 +303,7 @@ See the [examples](./examples) directory:
 ## Requirements
 
 - Node.js >= 18.0.0
-- `@google/adk` >= 0.2.0
+- `@google/adk` >= 0.2.2
 
 ## Contributing
 
