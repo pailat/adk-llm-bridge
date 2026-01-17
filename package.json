@@ -53,7 +53,7 @@
     "prepublishOnly": "bun run build"
   },
   "peerDependencies": {
-    "@google/adk": ">=0.2.2"
+    "@google/adk": ">=0.2.4"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.71.2",
@@ -61,8 +61,8 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^2.3.10",
-    "@google/adk": "^0.2.2",
-    "@google/genai": "^1.0.0",
+    "@google/adk": "^0.2.4",
+    "@google/genai": "^1.37.0",
     "@types/bun": "latest",
     "typescript": "^5.3.0"
   }
