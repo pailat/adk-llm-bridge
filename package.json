@@ -1,6 +1,6 @@
 {
   "name": "adk-llm-bridge",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "Use any LLM with Google ADK TypeScript - supports AI Gateway, OpenRouter, and 100+ models",
   "keywords": [
     "adk",
