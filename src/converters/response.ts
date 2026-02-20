@@ -211,8 +211,11 @@ export function createStreamAccumulator(): StreamAccumulator {
 /**
  * Safely parses a JSON string, returning an empty object on failure.
  *
- * Used for parsing function call arguments which may be malformed
- * in edge cases.
+ * Pre-processes the JSON string to convert large integers (17+ digits) to
+ * strings before parsing, preventing IEEE 754 double precision loss.
+ * Numbers with 17+ digits exceed Number.MAX_SAFE_INTEGER (16 digits), so
+ * they are silently rounded by JSON.parse — this is especially problematic
+ * for IDs like Zoho Desk ticket IDs (19 digits).
  *
  * @param str - The JSON string to parse
  * @returns The parsed object, or empty object if parsing fails
@@ -221,7 +224,14 @@ export function createStreamAccumulator(): StreamAccumulator {
  */
 function safeJsonParse(str: string): Record<string, unknown> {
   try {
-    return JSON.parse(str);
+    // Pre-process: wrap large integers (17+ digits) in quotes to prevent
+    // IEEE 754 precision loss. The pattern matches integers that appear as
+    // JSON values (preceded by :, [, or , and followed by ,, ], or }).
+    const safe = str.replace(
+      /([:\[,])\s*(-?\d{17,})(?=\s*[,\]\}])/g,
+      (_, delimiter, num) => `${delimiter} "${num}"`,
+    );
+    return JSON.parse(safe);
   } catch {
     return {};
   }

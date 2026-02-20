@@ -285,6 +285,25 @@ describe("convertAnthropicStreamEvent", () => {
       });
     });
 
+    it("preserves large integer IDs as strings in streamed tool call arguments", () => {
+      // Anthropic streaming sends raw JSON fragments via input_json_delta.
+      // Claude may emit the number without quotes even when schema says "type": "string".
+      // A 19-digit ID exceeds Number.MAX_SAFE_INTEGER and would be rounded by JSON.parse.
+      const zohoTicketId = "1021987000032211189";
+      const acc = createAnthropicStreamAccumulator();
+      acc.toolUses.set(0, {
+        id: "call_456",
+        name: "get_ticket",
+        input: `{"ticketId": ${zohoTicketId}}`,
+      });
+
+      const result = convertAnthropicStreamEvent({ type: "message_stop" }, acc);
+
+      const args = result.response?.content?.parts?.[0]?.functionCall?.args;
+      expect(args?.ticketId).toBe(zohoTicketId);
+      expect(typeof args?.ticketId).toBe("string");
+    });
+
     it("clears accumulator after message_stop", () => {
       const acc = createAnthropicStreamAccumulator();
       acc.text = "Hello";
