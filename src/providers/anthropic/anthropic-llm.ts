@@ -151,6 +151,13 @@ export class AnthropicLlm extends BaseProviderLlm {
   /**
    * Makes a single (non-streaming) API request.
    *
+   * Uses `messages.stream()` internally instead of `messages.create()` so
+   * that tool-call arguments arrive as raw JSON fragments (`input_json_delta`)
+   * and are parsed by our precision-safe `safeJsonParse`. If we used
+   * `messages.create()`, the Anthropic SDK would call `JSON.parse` on the
+   * response body before we see it, silently rounding integers larger than
+   * Number.MAX_SAFE_INTEGER (e.g. 19-digit Zoho Desk ticket IDs).
+   *
    * @private
    */
   private async singleResponse(
@@ -158,7 +165,7 @@ export class AnthropicLlm extends BaseProviderLlm {
     system: string | undefined,
     tools: AnthropicSDK.Tool[] | undefined,
   ): Promise<LlmResponse> {
-    const response = await this.client.messages.create({
+    const stream = this.client.messages.stream({
       model: this.model,
       max_tokens: this.maxTokens,
       messages,
@@ -166,7 +173,18 @@ export class AnthropicLlm extends BaseProviderLlm {
       ...(tools?.length ? { tools } : {}),
     });
 
-    return convertAnthropicResponse(response);
+    const acc = createAnthropicStreamAccumulator();
+
+    for await (const event of stream) {
+      const { response, isComplete } = convertAnthropicStreamEvent(event, acc);
+      if (isComplete && response) return response;
+    }
+
+    return {
+      errorCode: "NO_RESPONSE",
+      errorMessage: "No complete response received from Anthropic",
+      turnComplete: true,
+    };
   }
 
   /**

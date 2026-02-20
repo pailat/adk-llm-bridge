@@ -101,6 +101,43 @@ describe("convertResponse", () => {
     });
   });
 
+  it("preserves large integer IDs as strings in tool call arguments", () => {
+    // Claude may emit numbers without quotes even when schema says "type": "string".
+    // A 19-digit ID like Zoho Desk ticket IDs exceeds Number.MAX_SAFE_INTEGER
+    // and would be rounded by standard JSON.parse.
+    const zohoTicketId = "1021987000032211189";
+    const response = createCompletion({
+      choices: [
+        {
+          index: 0,
+          message: {
+            role: "assistant",
+            content: null,
+            refusal: null,
+            tool_calls: [
+              {
+                id: "call_456",
+                type: "function",
+                function: {
+                  name: "get_ticket",
+                  arguments: `{"ticketId": ${zohoTicketId}}`,
+                },
+              },
+            ],
+          },
+          finish_reason: "tool_calls",
+          logprobs: null,
+        },
+      ],
+    });
+
+    const result = convertResponse(response);
+    const args = result.content?.parts?.[0]?.functionCall?.args;
+
+    expect(args?.ticketId).toBe(zohoTicketId);
+    expect(typeof args?.ticketId).toBe("string");
+  });
+
   it("converts usage metadata", () => {
     const response = createCompletion({
       usage: { prompt_tokens: 10, completion_tokens: 20, total_tokens: 30 },
@@ -166,5 +203,21 @@ describe("convertStreamChunk", () => {
 
     expect(accumulated.text).toBe("");
     expect(accumulated.toolCalls.size).toBe(0);
+  });
+
+  it("preserves large integer IDs as strings in streamed tool call arguments", () => {
+    const zohoTicketId = "1021987000032211189";
+    const accumulated = createStreamAccumulator();
+    accumulated.toolCalls.set(0, {
+      id: "call_789",
+      name: "get_ticket",
+      arguments: `{"ticketId": ${zohoTicketId}}`,
+    });
+
+    const result = convertStreamChunk(createChunk({}, "tool_calls"), accumulated);
+
+    const args = result.response?.content?.parts?.[0]?.functionCall?.args;
+    expect(args?.ticketId).toBe(zohoTicketId);
+    expect(typeof args?.ticketId).toBe("string");
   });
 });
