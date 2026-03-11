@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from "bun:test";
 import { resetAllConfigs } from "../../../src/config";
-import { XAI_MODEL_PATTERNS } from "../../../src/providers/xai/constants";
-import { XAILlm } from "../../../src/providers/xai/xai-llm";
+import { XAI_DEFINITION } from "../../../src/providers/xai/definition";
+import { XAILlm } from "../../../src/providers/xai";
 
 describe("XAILlm", () => {
   beforeEach(() => {
@@ -15,8 +15,8 @@ describe("XAILlm", () => {
       expect(Array.isArray(XAILlm.supportedModels)).toBe(true);
     });
 
-    it("matches XAI_MODEL_PATTERNS", () => {
-      expect(XAILlm.supportedModels).toEqual(XAI_MODEL_PATTERNS);
+    it("matches XAI_DEFINITION.modelPatterns", () => {
+      expect(XAILlm.supportedModels).toEqual(XAI_DEFINITION.modelPatterns);
     });
 
     it("patterns match grok-* models", () => {
@@ -30,7 +30,7 @@ describe("XAILlm", () => {
       ];
 
       for (const model of grokModels) {
-        const matches = XAI_MODEL_PATTERNS.some((pattern) => {
+        const matches = XAI_DEFINITION.modelPatterns.some((pattern) => {
           if (pattern instanceof RegExp) return pattern.test(model);
           return pattern === model;
         });
@@ -47,7 +47,7 @@ describe("XAILlm", () => {
       ];
 
       for (const model of nonXAIModels) {
-        const matches = XAI_MODEL_PATTERNS.some((pattern) => {
+        const matches = XAI_DEFINITION.modelPatterns.some((pattern) => {
           if (pattern instanceof RegExp) return pattern.test(model);
           return pattern === model;
         });

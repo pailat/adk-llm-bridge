@@ -3,31 +3,16 @@
  * Copyright 2025 PAI
  * SPDX-License-Identifier: MIT
  */
+import { createProviderClass, createProviderFactory } from "../../core/create-provider";
+import { createRegisterFunction } from "../../core/create-register";
+import { AI_GATEWAY_DEFINITION } from "./definition";
 
-/**
- * Vercel AI Gateway provider for ADK.
- *
- * Provides access to 100+ LLM models through Vercel's AI Gateway service.
- *
- * @module providers/ai-gateway
- *
- * @example
- * ```typescript
- * import { AIGateway, registerAIGateway } from "adk-llm-bridge";
- *
- * // Option 1: Factory function
- * const llm = AIGateway("anthropic/claude-sonnet-4");
- *
- * // Option 2: Registry for string model names
- * registerAIGateway({ apiKey: "..." });
- * const agent = new LlmAgent({ model: "anthropic/claude-sonnet-4" });
- * ```
- */
+export { AI_GATEWAY_DEFINITION } from "./definition";
 
-export { AIGatewayLlm } from "./ai-gateway-llm";
-export { AIGateway } from "./factory";
-export {
-  _resetAIGatewayRegistration,
-  isAIGatewayRegistered,
-  registerAIGateway,
-} from "./register";
+export const AIGatewayLlm = createProviderClass(AI_GATEWAY_DEFINITION);
+export const AIGateway = createProviderFactory(AI_GATEWAY_DEFINITION);
+
+const reg = createRegisterFunction(AI_GATEWAY_DEFINITION, AIGatewayLlm);
+export const registerAIGateway = reg.register;
+export const isAIGatewayRegistered = reg.isRegistered;
+export const _resetAIGatewayRegistration = reg._reset;

@@ -4,7 +4,7 @@ import {
   _resetOpenRouterRegistration,
   isOpenRouterRegistered,
   registerOpenRouter,
-} from "../../../src/providers/openrouter/register";
+} from "../../../src/providers/openrouter";
 
 describe("registerOpenRouter", () => {
   beforeEach(() => {

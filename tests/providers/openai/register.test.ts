@@ -4,7 +4,7 @@ import {
   _resetOpenAIRegistration,
   isOpenAIRegistered,
   registerOpenAI,
-} from "../../../src/providers/openai/register";
+} from "../../../src/providers/openai";
 
 describe("registerOpenAI", () => {
   beforeEach(() => {

@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from "bun:test";
 import { resetAllConfigs } from "../../../src/config";
-import { OPENROUTER_MODEL_PATTERNS } from "../../../src/constants";
-import { OpenRouterLlm } from "../../../src/providers/openrouter/openrouter-llm";
+import { OPENROUTER_DEFINITION } from "../../../src/providers/openrouter/definition";
+import { OpenRouterLlm } from "../../../src/providers/openrouter";
 
 describe("OpenRouterLlm", () => {
   beforeEach(() => {
@@ -17,8 +17,8 @@ describe("OpenRouterLlm", () => {
       expect(Array.isArray(OpenRouterLlm.supportedModels)).toBe(true);
     });
 
-    it("matches OPENROUTER_MODEL_PATTERNS", () => {
-      expect(OpenRouterLlm.supportedModels).toEqual(OPENROUTER_MODEL_PATTERNS);
+    it("matches OPENROUTER_DEFINITION.modelPatterns", () => {
+      expect(OpenRouterLlm.supportedModels).toEqual(OPENROUTER_DEFINITION.modelPatterns);
     });
 
     it("patterns match expected model formats", () => {
@@ -31,7 +31,7 @@ describe("OpenRouterLlm", () => {
       ];
 
       for (const model of testModels) {
-        const matches = OPENROUTER_MODEL_PATTERNS.some((pattern) => {
+        const matches = OPENROUTER_DEFINITION.modelPatterns.some((pattern) => {
           if (pattern instanceof RegExp) return pattern.test(model);
           return pattern === model;
         });

@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from "bun:test";
 import { resetAllConfigs } from "../../../src/config";
-import { XAI } from "../../../src/providers/xai/factory";
-import { XAILlm } from "../../../src/providers/xai/xai-llm";
+import { OpenAICompatibleLlm } from "../../../src/core/openai-compatible-llm";
+import { XAI } from "../../../src/providers/xai";
 
 describe("XAI factory", () => {
   beforeEach(() => {
@@ -11,7 +11,7 @@ describe("XAI factory", () => {
 
   it("creates XAILlm instance", () => {
     const llm = XAI("grok-4");
-    expect(llm).toBeInstanceOf(XAILlm);
+    expect(llm).toBeInstanceOf(OpenAICompatibleLlm);
   });
 
   it("sets model correctly", () => {

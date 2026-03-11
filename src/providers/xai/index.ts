@@ -3,32 +3,16 @@
  * Copyright 2025 PAI
  * SPDX-License-Identifier: MIT
  */
+import { createProviderClass, createProviderFactory } from "../../core/create-provider";
+import { createRegisterFunction } from "../../core/create-register";
+import { XAI_DEFINITION } from "./definition";
 
-/**
- * xAI (Grok) provider module.
- *
- * Provides direct access to xAI's API for Grok models.
- *
- * @module providers/xai
- *
- * @example
- * ```typescript
- * import { XAI, registerXAI } from "adk-llm-bridge";
- *
- * // Option 1: Factory function
- * const llm = XAI("grok-4");
- *
- * // Option 2: Registry integration
- * registerXAI();
- * const agent = new LlmAgent({ model: "grok-4" });
- * ```
- */
+export { XAI_DEFINITION } from "./definition";
 
-export { XAI_BASE_URL, XAI_ENV, XAI_MODEL_PATTERNS } from "./constants";
-export { XAI } from "./factory";
-export {
-  _resetXAIRegistration,
-  isXAIRegistered,
-  registerXAI,
-} from "./register";
-export { XAILlm } from "./xai-llm";
+export const XAILlm = createProviderClass(XAI_DEFINITION);
+export const XAI = createProviderFactory(XAI_DEFINITION);
+
+const reg = createRegisterFunction(XAI_DEFINITION, XAILlm);
+export const registerXAI = reg.register;
+export const isXAIRegistered = reg.isRegistered;
+export const _resetXAIRegistration = reg._reset;

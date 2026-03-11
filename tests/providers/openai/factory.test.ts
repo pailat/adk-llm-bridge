@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from "bun:test";
 import { resetAllConfigs } from "../../../src/config";
-import { OpenAI } from "../../../src/providers/openai/factory";
-import { OpenAILlm } from "../../../src/providers/openai/openai-llm";
+import { OpenAICompatibleLlm } from "../../../src/core/openai-compatible-llm";
+import { OpenAI } from "../../../src/providers/openai";
 
 describe("OpenAI factory", () => {
   beforeEach(() => {
@@ -11,7 +11,7 @@ describe("OpenAI factory", () => {
 
   it("creates OpenAILlm instance", () => {
     const llm = OpenAI("gpt-4.1");
-    expect(llm).toBeInstanceOf(OpenAILlm);
+    expect(llm).toBeInstanceOf(OpenAICompatibleLlm);
   });
 
   it("sets model correctly", () => {

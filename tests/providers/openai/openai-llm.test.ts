@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from "bun:test";
 import { resetAllConfigs } from "../../../src/config";
-import { OPENAI_MODEL_PATTERNS } from "../../../src/providers/openai/constants";
-import { OpenAILlm } from "../../../src/providers/openai/openai-llm";
+import { OPENAI_DEFINITION } from "../../../src/providers/openai/definition";
+import { OpenAILlm } from "../../../src/providers/openai";
 
 describe("OpenAILlm", () => {
   beforeEach(() => {
@@ -17,8 +17,8 @@ describe("OpenAILlm", () => {
       expect(Array.isArray(OpenAILlm.supportedModels)).toBe(true);
     });
 
-    it("matches OPENAI_MODEL_PATTERNS", () => {
-      expect(OpenAILlm.supportedModels).toEqual(OPENAI_MODEL_PATTERNS);
+    it("matches OPENAI_DEFINITION.modelPatterns", () => {
+      expect(OpenAILlm.supportedModels).toEqual(OPENAI_DEFINITION.modelPatterns);
     });
 
     it("patterns match gpt-* models", () => {
@@ -32,7 +32,7 @@ describe("OpenAILlm", () => {
       ];
 
       for (const model of gptModels) {
-        const matches = OPENAI_MODEL_PATTERNS.some((pattern) => {
+        const matches = OPENAI_DEFINITION.modelPatterns.some((pattern) => {
           if (pattern instanceof RegExp) return pattern.test(model);
           return pattern === model;
         });
@@ -44,7 +44,7 @@ describe("OpenAILlm", () => {
       const oModels = ["o1", "o1-mini", "o1-preview", "o3", "o4-mini"];
 
       for (const model of oModels) {
-        const matches = OPENAI_MODEL_PATTERNS.some((pattern) => {
+        const matches = OPENAI_DEFINITION.modelPatterns.some((pattern) => {
           if (pattern instanceof RegExp) return pattern.test(model);
           return pattern === model;
         });
@@ -56,7 +56,7 @@ describe("OpenAILlm", () => {
       const chatgptModels = ["chatgpt-4o-latest"];
 
       for (const model of chatgptModels) {
-        const matches = OPENAI_MODEL_PATTERNS.some((pattern) => {
+        const matches = OPENAI_DEFINITION.modelPatterns.some((pattern) => {
           if (pattern instanceof RegExp) return pattern.test(model);
           return pattern === model;
         });
@@ -73,7 +73,7 @@ describe("OpenAILlm", () => {
       ];
 
       for (const model of nonOpenAIModels) {
-        const matches = OPENAI_MODEL_PATTERNS.some((pattern) => {
+        const matches = OPENAI_DEFINITION.modelPatterns.some((pattern) => {
           if (pattern instanceof RegExp) return pattern.test(model);
           return pattern === model;
         });

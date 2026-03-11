@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from "bun:test";
 import { resetConfig } from "../../../src/config";
-import { MODEL_PATTERNS } from "../../../src/constants";
-import { AIGatewayLlm } from "../../../src/providers/ai-gateway/ai-gateway-llm";
+import { AI_GATEWAY_DEFINITION } from "../../../src/providers/ai-gateway/definition";
+import { AIGatewayLlm } from "../../../src/providers/ai-gateway";
 
 describe("AIGatewayLlm", () => {
   beforeEach(() => {
@@ -18,8 +18,8 @@ describe("AIGatewayLlm", () => {
       expect(Array.isArray(AIGatewayLlm.supportedModels)).toBe(true);
     });
 
-    it("matches MODEL_PATTERNS", () => {
-      expect(AIGatewayLlm.supportedModels).toEqual(MODEL_PATTERNS);
+    it("matches AI_GATEWAY_DEFINITION.modelPatterns", () => {
+      expect(AIGatewayLlm.supportedModels).toEqual(AI_GATEWAY_DEFINITION.modelPatterns);
     });
 
     it("patterns match expected model formats", () => {
@@ -35,7 +35,7 @@ describe("AIGatewayLlm", () => {
       ];
 
       for (const model of testModels) {
-        const matches = MODEL_PATTERNS.some((pattern) => {
+        const matches = AI_GATEWAY_DEFINITION.modelPatterns.some((pattern) => {
           if (pattern instanceof RegExp) return pattern.test(model);
           return pattern === model;
         });

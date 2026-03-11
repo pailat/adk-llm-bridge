@@ -31,7 +31,7 @@ export function safeJsonParse(str: string): Record<string, unknown> {
     // JSON values (preceded by :, [, or , and followed by ,, ], or }).
     // Negative lookahead (?!\.\d) prevents matching large decimals.
     const safe = str.replace(
-      /([:\[,])\s*(-?\d{17,})(?!\.\d)(?=\s*[,\]\}])/g,
+      /([:[,])\s*(-?\d{17,})(?!\.\d)(?=\s*[,\]}])/g,
       (_, delimiter, num) => `${delimiter} "${num}"`,
     );
     return JSON.parse(safe);

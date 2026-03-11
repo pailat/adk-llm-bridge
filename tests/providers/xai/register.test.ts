@@ -4,7 +4,7 @@ import {
   _resetXAIRegistration,
   isXAIRegistered,
   registerXAI,
-} from "../../../src/providers/xai/register";
+} from "../../../src/providers/xai";
 
 describe("registerXAI", () => {
   beforeEach(() => {

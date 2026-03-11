@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from "bun:test";
 import { resetConfig } from "../../../src/config";
-import { AIGatewayLlm } from "../../../src/providers/ai-gateway/ai-gateway-llm";
-import { AIGateway } from "../../../src/providers/ai-gateway/factory";
+import { OpenAICompatibleLlm } from "../../../src/core/openai-compatible-llm";
+import { AIGateway } from "../../../src/providers/ai-gateway";
 
 describe("AIGateway factory", () => {
   beforeEach(() => {
@@ -12,7 +12,7 @@ describe("AIGateway factory", () => {
 
   it("creates AIGatewayLlm instance", () => {
     const llm = AIGateway("anthropic/claude-sonnet-4");
-    expect(llm).toBeInstanceOf(AIGatewayLlm);
+    expect(llm).toBeInstanceOf(OpenAICompatibleLlm);
     expect(llm.model).toBe("anthropic/claude-sonnet-4");
   });
 

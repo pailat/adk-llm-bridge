@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from "bun:test";
 import { resetAllConfigs } from "../../../src/config";
-import { OpenRouter } from "../../../src/providers/openrouter/factory";
-import { OpenRouterLlm } from "../../../src/providers/openrouter/openrouter-llm";
+import { OpenAICompatibleLlm } from "../../../src/core/openai-compatible-llm";
+import { OpenRouter } from "../../../src/providers/openrouter";
 
 describe("OpenRouter factory", () => {
   beforeEach(() => {
@@ -11,7 +11,7 @@ describe("OpenRouter factory", () => {
 
   it("creates OpenRouterLlm instance", () => {
     const llm = OpenRouter("anthropic/claude-sonnet-4");
-    expect(llm).toBeInstanceOf(OpenRouterLlm);
+    expect(llm).toBeInstanceOf(OpenAICompatibleLlm);
   });
 
   it("sets model correctly", () => {
