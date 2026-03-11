@@ -8,7 +8,9 @@
  * OpenAI-compatible LLM base class.
  *
  * This module provides the base class for LLM providers that use
- * OpenAI-compatible APIs (chat completions endpoint).
+ * OpenAI-compatible APIs (chat completions endpoint). Providers can
+ * be created either by extending this class or by using a declarative
+ * {@link ProviderDefinition}.
  *
  * @module core/openai-compatible-llm
  */
@@ -23,6 +25,8 @@ import {
 } from "../converters/response";
 import type { BaseProviderConfig } from "../types";
 import { BaseProviderLlm } from "./base-provider-llm";
+import { resolveConfig } from "./config-resolver";
+import type { ProviderDefinition } from "./provider-definition";
 
 /**
  * Configuration for the underlying OpenAI client.
@@ -30,171 +34,112 @@ import { BaseProviderLlm } from "./base-provider-llm";
  * These options are passed directly to the OpenAI SDK constructor.
  */
 export interface OpenAIClientConfig {
-  /**
-   * Base URL for the API endpoint.
-   *
-   * @example "https://ai-gateway.vercel.sh/v1"
-   * @example "https://openrouter.ai/api/v1"
-   */
+  /** Base URL for the API endpoint. */
   baseURL: string;
-
-  /**
-   * API key for authentication.
-   */
+  /** API key for authentication. */
   apiKey: string;
-
-  /**
-   * Request timeout in milliseconds.
-   */
+  /** Request timeout in milliseconds. */
   timeout: number;
-
-  /**
-   * Maximum number of retry attempts.
-   */
+  /** Maximum number of retry attempts. */
   maxRetries: number;
-
-  /**
-   * Additional HTTP headers to include in all requests.
-   *
-   * Useful for provider-specific headers like OpenRouter's site attribution.
-   */
+  /** Additional HTTP headers to include in all requests. */
   defaultHeaders?: Record<string, string>;
 }
 
 /**
  * Base class for LLM providers that use OpenAI-compatible APIs.
  *
- * Handles the common logic for:
- * - Converting ADK requests to OpenAI format
- * - Making chat completion API calls
- * - Processing both streaming and non-streaming responses
- * - Converting responses back to ADK format
+ * Supports two construction modes:
  *
- * Extend this class to implement support for any OpenAI-compatible API.
+ * 1. **Declarative** (recommended): Pass a {@link ProviderDefinition} that
+ *    describes the provider's configuration. Config resolution is automatic.
  *
- * @abstract
+ * 2. **Manual**: Pass a {@link BaseProviderConfig} + {@link OpenAIClientConfig}
+ *    with pre-resolved values. Used by CustomLlm which has unique URL logic.
  *
  * @example
  * ```typescript
- * class MyProviderLlm extends OpenAICompatibleLlm {
- *   static supportedModels = [/^myprovider\/.+$/];
+ * // Declarative (most providers)
+ * const llm = new OpenAICompatibleLlm(MY_DEFINITION, { model: "gpt-4o" });
  *
- *   constructor(config: MyProviderConfig) {
- *     super(config, {
- *       baseURL: "https://api.myprovider.com/v1",
- *       apiKey: config.apiKey,
- *       timeout: config.timeout ?? 60000,
- *       maxRetries: config.maxRetries ?? 2
- *     });
- *   }
- *
- *   protected getErrorPrefix(): string {
- *     return "MY_PROVIDER";
+ * // Manual (Custom provider)
+ * class CustomLlm extends OpenAICompatibleLlm {
+ *   constructor(config) {
+ *     super(config, { baseURL, apiKey, timeout, maxRetries });
  *   }
  * }
  * ```
- *
- * @see {@link BaseProviderLlm} for the parent class
- * @see {@link AIGatewayLlm} for AI Gateway implementation
- * @see {@link OpenRouterLlm} for OpenRouter implementation
  */
-export abstract class OpenAICompatibleLlm extends BaseProviderLlm {
-  /**
-   * The OpenAI SDK client instance.
-   *
-   * @protected
-   */
+export class OpenAICompatibleLlm extends BaseProviderLlm {
+  /** Model patterns for LLMRegistry — set by createProviderClass(). */
+  static supportedModels: (string | RegExp)[] = [];
+
+  /** @protected */
   protected readonly client: OpenAI;
 
-  /**
-   * Creates a new OpenAI-compatible LLM instance.
-   *
-   * @param config - Provider configuration (model, options)
-   * @param clientConfig - OpenAI client configuration (URL, auth, timeouts)
-   */
-  constructor(config: BaseProviderConfig, clientConfig: OpenAIClientConfig) {
-    super(config);
-    this.client = new OpenAI({
-      baseURL: clientConfig.baseURL,
-      apiKey: clientConfig.apiKey,
-      timeout: clientConfig.timeout,
-      maxRetries: clientConfig.maxRetries,
-      defaultHeaders: clientConfig.defaultHeaders,
-    });
+  private readonly _errorPrefix: string;
+  private readonly _getRequestOptions?: () => Record<string, unknown>;
+
+  /** Declarative constructor: definition + config */
+  constructor(definition: ProviderDefinition, config: BaseProviderConfig);
+  /** Manual constructor: config + clientConfig (for CustomLlm) */
+  constructor(config: BaseProviderConfig, clientConfig: OpenAIClientConfig);
+  constructor(
+    first: ProviderDefinition | BaseProviderConfig,
+    second: BaseProviderConfig | OpenAIClientConfig,
+  ) {
+    // Detect which overload: ProviderDefinition has 'id', BaseProviderConfig has 'model'
+    if ("id" in first && "model" in second) {
+      // Declarative mode
+      const definition = first as ProviderDefinition;
+      const config = second as BaseProviderConfig;
+
+      super(config);
+      this._errorPrefix = definition.errorPrefix;
+
+      const resolved = resolveConfig(definition, config);
+      this.client = new OpenAI({
+        baseURL: resolved.baseURL,
+        apiKey: resolved.apiKey,
+        timeout: resolved.timeout,
+        maxRetries: resolved.maxRetries,
+        defaultHeaders: Object.keys(resolved.headers).length
+          ? resolved.headers
+          : undefined,
+      });
+
+      if (definition.buildRequestOptions) {
+        const buildFn = definition.buildRequestOptions;
+        const configRef = config as unknown as Record<string, unknown>;
+        this._getRequestOptions = () => buildFn(configRef);
+      }
+    } else {
+      // Manual mode (CustomLlm)
+      const config = first as BaseProviderConfig;
+      const clientConfig = second as OpenAIClientConfig;
+
+      super(config);
+      this._errorPrefix = "CUSTOM";
+      this.client = new OpenAI({
+        baseURL: clientConfig.baseURL,
+        apiKey: clientConfig.apiKey,
+        timeout: clientConfig.timeout,
+        maxRetries: clientConfig.maxRetries,
+        defaultHeaders: clientConfig.defaultHeaders,
+      });
+    }
   }
 
-  /**
-   * Returns the provider-specific error prefix for error responses.
-   *
-   * Override in subclasses to return an appropriate prefix like
-   * "AI_GATEWAY" or "OPENROUTER".
-   *
-   * @returns The error prefix string
-   *
-   * @abstract
-   * @protected
-   *
-   * @example
-   * ```typescript
-   * protected getErrorPrefix(): string {
-   *   return "MY_PROVIDER";
-   * }
-   * // Errors will have codes like "MY_PROVIDER_ERROR" or "API_ERROR_429"
-   * ```
-   */
-  protected abstract getErrorPrefix(): string;
+  /** Returns the provider error prefix. */
+  protected getErrorPrefix(): string {
+    return this._errorPrefix;
+  }
 
-  /**
-   * Returns provider-specific options to merge into chat completion requests.
-   *
-   * Override in subclasses to add provider-specific parameters.
-   * The returned object is spread into the chat completion request body.
-   *
-   * @returns An object of additional request options
-   *
-   * @protected
-   *
-   * @example
-   * ```typescript
-   * protected getProviderRequestOptions(): Record<string, unknown> {
-   *   return {
-   *     provider: {
-   *       order: ["Anthropic"],
-   *       allow_fallbacks: true
-   *     }
-   *   };
-   * }
-   * ```
-   */
+  /** Returns provider-specific request options. */
   protected getProviderRequestOptions(): Record<string, unknown> {
-    return {};
+    return this._getRequestOptions?.() ?? {};
   }
 
-  /**
-   * Generates content from the LLM.
-   *
-   * Converts the ADK request to OpenAI format, makes the API call,
-   * and converts the response back to ADK format.
-   *
-   * @param llmRequest - The ADK LLM request
-   * @param stream - Whether to stream the response (default: false)
-   * @returns An async generator yielding LLM responses
-   *
-   * @example
-   * ```typescript
-   * // Non-streaming
-   * for await (const response of llm.generateContentAsync(request)) {
-   *   console.log(response);
-   * }
-   *
-   * // Streaming
-   * for await (const response of llm.generateContentAsync(request, true)) {
-   *   if (response.text) {
-   *     process.stdout.write(response.text);
-   *   }
-   * }
-   * ```
-   */
   async *generateContentAsync(
     llmRequest: LlmRequest,
     stream = false,
@@ -212,15 +157,6 @@ export abstract class OpenAICompatibleLlm extends BaseProviderLlm {
     }
   }
 
-  /**
-   * Makes a single (non-streaming) API request.
-   *
-   * @param messages - OpenAI format messages
-   * @param tools - OpenAI format tools (optional)
-   * @returns The converted LLM response
-   *
-   * @private
-   */
   private async singleResponse(
     messages: OpenAI.ChatCompletionMessageParam[],
     tools?: OpenAI.ChatCompletionTool[],
@@ -234,15 +170,6 @@ export abstract class OpenAICompatibleLlm extends BaseProviderLlm {
     return convertResponse(response);
   }
 
-  /**
-   * Makes a streaming API request and yields responses as they arrive.
-   *
-   * @param messages - OpenAI format messages
-   * @param tools - OpenAI format tools (optional)
-   * @returns An async generator yielding LLM responses
-   *
-   * @private
-   */
   private async *streamResponse(
     messages: OpenAI.ChatCompletionMessageParam[],
     tools?: OpenAI.ChatCompletionTool[],
