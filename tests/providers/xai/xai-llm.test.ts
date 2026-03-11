@@ -2,6 +2,10 @@ import { beforeEach, describe, expect, it } from "bun:test";
 import { resetAllConfigs } from "../../../src/config";
 import { XAI_DEFINITION } from "../../../src/providers/xai/definition";
 import { XAILlm } from "../../../src/providers/xai";
+import {
+  describeModelPatterns,
+  describeConnectError,
+} from "../../helpers/provider-test-helpers";
 
 describe("XAILlm", () => {
   beforeEach(() => {
@@ -9,51 +13,23 @@ describe("XAILlm", () => {
     delete process.env.XAI_API_KEY;
   });
 
-  describe("supportedModels", () => {
-    it("has static supportedModels property", () => {
-      expect(XAILlm.supportedModels).toBeDefined();
-      expect(Array.isArray(XAILlm.supportedModels)).toBe(true);
-    });
-
-    it("matches XAI_DEFINITION.modelPatterns", () => {
-      expect(XAILlm.supportedModels).toEqual(XAI_DEFINITION.modelPatterns);
-    });
-
-    it("patterns match grok-* models", () => {
-      const grokModels = [
-        "grok-4",
-        "grok-3-beta",
-        "grok-3-mini-beta",
-        "grok-4-1-fast-reasoning",
-        "grok-4-1-fast-non-reasoning",
-        "grok-code-fast-1",
-      ];
-
-      for (const model of grokModels) {
-        const matches = XAI_DEFINITION.modelPatterns.some((pattern) => {
-          if (pattern instanceof RegExp) return pattern.test(model);
-          return pattern === model;
-        });
-        expect(matches).toBe(true);
-      }
-    });
-
-    it("patterns do not match non-xAI models", () => {
-      const nonXAIModels = [
-        "gpt-4.1",
-        "claude-sonnet-4",
-        "gemini-2.0-flash",
-        "llama-3.1",
-      ];
-
-      for (const model of nonXAIModels) {
-        const matches = XAI_DEFINITION.modelPatterns.some((pattern) => {
-          if (pattern instanceof RegExp) return pattern.test(model);
-          return pattern === model;
-        });
-        expect(matches).toBe(false);
-      }
-    });
+  describeModelPatterns({
+    llmClass: XAILlm,
+    patterns: XAI_DEFINITION.modelPatterns,
+    validModels: [
+      "grok-4",
+      "grok-3-beta",
+      "grok-3-mini-beta",
+      "grok-4-1-fast-reasoning",
+      "grok-4-1-fast-non-reasoning",
+      "grok-code-fast-1",
+    ],
+    invalidModels: [
+      "gpt-4.1",
+      "claude-sonnet-4",
+      "gemini-2.0-flash",
+      "llama-3.1",
+    ],
   });
 
   describe("constructor", () => {
@@ -94,22 +70,5 @@ describe("XAILlm", () => {
     });
   });
 
-  describe("connect", () => {
-    it("throws error indicating connect is not supported", async () => {
-      const llm = new XAILlm({
-        model: "grok-4",
-        apiKey: "test",
-      });
-
-      const request = {
-        contents: [],
-        liveConnectConfig: {},
-        toolsDict: {},
-      } as Parameters<typeof llm.connect>[0];
-
-      expect(llm.connect(request)).rejects.toThrow(
-        "does not support bidirectional streaming",
-      );
-    });
-  });
+  describeConnectError(XAILlm, "grok-4");
 });

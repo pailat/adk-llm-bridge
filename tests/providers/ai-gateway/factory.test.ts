@@ -1,29 +1,17 @@
-import { beforeEach, describe, expect, it } from "bun:test";
-import { resetConfig } from "../../../src/config";
+import { describe, expect, it } from "bun:test";
 import { OpenAICompatibleLlm } from "../../../src/core/openai-compatible-llm";
 import { AIGateway } from "../../../src/providers/ai-gateway";
+import { describeProviderFactory } from "../../helpers/provider-test-helpers";
 
-describe("AIGateway factory", () => {
-  beforeEach(() => {
-    resetConfig();
-    delete process.env.AI_GATEWAY_URL;
-    delete process.env.AI_GATEWAY_API_KEY;
-  });
+describeProviderFactory({
+  name: "AIGateway",
+  factory: AIGateway,
+  expectedClass: OpenAICompatibleLlm,
+  defaultModel: "anthropic/claude-sonnet-4",
+  envVars: ["AI_GATEWAY_URL", "AI_GATEWAY_API_KEY"],
+});
 
-  it("creates AIGatewayLlm instance", () => {
-    const llm = AIGateway("anthropic/claude-sonnet-4");
-    expect(llm).toBeInstanceOf(OpenAICompatibleLlm);
-    expect(llm.model).toBe("anthropic/claude-sonnet-4");
-  });
-
-  it("passes options to AIGatewayLlm", () => {
-    const llm = AIGateway("openai/gpt-4o", {
-      apiKey: "test-key",
-      timeout: 30000,
-    });
-    expect(llm.model).toBe("openai/gpt-4o");
-  });
-
+describe("AIGateway factory (provider-specific)", () => {
   it("works with different providers", () => {
     const models = [
       "anthropic/claude-sonnet-4",

@@ -1,31 +1,17 @@
-import { beforeEach, describe, expect, it } from "bun:test";
-import { resetAllConfigs } from "../../../src/config";
+import { describe, expect, it } from "bun:test";
 import { OpenAICompatibleLlm } from "../../../src/core/openai-compatible-llm";
 import { OpenAI } from "../../../src/providers/openai";
+import { describeProviderFactory } from "../../helpers/provider-test-helpers";
 
-describe("OpenAI factory", () => {
-  beforeEach(() => {
-    resetAllConfigs();
-    delete process.env.OPENAI_API_KEY;
-  });
+describeProviderFactory({
+  name: "OpenAI",
+  factory: OpenAI,
+  expectedClass: OpenAICompatibleLlm,
+  defaultModel: "gpt-4.1",
+  envVars: ["OPENAI_API_KEY"],
+});
 
-  it("creates OpenAILlm instance", () => {
-    const llm = OpenAI("gpt-4.1");
-    expect(llm).toBeInstanceOf(OpenAICompatibleLlm);
-  });
-
-  it("sets model correctly", () => {
-    const llm = OpenAI("gpt-4o");
-    expect(llm.model).toBe("gpt-4o");
-  });
-
-  it("accepts optional configuration", () => {
-    const llm = OpenAI("gpt-4.1", {
-      apiKey: "test-key",
-    });
-    expect(llm.model).toBe("gpt-4.1");
-  });
-
+describe("OpenAI factory (provider-specific)", () => {
   it("accepts organization option", () => {
     const llm = OpenAI("gpt-4.1", {
       apiKey: "test-key",

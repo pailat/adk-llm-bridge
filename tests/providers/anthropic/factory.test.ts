@@ -1,30 +1,16 @@
-import { beforeEach, describe, expect, it } from "bun:test";
-import { resetAllConfigs } from "../../../src/config";
+import { describe, expect, it } from "bun:test";
 import { Anthropic, AnthropicLlm } from "../../../src/providers/anthropic";
+import { describeProviderFactory } from "../../helpers/provider-test-helpers";
 
-describe("Anthropic factory", () => {
-  beforeEach(() => {
-    resetAllConfigs();
-    delete process.env.ANTHROPIC_API_KEY;
-  });
+describeProviderFactory({
+  name: "Anthropic",
+  factory: Anthropic,
+  expectedClass: AnthropicLlm,
+  defaultModel: "claude-sonnet-4-5-20250929",
+  envVars: ["ANTHROPIC_API_KEY"],
+});
 
-  it("creates AnthropicLlm instance", () => {
-    const llm = Anthropic("claude-sonnet-4-5-20250929");
-    expect(llm).toBeInstanceOf(AnthropicLlm);
-  });
-
-  it("sets model correctly", () => {
-    const llm = Anthropic("claude-opus-4-5");
-    expect(llm.model).toBe("claude-opus-4-5");
-  });
-
-  it("accepts optional configuration", () => {
-    const llm = Anthropic("claude-sonnet-4-5-20250929", {
-      apiKey: "test-key",
-    });
-    expect(llm.model).toBe("claude-sonnet-4-5-20250929");
-  });
-
+describe("Anthropic factory (provider-specific)", () => {
   it("accepts maxTokens option", () => {
     const llm = Anthropic("claude-sonnet-4-5-20250929", {
       maxTokens: 8192,

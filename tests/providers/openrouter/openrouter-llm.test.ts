@@ -2,6 +2,10 @@ import { beforeEach, describe, expect, it } from "bun:test";
 import { resetAllConfigs } from "../../../src/config";
 import { OPENROUTER_DEFINITION } from "../../../src/providers/openrouter/definition";
 import { OpenRouterLlm } from "../../../src/providers/openrouter";
+import {
+  describeModelPatterns,
+  describeConnectError,
+} from "../../helpers/provider-test-helpers";
 
 describe("OpenRouterLlm", () => {
   beforeEach(() => {
@@ -11,33 +15,17 @@ describe("OpenRouterLlm", () => {
     delete process.env.OPENROUTER_APP_NAME;
   });
 
-  describe("supportedModels", () => {
-    it("has static supportedModels property", () => {
-      expect(OpenRouterLlm.supportedModels).toBeDefined();
-      expect(Array.isArray(OpenRouterLlm.supportedModels)).toBe(true);
-    });
-
-    it("matches OPENROUTER_DEFINITION.modelPatterns", () => {
-      expect(OpenRouterLlm.supportedModels).toEqual(OPENROUTER_DEFINITION.modelPatterns);
-    });
-
-    it("patterns match expected model formats", () => {
-      const testModels = [
-        "anthropic/claude-sonnet-4",
-        "openai/gpt-4o",
-        "google/gemini-2.0-flash",
-        "meta/llama-3.1-70b",
-        "mistral/mistral-large",
-      ];
-
-      for (const model of testModels) {
-        const matches = OPENROUTER_DEFINITION.modelPatterns.some((pattern) => {
-          if (pattern instanceof RegExp) return pattern.test(model);
-          return pattern === model;
-        });
-        expect(matches).toBe(true);
-      }
-    });
+  describeModelPatterns({
+    llmClass: OpenRouterLlm,
+    patterns: OPENROUTER_DEFINITION.modelPatterns,
+    validModels: [
+      "anthropic/claude-sonnet-4",
+      "openai/gpt-4o",
+      "google/gemini-2.0-flash",
+      "meta/llama-3.1-70b",
+      "mistral/mistral-large",
+    ],
+    invalidModels: [],
   });
 
   describe("constructor", () => {
@@ -75,22 +63,5 @@ describe("OpenRouterLlm", () => {
     });
   });
 
-  describe("connect", () => {
-    it("throws error indicating connect is not supported", async () => {
-      const llm = new OpenRouterLlm({
-        model: "anthropic/claude-sonnet-4",
-        apiKey: "test",
-      });
-
-      const request = {
-        contents: [],
-        liveConnectConfig: {},
-        toolsDict: {},
-      } as Parameters<typeof llm.connect>[0];
-
-      expect(llm.connect(request)).rejects.toThrow(
-        "does not support bidirectional streaming",
-      );
-    });
-  });
+  describeConnectError(OpenRouterLlm, "anthropic/claude-sonnet-4");
 });

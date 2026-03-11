@@ -1,33 +1,17 @@
-import { beforeEach, describe, expect, it } from "bun:test";
-import { resetAllConfigs } from "../../../src/config";
+import { describe, expect, it } from "bun:test";
 import { OpenAICompatibleLlm } from "../../../src/core/openai-compatible-llm";
 import { OpenRouter } from "../../../src/providers/openrouter";
+import { describeProviderFactory } from "../../helpers/provider-test-helpers";
 
-describe("OpenRouter factory", () => {
-  beforeEach(() => {
-    resetAllConfigs();
-    delete process.env.OPENROUTER_API_KEY;
-  });
+describeProviderFactory({
+  name: "OpenRouter",
+  factory: OpenRouter,
+  expectedClass: OpenAICompatibleLlm,
+  defaultModel: "anthropic/claude-sonnet-4",
+  envVars: ["OPENROUTER_API_KEY"],
+});
 
-  it("creates OpenRouterLlm instance", () => {
-    const llm = OpenRouter("anthropic/claude-sonnet-4");
-    expect(llm).toBeInstanceOf(OpenAICompatibleLlm);
-  });
-
-  it("sets model correctly", () => {
-    const llm = OpenRouter("openai/gpt-4o");
-    expect(llm.model).toBe("openai/gpt-4o");
-  });
-
-  it("accepts optional configuration", () => {
-    const llm = OpenRouter("anthropic/claude-sonnet-4", {
-      apiKey: "test-key",
-      siteUrl: "https://myapp.com",
-      appName: "My App",
-    });
-    expect(llm.model).toBe("anthropic/claude-sonnet-4");
-  });
-
+describe("OpenRouter factory (provider-specific)", () => {
   it("accepts provider preferences", () => {
     const llm = OpenRouter("anthropic/claude-sonnet-4", {
       provider: {

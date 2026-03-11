@@ -1,31 +1,17 @@
-import { beforeEach, describe, expect, it } from "bun:test";
-import { resetAllConfigs } from "../../../src/config";
+import { describe, expect, it } from "bun:test";
 import { OpenAICompatibleLlm } from "../../../src/core/openai-compatible-llm";
 import { XAI } from "../../../src/providers/xai";
+import { describeProviderFactory } from "../../helpers/provider-test-helpers";
 
-describe("XAI factory", () => {
-  beforeEach(() => {
-    resetAllConfigs();
-    delete process.env.XAI_API_KEY;
-  });
+describeProviderFactory({
+  name: "XAI",
+  factory: XAI,
+  expectedClass: OpenAICompatibleLlm,
+  defaultModel: "grok-4",
+  envVars: ["XAI_API_KEY"],
+});
 
-  it("creates XAILlm instance", () => {
-    const llm = XAI("grok-4");
-    expect(llm).toBeInstanceOf(OpenAICompatibleLlm);
-  });
-
-  it("sets model correctly", () => {
-    const llm = XAI("grok-4");
-    expect(llm.model).toBe("grok-4");
-  });
-
-  it("accepts optional configuration", () => {
-    const llm = XAI("grok-4", {
-      apiKey: "test-key",
-    });
-    expect(llm.model).toBe("grok-4");
-  });
-
+describe("XAI factory (provider-specific)", () => {
   it("accepts timeout and maxRetries options", () => {
     const llm = XAI("grok-4", {
       timeout: 30000,

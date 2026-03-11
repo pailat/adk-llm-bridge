@@ -2,6 +2,10 @@ import { beforeEach, describe, expect, it } from "bun:test";
 import { resetAllConfigs } from "../../../src/config";
 import { OPENAI_DEFINITION } from "../../../src/providers/openai/definition";
 import { OpenAILlm } from "../../../src/providers/openai";
+import {
+  describeModelPatterns,
+  describeConnectError,
+} from "../../helpers/provider-test-helpers";
 
 describe("OpenAILlm", () => {
   beforeEach(() => {
@@ -11,75 +15,29 @@ describe("OpenAILlm", () => {
     delete process.env.OPENAI_PROJECT;
   });
 
-  describe("supportedModels", () => {
-    it("has static supportedModels property", () => {
-      expect(OpenAILlm.supportedModels).toBeDefined();
-      expect(Array.isArray(OpenAILlm.supportedModels)).toBe(true);
-    });
-
-    it("matches OPENAI_DEFINITION.modelPatterns", () => {
-      expect(OpenAILlm.supportedModels).toEqual(OPENAI_DEFINITION.modelPatterns);
-    });
-
-    it("patterns match gpt-* models", () => {
-      const gptModels = [
-        "gpt-4",
-        "gpt-4o",
-        "gpt-4.1",
-        "gpt-4.1-mini",
-        "gpt-4-turbo",
-        "gpt-3.5-turbo",
-      ];
-
-      for (const model of gptModels) {
-        const matches = OPENAI_DEFINITION.modelPatterns.some((pattern) => {
-          if (pattern instanceof RegExp) return pattern.test(model);
-          return pattern === model;
-        });
-        expect(matches).toBe(true);
-      }
-    });
-
-    it("patterns match o* reasoning models", () => {
-      const oModels = ["o1", "o1-mini", "o1-preview", "o3", "o4-mini"];
-
-      for (const model of oModels) {
-        const matches = OPENAI_DEFINITION.modelPatterns.some((pattern) => {
-          if (pattern instanceof RegExp) return pattern.test(model);
-          return pattern === model;
-        });
-        expect(matches).toBe(true);
-      }
-    });
-
-    it("patterns match chatgpt-* models", () => {
-      const chatgptModels = ["chatgpt-4o-latest"];
-
-      for (const model of chatgptModels) {
-        const matches = OPENAI_DEFINITION.modelPatterns.some((pattern) => {
-          if (pattern instanceof RegExp) return pattern.test(model);
-          return pattern === model;
-        });
-        expect(matches).toBe(true);
-      }
-    });
-
-    it("patterns do not match non-OpenAI models", () => {
-      const nonOpenAIModels = [
-        "claude-sonnet-4",
-        "gemini-2.0-flash",
-        "grok-4",
-        "llama-3.1",
-      ];
-
-      for (const model of nonOpenAIModels) {
-        const matches = OPENAI_DEFINITION.modelPatterns.some((pattern) => {
-          if (pattern instanceof RegExp) return pattern.test(model);
-          return pattern === model;
-        });
-        expect(matches).toBe(false);
-      }
-    });
+  describeModelPatterns({
+    llmClass: OpenAILlm,
+    patterns: OPENAI_DEFINITION.modelPatterns,
+    validModels: [
+      "gpt-4",
+      "gpt-4o",
+      "gpt-4.1",
+      "gpt-4.1-mini",
+      "gpt-4-turbo",
+      "gpt-3.5-turbo",
+      "o1",
+      "o1-mini",
+      "o1-preview",
+      "o3",
+      "o4-mini",
+      "chatgpt-4o-latest",
+    ],
+    invalidModels: [
+      "claude-sonnet-4",
+      "gemini-2.0-flash",
+      "grok-4",
+      "llama-3.1",
+    ],
   });
 
   describe("constructor", () => {
@@ -136,22 +94,5 @@ describe("OpenAILlm", () => {
     });
   });
 
-  describe("connect", () => {
-    it("throws error indicating connect is not supported", async () => {
-      const llm = new OpenAILlm({
-        model: "gpt-4.1",
-        apiKey: "test",
-      });
-
-      const request = {
-        contents: [],
-        liveConnectConfig: {},
-        toolsDict: {},
-      } as Parameters<typeof llm.connect>[0];
-
-      expect(llm.connect(request)).rejects.toThrow(
-        "does not support bidirectional streaming",
-      );
-    });
-  });
+  describeConnectError(OpenAILlm, "gpt-4.1");
 });
