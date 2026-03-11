@@ -19,11 +19,14 @@ import { getProviderConfig } from "../../config";
 import { DEFAULT_MAX_RETRIES, DEFAULT_TIMEOUT } from "../../constants";
 import { BaseProviderLlm } from "../../core/base-provider-llm";
 import type { AnthropicProviderConfig } from "../../types";
-import {
-  ANTHROPIC_ENV,
-  ANTHROPIC_MODEL_PATTERNS,
-  DEFAULT_ANTHROPIC_MAX_TOKENS,
-} from "./constants";
+/** Environment variable names for Anthropic configuration. */
+const ANTHROPIC_ENV = { API_KEY: "ANTHROPIC_API_KEY" } as const;
+
+/** Default max tokens for Anthropic requests. */
+const DEFAULT_ANTHROPIC_MAX_TOKENS = 4096;
+
+/** Model patterns for Anthropic models. Matches claude-* */
+export const ANTHROPIC_MODEL_PATTERNS = [/claude-.*/];
 import { convertAnthropicRequest } from "./converters/request";
 import {
   convertAnthropicResponse,
@@ -149,6 +152,25 @@ export class AnthropicLlm extends BaseProviderLlm {
   }
 
   /**
+   * Builds the shared request parameters for the Anthropic API.
+   *
+   * @private
+   */
+  private buildRequestParams(
+    messages: AnthropicSDK.MessageParam[],
+    system: string | undefined,
+    tools: AnthropicSDK.Tool[] | undefined,
+  ) {
+    return {
+      model: this.model,
+      max_tokens: this.maxTokens,
+      messages,
+      ...(system ? { system } : {}),
+      ...(tools?.length ? { tools } : {}),
+    };
+  }
+
+  /**
    * Makes a single (non-streaming) API request.
    *
    * @private
@@ -158,14 +180,9 @@ export class AnthropicLlm extends BaseProviderLlm {
     system: string | undefined,
     tools: AnthropicSDK.Tool[] | undefined,
   ): Promise<LlmResponse> {
-    const response = await this.client.messages.create({
-      model: this.model,
-      max_tokens: this.maxTokens,
-      messages,
-      ...(system ? { system } : {}),
-      ...(tools?.length ? { tools } : {}),
-    });
-
+    const response = await this.client.messages.create(
+      this.buildRequestParams(messages, system, tools),
+    );
     return convertAnthropicResponse(response);
   }
 
@@ -179,13 +196,9 @@ export class AnthropicLlm extends BaseProviderLlm {
     system: string | undefined,
     tools: AnthropicSDK.Tool[] | undefined,
   ): AsyncGenerator<LlmResponse, void> {
-    const stream = this.client.messages.stream({
-      model: this.model,
-      max_tokens: this.maxTokens,
-      messages,
-      ...(system ? { system } : {}),
-      ...(tools?.length ? { tools } : {}),
-    });
+    const stream = this.client.messages.stream(
+      this.buildRequestParams(messages, system, tools),
+    );
 
     const acc = createAnthropicStreamAccumulator();
 

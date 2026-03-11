@@ -4,7 +4,7 @@ import {
   _resetAnthropicRegistration,
   isAnthropicRegistered,
   registerAnthropic,
-} from "../../../src/providers/anthropic/register";
+} from "../../../src/providers/anthropic";
 
 describe("registerAnthropic", () => {
   beforeEach(() => {
