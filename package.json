@@ -23,6 +23,7 @@
     "url": "https://github.com/pailat/adk-llm-bridge/issues"
   },
   "type": "module",
+  "sideEffects": false,
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
@@ -53,16 +54,16 @@
     "prepublishOnly": "bun run build"
   },
   "peerDependencies": {
-    "@google/adk": ">=0.2.4"
+    "@google/adk": ">=0.5.0"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.71.2",
-    "openai": "^4.73.0"
+    "@anthropic-ai/sdk": "^0.78.0",
+    "openai": "^6.27.0"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.3.10",
-    "@google/adk": "^0.2.4",
-    "@google/genai": "^1.37.0",
+    "@google/adk": "^0.5.0",
+    "@google/genai": "^1.40.0",
     "@types/bun": "latest",
     "typescript": "^5.3.0"
   }

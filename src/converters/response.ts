@@ -61,6 +61,7 @@ export function convertResponse(response: OpenAI.ChatCompletion): LlmResponse {
   }
 
   for (const tc of choice.message.tool_calls ?? []) {
+    if (tc.type !== "function") continue;
     parts.push({
       functionCall: {
         id: tc.id,
