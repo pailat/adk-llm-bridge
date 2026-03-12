@@ -204,7 +204,7 @@ LLMRegistry.register(AnthropicLlm);
 
 export const rootAgent = new LlmAgent({
   name: "assistant",
-  model: "claude-sonnet-4-5-20250929",
+  model: "claude-sonnet-4-5",
   instruction: "You are helpful.",
 });
 ```

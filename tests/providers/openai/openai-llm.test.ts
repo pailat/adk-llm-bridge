@@ -41,8 +41,8 @@ describe("OpenAILlm", () => {
   });
 
   describe("constructor", () => {
-    it("creates instance with model", () => {
-      const llm = new OpenAILlm({ model: "gpt-4.1" });
+    it("creates instance with apiKey", () => {
+      const llm = new OpenAILlm({ model: "gpt-4.1", apiKey: "test-key" });
       expect(llm.model).toBe("gpt-4.1");
     });
 
@@ -51,6 +51,12 @@ describe("OpenAILlm", () => {
 
       const llm = new OpenAILlm({ model: "gpt-4o" });
       expect(llm.model).toBe("gpt-4o");
+    });
+
+    it("throws when no API key provided", () => {
+      expect(() => new OpenAILlm({ model: "gpt-4.1" })).toThrow(
+        "[openai] API key is required",
+      );
     });
 
     it("accepts organization option", () => {
@@ -83,12 +89,14 @@ describe("OpenAILlm", () => {
 
     it("uses OPENAI_ORGANIZATION env var", () => {
       process.env.OPENAI_ORGANIZATION = "org-from-env";
+      process.env.OPENAI_API_KEY = "test-key";
       const llm = new OpenAILlm({ model: "gpt-4.1" });
       expect(llm.model).toBe("gpt-4.1");
     });
 
     it("uses OPENAI_PROJECT env var", () => {
       process.env.OPENAI_PROJECT = "proj-from-env";
+      process.env.OPENAI_API_KEY = "test-key";
       const llm = new OpenAILlm({ model: "gpt-4.1" });
       expect(llm.model).toBe("gpt-4.1");
     });

@@ -64,4 +64,14 @@ export interface ProviderDefinition {
   buildRequestOptions?: (
     config: Record<string, unknown>,
   ) => Record<string, unknown>;
+
+  /**
+   * Whether this provider requires an API key at construction time.
+   *
+   * Cloud providers (AI Gateway, OpenRouter, OpenAI, xAI) should set this
+   * to true. Local/self-hosted providers that may not need auth can omit it.
+   *
+   * @default false
+   */
+  requireApiKey?: boolean;
 }

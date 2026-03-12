@@ -25,6 +25,8 @@
  * @internal
  */
 export function safeJsonParse(str: string): Record<string, unknown> {
+  if (!str || typeof str !== "string") return {};
+
   try {
     // Pre-process: wrap large integers (17+ digits) in quotes to prevent
     // IEEE 754 precision loss. The pattern matches integers that appear as

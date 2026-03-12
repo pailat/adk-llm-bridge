@@ -19,6 +19,7 @@ import { getProviderConfig } from "../../config";
 import { DEFAULT_MAX_RETRIES, DEFAULT_TIMEOUT } from "../../constants";
 import { BaseProviderLlm } from "../../core/base-provider-llm";
 import type { AnthropicProviderConfig } from "../../types";
+import { clampPositive } from "../../utils/validate";
 /** Environment variable names for Anthropic configuration. */
 const ANTHROPIC_ENV = { API_KEY: "ANTHROPIC_API_KEY" } as const;
 
@@ -112,15 +113,31 @@ export class AnthropicLlm extends BaseProviderLlm {
       process.env[ANTHROPIC_ENV.API_KEY] ??
       "";
 
-    this.maxTokens =
-      config.maxTokens ??
-      globalConfig.maxTokens ??
-      DEFAULT_ANTHROPIC_MAX_TOKENS;
+    if (!apiKey) {
+      throw new Error(
+        `[anthropic] API key is required. Provide it via config, ` +
+          `setProviderConfig("anthropic", { apiKey }), or set the ANTHROPIC_API_KEY env var.`,
+      );
+    }
+
+    this.maxTokens = clampPositive(
+      config.maxTokens ?? globalConfig.maxTokens ?? DEFAULT_ANTHROPIC_MAX_TOKENS,
+      DEFAULT_ANTHROPIC_MAX_TOKENS,
+      1,
+    );
 
     this.client = new AnthropicSDK({
       apiKey,
-      timeout: config.timeout ?? DEFAULT_TIMEOUT,
-      maxRetries: config.maxRetries ?? DEFAULT_MAX_RETRIES,
+      timeout: clampPositive(
+        config.timeout ?? DEFAULT_TIMEOUT,
+        DEFAULT_TIMEOUT,
+        1000,
+      ),
+      maxRetries: clampPositive(
+        config.maxRetries ?? DEFAULT_MAX_RETRIES,
+        DEFAULT_MAX_RETRIES,
+        0,
+      ),
     });
   }
 

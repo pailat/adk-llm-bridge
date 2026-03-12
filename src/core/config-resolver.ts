@@ -16,6 +16,7 @@
 import { getProviderConfig } from "../config";
 import { DEFAULT_MAX_RETRIES, DEFAULT_TIMEOUT } from "../constants";
 import type { BaseProviderConfig } from "../types";
+import { clampPositive, requireValidURL } from "../utils/validate";
 import type { ProviderDefinition } from "./provider-definition";
 
 /**
@@ -71,11 +72,21 @@ export function resolveConfig(
     resolveEnvVar(definition.envKeys.apiKey) ??
     "";
 
+  if (definition.requireApiKey && !apiKey) {
+    const envHint = definition.envKeys.apiKey.join(" or ");
+    throw new Error(
+      `[${definition.id}] API key is required. Provide it via config, ` +
+        `setProviderConfig("${definition.id}", { apiKey }), or set the ${envHint} env var.`,
+    );
+  }
+
   const baseURL =
     instanceConfig.baseURL ??
     (globalConfig.baseURL as string | undefined) ??
     resolveEnvVar(definition.envKeys.baseURL ?? []) ??
     definition.defaultBaseURL;
+
+  requireValidURL(baseURL, "baseURL", definition.id);
 
   const headers =
     definition.buildHeaders?.({
@@ -86,8 +97,16 @@ export function resolveConfig(
   return {
     apiKey,
     baseURL,
-    timeout: instanceConfig.timeout ?? DEFAULT_TIMEOUT,
-    maxRetries: instanceConfig.maxRetries ?? DEFAULT_MAX_RETRIES,
+    timeout: clampPositive(
+      instanceConfig.timeout ?? DEFAULT_TIMEOUT,
+      DEFAULT_TIMEOUT,
+      1000,
+    ),
+    maxRetries: clampPositive(
+      instanceConfig.maxRetries ?? DEFAULT_MAX_RETRIES,
+      DEFAULT_MAX_RETRIES,
+      0,
+    ),
     headers,
   };
 }

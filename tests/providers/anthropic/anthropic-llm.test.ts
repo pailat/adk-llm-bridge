@@ -35,8 +35,11 @@ describe("AnthropicLlm", () => {
   });
 
   describe("constructor", () => {
-    it("creates instance with model", () => {
-      const llm = new AnthropicLlm({ model: "claude-sonnet-4-5-20250929" });
+    it("creates instance with model and apiKey", () => {
+      const llm = new AnthropicLlm({
+        model: "claude-sonnet-4-5-20250929",
+        apiKey: "sk-ant-test",
+      });
       expect(llm.model).toBe("claude-sonnet-4-5-20250929");
     });
 
@@ -55,9 +58,16 @@ describe("AnthropicLlm", () => {
       expect(llm.model).toBe("claude-sonnet-4-5-20250929");
     });
 
+    it("throws when no API key is provided", () => {
+      expect(
+        () => new AnthropicLlm({ model: "claude-sonnet-4-5-20250929" }),
+      ).toThrow("[anthropic] API key is required");
+    });
+
     it("accepts maxTokens option", () => {
       const llm = new AnthropicLlm({
         model: "claude-sonnet-4-5-20250929",
+        apiKey: "sk-ant-test",
         maxTokens: 8192,
       });
       expect(llm.model).toBe("claude-sonnet-4-5-20250929");
@@ -66,6 +76,7 @@ describe("AnthropicLlm", () => {
     it("accepts timeout option", () => {
       const llm = new AnthropicLlm({
         model: "claude-sonnet-4-5-20250929",
+        apiKey: "sk-ant-test",
         timeout: 30000,
       });
       expect(llm.model).toBe("claude-sonnet-4-5-20250929");
@@ -74,6 +85,7 @@ describe("AnthropicLlm", () => {
     it("accepts maxRetries option", () => {
       const llm = new AnthropicLlm({
         model: "claude-sonnet-4-5-20250929",
+        apiKey: "sk-ant-test",
         maxRetries: 5,
       });
       expect(llm.model).toBe("claude-sonnet-4-5-20250929");

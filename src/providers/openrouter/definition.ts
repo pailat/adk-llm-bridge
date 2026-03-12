@@ -11,6 +11,7 @@ export const OPENROUTER_DEFINITION: ProviderDefinition = {
   defaultBaseURL: "https://openrouter.ai/api/v1",
   envKeys: { apiKey: ["OPENROUTER_API_KEY"] },
   modelPatterns: [/.+\/.+/],
+  requireApiKey: true,
   buildHeaders: (config) => {
     const headers: Record<string, string> = {};
     const siteUrl =

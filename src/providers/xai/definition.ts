@@ -11,4 +11,5 @@ export const XAI_DEFINITION: ProviderDefinition = {
   defaultBaseURL: "https://api.x.ai/v1",
   envKeys: { apiKey: ["XAI_API_KEY"] },
   modelPatterns: [/grok-.+/],
+  requireApiKey: true,
 };

@@ -103,6 +103,8 @@ interface FactoryTestConfig {
   defaultModel: string;
   /** Env vars to clean before each test */
   envVars: string[];
+  /** Default options to pass to factory (e.g. { apiKey: "test" } for providers that require it) */
+  defaultOptions?: Record<string, unknown>;
 }
 
 export function describeProviderFactory(cfg: FactoryTestConfig) {
@@ -113,17 +115,20 @@ export function describeProviderFactory(cfg: FactoryTestConfig) {
     });
 
     it("creates correct instance", () => {
-      const llm = cfg.factory(cfg.defaultModel);
+      const llm = cfg.factory(cfg.defaultModel, cfg.defaultOptions);
       expect(llm).toBeInstanceOf(cfg.expectedClass);
     });
 
     it("sets model correctly", () => {
-      const llm = cfg.factory(cfg.defaultModel) as { model: string };
+      const llm = cfg.factory(cfg.defaultModel, cfg.defaultOptions) as {
+        model: string;
+      };
       expect(llm.model).toBe(cfg.defaultModel);
     });
 
     it("accepts optional configuration", () => {
       const llm = cfg.factory(cfg.defaultModel, {
+        ...cfg.defaultOptions,
         apiKey: "test-key",
       }) as { model: string };
       expect(llm.model).toBe(cfg.defaultModel);

@@ -280,19 +280,11 @@ app.post("/run", async (req, res) => {
       return res.status(400).json({ error: "userId and message are required" });
     }
 
-    // Get or create session
-    let session = sessionId
-      ? await sessionService
-          .getSession({ appName: APP_NAME, userId, sessionId })
-          .catch(() => null)
-      : null;
-
-    if (!session) {
-      session = await sessionService.createSession({
-        appName: APP_NAME,
-        userId,
-      });
-    }
+    const session = await sessionService.getOrCreateSession({
+      appName: APP_NAME,
+      userId,
+      sessionId,
+    });
 
     const events: unknown[] = [];
     const result = runner.runAsync({
@@ -336,19 +328,11 @@ app.post("/run_sse", async (req, res) => {
       return res.status(400).json({ error: "userId and message are required" });
     }
 
-    // Get or create session
-    let session = sessionId
-      ? await sessionService
-          .getSession({ appName: APP_NAME, userId, sessionId })
-          .catch(() => null)
-      : null;
-
-    if (!session) {
-      session = await sessionService.createSession({
-        appName: APP_NAME,
-        userId,
-      });
-    }
+    const session = await sessionService.getOrCreateSession({
+      appName: APP_NAME,
+      userId,
+      sessionId,
+    });
 
     // Set SSE headers
     res.setHeader("Content-Type", "text/event-stream");

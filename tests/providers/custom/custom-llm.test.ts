@@ -60,6 +60,36 @@ describe("CustomLlm", () => {
       });
       expect(llm.model).toBe("llama3");
     });
+
+    it("throws on empty model", () => {
+      expect(
+        () =>
+          new CustomLlm({
+            model: "",
+            baseURL: "http://localhost:11434/v1",
+          }),
+      ).toThrow("[adk-llm-bridge] model is required");
+    });
+
+    it("throws on whitespace-only model", () => {
+      expect(
+        () =>
+          new CustomLlm({
+            model: "   ",
+            baseURL: "http://localhost:11434/v1",
+          }),
+      ).toThrow("[adk-llm-bridge] model is required");
+    });
+
+    it("throws on invalid baseURL", () => {
+      expect(
+        () =>
+          new CustomLlm({
+            model: "llama3",
+            baseURL: "not-a-url",
+          } as import("../../../src/providers/custom/custom-llm").CustomLlmProviderConfig),
+      ).toThrow("Invalid baseURL");
+    });
   });
 
   describe("queryParams handling", () => {

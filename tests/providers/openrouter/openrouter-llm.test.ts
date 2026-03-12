@@ -29,8 +29,11 @@ describe("OpenRouterLlm", () => {
   });
 
   describe("constructor", () => {
-    it("creates instance with model", () => {
-      const llm = new OpenRouterLlm({ model: "anthropic/claude-sonnet-4" });
+    it("creates instance with apiKey", () => {
+      const llm = new OpenRouterLlm({
+        model: "anthropic/claude-sonnet-4",
+        apiKey: "test-key",
+      });
       expect(llm.model).toBe("anthropic/claude-sonnet-4");
     });
 
@@ -41,9 +44,16 @@ describe("OpenRouterLlm", () => {
       expect(llm.model).toBe("openai/gpt-4o");
     });
 
+    it("throws when no API key provided", () => {
+      expect(
+        () => new OpenRouterLlm({ model: "anthropic/claude-sonnet-4" }),
+      ).toThrow("[openrouter] API key is required");
+    });
+
     it("accepts provider preferences", () => {
       const llm = new OpenRouterLlm({
         model: "anthropic/claude-sonnet-4",
+        apiKey: "test-key",
         provider: {
           order: ["Anthropic"],
           allow_fallbacks: true,
@@ -56,6 +66,7 @@ describe("OpenRouterLlm", () => {
     it("accepts siteUrl and appName for ranking headers", () => {
       const llm = new OpenRouterLlm({
         model: "anthropic/claude-sonnet-4",
+        apiKey: "test-key",
         siteUrl: "https://myapp.com",
         appName: "My App",
       });

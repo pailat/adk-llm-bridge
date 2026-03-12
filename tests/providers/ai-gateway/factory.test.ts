@@ -9,6 +9,7 @@ describeProviderFactory({
   expectedClass: OpenAICompatibleLlm,
   defaultModel: "anthropic/claude-sonnet-4",
   envVars: ["AI_GATEWAY_URL", "AI_GATEWAY_API_KEY"],
+  defaultOptions: { apiKey: "test-key" },
 });
 
 describe("AIGateway factory (provider-specific)", () => {
@@ -21,7 +22,7 @@ describe("AIGateway factory (provider-specific)", () => {
     ];
 
     for (const model of models) {
-      const llm = AIGateway(model);
+      const llm = AIGateway(model, { apiKey: "test-key" });
       expect(llm.model).toBe(model);
     }
   });

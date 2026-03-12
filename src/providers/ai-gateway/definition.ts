@@ -14,4 +14,5 @@ export const AI_GATEWAY_DEFINITION: ProviderDefinition = {
     baseURL: ["AI_GATEWAY_URL", "OPENAI_BASE_URL"],
   },
   modelPatterns: [/.+\/.+/],
+  requireApiKey: true,
 };

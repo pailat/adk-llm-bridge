@@ -34,7 +34,10 @@ describe("AIGatewayLlm", () => {
 
   describe("constructor", () => {
     it("uses default base URL when no env vars", () => {
-      const llm = new AIGatewayLlm({ model: "anthropic/claude-sonnet-4" });
+      const llm = new AIGatewayLlm({
+        model: "anthropic/claude-sonnet-4",
+        apiKey: "test-key",
+      });
       expect(llm.model).toBe("anthropic/claude-sonnet-4");
     });
 
@@ -44,6 +47,12 @@ describe("AIGatewayLlm", () => {
 
       const llm = new AIGatewayLlm({ model: "openai/gpt-4o" });
       expect(llm.model).toBe("openai/gpt-4o");
+    });
+
+    it("throws when no API key provided", () => {
+      expect(
+        () => new AIGatewayLlm({ model: "anthropic/claude-sonnet-4" }),
+      ).toThrow("[ai-gateway] API key is required");
     });
   });
 

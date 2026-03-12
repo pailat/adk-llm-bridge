@@ -9,11 +9,13 @@ describeProviderFactory({
   expectedClass: OpenAICompatibleLlm,
   defaultModel: "grok-4",
   envVars: ["XAI_API_KEY"],
+  defaultOptions: { apiKey: "test-key" },
 });
 
 describe("XAI factory (provider-specific)", () => {
   it("accepts timeout and maxRetries options", () => {
     const llm = XAI("grok-4", {
+      apiKey: "test-key",
       timeout: 30000,
       maxRetries: 5,
     });
@@ -23,7 +25,7 @@ describe("XAI factory (provider-specific)", () => {
   it("works with different grok models", () => {
     const models = ["grok-4", "grok-3-beta", "grok-code-fast-1"];
     for (const model of models) {
-      const llm = XAI(model);
+      const llm = XAI(model, { apiKey: "test-key" });
       expect(llm.model).toBe(model);
     }
   });

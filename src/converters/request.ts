@@ -160,6 +160,14 @@ function processContent(
   for (const part of content.parts) {
     if (part.text) texts.push(part.text);
     if (part.functionCall) {
+      if (!part.functionCall.id) {
+        console.warn(
+          "[adk-llm-bridge] functionCall missing id, using generated ID",
+        );
+      }
+      if (!part.functionCall.name) {
+        console.warn("[adk-llm-bridge] functionCall missing name");
+      }
       calls.push({
         id: part.functionCall.id ?? `call_${Date.now()}`,
         name: part.functionCall.name ?? "",
@@ -167,6 +175,11 @@ function processContent(
       });
     }
     if (part.functionResponse) {
+      if (!part.functionResponse.id) {
+        console.warn(
+          "[adk-llm-bridge] functionResponse missing id",
+        );
+      }
       responses.push({
         id: part.functionResponse.id ?? "",
         content: JSON.stringify(part.functionResponse.response ?? {}),
@@ -220,10 +233,14 @@ function convertTools(
       Array.isArray(group.functionDeclarations)
     ) {
       for (const fn of group.functionDeclarations) {
+        if (!fn.name) {
+          console.warn("[adk-llm-bridge] Tool function missing name, skipping");
+          continue;
+        }
         tools.push({
           type: "function",
           function: {
-            name: fn.name ?? "",
+            name: fn.name,
             description: fn.description ?? "",
             parameters: normalizeSchema(fn.parameters) ?? {
               type: "object",

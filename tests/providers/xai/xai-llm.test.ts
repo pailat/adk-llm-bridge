@@ -33,8 +33,8 @@ describe("XAILlm", () => {
   });
 
   describe("constructor", () => {
-    it("creates instance with model", () => {
-      const llm = new XAILlm({ model: "grok-4" });
+    it("creates instance with apiKey", () => {
+      const llm = new XAILlm({ model: "grok-4", apiKey: "test-key" });
       expect(llm.model).toBe("grok-4");
     });
 
@@ -43,6 +43,12 @@ describe("XAILlm", () => {
 
       const llm = new XAILlm({ model: "grok-4" });
       expect(llm.model).toBe("grok-4");
+    });
+
+    it("throws when no API key provided", () => {
+      expect(() => new XAILlm({ model: "grok-4" })).toThrow(
+        "[xai] API key is required",
+      );
     });
 
     it("accepts explicit apiKey", () => {
@@ -56,6 +62,7 @@ describe("XAILlm", () => {
     it("accepts timeout option", () => {
       const llm = new XAILlm({
         model: "grok-4",
+        apiKey: "test-key",
         timeout: 30000,
       });
       expect(llm.model).toBe("grok-4");
@@ -64,6 +71,7 @@ describe("XAILlm", () => {
     it("accepts maxRetries option", () => {
       const llm = new XAILlm({
         model: "grok-4",
+        apiKey: "test-key",
         maxRetries: 5,
       });
       expect(llm.model).toBe("grok-4");

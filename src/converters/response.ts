@@ -143,7 +143,7 @@ export function convertStreamChunk(
 
   if (delta?.tool_calls) {
     for (const tc of delta.tool_calls) {
-      const idx = tc.index ?? 0;
+      const idx = tc.index ?? acc.toolCalls.size;
       let a = acc.toolCalls.get(idx);
       if (!a) {
         a = { id: "", name: "", arguments: "" };

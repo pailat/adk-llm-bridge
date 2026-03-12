@@ -182,5 +182,65 @@ describe("convertRequest", () => {
       const result = convertRequest(request);
       expect(result.tools).toBeUndefined();
     });
+
+    it("skips function declarations with empty name", () => {
+      const request = createLlmRequest({
+        contents: [{ role: "user", parts: [{ text: "Hello" }] }],
+        config: {
+          tools: [
+            {
+              functionDeclarations: [
+                {
+                  name: "",
+                  description: "No name tool",
+                  parameters: { type: "object", properties: {} } as Record<
+                    string,
+                    unknown
+                  >,
+                },
+                {
+                  name: "valid_tool",
+                  description: "Has a name",
+                  parameters: { type: "object", properties: {} } as Record<
+                    string,
+                    unknown
+                  >,
+                },
+              ],
+            },
+          ],
+        },
+      });
+
+      const result = convertRequest(request);
+
+      expect(result.tools).toHaveLength(1);
+      expect(result.tools?.[0].function.name).toBe("valid_tool");
+    });
+
+    it("skips function declarations with undefined name", () => {
+      const request = createLlmRequest({
+        contents: [{ role: "user", parts: [{ text: "Hello" }] }],
+        config: {
+          tools: [
+            {
+              functionDeclarations: [
+                {
+                  description: "No name at all",
+                  parameters: { type: "object", properties: {} } as Record<
+                    string,
+                    unknown
+                  >,
+                } as unknown as { name: string; description: string; parameters: Record<string, unknown> },
+              ],
+            },
+          ],
+        },
+      });
+
+      const result = convertRequest(request);
+
+      expect(result.tools).toBeUndefined();
+    });
   });
 });

@@ -73,11 +73,15 @@ export function convertAnthropicResponse(
     }
 
     if (block.type === "tool_use") {
+      const input =
+        typeof block.input === "object" && block.input !== null
+          ? (block.input as Record<string, unknown>)
+          : {};
       parts.push({
         functionCall: {
           id: block.id,
           name: block.name,
-          args: block.input as Record<string, unknown>,
+          args: input,
         },
       });
     }

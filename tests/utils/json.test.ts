@@ -83,6 +83,18 @@ describe("safeJsonParse", () => {
     expect(safeJsonParse("")).toEqual({});
   });
 
+  it("returns empty object for undefined input", () => {
+    expect(safeJsonParse(undefined as unknown as string)).toEqual({});
+  });
+
+  it("returns empty object for null input", () => {
+    expect(safeJsonParse(null as unknown as string)).toEqual({});
+  });
+
+  it("returns empty object for non-string input", () => {
+    expect(safeJsonParse(123 as unknown as string)).toEqual({});
+  });
+
   it("handles nested objects with large integers", () => {
     const result = safeJsonParse(
       '{"data": {"ticketId": 1021987000032211189}}',

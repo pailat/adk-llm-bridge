@@ -9,6 +9,7 @@ describeProviderFactory({
   expectedClass: OpenAICompatibleLlm,
   defaultModel: "gpt-4.1",
   envVars: ["OPENAI_API_KEY"],
+  defaultOptions: { apiKey: "test-key" },
 });
 
 describe("OpenAI factory (provider-specific)", () => {
@@ -30,6 +31,7 @@ describe("OpenAI factory (provider-specific)", () => {
 
   it("accepts timeout and maxRetries options", () => {
     const llm = OpenAI("gpt-4.1", {
+      apiKey: "test-key",
       timeout: 30000,
       maxRetries: 5,
     });

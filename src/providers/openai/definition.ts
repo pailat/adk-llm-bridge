@@ -11,6 +11,7 @@ export const OPENAI_DEFINITION: ProviderDefinition = {
   defaultBaseURL: "https://api.openai.com/v1",
   envKeys: { apiKey: ["OPENAI_API_KEY"] },
   modelPatterns: [/gpt-.+/, /o\d+.*/, /chatgpt-.+/],
+  requireApiKey: true,
   buildHeaders: (config) => {
     const headers: Record<string, string> = {};
     const org =

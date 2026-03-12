@@ -9,11 +9,13 @@ describeProviderFactory({
   expectedClass: OpenAICompatibleLlm,
   defaultModel: "anthropic/claude-sonnet-4",
   envVars: ["OPENROUTER_API_KEY"],
+  defaultOptions: { apiKey: "test-key" },
 });
 
 describe("OpenRouter factory (provider-specific)", () => {
   it("accepts provider preferences", () => {
     const llm = OpenRouter("anthropic/claude-sonnet-4", {
+      apiKey: "test-key",
       provider: {
         order: ["Anthropic", "Google"],
         allow_fallbacks: true,
