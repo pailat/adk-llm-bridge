@@ -120,6 +120,14 @@ function processContent(content: Content): Anthropic.MessageParam | null {
     }
 
     if (part.functionCall) {
+      if (!part.functionCall.id) {
+        console.warn(
+          "[adk-llm-bridge] functionCall missing id, using generated ID",
+        );
+      }
+      if (!part.functionCall.name) {
+        console.warn("[adk-llm-bridge] functionCall missing name");
+      }
       contentBlocks.push({
         type: "tool_use",
         id: part.functionCall.id ?? crypto.randomUUID(),

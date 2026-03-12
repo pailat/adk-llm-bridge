@@ -4,7 +4,7 @@ import {
   _resetAIGatewayRegistration,
   isAIGatewayRegistered,
   registerAIGateway,
-} from "../../../src/providers/ai-gateway/register";
+} from "../../../src/providers/ai-gateway";
 
 describe("registerAIGateway", () => {
   beforeEach(() => {

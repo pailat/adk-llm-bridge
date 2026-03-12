@@ -19,11 +19,15 @@ import { getProviderConfig } from "../../config";
 import { DEFAULT_MAX_RETRIES, DEFAULT_TIMEOUT } from "../../constants";
 import { BaseProviderLlm } from "../../core/base-provider-llm";
 import type { AnthropicProviderConfig } from "../../types";
-import {
-  ANTHROPIC_ENV,
-  ANTHROPIC_MODEL_PATTERNS,
-  DEFAULT_ANTHROPIC_MAX_TOKENS,
-} from "./constants";
+import { clampPositive } from "../../utils/validate";
+/** Environment variable names for Anthropic configuration. */
+const ANTHROPIC_ENV = { API_KEY: "ANTHROPIC_API_KEY" } as const;
+
+/** Default max tokens for Anthropic requests. */
+const DEFAULT_ANTHROPIC_MAX_TOKENS = 4096;
+
+/** Model patterns for Anthropic models. Matches claude-* */
+export const ANTHROPIC_MODEL_PATTERNS = [/claude-.*/];
 import { convertAnthropicRequest } from "./converters/request";
 import {
   convertAnthropicResponse,
@@ -109,15 +113,31 @@ export class AnthropicLlm extends BaseProviderLlm {
       process.env[ANTHROPIC_ENV.API_KEY] ??
       "";
 
-    this.maxTokens =
-      config.maxTokens ??
-      globalConfig.maxTokens ??
-      DEFAULT_ANTHROPIC_MAX_TOKENS;
+    if (!apiKey) {
+      throw new Error(
+        `[anthropic] API key is required. Provide it via config, ` +
+          `setProviderConfig("anthropic", { apiKey }), or set the ANTHROPIC_API_KEY env var.`,
+      );
+    }
+
+    this.maxTokens = clampPositive(
+      config.maxTokens ?? globalConfig.maxTokens ?? DEFAULT_ANTHROPIC_MAX_TOKENS,
+      DEFAULT_ANTHROPIC_MAX_TOKENS,
+      1,
+    );
 
     this.client = new AnthropicSDK({
       apiKey,
-      timeout: config.timeout ?? DEFAULT_TIMEOUT,
-      maxRetries: config.maxRetries ?? DEFAULT_MAX_RETRIES,
+      timeout: clampPositive(
+        config.timeout ?? DEFAULT_TIMEOUT,
+        DEFAULT_TIMEOUT,
+        1000,
+      ),
+      maxRetries: clampPositive(
+        config.maxRetries ?? DEFAULT_MAX_RETRIES,
+        DEFAULT_MAX_RETRIES,
+        0,
+      ),
     });
   }
 
@@ -149,6 +169,25 @@ export class AnthropicLlm extends BaseProviderLlm {
   }
 
   /**
+   * Builds the shared request parameters for the Anthropic API.
+   *
+   * @private
+   */
+  private buildRequestParams(
+    messages: AnthropicSDK.MessageParam[],
+    system: string | undefined,
+    tools: AnthropicSDK.Tool[] | undefined,
+  ) {
+    return {
+      model: this.model,
+      max_tokens: this.maxTokens,
+      messages,
+      ...(system ? { system } : {}),
+      ...(tools?.length ? { tools } : {}),
+    };
+  }
+
+  /**
    * Makes a single (non-streaming) API request.
    *
    * @private
@@ -158,14 +197,9 @@ export class AnthropicLlm extends BaseProviderLlm {
     system: string | undefined,
     tools: AnthropicSDK.Tool[] | undefined,
   ): Promise<LlmResponse> {
-    const response = await this.client.messages.create({
-      model: this.model,
-      max_tokens: this.maxTokens,
-      messages,
-      ...(system ? { system } : {}),
-      ...(tools?.length ? { tools } : {}),
-    });
-
+    const response = await this.client.messages.create(
+      this.buildRequestParams(messages, system, tools),
+    );
     return convertAnthropicResponse(response);
   }
 
@@ -179,13 +213,9 @@ export class AnthropicLlm extends BaseProviderLlm {
     system: string | undefined,
     tools: AnthropicSDK.Tool[] | undefined,
   ): AsyncGenerator<LlmResponse, void> {
-    const stream = this.client.messages.stream({
-      model: this.model,
-      max_tokens: this.maxTokens,
-      messages,
-      ...(system ? { system } : {}),
-      ...(tools?.length ? { tools } : {}),
-    });
+    const stream = this.client.messages.stream(
+      this.buildRequestParams(messages, system, tools),
+    );
 
     const acc = createAnthropicStreamAccumulator();
 

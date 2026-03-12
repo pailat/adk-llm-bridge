@@ -17,6 +17,7 @@
 import { DEFAULT_MAX_RETRIES, DEFAULT_TIMEOUT } from "../../constants";
 import { OpenAICompatibleLlm } from "../../core/openai-compatible-llm";
 import type { CustomLlmConfig } from "../../types";
+import { clampPositive, requireValidURL } from "../../utils/validate";
 
 /**
  * Configuration type with required baseURL for custom providers.
@@ -114,29 +115,25 @@ export class CustomLlm extends OpenAICompatibleLlm {
    * ```
    */
   constructor(config: CustomLlmProviderConfig) {
+    const providerName = config.name ?? "custom";
+
+    requireValidURL(config.baseURL, "baseURL", providerName);
+
     // Build final URL with query params if provided
     let finalBaseURL = config.baseURL;
     if (config.queryParams && Object.keys(config.queryParams).length > 0) {
-      try {
-        // Use URL API for proper URL construction
-        const url = new URL(config.baseURL);
-        for (const [key, value] of Object.entries(config.queryParams)) {
-          url.searchParams.append(key, value);
-        }
-        finalBaseURL = url.toString();
-      } catch {
-        // Fallback for non-standard URLs (e.g., localhost without protocol)
-        const params = new URLSearchParams(config.queryParams);
-        const separator = config.baseURL.includes("?") ? "&" : "?";
-        finalBaseURL = `${config.baseURL}${separator}${params.toString()}`;
+      const url = new URL(config.baseURL);
+      for (const [key, value] of Object.entries(config.queryParams)) {
+        url.searchParams.append(key, value);
       }
+      finalBaseURL = url.toString();
     }
 
     super(config, {
       baseURL: finalBaseURL,
       apiKey: config.apiKey ?? "",
-      timeout: config.timeout ?? DEFAULT_TIMEOUT,
-      maxRetries: config.maxRetries ?? DEFAULT_MAX_RETRIES,
+      timeout: clampPositive(config.timeout ?? DEFAULT_TIMEOUT, DEFAULT_TIMEOUT, 1000),
+      maxRetries: clampPositive(config.maxRetries ?? DEFAULT_MAX_RETRIES, DEFAULT_MAX_RETRIES, 0),
       defaultHeaders: config.headers,
     });
 

@@ -16,6 +16,7 @@
 import type Anthropic from "@anthropic-ai/sdk";
 import type { LlmResponse } from "@google/adk";
 import type { Part } from "@google/genai";
+import { safeJsonParse } from "../../../utils";
 
 /**
  * Accumulator for Anthropic streaming responses.
@@ -72,11 +73,15 @@ export function convertAnthropicResponse(
     }
 
     if (block.type === "tool_use") {
+      const input =
+        typeof block.input === "object" && block.input !== null
+          ? (block.input as Record<string, unknown>)
+          : {};
       parts.push({
         functionCall: {
           id: block.id,
           name: block.name,
-          args: block.input as Record<string, unknown>,
+          args: input,
         },
       });
     }
@@ -225,16 +230,5 @@ export function convertAnthropicStreamEvent(
 
     default:
       return { isComplete: false };
-  }
-}
-
-/**
- * Safely parses a JSON string, returning an empty object on failure.
- */
-function safeJsonParse(str: string): Record<string, unknown> {
-  try {
-    return JSON.parse(str);
-  } catch {
-    return {};
   }
 }

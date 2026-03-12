@@ -39,7 +39,7 @@ const result = await Bun.build({
   splitting: false,
 
   // External dependencies (not bundled)
-  external: ["@google/adk", "@google/genai", "openai"],
+  external: ["@google/adk", "@google/genai", "openai", "@anthropic-ai/sdk"],
 
   // Naming convention
   naming: "[name].js",

@@ -17,6 +17,7 @@ import type { LlmResponse } from "@google/adk";
 import type { Part } from "@google/genai";
 import type OpenAI from "openai";
 import type { StreamAccumulator, StreamChunkResult } from "../types";
+import { safeJsonParse } from "../utils";
 
 /**
  * Converts an OpenAI chat completion response to ADK LlmResponse format.
@@ -61,6 +62,7 @@ export function convertResponse(response: OpenAI.ChatCompletion): LlmResponse {
   }
 
   for (const tc of choice.message.tool_calls ?? []) {
+    if (tc.type !== "function") continue;
     parts.push({
       functionCall: {
         id: tc.id,
@@ -141,7 +143,7 @@ export function convertStreamChunk(
 
   if (delta?.tool_calls) {
     for (const tc of delta.tool_calls) {
-      const idx = tc.index ?? 0;
+      const idx = tc.index ?? acc.toolCalls.size;
       let a = acc.toolCalls.get(idx);
       if (!a) {
         a = { id: "", name: "", arguments: "" };
@@ -206,23 +208,4 @@ export function convertStreamChunk(
  */
 export function createStreamAccumulator(): StreamAccumulator {
   return { text: "", toolCalls: new Map() };
-}
-
-/**
- * Safely parses a JSON string, returning an empty object on failure.
- *
- * Used for parsing function call arguments which may be malformed
- * in edge cases.
- *
- * @param str - The JSON string to parse
- * @returns The parsed object, or empty object if parsing fails
- *
- * @internal
- */
-function safeJsonParse(str: string): Record<string, unknown> {
-  try {
-    return JSON.parse(str);
-  } catch {
-    return {};
-  }
 }

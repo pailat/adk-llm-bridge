@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-adk-llm-bridge connects [Google ADK](https://google.github.io/adk-docs/) ([GitHub](https://github.com/google/adk-js)) to [Vercel AI Gateway](https://vercel.com/ai-gateway), enabling 100+ LLM models (Claude, GPT-4, Llama, etc.) with ADK agents while preserving features like multi-agent orchestration, tool calling, and streaming.
+adk-llm-bridge connects [Google ADK](https://google.github.io/adk-docs/) ([GitHub](https://github.com/google/adk-js)) to multiple LLM providers (OpenAI, Anthropic, xAI, OpenRouter, AI Gateway), enabling 100+ LLM models with ADK agents while preserving features like multi-agent orchestration, tool calling, and streaming.
 
 ## Commands
 
@@ -23,42 +23,69 @@ bun run ci           # Full CI: typecheck:all + lint + test + build
 
 ## Architecture
 
-The package bridges ADK's LLM interface to the OpenAI-compatible AI Gateway API:
+### Core System
+
+The library uses a **declarative provider definition pattern**: OpenAI-compatible providers are pure config objects (`ProviderDefinition`) + factory functions, eliminating class-per-provider boilerplate.
 
 ```
-ADK LlmRequest → converters/request.ts → OpenAI format
-                         ↓
-                  OpenAI API call
-                         ↓
-ADK LlmResponse ← converters/response.ts ← OpenAI response
+src/core/
+├── base-provider-llm.ts      # Abstract base for all providers (extends ADK BaseLlm)
+├── openai-compatible-llm.ts   # Base for OpenAI-compatible APIs (uses openai SDK)
+├── provider-definition.ts     # ProviderDefinition interface
+├── config-resolver.ts         # Centralized config resolution (apiKey, baseURL, headers)
+├── create-provider.ts         # createProviderClass() / createProviderFactory()
+├── create-register.ts         # createRegisterFunction() (singleton pattern)
+└── index.ts                   # Core barrel exports
 ```
 
-### Key Components
+### Adding a New OpenAI-Compatible Provider
 
-- **`AIGatewayLlm`** (`src/ai-gateway-llm.ts`): Main LLM class extending `BaseLlm` from ADK. Handles both streaming and non-streaming generation via the OpenAI client.
+1. Create `src/providers/{name}/definition.ts` with a `ProviderDefinition` object
+2. Create `src/providers/{name}/index.ts` using `createProviderClass` + `createProviderFactory` + `createRegisterFunction`
+3. Export from `src/index.ts`
 
-- **`AIGateway()`** (`src/ai-gateway.ts`): Factory function for creating LLM instances with a clean API.
+### Provider Structure
 
-- **`registerAIGateway()`** (`src/register.ts`): Registers with ADK's `LLMRegistry` for string-based model names. Required for `adk-devtools` compatibility.
+**OpenAI-compatible providers** (OpenAI, xAI, OpenRouter, AI Gateway):
+```
+src/providers/{name}/
+├── definition.ts   # ProviderDefinition config (baseURL, envKeys, modelPatterns, etc.)
+└── index.ts        # Generated LLM class, factory, and register functions
+```
 
-- **Converters** (`src/converters/`):
-  - `request.ts`: Converts ADK `LlmRequest` to OpenAI message format, including tool/function declarations and Gemini-style schema normalization (UPPERCASE → lowercase types)
-  - `response.ts`: Converts OpenAI responses to ADK `LlmResponse`, handling both regular and streaming responses with tool call accumulation
+**Anthropic** (native SDK, not OpenAI-compatible):
+```
+src/providers/anthropic/
+├── anthropic-llm.ts           # Custom class using @anthropic-ai/sdk
+├── converters/request.ts      # ADK → Anthropic format
+├── converters/response.ts     # Anthropic → ADK format (streaming accumulator)
+└── index.ts                   # Factory + registration
+```
 
-### Model Pattern
+### Converters (shared by OpenAI-compatible providers)
 
-Models use `provider/model` format (e.g., `anthropic/claude-sonnet-4`). The pattern `/^.+\/.+$/` matches any valid model string; AI Gateway validates availability at runtime.
+```
+src/converters/
+├── request.ts     # ADK LlmRequest → OpenAI ChatCompletion format
+└── response.ts    # OpenAI response → ADK LlmResponse (streaming + non-streaming)
+```
 
 ### Configuration Priority
 
-API keys/URLs resolve in order: instance config → global config (via `setConfig`) → environment variables (`AI_GATEWAY_API_KEY` or `OPENAI_API_KEY`).
+API keys/URLs resolve in order: instance config → global config (via `setProviderConfig`) → environment variables.
+
+### JSON Safety
+
+`src/utils/json.ts` provides `safeJsonParse` which pre-processes large integers (17+ digits) to prevent IEEE 754 precision loss before `JSON.parse`.
 
 ## Testing
 
-Tests use Bun's test runner with mocking. Test structure mirrors `src/`:
+Tests use Bun's test runner. Shared helpers in `tests/helpers/provider-test-helpers.ts` reduce boilerplate for registration, factory, model pattern, and connect tests.
 
 ```bash
-bun test tests/register.test.ts  # Single file
+bun test tests/providers/openai/  # Provider tests
+bun test tests/converters/        # Converter tests
+bun test tests/utils/             # Utility tests
 bun test --watch                  # Watch mode
 ```
 

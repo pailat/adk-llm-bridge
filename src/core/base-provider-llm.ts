@@ -63,6 +63,11 @@ export abstract class BaseProviderLlm extends BaseLlm {
    * @param config - Provider configuration options
    */
   constructor(config: BaseProviderConfig) {
+    if (!config.model?.trim()) {
+      throw new Error(
+        "[adk-llm-bridge] model is required and cannot be empty.",
+      );
+    }
     super({ model: config.model });
     this.config = config;
   }
