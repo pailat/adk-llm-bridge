@@ -11,6 +11,22 @@ import { mapPermissionPolicyToFlags } from "../permissions/mapper";
 import type { ExternalAgentPermissionPolicy } from "../permissions/schema";
 import { GEMINI_CLI_PROVIDER } from "../provider/gemini-cli";
 
+declare const Bun: {
+  spawn(
+    command: string[],
+    options: {
+      cwd?: string;
+      env?: Record<string, string>;
+      stdout: "pipe";
+      stderr: "pipe";
+    },
+  ): {
+    stdout: ReadableStream<Uint8Array>;
+    stderr: ReadableStream<Uint8Array>;
+    exited: Promise<number>;
+  };
+};
+
 export interface GeminiCliSubprocess {
   stdout?:
     | AsyncIterable<Uint8Array | string>

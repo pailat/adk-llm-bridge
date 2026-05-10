@@ -10,6 +10,22 @@ import type { ExternalAgentPermissionPolicy } from "../permissions/schema";
 import { CODEX_PROVIDER } from "../provider/codex";
 import { SubprocessJsonlDriver } from "./subprocess-jsonl";
 
+declare const Bun: {
+  spawn(
+    command: string[],
+    options: {
+      cwd?: string;
+      env?: Record<string, string>;
+      stdout: "pipe";
+      stderr: "pipe";
+    },
+  ): {
+    stdout: ReadableStream<Uint8Array>;
+    stderr: ReadableStream<Uint8Array>;
+    exited: Promise<number>;
+  };
+};
+
 export interface CodexCliSpawnOptions {
   cwd?: string;
   env: Record<string, string>;
