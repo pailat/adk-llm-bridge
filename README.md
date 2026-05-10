@@ -95,6 +95,50 @@ const agent = new LlmAgent({
 });
 ```
 
+## External Agent Runtimes (Opt-in)
+
+`adk-llm-bridge` keeps its root import focused on LLM providers. Existing code that imports from `adk-llm-bridge` is unchanged. External agent runtime helpers are available from the explicit `/agents` subpath:
+
+```typescript
+import { CodexAgent, ClaudeAgent, GeminiCliAgent } from "adk-llm-bridge/agents";
+```
+
+Use this API when you want an ADK agent graph to include provider-owned coding CLIs/runtimes as `BaseAgent`-compatible sub-agents. The foundation layer exposes shared configuration, credential, permission, provider registry, and driver interfaces; it does **not** implement provider-specific runtime execution.
+
+```typescript
+import { LlmAgent } from "@google/adk";
+import { AIGateway } from "adk-llm-bridge";
+import { ClaudeAgent, EnvCredentialProvider } from "adk-llm-bridge/agents";
+
+const reviewer = new ClaudeAgent({
+  name: "CodeReviewer",
+  credentialProvider: new EnvCredentialProvider(),
+  workingDirectory: process.cwd(),
+  permissions: {
+    mode: "ask",
+    allowNetwork: false,
+    allowedPaths: [process.cwd()],
+  },
+  instruction: "Review this change for correctness and safety.",
+});
+
+export const rootAgent = new LlmAgent({
+  name: "Coordinator",
+  model: AIGateway("anthropic/claude-sonnet-4"),
+  instruction: "Route code review tasks to the reviewer sub-agent.",
+  subAgents: [reviewer],
+});
+```
+
+### External Agent Auth and Permissions
+
+- **Provider-owned auth** — Codex, Claude Code, Gemini CLI, or a custom runtime should continue to own its normal authentication flow.
+- **No default secret persistence** — the default credential provider stores nothing. Use `EnvCredentialProvider` to pass only provider-allowlisted environment variables, or provide your own `ExternalAgentCredentialProvider` for a secret manager.
+- **Optional runtime dependencies** — importing `adk-llm-bridge/agents` does not install or execute provider CLIs. Wire a driver/runtime explicitly in applications that need one.
+- **Permission presets** — use `read-only`, `ask`, `workspace-write`, or `full-access` policies, plus optional `allowNetwork` and `allowedPaths`, so provider drivers can map ADK intent to provider-specific sandbox flags.
+
+See [examples/external-agents](./examples/external-agents) for a shape-only example.
+
 ## Configuration
 
 ### Environment Variables
@@ -299,6 +343,7 @@ See the [examples](./examples) directory:
 - **[basic-agent-xai](./examples/basic-agent-xai)** - Multi-agent HelpDesk with xAI
 - **[basic-agent-lmstudio](./examples/basic-agent-lmstudio)** - Multi-agent HelpDesk with LM Studio
 - **[express-server](./examples/express-server)** - Production HTTP API with sessions, streaming, tools
+- **[external-agents](./examples/external-agents)** - Opt-in `/agents` API shape for external runtime sub-agents
 
 ## Requirements
 

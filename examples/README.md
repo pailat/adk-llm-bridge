@@ -13,6 +13,7 @@ Examples of using `adk-llm-bridge` with Google ADK and multiple LLM providers.
 | [basic-agent-xai](./basic-agent-xai) | xAI | Multi-agent HelpDesk with Grok models |
 | [basic-agent-lmstudio](./basic-agent-lmstudio) | LM Studio | Multi-agent HelpDesk with local models |
 | [express-server](./express-server) | AI Gateway | Full HTTP API with tools, state & streaming |
+| [external-agents](./external-agents) | External runtimes | Opt-in `/agents` API shape for Codex, Claude Code, and Gemini CLI sub-agents |
 
 ## Quick Start
 
@@ -86,6 +87,17 @@ cd examples/basic-agent-lmstudio
 bun install
 bun run web
 ```
+
+### external-agents
+
+Shape-only example for the opt-in external agent runtime API:
+
+```bash
+cd examples/external-agents
+# Read README.md first; provider-specific CLI drivers are intentionally not bundled.
+```
+
+Use this example to see `CodexAgent`, `ClaudeAgent`, and `GeminiCliAgent` imported from `adk-llm-bridge/agents` while the root package import remains LLM-focused.
 
 ### express-server
 
