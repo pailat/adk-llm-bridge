@@ -4,7 +4,11 @@
  * SPDX-License-Identifier: MIT
  */
 
-export type ExternalAgentProviderId = "codex" | "claude" | "gemini-cli" | (string & {});
+export type ExternalAgentProviderId =
+  | "codex"
+  | "claude"
+  | "gemini-cli"
+  | (string & {});
 
 export interface ExternalAgentProviderDefinition {
   /** Stable provider id used in events, registries, and configuration. */
@@ -17,12 +21,7 @@ export interface ExternalAgentProviderDefinition {
   envAllowlist?: readonly string[];
 }
 
-export const CODEX_PROVIDER: ExternalAgentProviderDefinition = {
-  id: "codex",
-  name: "Codex",
-  command: "codex",
-  envAllowlist: ["OPENAI_API_KEY", "CODEX_API_KEY"],
-};
+export { CODEX_PROVIDER } from "./codex";
 
 export const CLAUDE_PROVIDER: ExternalAgentProviderDefinition = {
   id: "claude",
