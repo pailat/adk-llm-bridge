@@ -1,12 +1,12 @@
 # External Agents Example
 
-This example shows the **opt-in** external agent runtime API:
+This example shows the **opt-in** external agent runtime API with a `ClaudeAgent` as the root ADK agent:
 
 ```ts
-import { CodexAgent, ClaudeAgent, GeminiCliAgent } from "adk-llm-bridge/agents";
+import { ClaudeAgent, CodexAgent, GeminiCliAgent } from "adk-llm-bridge/agents";
 ```
 
-The root package import remains focused on LLM providers:
+The root package import remains focused on LLM providers for other examples:
 
 ```ts
 import { AIGateway } from "adk-llm-bridge";
@@ -14,18 +14,27 @@ import { AIGateway } from "adk-llm-bridge";
 
 ## What this example demonstrates
 
-- Adding external runtime agents as ADK `subAgents`
-- Using `EnvCredentialProvider` to pass only provider-allowlisted environment variables
+- Running `ClaudeAgent` as the `rootAgent`
+- Using Claude Code's native CLI authentication cache/OAuth token when available
+- Using `EnvCredentialProvider` only as a pass-through for provider-allowlisted environment variables
 - Selecting permission presets such as `read-only`, `ask`, and `workspace-write`
-- Keeping provider-specific authentication owned by each native runtime/CLI
 - Keeping external runtime APIs opt-in through the `adk-llm-bridge/agents` subpath
 
 ## Quick Start
 
+First make sure Claude Code is installed and authenticated in your local shell:
+
+```bash
+claude --version
+# If needed, run Claude Code's native login/auth flow first.
+```
+
+Then run the example:
+
 ```bash
 cd examples/external-agents
 cp .env.example .env
-# Edit .env with at least AI_GATEWAY_API_KEY for the coordinator model
+# Optional: edit .env only if you want env-based auth instead of native Claude login.
 bun install
 bun run web
 ```
@@ -40,32 +49,23 @@ bun run typecheck
 
 ## Runtime setup
 
-This example coordinates three external runtime agents:
+The exported `rootAgent` is a `ClaudeAgent`, so normal chat in ADK DevTools is handled by Claude Code through the `claude -p ... --output-format stream-json` CLI path.
+
+The file also constructs specialist agents to demonstrate the import/configuration shape:
 
 - `CodexAgent` for Codex CLI-style implementation work
-- `ClaudeAgent` for Claude Code / Claude Agent SDK-style review work
 - `GeminiCliAgent` for Gemini CLI-style codebase exploration
 
 The bridge does **not** install provider CLIs or persist provider secrets for you. Install and authenticate each runtime using its native documentation when you want that runtime to execute real work.
 
-### Coordinator LLM
+### Claude native / OAuth auth
 
-The root `LlmAgent` uses:
+For local usage, Claude Code can use the credentials already configured on your machine. The driver preserves `HOME`, `PATH`, `USER`, `SHELL`, `CLAUDE_CONFIG_DIR`, and `XDG_CONFIG_HOME` for the subprocess so Claude can find its native config/cache.
 
-```ts
-AIGateway("anthropic/claude-sonnet-4")
-```
+You can also pass allowlisted env credentials when needed. Common variables are listed in [.env.example](./.env.example), including:
 
-Set `AI_GATEWAY_API_KEY` in `.env` for the coordinator.
-
-### External runtime credentials
-
-External runtimes own their normal auth flows. You can rely on native CLI login/cache for local use, or provide environment variables that `EnvCredentialProvider` passes through only when allowlisted by the provider definition.
-
-Common variables are listed in [.env.example](./.env.example), including:
-
-- Codex / OpenAI-compatible: `OPENAI_API_KEY`, `CODEX_API_KEY`, `CODEX_HOME`
 - Claude: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CONFIG_DIR`
+- Codex / OpenAI-compatible: `OPENAI_API_KEY`, `CODEX_API_KEY`, `CODEX_HOME`
 - Gemini: `GEMINI_API_KEY`, `GOOGLE_API_KEY`, `GOOGLE_GENAI_USE_VERTEXAI`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `GOOGLE_APPLICATION_CREDENTIALS`
 
 ## Important runtime note
@@ -82,4 +82,4 @@ External runtime usage is opt-in:
 import { CodexAgent, ClaudeAgent, GeminiCliAgent } from "adk-llm-bridge/agents";
 ```
 
-If a concrete runtime driver is unavailable or not configured, the agent should fail as a recoverable runtime configuration error rather than silently running with broad permissions.
+Claude CLI execution is side-effectful and uses the permissions configured on the `ClaudeAgent`; this example defaults to `ask` mode and limits allowed paths to the current working directory.

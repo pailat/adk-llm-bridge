@@ -1,5 +1,3 @@
-import { LlmAgent } from "@google/adk";
-import { AIGateway } from "adk-llm-bridge";
 import {
   ClaudeAgent,
   CodexAgent,
@@ -9,27 +7,14 @@ import {
 } from "adk-llm-bridge/agents";
 
 // External agent runtimes are opt-in and live under the /agents subpath.
-// The foundation exports ADK-compatible agent classes and shared configuration
-// shapes. Provider-specific runtime drivers are intentionally not bundled here.
+// ClaudeAgent is the root agent here, so it uses Claude Code's native CLI auth
+// cache/OAuth token (or allowlisted env vars) instead of an LLM provider API key.
 const credentialProvider = new EnvCredentialProvider();
-
-const codeReviewer = new ClaudeAgent({
-  name: "ClaudeCodeReviewer",
-  description: "Reviews repository changes with Claude Code when a driver is supplied.",
-  credentialProvider,
-  workingDirectory: process.cwd(),
-  permissions: {
-    ...mapPermissionModeToPolicy("ask"),
-    allowNetwork: false,
-    allowedPaths: [process.cwd()],
-  },
-  instruction:
-    "Review the proposed change. Focus on correctness, safety, and maintainability.",
-});
 
 const codexImplementer = new CodexAgent({
   name: "CodexImplementer",
-  description: "Implements scoped code changes with Codex when a driver is supplied.",
+  description:
+    "Implements scoped code changes with Codex when a driver is supplied.",
   credentialProvider,
   workingDirectory: process.cwd(),
   permissions: mapPermissionModeToPolicy("workspace-write"),
@@ -38,21 +23,29 @@ const codexImplementer = new CodexAgent({
 
 const geminiResearcher = new GeminiCliAgent({
   name: "GeminiResearcher",
-  description: "Explores large codebases with Gemini CLI when a driver is supplied.",
+  description:
+    "Explores large codebases with Gemini CLI when a driver is supplied.",
   credentialProvider,
   workingDirectory: process.cwd(),
   permissions: mapPermissionModeToPolicy("read-only"),
   instruction: "Summarize the relevant files and call out open questions.",
 });
 
-export const rootAgent = new LlmAgent({
-  name: "ExternalRuntimeCoordinator",
-  model: AIGateway("anthropic/claude-sonnet-4"),
+export const rootAgent = new ClaudeAgent({
+  name: "ClaudeCodeRoot",
   description:
-    "Routes requests between an LLM coordinator and opt-in external agent runtimes.",
-  instruction: `You coordinate work across specialist agents.
+    "Runs Claude Code as the root ADK agent using native Claude CLI authentication.",
+  credentialProvider,
+  workingDirectory: process.cwd(),
+  permissions: {
+    ...mapPermissionModeToPolicy("ask"),
+    allowNetwork: false,
+    allowedPaths: [process.cwd()],
+  },
+  instruction: `You are the root Claude Code agent for this repository.
 
-Use external runtime sub-agents only for tasks that explicitly need their CLI/runtime.
-Keep normal chat, planning, and tool use in the LLM coordinator.`,
-  subAgents: [codeReviewer, codexImplementer, geminiResearcher],
+Use the native Claude CLI authentication already configured on this machine.
+Review, explain, and coordinate code changes safely. Ask before making broad or destructive changes.
+Delegate to specialist agents only when the task explicitly benefits from Codex or Gemini CLI.`,
+  subAgents: [codexImplementer, geminiResearcher],
 });

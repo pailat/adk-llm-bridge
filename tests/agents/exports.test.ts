@@ -51,6 +51,9 @@ describe("agents public exports", () => {
     expect(codex.provider).toEqual(agents.CODEX_PROVIDER);
     expect(claude.provider).toEqual(agents.CLAUDE_PROVIDER);
     expect(gemini.provider).toEqual(agents.GEMINI_CLI_PROVIDER);
+
+    const root = new agents.ClaudeAgent({ name: "root", subAgents: [codex, gemini] });
+    expect(root.subAgents).toEqual([codex, gemini]);
   });
 
   test("package exports preserves root and adds agents subpath", () => {

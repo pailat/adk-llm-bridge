@@ -23,6 +23,7 @@ export interface ExternalAgentConfig {
   instruction?: string;
   workingDirectory?: string;
   permissions?: ExternalAgentPermissionPolicy;
+  subAgents?: BaseAgent[];
 }
 
 export class ExternalAgent extends BaseAgent {
@@ -34,7 +35,11 @@ export class ExternalAgent extends BaseAgent {
   readonly permissions?: ExternalAgentPermissionPolicy;
 
   constructor(config: ExternalAgentConfig) {
-    super({ name: config.name, description: config.description });
+    super({
+      name: config.name,
+      description: config.description,
+      subAgents: config.subAgents,
+    });
     this.provider = config.provider;
     this.driver =
       config.driver ?? new PlaceholderExternalAgentDriver(config.provider.id);

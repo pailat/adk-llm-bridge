@@ -15,6 +15,7 @@ export type {
   ExternalAgentCredential,
 } from "./auth/schema.js";
 
+export { ClaudeAgent } from "./claude-agent.js";
 export { CodexAgent } from "./codex-agent.js";
 export {
   CodexCliDriver,
@@ -26,6 +27,13 @@ export type {
   CodexCliSpawnOptions,
   CodexCliSubprocess,
 } from "./driver/codex-cli.js";
+export { ClaudeCliDriver, mapClaudePermissionArgs } from "./driver/claude-cli.js";
+export type {
+  ClaudeCliDriverConfig,
+  ClaudeCliSpawn,
+  ClaudeCliSpawnOptions,
+  ClaudeCliSubprocess,
+} from "./driver/claude-cli.js";
 export {
   GeminiCliDriver,
   buildGeminiArgs,
@@ -77,14 +85,3 @@ export type {
   ExternalAgentProviderDefinition,
   ExternalAgentProviderId,
 } from "./provider/schema.js";
-
-import { ExternalAgent, type ExternalAgentConfig } from "./external-agent.js";
-import { CLAUDE_PROVIDER } from "./provider/schema.js";
-
-type ProviderBackedAgentConfig = Omit<ExternalAgentConfig, "provider">;
-
-export class ClaudeAgent extends ExternalAgent {
-  constructor(config: ProviderBackedAgentConfig) {
-    super({ ...config, provider: CLAUDE_PROVIDER });
-  }
-}
