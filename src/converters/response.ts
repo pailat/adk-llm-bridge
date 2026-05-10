@@ -16,8 +16,8 @@
 import type { LlmResponse } from "@google/adk";
 import type { Part } from "@google/genai";
 import type OpenAI from "openai";
-import type { StreamAccumulator, StreamChunkResult } from "../types";
-import { safeJsonParse } from "../utils";
+import type { StreamAccumulator, StreamChunkResult } from "../types.js";
+import { safeJsonParse } from "../utils/index.js";
 
 /**
  * Converts an OpenAI chat completion response to ADK LlmResponse format.

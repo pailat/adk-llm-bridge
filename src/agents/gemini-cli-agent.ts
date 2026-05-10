@@ -4,10 +4,10 @@
  * SPDX-License-Identifier: MIT
  */
 
-import { EnvCredentialProvider } from "./auth/env";
-import { GeminiCliDriver } from "./driver/gemini-cli";
-import { ExternalAgent, type ExternalAgentConfig } from "./external-agent";
-import { GEMINI_CLI_PROVIDER } from "./provider/gemini-cli";
+import { EnvCredentialProvider } from "./auth/env.js";
+import { GeminiCliDriver } from "./driver/gemini-cli.js";
+import { ExternalAgent, type ExternalAgentConfig } from "./external-agent.js";
+import { GEMINI_CLI_PROVIDER } from "./provider/gemini-cli.js";
 
 type GeminiCliAgentConfig = Omit<ExternalAgentConfig, "provider">;
 

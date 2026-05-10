@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
-import { OpenAICompatibleLlm } from "../../../src/core/openai-compatible-llm";
-import { AIGateway } from "../../../src/providers/ai-gateway";
-import { describeProviderFactory } from "../../helpers/provider-test-helpers";
+import { OpenAICompatibleLlm } from "../../../src/core/openai-compatible-llm.js";
+import { AIGateway } from "../../../src/providers/ai-gateway/index.js";
+import { describeProviderFactory } from "../../helpers/provider-test-helpers.js";
 
 describeProviderFactory({
   name: "AIGateway",

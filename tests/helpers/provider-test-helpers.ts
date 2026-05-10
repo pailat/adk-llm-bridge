@@ -6,7 +6,7 @@
  */
 
 import { beforeEach, describe, expect, it, spyOn } from "bun:test";
-import { getProviderConfig, resetAllConfigs } from "../../src/config";
+import { getProviderConfig, resetAllConfigs } from "../../src/config.js";
 
 // ---------------------------------------------------------------------------
 // Registration test suite

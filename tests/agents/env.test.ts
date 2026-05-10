@@ -5,7 +5,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { EnvCredentialProvider, readAllowedEnv } from "../../src/agents";
+import { EnvCredentialProvider, readAllowedEnv } from "../../src/agents/index.js";
 
 describe("environment credential allowlist", () => {
   test("reads only allowlisted non-empty variables", () => {

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 
-import type { CredentialRequest, ExternalAgentCredential } from "./schema";
+import type { CredentialRequest, ExternalAgentCredential } from "./schema.js";
 
 export interface ExternalAgentCredentialProvider {
   getCredential(request: CredentialRequest): Promise<ExternalAgentCredential | undefined>;

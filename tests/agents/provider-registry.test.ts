@@ -11,7 +11,7 @@ import {
   createDefaultExternalAgentProviderRegistry,
   ExternalAgentProviderRegistry,
   GEMINI_CLI_PROVIDER,
-} from "../../src/agents";
+} from "../../src/agents/index.js";
 
 describe("ExternalAgentProviderRegistry", () => {
   test("registers and looks up providers", () => {

@@ -36,9 +36,9 @@
  * ```
  */
 
-export * from "./ai-gateway";
-export * from "./anthropic";
-export * from "./custom";
-export * from "./openai";
-export * from "./openrouter";
-export * from "./xai";
+export * from "./ai-gateway/index.js";
+export * from "./anthropic/index.js";
+export * from "./custom/index.js";
+export * from "./openai/index.js";
+export * from "./openrouter/index.js";
+export * from "./xai/index.js";

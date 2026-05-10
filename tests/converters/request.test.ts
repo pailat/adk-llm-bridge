@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import type { LlmRequest } from "@google/adk";
-import { convertRequest } from "../../src/converters/request";
+import { convertRequest } from "../../src/converters/request.js";
 
 function createLlmRequest(overrides: Partial<LlmRequest> = {}): LlmRequest {
   return {

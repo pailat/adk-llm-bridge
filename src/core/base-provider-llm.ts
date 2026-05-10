@@ -15,7 +15,7 @@
 
 import type { BaseLlmConnection, LlmRequest, LlmResponse } from "@google/adk";
 import { BaseLlm } from "@google/adk";
-import type { BaseProviderConfig } from "../types";
+import type { BaseProviderConfig } from "../types.js";
 
 /**
  * Abstract base class for all LLM providers in adk-llm-bridge.

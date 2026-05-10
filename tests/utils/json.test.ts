@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { safeJsonParse } from "../../src/utils/json";
+import { safeJsonParse } from "../../src/utils/json.js";
 
 describe("safeJsonParse", () => {
   it("parses normal JSON unchanged", () => {

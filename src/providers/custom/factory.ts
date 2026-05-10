@@ -10,8 +10,8 @@
  * @module providers/custom/factory
  */
 
-import type { CustomLlmConfig } from "../../types";
-import { CustomLlm, type CustomLlmProviderConfig } from "./custom-llm";
+import type { CustomLlmConfig } from "../../types.js";
+import { CustomLlm, type CustomLlmProviderConfig } from "./custom-llm.js";
 
 /**
  * Creates a custom LLM instance.

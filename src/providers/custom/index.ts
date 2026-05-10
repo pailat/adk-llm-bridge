@@ -32,5 +32,5 @@
  * @module providers/custom
  */
 
-export { CustomLlm, type CustomLlmProviderConfig } from "./custom-llm";
-export { Custom, createCustomLlm } from "./factory";
+export { CustomLlm, type CustomLlmProviderConfig } from "./custom-llm.js";
+export { Custom, createCustomLlm } from "./factory.js";

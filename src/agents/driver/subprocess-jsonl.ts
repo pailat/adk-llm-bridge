@@ -7,8 +7,8 @@
 import type {
   ExternalAgentDriver,
   ExternalAgentRunRequest,
-} from "../external-agent-driver";
-import { isExternalAgentEvent, type ExternalAgentEvent } from "../events";
+} from "../external-agent-driver.js";
+import { isExternalAgentEvent, type ExternalAgentEvent } from "../events.js";
 
 export interface SubprocessJsonlDriverConfig {
   providerId: string;

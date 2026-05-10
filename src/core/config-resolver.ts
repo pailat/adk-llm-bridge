@@ -13,11 +13,11 @@
  * @module core/config-resolver
  */
 
-import { getProviderConfig } from "../config";
-import { DEFAULT_MAX_RETRIES, DEFAULT_TIMEOUT } from "../constants";
-import type { BaseProviderConfig } from "../types";
-import { clampPositive, requireValidURL } from "../utils/validate";
-import type { ProviderDefinition } from "./provider-definition";
+import { getProviderConfig } from "../config.js";
+import { DEFAULT_MAX_RETRIES, DEFAULT_TIMEOUT } from "../constants.js";
+import type { BaseProviderConfig } from "../types.js";
+import { clampPositive, requireValidURL } from "../utils/validate.js";
+import type { ProviderDefinition } from "./provider-definition.js";
 
 /**
  * Fully resolved configuration ready to create an OpenAI client.

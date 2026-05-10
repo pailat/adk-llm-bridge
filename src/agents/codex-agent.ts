@@ -4,9 +4,9 @@
  * SPDX-License-Identifier: MIT
  */
 
-import { CodexCliDriver } from "./driver/codex-cli";
-import { ExternalAgent, type ExternalAgentConfig } from "./external-agent";
-import { CODEX_PROVIDER } from "./provider/codex";
+import { CodexCliDriver } from "./driver/codex-cli.js";
+import { ExternalAgent, type ExternalAgentConfig } from "./external-agent.js";
+import { CODEX_PROVIDER } from "./provider/codex.js";
 
 type CodexAgentConfig = Omit<ExternalAgentConfig, "provider">;
 

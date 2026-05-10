@@ -21,7 +21,7 @@ export interface ExternalAgentProviderDefinition {
   envAllowlist?: readonly string[];
 }
 
-export { CODEX_PROVIDER } from "./codex";
+export { CODEX_PROVIDER } from "./codex.js";
 
 export const CLAUDE_PROVIDER: ExternalAgentProviderDefinition = {
   id: "claude",

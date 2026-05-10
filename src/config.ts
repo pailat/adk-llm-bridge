@@ -42,7 +42,7 @@ import type {
   OpenRouterRegisterOptions,
   RegisterOptions,
   XAIRegisterOptions,
-} from "./types";
+} from "./types.js";
 
 /**
  * Mapping of provider identifiers to their configuration types.

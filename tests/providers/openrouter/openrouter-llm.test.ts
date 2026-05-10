@@ -1,11 +1,11 @@
 import { beforeEach, describe, expect, it } from "bun:test";
-import { resetAllConfigs } from "../../../src/config";
-import { OPENROUTER_DEFINITION } from "../../../src/providers/openrouter/definition";
-import { OpenRouterLlm } from "../../../src/providers/openrouter";
+import { resetAllConfigs } from "../../../src/config.js";
+import { OPENROUTER_DEFINITION } from "../../../src/providers/openrouter/definition.js";
+import { OpenRouterLlm } from "../../../src/providers/openrouter/index.js";
 import {
   describeModelPatterns,
   describeConnectError,
-} from "../../helpers/provider-test-helpers";
+} from "../../helpers/provider-test-helpers.js";
 
 describe("OpenRouterLlm", () => {
   beforeEach(() => {

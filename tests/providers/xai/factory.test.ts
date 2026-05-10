@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
-import { OpenAICompatibleLlm } from "../../../src/core/openai-compatible-llm";
-import { XAI } from "../../../src/providers/xai";
-import { describeProviderFactory } from "../../helpers/provider-test-helpers";
+import { OpenAICompatibleLlm } from "../../../src/core/openai-compatible-llm.js";
+import { XAI } from "../../../src/providers/xai/index.js";
+import { describeProviderFactory } from "../../helpers/provider-test-helpers.js";
 
 describeProviderFactory({
   name: "XAI",

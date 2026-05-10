@@ -6,13 +6,13 @@
 
 import { BaseAgent, createEvent, type InvocationContext } from "@google/adk";
 import type { Content } from "@google/genai";
-import type { ExternalAgentCredentialProvider } from "./auth/credential-provider";
-import { NoopCredentialProvider } from "./auth/credential-provider";
-import type { ExternalAgentDriver } from "./external-agent-driver";
-import { PlaceholderExternalAgentDriver } from "./external-agent-driver";
-import type { ExternalAgentEvent } from "./events";
-import type { ExternalAgentPermissionPolicy } from "./permissions/schema";
-import type { ExternalAgentProviderDefinition } from "./provider/schema";
+import type { ExternalAgentCredentialProvider } from "./auth/credential-provider.js";
+import { NoopCredentialProvider } from "./auth/credential-provider.js";
+import type { ExternalAgentDriver } from "./external-agent-driver.js";
+import { PlaceholderExternalAgentDriver } from "./external-agent-driver.js";
+import type { ExternalAgentEvent } from "./events.js";
+import type { ExternalAgentPermissionPolicy } from "./permissions/schema.js";
+import type { ExternalAgentProviderDefinition } from "./provider/schema.js";
 
 export interface ExternalAgentConfig {
   name: string;
