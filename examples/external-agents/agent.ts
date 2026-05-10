@@ -7,8 +7,9 @@ import {
 } from "adk-llm-bridge/agents";
 
 // External agent runtimes are opt-in and live under the /agents subpath.
-// ClaudeAgent is the root agent here, so it uses Claude Code's native CLI auth
-// cache/OAuth token (or allowlisted env vars) instead of an LLM provider API key.
+// ClaudeAgent is the root agent here. By default it uses the official
+// @anthropic-ai/claude-agent-sdk driver, which can use Claude Code's native
+// auth cache/OAuth token (or allowlisted env vars) instead of an LLM provider API key.
 const credentialProvider = new EnvCredentialProvider();
 
 const codexImplementer = new CodexAgent({
@@ -34,7 +35,7 @@ const geminiResearcher = new GeminiCliAgent({
 export const rootAgent = new ClaudeAgent({
   name: "ClaudeCodeRoot",
   description:
-    "Runs Claude Code as the root ADK agent using native Claude CLI authentication.",
+    "Runs Claude Code as the root ADK agent using the Claude Agent SDK and native Claude Code authentication.",
   credentialProvider,
   workingDirectory: process.cwd(),
   permissions: {
@@ -44,7 +45,7 @@ export const rootAgent = new ClaudeAgent({
   },
   instruction: `You are the root Claude Code agent for this repository.
 
-Use the native Claude CLI authentication already configured on this machine.
+Use the native Claude Code authentication already configured on this machine.
 Review, explain, and coordinate code changes safely. Ask before making broad or destructive changes.
 Delegate to specialist agents only when the task explicitly benefits from Codex or Gemini CLI.`,
   subAgents: [codexImplementer, geminiResearcher],
