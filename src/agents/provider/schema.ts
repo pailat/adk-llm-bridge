@@ -29,10 +29,3 @@ export const CLAUDE_PROVIDER: ExternalAgentProviderDefinition = {
   command: "claude",
   envAllowlist: ["ANTHROPIC_API_KEY", "CLAUDE_API_KEY"],
 };
-
-export const GEMINI_CLI_PROVIDER: ExternalAgentProviderDefinition = {
-  id: "gemini-cli",
-  name: "Gemini CLI",
-  command: "gemini",
-  envAllowlist: ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
-};

@@ -5,10 +5,10 @@
  */
 
 import { CODEX_PROVIDER } from "./codex";
+import { GEMINI_CLI_PROVIDER } from "./gemini-cli";
 import {
   CLAUDE_PROVIDER,
   type ExternalAgentProviderDefinition,
-  GEMINI_CLI_PROVIDER,
 } from "./schema";
 
 export class ExternalAgentProviderRegistry {
