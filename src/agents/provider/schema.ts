@@ -4,7 +4,11 @@
  * SPDX-License-Identifier: MIT
  */
 
-export type ExternalAgentProviderId = "codex" | "claude" | "gemini-cli" | (string & {});
+export type ExternalAgentProviderId =
+  | "codex"
+  | "claude"
+  | "gemini-cli"
+  | (string & {});
 
 export interface ExternalAgentProviderDefinition {
   /** Stable provider id used in events, registries, and configuration. */
@@ -29,11 +33,4 @@ export const CLAUDE_PROVIDER: ExternalAgentProviderDefinition = {
   name: "Claude Code",
   command: "claude",
   envAllowlist: ["ANTHROPIC_API_KEY", "CLAUDE_API_KEY"],
-};
-
-export const GEMINI_CLI_PROVIDER: ExternalAgentProviderDefinition = {
-  id: "gemini-cli",
-  name: "Gemini CLI",
-  command: "gemini",
-  envAllowlist: ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
 };

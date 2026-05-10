@@ -4,10 +4,10 @@
  * SPDX-License-Identifier: MIT
  */
 
+import { GEMINI_CLI_PROVIDER } from "./gemini-cli";
 import {
   CLAUDE_PROVIDER,
   CODEX_PROVIDER,
-  GEMINI_CLI_PROVIDER,
   type ExternalAgentProviderDefinition,
 } from "./schema";
 
