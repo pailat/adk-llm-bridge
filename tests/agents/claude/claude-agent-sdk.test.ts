@@ -6,6 +6,8 @@ import {
 } from "../../../src/agents/driver/claude-agent-sdk.js";
 import { ClaudeCliDriver } from "../../../src/agents/driver/claude-cli.js";
 import { CLAUDE_PROVIDER } from "../../../src/agents/provider/schema.js";
+import { CODEX_PROVIDER } from "../../../src/agents/provider/schema.js";
+import { ExternalAgent } from "../../../src/agents/external-agent.js";
 
 describe("ClaudeAgentSdkDriver", () => {
   test("ClaudeAgent uses the SDK driver by default", () => {
@@ -110,6 +112,52 @@ describe("ClaudeAgentSdkDriver", () => {
 
     expect(driver.normalizeMessage({ type: "system", subtype: "init" } as never)).toEqual([]);
     expect(driver.normalizeMessage({ type: "rate_limit_event" } as never)).toEqual([]);
+  });
+
+  test("builds SDK MCP options for ADK subagent delegation", async () => {
+    let handler: ((args: Record<string, unknown>, extra: unknown) => Promise<unknown>) | undefined;
+    const sdk = {
+      query: async function* () {},
+      tool: (
+        name: string,
+        _description: string,
+        inputSchema: Record<string, unknown>,
+        toolHandler: (args: Record<string, unknown>, extra: unknown) => Promise<unknown>,
+      ) => {
+        expect(name).toBe("run_adk_subagent");
+        expect(inputSchema.agentName).toBeDefined();
+        expect(inputSchema.task).toBeDefined();
+        handler = toolHandler;
+        return { name };
+      },
+      createSdkMcpServer: (options: Record<string, unknown>) => options,
+    };
+    const driver = new ClaudeAgentSdkDriver({ sdk });
+    const subAgent = new ExternalAgent({ name: "CodexImplementer", provider: CODEX_PROVIDER });
+    const result = { agentName: "CodexImplementer", output: "done", events: 1 };
+    const options = await driver.buildOptionsForRun(
+      {
+        provider: CLAUDE_PROVIDER,
+        context: {} as never,
+        subAgents: [subAgent],
+        toolGateway: {
+          runSubAgent: async (input: unknown) => {
+            expect(input).toEqual({ agentName: "CodexImplementer", task: "patch" });
+            return result;
+          },
+        } as never,
+      },
+      sdk,
+    );
+
+    expect(options.mcpServers?.adk_bridge).toMatchObject({
+      name: "adk_bridge",
+      tools: [{ name: "run_adk_subagent" }],
+    });
+    expect(options.allowedTools).toContain("mcp__adk_bridge__run_adk_subagent");
+    await expect(handler?.({ agentName: "CodexImplementer", task: "patch" }, {})).resolves.toEqual({
+      content: [{ type: "text", text: "done" }],
+    });
   });
 
   test("run uses injected SDK without importing the real package", async () => {

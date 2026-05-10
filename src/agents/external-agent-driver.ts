@@ -4,11 +4,14 @@
  * SPDX-License-Identifier: MIT
  */
 
-import type { InvocationContext } from "@google/adk";
+import type { BaseAgent, BaseTool, InvocationContext } from "@google/adk";
 import type { ExternalAgentCredential } from "./auth/schema.js";
 import type { ExternalAgentEvent } from "./events.js";
 import type { ExternalAgentPermissionPolicy } from "./permissions/schema.js";
 import type { ExternalAgentProviderDefinition } from "./provider/schema.js";
+import type { AgentRuntimeCapabilities } from "./runtime/capabilities.js";
+import type { AgentRuntimeSession } from "./runtime/runtime-session.js";
+import type { ToolGateway } from "./tools/tool-gateway.js";
 
 export interface ExternalAgentRunRequest {
   provider: ExternalAgentProviderDefinition;
@@ -17,10 +20,17 @@ export interface ExternalAgentRunRequest {
   workingDirectory?: string;
   credential?: ExternalAgentCredential;
   permissions?: ExternalAgentPermissionPolicy;
+  agent?: BaseAgent;
+  rootAgent?: BaseAgent;
+  subAgents?: readonly BaseAgent[];
+  tools?: readonly BaseTool[];
+  toolGateway?: ToolGateway;
+  runtimeSession?: AgentRuntimeSession;
 }
 
 export interface ExternalAgentDriver {
   readonly providerId: string;
+  capabilities?(): AgentRuntimeCapabilities;
   run(request: ExternalAgentRunRequest): AsyncIterable<ExternalAgentEvent>;
 }
 

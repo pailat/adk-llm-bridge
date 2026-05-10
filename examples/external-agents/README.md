@@ -18,6 +18,7 @@ import { AIGateway } from "adk-llm-bridge";
 - Using the official Claude Agent SDK TypeScript driver by default
 - Using `EnvCredentialProvider` only as a pass-through for provider-allowlisted environment variables
 - Selecting permission presets such as `read-only`, `ask`, and `workspace-write`
+- Exposing ADK `subAgents` to Claude Agent SDK through the in-process MCP `run_adk_subagent` bridge tool
 - Keeping external runtime APIs opt-in through the `adk-llm-bridge/agents` subpath
 
 ## Quick Start
@@ -54,10 +55,16 @@ bun run typecheck
 
 The exported `rootAgent` is a `ClaudeAgent`, so normal chat in ADK DevTools is handled by Claude Code through the official `@anthropic-ai/claude-agent-sdk` TypeScript path.
 
-The file also constructs specialist agents to demonstrate the import/configuration shape:
+The file also constructs specialist agents and registers them as ADK subagents:
 
 - `CodexAgent` for Codex CLI-style implementation work
 - `GeminiCliAgent` for Gemini CLI-style codebase exploration
+
+When `ClaudeAgent` runs through the SDK driver, those ADK subagents are exposed to Claude through an in-process MCP tool named `run_adk_subagent`. You can ask Claude to delegate explicitly, for example:
+
+```txt
+Ask CodexImplementer to inspect this repository and propose a minimal patch for the failing test.
+```
 
 The bridge does **not** install provider CLIs or persist provider secrets for you. Install and authenticate each runtime using its native documentation when you want that runtime to execute real work.
 

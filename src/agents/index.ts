@@ -70,6 +70,7 @@ export {
   mapPermissionModeToPolicy,
   mapPermissionPolicyToFlags,
 } from "./permissions/mapper.js";
+export { deriveSubAgentPermissionPolicy } from "./permissions/inheritance.js";
 export type {
   ExternalAgentPermissionMode,
   ExternalAgentPermissionPolicy,
@@ -90,3 +91,12 @@ export type {
   ExternalAgentProviderDefinition,
   ExternalAgentProviderId,
 } from "./provider/schema.js";
+export type { AgentRuntimeCapabilities } from "./runtime/capabilities.js";
+export type { AgentRuntimeRequestMetadata } from "./runtime/runtime-request.js";
+export type { AgentRuntimeSession } from "./runtime/runtime-session.js";
+export { ToolGateway } from "./tools/tool-gateway.js";
+export type {
+  RunSubAgentInput,
+  RunSubAgentResult,
+  ToolGatewayConfig,
+} from "./tools/tool-gateway.js";

@@ -10,10 +10,12 @@ import { CODEX_PROVIDER } from "../../src/agents/provider/schema.js";
 
 class StaticDriver implements ExternalAgentDriver {
   readonly providerId = CODEX_PROVIDER.id;
+  request?: ExternalAgentRunRequest;
 
   constructor(private readonly events: ExternalAgentEvent[]) {}
 
-  async *run(_request: ExternalAgentRunRequest): AsyncIterable<ExternalAgentEvent> {
+  async *run(request: ExternalAgentRunRequest): AsyncIterable<ExternalAgentEvent> {
+    this.request = request;
     yield* this.events;
   }
 }
@@ -31,6 +33,32 @@ async function collect(agent: ExternalAgent, context: Partial<InvocationContext>
 }
 
 describe("ExternalAgent ADK event formatting", () => {
+  test("passes runtime bridge context to the configured driver", async () => {
+    const driver = new StaticDriver([{ type: "completed", exitCode: 0 }]);
+    const subAgent = new ExternalAgent({
+      name: "codex_subagent",
+      provider: CODEX_PROVIDER,
+      driver: new StaticDriver([]),
+    });
+    const agent = new ExternalAgent({
+      name: "codex_agent",
+      provider: CODEX_PROVIDER,
+      driver,
+      subAgents: [subAgent],
+    });
+
+    await collect(agent);
+
+    expect(driver.request?.agent).toBe(agent);
+    expect(driver.request?.rootAgent).toBe(agent);
+    expect(driver.request?.subAgents).toEqual([subAgent]);
+    expect(driver.request?.toolGateway).toBeDefined();
+    expect(driver.request?.runtimeSession).toMatchObject({
+      id: "inv-1",
+      rootAgentName: "codex_agent",
+    });
+  });
+
   test("renders output as model text content with invocation metadata", async () => {
     const agent = new ExternalAgent({
       name: "codex_agent",

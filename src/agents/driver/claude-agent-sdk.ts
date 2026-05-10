@@ -31,15 +31,35 @@ type ClaudeAgentSdkOptions = {
   model?: string;
   systemPrompt?: string | { type: "preset"; preset: "claude_code"; append?: string };
   allowDangerouslySkipPermissions?: true;
+  mcpServers?: Record<string, unknown>;
+  allowedTools?: string[];
 };
 
 type ClaudeAgentSdkMessage = Record<string, unknown>;
+type ClaudeAgentSdkToolResult = {
+  content: Array<{ type: "text"; text: string }>;
+  isError?: boolean;
+};
+type ClaudeAgentSdkToolDefinition = unknown;
 
 type ClaudeAgentSdkLike = {
   query(params: {
     prompt: string | AsyncIterable<unknown>;
     options?: ClaudeAgentSdkOptions;
   }): AsyncIterable<ClaudeAgentSdkMessage>;
+  createSdkMcpServer?(options: {
+    name: string;
+    version?: string;
+    tools?: ClaudeAgentSdkToolDefinition[];
+    alwaysLoad?: boolean;
+  }): unknown;
+  tool?(
+    name: string,
+    description: string,
+    inputSchema: Record<string, unknown>,
+    handler: (args: Record<string, unknown>, extra: unknown) => Promise<ClaudeAgentSdkToolResult>,
+    extras?: Record<string, unknown>,
+  ): ClaudeAgentSdkToolDefinition;
 };
 
 export interface ClaudeAgentSdkDriverConfig {
@@ -78,7 +98,7 @@ export class ClaudeAgentSdkDriver {
   async *run(request: ExternalAgentRunRequest): AsyncIterable<ExternalAgentEvent> {
     const sdk = await this.loadSdk();
     const prompt = buildPrompt(request);
-    const options = this.buildOptions(request);
+    const options = await this.buildOptionsForRun(request, sdk);
 
     yield {
       type: "started",
@@ -225,6 +245,68 @@ export class ClaudeAgentSdkDriver {
     return [];
   }
 
+  async buildOptionsForRun(
+    request: ExternalAgentRunRequest,
+    sdk: ClaudeAgentSdkLike,
+  ): Promise<ClaudeAgentSdkOptions> {
+    const options = this.buildOptions(request);
+    if (!request.toolGateway || !request.subAgents || request.subAgents.length === 0) {
+      return options;
+    }
+
+    const mcpServer = await this.buildSubAgentMcpServer(request, sdk);
+    return removeUndefined({
+      ...options,
+      mcpServers: {
+        ...(options.mcpServers ?? {}),
+        adk_bridge: mcpServer,
+      },
+      allowedTools: [
+        ...(options.allowedTools ?? []),
+        "mcp__adk_bridge__run_adk_subagent",
+      ],
+    }) as ClaudeAgentSdkOptions;
+  }
+
+  private async buildSubAgentMcpServer(
+    request: ExternalAgentRunRequest,
+    sdk: ClaudeAgentSdkLike,
+  ): Promise<unknown> {
+    if (!sdk.createSdkMcpServer || !sdk.tool) {
+      throw new Error(
+        "Claude Agent SDK MCP support is required to expose ADK subagents. Update @anthropic-ai/claude-agent-sdk or run without subAgents.",
+      );
+    }
+
+    const schema = await createRunSubAgentSchema();
+    const available = request.subAgents?.map((agent) => agent.name).join(", ") ?? "";
+    const runSubAgentTool = sdk.tool(
+      "run_adk_subagent",
+      `Run one of the ADK subagents by name. Available subagents: ${available}`,
+      schema,
+      async (args) => {
+        const agentName = stringValue(args.agentName) ?? "";
+        const task = stringValue(args.task) ?? "";
+        const result = await request.toolGateway?.runSubAgent({ agentName, task });
+        if (!result) {
+          return toolTextResult("ADK ToolGateway is not available.", true);
+        }
+        if (result.error) {
+          return toolTextResult(result.error, true);
+        }
+        return toolTextResult(result.output || `Subagent ${result.agentName} completed with ${result.events} events.`);
+      },
+      { alwaysLoad: true },
+    );
+
+    return sdk.createSdkMcpServer({
+      name: "adk_bridge",
+      version: "0.1.0",
+      tools: [runSubAgentTool],
+      alwaysLoad: true,
+    });
+  }
+
   private async loadSdk(): Promise<ClaudeAgentSdkLike> {
     if (this.#sdk) {
       return this.#sdk;
@@ -264,6 +346,28 @@ export function mapPolicyToClaudeSdkPermission(
 
 async function importClaudeAgentSdk(): Promise<ClaudeAgentSdkLike> {
   return import("@anthropic-ai/claude-agent-sdk") as Promise<ClaudeAgentSdkLike>;
+}
+
+async function createRunSubAgentSchema(): Promise<Record<string, unknown>> {
+  try {
+    const { z } = await import("zod/v4");
+    return {
+      agentName: z.string().describe("Name of the ADK subagent to run"),
+      task: z.string().describe("Task or prompt for the subagent"),
+    };
+  } catch (error) {
+    throw new Error(
+      "Claude Agent SDK MCP subagent tooling requires zod/v4. Install zod or update @anthropic-ai/claude-agent-sdk dependencies.",
+      { cause: error },
+    );
+  }
+}
+
+function toolTextResult(text: string, isError?: boolean): ClaudeAgentSdkToolResult {
+  return {
+    content: [{ type: "text", text }],
+    ...(isError ? { isError: true } : {}),
+  };
 }
 
 function buildPrompt(request: ExternalAgentRunRequest): string {

@@ -39,6 +39,8 @@ describe("agents public exports", () => {
     expect(agents.readAllowedEnv).toBeFunction();
     expect(agents.mapPermissionModeToPolicy).toBeFunction();
     expect(agents.mapPermissionPolicyToFlags).toBeFunction();
+    expect(agents.deriveSubAgentPermissionPolicy).toBeFunction();
+    expect(agents.ToolGateway).toBeFunction();
   });
 
   test("provider-backed agents preserve expected public shape", () => {

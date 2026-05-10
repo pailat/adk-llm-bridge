@@ -13,6 +13,24 @@ import { PlaceholderExternalAgentDriver } from "./external-agent-driver.js";
 import type { ExternalAgentEvent } from "./events.js";
 import type { ExternalAgentPermissionPolicy } from "./permissions/schema.js";
 import type { ExternalAgentProviderDefinition } from "./provider/schema.js";
+import { ToolGateway } from "./tools/tool-gateway.js";
+
+function readPermissionOverride(
+  context: InvocationContext,
+): ExternalAgentPermissionPolicy | undefined {
+  const override = (context as { externalAgentPermissionOverride?: unknown })
+    .externalAgentPermissionOverride;
+  return isPermissionPolicy(override) ? override : undefined;
+}
+
+function isPermissionPolicy(value: unknown): value is ExternalAgentPermissionPolicy {
+  return Boolean(
+    value &&
+      typeof value === "object" &&
+      "mode" in value &&
+      typeof (value as { mode?: unknown }).mode === "string",
+  );
+}
 
 function normalizeToolCallArgs(input: unknown): Record<string, unknown> {
   if (input === undefined) {
@@ -62,6 +80,16 @@ export class ExternalAgent extends BaseAgent {
     this.permissions = config.permissions;
   }
 
+  protected createInvocationContext(parentContext: InvocationContext): InvocationContext {
+    const context = super.createInvocationContext(parentContext);
+    const inherited = readPermissionOverride(parentContext);
+    if (inherited) {
+      (context as { externalAgentPermissionOverride?: ExternalAgentPermissionPolicy })
+        .externalAgentPermissionOverride = inherited;
+    }
+    return context;
+  }
+
   protected async *runAsyncImpl(
     context: InvocationContext,
   ): AsyncGenerator<ReturnType<typeof createEvent>, void, void> {
@@ -69,6 +97,18 @@ export class ExternalAgent extends BaseAgent {
       providerId: this.provider.id,
       envAllowlist: this.provider.envAllowlist,
     });
+    const permissions = readPermissionOverride(context) ?? this.permissions;
+
+    const rootAgent = this.rootAgent ?? context.agent ?? this;
+    const subAgents = this.subAgents;
+    const toolGateway = subAgents.length > 0
+      ? new ToolGateway({
+          rootAgent,
+          subAgents,
+          parentContext: context,
+          parentPermissions: permissions,
+        })
+      : undefined;
 
     for await (const event of this.driver.run({
       provider: this.provider,
@@ -76,7 +116,15 @@ export class ExternalAgent extends BaseAgent {
       instruction: this.instruction,
       workingDirectory: this.workingDirectory,
       credential,
-      permissions: this.permissions,
+      permissions,
+      agent: this,
+      rootAgent,
+      subAgents,
+      toolGateway,
+      runtimeSession: {
+        id: context.invocationId,
+        rootAgentName: rootAgent.name,
+      },
     })) {
       const adkEvent = this.toAdkEvent(event, context);
       if (adkEvent) {
