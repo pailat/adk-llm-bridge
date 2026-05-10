@@ -4,11 +4,11 @@
  * SPDX-License-Identifier: MIT
  */
 
+import { CODEX_PROVIDER } from "./codex";
 import {
   CLAUDE_PROVIDER,
-  CODEX_PROVIDER,
-  GEMINI_CLI_PROVIDER,
   type ExternalAgentProviderDefinition,
+  GEMINI_CLI_PROVIDER,
 } from "./schema";
 
 export class ExternalAgentProviderRegistry {
