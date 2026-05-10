@@ -90,14 +90,17 @@ bun run web
 
 ### external-agents
 
-Shape-only example for the opt-in external agent runtime API:
+Standalone example for the opt-in external agent runtime API:
 
 ```bash
 cd examples/external-agents
-# Read README.md first; provider-specific CLI drivers are intentionally not bundled.
+cp .env.example .env
+# Edit .env with at least AI_GATEWAY_API_KEY for the coordinator model
+bun install
+bun run web
 ```
 
-Use this example to see `CodexAgent`, `ClaudeAgent`, and `GeminiCliAgent` imported from `adk-llm-bridge/agents` while the root package import remains LLM-focused.
+Use this example to see `CodexAgent`, `ClaudeAgent`, and `GeminiCliAgent` imported from `adk-llm-bridge/agents` while the root package import remains LLM-focused. Provider-specific CLIs/auth are intentionally owned by each external runtime and are not installed or persisted by the bridge.
 
 ### express-server
 
