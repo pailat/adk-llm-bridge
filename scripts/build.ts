@@ -13,8 +13,8 @@
  */
 
 const result = await Bun.build({
-  // Entry point
-  entrypoints: ["./src/index.ts"],
+  // Entry points
+  entrypoints: ["./src/index.ts", "./src/agents/index.ts"],
 
   // Output directory
   outdir: "./dist",
@@ -42,7 +42,7 @@ const result = await Bun.build({
   external: ["@google/adk", "@google/genai", "openai", "@anthropic-ai/sdk"],
 
   // Naming convention
-  naming: "[name].js",
+  naming: "[dir]/[name].js",
 });
 
 if (!result.success) {
