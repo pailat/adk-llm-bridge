@@ -181,11 +181,7 @@ export class ClaudeAgentSdkDriver {
 
     if (type === "result") {
       if (record.subtype === "success") {
-        const result = stringValue(record.result);
-        return [
-          ...(result ? [{ type: "output" as const, content: result, timestamp: Date.now() }] : []),
-          { type: "completed" as const, exitCode: 0, timestamp: Date.now() },
-        ];
+        return [{ type: "completed" as const, exitCode: 0, timestamp: Date.now() }];
       }
 
       const errors = Array.isArray(record.errors)

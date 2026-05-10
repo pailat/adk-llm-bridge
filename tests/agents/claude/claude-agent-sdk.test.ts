@@ -102,10 +102,7 @@ describe("ClaudeAgentSdkDriver", () => {
         subtype: "success",
         result: "Done",
       } as never),
-    ).toEqual([
-      { type: "output", content: "Done", timestamp: expect.any(Number) },
-      { type: "completed", exitCode: 0, timestamp: expect.any(Number) },
-    ]);
+    ).toEqual([{ type: "completed", exitCode: 0, timestamp: expect.any(Number) }]);
   });
 
   test("suppresses system and rate-limit diagnostics by default", () => {
@@ -146,7 +143,6 @@ describe("ClaudeAgentSdkDriver", () => {
     expect(called).toBe(true);
     expect(events.map((event) => event.type)).toEqual([
       "started",
-      "output",
       "output",
       "completed",
     ]);

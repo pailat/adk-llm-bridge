@@ -1,5 +1,6 @@
 import {
   ClaudeAgent,
+  ClaudeAgentSdkDriver,
   CodexAgent,
   EnvCredentialProvider,
   GeminiCliAgent,
@@ -37,6 +38,11 @@ export const rootAgent = new ClaudeAgent({
   description:
     "Runs Claude Code as the root ADK agent using the Claude Agent SDK and native Claude Code authentication.",
   credentialProvider,
+  driver: new ClaudeAgentSdkDriver({
+    // Optional fallback when package-manager postinstall scripts did not install
+    // the SDK's bundled native binary. Leave undefined to use the SDK default.
+    pathToClaudeCodeExecutable: process.env.CLAUDE_CODE_EXECUTABLE,
+  }),
   workingDirectory: process.cwd(),
   permissions: {
     ...mapPermissionModeToPolicy("ask"),

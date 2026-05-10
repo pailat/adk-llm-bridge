@@ -37,6 +37,7 @@ Then run the example:
 cd examples/external-agents
 cp .env.example .env
 # Optional: edit .env only if you want env-based auth instead of native Claude login.
+# If Bun reports blocked postinstalls, set CLAUDE_CODE_EXECUTABLE to your local claude path.
 bun install
 bun run web
 ```
@@ -63,6 +64,8 @@ The bridge does **not** install provider CLIs or persist provider secrets for yo
 ### Claude native / OAuth auth
 
 For local usage, Claude Code can use the credentials already configured on your machine. The SDK driver passes the minimal native-auth environment (`HOME`, `PATH`, `USER`, `SHELL`, `CLAUDE_CONFIG_DIR`, and `XDG_CONFIG_HOME`) so Claude can find its native config/cache.
+
+If your package manager blocks the SDK's native binary postinstall, set `CLAUDE_CODE_EXECUTABLE` in `.env` to an existing Claude Code executable, for example `/Users/you/.local/bin/claude`.
 
 You can also pass allowlisted env credentials when needed. Common variables are listed in [.env.example](./.env.example), including:
 

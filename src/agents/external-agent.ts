@@ -14,6 +14,18 @@ import type { ExternalAgentEvent } from "./events.js";
 import type { ExternalAgentPermissionPolicy } from "./permissions/schema.js";
 import type { ExternalAgentProviderDefinition } from "./provider/schema.js";
 
+function normalizeToolCallArgs(input: unknown): Record<string, unknown> {
+  if (input === undefined) {
+    return {};
+  }
+
+  if (typeof input === "object" && input !== null && !Array.isArray(input)) {
+    return input as Record<string, unknown>;
+  }
+
+  return { input };
+}
+
 export interface ExternalAgentConfig {
   name: string;
   description?: string;
@@ -66,7 +78,10 @@ export class ExternalAgent extends BaseAgent {
       credential,
       permissions: this.permissions,
     })) {
-      yield this.toAdkEvent(event);
+      const adkEvent = this.toAdkEvent(event, context);
+      if (adkEvent) {
+        yield adkEvent;
+      }
     }
   }
 
@@ -76,21 +91,52 @@ export class ExternalAgent extends BaseAgent {
     yield* this.runAsyncImpl(context);
   }
 
-  protected toAdkEvent(event: ExternalAgentEvent): ReturnType<typeof createEvent> {
-    return createEvent({
-      author: this.name,
-      content: this.eventToContent(event),
-    });
-  }
-
-  private eventToContent(event: ExternalAgentEvent): Content {
+  protected toAdkEvent(
+    event: ExternalAgentEvent,
+    context: InvocationContext,
+  ): ReturnType<typeof createEvent> | undefined {
     switch (event.type) {
       case "output":
-        return { role: "model", parts: [{ text: event.content }] };
+        return createEvent({
+          invocationId: context.invocationId,
+          author: this.name,
+          branch: context.branch,
+          content: { role: "model", parts: [{ text: event.content }] },
+        });
       case "error":
-        return { role: "model", parts: [{ text: event.message }] };
-      default:
-        return { role: "model", parts: [{ text: JSON.stringify(event) }] };
+        return createEvent({
+          invocationId: context.invocationId,
+          author: this.name,
+          branch: context.branch,
+          errorCode: event.code ?? "EXTERNAL_AGENT_ERROR",
+          errorMessage: event.message,
+        });
+      case "tool_call":
+        return createEvent({
+          invocationId: context.invocationId,
+          author: this.name,
+          branch: context.branch,
+          content: this.toolCallToContent(event),
+        });
+      case "started":
+      case "completed":
+        return undefined;
     }
+  }
+
+  private toolCallToContent(
+    event: Extract<ExternalAgentEvent, { type: "tool_call" }>,
+  ): Content {
+    return {
+      role: "model",
+      parts: [
+        {
+          functionCall: {
+            name: event.name,
+            args: normalizeToolCallArgs(event.input),
+          },
+        },
+      ],
+    };
   }
 }
