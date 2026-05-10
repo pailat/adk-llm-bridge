@@ -27,6 +27,11 @@ export type {
   CodexCliSpawnOptions,
   CodexCliSubprocess,
 } from "./driver/codex-cli.js";
+export {
+  ClaudeAgentSdkDriver,
+  mapPolicyToClaudeSdkPermission,
+} from "./driver/claude-agent-sdk.js";
+export type { ClaudeAgentSdkDriverConfig } from "./driver/claude-agent-sdk.js";
 export { ClaudeCliDriver, mapClaudePermissionArgs } from "./driver/claude-cli.js";
 export type {
   ClaudeCliDriverConfig,

@@ -9,6 +9,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.2.138",
     "@google/adk": "^1.1.0",
     "adk-llm-bridge": "file:../.."
   },

@@ -15,14 +15,16 @@ import { AIGateway } from "adk-llm-bridge";
 ## What this example demonstrates
 
 - Running `ClaudeAgent` as the `rootAgent`
-- Using Claude Code's native CLI authentication cache/OAuth token when available
+- Using the official Claude Agent SDK TypeScript driver by default
 - Using `EnvCredentialProvider` only as a pass-through for provider-allowlisted environment variables
 - Selecting permission presets such as `read-only`, `ask`, and `workspace-write`
 - Keeping external runtime APIs opt-in through the `adk-llm-bridge/agents` subpath
 
 ## Quick Start
 
-First make sure Claude Code is installed and authenticated in your local shell:
+First make sure Claude Code is authenticated. The SDK can use its bundled native Claude Code binary, and it can also use your existing Claude Code login/OAuth credentials.
+
+If needed, authenticate with your local Claude Code install first:
 
 ```bash
 claude --version
@@ -49,7 +51,7 @@ bun run typecheck
 
 ## Runtime setup
 
-The exported `rootAgent` is a `ClaudeAgent`, so normal chat in ADK DevTools is handled by Claude Code through the `claude -p ... --output-format stream-json` CLI path.
+The exported `rootAgent` is a `ClaudeAgent`, so normal chat in ADK DevTools is handled by Claude Code through the official `@anthropic-ai/claude-agent-sdk` TypeScript path.
 
 The file also constructs specialist agents to demonstrate the import/configuration shape:
 
@@ -60,7 +62,7 @@ The bridge does **not** install provider CLIs or persist provider secrets for yo
 
 ### Claude native / OAuth auth
 
-For local usage, Claude Code can use the credentials already configured on your machine. The driver preserves `HOME`, `PATH`, `USER`, `SHELL`, `CLAUDE_CONFIG_DIR`, and `XDG_CONFIG_HOME` for the subprocess so Claude can find its native config/cache.
+For local usage, Claude Code can use the credentials already configured on your machine. The SDK driver passes the minimal native-auth environment (`HOME`, `PATH`, `USER`, `SHELL`, `CLAUDE_CONFIG_DIR`, and `XDG_CONFIG_HOME`) so Claude can find its native config/cache.
 
 You can also pass allowlisted env credentials when needed. Common variables are listed in [.env.example](./.env.example), including:
 
@@ -82,4 +84,15 @@ External runtime usage is opt-in:
 import { CodexAgent, ClaudeAgent, GeminiCliAgent } from "adk-llm-bridge/agents";
 ```
 
-Claude CLI execution is side-effectful and uses the permissions configured on the `ClaudeAgent`; this example defaults to `ask` mode and limits allowed paths to the current working directory.
+Claude Agent SDK execution is side-effectful and uses the permissions configured on the `ClaudeAgent`; this example defaults to `ask` mode and limits allowed paths to the current working directory.
+
+If you need an explicit CLI fallback instead of the SDK driver, pass `new ClaudeCliDriver()` manually:
+
+```ts
+import { ClaudeAgent, ClaudeCliDriver } from "adk-llm-bridge/agents";
+
+export const rootAgent = new ClaudeAgent({
+  name: "ClaudeCodeRoot",
+  driver: new ClaudeCliDriver(),
+});
+```

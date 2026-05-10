@@ -1,6 +1,4 @@
 import { describe, expect, test } from "bun:test";
-import { EnvCredentialProvider } from "../../../src/agents/auth/env.js";
-import { ClaudeAgent } from "../../../src/agents/claude-agent.js";
 import {
   ClaudeCliDriver,
   mapClaudePermissionArgs,
@@ -18,12 +16,11 @@ describe("Claude CLI provider", () => {
     expect(CLAUDE_PROVIDER.envAllowlist).toContain("CLAUDE_CODE_USE_FOUNDRY");
   });
 
-  test("agent wires the Claude provider and CLI driver by default", () => {
-    const agent = new ClaudeAgent({ name: "claude" });
+  test("CLI fallback driver can be constructed without auth side effects", () => {
+    const driver = new ClaudeCliDriver({ command: "claude" });
 
-    expect(agent.provider).toBe(CLAUDE_PROVIDER);
-    expect(agent.driver).toBeInstanceOf(ClaudeCliDriver);
-    expect(agent.credentialProvider).toBeInstanceOf(EnvCredentialProvider);
+    expect(driver.providerId).toBe(CLAUDE_PROVIDER.id);
+    expect(driver.command).toBe("claude");
   });
 });
 

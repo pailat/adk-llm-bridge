@@ -62,13 +62,20 @@
     "check:types-package": "bunx @arethetypeswrong/cli --pack --profile esm-only ."
   },
   "peerDependencies": {
+    "@anthropic-ai/claude-agent-sdk": ">=0.2.138",
     "@google/adk": ">=0.6.1"
+  },
+  "peerDependenciesMeta": {
+    "@anthropic-ai/claude-agent-sdk": {
+      "optional": true
+    }
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.95.1",
     "openai": "^6.37.0"
   },
   "devDependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.2.138",
     "@biomejs/biome": "^2.3.10",
     "@google/adk": "^1.1.0",
     "@google/genai": "^2.0.1",
