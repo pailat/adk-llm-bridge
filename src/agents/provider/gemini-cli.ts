@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 
-import type { ExternalAgentProviderDefinition } from "./schema";
+import type { ExternalAgentProviderDefinition } from "./schema.js";
 
 export const GEMINI_CLI_ENV_ALLOWLIST = [
   "GEMINI_API_KEY",

@@ -4,11 +4,11 @@
  * SPDX-License-Identifier: MIT
  */
 
-import { type ExternalAgentEvent, isExternalAgentEvent } from "../events";
-import type { ExternalAgentRunRequest } from "../external-agent-driver";
-import type { ExternalAgentPermissionPolicy } from "../permissions/schema";
-import { CODEX_PROVIDER } from "../provider/codex";
-import { SubprocessJsonlDriver } from "./subprocess-jsonl";
+import { type ExternalAgentEvent, isExternalAgentEvent } from "../events.js";
+import type { ExternalAgentRunRequest } from "../external-agent-driver.js";
+import type { ExternalAgentPermissionPolicy } from "../permissions/schema.js";
+import { CODEX_PROVIDER } from "../provider/codex.js";
+import { SubprocessJsonlDriver } from "./subprocess-jsonl.js";
 
 declare const Bun: {
   spawn(

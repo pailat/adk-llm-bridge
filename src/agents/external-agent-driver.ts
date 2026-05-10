@@ -5,10 +5,10 @@
  */
 
 import type { InvocationContext } from "@google/adk";
-import type { ExternalAgentCredential } from "./auth/schema";
-import type { ExternalAgentEvent } from "./events";
-import type { ExternalAgentPermissionPolicy } from "./permissions/schema";
-import type { ExternalAgentProviderDefinition } from "./provider/schema";
+import type { ExternalAgentCredential } from "./auth/schema.js";
+import type { ExternalAgentEvent } from "./events.js";
+import type { ExternalAgentPermissionPolicy } from "./permissions/schema.js";
+import type { ExternalAgentProviderDefinition } from "./provider/schema.js";
 
 export interface ExternalAgentRunRequest {
   provider: ExternalAgentProviderDefinition;

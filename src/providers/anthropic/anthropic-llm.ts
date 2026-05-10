@@ -15,11 +15,11 @@
 
 import AnthropicSDK from "@anthropic-ai/sdk";
 import type { LlmRequest, LlmResponse } from "@google/adk";
-import { getProviderConfig } from "../../config";
-import { DEFAULT_MAX_RETRIES, DEFAULT_TIMEOUT } from "../../constants";
-import { BaseProviderLlm } from "../../core/base-provider-llm";
-import type { AnthropicProviderConfig } from "../../types";
-import { clampPositive } from "../../utils/validate";
+import { getProviderConfig } from "../../config.js";
+import { DEFAULT_MAX_RETRIES, DEFAULT_TIMEOUT } from "../../constants.js";
+import { BaseProviderLlm } from "../../core/base-provider-llm.js";
+import type { AnthropicProviderConfig } from "../../types.js";
+import { clampPositive } from "../../utils/validate.js";
 /** Environment variable names for Anthropic configuration. */
 const ANTHROPIC_ENV = { API_KEY: "ANTHROPIC_API_KEY" } as const;
 
@@ -28,12 +28,12 @@ const DEFAULT_ANTHROPIC_MAX_TOKENS = 4096;
 
 /** Model patterns for Anthropic models. Matches claude-* */
 export const ANTHROPIC_MODEL_PATTERNS = [/claude-.*/];
-import { convertAnthropicRequest } from "./converters/request";
+import { convertAnthropicRequest } from "./converters/request.js";
 import {
   convertAnthropicResponse,
   convertAnthropicStreamEvent,
   createAnthropicStreamAccumulator,
-} from "./converters/response";
+} from "./converters/response.js";
 
 /**
  * Anthropic (Claude) LLM provider.

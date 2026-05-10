@@ -37,14 +37,14 @@
  * ```
  */
 
-export { BaseProviderLlm } from "./base-provider-llm";
-export { resolveConfig, resolveEnvVar } from "./config-resolver";
-export type { ResolvedConfig } from "./config-resolver";
-export { createProviderClass, createProviderFactory } from "./create-provider";
-export { createRegisterFunction } from "./create-register";
-export type { OpenAIClientConfig } from "./openai-compatible-llm";
-export { OpenAICompatibleLlm } from "./openai-compatible-llm";
+export { BaseProviderLlm } from "./base-provider-llm.js";
+export { resolveConfig, resolveEnvVar } from "./config-resolver.js";
+export type { ResolvedConfig } from "./config-resolver.js";
+export { createProviderClass, createProviderFactory } from "./create-provider.js";
+export { createRegisterFunction } from "./create-register.js";
+export type { OpenAIClientConfig } from "./openai-compatible-llm.js";
+export { OpenAICompatibleLlm } from "./openai-compatible-llm.js";
 export type {
   ProviderDefinition,
   ProviderEnvKeys,
-} from "./provider-definition";
+} from "./provider-definition.js";

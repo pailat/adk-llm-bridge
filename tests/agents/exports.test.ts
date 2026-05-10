@@ -6,8 +6,8 @@
 
 import { describe, expect, test } from "bun:test";
 import { BaseAgent } from "@google/adk";
-import * as root from "../../src/index";
-import * as agents from "../../src/agents";
+import * as root from "../../src/index.js";
+import * as agents from "../../src/agents/index.js";
 import packageJson from "../../package.json";
 
 describe("agents public exports", () => {

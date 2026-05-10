@@ -3,7 +3,7 @@
  * Copyright 2025 PAI
  * SPDX-License-Identifier: MIT
  */
-import type { ProviderDefinition } from "../../core/provider-definition";
+import type { ProviderDefinition } from "../../core/provider-definition.js";
 
 export const XAI_DEFINITION: ProviderDefinition = {
   id: "xai",

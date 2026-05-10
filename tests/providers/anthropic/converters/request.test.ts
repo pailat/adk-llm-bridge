@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import type { LlmRequest } from "@google/adk";
 import type { Schema } from "@google/genai";
-import { convertAnthropicRequest } from "../../../../src/providers/anthropic/converters/request";
+import { convertAnthropicRequest } from "../../../../src/providers/anthropic/converters/request.js";
 
 function createLlmRequest(overrides: Partial<LlmRequest> = {}): LlmRequest {
   return {

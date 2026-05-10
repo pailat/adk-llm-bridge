@@ -11,23 +11,23 @@
  */
 
 import { LLMRegistry } from "@google/adk";
-import { resetProviderConfig, setProviderConfig } from "../../config";
-import type { AnthropicProviderConfig, AnthropicRegisterOptions } from "../../types";
-import { AnthropicLlm } from "./anthropic-llm";
+import { resetProviderConfig, setProviderConfig } from "../../config.js";
+import type { AnthropicProviderConfig, AnthropicRegisterOptions } from "../../types.js";
+import { AnthropicLlm } from "./anthropic-llm.js";
 
 // Re-exports
-export { AnthropicLlm, ANTHROPIC_MODEL_PATTERNS } from "./anthropic-llm";
-export type { ConvertedAnthropicRequest } from "./converters/request";
-export { convertAnthropicRequest } from "./converters/request";
+export { AnthropicLlm, ANTHROPIC_MODEL_PATTERNS } from "./anthropic-llm.js";
+export type { ConvertedAnthropicRequest } from "./converters/request.js";
+export { convertAnthropicRequest } from "./converters/request.js";
 export type {
   AnthropicStreamAccumulator,
   AnthropicStreamResult,
-} from "./converters/response";
+} from "./converters/response.js";
 export {
   convertAnthropicResponse,
   convertAnthropicStreamEvent,
   createAnthropicStreamAccumulator,
-} from "./converters/response";
+} from "./converters/response.js";
 
 /**
  * Creates an Anthropic (Claude) LLM instance.

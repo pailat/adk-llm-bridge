@@ -1,8 +1,8 @@
 {
   "compilerOptions": {
     "target": "ESNext",
-    "module": "ESNext",
-    "moduleResolution": "bundler",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
     "declaration": true,
     "declarationMap": true,
     "outDir": "./dist",
@@ -11,8 +11,8 @@
     "noEmit": false,
     "esModuleInterop": true,
     "allowSyntheticDefaultImports": true,
-    "types": ["bun-types"],
+    "types": ["bun-types"]
   },
   "include": ["src/**/*"],
-  "exclude": ["node_modules", "dist", "tests"],
+  "exclude": ["node_modules", "dist", "tests"]
 }

@@ -3,11 +3,11 @@
  * Copyright 2025 PAI
  * SPDX-License-Identifier: MIT
  */
-import { createProviderClass, createProviderFactory } from "../../core/create-provider";
-import { createRegisterFunction } from "../../core/create-register";
-import { OPENROUTER_DEFINITION } from "./definition";
+import { createProviderClass, createProviderFactory } from "../../core/create-provider.js";
+import { createRegisterFunction } from "../../core/create-register.js";
+import { OPENROUTER_DEFINITION } from "./definition.js";
 
-export { OPENROUTER_DEFINITION } from "./definition";
+export { OPENROUTER_DEFINITION } from "./definition.js";
 
 export const OpenRouterLlm = createProviderClass(OPENROUTER_DEFINITION);
 export const OpenRouter = createProviderFactory(OPENROUTER_DEFINITION);

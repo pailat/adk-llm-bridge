@@ -13,8 +13,8 @@ import {
   buildGeminiArgs,
   mapGeminiPermissionArgs,
   type GeminiCliSpawn,
-} from "../../../src/agents";
-import type { ExternalAgentRunRequest } from "../../../src/agents";
+} from "../../../src/agents/index.js";
+import type { ExternalAgentRunRequest } from "../../../src/agents/index.js";
 
 function request(
   overrides: Partial<ExternalAgentRunRequest> = {},

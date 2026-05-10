@@ -1,11 +1,11 @@
 import { beforeEach, describe, expect, it } from "bun:test";
-import { resetAllConfigs } from "../../../src/config";
-import { OPENAI_DEFINITION } from "../../../src/providers/openai/definition";
-import { OpenAILlm } from "../../../src/providers/openai";
+import { resetAllConfigs } from "../../../src/config.js";
+import { OPENAI_DEFINITION } from "../../../src/providers/openai/definition.js";
+import { OpenAILlm } from "../../../src/providers/openai/index.js";
 import {
   describeModelPatterns,
   describeConnectError,
-} from "../../helpers/provider-test-helpers";
+} from "../../helpers/provider-test-helpers.js";
 
 describe("OpenAILlm", () => {
   beforeEach(() => {

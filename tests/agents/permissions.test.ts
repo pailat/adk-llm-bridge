@@ -8,7 +8,7 @@ import { describe, expect, test } from "bun:test";
 import {
   mapPermissionModeToPolicy,
   mapPermissionPolicyToFlags,
-} from "../../src/agents";
+} from "../../src/agents/index.js";
 
 describe("permission mapping", () => {
   test("maps read-only policy to provider flags", () => {

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 
-import type { ExternalAgentProviderDefinition } from "./schema";
+import type { ExternalAgentProviderDefinition } from "./schema.js";
 
 export const CODEX_ENV_ALLOWLIST = [
   "CODEX_API_KEY",

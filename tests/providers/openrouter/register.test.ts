@@ -2,8 +2,8 @@ import {
   _resetOpenRouterRegistration,
   isOpenRouterRegistered,
   registerOpenRouter,
-} from "../../../src/providers/openrouter";
-import { describeProviderRegistration } from "../../helpers/provider-test-helpers";
+} from "../../../src/providers/openrouter/index.js";
+import { describeProviderRegistration } from "../../helpers/provider-test-helpers.js";
 
 describeProviderRegistration({
   name: "OpenRouter",

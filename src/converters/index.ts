@@ -29,9 +29,9 @@
  * ```
  */
 
-export { convertRequest } from "./request";
+export { convertRequest } from "./request.js";
 export {
   convertResponse,
   convertStreamChunk,
   createStreamAccumulator,
-} from "./response";
+} from "./response.js";

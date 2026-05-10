@@ -16,7 +16,7 @@
 import type Anthropic from "@anthropic-ai/sdk";
 import type { LlmResponse } from "@google/adk";
 import type { Part } from "@google/genai";
-import { safeJsonParse } from "../../../utils";
+import { safeJsonParse } from "../../../utils/index.js";
 
 /**
  * Accumulator for Anthropic streaming responses.

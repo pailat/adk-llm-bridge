@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { BaseProviderLlm } from "../../src/core/base-provider-llm";
+import { BaseProviderLlm } from "../../src/core/base-provider-llm.js";
 import type { LlmRequest, LlmResponse } from "@google/adk";
 
 // Concrete subclass for testing the abstract base

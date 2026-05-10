@@ -13,7 +13,7 @@ import {
   type CodexCliSpawn,
   type ExternalAgentRunRequest,
   mapPolicyToCodexArgs,
-} from "../../../src/agents";
+} from "../../../src/agents/index.js";
 
 function context(input = "user request"): InvocationContext {
   return { input } as unknown as InvocationContext;

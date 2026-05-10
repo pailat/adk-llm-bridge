@@ -8,7 +8,7 @@ import type {
   ExternalAgentPermissionMode,
   ExternalAgentPermissionPolicy,
   ProviderPermissionFlags,
-} from "./schema";
+} from "./schema.js";
 
 export function mapPermissionPolicyToFlags(
   policy: ExternalAgentPermissionPolicy,

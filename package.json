@@ -16,7 +16,7 @@
   "author": "PAI",
   "repository": {
     "type": "git",
-    "url": "https://github.com/pailat/adk-llm-bridge"
+    "url": "git+https://github.com/pailat/adk-llm-bridge.git"
   },
   "homepage": "https://github.com/pailat/adk-llm-bridge#readme",
   "bugs": {
@@ -40,7 +40,7 @@
     "dist"
   ],
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=20.0.0"
   },
   "scripts": {
     "build": "bun run scripts/build.ts && bun run build:types",
@@ -55,20 +55,24 @@
     "check": "biome check ./src ./tests",
     "check:fix": "biome check --write ./src ./tests",
     "ci": "bun run typecheck:all && bun run lint && bun test && bun run build",
-    "prepublishOnly": "bun run build"
+    "prepublishOnly": "bun run build",
+    "typecheck:compat:nodenext": "bun run build && bun run check:dts-extensions && bunx tsc -p tests/compat/nodenext-consumer/tsconfig.json",
+    "check:dts-extensions": "bun run scripts/check-dts-extensions.ts",
+    "lint:package": "bunx publint",
+    "check:types-package": "bunx @arethetypeswrong/cli --pack --profile esm-only ."
   },
   "peerDependencies": {
-    "@google/adk": ">=0.5.0"
+    "@google/adk": ">=0.6.1"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.78.0",
-    "openai": "^6.27.0"
+    "@anthropic-ai/sdk": "^0.95.1",
+    "openai": "^6.37.0"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.3.10",
-    "@google/adk": "^0.5.0",
-    "@google/genai": "^1.40.0",
+    "@google/adk": "^1.1.0",
+    "@google/genai": "^2.0.1",
     "@types/bun": "latest",
-    "typescript": "^5.3.0"
+    "typescript": "^5.9.3"
   }
 }

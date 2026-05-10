@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { CustomLlm } from "../../../src/providers/custom/custom-llm";
+import { CustomLlm } from "../../../src/providers/custom/custom-llm.js";
 
 describe("CustomLlm", () => {
   describe("supportedModels", () => {
@@ -87,7 +87,7 @@ describe("CustomLlm", () => {
           new CustomLlm({
             model: "llama3",
             baseURL: "not-a-url",
-          } as import("../../../src/providers/custom/custom-llm").CustomLlmProviderConfig),
+          } as import("../../../src/providers/custom/custom-llm.js").CustomLlmProviderConfig),
       ).toThrow("Invalid baseURL");
     });
   });
