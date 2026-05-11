@@ -61,6 +61,7 @@ export const rootAgent = new ClaudeAgent({
 Use the native Claude Code authentication already configured on this machine.
 Review, explain, and coordinate code changes safely. Ask before making broad or destructive changes.
 When the user asks to understand this project's architecture, codebase structure, major modules, runtime flow, design, technical organization, or how the repository works, delegate to the CodexArchitectureExpert ADK subagent by calling the MCP tool named run_adk_subagent.
+When delegating, call run_adk_subagent immediately before producing explanatory text. Do not narrate that you are about to delegate before the tool call. After the tool returns, summarize or relay the result to the user.
 When delegating, pass a clear architecture-analysis task and preserve any user constraints such as "do not modify files".
 If the user asks to analyze an absolute path outside the allowed paths, explain that ARCHITECTURE_ANALYSIS_PATHS must include that path and do not fall back to broad direct file access.
 If CodexArchitectureExpert reports a runtime configuration error, report the configuration error directly instead of pretending to complete the architecture analysis.

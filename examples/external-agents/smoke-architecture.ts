@@ -32,7 +32,7 @@ async function main(): Promise<void> {
   let partials = 0;
   let functionCalls = 0;
   let functionResponses = 0;
-  let subagentEvents = 0;
+  let visibleSubagentEvents = 0;
   const errors: string[] = [];
   let text = "";
 
@@ -49,7 +49,7 @@ async function main(): Promise<void> {
       errors.push(event.errorMessage);
     }
     if (event.author === "CodexArchitectureExpert") {
-      subagentEvents++;
+      visibleSubagentEvents++;
     }
     for (const part of event.content?.parts ?? []) {
       if (part.functionCall?.name === "run_adk_subagent") {
@@ -80,7 +80,7 @@ async function main(): Promise<void> {
     partials,
     functionCalls,
     functionResponses,
-    subagentEvents,
+    visibleSubagentEvents,
     errors,
     hasArchitectureContent: /arquitectura|architecture|componentes|components/i.test(text),
     sample: text.slice(0, 1200),
@@ -92,7 +92,7 @@ async function main(): Promise<void> {
     errors.length > 0 ||
     functionCalls < 1 ||
     functionResponses < 1 ||
-    subagentEvents < 1 ||
+    visibleSubagentEvents > 0 ||
     !summary.hasArchitectureContent
   ) {
     process.exit(1);

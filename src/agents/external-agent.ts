@@ -311,9 +311,7 @@ function traceAdkEvent({
   context: InvocationContext;
   providerId: string;
 }): void {
-  const spanName = event.content?.parts?.some((part) => part.functionCall || part.functionResponse)
-    ? "execute_tool run_adk_subagent"
-    : "call_llm";
+  const spanName = spanNameForEvent(event);
   const span = tracer.startSpan(spanName);
   try {
     const title = readableEventTitle(event);
@@ -358,6 +356,37 @@ function traceAdkEvent({
   }
 }
 
+function spanNameForEvent(event: Event): string {
+  const functionCall = event.content?.parts?.find((part) => part.functionCall)?.functionCall;
+  if (functionCall) {
+    const subAgentName = stringValue((functionCall.args as { agentName?: unknown } | undefined)?.agentName);
+    return functionCall.name === "run_adk_subagent" && subAgentName
+      ? `execute_tool run_adk_subagent → ${subAgentName}`
+      : `execute_tool ${functionCall.name ?? "<unknown>"}${toolDetail(functionCall.args)}`;
+  }
+
+  const functionResponse = event.content?.parts?.find((part) => part.functionResponse)?.functionResponse;
+  if (functionResponse) {
+    const subAgentName = stringValue((functionResponse.response as { agentName?: unknown } | undefined)?.agentName);
+    return functionResponse.name === "run_adk_subagent" && subAgentName
+      ? `execute_tool run_adk_subagent ← ${subAgentName}`
+      : `execute_tool ${functionResponse.name ?? "<unknown>"}${toolDetail(functionResponse.response)}`;
+  }
+
+  return "call_llm";
+}
+
+function toolDetail(value: unknown): string {
+  if (!value || typeof value !== "object") {
+    return "";
+  }
+  const record = value as Record<string, unknown>;
+  const command = typeof record.command === "string" ? record.command : undefined;
+  const status = typeof record.status === "string" ? record.status : undefined;
+  const detail = command ?? status;
+  return detail ? `: ${truncate(detail, 72)}` : "";
+}
+
 function readableEventTitle(event: Event): string {
   const metadataTitle = stringValue(
     (event as { customMetadata?: { title?: unknown } }).customMetadata?.title,
@@ -380,7 +409,7 @@ function readableEventTitle(event: Event): string {
     ?.map((part) => part.text)
     .find((part): part is string => typeof part === "string" && part.length > 0);
   if (text) {
-    return text.length > 80 ? `${text.slice(0, 77)}...` : text;
+    return truncate(text, 80);
   }
 
   return event.errorMessage ? `error:${event.errorCode ?? "EXTERNAL_AGENT_ERROR"}` : event.author ?? "external_agent";
@@ -389,6 +418,10 @@ function readableEventTitle(event: Event): string {
 function readSessionId(context: InvocationContext): string {
   const session = (context as { session?: { id?: unknown } }).session;
   return typeof session?.id === "string" ? session.id : "";
+}
+
+function truncate(value: string, maxLength: number): string {
+  return value.length > maxLength ? `${value.slice(0, maxLength - 3)}...` : value;
 }
 
 function stringValue(value: unknown): string {

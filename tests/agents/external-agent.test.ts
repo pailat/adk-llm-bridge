@@ -238,7 +238,7 @@ describe("ExternalAgent ADK event formatting", () => {
     });
   });
 
-  test("forwards ToolGateway subagent events through Runner sessions and state", async () => {
+  test("emits native ToolGateway function events through Runner sessions and state", async () => {
     const sessionService = new InMemorySessionService();
     const session = await sessionService.createSession({
       appName: "app",
@@ -278,12 +278,20 @@ describe("ExternalAgent ADK event formatting", () => {
       updated?.events.some(
         (event) => event.author === "state_agent" && event.content?.parts?.[0]?.text === "child output",
       ),
-    ).toBe(true);
+    ).toBe(false);
     expect(
       updated?.events.some((event) =>
         event.content?.parts?.some((part) => part.functionResponse?.name === "run_adk_subagent"),
       ),
     ).toBe(true);
+    const functionCallIndex = updated?.events.findIndex((event) =>
+      event.content?.parts?.some((part) => part.functionCall?.name === "run_adk_subagent"),
+    );
+    const functionResponseIndex = updated?.events.findIndex((event) =>
+      event.content?.parts?.some((part) => part.functionResponse?.name === "run_adk_subagent"),
+    );
+    expect(functionCallIndex).toBeGreaterThanOrEqual(0);
+    expect(functionResponseIndex).toBeGreaterThan(functionCallIndex ?? -1);
     expect(updated?.state.architectureSummary).toBe("done");
   });
 });

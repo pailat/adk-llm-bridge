@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 
-import { createEvent, type BaseAgent, type Event, type InvocationContext } from "@google/adk";
+import { createEvent, createEventActions, type BaseAgent, type Event, type InvocationContext } from "@google/adk";
 import type { Content } from "@google/genai";
 import { deriveSubAgentPermissionPolicy } from "../permissions/inheritance.js";
 import type { ExternalAgentPermissionPolicy } from "../permissions/schema.js";
@@ -14,10 +14,20 @@ export interface RunSubAgentInput {
   task: string;
 }
 
+export interface RunSubAgentExecutionSummary {
+  events: number;
+  textEvents: number;
+  toolCalls: number;
+  errors: number;
+  durationMs: number;
+}
+
 export interface RunSubAgentResult {
   agentName: string;
   output: string;
   events: number;
+  summary: RunSubAgentExecutionSummary;
+  stateDelta?: Record<string, unknown>;
   error?: string;
 }
 
@@ -29,6 +39,7 @@ export interface ToolGatewayConfig {
   parentContext: InvocationContext;
   parentPermissions?: ExternalAgentPermissionPolicy;
   eventSink?: ToolGatewayEventSink;
+  exposeSubAgentEvents?: boolean;
 }
 
 export class ToolGateway {
@@ -37,6 +48,7 @@ export class ToolGateway {
   readonly #parentContext: InvocationContext;
   readonly #parentPermissions?: ExternalAgentPermissionPolicy;
   readonly #eventSink?: ToolGatewayEventSink;
+  readonly #exposeSubAgentEvents: boolean;
 
   constructor(config: ToolGatewayConfig) {
     this.#rootAgent = config.rootAgent;
@@ -44,6 +56,7 @@ export class ToolGateway {
     this.#parentContext = config.parentContext;
     this.#parentPermissions = config.parentPermissions;
     this.#eventSink = config.eventSink;
+    this.#exposeSubAgentEvents = config.exposeSubAgentEvents ?? false;
   }
 
   listSubAgents(): readonly BaseAgent[] {
@@ -57,6 +70,13 @@ export class ToolGateway {
         agentName: input.agentName,
         output: "",
         events: 0,
+        summary: {
+          events: 0,
+          textEvents: 0,
+          toolCalls: 0,
+          errors: 1,
+          durationMs: 0,
+        },
         error: `Unknown ADK subagent: ${input.agentName}`,
       };
     }
@@ -64,31 +84,51 @@ export class ToolGateway {
     const callId = createBridgeCallId();
     this.emit(this.createFunctionCallEvent(input, callId));
 
+    const startedAt = Date.now();
     const events: Event[] = [];
     const text: string[] = [];
+    const stateDelta: Record<string, unknown> = {};
+    let textEvents = 0;
+    let toolCalls = 0;
+    let errors = 0;
     let error: string | undefined;
 
     try {
       for await (const event of agent.runAsync(this.createChildContext(agent, input.task))) {
         events.push(event);
-        this.emit(event);
+        if (this.#exposeSubAgentEvents) {
+          this.emit(event);
+        }
+        Object.assign(stateDelta, event.actions?.stateDelta ?? {});
         const visible = extractVisibleText(event);
         if (visible) {
+          textEvents++;
           text.push(visible);
         }
+        toolCalls += countFunctionCalls(event);
         if (event.errorMessage) {
+          errors++;
           error = event.errorMessage;
         }
       }
     } catch (caught) {
+      errors++;
       error = caught instanceof Error ? caught.message : String(caught);
     }
 
-    const result = {
+    const result: RunSubAgentResult = {
       agentName: agent.name,
       output: text.join("\n"),
       events: events.length,
-      error,
+      summary: {
+        events: events.length,
+        textEvents,
+        toolCalls,
+        errors,
+        durationMs: Date.now() - startedAt,
+      },
+      ...(Object.keys(stateDelta).length > 0 ? { stateDelta } : {}),
+      ...(error ? { error } : {}),
     };
     this.emit(this.createFunctionResponseEvent(result, callId));
 
@@ -143,6 +183,7 @@ export class ToolGateway {
     result: RunSubAgentResult,
     callId: string,
   ): Event {
+    const { stateDelta: _stateDelta, ...response } = result;
     return createEvent({
       invocationId: this.#parentContext.invocationId,
       author: this.#parentContext.agent?.name ?? this.#rootAgent.name,
@@ -154,6 +195,9 @@ export class ToolGateway {
         subAgentName: result.agentName,
         error: result.error,
       },
+      actions: result.stateDelta
+        ? createEventActions({ stateDelta: result.stateDelta })
+        : undefined,
       content: {
         role: "user",
         parts: [
@@ -161,7 +205,7 @@ export class ToolGateway {
             functionResponse: {
               id: callId,
               name: "run_adk_subagent",
-              response: { ...result },
+              response,
             },
           },
         ],
@@ -198,6 +242,10 @@ function isPermissionPolicy(value: unknown): value is ExternalAgentPermissionPol
       "mode" in value &&
       typeof (value as { mode?: unknown }).mode === "string",
   );
+}
+
+function countFunctionCalls(event: Event): number {
+  return event.content?.parts?.filter((part) => part.functionCall).length ?? 0;
 }
 
 function extractVisibleText(event: Event): string | undefined {
