@@ -171,6 +171,8 @@ describe("CodexSdkDriver", () => {
         type: "tool_call",
         name: "command_execution",
         input: { command: "pwd", status: "completed", exitCode: 0 },
+        callId: "item-2",
+        metadata: { itemType: "command_execution", status: "completed" },
         timestamp: expect.any(Number),
       },
       { type: "completed", exitCode: 0, timestamp: expect.any(Number) },

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 
-import type { BaseAgent, Event, InvocationContext } from "@google/adk";
+import { createEvent, type BaseAgent, type Event, type InvocationContext } from "@google/adk";
 import type { Content } from "@google/genai";
 import { deriveSubAgentPermissionPolicy } from "../permissions/inheritance.js";
 import type { ExternalAgentPermissionPolicy } from "../permissions/schema.js";
@@ -21,11 +21,14 @@ export interface RunSubAgentResult {
   error?: string;
 }
 
+export type ToolGatewayEventSink = (event: Event) => void;
+
 export interface ToolGatewayConfig {
   rootAgent: BaseAgent;
   subAgents: readonly BaseAgent[];
   parentContext: InvocationContext;
   parentPermissions?: ExternalAgentPermissionPolicy;
+  eventSink?: ToolGatewayEventSink;
 }
 
 export class ToolGateway {
@@ -33,12 +36,14 @@ export class ToolGateway {
   readonly #subAgents: readonly BaseAgent[];
   readonly #parentContext: InvocationContext;
   readonly #parentPermissions?: ExternalAgentPermissionPolicy;
+  readonly #eventSink?: ToolGatewayEventSink;
 
   constructor(config: ToolGatewayConfig) {
     this.#rootAgent = config.rootAgent;
     this.#subAgents = config.subAgents;
     this.#parentContext = config.parentContext;
     this.#parentPermissions = config.parentPermissions;
+    this.#eventSink = config.eventSink;
   }
 
   listSubAgents(): readonly BaseAgent[] {
@@ -56,6 +61,9 @@ export class ToolGateway {
       };
     }
 
+    const callId = createBridgeCallId();
+    this.emit(this.createFunctionCallEvent(input, callId));
+
     const events: Event[] = [];
     const text: string[] = [];
     let error: string | undefined;
@@ -63,6 +71,7 @@ export class ToolGateway {
     try {
       for await (const event of agent.runAsync(this.createChildContext(agent, input.task))) {
         events.push(event);
+        this.emit(event);
         const visible = extractVisibleText(event);
         if (visible) {
           text.push(visible);
@@ -75,12 +84,15 @@ export class ToolGateway {
       error = caught instanceof Error ? caught.message : String(caught);
     }
 
-    return {
+    const result = {
       agentName: agent.name,
       output: text.join("\n"),
       events: events.length,
       error,
     };
+    this.emit(this.createFunctionResponseEvent(result, callId));
+
+    return result;
   }
 
   private findSubAgent(agentName: string): BaseAgent | undefined {
@@ -92,6 +104,7 @@ export class ToolGateway {
     return {
       ...this.#parentContext,
       agent: this.#rootAgent,
+      branch: childBranch(this.#parentContext.branch, agent.name),
       userContent: taskToContent(task),
       externalAgentPermissionOverride: deriveSubAgentPermissionPolicy(
         this.#parentPermissions,
@@ -99,6 +112,61 @@ export class ToolGateway {
       ),
     } as unknown as InvocationContext;
   }
+
+  private createFunctionCallEvent(input: RunSubAgentInput, callId: string): Event {
+    return createEvent({
+      invocationId: this.#parentContext.invocationId,
+      author: this.#parentContext.agent?.name ?? this.#rootAgent.name,
+      branch: this.#parentContext.branch,
+      content: {
+        role: "model",
+        parts: [
+          {
+            functionCall: {
+              id: callId,
+              name: "run_adk_subagent",
+              args: { ...input },
+            },
+          },
+        ],
+      },
+    });
+  }
+
+  private createFunctionResponseEvent(
+    result: RunSubAgentResult,
+    callId: string,
+  ): Event {
+    return createEvent({
+      invocationId: this.#parentContext.invocationId,
+      author: this.#parentContext.agent?.name ?? this.#rootAgent.name,
+      branch: this.#parentContext.branch,
+      content: {
+        role: "user",
+        parts: [
+          {
+            functionResponse: {
+              id: callId,
+              name: "run_adk_subagent",
+              response: { ...result },
+            },
+          },
+        ],
+      },
+    });
+  }
+
+  private emit(event: Event): void {
+    this.#eventSink?.(event);
+  }
+}
+
+function createBridgeCallId(): string {
+  return `adk-run-subagent-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function childBranch(parentBranch: string | undefined, agentName: string): string {
+  return parentBranch ? `${parentBranch}.${agentName}` : agentName;
 }
 
 function taskToContent(task: string): Content {

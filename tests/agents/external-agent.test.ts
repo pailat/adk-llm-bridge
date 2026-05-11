@@ -1,5 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import type { InvocationContext } from "@google/adk";
+import {
+  BaseAgent,
+  createEvent,
+  createEventActions,
+  InMemorySessionService,
+  Runner,
+  type InvocationContext,
+} from "@google/adk";
 import {
   ExternalAgent,
   type ExternalAgentDriver,
@@ -7,6 +14,24 @@ import {
   type ExternalAgentRunRequest,
 } from "../../src/agents/index.js";
 import { CODEX_PROVIDER } from "../../src/agents/provider/schema.js";
+
+class StateAgent extends BaseAgent {
+  constructor(name = "state_agent") {
+    super({ name });
+  }
+
+  protected async *runAsyncImpl(context: InvocationContext) {
+    yield createEvent({
+      invocationId: context.invocationId,
+      author: this.name,
+      branch: context.branch,
+      content: { role: "model", parts: [{ text: "child output" }] },
+      actions: createEventActions({ stateDelta: { architectureSummary: "done" } }),
+    });
+  }
+
+  protected async *runLiveImpl() {}
+}
 
 class StaticDriver implements ExternalAgentDriver {
   readonly providerId = CODEX_PROVIDER.id;
@@ -17,6 +42,19 @@ class StaticDriver implements ExternalAgentDriver {
   async *run(request: ExternalAgentRunRequest): AsyncIterable<ExternalAgentEvent> {
     this.request = request;
     yield* this.events;
+  }
+}
+
+class DelegatingDriver implements ExternalAgentDriver {
+  readonly providerId = CODEX_PROVIDER.id;
+
+  async *run(request: ExternalAgentRunRequest): AsyncIterable<ExternalAgentEvent> {
+    yield { type: "output", content: "starting", partial: true };
+    const result = await request.toolGateway?.runSubAgent({
+      agentName: "state_agent",
+      task: "summarize architecture",
+    });
+    yield { type: "output", content: result?.output ?? "missing" };
   }
 }
 
@@ -74,6 +112,31 @@ describe("ExternalAgent ADK event formatting", () => {
       author: "codex_agent",
       branch: "root.external",
       content: { role: "model", parts: [{ text: "Hello" }] },
+    });
+  });
+
+  test("renders partial output as non-terminal streaming ADK events", async () => {
+    const agent = new ExternalAgent({
+      name: "codex_agent",
+      provider: CODEX_PROVIDER,
+      driver: new StaticDriver([
+        { type: "output", content: "partial", partial: true },
+        { type: "output", content: "final" },
+      ]),
+    });
+
+    const events = await collect(agent);
+
+    expect(events).toHaveLength(2);
+    expect(events[0]).toMatchObject({
+      partial: true,
+      turnComplete: false,
+      content: { role: "model", parts: [{ text: "partial" }] },
+    });
+    expect(events[1]).toMatchObject({
+      partial: undefined,
+      turnComplete: true,
+      content: { role: "model", parts: [{ text: "final" }] },
     });
   });
 
@@ -142,5 +205,85 @@ describe("ExternalAgent ADK event formatting", () => {
       role: "model",
       parts: [{ functionCall: { name: "raw", args: { input: "value" } } }],
     });
+  });
+
+  test("renders tool results as ADK functionResponse parts", async () => {
+    const agent = new ExternalAgent({
+      name: "codex_agent",
+      provider: CODEX_PROVIDER,
+      driver: new StaticDriver([
+        {
+          type: "tool_result",
+          name: "shell",
+          callId: "call-1",
+          result: { stdout: "ok" },
+        },
+      ]),
+    });
+
+    const events = await collect(agent);
+
+    expect(events).toHaveLength(1);
+    expect(events[0].content).toEqual({
+      role: "user",
+      parts: [
+        {
+          functionResponse: {
+            id: "call-1",
+            name: "shell",
+            response: { stdout: "ok" },
+          },
+        },
+      ],
+    });
+  });
+
+  test("forwards ToolGateway subagent events through Runner sessions and state", async () => {
+    const sessionService = new InMemorySessionService();
+    const session = await sessionService.createSession({
+      appName: "app",
+      userId: "user",
+    });
+    const agent = new ExternalAgent({
+      name: "root_external",
+      provider: CODEX_PROVIDER,
+      driver: new DelegatingDriver(),
+      subAgents: [new StateAgent()],
+    });
+    const runner = new Runner({ appName: "app", agent, sessionService });
+
+    const streamed = [];
+    for await (const event of runner.runAsync({
+      userId: "user",
+      sessionId: session.id,
+      newMessage: { role: "user", parts: [{ text: "understand architecture" }] },
+    })) {
+      streamed.push(event);
+    }
+
+    const updated = await sessionService.getSession({
+      appName: "app",
+      userId: "user",
+      sessionId: session.id,
+    });
+
+    expect(streamed.some((event) => event.partial)).toBe(true);
+    expect(updated?.events.some((event) => event.partial)).toBe(false);
+    expect(
+      updated?.events.some((event) =>
+        event.content?.parts?.some((part) => part.functionCall?.name === "run_adk_subagent"),
+      ),
+    ).toBe(true);
+    expect(
+      updated?.events.some(
+        (event) => event.author === "state_agent" && event.content?.parts?.[0]?.text === "child output",
+      ),
+    ).toBe(true);
+    expect(
+      updated?.events.some((event) =>
+        event.content?.parts?.some((part) => part.functionResponse?.name === "run_adk_subagent"),
+      ),
+    ).toBe(true);
+    expect(updated?.state.architectureSummary).toBe("done");
   });
 });

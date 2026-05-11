@@ -4,8 +4,9 @@
  * SPDX-License-Identifier: MIT
  */
 
-import { BaseAgent, createEvent, type InvocationContext } from "@google/adk";
+import { BaseAgent, createEvent, type Event, type InvocationContext } from "@google/adk";
 import type { Content } from "@google/genai";
+import { trace } from "@opentelemetry/api";
 import type { ExternalAgentCredentialProvider } from "./auth/credential-provider.js";
 import { NoopCredentialProvider } from "./auth/credential-provider.js";
 import type { ExternalAgentDriver } from "./external-agent-driver.js";
@@ -14,6 +15,8 @@ import type { ExternalAgentEvent } from "./events.js";
 import type { ExternalAgentPermissionPolicy } from "./permissions/schema.js";
 import type { ExternalAgentProviderDefinition } from "./provider/schema.js";
 import { ToolGateway } from "./tools/tool-gateway.js";
+
+const tracer = trace.getTracer("gcp.vertex.agent", "adk-llm-bridge");
 
 function readPermissionOverride(
   context: InvocationContext,
@@ -92,13 +95,14 @@ export class ExternalAgent extends BaseAgent {
 
   protected async *runAsyncImpl(
     context: InvocationContext,
-  ): AsyncGenerator<ReturnType<typeof createEvent>, void, void> {
+  ): AsyncGenerator<Event, void, void> {
     const credential = await this.credentialProvider.getCredential({
       providerId: this.provider.id,
       envAllowlist: this.provider.envAllowlist,
     });
     const permissions = readPermissionOverride(context) ?? this.permissions;
 
+    const queue = new AsyncEventQueue<Event>();
     const rootAgent = this.rootAgent ?? context.agent ?? this;
     const subAgents = this.subAgents;
     const toolGateway = subAgents.length > 0
@@ -107,42 +111,56 @@ export class ExternalAgent extends BaseAgent {
           subAgents,
           parentContext: context,
           parentPermissions: permissions,
+          eventSink: (event) => {
+            traceAdkEvent({ event, context, providerId: this.provider.id });
+            queue.push(event);
+          },
         })
       : undefined;
 
-    for await (const event of this.driver.run({
-      provider: this.provider,
-      context,
-      instruction: this.instruction,
-      workingDirectory: this.workingDirectory,
-      credential,
-      permissions,
-      agent: this,
-      rootAgent,
-      subAgents,
-      toolGateway,
-      runtimeSession: {
-        id: context.invocationId,
-        rootAgentName: rootAgent.name,
-      },
-    })) {
-      const adkEvent = this.toAdkEvent(event, context);
-      if (adkEvent) {
-        yield adkEvent;
+    void (async () => {
+      try {
+        for await (const event of this.driver.run({
+          provider: this.provider,
+          context,
+          instruction: this.instruction,
+          workingDirectory: this.workingDirectory,
+          credential,
+          permissions,
+          agent: this,
+          rootAgent,
+          subAgents,
+          toolGateway,
+          runtimeSession: {
+            id: context.invocationId,
+            rootAgentName: rootAgent.name,
+          },
+        })) {
+          const adkEvent = this.toAdkEvent(event, context);
+          if (adkEvent) {
+            traceAdkEvent({ event: adkEvent, context, providerId: this.provider.id });
+            queue.push(adkEvent);
+          }
+        }
+        queue.close();
+      } catch (error) {
+        queue.fail(error);
       }
-    }
+    })();
+
+    yield* queue;
   }
 
   protected async *runLiveImpl(
     context: InvocationContext,
-  ): AsyncGenerator<ReturnType<typeof createEvent>, void, void> {
+  ): AsyncGenerator<Event, void, void> {
     yield* this.runAsyncImpl(context);
   }
 
   protected toAdkEvent(
     event: ExternalAgentEvent,
     context: InvocationContext,
-  ): ReturnType<typeof createEvent> | undefined {
+  ): Event | undefined {
     switch (event.type) {
       case "output":
         return createEvent({
@@ -150,6 +168,10 @@ export class ExternalAgent extends BaseAgent {
           author: this.name,
           branch: context.branch,
           content: { role: "model", parts: [{ text: event.content }] },
+          partial: event.partial,
+          turnComplete: event.turnComplete ?? !event.partial,
+          customMetadata: event.metadata,
+          timestamp: event.timestamp,
         });
       case "error":
         return createEvent({
@@ -158,6 +180,7 @@ export class ExternalAgent extends BaseAgent {
           branch: context.branch,
           errorCode: event.code ?? "EXTERNAL_AGENT_ERROR",
           errorMessage: event.message,
+          timestamp: event.timestamp,
         });
       case "tool_call":
         return createEvent({
@@ -165,6 +188,17 @@ export class ExternalAgent extends BaseAgent {
           author: this.name,
           branch: context.branch,
           content: this.toolCallToContent(event),
+          customMetadata: event.metadata,
+          timestamp: event.timestamp,
+        });
+      case "tool_result":
+        return createEvent({
+          invocationId: context.invocationId,
+          author: this.name,
+          branch: context.branch,
+          content: this.toolResultToContent(event),
+          customMetadata: event.metadata,
+          timestamp: event.timestamp,
         });
       case "started":
       case "completed":
@@ -180,11 +214,150 @@ export class ExternalAgent extends BaseAgent {
       parts: [
         {
           functionCall: {
+            id: event.callId,
             name: event.name,
             args: normalizeToolCallArgs(event.input),
           },
         },
       ],
     };
+  }
+
+  private toolResultToContent(
+    event: Extract<ExternalAgentEvent, { type: "tool_result" }>,
+  ): Content {
+    const response = typeof event.result === "object" && event.result !== null
+      ? (event.result as Record<string, unknown>)
+      : { result: event.result };
+    return {
+      role: "user",
+      parts: [
+        {
+          functionResponse: {
+            id: event.callId,
+            name: event.name,
+            response: event.error ? { ...response, error: event.error } : response,
+          },
+        },
+      ],
+    };
+  }
+}
+
+class AsyncEventQueue<T> implements AsyncIterable<T> {
+  readonly #items: T[] = [];
+  readonly #waiters: Array<{
+    resolve: (result: IteratorResult<T>) => void;
+    reject: (reason?: unknown) => void;
+  }> = [];
+  #closed = false;
+  #error: unknown;
+
+  push(item: T): void {
+    if (this.#closed) {
+      return;
+    }
+    const waiter = this.#waiters.shift();
+    if (waiter) {
+      waiter.resolve({ value: item, done: false });
+      return;
+    }
+    this.#items.push(item);
+  }
+
+  close(): void {
+    this.#closed = true;
+    while (this.#waiters.length > 0) {
+      this.#waiters.shift()?.resolve({ value: undefined, done: true });
+    }
+  }
+
+  fail(error: unknown): void {
+    this.#error = error;
+    this.#closed = true;
+    while (this.#waiters.length > 0) {
+      this.#waiters.shift()?.reject(error);
+    }
+  }
+
+  [Symbol.asyncIterator](): AsyncIterator<T> {
+    return {
+      next: () => this.next(),
+    };
+  }
+
+  private next(): Promise<IteratorResult<T>> {
+    if (this.#items.length > 0) {
+      return Promise.resolve({ value: this.#items.shift() as T, done: false });
+    }
+    if (this.#error) {
+      return Promise.reject(this.#error);
+    }
+    if (this.#closed) {
+      return Promise.resolve({ value: undefined, done: true });
+    }
+    return new Promise<IteratorResult<T>>((resolve, reject) => {
+      this.#waiters.push({ resolve, reject });
+    });
+  }
+}
+
+function traceAdkEvent({
+  event,
+  context,
+  providerId,
+}: {
+  event: Event;
+  context: InvocationContext;
+  providerId: string;
+}): void {
+  const spanName = event.content?.parts?.some((part) => part.functionCall || part.functionResponse)
+    ? "execute_tool run_adk_subagent"
+    : "call_llm";
+  const span = tracer.startSpan(spanName);
+  try {
+    span.setAttributes({
+      "gen_ai.system": providerId,
+      "gen_ai.request.model": providerId,
+      "gcp.vertex.agent.invocation_id": context.invocationId,
+      "gcp.vertex.agent.session_id": readSessionId(context),
+      "gcp.vertex.agent.event_id": event.id,
+      "gcp.vertex.agent.llm_request": "{}",
+      "gcp.vertex.agent.llm_response": safeJsonSerialize(event),
+    });
+
+    const functionCall = event.content?.parts?.find((part) => part.functionCall)?.functionCall;
+    const functionResponse = event.content?.parts?.find((part) => part.functionResponse)?.functionResponse;
+    if (functionCall) {
+      span.setAttributes({
+        "gen_ai.operation.name": "execute_tool",
+        "gen_ai.tool.name": functionCall.name ?? "run_adk_subagent",
+        "gen_ai.tool.call.id": functionCall.id ?? event.id,
+        "gcp.vertex.agent.tool_call_args": safeJsonSerialize(functionCall.args ?? {}),
+      });
+    }
+    if (functionResponse) {
+      span.setAttributes({
+        "gen_ai.operation.name": "execute_tool",
+        "gen_ai.tool.name": functionResponse.name ?? "run_adk_subagent",
+        "gen_ai.tool.call.id": functionResponse.id ?? event.id,
+        "gcp.vertex.agent.tool_response": safeJsonSerialize(functionResponse.response ?? {}),
+      });
+    }
+  } finally {
+    span.end();
+  }
+}
+
+function readSessionId(context: InvocationContext): string {
+  const session = (context as { session?: { id?: unknown } }).session;
+  return typeof session?.id === "string" ? session.id : "";
+}
+
+function safeJsonSerialize(value: unknown): string {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return "<not serializable>";
   }
 }

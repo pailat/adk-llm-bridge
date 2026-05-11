@@ -244,6 +244,10 @@ export class CodexSdkDriver {
       ];
     }
 
+    if (type === "item.started" || type === "item.updated") {
+      return normalizeProgressItem(asRecord(event.item), timestamp);
+    }
+
     if (type !== "item.completed") {
       return [];
     }
@@ -313,6 +317,65 @@ async function importCodexSdk(): Promise<CodexSdkModuleLike> {
   return import("@openai/codex-sdk") as Promise<CodexSdkModuleLike>;
 }
 
+function normalizeProgressItem(
+  item: Record<string, unknown>,
+  timestamp: number,
+): ExternalAgentEvent[] {
+  const itemType = stringValue(item.type);
+
+  if (itemType === "command_execution") {
+    const command = stringValue(item.command);
+    const status = stringValue(item.status);
+    return command
+      ? [
+          {
+            type: "output",
+            content: `Codex command ${status ?? "running"}: ${command}`,
+            partial: true,
+            turnComplete: false,
+            metadata: { itemType, status, exitCode: item.exit_code },
+            timestamp,
+          },
+        ]
+      : [];
+  }
+
+  if (itemType === "mcp_tool_call") {
+    return [
+      {
+        type: "tool_call",
+        name: stringValue(item.tool) ?? "mcp_tool_call",
+        input: {
+          server: item.server,
+          arguments: item.arguments,
+          status: item.status,
+        },
+        callId: stringValue(item.id),
+        metadata: { itemType, status: item.status },
+        timestamp,
+      },
+    ];
+  }
+
+  if (itemType === "web_search") {
+    const query = stringValue(item.query);
+    return query
+      ? [
+          {
+            type: "output",
+            content: `Codex web search: ${query}`,
+            partial: true,
+            turnComplete: false,
+            metadata: { itemType },
+            timestamp,
+          },
+        ]
+      : [];
+  }
+
+  return [];
+}
+
 function normalizeCompletedItem(
   item: Record<string, unknown>,
   timestamp: number,
@@ -348,6 +411,8 @@ function normalizeCompletedItem(
           result: item.result,
           error: item.error,
         },
+        callId: stringValue(item.id),
+        metadata: { itemType, status: item.status },
         timestamp,
       },
     ];
@@ -363,6 +428,8 @@ function normalizeCompletedItem(
           status: item.status,
           exitCode: item.exit_code,
         },
+        callId: stringValue(item.id),
+        metadata: { itemType, status: item.status },
         timestamp,
       },
     ];

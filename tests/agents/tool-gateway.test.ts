@@ -63,6 +63,34 @@ describe("ToolGateway", () => {
     });
   });
 
+  test("emits native function call, child, and function response events", async () => {
+    const worker = new TextAgent("worker");
+    const root = new TextAgent("root");
+    const emitted = [];
+    const gateway = new ToolGateway({
+      rootAgent: root,
+      subAgents: [worker],
+      parentContext: parentContext(root),
+      eventSink: (event) => emitted.push(event),
+    });
+
+    await gateway.runSubAgent({ agentName: "worker", task: "do it" });
+
+    expect(emitted).toHaveLength(4);
+    expect(emitted[0].content?.parts?.[0]?.functionCall).toMatchObject({
+      name: "run_adk_subagent",
+      args: { agentName: "worker", task: "do it" },
+    });
+    expect(emitted[1]).toMatchObject({
+      author: "worker",
+      content: { role: "model", parts: [{ text: "OK: do it" }] },
+    });
+    expect(emitted[3].content?.parts?.[0]?.functionResponse).toMatchObject({
+      name: "run_adk_subagent",
+      response: { agentName: "worker", output: "OK: do it", events: 2 },
+    });
+  });
+
   test("applies inherited permission override to ExternalAgent subagents", async () => {
     const driver = new CaptureDriver();
     const worker = new ExternalAgent({
