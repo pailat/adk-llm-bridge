@@ -7,23 +7,25 @@ import {
 } from "adk-llm-bridge/agents";
 
 // External agent runtimes are opt-in and live under the /agents subpath.
-// This example intentionally keeps the graph small while validating the current
-// recommended path: Claude Code as the root coordinator and Codex as the only
+// This example keeps the graph small while validating the recommended path:
+// Claude Code as the root coordinator and Codex as the architecture-analysis
 // ADK subagent exposed through Claude's in-process MCP bridge.
 const credentialProvider = new EnvCredentialProvider();
 const workingDirectory = process.cwd();
 
-const codexImplementer = new CodexAgent({
-  name: "CodexImplementer",
+const codexArchitectureExpert = new CodexAgent({
+  name: "CodexArchitectureExpert",
   description:
-    "Uses the official Codex SDK runtime for scoped repository analysis and implementation tasks.",
+    "Uses the official Codex SDK runtime to understand, map, and explain project architecture.",
   credentialProvider,
   workingDirectory,
-  permissions: mapPermissionModeToPolicy("workspace-write"),
-  instruction: `You are the Codex specialist for this repository.
+  permissions: mapPermissionModeToPolicy("read-only"),
+  instruction: `You are the Codex architecture expert for this repository.
 
-Use Codex native authentication/configuration. Keep changes minimal and scoped to the user's request.
-When asked to analyze only, do not modify files. Report concise findings and mention any files you inspected.`,
+Use Codex native authentication/configuration. Your job is to understand and explain the project's architecture, not to edit files.
+When analyzing a project, inspect relevant files before answering. Prioritize README files, package manifests, src/, examples/, tests/, and configuration files.
+Explain the main modules, entry points, runtime flow, important abstractions, and how components interact.
+Keep responses structured and concise. Mention representative files you inspected. Do not modify files.`,
 });
 
 const claudeDriver = process.env.CLAUDE_CODE_EXECUTABLE
@@ -38,7 +40,7 @@ const claudeDriver = process.env.CLAUDE_CODE_EXECUTABLE
 export const rootAgent = new ClaudeAgent({
   name: "ClaudeCodeRoot",
   description:
-    "Runs Claude Code as the root ADK agent and exposes CodexImplementer through the ADK subagent bridge.",
+    "Runs Claude Code as the root ADK agent and exposes CodexArchitectureExpert through the ADK subagent bridge.",
   credentialProvider,
   ...(claudeDriver ? { driver: claudeDriver } : {}),
   workingDirectory,
@@ -51,6 +53,8 @@ export const rootAgent = new ClaudeAgent({
 
 Use the native Claude Code authentication already configured on this machine.
 Review, explain, and coordinate code changes safely. Ask before making broad or destructive changes.
-When the user explicitly asks you to use CodexImplementer or run_adk_subagent, call the MCP tool named run_adk_subagent and delegate to the CodexImplementer ADK subagent.`,
-  subAgents: [codexImplementer],
+When the user asks to understand this project's architecture, codebase structure, major modules, runtime flow, design, technical organization, or how the repository works, delegate to the CodexArchitectureExpert ADK subagent by calling the MCP tool named run_adk_subagent.
+When delegating, pass a clear architecture-analysis task and preserve any user constraints such as "do not modify files".
+You may answer directly for simple factual questions that do not require codebase architecture analysis.`,
+  subAgents: [codexArchitectureExpert],
 });
