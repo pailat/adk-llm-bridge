@@ -94,7 +94,7 @@ export class CodexCliDriver extends SubprocessJsonlDriver {
 
     if (child.stderr) {
       for await (const line of readLines(child.stderr)) {
-        if (line.trim().length === 0) {
+        if (line.trim().length === 0 || isIgnorableCodexStderr(line)) {
           continue;
         }
         yield { type: "error", message: line, recoverable: false };
@@ -108,8 +108,6 @@ export class CodexCliDriver extends SubprocessJsonlDriver {
   buildArgs(request: ExternalAgentRunRequest): readonly string[] {
     const prompt = buildPrompt(request);
     return [
-      "exec",
-      "--json",
       ...mapPolicyToCodexArgs(request.permissions),
       ...this.args,
       prompt,
@@ -119,6 +117,10 @@ export class CodexCliDriver extends SubprocessJsonlDriver {
   buildEnv(request: ExternalAgentRunRequest): Record<string, string> {
     const env: Record<string, string> = {};
     copyIfPresent(this.#env, env, "PATH");
+    copyIfPresent(this.#env, env, "HOME");
+    copyIfPresent(this.#env, env, "USER");
+    copyIfPresent(this.#env, env, "SHELL");
+    copyIfPresent(this.#env, env, "XDG_CONFIG_HOME");
 
     if (request.credential?.kind === "env") {
       for (const key of request.provider.envAllowlist ?? []) {
@@ -146,18 +148,34 @@ export function mapPolicyToCodexArgs(
 ): readonly string[] {
   switch (policy.mode) {
     case "read-only":
-      return ["--sandbox", "read-only", "--ask-for-approval", "never"];
+      return [
+        "--ask-for-approval",
+        "never",
+        "exec",
+        "--json",
+        "--sandbox",
+        "read-only",
+      ];
     case "ask":
       return [
-        "--sandbox",
-        "workspace-write",
         "--ask-for-approval",
         "on-request",
+        "exec",
+        "--json",
+        "--sandbox",
+        "workspace-write",
       ];
     case "workspace-write":
-      return ["--sandbox", "workspace-write", "--ask-for-approval", "never"];
+      return [
+        "--ask-for-approval",
+        "never",
+        "exec",
+        "--json",
+        "--sandbox",
+        "workspace-write",
+      ];
     case "full-access":
-      return ["--sandbox", "danger-full-access", "--ask-for-approval", "never"];
+      return ["--dangerously-bypass-approvals-and-sandbox", "exec", "--json"];
   }
 }
 
@@ -176,6 +194,17 @@ function normalizeCodexEvent(value: unknown): ExternalAgentEvent {
         JSON.stringify(value),
       code: stringValue(record.code),
       recoverable: false,
+      timestamp,
+    };
+  }
+
+  const item = asRecord(record.item);
+  const itemType = stringValue(item.type);
+  if (itemType === "agent_message") {
+    return {
+      type: "output",
+      content: extractText(item) ?? JSON.stringify(item),
+      stream: "stdout",
       timestamp,
     };
   }
@@ -305,16 +334,9 @@ async function* readLines(source: LineSource): AsyncIterable<string> {
 async function* toAsyncIterable(
   source: LineSource,
 ): AsyncIterable<Uint8Array | string> {
-  const maybeAsyncIterable = source as Partial<
-    AsyncIterable<Uint8Array | string>
-  >;
-  if (typeof maybeAsyncIterable[Symbol.asyncIterator] === "function") {
-    yield* source as AsyncIterable<Uint8Array | string>;
-    return;
-  }
-
-  const reader = (source as ReadableStream<Uint8Array>).getReader();
-  try {
+  const maybeReadableStream = source as Partial<ReadableStream<Uint8Array>>;
+  if (typeof maybeReadableStream.getReader === "function") {
+    const reader = maybeReadableStream.getReader();
     while (true) {
       const { done, value } = await reader.read();
       if (done) {
@@ -322,9 +344,18 @@ async function* toAsyncIterable(
       }
       yield value;
     }
-  } finally {
-    reader.releaseLock();
   }
+
+  const maybeAsyncIterable = source as Partial<
+    AsyncIterable<Uint8Array | string>
+  >;
+  if (typeof maybeAsyncIterable[Symbol.asyncIterator] === "function") {
+    yield* source as AsyncIterable<Uint8Array | string>;
+  }
+}
+
+function isIgnorableCodexStderr(line: string): boolean {
+  return line.trim() === "Reading additional input from stdin...";
 }
 
 function spawnWithBun(

@@ -64,12 +64,12 @@ describe("Codex CLI driver", () => {
     expect(calls[0].command).toBe("codex");
     expect(calls[0].cwd).toBe("/repo");
     expect(calls[0].args).toEqual([
+      "--ask-for-approval",
+      "never",
       "exec",
       "--json",
       "--sandbox",
       "read-only",
-      "--ask-for-approval",
-      "never",
       "system instruction\n\nuser request",
     ]);
   });
@@ -83,7 +83,15 @@ describe("Codex CLI driver", () => {
 
     const driver = new CodexCliDriver({
       spawn,
-      env: { PATH: "/bin", OPENAI_API_KEY: "blocked", SECRET_TOKEN: "blocked" },
+      env: {
+        PATH: "/bin",
+        HOME: "/Users/example",
+        USER: "example",
+        SHELL: "/bin/zsh",
+        XDG_CONFIG_HOME: "/Users/example/.config",
+        OPENAI_API_KEY: "blocked",
+        SECRET_TOKEN: "blocked",
+      },
     });
 
     await collect(
@@ -106,6 +114,10 @@ describe("Codex CLI driver", () => {
 
     expect(capturedEnv).toEqual({
       PATH: "/bin",
+      HOME: "/Users/example",
+      USER: "example",
+      SHELL: "/bin/zsh",
+      XDG_CONFIG_HOME: "/Users/example/.config",
       CODEX_API_KEY: "codex-key",
       CODEX_HOME: "/tmp/codex-home",
       CODEX_CA_CERTIFICATE: "/tmp/ca.pem",
@@ -118,6 +130,10 @@ describe("Codex CLI driver", () => {
       stdout: chunks([
         JSON.stringify({ type: "thread.started", id: "run-1" }),
         JSON.stringify({ type: "response.output_text.delta", delta: "hello" }),
+        JSON.stringify({
+          type: "item.completed",
+          item: { id: "item-1", type: "agent_message", text: "final" },
+        }),
         JSON.stringify({
           type: "tool_call.created",
           name: "shell",
@@ -143,6 +159,12 @@ describe("Codex CLI driver", () => {
       timestamp: undefined,
     });
     expect(events).toContainEqual({
+      type: "output",
+      content: "final",
+      stream: "stdout",
+      timestamp: undefined,
+    });
+    expect(events).toContainEqual({
       type: "tool_call",
       name: "shell",
       input: { cmd: "ls" },
@@ -155,30 +177,35 @@ describe("Codex CLI driver", () => {
     });
   });
 
-  test("maps bridge permissions to Codex sandbox and approval flags", () => {
+  test("maps bridge permissions to current Codex global and exec flags", () => {
     expect(mapPolicyToCodexArgs()).toEqual([
+      "--ask-for-approval",
+      "never",
+      "exec",
+      "--json",
       "--sandbox",
       "read-only",
-      "--ask-for-approval",
-      "never",
     ]);
     expect(mapPolicyToCodexArgs({ mode: "ask" })).toEqual([
-      "--sandbox",
-      "workspace-write",
       "--ask-for-approval",
       "on-request",
-    ]);
-    expect(mapPolicyToCodexArgs({ mode: "workspace-write" })).toEqual([
+      "exec",
+      "--json",
       "--sandbox",
       "workspace-write",
+    ]);
+    expect(mapPolicyToCodexArgs({ mode: "workspace-write" })).toEqual([
       "--ask-for-approval",
       "never",
+      "exec",
+      "--json",
+      "--sandbox",
+      "workspace-write",
     ]);
     expect(mapPolicyToCodexArgs({ mode: "full-access" })).toEqual([
-      "--sandbox",
-      "danger-full-access",
-      "--ask-for-approval",
-      "never",
+      "--dangerously-bypass-approvals-and-sandbox",
+      "exec",
+      "--json",
     ]);
   });
 
