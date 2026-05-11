@@ -38,10 +38,11 @@ Then run the example:
 ```bash
 cd examples/external-agents
 cp .env.example .env
-# Optional: edit .env only if you want env-based auth instead of native runtime auth.
+# Edit .env if you want to analyze projects outside this directory, e.g.:
+# ARCHITECTURE_ANALYSIS_PATHS=/Users/you/Projects/my-repo
+# Env-based auth is optional when native runtime auth is already configured.
 # If Bun reports blocked Claude SDK postinstalls, the driver autodetects common Claude paths; set CLAUDE_CODE_EXECUTABLE if needed.
 # If Codex SDK cannot discover optional CLI binaries, set CODEX_EXECUTABLE to your local codex path.
-# If you want to analyze projects outside this directory, set ARCHITECTURE_ANALYSIS_PATHS.
 bun install
 bun run smoke:architecture
 bun run web
@@ -101,7 +102,7 @@ The bridge does **not** persist provider secrets for you. Install and authentica
 
 For local usage, Claude Code can use the credentials already configured on your machine. The SDK driver passes the minimal native-auth environment (`HOME`, `PATH`, `USER`, `SHELL`, `CLAUDE_CONFIG_DIR`, and `XDG_CONFIG_HOME`) so Claude can find its native config/cache.
 
-If your package manager blocks the SDK's native binary postinstall, the driver autodetects common Claude Code locations such as `~/.local/bin/claude`, `/opt/homebrew/bin/claude`, `/usr/local/bin/claude`, and local optional SDK packages. If needed, set `CLAUDE_CODE_EXECUTABLE` or `CLAUDE_CODE_PATH` in [.env](./.env) to an existing Claude Code executable, for example `/Users/you/.local/bin/claude`.
+If your package manager blocks the SDK's native binary postinstall, the driver autodetects `PATH`, user-local locations such as `~/.local/bin/claude`, and local optional SDK packages. If needed, set `CLAUDE_CODE_EXECUTABLE` or `CLAUDE_CODE_PATH` in [.env](./.env) to an existing Claude Code executable, for example `/Users/you/.local/bin/claude`.
 
 You can also pass allowlisted env credentials when needed. Common variables are listed in [.env.example](./.env.example), including:
 

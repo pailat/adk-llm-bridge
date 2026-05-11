@@ -41,7 +41,7 @@ describe("CodexSdkDriver", () => {
         OPENAI_API_KEY: "blocked",
         SECRET_NOT_ALLOWED: "blocked",
       },
-      codexPathOverride: "/usr/local/bin/codex",
+      codexPathOverride: "/example/bin/codex",
       baseUrl: "https://example.test/v1",
       config: { show_raw_agent_reasoning: true },
     });
@@ -64,7 +64,7 @@ describe("CodexSdkDriver", () => {
     });
 
     expect(options).toEqual({
-      codexPathOverride: "/usr/local/bin/codex",
+      codexPathOverride: "/example/bin/codex",
       baseUrl: "https://example.test/v1",
       apiKey: "codex-key",
       config: { show_raw_agent_reasoning: true },

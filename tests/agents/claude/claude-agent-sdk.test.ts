@@ -40,7 +40,7 @@ describe("ClaudeAgentSdkDriver", () => {
         CLAUDE_CODE_PATH: "/tmp/claude-path",
         SECRET_NOT_ALLOWED: "nope",
       },
-      pathToClaudeCodeExecutable: "/usr/local/bin/claude",
+      pathToClaudeCodeExecutable: "/example/bin/claude",
       settingSources: ["user", "project", "local"],
       maxTurns: 3,
       model: "sonnet",
@@ -67,7 +67,7 @@ describe("ClaudeAgentSdkDriver", () => {
     expect(options.cwd).toBe("/repo");
     expect(options.permissionMode).toBe("acceptEdits");
     expect(options.additionalDirectories).toEqual(["/repo"]);
-    expect(options.pathToClaudeCodeExecutable).toBe("/usr/local/bin/claude");
+    expect(options.pathToClaudeCodeExecutable).toBe("/example/bin/claude");
     expect(options.settingSources).toEqual(["user", "project", "local"]);
     expect(options.maxTurns).toBe(3);
     expect(options.model).toBe("sonnet");
@@ -99,6 +99,25 @@ describe("ClaudeAgentSdkDriver", () => {
 
     expect(resolution.path).toBe(executable);
     expect(options.pathToClaudeCodeExecutable).toBe(executable);
+  });
+
+  test("detects Claude Code executable from configurable search paths", () => {
+    const dir = mkdtempSync(join(tmpdir(), "claude-sdk-search-path-"));
+    const executable = join(dir, process.platform === "win32" ? "claude.exe" : "claude");
+    writeFileSync(executable, "#!/bin/sh\nexit 0\n");
+    chmodSync(executable, 0o755);
+    const driver = new ClaudeAgentSdkDriver({
+      env: { PATH: "" },
+      executableSearchPaths: [dir],
+    });
+
+    const resolution = driver.resolveClaudeExecutable({
+      provider: CLAUDE_PROVIDER,
+      context: {} as never,
+    });
+
+    expect(resolution.path).toBe(executable);
+    expect(resolution.checked).toContain(executable);
   });
 
   test("emits actionable Claude executable lookup errors", async () => {

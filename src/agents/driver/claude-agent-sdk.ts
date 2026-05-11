@@ -74,6 +74,7 @@ export interface ClaudeAgentSdkDriverConfig {
   sdk?: ClaudeAgentSdkLike;
   importSdk?: () => Promise<ClaudeAgentSdkLike>;
   pathToClaudeCodeExecutable?: string;
+  executableSearchPaths?: string[];
   env?: Record<string, string | undefined>;
   settingSources?: ClaudeAgentSdkSettingSource[];
   maxTurns?: number;
@@ -87,6 +88,7 @@ export class ClaudeAgentSdkDriver {
   readonly #importSdk: () => Promise<ClaudeAgentSdkLike>;
   readonly #env: Record<string, string | undefined>;
   readonly #pathToClaudeCodeExecutable?: string;
+  readonly #executableSearchPaths: string[];
   readonly #settingSources?: ClaudeAgentSdkSettingSource[];
   readonly #maxTurns?: number;
   readonly #model?: string;
@@ -97,6 +99,7 @@ export class ClaudeAgentSdkDriver {
     this.#importSdk = config.importSdk ?? importClaudeAgentSdk;
     this.#env = config.env ?? process.env;
     this.#pathToClaudeCodeExecutable = config.pathToClaudeCodeExecutable;
+    this.#executableSearchPaths = config.executableSearchPaths ?? [];
     this.#settingSources = config.settingSources;
     this.#maxTurns = config.maxTurns;
     this.#model = config.model;
@@ -181,6 +184,7 @@ export class ClaudeAgentSdkDriver {
     for (const candidate of claudeExecutableCandidates({
       env: this.#env,
       workingDirectory: request.workingDirectory,
+      executableSearchPaths: this.#executableSearchPaths,
     })) {
       checked.push(candidate);
       if (existsSync(candidate)) {
@@ -356,8 +360,7 @@ export class ClaudeAgentSdkDriver {
       : "  - <no candidates>";
     return [
       "Claude Agent SDK could not locate a Claude Code executable.",
-      "Set CLAUDE_CODE_EXECUTABLE=/absolute/path/to/claude or CLAUDE_CODE_PATH=/absolute/path/to/claude, or reinstall @anthropic-ai/claude-agent-sdk with optional dependencies.",
-      "For this machine, /Users/alejandro/.local/bin/claude is a known working example if it still exists.",
+      "Set CLAUDE_CODE_EXECUTABLE=/absolute/path/to/claude or CLAUDE_CODE_PATH=/absolute/path/to/claude, add the executable directory to PATH, pass executableSearchPaths, or reinstall @anthropic-ai/claude-agent-sdk with optional dependencies.",
       `Original error: ${message}`,
       "Checked paths:",
       checked,
@@ -404,9 +407,11 @@ export function mapPolicyToClaudeSdkPermission(
 function claudeExecutableCandidates({
   env,
   workingDirectory,
+  executableSearchPaths,
 }: {
   env: Record<string, string | undefined>;
   workingDirectory?: string;
+  executableSearchPaths?: string[];
 }): string[] {
   const executable = process.platform === "win32" ? "claude.exe" : "claude";
   const candidates = new Set<string>();
@@ -423,8 +428,11 @@ function claudeExecutableCandidates({
     candidates.add(join(home, ".claude", "local", executable));
   }
 
-  candidates.add(join("/opt/homebrew/bin", executable));
-  candidates.add(join("/usr/local/bin", executable));
+  for (const dir of executableSearchPaths ?? []) {
+    if (dir.length > 0) {
+      candidates.add(join(dir, executable));
+    }
+  }
 
   for (const base of candidateBaseDirectories(workingDirectory)) {
     candidates.add(join(base, "node_modules", ".bin", executable));
