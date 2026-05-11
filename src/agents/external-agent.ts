@@ -316,12 +316,19 @@ function traceAdkEvent({
     : "call_llm";
   const span = tracer.startSpan(spanName);
   try {
+    const title = readableEventTitle(event);
     span.setAttributes({
       "gen_ai.system": providerId,
+      "gen_ai.agent.name": event.author ?? context.agent?.name ?? "external_agent",
+      "gen_ai.operation.name": spanName === "call_llm" ? "call_llm" : "execute_tool",
       "gen_ai.request.model": providerId,
       "gcp.vertex.agent.invocation_id": context.invocationId,
       "gcp.vertex.agent.session_id": readSessionId(context),
       "gcp.vertex.agent.event_id": event.id,
+      "gcp.vertex.agent.provider_id": providerId,
+      "gcp.vertex.agent.external_agent.name": event.author ?? "",
+      "gcp.vertex.agent.event_title": title,
+      "gcp.vertex.agent.branch": event.branch ?? "",
       "gcp.vertex.agent.llm_request": "{}",
       "gcp.vertex.agent.llm_response": safeJsonSerialize(event),
     });
@@ -334,6 +341,7 @@ function traceAdkEvent({
         "gen_ai.tool.name": functionCall.name ?? "run_adk_subagent",
         "gen_ai.tool.call.id": functionCall.id ?? event.id,
         "gcp.vertex.agent.tool_call_args": safeJsonSerialize(functionCall.args ?? {}),
+        "gcp.vertex.agent.subagent.name": stringValue((functionCall.args as { agentName?: unknown } | undefined)?.agentName),
       });
     }
     if (functionResponse) {
@@ -342,6 +350,7 @@ function traceAdkEvent({
         "gen_ai.tool.name": functionResponse.name ?? "run_adk_subagent",
         "gen_ai.tool.call.id": functionResponse.id ?? event.id,
         "gcp.vertex.agent.tool_response": safeJsonSerialize(functionResponse.response ?? {}),
+        "gcp.vertex.agent.subagent.name": stringValue((functionResponse.response as { agentName?: unknown } | undefined)?.agentName),
       });
     }
   } finally {
@@ -349,9 +358,41 @@ function traceAdkEvent({
   }
 }
 
+function readableEventTitle(event: Event): string {
+  const metadataTitle = stringValue(
+    (event as { customMetadata?: { title?: unknown } }).customMetadata?.title,
+  );
+  if (metadataTitle) {
+    return metadataTitle;
+  }
+
+  const functionCall = event.content?.parts?.find((part) => part.functionCall)?.functionCall;
+  if (functionCall?.name) {
+    return `functionCall:${functionCall.name}`;
+  }
+
+  const functionResponse = event.content?.parts?.find((part) => part.functionResponse)?.functionResponse;
+  if (functionResponse?.name) {
+    return `functionResponse:${functionResponse.name}`;
+  }
+
+  const text = event.content?.parts
+    ?.map((part) => part.text)
+    .find((part): part is string => typeof part === "string" && part.length > 0);
+  if (text) {
+    return text.length > 80 ? `${text.slice(0, 77)}...` : text;
+  }
+
+  return event.errorMessage ? `error:${event.errorCode ?? "EXTERNAL_AGENT_ERROR"}` : event.author ?? "external_agent";
+}
+
 function readSessionId(context: InvocationContext): string {
   const session = (context as { session?: { id?: unknown } }).session;
   return typeof session?.id === "string" ? session.id : "";
+}
+
+function stringValue(value: unknown): string {
+  return typeof value === "string" ? value : "";
 }
 
 function safeJsonSerialize(value: unknown): string {

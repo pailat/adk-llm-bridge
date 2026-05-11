@@ -12,6 +12,10 @@ import {
 // ADK subagent exposed through Claude's in-process MCP bridge.
 const credentialProvider = new EnvCredentialProvider();
 const workingDirectory = process.cwd();
+const architectureAnalysisPaths = parsePathList(
+  process.env.ARCHITECTURE_ANALYSIS_PATHS,
+);
+const allowedPaths = [workingDirectory, ...architectureAnalysisPaths];
 
 const codexArchitectureExpert = new CodexAgent({
   name: "CodexArchitectureExpert",
@@ -19,7 +23,10 @@ const codexArchitectureExpert = new CodexAgent({
     "Uses the official Codex SDK runtime to understand, map, and explain project architecture.",
   credentialProvider,
   workingDirectory,
-  permissions: mapPermissionModeToPolicy("read-only"),
+  permissions: {
+    ...mapPermissionModeToPolicy("read-only"),
+    allowedPaths,
+  },
   instruction: `You are the Codex architecture expert for this repository.
 
 Use Codex native authentication/configuration. Your job is to understand and explain the project's architecture, not to edit files.
@@ -47,7 +54,7 @@ export const rootAgent = new ClaudeAgent({
   permissions: {
     ...mapPermissionModeToPolicy("ask"),
     allowNetwork: false,
-    allowedPaths: [workingDirectory],
+    allowedPaths,
   },
   instruction: `You are the root Claude Code agent for this repository.
 
@@ -55,6 +62,17 @@ Use the native Claude Code authentication already configured on this machine.
 Review, explain, and coordinate code changes safely. Ask before making broad or destructive changes.
 When the user asks to understand this project's architecture, codebase structure, major modules, runtime flow, design, technical organization, or how the repository works, delegate to the CodexArchitectureExpert ADK subagent by calling the MCP tool named run_adk_subagent.
 When delegating, pass a clear architecture-analysis task and preserve any user constraints such as "do not modify files".
-You may answer directly for simple factual questions that do not require codebase architecture analysis.`,
+If the user asks to analyze an absolute path outside the allowed paths, explain that ARCHITECTURE_ANALYSIS_PATHS must include that path and do not fall back to broad direct file access.
+If CodexArchitectureExpert reports a runtime configuration error, report the configuration error directly instead of pretending to complete the architecture analysis.
+You may answer directly for simple factual questions that do not require codebase architecture analysis.
+
+Allowed architecture analysis paths: ${allowedPaths.join(", ")}.`,
   subAgents: [codexArchitectureExpert],
 });
+
+function parsePathList(value: string | undefined): string[] {
+  return (value ?? "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0);
+}

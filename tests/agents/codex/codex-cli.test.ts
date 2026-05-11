@@ -102,6 +102,8 @@ describe("Codex CLI driver", () => {
             env: {
               CODEX_API_KEY: "codex-key",
               CODEX_HOME: "/tmp/codex-home",
+              CODEX_EXECUTABLE: "/tmp/codex-bin",
+              CODEX_CLI_PATH: "/tmp/codex-cli",
               CODEX_CA_CERTIFICATE: "/tmp/ca.pem",
               SSL_CERT_FILE: "/tmp/ssl.pem",
               OPENAI_API_KEY: "blocked",
@@ -120,6 +122,8 @@ describe("Codex CLI driver", () => {
       XDG_CONFIG_HOME: "/Users/example/.config",
       CODEX_API_KEY: "codex-key",
       CODEX_HOME: "/tmp/codex-home",
+      CODEX_EXECUTABLE: "/tmp/codex-bin",
+      CODEX_CLI_PATH: "/tmp/codex-cli",
       CODEX_CA_CERTIFICATE: "/tmp/ca.pem",
       SSL_CERT_FILE: "/tmp/ssl.pem",
     });

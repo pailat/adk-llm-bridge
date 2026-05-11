@@ -118,6 +118,12 @@ export class ToolGateway {
       invocationId: this.#parentContext.invocationId,
       author: this.#parentContext.agent?.name ?? this.#rootAgent.name,
       branch: this.#parentContext.branch,
+      customMetadata: {
+        title: `run_adk_subagent → ${input.agentName}`,
+        externalAgent: true,
+        toolName: "run_adk_subagent",
+        subAgentName: input.agentName,
+      },
       content: {
         role: "model",
         parts: [
@@ -141,6 +147,13 @@ export class ToolGateway {
       invocationId: this.#parentContext.invocationId,
       author: this.#parentContext.agent?.name ?? this.#rootAgent.name,
       branch: this.#parentContext.branch,
+      customMetadata: {
+        title: `run_adk_subagent ← ${result.agentName}`,
+        externalAgent: true,
+        toolName: "run_adk_subagent",
+        subAgentName: result.agentName,
+        error: result.error,
+      },
       content: {
         role: "user",
         parts: [

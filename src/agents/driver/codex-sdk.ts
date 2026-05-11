@@ -4,6 +4,9 @@
  * SPDX-License-Identifier: MIT
  */
 
+import { existsSync } from "node:fs";
+import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { ExternalAgentEvent } from "../events.js";
 import type { ExternalAgentRunRequest } from "../external-agent-driver.js";
 import type { ExternalAgentPermissionPolicy } from "../permissions/schema.js";
@@ -67,6 +70,11 @@ type CodexSdkModuleLike = {
   Codex: CodexSdkConstructor;
 };
 
+export interface CodexBinaryResolution {
+  path?: string;
+  checked: string[];
+}
+
 export interface CodexSdkDriverConfig {
   sdk?: CodexSdkClientLike;
   Codex?: CodexSdkConstructor;
@@ -129,10 +137,6 @@ export class CodexSdkDriver {
   }
 
   async *run(request: ExternalAgentRunRequest): AsyncIterable<ExternalAgentEvent> {
-    const sdk = await this.loadSdk(request);
-    const thread = sdk.startThread(this.buildThreadOptions(request));
-    const prompt = buildPrompt(request);
-
     yield {
       type: "started",
       providerId: this.providerId,
@@ -140,7 +144,11 @@ export class CodexSdkDriver {
     };
 
     let completed = false;
+    let failed = false;
     try {
+      const sdk = await this.loadSdk(request);
+      const thread = sdk.startThread(this.buildThreadOptions(request));
+      const prompt = buildPrompt(request);
       const { events } = await thread.runStreamed(prompt, {
         signal: request.context.abortSignal,
         outputSchema: this.#outputSchema,
@@ -154,9 +162,10 @@ export class CodexSdkDriver {
         }
       }
     } catch (error) {
+      failed = true;
       yield {
         type: "error",
-        message: error instanceof Error ? error.message : String(error),
+        message: this.describeError(error, request),
         code: "CODEX_SDK_ERROR",
         recoverable: true,
         timestamp: Date.now(),
@@ -164,13 +173,13 @@ export class CodexSdkDriver {
     }
 
     if (!completed) {
-      yield { type: "completed", exitCode: 0, timestamp: Date.now() };
+      yield { type: "completed", exitCode: failed ? 1 : 0, timestamp: Date.now() };
     }
   }
 
   buildClientOptions(request: ExternalAgentRunRequest): CodexSdkOptions {
     return removeUndefined({
-      codexPathOverride: this.#codexPathOverride,
+      codexPathOverride: this.resolveCodexBinary(request).path,
       baseUrl: this.#baseUrl,
       apiKey: this.#apiKey ?? readCredentialEnv(request, "CODEX_API_KEY"),
       config: this.#config,
@@ -188,6 +197,33 @@ export class CodexSdkDriver {
       webSearchMode: this.#webSearchMode,
       webSearchEnabled: this.#webSearchEnabled,
     }) as CodexSdkThreadOptions;
+  }
+
+  resolveCodexBinary(request: ExternalAgentRunRequest): CodexBinaryResolution {
+    const checked: string[] = [];
+    const explicit = firstNonEmpty(
+      this.#codexPathOverride,
+      this.#env.CODEX_EXECUTABLE,
+      this.#env.CODEX_CLI_PATH,
+      readCredentialEnv(request, "CODEX_EXECUTABLE"),
+      readCredentialEnv(request, "CODEX_CLI_PATH"),
+    );
+    if (explicit) {
+      checked.push(explicit);
+      return { path: explicit, checked };
+    }
+
+    for (const candidate of codexBinaryCandidates({
+      env: this.#env,
+      workingDirectory: request.workingDirectory,
+    })) {
+      checked.push(candidate);
+      if (existsSync(candidate)) {
+        return { path: candidate, checked };
+      }
+    }
+
+    return { checked };
   }
 
   buildEnv(request: ExternalAgentRunRequest): Record<string, string> {
@@ -273,6 +309,25 @@ export class CodexSdkDriver {
         { cause: error },
       );
     }
+  }
+
+  private describeError(error: unknown, request: ExternalAgentRunRequest): string {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!message.includes("Unable to locate Codex CLI binaries")) {
+      return message;
+    }
+
+    const resolution = this.resolveCodexBinary(request);
+    const checked = resolution.checked.length > 0
+      ? resolution.checked.map((item) => `  - ${item}`).join("\n")
+      : "  - <no candidates>";
+    return [
+      "Codex SDK could not locate a Codex binary.",
+      "Set CODEX_EXECUTABLE=/absolute/path/to/codex or CODEX_CLI_PATH=/absolute/path/to/codex, or reinstall @openai/codex with optional dependencies.",
+      `Original error: ${message}`,
+      "Checked paths:",
+      checked,
+    ].join("\n");
   }
 }
 
@@ -492,6 +547,86 @@ function extractText(value: unknown): string | undefined {
   }
 
   return undefined;
+}
+
+function codexBinaryCandidates({
+  env,
+  workingDirectory,
+}: {
+  env: Record<string, string | undefined>;
+  workingDirectory?: string;
+}): string[] {
+  const executable = process.platform === "win32" ? "codex.exe" : "codex";
+  const candidates = new Set<string>();
+
+  for (const dir of (env.PATH ?? "").split(delimiter)) {
+    if (dir.length > 0) {
+      candidates.add(join(dir, executable));
+    }
+  }
+
+  for (const base of candidateBaseDirectories(workingDirectory)) {
+    candidates.add(join(base, "node_modules", ".bin", executable));
+    for (const [platformPackage, targetTriple] of platformCodexPackages()) {
+      candidates.add(
+        join(
+          base,
+          "node_modules",
+          "@openai",
+          platformPackage,
+          "vendor",
+          targetTriple,
+          "codex",
+          executable,
+        ),
+      );
+    }
+  }
+
+  return [...candidates];
+}
+
+function candidateBaseDirectories(workingDirectory?: string): string[] {
+  const roots = new Set<string>();
+  if (workingDirectory) {
+    roots.add(resolve(workingDirectory));
+  }
+  roots.add(process.cwd());
+
+  let current = dirname(fileURLToPath(import.meta.url));
+  for (let index = 0; index < 8; index++) {
+    roots.add(current);
+    const next = dirname(current);
+    if (next === current) {
+      break;
+    }
+    current = next;
+  }
+
+  return [...roots].filter((item) => isAbsolute(item));
+}
+
+function platformCodexPackages(): Array<[string, string]> {
+  switch (`${process.platform}:${process.arch}`) {
+    case "darwin:arm64":
+      return [["codex-darwin-arm64", "aarch64-apple-darwin"]];
+    case "darwin:x64":
+      return [["codex-darwin-x64", "x86_64-apple-darwin"]];
+    case "linux:arm64":
+      return [["codex-linux-arm64", "aarch64-unknown-linux-musl"]];
+    case "linux:x64":
+      return [["codex-linux-x64", "x86_64-unknown-linux-musl"]];
+    case "win32:arm64":
+      return [["codex-win32-arm64", "aarch64-pc-windows-msvc"]];
+    case "win32:x64":
+      return [["codex-win32-x64", "x86_64-pc-windows-msvc"]];
+    default:
+      return [];
+  }
+}
+
+function firstNonEmpty(...values: Array<string | undefined>): string | undefined {
+  return values.find((value): value is string => typeof value === "string" && value.length > 0);
 }
 
 function readCredentialEnv(

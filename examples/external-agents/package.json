@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "bunx @google/adk-devtools run agent.ts",
     "web": "bunx @google/adk-devtools web",
+    "smoke:architecture": "bun smoke-architecture.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

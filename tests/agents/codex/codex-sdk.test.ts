@@ -1,3 +1,6 @@
+import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import { CodexAgent } from "../../../src/agents/codex-agent.js";
 import { CodexCliDriver } from "../../../src/agents/driver/codex-cli.js";
@@ -51,6 +54,8 @@ describe("CodexSdkDriver", () => {
         env: {
           CODEX_API_KEY: "codex-key",
           CODEX_HOME: "/tmp/codex-home",
+          CODEX_EXECUTABLE: "/tmp/codex-bin",
+          CODEX_CLI_PATH: "/tmp/codex-cli",
           CODEX_CA_CERTIFICATE: "/tmp/ca.pem",
           SSL_CERT_FILE: "/tmp/ssl.pem",
           OPENAI_API_KEY: "blocked",
@@ -71,10 +76,66 @@ describe("CodexSdkDriver", () => {
         XDG_CONFIG_HOME: "/Users/example/.config",
         CODEX_API_KEY: "codex-key",
         CODEX_HOME: "/tmp/codex-home",
+        CODEX_EXECUTABLE: "/tmp/codex-bin",
+        CODEX_CLI_PATH: "/tmp/codex-cli",
         CODEX_CA_CERTIFICATE: "/tmp/ca.pem",
         SSL_CERT_FILE: "/tmp/ssl.pem",
       },
     });
+  });
+
+  test("detects Codex binary from explicit environment overrides", () => {
+    const dir = mkdtempSync(join(tmpdir(), "codex-sdk-driver-"));
+    const executable = join(dir, process.platform === "win32" ? "codex.exe" : "codex");
+    writeFileSync(executable, "#!/bin/sh\nexit 0\n");
+    chmodSync(executable, 0o755);
+    const driver = new CodexSdkDriver({ env: { CODEX_EXECUTABLE: executable } });
+
+    const resolution = driver.resolveCodexBinary({
+      provider: CODEX_PROVIDER,
+      context: {} as never,
+    });
+    const options = driver.buildClientOptions({
+      provider: CODEX_PROVIDER,
+      context: {} as never,
+    });
+
+    expect(resolution.path).toBe(executable);
+    expect(options.codexPathOverride).toBe(executable);
+  });
+
+  test("emits actionable Codex binary lookup errors", async () => {
+    const driver = new CodexSdkDriver({
+      env: { CODEX_EXECUTABLE: "/missing/codex" },
+      Codex: class {
+        startThread() {
+          throw new Error("Unable to locate Codex CLI binaries. Ensure @openai/codex is installed with optional dependencies.");
+        }
+        resumeThread() {
+          throw new Error("not used");
+        }
+      },
+    });
+
+    const events = [];
+    for await (const event of driver.run({
+      provider: CODEX_PROVIDER,
+      context: {} as never,
+    })) {
+      events.push(event);
+    }
+
+    expect(events).toEqual([
+      { type: "started", providerId: "codex", timestamp: expect.any(Number) },
+      {
+        type: "error",
+        message: expect.stringContaining("Set CODEX_EXECUTABLE=/absolute/path/to/codex"),
+        code: "CODEX_SDK_ERROR",
+        recoverable: true,
+        timestamp: expect.any(Number),
+      },
+      { type: "completed", exitCode: 1, timestamp: expect.any(Number) },
+    ]);
   });
 
   test("maps bridge permissions to Codex SDK thread options", () => {
