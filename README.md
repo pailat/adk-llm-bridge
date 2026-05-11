@@ -103,7 +103,7 @@ const agent = new LlmAgent({
 import { CodexAgent, ClaudeAgent, GeminiCliAgent } from "adk-llm-bridge/agents";
 ```
 
-Use this API when you want an ADK agent graph to include provider-owned coding CLIs/runtimes as `BaseAgent`-compatible sub-agents. The foundation layer exposes shared configuration, credential, permission, provider registry, and driver interfaces; it does **not** implement provider-specific runtime execution.
+Use this API when you want an ADK agent graph to include provider-owned coding CLIs/runtimes as `BaseAgent`-compatible sub-agents. The agent layer exposes shared configuration, credential, permission, provider registry, and runtime drivers while keeping provider auth/configuration owned by each external runtime. `CodexAgent` uses the official `@openai/codex-sdk` driver by default; pass `new CodexCliDriver()` explicitly when you need the lower-level CLI fallback.
 
 ```typescript
 import { LlmAgent } from "@google/adk";

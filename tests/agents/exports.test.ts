@@ -35,6 +35,7 @@ describe("agents public exports", () => {
     expect(agents.EnvCredentialProvider).toBeFunction();
     expect(agents.NoopCredentialProvider).toBeFunction();
     expect(agents.SubprocessJsonlDriver).toBeFunction();
+    expect(agents.CodexSdkDriver).toBeFunction();
     expect(agents.PlaceholderExternalAgentDriver).toBeFunction();
     expect(agents.readAllowedEnv).toBeFunction();
     expect(agents.mapPermissionModeToPolicy).toBeFunction();

@@ -209,10 +209,11 @@ describe("Codex CLI driver", () => {
     ]);
   });
 
-  test("CodexAgent defaults to Codex provider and CLI driver without import-time side effects", () => {
-    const agent = new CodexAgent({ name: "codex" });
+  test("CodexAgent accepts an explicit CLI fallback driver", () => {
+    const driver = new CodexCliDriver();
+    const agent = new CodexAgent({ name: "codex", driver });
 
     expect(agent.provider).toEqual(CODEX_PROVIDER);
-    expect(agent.driver).toBeInstanceOf(CodexCliDriver);
+    expect(agent.driver).toBe(driver);
   });
 });

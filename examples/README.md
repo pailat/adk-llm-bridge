@@ -100,7 +100,7 @@ bun install
 bun run web
 ```
 
-Use this example to see `ClaudeAgent`, `CodexAgent`, and `GeminiCliAgent` imported from `adk-llm-bridge/agents` while the root package import remains LLM-focused. Provider-specific CLIs/auth are intentionally owned by each external runtime and are not installed or persisted by the bridge.
+Use this example to see `ClaudeAgent`, `CodexAgent`, and `GeminiCliAgent` imported from `adk-llm-bridge/agents` while the root package import remains LLM-focused. `CodexAgent` uses the official `@openai/codex-sdk` driver by default, with `CodexCliDriver` available as an explicit fallback. Provider-specific runtime auth remains owned by each external runtime and is not persisted by the bridge.
 
 ### express-server
 

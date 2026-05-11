@@ -19,6 +19,7 @@ import { AIGateway } from "adk-llm-bridge";
 - Using `EnvCredentialProvider` only as a pass-through for provider-allowlisted environment variables
 - Selecting permission presets such as `read-only`, `ask`, and `workspace-write`
 - Exposing ADK `subAgents` to Claude Agent SDK through the in-process MCP `run_adk_subagent` bridge tool
+- Using the official `@openai/codex-sdk` TypeScript driver for `CodexAgent` by default, with `CodexCliDriver` available as an explicit fallback
 - Keeping external runtime APIs opt-in through the `adk-llm-bridge/agents` subpath
 
 ## Quick Start
@@ -66,7 +67,9 @@ When `ClaudeAgent` runs through the SDK driver, those ADK subagents are exposed 
 Ask CodexImplementer to inspect this repository and propose a minimal patch for the failing test.
 ```
 
-The bridge does **not** install provider CLIs or persist provider secrets for you. Install and authenticate each runtime using its native documentation when you want that runtime to execute real work.
+`CodexAgent` uses `@openai/codex-sdk` by default. The SDK still controls the local Codex runtime and reuses Codex native authentication/configuration. Use `codex login` for local ChatGPT-managed auth or provide `CODEX_API_KEY` for API-key automation. If you need the lower-level CLI fallback, pass `new CodexCliDriver()` explicitly.
+
+The bridge does **not** persist provider secrets for you. Install and authenticate each runtime using its native documentation when you want that runtime to execute real work.
 
 ### Claude native / OAuth auth
 
@@ -96,7 +99,7 @@ import { CodexAgent, ClaudeAgent, GeminiCliAgent } from "adk-llm-bridge/agents";
 
 Claude Agent SDK execution is side-effectful and uses the permissions configured on the `ClaudeAgent`; this example defaults to `ask` mode and limits allowed paths to the current working directory.
 
-If you need an explicit CLI fallback instead of the SDK driver, pass `new ClaudeCliDriver()` manually:
+If you need an explicit Claude CLI fallback instead of the SDK driver, pass `new ClaudeCliDriver()` manually:
 
 ```ts
 import { ClaudeAgent, ClaudeCliDriver } from "adk-llm-bridge/agents";
@@ -104,5 +107,16 @@ import { ClaudeAgent, ClaudeCliDriver } from "adk-llm-bridge/agents";
 export const rootAgent = new ClaudeAgent({
   name: "ClaudeCodeRoot",
   driver: new ClaudeCliDriver(),
+});
+```
+
+For Codex, the equivalent fallback is:
+
+```ts
+import { CodexAgent, CodexCliDriver } from "adk-llm-bridge/agents";
+
+const codexImplementer = new CodexAgent({
+  name: "CodexImplementer",
+  driver: new CodexCliDriver(),
 });
 ```

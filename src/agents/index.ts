@@ -28,6 +28,11 @@ export type {
   CodexCliSubprocess,
 } from "./driver/codex-cli.js";
 export {
+  CodexSdkDriver,
+  mapPolicyToCodexSdkThreadOptions,
+} from "./driver/codex-sdk.js";
+export type { CodexSdkDriverConfig } from "./driver/codex-sdk.js";
+export {
   ClaudeAgentSdkDriver,
   mapPolicyToClaudeSdkPermission,
 } from "./driver/claude-agent-sdk.js";
