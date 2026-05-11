@@ -35,21 +35,19 @@ Explain the main modules, entry points, runtime flow, important abstractions, an
 Keep responses structured and concise. Mention representative files you inspected. Do not modify files.`,
 });
 
-const claudeDriver = process.env.CLAUDE_CODE_EXECUTABLE
-  ? new ClaudeAgentSdkDriver({
-      // Optional fallback when package-manager postinstall scripts did not install
-      // the SDK's bundled native binary. Leave CLAUDE_CODE_EXECUTABLE unset to
-      // use the SDK default.
-      pathToClaudeCodeExecutable: process.env.CLAUDE_CODE_EXECUTABLE,
-    })
-  : undefined;
+const claudeDriver = new ClaudeAgentSdkDriver({
+  // Optional fallback when package-manager postinstall scripts did not install
+  // the SDK's bundled native binary. Leave these unset to use driver autodetection
+  // and the SDK default.
+  pathToClaudeCodeExecutable: process.env.CLAUDE_CODE_EXECUTABLE ?? process.env.CLAUDE_CODE_PATH,
+});
 
 export const rootAgent = new ClaudeAgent({
   name: "ClaudeCodeRoot",
   description:
     "Runs Claude Code as the root ADK agent and exposes CodexArchitectureExpert through the ADK subagent bridge.",
   credentialProvider,
-  ...(claudeDriver ? { driver: claudeDriver } : {}),
+  driver: claudeDriver,
   workingDirectory,
   permissions: {
     ...mapPermissionModeToPolicy("ask"),

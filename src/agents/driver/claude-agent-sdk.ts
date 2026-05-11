@@ -4,6 +4,9 @@
  * SPDX-License-Identifier: MIT
  */
 
+import { existsSync } from "node:fs";
+import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { ExternalAgentEvent } from "../events.js";
 import type { ExternalAgentRunRequest } from "../external-agent-driver.js";
 import { mapPermissionPolicyToFlags } from "../permissions/mapper.js";
@@ -62,6 +65,11 @@ type ClaudeAgentSdkLike = {
   ): ClaudeAgentSdkToolDefinition;
 };
 
+export interface ClaudeExecutableResolution {
+  path?: string;
+  checked: string[];
+}
+
 export interface ClaudeAgentSdkDriverConfig {
   sdk?: ClaudeAgentSdkLike;
   importSdk?: () => Promise<ClaudeAgentSdkLike>;
@@ -107,6 +115,7 @@ export class ClaudeAgentSdkDriver {
     };
 
     let completed = false;
+    let failed = false;
     try {
       for await (const message of sdk.query({ prompt, options })) {
         const events = this.normalizeMessage(message);
@@ -118,9 +127,10 @@ export class ClaudeAgentSdkDriver {
         }
       }
     } catch (error) {
+      failed = true;
       yield {
         type: "error",
-        message: error instanceof Error ? error.message : String(error),
+        message: this.describeError(error, request),
         code: "CLAUDE_AGENT_SDK_ERROR",
         recoverable: true,
         timestamp: Date.now(),
@@ -128,7 +138,7 @@ export class ClaudeAgentSdkDriver {
     }
 
     if (!completed) {
-      yield { type: "completed", exitCode: 0, timestamp: Date.now() };
+      yield { type: "completed", exitCode: failed ? 1 : 0, timestamp: Date.now() };
     }
   }
 
@@ -141,7 +151,7 @@ export class ClaudeAgentSdkDriver {
       additionalDirectories: request.permissions?.allowedPaths
         ? [...request.permissions.allowedPaths]
         : undefined,
-      pathToClaudeCodeExecutable: this.#pathToClaudeCodeExecutable,
+      pathToClaudeCodeExecutable: this.resolveClaudeExecutable(request).path,
       settingSources: this.#settingSources,
       maxTurns: this.#maxTurns,
       model: this.#model,
@@ -152,6 +162,33 @@ export class ClaudeAgentSdkDriver {
     };
 
     return removeUndefined(options) as ClaudeAgentSdkOptions;
+  }
+
+  resolveClaudeExecutable(request: ExternalAgentRunRequest): ClaudeExecutableResolution {
+    const checked: string[] = [];
+    const explicit = firstNonEmpty(
+      this.#pathToClaudeCodeExecutable,
+      this.#env.CLAUDE_CODE_EXECUTABLE,
+      this.#env.CLAUDE_CODE_PATH,
+      readCredentialEnv(request, "CLAUDE_CODE_EXECUTABLE"),
+      readCredentialEnv(request, "CLAUDE_CODE_PATH"),
+    );
+    if (explicit) {
+      checked.push(explicit);
+      return { path: explicit, checked };
+    }
+
+    for (const candidate of claudeExecutableCandidates({
+      env: this.#env,
+      workingDirectory: request.workingDirectory,
+    })) {
+      checked.push(candidate);
+      if (existsSync(candidate)) {
+        return { path: candidate, checked };
+      }
+    }
+
+    return { checked };
   }
 
   buildEnv(request: ExternalAgentRunRequest): Record<string, string | undefined> {
@@ -307,6 +344,26 @@ export class ClaudeAgentSdkDriver {
     });
   }
 
+  private describeError(error: unknown, request: ExternalAgentRunRequest): string {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!message.includes("Native CLI binary") && !message.includes("pathToClaudeCodeExecutable")) {
+      return message;
+    }
+
+    const resolution = this.resolveClaudeExecutable(request);
+    const checked = resolution.checked.length > 0
+      ? resolution.checked.map((item) => `  - ${item}`).join("\n")
+      : "  - <no candidates>";
+    return [
+      "Claude Agent SDK could not locate a Claude Code executable.",
+      "Set CLAUDE_CODE_EXECUTABLE=/absolute/path/to/claude or CLAUDE_CODE_PATH=/absolute/path/to/claude, or reinstall @anthropic-ai/claude-agent-sdk with optional dependencies.",
+      "For this machine, /Users/alejandro/.local/bin/claude is a known working example if it still exists.",
+      `Original error: ${message}`,
+      "Checked paths:",
+      checked,
+    ].join("\n");
+  }
+
   private async loadSdk(): Promise<ClaudeAgentSdkLike> {
     if (this.#sdk) {
       return this.#sdk;
@@ -344,7 +401,92 @@ export function mapPolicyToClaudeSdkPermission(
   return { permissionMode: "default" };
 }
 
-async function importClaudeAgentSdk(): Promise<ClaudeAgentSdkLike> {
+function claudeExecutableCandidates({
+  env,
+  workingDirectory,
+}: {
+  env: Record<string, string | undefined>;
+  workingDirectory?: string;
+}): string[] {
+  const executable = process.platform === "win32" ? "claude.exe" : "claude";
+  const candidates = new Set<string>();
+
+  for (const dir of (env.PATH ?? "").split(delimiter)) {
+    if (dir.length > 0) {
+      candidates.add(join(dir, executable));
+    }
+  }
+
+  const home = env.HOME;
+  if (home) {
+    candidates.add(join(home, ".local", "bin", executable));
+    candidates.add(join(home, ".claude", "local", executable));
+  }
+
+  candidates.add(join("/opt/homebrew/bin", executable));
+  candidates.add(join("/usr/local/bin", executable));
+
+  for (const base of candidateBaseDirectories(workingDirectory)) {
+    candidates.add(join(base, "node_modules", ".bin", executable));
+    for (const platformPackage of platformClaudePackages()) {
+      candidates.add(join(base, "node_modules", "@anthropic-ai", platformPackage, executable));
+    }
+  }
+
+  return [...candidates];
+}
+
+function candidateBaseDirectories(workingDirectory?: string): string[] {
+  const roots = new Set<string>();
+  if (workingDirectory) {
+    roots.add(resolve(workingDirectory));
+  }
+  roots.add(process.cwd());
+
+  let current = dirname(fileURLToPath(import.meta.url));
+  for (let index = 0; index < 8; index++) {
+    roots.add(current);
+    const next = dirname(current);
+    if (next === current) {
+      break;
+    }
+    current = next;
+  }
+
+  return [...roots].filter((item) => isAbsolute(item));
+}
+
+function platformClaudePackages(): string[] {
+  switch (`${process.platform}:${process.arch}`) {
+    case "darwin:arm64":
+      return ["claude-agent-sdk-darwin-arm64"];
+    case "darwin:x64":
+      return ["claude-agent-sdk-darwin-x64"];
+    case "linux:arm64":
+      return ["claude-agent-sdk-linux-arm64"];
+    case "linux:x64":
+      return ["claude-agent-sdk-linux-x64"];
+    case "win32:arm64":
+      return ["claude-agent-sdk-win32-arm64"];
+    case "win32:x64":
+      return ["claude-agent-sdk-win32-x64"];
+    default:
+      return [];
+  }
+}
+
+function firstNonEmpty(...values: Array<string | undefined>): string | undefined {
+  return values.find((value): value is string => typeof value === "string" && value.length > 0);
+}
+
+function readCredentialEnv(
+  request: ExternalAgentRunRequest,
+  key: string,
+): string | undefined {
+  return request.credential?.kind === "env" ? request.credential.env?.[key] : undefined;
+}
+
+function importClaudeAgentSdk(): Promise<ClaudeAgentSdkLike> {
   return import("@anthropic-ai/claude-agent-sdk") as Promise<ClaudeAgentSdkLike>;
 }
 

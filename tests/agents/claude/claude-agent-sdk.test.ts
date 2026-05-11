@@ -1,3 +1,6 @@
+import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import { ClaudeAgent } from "../../../src/agents/claude-agent.js";
 import {
@@ -33,6 +36,8 @@ describe("ClaudeAgentSdkDriver", () => {
         CLAUDE_CONFIG_DIR: "/Users/example/.claude",
         ANTHROPIC_API_KEY: "anthropic-key",
         CLAUDE_CODE_OAUTH_TOKEN: "oauth-token",
+        CLAUDE_CODE_EXECUTABLE: "/tmp/claude-bin",
+        CLAUDE_CODE_PATH: "/tmp/claude-path",
         SECRET_NOT_ALLOWED: "nope",
       },
       pathToClaudeCodeExecutable: "/usr/local/bin/claude",
@@ -52,6 +57,8 @@ describe("ClaudeAgentSdkDriver", () => {
         env: {
           ANTHROPIC_API_KEY: "anthropic-key",
           CLAUDE_CODE_OAUTH_TOKEN: "oauth-token",
+          CLAUDE_CODE_EXECUTABLE: "/tmp/claude-bin",
+          CLAUDE_CODE_PATH: "/tmp/claude-path",
           SECRET_NOT_ALLOWED: "nope",
         },
       },
@@ -69,7 +76,60 @@ describe("ClaudeAgentSdkDriver", () => {
     expect(options.env?.CLAUDE_CONFIG_DIR).toBe("/Users/example/.claude");
     expect(options.env?.ANTHROPIC_API_KEY).toBe("anthropic-key");
     expect(options.env?.CLAUDE_CODE_OAUTH_TOKEN).toBe("oauth-token");
+    expect(options.env?.CLAUDE_CODE_EXECUTABLE).toBe("/tmp/claude-bin");
+    expect(options.env?.CLAUDE_CODE_PATH).toBe("/tmp/claude-path");
     expect(options.env?.SECRET_NOT_ALLOWED).toBeUndefined();
+  });
+
+  test("detects Claude Code executable from explicit environment overrides", () => {
+    const dir = mkdtempSync(join(tmpdir(), "claude-sdk-driver-"));
+    const executable = join(dir, process.platform === "win32" ? "claude.exe" : "claude");
+    writeFileSync(executable, "#!/bin/sh\nexit 0\n");
+    chmodSync(executable, 0o755);
+    const driver = new ClaudeAgentSdkDriver({ env: { CLAUDE_CODE_EXECUTABLE: executable } });
+
+    const resolution = driver.resolveClaudeExecutable({
+      provider: CLAUDE_PROVIDER,
+      context: {} as never,
+    });
+    const options = driver.buildOptions({
+      provider: CLAUDE_PROVIDER,
+      context: {} as never,
+    });
+
+    expect(resolution.path).toBe(executable);
+    expect(options.pathToClaudeCodeExecutable).toBe(executable);
+  });
+
+  test("emits actionable Claude executable lookup errors", async () => {
+    const driver = new ClaudeAgentSdkDriver({
+      env: { CLAUDE_CODE_EXECUTABLE: "/missing/claude" },
+      sdk: {
+        query: () => {
+          throw new Error("Native CLI binary for darwin-arm64 not found. Reinstall @anthropic-ai/claude-agent-sdk without --omit=optional, or set options.pathToClaudeCodeExecutable.");
+        },
+      },
+    });
+
+    const events = [];
+    for await (const event of driver.run({
+      provider: CLAUDE_PROVIDER,
+      context: {} as never,
+    })) {
+      events.push(event);
+    }
+
+    expect(events).toEqual([
+      { type: "started", providerId: "claude", timestamp: expect.any(Number) },
+      {
+        type: "error",
+        message: expect.stringContaining("Set CLAUDE_CODE_EXECUTABLE=/absolute/path/to/claude"),
+        code: "CLAUDE_AGENT_SDK_ERROR",
+        recoverable: true,
+        timestamp: expect.any(Number),
+      },
+      { type: "completed", exitCode: 1, timestamp: expect.any(Number) },
+    ]);
   });
 
   test("maps bridge permissions to Claude SDK permission modes", () => {

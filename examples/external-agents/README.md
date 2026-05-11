@@ -39,7 +39,7 @@ Then run the example:
 cd examples/external-agents
 cp .env.example .env
 # Optional: edit .env only if you want env-based auth instead of native runtime auth.
-# If Bun reports blocked Claude SDK postinstalls, set CLAUDE_CODE_EXECUTABLE to your local claude path.
+# If Bun reports blocked Claude SDK postinstalls, the driver autodetects common Claude paths; set CLAUDE_CODE_EXECUTABLE if needed.
 # If Codex SDK cannot discover optional CLI binaries, set CODEX_EXECUTABLE to your local codex path.
 # If you want to analyze projects outside this directory, set ARCHITECTURE_ANALYSIS_PATHS.
 bun install
@@ -101,11 +101,11 @@ The bridge does **not** persist provider secrets for you. Install and authentica
 
 For local usage, Claude Code can use the credentials already configured on your machine. The SDK driver passes the minimal native-auth environment (`HOME`, `PATH`, `USER`, `SHELL`, `CLAUDE_CONFIG_DIR`, and `XDG_CONFIG_HOME`) so Claude can find its native config/cache.
 
-If your package manager blocks the SDK's native binary postinstall, set `CLAUDE_CODE_EXECUTABLE` in [.env](./.env) to an existing Claude Code executable, for example `/Users/you/.local/bin/claude`. If this variable is unset, the example uses the Claude Agent SDK default driver setup.
+If your package manager blocks the SDK's native binary postinstall, the driver autodetects common Claude Code locations such as `~/.local/bin/claude`, `/opt/homebrew/bin/claude`, `/usr/local/bin/claude`, and local optional SDK packages. If needed, set `CLAUDE_CODE_EXECUTABLE` or `CLAUDE_CODE_PATH` in [.env](./.env) to an existing Claude Code executable, for example `/Users/you/.local/bin/claude`.
 
 You can also pass allowlisted env credentials when needed. Common variables are listed in [.env.example](./.env.example), including:
 
-- Claude: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CONFIG_DIR`
+- Claude: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CODE_EXECUTABLE`, `CLAUDE_CODE_PATH`, `CLAUDE_CONFIG_DIR`
 - Codex: `CODEX_API_KEY`, `CODEX_HOME`, `CODEX_EXECUTABLE`, `CODEX_CLI_PATH`
 - Analysis scope: `ARCHITECTURE_ANALYSIS_PATHS` for comma-separated absolute paths outside this example directory
 
