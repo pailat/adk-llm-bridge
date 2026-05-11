@@ -92,7 +92,7 @@ async function main(): Promise<void> {
     errors.length > 0 ||
     functionCalls < 1 ||
     functionResponses < 1 ||
-    visibleSubagentEvents > 0 ||
+    visibleSubagentEvents < 1 ||
     !summary.hasArchitectureContent
   ) {
     process.exit(1);

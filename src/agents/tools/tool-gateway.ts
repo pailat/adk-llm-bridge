@@ -56,7 +56,7 @@ export class ToolGateway {
     this.#parentContext = config.parentContext;
     this.#parentPermissions = config.parentPermissions;
     this.#eventSink = config.eventSink;
-    this.#exposeSubAgentEvents = config.exposeSubAgentEvents ?? false;
+    this.#exposeSubAgentEvents = config.exposeSubAgentEvents ?? true;
   }
 
   listSubAgents(): readonly BaseAgent[] {
@@ -97,7 +97,12 @@ export class ToolGateway {
       for await (const event of agent.runAsync(this.createChildContext(agent, input.task))) {
         events.push(event);
         if (this.#exposeSubAgentEvents) {
-          this.emit(event);
+          this.emit(enrichSubAgentEvent({
+            event,
+            rootAgentName: this.#rootAgent.name,
+            subAgentName: agent.name,
+            parentToolCallId: callId,
+          }));
         }
         Object.assign(stateDelta, event.actions?.stateDelta ?? {});
         const visible = extractVisibleText(event);
@@ -242,6 +247,76 @@ function isPermissionPolicy(value: unknown): value is ExternalAgentPermissionPol
       "mode" in value &&
       typeof (value as { mode?: unknown }).mode === "string",
   );
+}
+
+function enrichSubAgentEvent({
+  event,
+  rootAgentName,
+  subAgentName,
+  parentToolCallId,
+}: {
+  event: Event;
+  rootAgentName: string;
+  subAgentName: string;
+  parentToolCallId: string;
+}): Event {
+  const metadata = (event as { customMetadata?: Record<string, unknown> }).customMetadata ?? {};
+  return {
+    ...event,
+    customMetadata: {
+      ...metadata,
+      title: readableSubAgentEventTitle(event, subAgentName),
+      externalAgent: true,
+      subAgentEvent: true,
+      parentToolName: "run_adk_subagent",
+      parentToolCallId,
+      rootAgentName,
+      subAgentName,
+    },
+  };
+}
+
+function readableSubAgentEventTitle(event: Event, subAgentName: string): string {
+  const functionCall = event.content?.parts?.find((part) => part.functionCall)?.functionCall;
+  if (functionCall?.name) {
+    return `${subAgentName}: ${functionCall.name} call${toolDetail(functionCall.args)}`;
+  }
+
+  const functionResponse = event.content?.parts?.find((part) => part.functionResponse)?.functionResponse;
+  if (functionResponse?.name) {
+    return `${subAgentName}: ${functionResponse.name} response${toolDetail(functionResponse.response)}`;
+  }
+
+  const itemType = stringValue((event as { customMetadata?: { itemType?: unknown } }).customMetadata?.itemType);
+  const status = stringValue((event as { customMetadata?: { status?: unknown } }).customMetadata?.status);
+  if (itemType) {
+    return `${subAgentName}: ${itemType}${status ? ` ${status}` : ""}`;
+  }
+
+  if (event.errorMessage) {
+    return `${subAgentName}: error ${event.errorCode ?? "EXTERNAL_AGENT_ERROR"}`;
+  }
+
+  return event.partial ? `${subAgentName}: progress` : `${subAgentName}: final response`;
+}
+
+function toolDetail(value: unknown): string {
+  if (!value || typeof value !== "object") {
+    return "";
+  }
+  const record = value as Record<string, unknown>;
+  const command = stringValue(record.command);
+  const status = stringValue(record.status);
+  const detail = command ?? status;
+  return detail ? `: ${truncate(detail, 72)}` : "";
+}
+
+function truncate(value: string, maxLength: number): string {
+  return value.length > maxLength ? `${value.slice(0, maxLength - 3)}...` : value;
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
 function countFunctionCalls(event: Event): number {

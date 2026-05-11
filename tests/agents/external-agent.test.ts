@@ -276,9 +276,12 @@ describe("ExternalAgent ADK event formatting", () => {
     ).toBe(true);
     expect(
       updated?.events.some(
-        (event) => event.author === "state_agent" && event.content?.parts?.[0]?.text === "child output",
+        (event) =>
+          event.author === "state_agent" &&
+          event.content?.parts?.[0]?.text === "child output" &&
+          event.customMetadata?.subAgentEvent === true,
       ),
-    ).toBe(false);
+    ).toBe(true);
     expect(
       updated?.events.some((event) =>
         event.content?.parts?.some((part) => part.functionResponse?.name === "run_adk_subagent"),
@@ -287,11 +290,15 @@ describe("ExternalAgent ADK event formatting", () => {
     const functionCallIndex = updated?.events.findIndex((event) =>
       event.content?.parts?.some((part) => part.functionCall?.name === "run_adk_subagent"),
     );
+    const childEventIndex = updated?.events.findIndex(
+      (event) => event.author === "state_agent" && event.customMetadata?.subAgentEvent === true,
+    );
     const functionResponseIndex = updated?.events.findIndex((event) =>
       event.content?.parts?.some((part) => part.functionResponse?.name === "run_adk_subagent"),
     );
     expect(functionCallIndex).toBeGreaterThanOrEqual(0);
-    expect(functionResponseIndex).toBeGreaterThan(functionCallIndex ?? -1);
+    expect(childEventIndex).toBeGreaterThan(functionCallIndex ?? -1);
+    expect(functionResponseIndex).toBeGreaterThan(childEventIndex ?? -1);
     expect(updated?.state.architectureSummary).toBe("done");
   });
 });

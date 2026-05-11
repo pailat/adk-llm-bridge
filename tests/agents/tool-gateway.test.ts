@@ -70,7 +70,7 @@ describe("ToolGateway", () => {
     });
   });
 
-  test("emits native function call and function response events by default", async () => {
+  test("emits native function call, subagent events, and function response events by default", async () => {
     const worker = new TextAgent("worker");
     const root = new TextAgent("root");
     const emitted = [];
@@ -83,12 +83,25 @@ describe("ToolGateway", () => {
 
     await gateway.runSubAgent({ agentName: "worker", task: "do it" });
 
-    expect(emitted).toHaveLength(2);
+    expect(emitted).toHaveLength(4);
     expect(emitted[0].content?.parts?.[0]?.functionCall).toMatchObject({
       name: "run_adk_subagent",
       args: { agentName: "worker", task: "do it" },
     });
-    expect(emitted[1].content?.parts?.[0]?.functionResponse).toMatchObject({
+    expect(emitted[1]).toMatchObject({
+      author: "worker",
+      customMetadata: {
+        title: "worker: final response",
+        externalAgent: true,
+        subAgentEvent: true,
+        parentToolName: "run_adk_subagent",
+        parentToolCallId: expect.any(String),
+        rootAgentName: "root",
+        subAgentName: "worker",
+      },
+      content: { role: "model", parts: [{ text: "OK: do it" }] },
+    });
+    expect(emitted[3].content?.parts?.[0]?.functionResponse).toMatchObject({
       name: "run_adk_subagent",
       response: {
         agentName: "worker",
@@ -105,7 +118,7 @@ describe("ToolGateway", () => {
     });
   });
 
-  test("can expose subagent events for diagnostics", async () => {
+  test("can hide subagent events for quiet summaries", async () => {
     const worker = new TextAgent("worker");
     const root = new TextAgent("root");
     const emitted = [];
@@ -113,18 +126,14 @@ describe("ToolGateway", () => {
       rootAgent: root,
       subAgents: [worker],
       parentContext: parentContext(root),
-      exposeSubAgentEvents: true,
+      exposeSubAgentEvents: false,
       eventSink: (event) => emitted.push(event),
     });
 
     await gateway.runSubAgent({ agentName: "worker", task: "do it" });
 
-    expect(emitted).toHaveLength(4);
-    expect(emitted[1]).toMatchObject({
-      author: "worker",
-      content: { role: "model", parts: [{ text: "OK: do it" }] },
-    });
-    expect(emitted[3].content?.parts?.[0]?.functionResponse).toMatchObject({
+    expect(emitted).toHaveLength(2);
+    expect(emitted[1].content?.parts?.[0]?.functionResponse).toMatchObject({
       name: "run_adk_subagent",
       response: {
         agentName: "worker",
@@ -171,9 +180,17 @@ describe("ToolGateway", () => {
     const result = await gateway.runSubAgent({ agentName: "worker", task: "do it" });
 
     expect(result.stateDelta).toEqual({ architectureSummary: "done" });
-    expect(emitted).toHaveLength(2);
-    expect(emitted[1].actions.stateDelta).toEqual({ architectureSummary: "done" });
-    expect(emitted[1].content?.parts?.[0]?.functionResponse?.response).toEqual({
+    expect(emitted).toHaveLength(3);
+    expect(emitted[1]).toMatchObject({
+      author: "worker",
+      customMetadata: {
+        subAgentEvent: true,
+        subAgentName: "worker",
+        parentToolName: "run_adk_subagent",
+      },
+    });
+    expect(emitted[2].actions.stateDelta).toEqual({ architectureSummary: "done" });
+    expect(emitted[2].content?.parts?.[0]?.functionResponse?.response).toEqual({
       agentName: "worker",
       output: "stateful",
       events: 1,

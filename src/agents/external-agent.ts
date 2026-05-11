@@ -170,7 +170,7 @@ export class ExternalAgent extends BaseAgent {
           content: { role: "model", parts: [{ text: event.content }] },
           partial: event.partial,
           turnComplete: event.turnComplete ?? !event.partial,
-          customMetadata: event.metadata,
+          customMetadata: metadataForExternalEvent(this.name, event),
           timestamp: event.timestamp,
         });
       case "error":
@@ -180,6 +180,7 @@ export class ExternalAgent extends BaseAgent {
           branch: context.branch,
           errorCode: event.code ?? "EXTERNAL_AGENT_ERROR",
           errorMessage: event.message,
+          customMetadata: metadataForExternalEvent(this.name, event),
           timestamp: event.timestamp,
         });
       case "tool_call":
@@ -188,7 +189,7 @@ export class ExternalAgent extends BaseAgent {
           author: this.name,
           branch: context.branch,
           content: this.toolCallToContent(event),
-          customMetadata: event.metadata,
+          customMetadata: metadataForExternalEvent(this.name, event),
           timestamp: event.timestamp,
         });
       case "tool_result":
@@ -197,7 +198,7 @@ export class ExternalAgent extends BaseAgent {
           author: this.name,
           branch: context.branch,
           content: this.toolResultToContent(event),
-          customMetadata: event.metadata,
+          customMetadata: metadataForExternalEvent(this.name, event),
           timestamp: event.timestamp,
         });
       case "started":
@@ -241,6 +242,40 @@ export class ExternalAgent extends BaseAgent {
         },
       ],
     };
+  }
+}
+
+function metadataForExternalEvent(agentName: string, event: ExternalAgentEvent): Record<string, unknown> {
+  const metadata = "metadata" in event && event.metadata ? event.metadata : {};
+  return {
+    ...metadata,
+    title: typeof metadata.title === "string"
+      ? metadata.title
+      : readableExternalEventTitle(agentName, event),
+    externalAgent: true,
+  };
+}
+
+function readableExternalEventTitle(agentName: string, event: ExternalAgentEvent): string {
+  switch (event.type) {
+    case "output": {
+      const itemType = stringValue(event.metadata?.itemType);
+      const status = stringValue(event.metadata?.status);
+      if (itemType) {
+        return `${agentName}: ${itemType}${status ? ` ${status}` : ""}`;
+      }
+      return event.partial ? `${agentName}: progress` : `${agentName}: final response`;
+    }
+    case "error":
+      return `${agentName}: error ${event.code ?? "EXTERNAL_AGENT_ERROR"}`;
+    case "tool_call":
+      return `${agentName}: ${event.name} call${toolDetail(event.input)}`;
+    case "tool_result":
+      return `${agentName}: ${event.name} response${toolDetail(event.result)}`;
+    case "started":
+      return `${agentName}: started`;
+    case "completed":
+      return `${agentName}: completed`;
   }
 }
 
@@ -315,6 +350,10 @@ function traceAdkEvent({
   const span = tracer.startSpan(spanName);
   try {
     const title = readableEventTitle(event);
+    const metadata = readCustomMetadata(event);
+    const parentToolName = stringValue(metadata.parentToolName);
+    const parentToolCallId = stringValue(metadata.parentToolCallId);
+    const metadataSubAgentName = stringValue(metadata.subAgentName);
     span.setAttributes({
       "gen_ai.system": providerId,
       "gen_ai.agent.name": event.author ?? context.agent?.name ?? "external_agent",
@@ -327,6 +366,9 @@ function traceAdkEvent({
       "gcp.vertex.agent.external_agent.name": event.author ?? "",
       "gcp.vertex.agent.event_title": title,
       "gcp.vertex.agent.branch": event.branch ?? "",
+      "gcp.vertex.agent.subagent.name": metadataSubAgentName,
+      "gcp.vertex.agent.parent_tool.name": parentToolName,
+      "gcp.vertex.agent.parent_tool.call_id": parentToolCallId,
       "gcp.vertex.agent.llm_request": "{}",
       "gcp.vertex.agent.llm_response": safeJsonSerialize(event),
     });
@@ -339,7 +381,7 @@ function traceAdkEvent({
         "gen_ai.tool.name": functionCall.name ?? "run_adk_subagent",
         "gen_ai.tool.call.id": functionCall.id ?? event.id,
         "gcp.vertex.agent.tool_call_args": safeJsonSerialize(functionCall.args ?? {}),
-        "gcp.vertex.agent.subagent.name": stringValue((functionCall.args as { agentName?: unknown } | undefined)?.agentName),
+        "gcp.vertex.agent.subagent.name": stringValue((functionCall.args as { agentName?: unknown } | undefined)?.agentName) || metadataSubAgentName,
       });
     }
     if (functionResponse) {
@@ -348,7 +390,7 @@ function traceAdkEvent({
         "gen_ai.tool.name": functionResponse.name ?? "run_adk_subagent",
         "gen_ai.tool.call.id": functionResponse.id ?? event.id,
         "gcp.vertex.agent.tool_response": safeJsonSerialize(functionResponse.response ?? {}),
-        "gcp.vertex.agent.subagent.name": stringValue((functionResponse.response as { agentName?: unknown } | undefined)?.agentName),
+        "gcp.vertex.agent.subagent.name": stringValue((functionResponse.response as { agentName?: unknown } | undefined)?.agentName) || metadataSubAgentName,
       });
     }
   } finally {
@@ -381,16 +423,15 @@ function toolDetail(value: unknown): string {
     return "";
   }
   const record = value as Record<string, unknown>;
-  const command = typeof record.command === "string" ? record.command : undefined;
-  const status = typeof record.status === "string" ? record.status : undefined;
-  const detail = command ?? status;
+  const command = stringValue(record.command);
+  const status = stringValue(record.status);
+  const detail = command || status;
   return detail ? `: ${truncate(detail, 72)}` : "";
 }
 
 function readableEventTitle(event: Event): string {
-  const metadataTitle = stringValue(
-    (event as { customMetadata?: { title?: unknown } }).customMetadata?.title,
-  );
+  const metadata = readCustomMetadata(event);
+  const metadataTitle = stringValue(metadata.title);
   if (metadataTitle) {
     return metadataTitle;
   }
@@ -412,7 +453,18 @@ function readableEventTitle(event: Event): string {
     return truncate(text, 80);
   }
 
+  const itemType = stringValue(metadata.itemType);
+  const status = stringValue(metadata.status);
+  const subAgentName = stringValue(metadata.subAgentName) || event.author;
+  if (itemType && subAgentName) {
+    return `${subAgentName}: ${itemType}${status ? ` ${status}` : ""}`;
+  }
+
   return event.errorMessage ? `error:${event.errorCode ?? "EXTERNAL_AGENT_ERROR"}` : event.author ?? "external_agent";
+}
+
+function readCustomMetadata(event: Event): Record<string, unknown> {
+  return (event as { customMetadata?: Record<string, unknown> }).customMetadata ?? {};
 }
 
 function readSessionId(context: InvocationContext): string {

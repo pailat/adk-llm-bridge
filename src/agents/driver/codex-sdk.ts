@@ -388,7 +388,13 @@ function normalizeProgressItem(
             content: `Codex command ${status ?? "running"}: ${command}`,
             partial: true,
             turnComplete: false,
-            metadata: { itemType, status, exitCode: item.exit_code },
+            metadata: {
+              itemType,
+              status,
+              command,
+              exitCode: item.exit_code,
+              title: `Codex: command_execution ${status ?? "running"}`,
+            },
             timestamp,
           },
         ]
@@ -396,17 +402,23 @@ function normalizeProgressItem(
   }
 
   if (itemType === "mcp_tool_call") {
+    const toolName = stringValue(item.tool) ?? "mcp_tool_call";
+    const status = stringValue(item.status) ?? "running";
     return [
       {
         type: "tool_call",
-        name: stringValue(item.tool) ?? "mcp_tool_call",
+        name: toolName,
         input: {
           server: item.server,
           arguments: item.arguments,
           status: item.status,
         },
         callId: stringValue(item.id),
-        metadata: { itemType, status: item.status },
+        metadata: {
+          itemType,
+          status: item.status,
+          title: `Codex: ${toolName} ${status}`,
+        },
         timestamp,
       },
     ];
@@ -421,7 +433,7 @@ function normalizeProgressItem(
             content: `Codex web search: ${query}`,
             partial: true,
             turnComplete: false,
-            metadata: { itemType },
+            metadata: { itemType, query, title: "Codex: web_search" },
             timestamp,
           },
         ]
@@ -455,25 +467,49 @@ function normalizeCompletedItem(
   }
 
   if (itemType === "mcp_tool_call") {
+    const toolName = stringValue(item.tool) ?? "mcp_tool_call";
+    const status = stringValue(item.status) ?? "completed";
     return [
       {
         type: "tool_call",
-        name: stringValue(item.tool) ?? "mcp_tool_call",
+        name: toolName,
         input: {
           server: item.server,
           arguments: item.arguments,
+          status: item.status,
+        },
+        callId: stringValue(item.id),
+        metadata: {
+          itemType,
+          status: item.status,
+          title: `Codex: ${toolName} call`,
+        },
+        timestamp,
+      },
+      {
+        type: "tool_result",
+        name: toolName,
+        result: {
+          server: item.server,
           status: item.status,
           result: item.result,
           error: item.error,
         },
         callId: stringValue(item.id),
-        metadata: { itemType, status: item.status },
+        error: stringValue(item.error),
+        metadata: {
+          itemType,
+          status: item.status,
+          title: `Codex: ${toolName} ${status}`,
+        },
         timestamp,
       },
     ];
   }
 
   if (itemType === "command_execution") {
+    const command = stringValue(item.command);
+    const status = stringValue(item.status) ?? "completed";
     return [
       {
         type: "tool_call",
@@ -484,7 +520,30 @@ function normalizeCompletedItem(
           exitCode: item.exit_code,
         },
         callId: stringValue(item.id),
-        metadata: { itemType, status: item.status },
+        metadata: {
+          itemType,
+          status: item.status,
+          command,
+          title: "Codex: command_execution call",
+        },
+        timestamp,
+      },
+      {
+        type: "tool_result",
+        name: "command_execution",
+        result: {
+          command: item.command,
+          status: item.status,
+          exitCode: item.exit_code,
+        },
+        callId: stringValue(item.id),
+        metadata: {
+          itemType,
+          status: item.status,
+          command,
+          exitCode: item.exit_code,
+          title: `Codex: command_execution ${status}`,
+        },
         timestamp,
       },
     ];
