@@ -3,56 +3,54 @@ import {
   ClaudeAgentSdkDriver,
   CodexAgent,
   EnvCredentialProvider,
-  GeminiCliAgent,
   mapPermissionModeToPolicy,
 } from "adk-llm-bridge/agents";
 
 // External agent runtimes are opt-in and live under the /agents subpath.
-// ClaudeAgent is the root agent here. By default it uses the official
-// @anthropic-ai/claude-agent-sdk driver, which can use Claude Code's native
-// auth cache/OAuth token (or allowlisted env vars) instead of an LLM provider API key.
+// This example intentionally keeps the graph small while validating the current
+// recommended path: Claude Code as the root coordinator and Codex as the only
+// ADK subagent exposed through Claude's in-process MCP bridge.
 const credentialProvider = new EnvCredentialProvider();
+const workingDirectory = process.cwd();
 
 const codexImplementer = new CodexAgent({
   name: "CodexImplementer",
   description:
-    "Implements scoped code changes with Codex when a driver is supplied.",
+    "Uses the official Codex SDK runtime for scoped repository analysis and implementation tasks.",
   credentialProvider,
-  workingDirectory: process.cwd(),
+  workingDirectory,
   permissions: mapPermissionModeToPolicy("workspace-write"),
-  instruction: "Make the smallest safe code change that satisfies the request.",
+  instruction: `You are the Codex specialist for this repository.
+
+Use Codex native authentication/configuration. Keep changes minimal and scoped to the user's request.
+When asked to analyze only, do not modify files. Report concise findings and mention any files you inspected.`,
 });
 
-const geminiResearcher = new GeminiCliAgent({
-  name: "GeminiResearcher",
-  description:
-    "Explores large codebases with Gemini CLI when a driver is supplied.",
-  credentialProvider,
-  workingDirectory: process.cwd(),
-  permissions: mapPermissionModeToPolicy("read-only"),
-  instruction: "Summarize the relevant files and call out open questions.",
-});
+const claudeDriver = process.env.CLAUDE_CODE_EXECUTABLE
+  ? new ClaudeAgentSdkDriver({
+      // Optional fallback when package-manager postinstall scripts did not install
+      // the SDK's bundled native binary. Leave CLAUDE_CODE_EXECUTABLE unset to
+      // use the SDK default.
+      pathToClaudeCodeExecutable: process.env.CLAUDE_CODE_EXECUTABLE,
+    })
+  : undefined;
 
 export const rootAgent = new ClaudeAgent({
   name: "ClaudeCodeRoot",
   description:
-    "Runs Claude Code as the root ADK agent using the Claude Agent SDK and native Claude Code authentication.",
+    "Runs Claude Code as the root ADK agent and exposes CodexImplementer through the ADK subagent bridge.",
   credentialProvider,
-  driver: new ClaudeAgentSdkDriver({
-    // Optional fallback when package-manager postinstall scripts did not install
-    // the SDK's bundled native binary. Leave undefined to use the SDK default.
-    pathToClaudeCodeExecutable: process.env.CLAUDE_CODE_EXECUTABLE,
-  }),
-  workingDirectory: process.cwd(),
+  ...(claudeDriver ? { driver: claudeDriver } : {}),
+  workingDirectory,
   permissions: {
     ...mapPermissionModeToPolicy("ask"),
     allowNetwork: false,
-    allowedPaths: [process.cwd()],
+    allowedPaths: [workingDirectory],
   },
   instruction: `You are the root Claude Code agent for this repository.
 
 Use the native Claude Code authentication already configured on this machine.
 Review, explain, and coordinate code changes safely. Ask before making broad or destructive changes.
-Delegate to specialist agents only when the task explicitly benefits from Codex or Gemini CLI.`,
-  subAgents: [codexImplementer, geminiResearcher],
+When the user explicitly asks you to use CodexImplementer or run_adk_subagent, call the MCP tool named run_adk_subagent and delegate to the CodexImplementer ADK subagent.`,
+  subAgents: [codexImplementer],
 });
