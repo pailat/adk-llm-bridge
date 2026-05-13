@@ -415,7 +415,25 @@ function spanNameForEvent(event: Event): string {
       : `execute_tool ${functionResponse.name ?? "<unknown>"}${toolDetail(functionResponse.response)}`;
   }
 
+  const toolProgressSpanName = spanNameForToolProgress(event);
+  if (toolProgressSpanName) {
+    return toolProgressSpanName;
+  }
+
   return "call_llm";
+}
+
+function spanNameForToolProgress(event: Event): string | undefined {
+  const metadata = readCustomMetadata(event);
+  const itemType = stringValue(metadata.itemType);
+  if (!isToolProgressItemType(itemType)) {
+    return undefined;
+  }
+  return `execute_tool ${itemType}${toolDetail(metadata)}`;
+}
+
+function isToolProgressItemType(value: string): boolean {
+  return value === "command_execution" || value === "web_search" || value === "mcp_tool_call";
 }
 
 function toolDetail(value: unknown): string {
@@ -425,7 +443,9 @@ function toolDetail(value: unknown): string {
   const record = value as Record<string, unknown>;
   const command = stringValue(record.command);
   const status = stringValue(record.status);
-  const detail = command || status;
+  const query = stringValue(record.query);
+  const toolName = stringValue(record.toolName);
+  const detail = command || query || toolName || status;
   return detail ? `: ${truncate(detail, 72)}` : "";
 }
 

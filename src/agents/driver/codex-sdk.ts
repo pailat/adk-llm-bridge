@@ -406,16 +406,13 @@ function normalizeProgressItem(
     const status = stringValue(item.status) ?? "running";
     return [
       {
-        type: "tool_call",
-        name: toolName,
-        input: {
-          server: item.server,
-          arguments: item.arguments,
-          status: item.status,
-        },
-        callId: stringValue(item.id),
+        type: "output",
+        content: `Codex MCP tool ${status}: ${toolName}`,
+        partial: true,
+        turnComplete: false,
         metadata: {
           itemType,
+          toolName,
           status: item.status,
           title: `Codex: ${toolName} ${status}`,
         },

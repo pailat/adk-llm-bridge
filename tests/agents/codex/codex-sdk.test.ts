@@ -259,6 +259,88 @@ describe("CodexSdkDriver", () => {
     ]);
   });
 
+  test("normalizes mcp_tool_call progress without duplicate function calls", () => {
+    const driver = new CodexSdkDriver();
+
+    expect(
+      driver.normalizeEvent({
+        type: "item.updated",
+        item: {
+          id: "mcp-1",
+          type: "mcp_tool_call",
+          tool: "search_docs",
+          status: "in_progress",
+          server: "docs",
+          arguments: { query: "ADK" },
+        },
+      }),
+    ).toEqual([
+      {
+        type: "output",
+        content: "Codex MCP tool in_progress: search_docs",
+        partial: true,
+        turnComplete: false,
+        metadata: {
+          itemType: "mcp_tool_call",
+          toolName: "search_docs",
+          status: "in_progress",
+          title: "Codex: search_docs in_progress",
+        },
+        timestamp: expect.any(Number),
+      },
+    ]);
+
+    expect(
+      driver.normalizeEvent({
+        type: "item.completed",
+        item: {
+          id: "mcp-1",
+          type: "mcp_tool_call",
+          tool: "search_docs",
+          status: "completed",
+          server: "docs",
+          arguments: { query: "ADK" },
+          result: { hits: 2 },
+        },
+      }),
+    ).toEqual([
+      {
+        type: "tool_call",
+        name: "search_docs",
+        input: {
+          server: "docs",
+          arguments: { query: "ADK" },
+          status: "completed",
+        },
+        callId: "mcp-1",
+        metadata: {
+          itemType: "mcp_tool_call",
+          status: "completed",
+          title: "Codex: search_docs call",
+        },
+        timestamp: expect.any(Number),
+      },
+      {
+        type: "tool_result",
+        name: "search_docs",
+        result: {
+          server: "docs",
+          status: "completed",
+          result: { hits: 2 },
+          error: undefined,
+        },
+        callId: "mcp-1",
+        error: undefined,
+        metadata: {
+          itemType: "mcp_tool_call",
+          status: "completed",
+          title: "Codex: search_docs completed",
+        },
+        timestamp: expect.any(Number),
+      },
+    ]);
+  });
+
   test("normalizes failures and item errors", () => {
     const driver = new CodexSdkDriver();
 
