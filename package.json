@@ -40,7 +40,7 @@
   },
   "scripts": {
     "build": "bun run scripts/build.ts && bun run build:types",
-    "build:types": "bunx tsc --project tsconfig.build.json",
+    "build:types": "bunx tsc --project tsconfig.build.json && bun run scripts/fix-declaration-imports.mjs",
     "test": "bun test",
     "typecheck": "bunx tsc --noEmit",
     "typecheck:all": "bunx tsc --noEmit -p tsconfig.test.json",
