@@ -1,27 +1,21 @@
-# External Agents Example
+# External Agents HelpDesk Example
 
-This example shows the **opt-in** external agent runtime API with Claude Code as the root ADK agent and Codex as the architecture expert subagent:
+This example mirrors the OpenRouter HelpDesk example, but makes Claude Code the root ADK agent and mixes external runtime subagents with a normal OpenRouter-backed `LlmAgent`.
 
-```ts
-import { ClaudeAgent, CodexAgent } from "adk-llm-bridge/agents";
+```txt
+ClaudeCodeRoot: ClaudeAgent
+  -> CodexBillingSpecialist: CodexAgent
+  -> OpenRouterSupportSpecialist: LlmAgent + OpenRouter(...)
 ```
 
-The root package import remains focused on LLM providers for other examples:
+## What This Demonstrates
 
-```ts
-import { AIGateway } from "adk-llm-bridge";
-```
-
-## What this example demonstrates
-
-- Running `ClaudeAgent` as the `rootAgent`
-- Using the official Claude Agent SDK driver by default
-- Using the official `@openai/codex-sdk` driver for `CodexAgent` by default
-- Configuring Codex as `CodexArchitectureExpert`, a read-only specialist for understanding project architecture
-- Using `EnvCredentialProvider` only as a pass-through for provider-allowlisted environment variables
-- Selecting permission presets such as `ask` and `read-only`
-- Letting Claude infer that architecture/codebase-structure questions should be delegated through the in-process MCP `run_adk_subagent` bridge tool
-- Keeping external runtime APIs opt-in through the `adk-llm-bridge/agents` subpath
+- `ClaudeAgent` can be the ADK `rootAgent`.
+- `CodexAgent` can be a normal ADK subagent even though it is an external runtime.
+- `LlmAgent` using `OpenRouter(...)` from `adk-llm-bridge` can be a subagent of Claude Code.
+- Claude Code delegates to both subagents through the runtime MCP bridge tool `run_adk_subagent`.
+- `run_adk_subagent` remains bounded RPC semantics: Claude calls a tool, the bridge runs a subagent, then Claude receives the result.
+- External runtime APIs stay opt-in through `adk-llm-bridge/agents`, while model providers stay in the root `adk-llm-bridge` import.
 
 ## Quick Start
 
@@ -38,13 +32,10 @@ Then run the example:
 ```bash
 cd examples/external-agents
 cp .env.example .env
-# Edit .env if you want to analyze projects outside this directory, e.g.:
-# ARCHITECTURE_ANALYSIS_PATHS=/Users/you/Projects/my-repo
-# Env-based auth is optional when native runtime auth is already configured.
-# If Bun reports blocked Claude SDK postinstalls, the driver autodetects common Claude paths; set CLAUDE_CODE_EXECUTABLE if needed.
-# If Codex SDK cannot discover optional CLI binaries, set CODEX_EXECUTABLE to your local codex path.
+# Edit .env with OPENROUTER_API_KEY for the OpenRouterSupportSpecialist.
+# Env-based Claude/Codex auth is optional when native runtime auth is already configured.
 bun install
-bun run smoke:architecture
+bun run smoke:helpdesk
 bun run web
 ```
 
@@ -54,68 +45,79 @@ You can also type-check the example directly:
 bun run typecheck
 ```
 
-The smoke script executes the root agent through ADK `Runner` and fails if the run does not delegate to `CodexArchitectureExpert`:
+## Smoke Tests
+
+Billing smoke delegates from Claude Code to Codex:
 
 ```bash
-bun run smoke:architecture
+bun run smoke:helpdesk
 ```
 
-To smoke test a specific repository, allow the path and pass a prompt:
+Support smoke delegates from Claude Code to the OpenRouter-backed `LlmAgent`:
 
 ```bash
-ARCHITECTURE_ANALYSIS_PATHS=/Users/you/Projects/my-repo \
-SMOKE_ARCHITECTURE_PROMPT="Entiende la arquitectura de /Users/you/Projects/my-repo. No modifiques archivos." \
-bun run smoke:architecture
+bun run smoke:helpdesk:support
 ```
 
-> Note: in this repository, `package.json` uses `"adk-llm-bridge": "file:../.."` so the example validates against the local checkout that contains the `/agents` subpath. The example `tsconfig.json` also maps `adk-llm-bridge`, `adk-llm-bridge/agents`, and `@google/adk` for local type-checking, avoiding duplicate nominal ADK symbols while using a file dependency. If you copy this example into another project, replace the local file dependency with a published `adk-llm-bridge` version that includes `/agents` and remove the local `paths` override if it is no longer needed.
+Both smoke tests execute the exported `rootAgent` through ADK `Runner` and fail if Claude Code does not call `run_adk_subagent`, if the expected subagent does not emit visible events, or if the bridge does not emit the matching function response.
 
-## Runtime setup
+## Example Prompts
+
+Billing, routed to `CodexBillingSpecialist`:
+
+```txt
+Can you check the status of invoice INV-001?
+```
+
+```txt
+I need to request a refund for invoice INV-002 because I forgot to cancel.
+```
+
+Support, routed to `OpenRouterSupportSpecialist`:
+
+```txt
+What's the current status of the auth service?
+```
+
+```txt
+I need to reset my password for user@example.com.
+```
+
+For lower-level bridge diagnostics, you can force the tool call explicitly:
+
+```txt
+Use run_adk_subagent to delegate to OpenRouterSupportSpecialist. Ask it to check auth status and reset user@example.com.
+```
+
+## Runtime Setup
 
 The exported `rootAgent` is a `ClaudeAgent`, so normal chat in ADK DevTools is handled by Claude Code through the official `@anthropic-ai/claude-agent-sdk` TypeScript path.
 
-The file also constructs one specialist ADK subagent:
+The example constructs two specialist ADK subagents:
 
-- `CodexArchitectureExpert` — a read-only `CodexAgent` for mapping project structure, major modules, entry points, runtime flow, and important abstractions
+- `CodexBillingSpecialist` — a read-only `CodexAgent` that answers billing, invoice, payment, refund, and subscription questions from fixed demo data.
+- `OpenRouterSupportSpecialist` — a standard ADK `LlmAgent` using `OpenRouter(...)`, with `check_system_status` and `reset_password` tools.
 
-When `ClaudeAgent` runs through the SDK driver, `CodexArchitectureExpert` is exposed to Claude through an in-process MCP tool named `run_adk_subagent`. The root prompt tells Claude to delegate naturally when the user asks about architecture or codebase structure, so in the Web UI you can ask:
+`CodexAgent` uses `@openai/codex-sdk` by default. The SDK controls the local Codex runtime and reuses Codex native authentication/configuration. Use `codex login` for local auth or provide `CODEX_API_KEY` for API-key automation. If optional Codex binary discovery fails, set `CODEX_EXECUTABLE` or `CODEX_CLI_PATH` to an existing `codex` executable.
 
-```txt
-Entiende la arquitectura de este proyecto y explícame los componentes principales. No modifiques archivos.
+For local usage, Claude Code can use the credentials already configured on your machine. The SDK driver passes the minimal native-auth environment (`HOME`, `PATH`, `USER`, `SHELL`, `CLAUDE_CONFIG_DIR`, and `XDG_CONFIG_HOME`) so Claude can find its native config/cache. If needed, set `CLAUDE_CODE_EXECUTABLE` or `CLAUDE_CODE_PATH` in `.env`.
+
+The OpenRouter subagent requires `OPENROUTER_API_KEY` unless your environment already provides it. You can change the model with:
+
+```bash
+OPENROUTER_MODEL=google/gemini-2.0-flash-001
 ```
 
-```txt
-Can you map the architecture of this repository and explain the main runtime flow? Do not modify files.
-```
+The default is `google/gemini-2.0-flash-001` because the free DeepSeek route can return intermittent OpenRouter provider `429` errors during tool-heavy support flows.
 
-For lower-level bridge diagnostics, you can still force the tool call explicitly:
+The bridge does not persist provider secrets. Install and authenticate each runtime using its native documentation when you want that runtime to execute real work.
 
-```txt
-Use run_adk_subagent to delegate to CodexArchitectureExpert. Ask it to inspect this example and explain in 5 bullets how the root delegates architecture analysis. Do not modify files.
-```
-
-`CodexAgent` uses `@openai/codex-sdk` by default. The SDK controls the local Codex runtime and reuses Codex native authentication/configuration. Use `codex login` for local auth or provide `CODEX_API_KEY` for API-key automation. If optional Codex binary discovery fails, set `CODEX_EXECUTABLE` or `CODEX_CLI_PATH` to an existing `codex` executable. If you need the lower-level CLI fallback, pass `new CodexCliDriver()` explicitly.
-
-The bridge does **not** persist provider secrets for you. Install and authenticate each runtime using its native documentation when you want that runtime to execute real work.
-
-### Claude native / OAuth auth
-
-For local usage, Claude Code can use the credentials already configured on your machine. The SDK driver passes the minimal native-auth environment (`HOME`, `PATH`, `USER`, `SHELL`, `CLAUDE_CONFIG_DIR`, and `XDG_CONFIG_HOME`) so Claude can find its native config/cache.
-
-If your package manager blocks the SDK's native binary postinstall, the driver autodetects `PATH`, user-local locations such as `~/.local/bin/claude`, and local optional SDK packages. If needed, set `CLAUDE_CODE_EXECUTABLE` or `CLAUDE_CODE_PATH` in [.env](./.env) to an existing Claude Code executable, for example `/Users/you/.local/bin/claude`.
-
-You can also pass allowlisted env credentials when needed. Common variables are listed in [.env.example](./.env.example), including:
-
-- Claude: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CODE_EXECUTABLE`, `CLAUDE_CODE_PATH`, `CLAUDE_CONFIG_DIR`
-- Codex: `CODEX_API_KEY`, `CODEX_HOME`, `CODEX_EXECUTABLE`, `CODEX_CLI_PATH`
-- Analysis scope: `ARCHITECTURE_ANALYSIS_PATHS` for comma-separated absolute paths outside this example directory
-
-## Important runtime note
+## Important Runtime Note
 
 The `/agents` API is intentionally separate from the root LLM provider API. Normal LLM usage remains under:
 
 ```ts
-import { AIGateway, OpenRouter, OpenAI } from "adk-llm-bridge";
+import { OpenRouter } from "adk-llm-bridge";
 ```
 
 External runtime usage is opt-in:
@@ -124,26 +126,6 @@ External runtime usage is opt-in:
 import { CodexAgent, ClaudeAgent } from "adk-llm-bridge/agents";
 ```
 
-Claude Agent SDK execution is side-effectful and uses the permissions configured on the `ClaudeAgent`; this example defaults to `ask` mode and limits allowed paths to the current working directory plus any paths in `ARCHITECTURE_ANALYSIS_PATHS`. Subagent permissions are inherited conservatively, so `CodexArchitectureExpert` cannot expand beyond the root agent restrictions.
+Claude Agent SDK execution is side-effectful and uses the permissions configured on the `ClaudeAgent`; this example defaults to `ask` mode and limits allowed paths to the current working directory plus any paths in `ARCHITECTURE_ANALYSIS_PATHS`. Subagent permissions are inherited conservatively, so `CodexBillingSpecialist` cannot expand beyond the root agent restrictions.
 
-If you need an explicit Claude CLI fallback instead of the SDK driver, pass `new ClaudeCliDriver()` manually:
-
-```ts
-import { ClaudeAgent, ClaudeCliDriver } from "adk-llm-bridge/agents";
-
-export const rootAgent = new ClaudeAgent({
-  name: "ClaudeCodeRoot",
-  driver: new ClaudeCliDriver(),
-});
-```
-
-For Codex, the equivalent fallback is:
-
-```ts
-import { CodexAgent, CodexCliDriver } from "adk-llm-bridge/agents";
-
-const codexArchitectureExpert = new CodexAgent({
-  name: "CodexArchitectureExpert",
-  driver: new CodexCliDriver(),
-});
-```
+The example `tsconfig.json` maps `adk-llm-bridge`, `adk-llm-bridge/agents`, and `@google/adk` for local type-checking, avoiding duplicate nominal ADK symbols while using a file dependency. The agent imports the ADK runtime ESM build directly so Bun does not execute declaration files at runtime.

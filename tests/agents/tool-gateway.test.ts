@@ -1,4 +1,16 @@
-import { BaseAgent, createEvent, createEventActions, type InvocationContext } from "@google/adk";
+import {
+  BaseAgent,
+  BaseLlm,
+  createEvent,
+  createEventActions,
+  FunctionTool,
+  LlmAgent,
+  PluginManager,
+  type BaseLlmConnection,
+  type InvocationContext,
+  type LlmRequest,
+  type LlmResponse,
+} from "@google/adk";
 import { describe, expect, test } from "bun:test";
 import {
   ExternalAgent,
@@ -36,11 +48,89 @@ class TextAgent extends BaseAgent {
   protected async *runLiveImpl() {}
 }
 
+class FunctionResponseAgent extends BaseAgent {
+  constructor(
+    private readonly eventsToYield: ReturnType<typeof createEvent>[],
+    name = "worker",
+  ) {
+    super({ name });
+  }
+
+  protected async *runAsyncImpl() {
+    yield* this.eventsToYield;
+  }
+
+  protected async *runLiveImpl() {}
+}
+
+class FakeLlm extends BaseLlm {
+  readonly requests: LlmRequest[] = [];
+
+  constructor() {
+    super({ model: "fake-model" });
+  }
+
+  async *generateContentAsync(llmRequest: LlmRequest): AsyncGenerator<LlmResponse, void> {
+    this.requests.push(llmRequest);
+    yield { content: { role: "model", parts: [{ text: "child saw task" }] } };
+  }
+
+  async connect(): Promise<BaseLlmConnection> {
+    throw new Error("FakeLlm.connect is not implemented");
+  }
+}
+
+class ToolCallingFakeLlm extends BaseLlm {
+  readonly requests: LlmRequest[] = [];
+
+  constructor() {
+    super({ model: "fake-tool-model" });
+  }
+
+  async *generateContentAsync(llmRequest: LlmRequest): AsyncGenerator<LlmResponse, void> {
+    this.requests.push(llmRequest);
+    const hasToolResponse = llmRequest.contents.some((content) =>
+      content.parts?.some((part) => part.functionResponse?.name === "lookup_status")
+    );
+    if (hasToolResponse) {
+      yield { content: { role: "model", parts: [{ text: "final after tool" }] } };
+      return;
+    }
+    yield {
+      content: {
+        role: "model",
+        parts: [
+          {
+            functionCall: {
+              id: "call-1",
+              name: "lookup_status",
+              args: { service: "auth" },
+            },
+          },
+        ],
+      },
+    };
+  }
+
+  async connect(): Promise<BaseLlmConnection> {
+    throw new Error("ToolCallingFakeLlm.connect is not implemented");
+  }
+}
+
 function parentContext(agent: BaseAgent): InvocationContext {
   return {
     invocationId: "inv-1",
     agent,
     userContent: { role: "user", parts: [{ text: "parent" }] },
+    session: {
+      id: "session-1",
+      appName: "app",
+      userId: "user",
+      state: {},
+      events: [],
+      lastUpdateTime: 1,
+    },
+    pluginManager: new PluginManager(),
   } as InvocationContext;
 }
 
@@ -148,6 +238,137 @@ describe("ToolGateway", () => {
         },
       },
     });
+  });
+
+  test("passes delegated task to real LlmAgent through child session contents", async () => {
+    const fakeLlm = new FakeLlm();
+    const worker = new LlmAgent({ name: "worker", model: fakeLlm });
+    const root = new TextAgent("root");
+    const context = parentContext(root);
+    context.session.events.push(
+      createEvent({
+        invocationId: "previous",
+        author: "user",
+        content: { role: "user", parts: [{ text: "previous task" }] },
+      }),
+    );
+    const gateway = new ToolGateway({
+      rootAgent: root,
+      subAgents: [worker],
+      parentContext: context,
+    });
+
+    const result = await gateway.runSubAgent({ agentName: "worker", task: "delegated task" });
+
+    expect(result.output).toBe("child saw task");
+    expect(fakeLlm.requests).toHaveLength(1);
+    expect(fakeLlm.requests[0].contents.at(-1)).toEqual({
+      role: "user",
+      parts: [{ text: "delegated task" }],
+    });
+    expect(context.session.events).toHaveLength(1);
+    expect(context.session.events[0].content?.parts?.[0]?.text).toBe("previous task");
+  });
+
+  test("persists child LlmAgent events in the child session for multi-step tool calls", async () => {
+    const fakeLlm = new ToolCallingFakeLlm();
+    const lookupStatus = new FunctionTool({
+      name: "lookup_status",
+      description: "Look up service status.",
+      parameters: {
+        type: "OBJECT",
+        properties: {
+          service: { type: "STRING" },
+        },
+      } as never,
+      execute: () => ({ status: "degraded" }),
+    });
+    const worker = new LlmAgent({ name: "worker", model: fakeLlm, tools: [lookupStatus] });
+    const root = new TextAgent("root");
+    const context = parentContext(root);
+    const gateway = new ToolGateway({
+      rootAgent: root,
+      subAgents: [worker],
+      parentContext: context,
+    });
+
+    const result = await gateway.runSubAgent({ agentName: "worker", task: "check auth" });
+
+    expect(result.output).toBe("final after tool");
+    expect(result.summary.toolCalls).toBe(1);
+    expect(fakeLlm.requests).toHaveLength(2);
+    expect(fakeLlm.requests[1].contents.some((content) =>
+      content.parts?.some((part) => part.functionResponse?.name === "lookup_status")
+    )).toBe(true);
+    expect(context.session.events).toHaveLength(0);
+  });
+
+  test("prefers visible text over function response fallback output", async () => {
+    const worker = new FunctionResponseAgent([
+      createEvent({
+        invocationId: "inv-1",
+        author: "worker",
+        content: {
+          role: "user",
+          parts: [
+            {
+              functionResponse: {
+                id: "call-1",
+                name: "tool",
+                response: { output: "tool output" },
+              },
+            },
+          ],
+        },
+      }),
+      createEvent({
+        invocationId: "inv-1",
+        author: "worker",
+        content: { role: "model", parts: [{ text: "final text" }] },
+      }),
+    ]);
+    const root = new TextAgent("root");
+    const gateway = new ToolGateway({
+      rootAgent: root,
+      subAgents: [worker],
+      parentContext: parentContext(root),
+    });
+
+    const result = await gateway.runSubAgent({ agentName: "worker", task: "do it" });
+
+    expect(result.output).toBe("final text");
+  });
+
+  test("uses function response output when subagent emits no visible text", async () => {
+    const worker = new FunctionResponseAgent([
+      createEvent({
+        invocationId: "inv-1",
+        author: "worker",
+        content: {
+          role: "user",
+          parts: [
+            {
+              functionResponse: {
+                id: "call-1",
+                name: "tool",
+                response: { output: "tool output" },
+              },
+            },
+          ],
+        },
+      }),
+    ]);
+    const root = new TextAgent("root");
+    const gateway = new ToolGateway({
+      rootAgent: root,
+      subAgents: [worker],
+      parentContext: parentContext(root),
+    });
+
+    const result = await gateway.runSubAgent({ agentName: "worker", task: "do it" });
+
+    expect(result.output).toBe("tool output");
+    expect(result.summary.textEvents).toBe(0);
   });
 
   test("propagates subagent state through the synthetic function response", async () => {

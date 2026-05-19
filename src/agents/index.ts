@@ -6,6 +6,20 @@
 
 export { BaseAgent } from "@google/adk";
 
+export {
+  createExternalAgent,
+  createExternalAgentConfig,
+} from "./agent-schema.js";
+export type {
+  ExternalAgentDefinition,
+  ExternalAgentDefinitionConfig,
+  ExternalAgentRuntimeKind,
+} from "./agent-schema.js";
+export {
+  createDefaultExternalAgentDefinitionRegistry,
+  ExternalAgentDefinitionRegistry,
+  externalAgentDefinitionRegistry,
+} from "./agent-registry.js";
 export type { ExternalAgentCredentialProvider } from "./auth/credential-provider.js";
 export { NoopCredentialProvider } from "./auth/credential-provider.js";
 export { EnvCredentialProvider, readAllowedEnv } from "./auth/env.js";
@@ -15,8 +29,10 @@ export type {
   ExternalAgentCredential,
 } from "./auth/schema.js";
 
-export { ClaudeAgent } from "./claude-agent.js";
-export { CodexAgent } from "./codex-agent.js";
+export { CLAUDE_AGENT_DEFINITION, ClaudeAgent } from "./claude-agent.js";
+export type { ClaudeAgentConfig } from "./claude-agent.js";
+export { CODEX_AGENT_DEFINITION, CodexAgent } from "./codex-agent.js";
+export type { CodexAgentConfig } from "./codex-agent.js";
 export {
   CodexCliDriver,
   mapPolicyToCodexArgs,
@@ -69,7 +85,8 @@ export type {
   ExternalAgentDriver,
   ExternalAgentRunRequest,
 } from "./external-agent-driver.js";
-export { GeminiCliAgent } from "./gemini-cli-agent.js";
+export { GEMINI_CLI_AGENT_DEFINITION, GeminiCliAgent } from "./gemini-cli-agent.js";
+export type { GeminiCliAgentConfig } from "./gemini-cli-agent.js";
 
 export {
   mapPermissionModeToPolicy,

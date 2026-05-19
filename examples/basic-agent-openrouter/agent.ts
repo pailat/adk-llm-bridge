@@ -130,7 +130,7 @@ const resetPassword = new FunctionTool({
 
 const billingAgent = new LlmAgent({
   name: "Billing",
-  model: OpenRouter("xiaomi/mimo-v2-flash:free"),
+  model: OpenRouter("~google/gemini-flash-latest"),
   description:
     "Handles billing inquiries, invoice lookups, and refund requests.",
   instruction: `You are a billing specialist assistant. Help customers with:
@@ -144,7 +144,7 @@ Be professional, empathetic, and efficient. Always verify the invoice/account be
 
 const supportAgent = new LlmAgent({
   name: "Support",
-  model: OpenRouter("arcee-ai/trinity-mini:free"),
+  model: OpenRouter("~google/gemini-flash-latest"),
   description:
     "Handles technical support requests, login issues, and system status.",
   instruction: `You are a technical support specialist. Help customers with:
@@ -163,7 +163,7 @@ Be patient and guide users step by step. Check system status when relevant to is
 
 export const rootAgent = new LlmAgent({
   name: "HelpDeskCoordinator",
-  model: OpenRouter("nvidia/nemotron-3-nano-30b-a3b:free"),
+  model: OpenRouter("~google/gemini-flash-latest"),
   description:
     "Main help desk router that directs users to the appropriate specialist.",
   instruction: `You are a help desk coordinator. Your job is to:

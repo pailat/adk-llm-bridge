@@ -13,7 +13,7 @@ Examples of using `adk-llm-bridge` with Google ADK and multiple LLM providers.
 | [basic-agent-xai](./basic-agent-xai) | xAI | Multi-agent HelpDesk with Grok models |
 | [basic-agent-lmstudio](./basic-agent-lmstudio) | LM Studio | Multi-agent HelpDesk with local models |
 | [express-server](./express-server) | AI Gateway | Full HTTP API with tools, state & streaming |
-| [external-agents](./external-agents) | External runtimes | Opt-in `/agents` API shape for Codex, Claude Code, and Gemini CLI sub-agents |
+| [external-agents](./external-agents) | External runtimes + OpenRouter | Hybrid HelpDesk with Claude Code root, Codex subagent, and OpenRouter-backed LlmAgent subagent |
 
 ## Quick Start
 
@@ -90,7 +90,7 @@ bun run web
 
 ### external-agents
 
-Standalone example for the opt-in external agent runtime API with `ClaudeAgent` as the root agent:
+Standalone hybrid HelpDesk example for the opt-in external agent runtime API with `ClaudeAgent` as the root agent:
 
 ```bash
 cd examples/external-agents
@@ -100,7 +100,7 @@ bun install
 bun run web
 ```
 
-Use this example to see `ClaudeAgent`, `CodexAgent`, and `GeminiCliAgent` imported from `adk-llm-bridge/agents` while the root package import remains LLM-focused. `CodexAgent` uses the official `@openai/codex-sdk` driver by default, with `CodexCliDriver` available as an explicit fallback. Provider-specific runtime auth remains owned by each external runtime and is not persisted by the bridge.
+Use this example to see `ClaudeAgent` and `CodexAgent` imported from `adk-llm-bridge/agents` alongside an OpenRouter-backed ADK `LlmAgent` imported from the root `adk-llm-bridge` provider API. `CodexAgent` uses the official `@openai/codex-sdk` driver by default, with `CodexCliDriver` available as an explicit fallback. Provider-specific runtime auth remains owned by each external runtime and is not persisted by the bridge.
 
 ### express-server
 

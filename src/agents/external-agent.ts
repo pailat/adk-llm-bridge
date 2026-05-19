@@ -16,7 +16,8 @@ import type { ExternalAgentPermissionPolicy } from "./permissions/schema.js";
 import type { ExternalAgentProviderDefinition } from "./provider/schema.js";
 import { ToolGateway } from "./tools/tool-gateway.js";
 
-const tracer = trace.getTracer("gcp.vertex.agent", "adk-llm-bridge");
+const tracerName = "gcp.vertex.agent";
+const tracerVersion = "adk-llm-bridge";
 
 function readPermissionOverride(
   context: InvocationContext,
@@ -347,15 +348,17 @@ function traceAdkEvent({
   providerId: string;
 }): void {
   const spanName = spanNameForEvent(event);
+  const tracer = trace.getTracer(tracerName, tracerVersion);
   const span = tracer.startSpan(spanName);
   try {
     const title = readableEventTitle(event);
     const metadata = readCustomMetadata(event);
+    const llmRequest = buildSyntheticAdkLlmRequest(context, providerId);
     const parentToolName = stringValue(metadata.parentToolName);
     const parentToolCallId = stringValue(metadata.parentToolCallId);
     const metadataSubAgentName = stringValue(metadata.subAgentName);
     span.setAttributes({
-      "gen_ai.system": providerId,
+      "gen_ai.system": "gcp.vertex.agent",
       "gen_ai.agent.name": event.author ?? context.agent?.name ?? "external_agent",
       "gen_ai.operation.name": spanName === "call_llm" ? "call_llm" : "execute_tool",
       "gen_ai.request.model": providerId,
@@ -369,7 +372,7 @@ function traceAdkEvent({
       "gcp.vertex.agent.subagent.name": metadataSubAgentName,
       "gcp.vertex.agent.parent_tool.name": parentToolName,
       "gcp.vertex.agent.parent_tool.call_id": parentToolCallId,
-      "gcp.vertex.agent.llm_request": "{}",
+      "gcp.vertex.agent.llm_request": safeJsonSerialize(llmRequest),
       "gcp.vertex.agent.llm_response": safeJsonSerialize(event),
     });
 
@@ -396,6 +399,24 @@ function traceAdkEvent({
   } finally {
     span.end();
   }
+}
+
+function buildSyntheticAdkLlmRequest(
+  context: InvocationContext,
+  providerId: string,
+): { model: string; contents: Content[] } {
+  const userContent = (context as { userContent?: Content }).userContent;
+  return {
+    model: providerId,
+    contents: userContent ? [contentForTrace(userContent)] : [],
+  };
+}
+
+function contentForTrace(content: Content): Content {
+  return {
+    role: content.role,
+    parts: content.parts?.filter((part) => !part.inlineData) ?? [],
+  };
 }
 
 function spanNameForEvent(event: Event): string {

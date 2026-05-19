@@ -28,9 +28,16 @@ describe("agents public exports", () => {
   test("./agents exposes external agent symbols", () => {
     expect(agents.BaseAgent).toBe(BaseAgent);
     expect(agents.ExternalAgent).toBeFunction();
+    expect(agents.createExternalAgent).toBeFunction();
+    expect(agents.createExternalAgentConfig).toBeFunction();
+    expect(agents.ExternalAgentDefinitionRegistry).toBeFunction();
+    expect(agents.externalAgentDefinitionRegistry).toBeDefined();
     expect(agents.CodexAgent).toBeFunction();
     expect(agents.ClaudeAgent).toBeFunction();
     expect(agents.GeminiCliAgent).toBeFunction();
+    expect(agents.CODEX_AGENT_DEFINITION.provider).toBe(agents.CODEX_PROVIDER);
+    expect(agents.CLAUDE_AGENT_DEFINITION.provider).toBe(agents.CLAUDE_PROVIDER);
+    expect(agents.GEMINI_CLI_AGENT_DEFINITION.provider).toBe(agents.GEMINI_CLI_PROVIDER);
     expect(agents.ExternalAgentProviderRegistry).toBeFunction();
     expect(agents.EnvCredentialProvider).toBeFunction();
     expect(agents.NoopCredentialProvider).toBeFunction();

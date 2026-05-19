@@ -4,7 +4,14 @@
  * SPDX-License-Identifier: MIT
  */
 
-import { createEvent, createEventActions, type BaseAgent, type Event, type InvocationContext } from "@google/adk";
+import {
+  createEvent,
+  createEventActions,
+  type BaseAgent,
+  type Event,
+  type InvocationContext,
+  type Session,
+} from "@google/adk";
 import type { Content } from "@google/genai";
 import { deriveSubAgentPermissionPolicy } from "../permissions/inheritance.js";
 import type { ExternalAgentPermissionPolicy } from "../permissions/schema.js";
@@ -87,6 +94,7 @@ export class ToolGateway {
     const startedAt = Date.now();
     const events: Event[] = [];
     const text: string[] = [];
+    const fallbackOutput: string[] = [];
     const stateDelta: Record<string, unknown> = {};
     let textEvents = 0;
     let toolCalls = 0;
@@ -94,7 +102,9 @@ export class ToolGateway {
     let error: string | undefined;
 
     try {
-      for await (const event of agent.runAsync(this.createChildContext(agent, input.task))) {
+      const childContext = this.createChildContext(agent, input.task);
+      for await (const event of agent.runAsync(childContext)) {
+        childContext.session.events.push(event);
         events.push(event);
         if (this.#exposeSubAgentEvents) {
           this.emit(enrichSubAgentEvent({
@@ -109,6 +119,11 @@ export class ToolGateway {
         if (visible) {
           textEvents++;
           text.push(visible);
+        } else {
+          const fallback = extractFallbackOutput(event);
+          if (fallback) {
+            fallbackOutput.push(fallback);
+          }
         }
         toolCalls += countFunctionCalls(event);
         if (event.errorMessage) {
@@ -123,7 +138,7 @@ export class ToolGateway {
 
     const result: RunSubAgentResult = {
       agentName: agent.name,
-      output: text.join("\n"),
+      output: text.length > 0 ? text.join("\n") : fallbackOutput.join("\n"),
       events: events.length,
       summary: {
         events: events.length,
@@ -146,11 +161,20 @@ export class ToolGateway {
   }
 
   private createChildContext(agent: BaseAgent, task: string): InvocationContext {
+    const branch = childBranch(this.#parentContext.branch, agent.name);
+    const userContent = taskToContent(task);
+    const syntheticUserEvent = createDelegatedTaskEvent({
+      invocationId: this.#parentContext.invocationId,
+      branch,
+      content: userContent,
+    });
+
     return {
       ...this.#parentContext,
       agent: this.#rootAgent,
-      branch: childBranch(this.#parentContext.branch, agent.name),
-      userContent: taskToContent(task),
+      branch,
+      userContent,
+      session: createChildSessionView(this.#parentContext.session, syntheticUserEvent),
       externalAgentPermissionOverride: deriveSubAgentPermissionPolicy(
         this.#parentPermissions,
         readAgentPermissions(agent),
@@ -233,6 +257,39 @@ function childBranch(parentBranch: string | undefined, agentName: string): strin
 
 function taskToContent(task: string): Content {
   return { role: "user", parts: [{ text: task }] };
+}
+
+function createDelegatedTaskEvent({
+  invocationId,
+  branch,
+  content,
+}: {
+  invocationId: string;
+  branch: string;
+  content: Content;
+}): Event {
+  return createEvent({
+    invocationId,
+    author: "user",
+    branch,
+    content,
+    customMetadata: {
+      externalAgent: true,
+      delegatedTask: true,
+      toolName: "run_adk_subagent",
+    },
+  });
+}
+
+function createChildSessionView(parentSession: Session | undefined, syntheticUserEvent: Event): Session {
+  return {
+    id: parentSession?.id ?? "tool-gateway-child-session",
+    appName: parentSession?.appName ?? "tool-gateway",
+    userId: parentSession?.userId ?? "tool-gateway-user",
+    state: parentSession?.state ?? {},
+    events: [...(parentSession?.events ?? []), syntheticUserEvent],
+    lastUpdateTime: parentSession?.lastUpdateTime ?? Date.now(),
+  };
 }
 
 function readAgentPermissions(agent: BaseAgent): ExternalAgentPermissionPolicy | undefined {
@@ -334,4 +391,42 @@ function extractVisibleText(event: Event): string | undefined {
     .filter((part): part is string => typeof part === "string" && part.length > 0)
     .join("");
   return text.length > 0 ? text : undefined;
+}
+
+function extractFallbackOutput(event: Event): string | undefined {
+  if (event.errorMessage) {
+    return event.errorMessage;
+  }
+
+  const parts = event.content?.parts;
+  if (!parts) {
+    return undefined;
+  }
+
+  const output = parts
+    .map((part) => part.functionResponse?.response)
+    .map(stringifyUsefulOutput)
+    .filter((value): value is string => Boolean(value));
+
+  return output.length > 0 ? output.join("\n") : undefined;
+}
+
+function stringifyUsefulOutput(value: unknown): string | undefined {
+  if (typeof value === "string") {
+    return value;
+  }
+
+  if (value && typeof value === "object") {
+    const output = (value as { output?: unknown }).output;
+    if (typeof output === "string" && output.length > 0) {
+      return output;
+    }
+  }
+
+  try {
+    const serialized = JSON.stringify(value);
+    return serialized && serialized !== "{}" ? serialized : undefined;
+  } catch {
+    return String(value);
+  }
 }

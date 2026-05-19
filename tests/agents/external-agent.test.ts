@@ -7,6 +7,7 @@ import {
   Runner,
   type InvocationContext,
 } from "@google/adk";
+import { trace } from "@opentelemetry/api";
 import {
   ExternalAgent,
   type ExternalAgentDriver,
@@ -56,6 +57,38 @@ class DelegatingDriver implements ExternalAgentDriver {
     });
     yield { type: "output", content: result?.output ?? "missing" };
   }
+}
+
+type CapturedSpan = {
+  name: string;
+  attributes: Record<string, unknown>;
+};
+
+function installTraceCapture(): CapturedSpan[] {
+  const spans: CapturedSpan[] = [];
+  trace.disable();
+  trace.setGlobalTracerProvider({
+    getTracer() {
+      return {
+        startSpan(name: string) {
+          const span = { name, attributes: {} };
+          spans.push(span);
+          return {
+            setAttributes(attributes: Record<string, unknown>) {
+              Object.assign(span.attributes, attributes);
+              return this;
+            },
+            setAttribute(key: string, value: unknown) {
+              span.attributes[key] = value;
+              return this;
+            },
+            end() {},
+          };
+        },
+      };
+    },
+  } as never);
+  return spans;
 }
 
 async function collect(agent: ExternalAgent, context: Partial<InvocationContext> = {}) {
@@ -155,6 +188,31 @@ describe("ExternalAgent ADK event formatting", () => {
 
     expect(events).toHaveLength(1);
     expect(events[0].content?.parts?.[0]?.text).toBe("Visible");
+  });
+
+  test("traces synthetic ADK llm_request with native ADK model attributes", async () => {
+    const spans = installTraceCapture();
+    const agent = new ExternalAgent({
+      name: "codex_agent",
+      provider: CODEX_PROVIDER,
+      driver: new StaticDriver([{ type: "output", content: "Hello" }]),
+    });
+
+    await collect(agent, {
+      userContent: { role: "user", parts: [{ text: "Review this diff" }] },
+    });
+
+    expect(spans).toHaveLength(1);
+    expect(spans[0].attributes).toMatchObject({
+      "gen_ai.system": "gcp.vertex.agent",
+      "gen_ai.request.model": CODEX_PROVIDER.id,
+      "gcp.vertex.agent.provider_id": CODEX_PROVIDER.id,
+      "gcp.vertex.agent.event_title": "codex_agent: final response",
+    });
+    expect(JSON.parse(spans[0].attributes["gcp.vertex.agent.llm_request"] as string)).toEqual({
+      model: CODEX_PROVIDER.id,
+      contents: [{ role: "user", parts: [{ text: "Review this diff" }] }],
+    });
   });
 
   test("renders errors using ADK errorCode and errorMessage fields", async () => {
