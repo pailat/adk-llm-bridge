@@ -4,7 +4,13 @@
  * SPDX-License-Identifier: MIT
  */
 
-import { BaseAgent, createEvent, type Event, type InvocationContext } from "@google/adk";
+import {
+  BaseAgent,
+  createEvent,
+  createEventActions,
+  type Event,
+  type InvocationContext,
+} from "@google/adk";
 import type { Content } from "@google/genai";
 import { trace } from "@opentelemetry/api";
 import type { ExternalAgentCredentialProvider } from "./auth/credential-provider.js";
@@ -202,6 +208,15 @@ export class ExternalAgent extends BaseAgent {
           customMetadata: metadataForExternalEvent(this.name, event),
           timestamp: event.timestamp,
         });
+      case "state_delta":
+        return createEvent({
+          invocationId: context.invocationId,
+          author: this.name,
+          branch: context.branch,
+          actions: createEventActions({ stateDelta: event.stateDelta }),
+          customMetadata: metadataForExternalEvent(this.name, event),
+          timestamp: event.timestamp,
+        });
       case "started":
       case "completed":
         return undefined;
@@ -273,6 +288,8 @@ function readableExternalEventTitle(agentName: string, event: ExternalAgentEvent
       return `${agentName}: ${event.name} call${toolDetail(event.input)}`;
     case "tool_result":
       return `${agentName}: ${event.name} response${toolDetail(event.result)}`;
+    case "state_delta":
+      return `${agentName}: state update`;
     case "started":
       return `${agentName}: started`;
     case "completed":

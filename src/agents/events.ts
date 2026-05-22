@@ -11,6 +11,7 @@ export type ExternalAgentEvent =
   | ExternalAgentToolCallEvent
   | ExternalAgentToolResultEvent
   | ExternalAgentErrorEvent
+  | ExternalAgentStateDeltaEvent
   | ExternalAgentCompletedEvent;
 
 export interface ExternalAgentStartedEvent {
@@ -57,6 +58,12 @@ export interface ExternalAgentErrorEvent {
   timestamp?: number;
 }
 
+export interface ExternalAgentStateDeltaEvent {
+  type: "state_delta";
+  stateDelta: Record<string, unknown>;
+  timestamp?: number;
+}
+
 export interface ExternalAgentCompletedEvent {
   type: "completed";
   exitCode?: number;
@@ -76,6 +83,7 @@ export function isExternalAgentEvent(value: unknown): value is ExternalAgentEven
     type === "tool_call" ||
     type === "tool_result" ||
     type === "error" ||
+    type === "state_delta" ||
     type === "completed"
   );
 }
