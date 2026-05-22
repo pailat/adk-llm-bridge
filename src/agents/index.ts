@@ -49,6 +49,15 @@ export {
 } from "./driver/codex-sdk.js";
 export type { CodexSdkDriverConfig } from "./driver/codex-sdk.js";
 export {
+  summarizeHistoryForColdStart,
+  userContentToCodexInput,
+} from "./driver/codex-input-mapper.js";
+export type {
+  CodexInputMapperOptions,
+  CodexInputMapping,
+  CodexInputPart,
+} from "./driver/codex-input-mapper.js";
+export {
   ClaudeAgentSdkDriver,
   mapPolicyToClaudeSdkPermission,
 } from "./driver/claude-agent-sdk.js";
@@ -80,7 +89,16 @@ export type {
 export { SubprocessJsonlDriver } from "./driver/subprocess-jsonl.js";
 export type { SubprocessJsonlDriverConfig } from "./driver/subprocess-jsonl.js";
 
-export type { ExternalAgentEvent } from "./events.js";
+export type {
+  ExternalAgentCompletedEvent,
+  ExternalAgentErrorEvent,
+  ExternalAgentEvent,
+  ExternalAgentOutputEvent,
+  ExternalAgentStartedEvent,
+  ExternalAgentStateDeltaEvent,
+  ExternalAgentToolCallEvent,
+  ExternalAgentToolResultEvent,
+} from "./events.js";
 export { isExternalAgentEvent } from "./events.js";
 export type { ExternalAgentConfig } from "./external-agent.js";
 export { ExternalAgent } from "./external-agent.js";

@@ -7,14 +7,17 @@
 import { existsSync } from "node:fs";
 import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { Content } from "@google/genai";
 import type { ExternalAgentEvent } from "../events.js";
 import type { ExternalAgentRunRequest } from "../external-agent-driver.js";
 import type { ExternalAgentPermissionPolicy } from "../permissions/schema.js";
 import { CODEX_PROVIDER } from "../provider/codex.js";
+import { collectContents } from "../runtime/content-collector.js";
 import {
-  collectContents,
-  flattenContentsToPrompt,
-} from "../runtime/content-collector.js";
+  type CodexInputPart,
+  summarizeHistoryForColdStart,
+  userContentToCodexInput,
+} from "./codex-input-mapper.js";
 
 type CodexSdkApprovalMode = "never" | "on-request" | "on-failure" | "untrusted";
 type CodexSdkSandboxMode = "read-only" | "workspace-write" | "danger-full-access";
@@ -56,9 +59,12 @@ type CodexSdkTurnOptions = {
 
 type CodexSdkThreadEvent = Record<string, unknown>;
 
+type CodexSdkInput = string | CodexInputPart[];
+
 type CodexSdkThreadLike = {
+  readonly id?: string | null;
   runStreamed(
-    input: string,
+    input: CodexSdkInput,
     options?: CodexSdkTurnOptions,
   ): Promise<{ events: AsyncGenerator<CodexSdkThreadEvent> }>;
 };
@@ -94,6 +100,12 @@ export interface CodexSdkDriverConfig {
   webSearchMode?: CodexSdkWebSearchMode;
   webSearchEnabled?: boolean;
   outputSchema?: Record<string, unknown>;
+  /**
+   * Computes the `session.state` key used to persist Codex thread IDs so a
+   * subsequent invocation can call `resumeThread(savedId)` instead of starting
+   * a fresh thread. Defaults to `"codex_thread:" + agentName`.
+   */
+  threadStateKey?: (agentName: string) => string;
 }
 
 export class CodexSdkDriver {
@@ -112,6 +124,7 @@ export class CodexSdkDriver {
   readonly #webSearchMode?: CodexSdkWebSearchMode;
   readonly #webSearchEnabled?: boolean;
   readonly #outputSchema?: Record<string, unknown>;
+  readonly #threadStateKey: (agentName: string) => string;
 
   constructor(config: CodexSdkDriverConfig = {}) {
     this.#sdk = config.sdk;
@@ -128,6 +141,8 @@ export class CodexSdkDriver {
     this.#webSearchMode = config.webSearchMode;
     this.#webSearchEnabled = config.webSearchEnabled;
     this.#outputSchema = config.outputSchema;
+    this.#threadStateKey =
+      config.threadStateKey ?? ((agentName) => `codex_thread:${agentName}`);
   }
 
   capabilities() {
@@ -149,21 +164,69 @@ export class CodexSdkDriver {
 
     let completed = false;
     let failed = false;
+    const pendingEvents: ExternalAgentEvent[] = [];
+    let cleanup: () => Promise<void> = async () => {};
     try {
       const sdk = await this.loadSdk(request);
-      const thread = sdk.startThread(this.buildThreadOptions(request));
-      const prompt = buildPrompt(request);
-      const { events } = await thread.runStreamed(prompt, {
-        signal: request.context.abortSignal,
+      const threadOptions = this.buildThreadOptions(request);
+      const agentName = request.agent?.name ?? request.context?.agent?.name;
+      const stateKey = agentName ? this.#threadStateKey(agentName) : undefined;
+      const savedThreadId = readSavedThreadId(request, stateKey);
+      const contents = safeCollectContents(request);
+      const lastContent = contents[contents.length - 1];
+
+      let thread: CodexSdkThreadLike;
+      let input: CodexSdkInput;
+
+      if (savedThreadId) {
+        thread = sdk.resumeThread(savedThreadId, threadOptions);
+        const mapping = mapLastContentOrFallback(lastContent, request);
+        cleanup = mapping.cleanup;
+        input = applyInstruction(request.instruction, mapping.input);
+      } else if (contents.length > 1 && lastContent) {
+        thread = sdk.startThread(threadOptions);
+        const mapping = userContentToCodexInput(lastContent);
+        cleanup = mapping.cleanup;
+        const transcript = summarizeHistoryForColdStart(contents);
+        input = applyInstruction(
+          request.instruction,
+          prependColdStartTranscript(mapping.input, transcript),
+        );
+      } else {
+        thread = sdk.startThread(threadOptions);
+        const mapping = mapLastContentOrFallback(lastContent, request);
+        cleanup = mapping.cleanup;
+        input = applyInstruction(request.instruction, mapping.input);
+      }
+
+      const { events } = await thread.runStreamed(input, {
+        signal: request.context?.abortSignal,
         outputSchema: this.#outputSchema,
       });
       for await (const event of events) {
         for (const normalized of this.normalizeEvent(event)) {
           if (normalized.type === "completed") {
-            completed = true;
+            pendingEvents.push(normalized);
+            continue;
           }
           yield normalized;
         }
+      }
+
+      const newThreadId = thread.id ?? undefined;
+      if (stateKey && newThreadId && newThreadId !== savedThreadId) {
+        yield {
+          type: "state_delta",
+          stateDelta: { [stateKey]: newThreadId },
+          timestamp: Date.now(),
+        };
+      }
+
+      for (const event of pendingEvents) {
+        if (event.type === "completed") {
+          completed = true;
+        }
+        yield event;
       }
     } catch (error) {
       failed = true;
@@ -174,6 +237,12 @@ export class CodexSdkDriver {
         recoverable: true,
         timestamp: Date.now(),
       };
+    } finally {
+      try {
+        await cleanup();
+      } catch {
+        // best-effort cleanup; never let tmp deletion mask the real error.
+      }
     }
 
     if (!completed) {
@@ -553,22 +622,75 @@ function normalizeCompletedItem(
   return [];
 }
 
-function buildPrompt(request: ExternalAgentRunRequest): string {
-  const body = (() => {
-    try {
-      const contents = collectContents(request.context);
-      if (contents.length > 0) {
-        return flattenContentsToPrompt(contents);
-      }
-    } catch {
-      // fall through to legacy extractor
-    }
-    return extractContextText(request.context);
-  })();
-  const parts = [request.instruction, body].filter(
-    (part): part is string => typeof part === "string" && part.length > 0,
-  );
-  return parts.join("\n\n");
+function safeCollectContents(request: ExternalAgentRunRequest): Content[] {
+  try {
+    return collectContents(request.context);
+  } catch {
+    return [];
+  }
+}
+
+function mapLastContentOrFallback(
+  lastContent: Content | undefined,
+  request: ExternalAgentRunRequest,
+): { input: CodexSdkInput; cleanup: () => Promise<void> } {
+  if (lastContent) {
+    return userContentToCodexInput(lastContent);
+  }
+  // No content collected — fall back to the legacy text extractor so synthetic
+  // contexts (e.g. unit tests with just `userContent: {...}`) keep working.
+  const text = extractContextText(request.context) ?? "";
+  return { input: text, cleanup: async () => {} };
+}
+
+function applyInstruction(
+  instruction: string | undefined,
+  input: CodexSdkInput,
+): CodexSdkInput {
+  if (!instruction || instruction.length === 0) {
+    return input;
+  }
+  if (typeof input === "string") {
+    return input.length > 0 ? `${instruction}\n\n${input}` : instruction;
+  }
+  return [{ type: "text", text: instruction }, ...input];
+}
+
+function prependColdStartTranscript(
+  input: CodexSdkInput,
+  transcript: string,
+): CodexSdkInput {
+  if (!transcript || transcript.length === 0) {
+    return input;
+  }
+  if (typeof input === "string") {
+    return input.length > 0 ? `${transcript}\n\n${input}` : transcript;
+  }
+  // Array input. If the first part is text, fold the transcript into it;
+  // otherwise (e.g. starts with an image), insert a synthetic text part.
+  const first = input[0];
+  if (first && first.type === "text") {
+    return [
+      { type: "text", text: `${transcript}\n\n${first.text}` },
+      ...input.slice(1),
+    ];
+  }
+  return [{ type: "text", text: transcript }, ...input];
+}
+
+function readSavedThreadId(
+  request: ExternalAgentRunRequest,
+  stateKey: string | undefined,
+): string | undefined {
+  if (!stateKey) return undefined;
+  const session = (request.context as { session?: { state?: unknown } } | undefined)
+    ?.session;
+  const state = session?.state;
+  if (!state || typeof state !== "object") {
+    return undefined;
+  }
+  const value = (state as Record<string, unknown>)[stateKey];
+  return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
 function extractContextText(context: unknown): string | undefined {

@@ -388,6 +388,204 @@ describe("CodexSdkDriver", () => {
     ]);
   });
 
+  test("first invocation emits state_delta carrying the new thread id", async () => {
+    let startCalls = 0;
+    let resumeCalls = 0;
+    let runInput: unknown;
+    const driver = new CodexSdkDriver({
+      sdk: {
+        startThread: () => {
+          startCalls++;
+          return {
+            id: "thread-test-123",
+            runStreamed: async (input) => {
+              runInput = input;
+              return {
+                events: sdkEvents([
+                  { type: "thread.started", thread_id: "thread-test-123" },
+                  {
+                    type: "item.completed",
+                    item: { id: "item-1", type: "agent_message", text: "Hi" },
+                  },
+                  { type: "turn.completed", usage: { input_tokens: 1 } },
+                ]),
+              };
+            },
+          } as never;
+        },
+        resumeThread: () => {
+          resumeCalls++;
+          throw new Error("should not resume");
+        },
+      },
+    });
+
+    const session = { state: {} as Record<string, unknown>, events: [] };
+    const events = [];
+    for await (const event of driver.run({
+      provider: CODEX_PROVIDER,
+      agent: { name: "codex" } as never,
+      context: {
+        agent: { name: "codex" },
+        session,
+        userContent: { role: "user", parts: [{ text: "hello" }] },
+      } as never,
+      permissions: { mode: "read-only" },
+    })) {
+      events.push(event);
+    }
+
+    expect(startCalls).toBe(1);
+    expect(resumeCalls).toBe(0);
+    expect(runInput).toBe("hello");
+    const stateDeltaEvent = events.find((e) => e.type === "state_delta");
+    expect(stateDeltaEvent).toEqual({
+      type: "state_delta",
+      stateDelta: { "codex_thread:codex": "thread-test-123" },
+      timestamp: expect.any(Number),
+    });
+
+    // Drive the state_delta through ExternalAgent and confirm the resulting
+    // ADK Event carries actions.stateDelta so ADK's session machinery would
+    // apply the delta.
+    const { ExternalAgent } = await import(
+      "../../../src/agents/external-agent.js"
+    );
+    const adkEvent = new (class extends ExternalAgent {
+      expose(ev: unknown, ctx: unknown) {
+        return (this as unknown as {
+          toAdkEvent: (e: unknown, c: unknown) => unknown;
+        }).toAdkEvent(ev, ctx);
+      }
+    })({ name: "codex", provider: CODEX_PROVIDER }).expose(stateDeltaEvent, {
+      invocationId: "inv-1",
+      branch: "root",
+    });
+    expect((adkEvent as { actions?: { stateDelta?: unknown } }).actions?.stateDelta)
+      .toEqual({ "codex_thread:codex": "thread-test-123" });
+  });
+
+  test("second invocation resumes the saved thread and sends only the current turn", async () => {
+    let startCalls = 0;
+    let resumeId: string | undefined;
+    let runInput: unknown;
+    const driver = new CodexSdkDriver({
+      sdk: {
+        startThread: () => {
+          startCalls++;
+          throw new Error("should not start a new thread");
+        },
+        resumeThread: (id) => {
+          resumeId = id;
+          return {
+            id,
+            runStreamed: async (input) => {
+              runInput = input;
+              return {
+                events: sdkEvents([
+                  {
+                    type: "item.completed",
+                    item: { id: "item-2", type: "agent_message", text: "ok" },
+                  },
+                  { type: "turn.completed", usage: { input_tokens: 1 } },
+                ]),
+              };
+            },
+          } as never;
+        },
+      },
+    });
+
+    const events = [];
+    for await (const event of driver.run({
+      provider: CODEX_PROVIDER,
+      agent: { name: "codex" } as never,
+      context: {
+        agent: { name: "codex" },
+        session: {
+          state: { "codex_thread:codex": "saved-thread-9" },
+          events: [
+            {
+              author: "user",
+              content: { role: "user", parts: [{ text: "first question" }] },
+            },
+            {
+              author: "codex",
+              content: { role: "model", parts: [{ text: "earlier reply" }] },
+            },
+          ],
+        },
+        userContent: { role: "user", parts: [{ text: "follow-up" }] },
+      } as never,
+      permissions: { mode: "read-only" },
+    })) {
+      events.push(event);
+    }
+
+    expect(startCalls).toBe(0);
+    expect(resumeId).toBe("saved-thread-9");
+    expect(runInput).toBe("follow-up");
+    expect(String(runInput)).not.toContain("first question");
+    expect(String(runInput)).not.toContain("earlier reply");
+    expect(events.some((e) => e.type === "state_delta")).toBe(false);
+  });
+
+  test("cold start with history prepends transcript before the current turn", async () => {
+    let capturedInput: unknown;
+    const driver = new CodexSdkDriver({
+      sdk: {
+        startThread: () => ({
+          id: "thread-cold-1",
+          runStreamed: async (input) => {
+            capturedInput = input;
+            return {
+              events: sdkEvents([{ type: "turn.completed" }]),
+            };
+          },
+        }) as never,
+        resumeThread: () => {
+          throw new Error("not used");
+        },
+      },
+    });
+
+    for await (const _event of driver.run({
+      provider: CODEX_PROVIDER,
+      agent: { name: "codex" } as never,
+      context: {
+        agent: { name: "codex" },
+        branch: "root",
+        session: {
+          state: {},
+          events: [
+            {
+              author: "user",
+              content: { role: "user", parts: [{ text: "first question" }] },
+            },
+            {
+              author: "codex",
+              content: { role: "model", parts: [{ text: "earlier reply" }] },
+            },
+          ],
+        },
+        userContent: { role: "user", parts: [{ text: "follow-up question" }] },
+      } as never,
+      permissions: { mode: "read-only" },
+    })) {
+      void _event;
+    }
+
+    expect(typeof capturedInput).toBe("string");
+    const text = String(capturedInput);
+    expect(text).toContain("first question");
+    expect(text).toContain("earlier reply");
+    expect(text).toContain("follow-up question");
+    // Transcript prefix must precede the current turn text.
+    expect(text.indexOf("first question")).toBeLessThan(
+      text.indexOf("follow-up question"),
+    );
+  });
+
   test("normalizes failures and item errors", () => {
     const driver = new CodexSdkDriver();
 
