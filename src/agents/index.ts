@@ -53,6 +53,12 @@ export {
   mapPolicyToClaudeSdkPermission,
 } from "./driver/claude-agent-sdk.js";
 export type { ClaudeAgentSdkDriverConfig } from "./driver/claude-agent-sdk.js";
+export { contentsToSdkMessages } from "./driver/claude-message-mapper.js";
+export type {
+  ClaudeContentBlockParam,
+  ClaudeMessageParam,
+  SDKUserMessage,
+} from "./driver/claude-message-mapper.js";
 export { ClaudeCliDriver, mapClaudePermissionArgs } from "./driver/claude-cli.js";
 export type {
   ClaudeCliDriverConfig,

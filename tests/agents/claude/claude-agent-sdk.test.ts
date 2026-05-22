@@ -12,6 +12,27 @@ import { CLAUDE_PROVIDER } from "../../../src/agents/provider/schema.js";
 import { CODEX_PROVIDER } from "../../../src/agents/provider/schema.js";
 import { ExternalAgent } from "../../../src/agents/external-agent.js";
 
+async function materializePrompt(prompt: unknown): Promise<string> {
+  if (typeof prompt === "string") {
+    return prompt;
+  }
+  if (prompt && typeof prompt === "object" && Symbol.asyncIterator in prompt) {
+    const parts: string[] = [];
+    for await (const message of prompt as AsyncIterable<{
+      message?: { content?: Array<{ type: string; text?: string }> };
+    }>) {
+      const blocks = message.message?.content ?? [];
+      for (const block of blocks) {
+        if (block.type === "text" && typeof block.text === "string") {
+          parts.push(block.text);
+        }
+      }
+    }
+    return parts.join("\n");
+  }
+  return String(prompt);
+}
+
 describe("ClaudeAgentSdkDriver", () => {
   test("ClaudeAgent uses the SDK driver by default", () => {
     const agent = new ClaudeAgent({ name: "claude" });
@@ -240,11 +261,11 @@ describe("ClaudeAgentSdkDriver", () => {
   });
 
   test("buildPrompt includes prior session history alongside userContent", async () => {
-    let capturedPrompt = "";
+    let capturedPrompt: unknown;
     const driver = new ClaudeAgentSdkDriver({
       sdk: {
         query: ({ prompt }) => {
-          capturedPrompt = String(prompt);
+          capturedPrompt = prompt;
           return (async function* () {
             yield { type: "result", subtype: "success", result: "ok" } as never;
           })() as never;
@@ -277,9 +298,162 @@ describe("ClaudeAgentSdkDriver", () => {
       void _event;
     }
 
-    expect(capturedPrompt).toContain("first question");
-    expect(capturedPrompt).toContain("earlier reply");
-    expect(capturedPrompt).toContain("follow-up question");
+    const flattened = await materializePrompt(capturedPrompt);
+    expect(flattened).toContain("first question");
+    expect(flattened).toContain("earlier reply");
+    expect(flattened).toContain("follow-up question");
+  });
+
+  test("text-only single-turn invocation passes a string prompt", async () => {
+    let capturedPrompt: unknown;
+    const driver = new ClaudeAgentSdkDriver({
+      sdk: {
+        query: ({ prompt }) => {
+          capturedPrompt = prompt;
+          return (async function* () {
+            yield { type: "result", subtype: "success", result: "ok" } as never;
+          })() as never;
+        },
+      },
+    });
+
+    for await (const _event of driver.run({
+      provider: CLAUDE_PROVIDER,
+      context: {
+        agent: { name: "claude" },
+        branch: "root",
+        session: { events: [] },
+        userContent: { role: "user", parts: [{ text: "hello" }] },
+      } as never,
+      permissions: { mode: "ask" },
+    })) {
+      void _event;
+    }
+
+    expect(typeof capturedPrompt).toBe("string");
+    expect(capturedPrompt).toContain("hello");
+  });
+
+  test("multimodal history yields async iterable of SDK user messages", async () => {
+    let capturedPrompt: unknown;
+    const driver = new ClaudeAgentSdkDriver({
+      sdk: {
+        query: ({ prompt }) => {
+          capturedPrompt = prompt;
+          return (async function* () {
+            yield { type: "result", subtype: "success", result: "ok" } as never;
+          })() as never;
+        },
+      },
+    });
+
+    for await (const _event of driver.run({
+      provider: CLAUDE_PROVIDER,
+      context: {
+        agent: { name: "claude" },
+        branch: "root",
+        session: {
+          events: [
+            {
+              author: "user",
+              content: {
+                role: "user",
+                parts: [
+                  { text: "look at this" },
+                  { inlineData: { mimeType: "image/png", data: "AAAA" } },
+                ],
+              },
+            },
+          ],
+        },
+        userContent: {
+          role: "user",
+          parts: [
+            { text: "look at this" },
+            { inlineData: { mimeType: "image/png", data: "AAAA" } },
+          ],
+        },
+      } as never,
+      permissions: { mode: "ask" },
+    })) {
+      void _event;
+    }
+
+    expect(typeof capturedPrompt).not.toBe("string");
+    expect(capturedPrompt).toBeDefined();
+    const iterable = capturedPrompt as AsyncIterable<{
+      message: { content: Array<{ type: string; source?: { media_type?: string } }> };
+    }>;
+    const collected: Array<{
+      message: { content: Array<{ type: string; source?: { media_type?: string } }> };
+    }> = [];
+    for await (const message of iterable) {
+      collected.push(message);
+    }
+    expect(collected.length).toBeGreaterThan(0);
+    const allBlocks = collected.flatMap((m) => m.message.content);
+    const imageBlock = allBlocks.find((b) => b.type === "image");
+    expect(imageBlock).toBeDefined();
+    expect(imageBlock?.source?.media_type).toBe("image/png");
+  });
+
+  test("resumeSessionId sends only the current turn and forwards resume option", async () => {
+    let capturedPrompt: unknown;
+    let capturedOptions: { resume?: string } | undefined;
+    const driver = new ClaudeAgentSdkDriver({
+      resumeSessionId: "session-xyz",
+      sdk: {
+        query: ({ prompt, options }) => {
+          capturedPrompt = prompt;
+          capturedOptions = options as { resume?: string };
+          return (async function* () {
+            yield { type: "result", subtype: "success", result: "ok" } as never;
+          })() as never;
+        },
+      },
+    });
+
+    for await (const _event of driver.run({
+      provider: CLAUDE_PROVIDER,
+      context: {
+        agent: { name: "claude" },
+        branch: "root",
+        session: {
+          events: [
+            {
+              author: "user",
+              content: { role: "user", parts: [{ text: "first" }] },
+            },
+            {
+              author: "claude",
+              content: { role: "model", parts: [{ text: "reply" }] },
+            },
+          ],
+        },
+        userContent: { role: "user", parts: [{ text: "follow-up" }] },
+      } as never,
+      permissions: { mode: "ask" },
+    })) {
+      void _event;
+    }
+
+    expect(capturedOptions?.resume).toBe("session-xyz");
+    expect(typeof capturedPrompt).not.toBe("string");
+    const iterable = capturedPrompt as AsyncIterable<{
+      message: { content: Array<{ type: string; text?: string }> };
+    }>;
+    const collected: Array<{
+      message: { content: Array<{ type: string; text?: string }> };
+    }> = [];
+    for await (const message of iterable) {
+      collected.push(message);
+    }
+    expect(collected).toHaveLength(1);
+    const text = collected[0].message.content
+      .filter((b) => b.type === "text")
+      .map((b) => b.text)
+      .join("");
+    expect(text).toBe("follow-up");
   });
 
   test("run uses injected SDK without importing the real package", async () => {

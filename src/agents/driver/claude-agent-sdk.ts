@@ -16,6 +16,10 @@ import {
   collectContents,
   flattenContentsToPrompt,
 } from "../runtime/content-collector.js";
+import {
+  contentsToSdkMessages,
+  type SDKUserMessage,
+} from "./claude-message-mapper.js";
 
 type ClaudeAgentSdkPermissionMode =
   | "default"
@@ -40,6 +44,8 @@ type ClaudeAgentSdkOptions = {
   allowDangerouslySkipPermissions?: true;
   mcpServers?: Record<string, unknown>;
   allowedTools?: string[];
+  resume?: string;
+  forkSession?: boolean;
 };
 
 type ClaudeAgentSdkMessage = Record<string, unknown>;
@@ -84,6 +90,18 @@ export interface ClaudeAgentSdkDriverConfig {
   maxTurns?: number;
   model?: string;
   debugEvents?: boolean;
+  /**
+   * If set, the driver passes this session id to the Claude SDK
+   * `options.resume` field and sends only the current user turn (not the full
+   * ADK history) so the SDK appends to the resumed session instead of
+   * re-feeding history that the SDK already has on disk.
+   */
+  resumeSessionId?: string;
+  /**
+   * Pass-through for the Claude SDK `options.forkSession` flag. Use with
+   * `resumeSessionId` to fork rather than continue the previous session.
+   */
+  forkSession?: boolean;
 }
 
 export class ClaudeAgentSdkDriver {
@@ -97,6 +115,8 @@ export class ClaudeAgentSdkDriver {
   readonly #maxTurns?: number;
   readonly #model?: string;
   readonly #debugEvents: boolean;
+  readonly #resumeSessionId?: string;
+  readonly #forkSession?: boolean;
 
   constructor(config: ClaudeAgentSdkDriverConfig = {}) {
     this.#sdk = config.sdk;
@@ -108,11 +128,13 @@ export class ClaudeAgentSdkDriver {
     this.#maxTurns = config.maxTurns;
     this.#model = config.model;
     this.#debugEvents = config.debugEvents ?? false;
+    this.#resumeSessionId = config.resumeSessionId;
+    this.#forkSession = config.forkSession;
   }
 
   async *run(request: ExternalAgentRunRequest): AsyncIterable<ExternalAgentEvent> {
     const sdk = await this.loadSdk();
-    const prompt = buildPrompt(request);
+    const prompt = this.buildPromptInput(request);
     const options = await this.buildOptionsForRun(request, sdk);
 
     yield {
@@ -166,9 +188,58 @@ export class ClaudeAgentSdkDriver {
         ? { type: "preset", preset: "claude_code", append: request.instruction }
         : { type: "preset", preset: "claude_code" },
       allowDangerouslySkipPermissions: permission.allowDangerouslySkipPermissions,
+      resume: this.#resumeSessionId,
+      forkSession: this.#forkSession,
     };
 
     return removeUndefined(options) as ClaudeAgentSdkOptions;
+  }
+
+  /**
+   * Build the SDK `prompt` input from a run request. Returns:
+   * - a plain string for text-only single-turn invocations (fast path);
+   * - an `AsyncIterable<SDKUserMessage>` carrying lossless multimodal blocks
+   *   for multi-turn or multimodal history;
+   * - an empty string when no content can be collected (defensive fallback).
+   *
+   * When `resumeSessionId` is configured, only the last collected `Content`
+   * is sent so the resumed session continues from existing transcript on disk
+   * rather than re-feeding history.
+   */
+  buildPromptInput(
+    request: ExternalAgentRunRequest,
+  ): string | AsyncIterable<SDKUserMessage> {
+    let contents: ReturnType<typeof collectContents>;
+    try {
+      contents = collectContents(request.context);
+    } catch {
+      contents = [];
+    }
+
+    if (contents.length === 0) {
+      return extractContextText(request.context) ?? "";
+    }
+
+    if (this.#resumeSessionId) {
+      const last = contents[contents.length - 1];
+      const messages = contentsToSdkMessages([last]);
+      return asyncIterable(messages);
+    }
+
+    if (contents.length === 1) {
+      const onlyTextParts = (contents[0].parts ?? []).every(
+        (part) => typeof part.text === "string" && !part.thought,
+      );
+      if (onlyTextParts) {
+        return buildPrompt(request);
+      }
+    }
+
+    const messages = contentsToSdkMessages(contents);
+    if (messages.length === 0) {
+      return buildPrompt(request);
+    }
+    return asyncIterable(messages);
   }
 
   resolveClaudeExecutable(request: ExternalAgentRunRequest): ClaudeExecutableResolution {
@@ -522,6 +593,16 @@ function toolTextResult(text: string, isError?: boolean): ClaudeAgentSdkToolResu
     content: [{ type: "text", text }],
     ...(isError ? { isError: true } : {}),
   };
+}
+
+function asyncIterable(
+  messages: ReadonlyArray<SDKUserMessage>,
+): AsyncIterable<SDKUserMessage> {
+  return (async function* () {
+    for (const message of messages) {
+      yield message;
+    }
+  })();
 }
 
 function buildPrompt(request: ExternalAgentRunRequest): string {
