@@ -239,6 +239,49 @@ describe("ClaudeAgentSdkDriver", () => {
     });
   });
 
+  test("buildPrompt includes prior session history alongside userContent", async () => {
+    let capturedPrompt = "";
+    const driver = new ClaudeAgentSdkDriver({
+      sdk: {
+        query: ({ prompt }) => {
+          capturedPrompt = String(prompt);
+          return (async function* () {
+            yield { type: "result", subtype: "success", result: "ok" } as never;
+          })() as never;
+        },
+      },
+    });
+
+    for await (const _event of driver.run({
+      provider: CLAUDE_PROVIDER,
+      context: {
+        agent: { name: "claude" },
+        branch: "root",
+        session: {
+          events: [
+            {
+              author: "user",
+              content: { role: "user", parts: [{ text: "first question" }] },
+            },
+            {
+              author: "claude",
+              content: { role: "model", parts: [{ text: "earlier reply" }] },
+            },
+          ],
+        },
+        userContent: { role: "user", parts: [{ text: "follow-up question" }] },
+      } as never,
+      permissions: { mode: "ask" },
+    })) {
+      // consume events
+      void _event;
+    }
+
+    expect(capturedPrompt).toContain("first question");
+    expect(capturedPrompt).toContain("earlier reply");
+    expect(capturedPrompt).toContain("follow-up question");
+  });
+
   test("run uses injected SDK without importing the real package", async () => {
     let called = false;
     const driver = new ClaudeAgentSdkDriver({

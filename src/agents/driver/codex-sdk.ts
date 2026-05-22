@@ -11,6 +11,10 @@ import type { ExternalAgentEvent } from "../events.js";
 import type { ExternalAgentRunRequest } from "../external-agent-driver.js";
 import type { ExternalAgentPermissionPolicy } from "../permissions/schema.js";
 import { CODEX_PROVIDER } from "../provider/codex.js";
+import {
+  collectContents,
+  flattenContentsToPrompt,
+} from "../runtime/content-collector.js";
 
 type CodexSdkApprovalMode = "never" | "on-request" | "on-failure" | "untrusted";
 type CodexSdkSandboxMode = "read-only" | "workspace-write" | "danger-full-access";
@@ -550,10 +554,18 @@ function normalizeCompletedItem(
 }
 
 function buildPrompt(request: ExternalAgentRunRequest): string {
-  const parts = [
-    request.instruction,
-    extractContextText(request.context),
-  ].filter(
+  const body = (() => {
+    try {
+      const contents = collectContents(request.context);
+      if (contents.length > 0) {
+        return flattenContentsToPrompt(contents);
+      }
+    } catch {
+      // fall through to legacy extractor
+    }
+    return extractContextText(request.context);
+  })();
+  const parts = [request.instruction, body].filter(
     (part): part is string => typeof part === "string" && part.length > 0,
   );
   return parts.join("\n\n");

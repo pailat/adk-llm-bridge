@@ -12,6 +12,10 @@ import type { ExternalAgentRunRequest } from "../external-agent-driver.js";
 import { mapPermissionPolicyToFlags } from "../permissions/mapper.js";
 import type { ExternalAgentPermissionPolicy } from "../permissions/schema.js";
 import { CLAUDE_PROVIDER } from "../provider/schema.js";
+import {
+  collectContents,
+  flattenContentsToPrompt,
+} from "../runtime/content-collector.js";
 
 type ClaudeAgentSdkPermissionMode =
   | "default"
@@ -521,6 +525,14 @@ function toolTextResult(text: string, isError?: boolean): ClaudeAgentSdkToolResu
 }
 
 function buildPrompt(request: ExternalAgentRunRequest): string {
+  try {
+    const contents = collectContents(request.context);
+    if (contents.length > 0) {
+      return flattenContentsToPrompt(contents);
+    }
+  } catch {
+    // fall through to legacy extractor
+  }
   return extractContextText(request.context) ?? "";
 }
 

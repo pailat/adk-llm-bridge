@@ -259,6 +259,53 @@ describe("CodexSdkDriver", () => {
     ]);
   });
 
+  test("buildPrompt includes prior session history alongside userContent", async () => {
+    let capturedInput = "";
+    const driver = new CodexSdkDriver({
+      sdk: {
+        startThread: () => ({
+          runStreamed: async (input) => {
+            capturedInput = String(input);
+            return {
+              events: sdkEvents([{ type: "turn.completed" }]),
+            };
+          },
+        }),
+        resumeThread: () => {
+          throw new Error("not used");
+        },
+      },
+    });
+
+    for await (const _event of driver.run({
+      provider: CODEX_PROVIDER,
+      context: {
+        agent: { name: "codex" },
+        branch: "root",
+        session: {
+          events: [
+            {
+              author: "user",
+              content: { role: "user", parts: [{ text: "first question" }] },
+            },
+            {
+              author: "codex",
+              content: { role: "model", parts: [{ text: "earlier reply" }] },
+            },
+          ],
+        },
+        userContent: { role: "user", parts: [{ text: "follow-up question" }] },
+      } as never,
+      permissions: { mode: "read-only" },
+    })) {
+      void _event;
+    }
+
+    expect(capturedInput).toContain("first question");
+    expect(capturedInput).toContain("earlier reply");
+    expect(capturedInput).toContain("follow-up question");
+  });
+
   test("normalizes mcp_tool_call progress without duplicate function calls", () => {
     const driver = new CodexSdkDriver();
 

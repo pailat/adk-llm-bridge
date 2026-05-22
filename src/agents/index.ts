@@ -114,6 +114,10 @@ export type {
   ExternalAgentProviderId,
 } from "./provider/schema.js";
 export type { AgentRuntimeCapabilities } from "./runtime/capabilities.js";
+export {
+  collectContents,
+  flattenContentsToPrompt,
+} from "./runtime/content-collector.js";
 export type { AgentRuntimeRequestMetadata } from "./runtime/runtime-request.js";
 export type { AgentRuntimeSession } from "./runtime/runtime-session.js";
 export { ToolGateway } from "./tools/tool-gateway.js";
