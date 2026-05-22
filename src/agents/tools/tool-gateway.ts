@@ -115,7 +115,7 @@ export class ToolGateway {
           }));
         }
         Object.assign(stateDelta, event.actions?.stateDelta ?? {});
-        const visible = extractVisibleText(event);
+        const visible = event.partial ? undefined : extractVisibleText(event);
         if (visible) {
           textEvents++;
           text.push(visible);

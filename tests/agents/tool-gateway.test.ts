@@ -371,6 +371,41 @@ describe("ToolGateway", () => {
     expect(result.summary.textEvents).toBe(0);
   });
 
+  test("ignores partial streaming chunks when aggregating subagent output", async () => {
+    const worker = new FunctionResponseAgent([
+      createEvent({
+        invocationId: "inv-1",
+        author: "worker",
+        content: { role: "model", parts: [{ text: "L" }] },
+        partial: true,
+      }),
+      createEvent({
+        invocationId: "inv-1",
+        author: "worker",
+        content: { role: "model", parts: [{ text: "amento" }] },
+        partial: true,
+      }),
+      createEvent({
+        invocationId: "inv-1",
+        author: "worker",
+        content: { role: "model", parts: [{ text: "Lamento completo" }] },
+        turnComplete: true,
+      }),
+    ]);
+    const root = new TextAgent("root");
+    const gateway = new ToolGateway({
+      rootAgent: root,
+      subAgents: [worker],
+      parentContext: parentContext(root),
+    });
+
+    const result = await gateway.runSubAgent({ agentName: "worker", task: "do it" });
+
+    expect(result.output).toBe("Lamento completo");
+    expect(result.summary.textEvents).toBe(1);
+    expect(result.events).toBe(3);
+  });
+
   test("propagates subagent state through the synthetic function response", async () => {
     class StateAgent extends BaseAgent {
       constructor() {
