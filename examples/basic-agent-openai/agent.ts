@@ -130,7 +130,7 @@ const resetPassword = new FunctionTool({
 
 const billingAgent = new LlmAgent({
   name: "Billing",
-  model: OpenAI("gpt-4.1"),
+  model: OpenAI("gpt-5.5"),
   description:
     "Handles billing inquiries, invoice lookups, and refund requests.",
   instruction: `You are a billing specialist assistant. Help customers with:
@@ -144,7 +144,7 @@ Be professional, empathetic, and efficient. Always verify the invoice/account be
 
 const supportAgent = new LlmAgent({
   name: "Support",
-  model: OpenAI("gpt-4.1"),
+  model: OpenAI("gpt-5.5"),
   description:
     "Handles technical support requests, login issues, and system status.",
   instruction: `You are a technical support specialist. Help customers with:
@@ -163,7 +163,7 @@ Be patient and guide users step by step. Check system status when relevant to is
 
 export const rootAgent = new LlmAgent({
   name: "HelpDeskCoordinator",
-  model: OpenAI("gpt-4.1"),
+  model: OpenAI("gpt-5.5"),
   description:
     "Main help desk router that directs users to the appropriate specialist.",
   instruction: `You are a help desk coordinator. Your job is to:
