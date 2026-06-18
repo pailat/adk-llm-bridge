@@ -11,6 +11,6 @@
     "@types/express": "^5.0.0",
     "adk-llm-bridge": "^0.5.2",
     "express": "^5.0.0",
-    "zod": "^3.24.0"
+    "zod": "^4.2.1"
   }
 }
