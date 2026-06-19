@@ -199,9 +199,15 @@ export {
 // Converters (for building custom providers)
 // =============================================================================
 
-export { convertRequest } from "./converters/request";
+export {
+  convertGenerationConfig,
+  convertRequest,
+  convertStructuredOutput,
+  convertToolChoice,
+} from "./converters/request";
 export {
   convertResponse,
   convertStreamChunk,
   createStreamAccumulator,
 } from "./converters/response";
+export { normalizeSchema } from "./converters/schema";

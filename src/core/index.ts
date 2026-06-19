@@ -38,8 +38,8 @@
  */
 
 export { BaseProviderLlm } from "./base-provider-llm";
-export { resolveConfig, resolveEnvVar } from "./config-resolver";
 export type { ResolvedConfig } from "./config-resolver";
+export { resolveConfig, resolveEnvVar } from "./config-resolver";
 export { createProviderClass, createProviderFactory } from "./create-provider";
 export { createRegisterFunction } from "./create-register";
 export type { OpenAIClientConfig } from "./openai-compatible-llm";

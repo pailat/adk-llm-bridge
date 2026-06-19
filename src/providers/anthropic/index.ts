@@ -12,11 +12,14 @@
 
 import { LLMRegistry } from "@google/adk";
 import { resetProviderConfig, setProviderConfig } from "../../config";
-import type { AnthropicProviderConfig, AnthropicRegisterOptions } from "../../types";
+import type {
+  AnthropicProviderConfig,
+  AnthropicRegisterOptions,
+} from "../../types";
 import { AnthropicLlm } from "./anthropic-llm";
 
 // Re-exports
-export { AnthropicLlm, ANTHROPIC_MODEL_PATTERNS } from "./anthropic-llm";
+export { ANTHROPIC_MODEL_PATTERNS, AnthropicLlm } from "./anthropic-llm";
 export type { ConvertedAnthropicRequest } from "./converters/request";
 export { convertAnthropicRequest } from "./converters/request";
 export type {

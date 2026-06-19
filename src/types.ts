@@ -544,6 +544,23 @@ export interface AnthropicProviderConfig extends BaseProviderConfig {
    * @defaultValue 4096
    */
   maxTokens?: number;
+
+  /**
+   * Opt-in Anthropic prompt caching.
+   *
+   * When `true`, attaches `cache_control: { type: "ephemeral" }` to the
+   * system prompt block and the last tool definition, marking the largely
+   * static prefix of the request (system instruction + tool schemas) as
+   * cacheable. This can substantially reduce cost and latency for prompts
+   * that reuse the same system instruction and tools across turns.
+   *
+   * This is a bridge-level instance setting, NOT derived from ADK's
+   * `config.cachedContent` (which is a non-portable Gemini resource name).
+   *
+   * @defaultValue false
+   * @see {@link https://platform.claude.com/docs/en/docs/build-with-claude/prompt-caching|Anthropic Prompt Caching}
+   */
+  promptCaching?: boolean;
 }
 
 /**
@@ -573,6 +590,18 @@ export interface AnthropicRegisterOptions {
    * @defaultValue 4096
    */
   maxTokens?: number;
+
+  /**
+   * Opt-in Anthropic prompt caching for all models created through the
+   * registry.
+   *
+   * When `true`, attaches `cache_control: { type: "ephemeral" }` to the
+   * system prompt block and the last tool definition.
+   *
+   * @defaultValue false
+   * @see {@link AnthropicProviderConfig.promptCaching}
+   */
+  promptCaching?: boolean;
 }
 
 // =============================================================================
@@ -623,8 +652,25 @@ export interface StreamAccumulator {
   /** Accumulated text content from all chunks */
   text: string;
 
+  /**
+   * Accumulated reasoning/thinking text from all chunks.
+   *
+   * Populated from provider `delta.reasoning` / `delta.reasoning_content`
+   * fields. Emitted as a `{ thought: true }` part.
+   */
+  reasoning: string;
+
   /** Map of tool call index to accumulated tool call data */
   toolCalls: Map<number, ToolCallAccumulator>;
+
+  /**
+   * Token usage captured from the final OpenAI streaming chunk.
+   *
+   * Populated when `stream_options.include_usage` is enabled; emitted as
+   * `usageMetadata` on the final response. Includes `thoughtsTokenCount` when
+   * the provider reports `completion_tokens_details.reasoning_tokens`.
+   */
+  usage?: LlmResponse["usageMetadata"];
 }
 
 /**

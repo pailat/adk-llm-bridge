@@ -15,8 +15,33 @@
 
 import type Anthropic from "@anthropic-ai/sdk";
 import type { LlmResponse } from "@google/adk";
-import type { Part } from "@google/genai";
+import { FinishReason, type Part } from "@google/genai";
 import { safeJsonParse } from "../../../utils";
+
+/**
+ * Maps an Anthropic `stop_reason` to the ADK/genai {@link FinishReason} enum.
+ *
+ * @param reason - The Anthropic stop reason (may be null/undefined)
+ * @returns The mapped FinishReason, or undefined when unknown
+ *
+ * @internal
+ */
+function mapAnthropicStopReason(
+  reason: string | null | undefined,
+): FinishReason | undefined {
+  switch (reason) {
+    case "end_turn":
+    case "stop_sequence":
+    case "tool_use":
+      return FinishReason.STOP;
+    case "max_tokens":
+      return FinishReason.MAX_TOKENS;
+    case "refusal":
+      return FinishReason.SAFETY;
+    default:
+      return undefined;
+  }
+}
 
 /**
  * Accumulator for Anthropic streaming responses.
@@ -35,6 +60,15 @@ export interface AnthropicStreamAccumulator {
     }
   >;
 
+  /** Accumulated thinking (extended reasoning) blocks, keyed by block index */
+  thinkingBlocks: Map<
+    number,
+    {
+      thinking: string;
+      signature: string;
+    }
+  >;
+
   /** Current content block index being processed */
   currentBlockIndex: number;
 
@@ -43,6 +77,9 @@ export interface AnthropicStreamAccumulator {
 
   /** Output tokens accumulated during streaming */
   outputTokens?: number;
+
+  /** Stop reason captured from the message_delta event */
+  stopReason?: string | null;
 }
 
 /**
@@ -72,6 +109,25 @@ export function convertAnthropicResponse(
       parts.push({ text: block.text });
     }
 
+    // Extended thinking: surface as an ADK thought part. The signature
+    // (encrypted full reasoning) is preserved on thoughtSignature so it can be
+    // echoed back on multi-turn requests.
+    if (block.type === "thinking") {
+      parts.push({
+        text: block.thinking,
+        thought: true,
+        thoughtSignature: block.signature,
+      });
+    }
+
+    // Redacted thinking carries only opaque encrypted data (no signature/text).
+    if (block.type === "redacted_thinking") {
+      parts.push({
+        thought: true,
+        thoughtSignature: block.data,
+      });
+    }
+
     if (block.type === "tool_use") {
       const input =
         typeof block.input === "object" && block.input !== null
@@ -90,6 +146,7 @@ export function convertAnthropicResponse(
   return {
     content: parts.length ? { role: "model", parts } : undefined,
     turnComplete: true,
+    finishReason: mapAnthropicStopReason(message.stop_reason),
     usageMetadata: message.usage
       ? {
           promptTokenCount: message.usage.input_tokens,
@@ -108,9 +165,11 @@ export function createAnthropicStreamAccumulator(): AnthropicStreamAccumulator {
   return {
     text: "",
     toolUses: new Map(),
+    thinkingBlocks: new Map(),
     currentBlockIndex: -1,
     inputTokens: undefined,
     outputTokens: undefined,
+    stopReason: undefined,
   };
 }
 
@@ -139,6 +198,10 @@ export function convertAnthropicStreamEvent(
       if (event.usage?.output_tokens) {
         acc.outputTokens = event.usage.output_tokens;
       }
+      // Capture the stop reason (carried on the message_delta).
+      if (event.delta?.stop_reason) {
+        acc.stopReason = event.delta.stop_reason;
+      }
       return { isComplete: false };
     }
 
@@ -151,6 +214,29 @@ export function convertAnthropicStreamEvent(
           name: event.content_block.name,
           input: "",
         });
+      }
+
+      if (event.content_block.type === "thinking") {
+        acc.thinkingBlocks.set(event.index, {
+          thinking: event.content_block.thinking ?? "",
+          signature: event.content_block.signature ?? "",
+        });
+      }
+
+      // Redacted thinking arrives whole (opaque encrypted data, no deltas).
+      if (event.content_block.type === "redacted_thinking") {
+        return {
+          response: {
+            content: {
+              role: "model",
+              parts: [
+                { thought: true, thoughtSignature: event.content_block.data },
+              ],
+            },
+            partial: true,
+          },
+          isComplete: false,
+        };
       }
 
       return { isComplete: false };
@@ -175,14 +261,61 @@ export function convertAnthropicStreamEvent(
         if (toolUse) {
           toolUse.input += delta.partial_json;
         }
+        return { isComplete: false };
+      }
+
+      if (delta.type === "thinking_delta") {
+        const block = acc.thinkingBlocks.get(event.index) ?? {
+          thinking: "",
+          signature: "",
+        };
+        block.thinking += delta.thinking;
+        acc.thinkingBlocks.set(event.index, block);
+        return {
+          response: {
+            content: {
+              role: "model",
+              parts: [{ text: delta.thinking, thought: true }],
+            },
+            partial: true,
+          },
+          isComplete: false,
+        };
+      }
+
+      // The signature arrives after the thinking text; record it for the final
+      // assembled thought part (carried on thoughtSignature).
+      if (delta.type === "signature_delta") {
+        const block = acc.thinkingBlocks.get(event.index) ?? {
+          thinking: "",
+          signature: "",
+        };
+        block.signature += delta.signature;
+        acc.thinkingBlocks.set(event.index, block);
       }
 
       return { isComplete: false };
     }
 
     case "message_stop": {
-      // Build final response with accumulated content
+      // Build final response with accumulated content. Thinking parts are
+      // emitted first (in block-index order) so the final assistant turn can be
+      // echoed back with signatures intact.
       const parts: Part[] = [];
+
+      for (const index of [...acc.thinkingBlocks.keys()].sort(
+        (a, b) => a - b,
+      )) {
+        const block = acc.thinkingBlocks.get(index);
+        if (!block) continue;
+        parts.push({
+          text: block.thinking,
+          thought: true,
+          ...(block.signature
+            ? { thoughtSignature: block.signature }
+            : undefined),
+        });
+      }
 
       if (acc.text) {
         parts.push({ text: acc.text });
@@ -211,17 +344,22 @@ export function convertAnthropicStreamEvent(
           }
         : undefined;
 
+      const finishReason = mapAnthropicStopReason(acc.stopReason);
+
       // Reset accumulator
       acc.text = "";
       acc.toolUses.clear();
+      acc.thinkingBlocks.clear();
       acc.currentBlockIndex = -1;
       acc.inputTokens = undefined;
       acc.outputTokens = undefined;
+      acc.stopReason = undefined;
 
       return {
         response: {
           content: parts.length ? { role: "model", parts } : undefined,
           turnComplete: true,
+          finishReason,
           usageMetadata,
         },
         isComplete: true,

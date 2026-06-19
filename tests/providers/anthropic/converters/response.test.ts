@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import type Anthropic from "@anthropic-ai/sdk";
+import { FinishReason } from "@google/genai";
 import {
   convertAnthropicResponse,
   convertAnthropicStreamEvent,
@@ -127,6 +128,34 @@ describe("convertAnthropicResponse", () => {
 
       expect(result.content).toBeUndefined();
       expect(result.turnComplete).toBe(true);
+    });
+  });
+
+  describe("finishReason mapping (non-stream)", () => {
+    function withStop(reason: Anthropic.Message["stop_reason"]) {
+      return convertAnthropicResponse(
+        createMessage({
+          content: [{ type: "text", text: "x", citations: null }],
+          stop_reason: reason,
+          usage: { input_tokens: 1, output_tokens: 1 },
+        }),
+      );
+    }
+
+    it("maps end_turn to STOP", () => {
+      expect(withStop("end_turn").finishReason).toBe(FinishReason.STOP);
+    });
+
+    it("maps max_tokens to MAX_TOKENS", () => {
+      expect(withStop("max_tokens").finishReason).toBe(FinishReason.MAX_TOKENS);
+    });
+
+    it("maps tool_use to STOP", () => {
+      expect(withStop("tool_use").finishReason).toBe(FinishReason.STOP);
+    });
+
+    it("maps refusal to SAFETY", () => {
+      expect(withStop("refusal").finishReason).toBe(FinishReason.SAFETY);
     });
   });
 });
@@ -384,6 +413,168 @@ describe("convertAnthropicStreamEvent", () => {
       const result = convertAnthropicStreamEvent(event, acc);
 
       expect(result.response?.usageMetadata).toBeUndefined();
+    });
+  });
+
+  describe("finishReason mapping (stream)", () => {
+    it("captures stop_reason from message_delta and emits it on message_stop", () => {
+      const acc = createAnthropicStreamAccumulator();
+      acc.text = "done";
+
+      convertAnthropicStreamEvent(
+        {
+          type: "message_delta",
+          delta: { stop_reason: "max_tokens", stop_sequence: null },
+          usage: {
+            output_tokens: 5,
+            input_tokens: null,
+            cache_creation_input_tokens: null,
+            cache_read_input_tokens: null,
+            server_tool_use: null,
+          },
+        },
+        acc,
+      );
+
+      const result = convertAnthropicStreamEvent({ type: "message_stop" }, acc);
+
+      expect(result.response?.finishReason).toBe(FinishReason.MAX_TOKENS);
+      expect(acc.stopReason).toBeUndefined();
+    });
+
+    it("maps tool_use stop_reason to STOP", () => {
+      const acc = createAnthropicStreamAccumulator();
+      acc.toolUses.set(0, {
+        id: "c1",
+        name: "get_weather",
+        input: "{}",
+      });
+
+      convertAnthropicStreamEvent(
+        {
+          type: "message_delta",
+          delta: { stop_reason: "tool_use", stop_sequence: null },
+          usage: {
+            output_tokens: 5,
+            input_tokens: null,
+            cache_creation_input_tokens: null,
+            cache_read_input_tokens: null,
+            server_tool_use: null,
+          },
+        },
+        acc,
+      );
+
+      const result = convertAnthropicStreamEvent({ type: "message_stop" }, acc);
+      expect(result.response?.finishReason).toBe(FinishReason.STOP);
+    });
+  });
+
+  describe("extended thinking (non-streaming)", () => {
+    it("converts a thinking block to a thought part with signature", () => {
+      const message = createMessage({
+        content: [
+          {
+            type: "thinking",
+            thinking: "Let me reason about this...",
+            signature: "sig-abc-123",
+          },
+          { type: "text", text: "The answer is 42.", citations: null },
+        ],
+        usage: { input_tokens: 10, output_tokens: 20 },
+      });
+
+      const result = convertAnthropicResponse(message);
+
+      expect(result.content?.parts).toHaveLength(2);
+      const thought = result.content?.parts?.[0];
+      expect(thought?.thought).toBe(true);
+      expect(thought?.text).toBe("Let me reason about this...");
+      expect(thought?.thoughtSignature).toBe("sig-abc-123");
+      expect(result.content?.parts?.[1].text).toBe("The answer is 42.");
+    });
+
+    it("converts a redacted_thinking block to a thought part carrying data", () => {
+      const message = createMessage({
+        content: [
+          { type: "redacted_thinking", data: "encrypted-blob" },
+          { type: "text", text: "Done.", citations: null },
+        ],
+        usage: { input_tokens: 5, output_tokens: 5 },
+      });
+
+      const result = convertAnthropicResponse(message);
+
+      const thought = result.content?.parts?.[0];
+      expect(thought?.thought).toBe(true);
+      expect(thought?.thoughtSignature).toBe("encrypted-blob");
+      expect(thought?.text).toBeUndefined();
+    });
+  });
+
+  describe("extended thinking (streaming)", () => {
+    it("emits a partial thought part for thinking_delta and assembles signature", () => {
+      const acc = createAnthropicStreamAccumulator();
+
+      convertAnthropicStreamEvent(
+        {
+          type: "content_block_start",
+          index: 0,
+          content_block: { type: "thinking", thinking: "", signature: "" },
+        },
+        acc,
+      );
+
+      const deltaResult = convertAnthropicStreamEvent(
+        {
+          type: "content_block_delta",
+          index: 0,
+          delta: { type: "thinking_delta", thinking: "Step 1..." },
+        },
+        acc,
+      );
+
+      const part = deltaResult.response?.content?.parts?.[0];
+      expect(deltaResult.response?.partial).toBe(true);
+      expect(part?.thought).toBe(true);
+      expect(part?.text).toBe("Step 1...");
+
+      convertAnthropicStreamEvent(
+        {
+          type: "content_block_delta",
+          index: 0,
+          delta: { type: "signature_delta", signature: "sig-xyz" },
+        },
+        acc,
+      );
+
+      expect(acc.thinkingBlocks.get(0)?.thinking).toBe("Step 1...");
+      expect(acc.thinkingBlocks.get(0)?.signature).toBe("sig-xyz");
+
+      const final = convertAnthropicStreamEvent({ type: "message_stop" }, acc);
+      const thought = final.response?.content?.parts?.[0];
+      expect(thought?.thought).toBe(true);
+      expect(thought?.text).toBe("Step 1...");
+      expect(thought?.thoughtSignature).toBe("sig-xyz");
+      expect(acc.thinkingBlocks.size).toBe(0);
+    });
+
+    it("emits a partial thought for a redacted_thinking content_block_start", () => {
+      const acc = createAnthropicStreamAccumulator();
+
+      const result = convertAnthropicStreamEvent(
+        {
+          type: "content_block_start",
+          index: 0,
+          content_block: { type: "redacted_thinking", data: "enc-blob" },
+        },
+        acc,
+      );
+
+      const part = result.response?.content?.parts?.[0];
+      expect(result.response?.partial).toBe(true);
+      expect(part?.thought).toBe(true);
+      expect(part?.thoughtSignature).toBe("enc-blob");
     });
   });
 });

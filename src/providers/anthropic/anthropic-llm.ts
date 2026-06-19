@@ -20,6 +20,7 @@ import { DEFAULT_MAX_RETRIES, DEFAULT_TIMEOUT } from "../../constants";
 import { BaseProviderLlm } from "../../core/base-provider-llm";
 import type { AnthropicProviderConfig } from "../../types";
 import { clampPositive } from "../../utils/validate";
+
 /** Environment variable names for Anthropic configuration. */
 const ANTHROPIC_ENV = { API_KEY: "ANTHROPIC_API_KEY" } as const;
 
@@ -28,7 +29,12 @@ const DEFAULT_ANTHROPIC_MAX_TOKENS = 4096;
 
 /** Model patterns for Anthropic models. Matches claude-* */
 export const ANTHROPIC_MODEL_PATTERNS = [/claude-.*/];
-import { convertAnthropicRequest } from "./converters/request";
+
+import type { AnthropicGenerationParams } from "./converters/request";
+import {
+  applyAnthropicPromptCaching,
+  convertAnthropicRequest,
+} from "./converters/request";
 import {
   convertAnthropicResponse,
   convertAnthropicStreamEvent,
@@ -89,6 +95,13 @@ export class AnthropicLlm extends BaseProviderLlm {
   private readonly maxTokens: number;
 
   /**
+   * Whether opt-in prompt caching is enabled for this instance.
+   *
+   * @private
+   */
+  private readonly promptCaching: boolean;
+
+  /**
    * Creates a new Anthropic LLM instance.
    *
    * @param config - Configuration options for the Anthropic provider
@@ -121,10 +134,15 @@ export class AnthropicLlm extends BaseProviderLlm {
     }
 
     this.maxTokens = clampPositive(
-      config.maxTokens ?? globalConfig.maxTokens ?? DEFAULT_ANTHROPIC_MAX_TOKENS,
+      config.maxTokens ??
+        globalConfig.maxTokens ??
+        DEFAULT_ANTHROPIC_MAX_TOKENS,
       DEFAULT_ANTHROPIC_MAX_TOKENS,
       1,
     );
+
+    this.promptCaching =
+      config.promptCaching ?? globalConfig.promptCaching ?? false;
 
     this.client = new AnthropicSDK({
       apiKey,
@@ -156,12 +174,19 @@ export class AnthropicLlm extends BaseProviderLlm {
     stream = false,
   ): AsyncGenerator<LlmResponse, void> {
     try {
-      const { messages, system, tools } = convertAnthropicRequest(llmRequest);
+      const { messages, system, tools, params, toolChoice } =
+        convertAnthropicRequest(llmRequest);
 
       if (stream) {
-        yield* this.streamResponse(messages, system, tools);
+        yield* this.streamResponse(messages, system, tools, params, toolChoice);
       } else {
-        yield await this.singleResponse(messages, system, tools);
+        yield await this.singleResponse(
+          messages,
+          system,
+          tools,
+          params,
+          toolChoice,
+        );
       }
     } catch (error) {
       yield this.createErrorResponse(error, "ANTHROPIC");
@@ -171,19 +196,67 @@ export class AnthropicLlm extends BaseProviderLlm {
   /**
    * Builds the shared request parameters for the Anthropic API.
    *
+   * Per-request `config.maxOutputTokens` (params.max_tokens) overrides the
+   * instance default. Anthropic requires `max_tokens` to always be present.
+   *
    * @private
    */
   private buildRequestParams(
     messages: AnthropicSDK.MessageParam[],
     system: string | undefined,
     tools: AnthropicSDK.Tool[] | undefined,
-  ) {
+    params?: AnthropicGenerationParams,
+    toolChoice?: AnthropicSDK.ToolChoice,
+  ): AnthropicSDK.MessageCreateParamsNonStreaming {
+    const { max_tokens, ...sampling } = params ?? {};
+
+    // Anthropic requires max_tokens to be strictly greater than the thinking
+    // budget. When extended thinking is enabled, raise max_tokens if the
+    // configured/default value would not leave room for the response.
+    let resolvedMaxTokens = max_tokens ?? this.maxTokens;
+    if (sampling.thinking?.type === "enabled") {
+      const minMaxTokens = sampling.thinking.budget_tokens + 1;
+      if (resolvedMaxTokens <= sampling.thinking.budget_tokens) {
+        resolvedMaxTokens = minMaxTokens;
+      }
+    }
+
+    // Opt-in prompt caching: attach ephemeral cache breakpoints to the static
+    // prefix (system block + last tool). When disabled, the system string and
+    // tools pass through unchanged (no behavior change).
+    let systemField: AnthropicSDK.MessageCreateParams["system"] = system;
+    let toolsField = tools;
+    if (this.promptCaching) {
+      const cached = applyAnthropicPromptCaching(system, tools);
+      if (cached.system) systemField = cached.system;
+      if (cached.tools) toolsField = cached.tools;
+    }
+
+    // thinking + forced tool_choice -> 400. Anthropic only allows tool_choice
+    // auto/none when extended thinking is enabled; { type: "any" } and
+    // { type: "tool", name } both error. When thinking is on, downgrade any
+    // forced choice (structured-output's forced json_output tool, or a
+    // functionCallingConfig ANY/VALIDATED mapping) to { type: "auto" } so
+    // thinking + forced-tool never co-occur. Structured output therefore
+    // becomes best-effort under thinking; "none" is preserved (still valid).
+    let resolvedToolChoice = toolChoice;
+    if (
+      sampling.thinking?.type === "enabled" &&
+      (toolChoice?.type === "any" || toolChoice?.type === "tool")
+    ) {
+      resolvedToolChoice = { type: "auto" };
+    }
+
     return {
       model: this.model,
-      max_tokens: this.maxTokens,
+      max_tokens: resolvedMaxTokens,
       messages,
-      ...(system ? { system } : {}),
-      ...(tools?.length ? { tools } : {}),
+      ...sampling,
+      ...(systemField ? { system: systemField } : {}),
+      ...(toolsField?.length ? { tools: toolsField } : {}),
+      ...(resolvedToolChoice && toolsField?.length
+        ? { tool_choice: resolvedToolChoice }
+        : {}),
     };
   }
 
@@ -196,9 +269,11 @@ export class AnthropicLlm extends BaseProviderLlm {
     messages: AnthropicSDK.MessageParam[],
     system: string | undefined,
     tools: AnthropicSDK.Tool[] | undefined,
+    params?: AnthropicGenerationParams,
+    toolChoice?: AnthropicSDK.ToolChoice,
   ): Promise<LlmResponse> {
     const response = await this.client.messages.create(
-      this.buildRequestParams(messages, system, tools),
+      this.buildRequestParams(messages, system, tools, params, toolChoice),
     );
     return convertAnthropicResponse(response);
   }
@@ -212,9 +287,11 @@ export class AnthropicLlm extends BaseProviderLlm {
     messages: AnthropicSDK.MessageParam[],
     system: string | undefined,
     tools: AnthropicSDK.Tool[] | undefined,
+    params?: AnthropicGenerationParams,
+    toolChoice?: AnthropicSDK.ToolChoice,
   ): AsyncGenerator<LlmResponse, void> {
     const stream = this.client.messages.stream(
-      this.buildRequestParams(messages, system, tools),
+      this.buildRequestParams(messages, system, tools, params, toolChoice),
     );
 
     const acc = createAnthropicStreamAccumulator();

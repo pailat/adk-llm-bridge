@@ -145,12 +145,15 @@ export class OpenAICompatibleLlm extends BaseProviderLlm {
     stream = false,
   ): AsyncGenerator<LlmResponse, void> {
     try {
-      const { messages, tools } = convertRequest(llmRequest);
+      const { messages, tools, params, toolChoice } = convertRequest(
+        llmRequest,
+        this.model,
+      );
 
       if (stream) {
-        yield* this.streamResponse(messages, tools);
+        yield* this.streamResponse(messages, tools, params, toolChoice);
       } else {
-        yield await this.singleResponse(messages, tools);
+        yield await this.singleResponse(messages, tools, params, toolChoice);
       }
     } catch (error) {
       yield this.createErrorResponse(error, this.getErrorPrefix());
@@ -160,11 +163,15 @@ export class OpenAICompatibleLlm extends BaseProviderLlm {
   private async singleResponse(
     messages: OpenAI.ChatCompletionMessageParam[],
     tools?: OpenAI.ChatCompletionTool[],
+    params?: Record<string, unknown>,
+    toolChoice?: OpenAI.ChatCompletionToolChoiceOption,
   ): Promise<LlmResponse> {
     const response = await this.client.chat.completions.create({
       model: this.model,
       messages,
+      ...params,
       ...(tools?.length ? { tools } : {}),
+      ...(toolChoice && tools?.length ? { tool_choice: toolChoice } : {}),
       ...this.getProviderRequestOptions(),
     });
     return convertResponse(response);
@@ -173,21 +180,44 @@ export class OpenAICompatibleLlm extends BaseProviderLlm {
   private async *streamResponse(
     messages: OpenAI.ChatCompletionMessageParam[],
     tools?: OpenAI.ChatCompletionTool[],
+    params?: Record<string, unknown>,
+    toolChoice?: OpenAI.ChatCompletionToolChoiceOption,
   ): AsyncGenerator<LlmResponse, void> {
     const stream = await this.client.chat.completions.create({
       model: this.model,
       messages,
       stream: true,
+      stream_options: { include_usage: true },
+      ...params,
       ...(tools?.length ? { tools } : {}),
+      ...(toolChoice && tools?.length ? { tool_choice: toolChoice } : {}),
       ...this.getProviderRequestOptions(),
     });
 
     const acc = createStreamAccumulator();
 
+    // OpenAI with stream_options.include_usage emits the cumulative usage in a
+    // SEPARATE, choices-empty chunk that arrives AFTER the finish chunk. If we
+    // broke the loop on finish we would drop that usage. Instead, stash the
+    // final (isComplete) response, keep draining the stream so the trailing
+    // usage chunk is read into acc.usage, then merge and yield it last.
+    let finalResponse: LlmResponse | undefined;
+
     for await (const chunk of stream) {
       const { response, isComplete } = convertStreamChunk(chunk, acc);
+      if (isComplete) {
+        // Hold the final response; do not break — a usage-only chunk may follow.
+        finalResponse = response;
+        continue;
+      }
       if (response) yield response;
-      if (isComplete) break;
+    }
+
+    if (finalResponse) {
+      // acc.usage is repopulated by a post-finish usage chunk (if any); prefer
+      // it over whatever was captured before finish.
+      if (acc.usage) finalResponse.usageMetadata = acc.usage;
+      yield finalResponse;
     }
   }
 }

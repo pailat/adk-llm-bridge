@@ -1,12 +1,12 @@
 import { beforeEach, describe, expect, it } from "bun:test";
 import { resetAllConfigs } from "../../../src/config";
 import {
-  AnthropicLlm,
   ANTHROPIC_MODEL_PATTERNS,
+  AnthropicLlm,
 } from "../../../src/providers/anthropic";
 import {
-  describeModelPatterns,
   describeConnectError,
+  describeModelPatterns,
 } from "../../helpers/provider-test-helpers";
 
 describe("AnthropicLlm", () => {
@@ -26,12 +26,7 @@ describe("AnthropicLlm", () => {
       "claude-3-opus-20240229",
       "claude-3-haiku-20240307",
     ],
-    invalidModels: [
-      "gpt-4.1",
-      "grok-4",
-      "gemini-2.0-flash",
-      "llama-3.1",
-    ],
+    invalidModels: ["gpt-4.1", "grok-4", "gemini-2.0-flash", "llama-3.1"],
   });
 
   describe("constructor", () => {
@@ -89,6 +84,184 @@ describe("AnthropicLlm", () => {
         maxRetries: 5,
       });
       expect(llm.model).toBe("claude-sonnet-4-5-20250929");
+    });
+  });
+
+  describe("buildRequestParams (max_tokens override)", () => {
+    // Expose the private buildRequestParams for assertions.
+    type TestableParams = {
+      max_tokens?: number;
+      temperature?: number;
+      top_p?: number;
+      top_k?: number;
+      thinking?: { type: "enabled"; budget_tokens: number };
+    };
+    type ToolChoice =
+      | { type: "auto" }
+      | { type: "none" }
+      | { type: "any" }
+      | { type: "tool"; name: string };
+    type BuildResult = {
+      max_tokens: number;
+      thinking?: { type: "enabled"; budget_tokens: number };
+      tool_choice?: ToolChoice;
+      system?: unknown;
+      tools?: Array<{ name: string; cache_control?: unknown }>;
+    };
+    class TestableAnthropicLlm extends AnthropicLlm {
+      callBuild(
+        params?: TestableParams,
+        opts?: {
+          system?: string;
+          tools?: unknown;
+          toolChoice?: ToolChoice;
+        },
+      ): BuildResult {
+        return (
+          this as unknown as {
+            buildRequestParams: (
+              messages: unknown[],
+              system: string | undefined,
+              tools: unknown,
+              params?: TestableParams,
+              toolChoice?: ToolChoice,
+            ) => BuildResult;
+          }
+        ).buildRequestParams(
+          [],
+          opts?.system,
+          opts?.tools,
+          params,
+          opts?.toolChoice,
+        );
+      }
+    }
+
+    it("uses per-request max_tokens over the instance default", () => {
+      const llm = new TestableAnthropicLlm({
+        model: "claude-sonnet-4-5-20250929",
+        apiKey: "sk-ant-test",
+        maxTokens: 4096,
+      });
+
+      expect(llm.callBuild({ max_tokens: 256 }).max_tokens).toBe(256);
+    });
+
+    it("falls back to the instance default when no per-request value", () => {
+      const llm = new TestableAnthropicLlm({
+        model: "claude-sonnet-4-5-20250929",
+        apiKey: "sk-ant-test",
+        maxTokens: 8192,
+      });
+
+      expect(llm.callBuild().max_tokens).toBe(8192);
+    });
+
+    it("raises max_tokens above the thinking budget when too small", () => {
+      const llm = new TestableAnthropicLlm({
+        model: "claude-sonnet-4-5-20250929",
+        apiKey: "sk-ant-test",
+        maxTokens: 1024,
+      });
+
+      const result = llm.callBuild({
+        thinking: { type: "enabled", budget_tokens: 4096 },
+      });
+      expect(result.thinking).toEqual({ type: "enabled", budget_tokens: 4096 });
+      expect(result.max_tokens).toBe(4097);
+    });
+
+    it("keeps max_tokens when already greater than the thinking budget", () => {
+      const llm = new TestableAnthropicLlm({
+        model: "claude-sonnet-4-5-20250929",
+        apiKey: "sk-ant-test",
+        maxTokens: 8192,
+      });
+
+      const result = llm.callBuild({
+        thinking: { type: "enabled", budget_tokens: 4096 },
+        max_tokens: 8192,
+      });
+      expect(result.max_tokens).toBe(8192);
+    });
+
+    describe("thinking + forced tool_choice reconciliation", () => {
+      const tool = { name: "json_output", description: "", input_schema: {} };
+
+      function newLlm() {
+        return new TestableAnthropicLlm({
+          model: "claude-sonnet-4-5-20250929",
+          apiKey: "sk-ant-test",
+          maxTokens: 8192,
+        });
+      }
+
+      it("downgrades a forced {type:'tool'} choice to auto when thinking is on", () => {
+        const result = newLlm().callBuild(
+          { thinking: { type: "enabled", budget_tokens: 2048 } },
+          { tools: [tool], toolChoice: { type: "tool", name: "json_output" } },
+        );
+        expect(result.tool_choice).toEqual({ type: "auto" });
+      });
+
+      it("downgrades a forced {type:'any'} choice to auto when thinking is on", () => {
+        const result = newLlm().callBuild(
+          { thinking: { type: "enabled", budget_tokens: 2048 } },
+          { tools: [tool], toolChoice: { type: "any" } },
+        );
+        expect(result.tool_choice).toEqual({ type: "auto" });
+      });
+
+      it("preserves {type:'none'} when thinking is on", () => {
+        const result = newLlm().callBuild(
+          { thinking: { type: "enabled", budget_tokens: 2048 } },
+          { tools: [tool], toolChoice: { type: "none" } },
+        );
+        expect(result.tool_choice).toEqual({ type: "none" });
+      });
+
+      it("keeps a forced {type:'tool'} choice when thinking is OFF", () => {
+        const result = newLlm().callBuild(
+          {},
+          { tools: [tool], toolChoice: { type: "tool", name: "json_output" } },
+        );
+        expect(result.tool_choice).toEqual({
+          type: "tool",
+          name: "json_output",
+        });
+      });
+    });
+
+    describe("prompt caching wiring", () => {
+      const tool = { name: "get_weather", description: "", input_schema: {} };
+
+      it("applies cache_control only when promptCaching is enabled", () => {
+        const enabled = new TestableAnthropicLlm({
+          model: "claude-sonnet-4-5-20250929",
+          apiKey: "sk-ant-test",
+          promptCaching: true,
+        });
+
+        const result = enabled.callBuild({}, { system: "sys", tools: [tool] });
+        // System widened to a cacheable text-block array.
+        expect(result.system).toEqual([
+          { type: "text", text: "sys", cache_control: { type: "ephemeral" } },
+        ]);
+        // Last (only) tool carries cache_control.
+        expect(result.tools?.[0].cache_control).toEqual({ type: "ephemeral" });
+      });
+
+      it("does not apply cache_control when promptCaching is disabled (default)", () => {
+        const disabled = new TestableAnthropicLlm({
+          model: "claude-sonnet-4-5-20250929",
+          apiKey: "sk-ant-test",
+        });
+
+        const result = disabled.callBuild({}, { system: "sys", tools: [tool] });
+        // System stays a plain string; tool carries no cache_control.
+        expect(result.system).toBe("sys");
+        expect(result.tools?.[0].cache_control).toBeUndefined();
+      });
     });
   });
 
