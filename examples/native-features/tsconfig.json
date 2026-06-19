@@ -1,0 +1,30 @@
+{
+  // Bun's recommended TypeScript configuration (see https://bun.com/docs/typescript).
+  // `module: "Preserve"` + `moduleResolution: "bundler"` is what makes Bun's
+  // extensionless / `.ts` relative imports (e.g. `./output`) resolve in every
+  // tool — editor, `tsc`, and `bun` — instead of Node-ESM resolution demanding
+  // an explicit `.js` extension.
+  "compilerOptions": {
+    // Environment
+    "lib": ["ESNext"],
+    "target": "ESNext",
+    "module": "Preserve",
+    "moduleDetection": "force",
+    "allowJs": true,
+    "types": ["bun"],
+
+    // Bundler mode (Bun runs TypeScript directly — never emits here)
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "noEmit": true,
+
+    // Best practices
+    "strict": true,
+    "skipLibCheck": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true
+  },
+  "include": ["src/**/*.ts", "agent.ts"]
+}

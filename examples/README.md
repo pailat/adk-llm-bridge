@@ -13,6 +13,7 @@ Examples of using `adk-llm-bridge` with Google ADK and multiple LLM providers.
 | [basic-agent-xai](./basic-agent-xai) | xAI | Multi-agent HelpDesk with Grok models |
 | [basic-agent-lmstudio](./basic-agent-lmstudio) | LM Studio | Multi-agent HelpDesk with local models |
 | [express-server](./express-server) | AI Gateway | Full HTTP API with tools, state & streaming |
+| [native-features](./native-features) | Anthropic / OpenAI | CLI showcasing sampling, reasoning, structured output, multimodal, tool choice & streaming |
 
 ## Known limitations
 
@@ -160,6 +161,24 @@ curl http://localhost:3000/sessions/user-1
 # Get session history
 curl "http://localhost:3000/session/SESSION_ID?userId=user-1"
 ```
+
+### native-features
+
+A programmatic CLI that demonstrates every native-model capability the bridge
+passes through (sampling, extended thinking, structured output, multimodal image
+input, forced tool choice, and token streaming). Each feature is an isolated demo
+you can run on its own:
+
+```bash
+cd examples/native-features
+cp .env.example .env
+# Edit .env with your ANTHROPIC_API_KEY (default provider)
+bun install
+bun run all          # run all six demos
+# or run one: bun run reasoning | bun run structured | bun run multimodal | ...
+```
+
+> Run from this directory — Bun loads `.env` from the current working directory.
 
 ## Important: adk-devtools Bundling
 

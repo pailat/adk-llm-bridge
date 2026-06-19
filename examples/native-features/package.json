@@ -1,0 +1,27 @@
+{
+  "name": "native-features-example",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "bun run src/cli.ts",
+    "dev": "bun run --watch src/cli.ts",
+    "list": "bun run src/cli.ts list",
+    "all": "bun run src/cli.ts all",
+    "sampling": "bun run src/cli.ts sampling",
+    "reasoning": "bun run src/cli.ts reasoning",
+    "structured": "bun run src/cli.ts structured-output",
+    "multimodal": "bun run src/cli.ts multimodal",
+    "tool-choice": "bun run src/cli.ts tool-choice",
+    "streaming": "bun run src/cli.ts streaming",
+    "web": "bunx @google/adk-devtools web",
+    "web:dev": "bunx @google/adk-devtools run agent.ts"
+  },
+  "dependencies": {
+    "@google/adk": "^1.2.0",
+    "adk-llm-bridge": "^0.5.3",
+    "zod": "^4.2.1"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  }
+}
