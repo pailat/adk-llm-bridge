@@ -67,10 +67,11 @@ export interface RunResult {
   /**
    * Parsed structured-output object, when `LlmAgent.outputSchema` is set.
    *
-   * Depending on the provider/path, ADK 1.2 surfaces an `outputSchema` result
-   * either as JSON text (which ADK auto-parses into `session.state[outputKey]`)
-   * or as a forced `json_output` function call carrying the object as its args.
-   * The harness normalizes both into this field.
+   * ADK 1.2 surfaces an `outputSchema` result as JSON text, which ADK
+   * auto-parses into `session.state[outputKey]`. The Anthropic path returns
+   * the same JSON text (the bridge surfaces its synthetic `json_output` tool
+   * result as text), so it works like every other provider. The harness reads
+   * it from `session.state[outputKey]` or the JSON final text.
    */
   structured?: unknown;
   /** How many partial (streaming) events arrived. */

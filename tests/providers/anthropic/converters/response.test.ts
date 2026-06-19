@@ -578,3 +578,105 @@ describe("convertAnthropicStreamEvent", () => {
     });
   });
 });
+
+describe("structured output (json_output synthetic tool)", () => {
+  it("non-streaming: json_output tool_use surfaces as TEXT, not functionCall", () => {
+    const message = createMessage({
+      content: [
+        {
+          type: "tool_use",
+          id: "call_1",
+          name: "json_output",
+          input: { city: "Tokyo", temp: 21 },
+        },
+      ],
+      stop_reason: "tool_use",
+      usage: { input_tokens: 10, output_tokens: 20 },
+    });
+
+    const result = convertAnthropicResponse(message);
+
+    expect(result.content?.parts).toHaveLength(1);
+    expect(result.content?.parts?.[0].functionCall).toBeUndefined();
+    expect(result.content?.parts?.[0].text).toBe(
+      JSON.stringify({ city: "Tokyo", temp: 21 }),
+    );
+    expect(JSON.parse(result.content?.parts?.[0].text as string)).toEqual({
+      city: "Tokyo",
+      temp: 21,
+    });
+  });
+
+  it("non-streaming: a REAL tool still emits a functionCall (regression guard)", () => {
+    const message = createMessage({
+      content: [
+        {
+          type: "tool_use",
+          id: "call_1",
+          name: "get_weather",
+          input: { city: "Tokyo" },
+        },
+      ],
+      stop_reason: "tool_use",
+      usage: { input_tokens: 10, output_tokens: 20 },
+    });
+
+    const result = convertAnthropicResponse(message);
+
+    expect(result.content?.parts?.[0].functionCall?.name).toBe("get_weather");
+    expect(result.content?.parts?.[0].text).toBeUndefined();
+  });
+
+  it("streaming: json_output tool surfaces as TEXT at message_stop", () => {
+    const acc = createAnthropicStreamAccumulator();
+    acc.toolUses.set(0, { id: "c1", name: "json_output", input: '{"answer":42}' });
+
+    const result = convertAnthropicStreamEvent({ type: "message_stop" }, acc);
+
+    expect(result.isComplete).toBe(true);
+    const part = result.response?.content?.parts?.[0];
+    expect(part?.functionCall).toBeUndefined();
+    expect(JSON.parse(part?.text as string)).toEqual({ answer: 42 });
+  });
+
+  it("streaming: real tool still emits functionCall at message_stop (regression guard)", () => {
+    const acc = createAnthropicStreamAccumulator();
+    acc.toolUses.set(0, {
+      id: "c1",
+      name: "get_weather",
+      input: '{"city":"Tokyo"}',
+    });
+
+    const result = convertAnthropicStreamEvent({ type: "message_stop" }, acc);
+
+    expect(result.response?.content?.parts?.[0].functionCall?.name).toBe(
+      "get_weather",
+    );
+    expect(result.response?.content?.parts?.[0].text).toBeUndefined();
+  });
+
+  it("produces ADK-parseable JSON text with no functionCall (outputKey contract)", () => {
+    const message = createMessage({
+      content: [
+        {
+          type: "tool_use",
+          id: "call_1",
+          name: "json_output",
+          input: { a: 1, b: "two" },
+        },
+      ],
+      stop_reason: "tool_use",
+      usage: { input_tokens: 1, output_tokens: 1 },
+    });
+
+    const result = convertAnthropicResponse(message);
+    const parts = result.content?.parts ?? [];
+
+    // isFinalResponse would be true: no functionCall parts present.
+    expect(parts.every((p) => p.functionCall === undefined)).toBe(true);
+    // maybeSaveOutputToState reads parts.map(p=>p.text).join("") and JSON.parses.
+    const resultStr = parts.map((p) => p.text ?? "").join("");
+    expect(() => JSON.parse(resultStr)).not.toThrow();
+    expect(JSON.parse(resultStr)).toEqual({ a: 1, b: "two" });
+  });
+});

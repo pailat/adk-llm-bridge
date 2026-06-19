@@ -28,7 +28,7 @@ import {
 import { normalizeSchema as normalizeSharedSchema } from "../../../converters/schema";
 
 /** Name of the synthetic tool used to emulate structured JSON output. */
-const JSON_OUTPUT_TOOL_NAME = "json_output";
+export const JSON_OUTPUT_TOOL_NAME = "json_output";
 
 /**
  * Result of converting an ADK LlmRequest to Anthropic format.
@@ -223,7 +223,10 @@ export function convertAnthropicGenerationConfig(
   }
   if (config.topP !== undefined) params.top_p = config.topP;
   if (config.topK !== undefined) params.top_k = config.topK;
-  if (config.maxOutputTokens !== undefined)
+  // Anthropic rejects max_tokens < 1 (400). Treat a non-positive
+  // maxOutputTokens as unset so buildRequestParams falls back to the
+  // clamped instance default (this.maxTokens) via `max_tokens ?? this.maxTokens`.
+  if (config.maxOutputTokens !== undefined && config.maxOutputTokens >= 1)
     params.max_tokens = config.maxOutputTokens;
   if (config.stopSequences !== undefined)
     params.stop_sequences = config.stopSequences;
@@ -232,13 +235,17 @@ export function convertAnthropicGenerationConfig(
   // non-reasoning requests are unaffected. Anthropic requires a budget >= 1024.
   if (config.thinkingConfig) {
     const budget = config.thinkingConfig.thinkingBudget;
-    params.thinking = {
-      type: "enabled",
-      budget_tokens:
-        budget !== undefined && budget >= MIN_THINKING_BUDGET
-          ? budget
-          : DEFAULT_THINKING_BUDGET,
-    };
+    // An explicit budget <= 0 disables thinking (matches the OpenAI reasoning
+    // path). Don't enable extended thinking with a default budget in that case.
+    if (budget === undefined || budget > 0) {
+      params.thinking = {
+        type: "enabled",
+        budget_tokens:
+          budget !== undefined && budget >= MIN_THINKING_BUDGET
+            ? budget
+            : DEFAULT_THINKING_BUDGET,
+      };
+    }
   }
 
   reconcileAnthropicSamplingParams(params);

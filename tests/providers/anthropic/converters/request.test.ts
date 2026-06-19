@@ -353,6 +353,36 @@ describe("convertAnthropicRequest", () => {
         max_tokens: 128,
       });
     });
+
+    it("omits max_tokens when maxOutputTokens is 0 (Anthropic rejects <1)", () => {
+      const request = createLlmRequest({
+        config: { maxOutputTokens: 0, temperature: 0.5 },
+      });
+      expect(convertAnthropicGenerationConfig(request)).toEqual({
+        temperature: 0.5,
+      });
+    });
+
+    it("returns undefined when maxOutputTokens 0 is the only field", () => {
+      const request = createLlmRequest({ config: { maxOutputTokens: 0 } });
+      expect(convertAnthropicGenerationConfig(request)).toBeUndefined();
+    });
+
+    it("omits negative maxOutputTokens", () => {
+      const request = createLlmRequest({
+        config: { maxOutputTokens: -5, temperature: 0.5 },
+      });
+      expect(convertAnthropicGenerationConfig(request)).toEqual({
+        temperature: 0.5,
+      });
+    });
+
+    it("preserves maxOutputTokens of 1 (boundary)", () => {
+      const request = createLlmRequest({ config: { maxOutputTokens: 1 } });
+      expect(convertAnthropicGenerationConfig(request)).toEqual({
+        max_tokens: 1,
+      });
+    });
   });
 
   describe("extended thinking", () => {
@@ -389,6 +419,24 @@ describe("convertAnthropicRequest", () => {
 
     it("does not emit thinking when thinkingConfig is absent", () => {
       const request = createLlmRequest({ config: { temperature: 0.5 } });
+      expect(
+        convertAnthropicGenerationConfig(request)?.thinking,
+      ).toBeUndefined();
+    });
+
+    it("does not emit thinking when thinkingBudget is 0 (disabled)", () => {
+      const request = createLlmRequest({
+        config: { thinkingConfig: { thinkingBudget: 0 } },
+      });
+      expect(
+        convertAnthropicGenerationConfig(request)?.thinking,
+      ).toBeUndefined();
+    });
+
+    it("does not emit thinking when thinkingBudget is negative (disabled)", () => {
+      const request = createLlmRequest({
+        config: { thinkingConfig: { thinkingBudget: -1 } },
+      });
       expect(
         convertAnthropicGenerationConfig(request)?.thinking,
       ).toBeUndefined();

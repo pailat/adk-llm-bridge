@@ -43,6 +43,25 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `ToolContext` import is gone) and reports `updatedAt` from `listSessions`; all
   examples bumped `zod` to `^4.2.1` for ADK 1.2.0 type compatibility.
 
+### Fixed
+
+- Hardening from an internal review of the passthrough feature (all additive,
+  no public API change):
+  - **Anthropic structured output now works with ADK `outputSchema`/`outputKey`.**
+    The emulated `json_output` tool result is surfaced as JSON **text** (not a
+    dispatchable `functionCall`), so ADK populates `session.state[outputKey]`
+    and treats the turn as final — matching the OpenAI path.
+  - Anthropic `maxOutputTokens <= 0` no longer sends `max_tokens: 0` (rejected
+    by the API); it falls back to the instance default.
+  - Anthropic `thinkingConfig.thinkingBudget <= 0` now disables thinking
+    (consistent with the OpenAI path) instead of forcing it on at the minimum
+    budget.
+  - OpenAI-compatible: `candidateCount`/`n` is dropped for reasoning models
+    (gpt-5/o-series reject `n > 1`), and `top_logprobs` is clamped to `0..20`.
+  - A one-time warning is emitted when image parts on a non-user turn are
+    dropped, and when a forced `tool_choice` is downgraded under Anthropic
+    extended thinking.
+
 ### Docs
 
 - Documented the upstream `@google/adk-devtools` web-UI "Sessions" tab

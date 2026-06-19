@@ -261,8 +261,10 @@ export function convertGenerationConfig(
     params.presence_penalty = config.presencePenalty;
   if (config.frequencyPenalty !== undefined && !reasoningModel)
     params.frequency_penalty = config.frequencyPenalty;
-  // n>1 stays cosmetic: convertResponse reads choices[0] only.
-  if (config.candidateCount !== undefined) params.n = config.candidateCount;
+  // n>1 stays cosmetic: convertResponse reads choices[0] only. Reasoning
+  // models (gpt-5*, o-series) reject n>1 with a 400, so drop it for them.
+  if (config.candidateCount !== undefined && !reasoningModel)
+    params.n = config.candidateCount;
   // topK intentionally dropped — no OpenAI Chat Completions equivalent.
   // Reasoning is handled separately in convertReasoningConfig.
 
@@ -374,7 +376,9 @@ export function convertLogprobsConfig(
     params.logprobs = true;
   }
   if (config.logprobs !== undefined && config.logprobs !== null) {
-    params.top_logprobs = config.logprobs;
+    // OpenAI-compatible APIs accept top_logprobs only in the 0-20 range and
+    // return a 400 outside it. Clamp so out-of-range ADK values still succeed.
+    params.top_logprobs = Math.min(Math.max(config.logprobs, 0), 20);
     // top_logprobs requires logprobs:true on OpenAI-compatible APIs.
     params.logprobs = true;
   }
@@ -572,6 +576,14 @@ function processContent(
       messages.push({ role: "tool", tool_call_id: r.id, content: r.content });
     }
   } else if (content.role === "model") {
+    if (images.length) {
+      // OpenAI assistant messages cannot carry images; only user messages can.
+      // Drop image parts on a model/assistant turn (keep text + tool_calls).
+      console.warn(
+        "[adk-llm-bridge] dropping image part(s) on an assistant/model turn — " +
+          "OpenAI assistant messages cannot carry images",
+      );
+    }
     if (texts.length || calls.length) {
       const msg: OpenAI.ChatCompletionAssistantMessageParam = {
         role: "assistant",
