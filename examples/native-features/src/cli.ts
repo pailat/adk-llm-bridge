@@ -26,6 +26,7 @@ function parseArgs(argv: string[]): ParsedArgs {
   const parsed: ParsedArgs = {};
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
+    if (arg === undefined) continue;
     if (arg === "--provider") parsed.provider = argv[++i];
     else if (arg === "--model") parsed.model = argv[++i];
     else if (!arg.startsWith("--") && parsed.command === undefined)
