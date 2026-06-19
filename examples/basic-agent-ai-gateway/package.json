@@ -9,7 +9,7 @@
   },
   "dependencies": {
     "@google/adk": "^1.2.0",
-    "adk-llm-bridge": "^0.5.2",
+    "adk-llm-bridge": "^0.5.3",
     "zod": "^4.2.1"
   }
 }

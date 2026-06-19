@@ -4,6 +4,51 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.3] - 2026-06-19
+
+### Added
+
+- **Native model config passthrough** ([#76]). The provider converters now
+  forward the full `LlmRequest.config` (a `@google/genai` `GenerateContentConfig`)
+  to each provider instead of dropping everything but `systemInstruction`,
+  `contents`, and tool `functionDeclarations`. Covers both the OpenAI-compatible
+  family (OpenAI/xAI/OpenRouter/AI Gateway/Custom) and the Anthropic native
+  provider:
+  - Sampling/generation config (`temperature`, `topP`, `topK`,
+    `maxOutputTokens`, `stopSequences`, `seed`, presence/frequency penalties,
+    `candidateCount`, logprobs).
+  - `tool_choice` (from `toolConfig.functionCallingConfig`).
+  - `finishReason` (provider finish/stop reason → ADK `FinishReason`).
+  - Streaming token usage (OpenAI `stream_options.include_usage`).
+  - Multimodal image input (`inlineData`/`fileData` → OpenAI `image_url` /
+    Anthropic image + document blocks).
+  - Structured output (`responseSchema` → OpenAI `response_format` json_schema /
+    Anthropic forced `json_output` tool).
+  - Reasoning/thinking input + output (`thinkingConfig` → OpenAI
+    `reasoning_effort`, model-gated with `max_completion_tokens`; Anthropic
+    extended thinking with a signed thinking-block round-trip), surfaced as ADK
+    thought parts + `thoughtsTokenCount`.
+  - Anthropic prompt caching (opt-in instance config).
+  - Gemini-only tools/config are filtered cleanly with a one-time warning.
+  Provider-API forbidden combinations are reconciled and verified against the
+  live APIs (e.g. Anthropic drops sampling params and forced `tool_choice` when
+  thinking is enabled). Public API is additive; no existing signatures changed.
+
+### Changed
+
+- Tested and built against `@google/adk@1.2.0` ([#75]): dev dependency bumped to
+  `^1.2.0`, peer range tightened to `>=0.5.0 <2`, and all examples updated to
+  `@google/adk@^1.2.0`. `src/` is compatible with both 0.5.x and 1.2.x.
+- Examples: `express-server` uses the `Context` type (the non-existent
+  `ToolContext` import is gone) and reports `updatedAt` from `listSessions`; all
+  examples bumped `zod` to `^4.2.1` for ADK 1.2.0 type compatibility.
+
+### Docs
+
+- Documented the upstream `@google/adk-devtools` web-UI "Sessions" tab
+  limitation and clarified the `LLMRegistry.register` vs factory-pattern
+  distinction.
+
 ## [0.5.2] - 2026-06-18
 
 ### Fixed
@@ -38,5 +83,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `scripts/build.ts` and `scripts/fix-declaration-imports.mjs` (superseded by
   `bunup`, which emits correct ESM import specifiers).
 
+[0.5.3]: https://github.com/pailat/adk-llm-bridge/releases/tag/v0.5.3
 [0.5.2]: https://github.com/pailat/adk-llm-bridge/releases/tag/v0.5.2
 [#73]: https://github.com/pailat/adk-llm-bridge/issues/73
+[#75]: https://github.com/pailat/adk-llm-bridge/pull/75
+[#76]: https://github.com/pailat/adk-llm-bridge/pull/76
