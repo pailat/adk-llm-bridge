@@ -6,14 +6,27 @@
  * `LLMRegistry.register` (only the string-model path does). This module is the
  * single switch point for adding more providers later.
  */
-import { Anthropic, OpenAI, type BaseLlm } from "adk-llm-bridge";
+import {
+  AIGateway,
+  Anthropic,
+  OpenAI,
+  OpenRouter,
+  XAI,
+  type BaseLlm,
+} from "adk-llm-bridge";
 import type { AppConfig } from "./types";
 
 export function makeModel(config: AppConfig): BaseLlm {
   switch (config.provider) {
-    case "openai":
-      return OpenAI(config.model);
     case "anthropic":
       return Anthropic(config.model);
+    case "openai":
+      return OpenAI(config.model);
+    case "ai-gateway":
+      return AIGateway(config.model);
+    case "openrouter":
+      return OpenRouter(config.model);
+    case "xai":
+      return XAI(config.model);
   }
 }

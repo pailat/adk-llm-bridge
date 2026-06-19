@@ -8,13 +8,20 @@ import type { AgentHarness } from "./runner";
 import type { Output } from "./output";
 
 /** Which library factory builds the model. */
-export type ProviderName = "anthropic" | "openai";
+export type ProviderName =
+  | "anthropic"
+  | "openai"
+  | "ai-gateway"
+  | "openrouter"
+  | "xai";
 
 /** Resolved, validated application configuration. */
 export interface AppConfig {
   provider: ProviderName;
   model: string;
   apiKey: string;
+  /** True when `model` came from an explicit --model / MODEL (not the default). */
+  modelExplicit: boolean;
 }
 
 /**

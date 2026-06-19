@@ -11,6 +11,7 @@
  * thinking.
  */
 import { LlmAgent } from "@google/adk";
+import { reasoningModelFor } from "../config";
 import { makeModel } from "../providers";
 import { buildMessage } from "../runner";
 import type { Demo } from "../types";
@@ -23,9 +24,15 @@ export const reasoningDemo: Demo = {
   async run({ harness, out, config }) {
     out.header(reasoningDemo, config);
 
+    // Reasoning is model-gated, so this demo uses a reasoning-capable model for
+    // the provider (overridable with --model). The default models for some
+    // providers (e.g. gpt-4o) do not reason.
+    const model = reasoningModelFor(config);
+    out.label("reasoning model", model);
+
     const agent = new LlmAgent({
       name: "reasoner",
-      model: makeModel(config),
+      model: makeModel({ ...config, model }),
       instruction:
         "Think step by step, then give a single final numeric answer.",
       generateContentConfig: {

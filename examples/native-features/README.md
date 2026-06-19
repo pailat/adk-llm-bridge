@@ -189,11 +189,40 @@ lookup), **Facade** (`AgentHarness` hides ADK plumbing and reduces the event
 stream into a typed `RunResult`), **Factory** (library `Anthropic()`/`OpenAI()`),
 and **Dependency Injection** (a `DemoContext` is passed into every demo).
 
-## Supported Models
+## Providers & models
 
-Default: `claude-sonnet-4-6` (supports thinking, vision, and structured output).
-Swap with `--model <id>` or the `MODEL` env var. For OpenAI, pass
-`--provider openai` (default model `gpt-4o`) and set `OPENAI_API_KEY`.
+Select a provider with `--provider <name>` (or `PROVIDER` env), and optionally a
+model with `--model <id>` (or `MODEL`). Each provider reads its own key from
+`.env`.
+
+| Provider | Key | Default model | Reasoning model (auto for the `reasoning` demo) |
+|---|---|---|---|
+| `anthropic` (default) | `ANTHROPIC_API_KEY` | `claude-sonnet-4-6` | `claude-sonnet-4-6` |
+| `openai` | `OPENAI_API_KEY` | `gpt-4o` | `gpt-5.5` |
+| `ai-gateway` | `AI_GATEWAY_API_KEY` | `anthropic/claude-sonnet-4.6` | `openai/gpt-5.5` |
+| `openrouter` | `OPENROUTER_API_KEY` | `openai/gpt-4o` | `deepseek/deepseek-r1` |
+| `xai` | `XAI_API_KEY` | `grok-4.3` | `grok-4.3` |
+
+```bash
+bun run all --provider openai            # all demos on gpt-4o
+bun run reasoning --provider openrouter  # auto-uses deepseek/deepseek-r1
+bun run sampling --provider xai --model grok-4.3
+```
+
+**Reasoning is model-gated.** Because most providers' *default* models don't
+reason, the `reasoning` demo automatically swaps to a reasoning-capable model
+per provider (the table above; override with `--model`). The bridge only emits
+`reasoning_effort` / extended thinking for reasoning models, so other demos on
+plain models are unaffected.
+
+### Validated across all five providers
+
+Every feature passes on every provider with an appropriate model. Notes on
+model behavior (not bridge limitations): OpenAI/AI-Gateway reasoning models
+report `thoughtsTokenCount` but hide the reasoning *text* (Anthropic, Grok and
+DeepSeek-R1 surface thought parts); `grok-4.3` reasons on every turn, so giving
+the `sampling` demo a tiny `maxOutputTokens` can leave no room for an answer,
+and `grok-4.3` does not reliably honor JSON-schema structured output.
 
 ## Local development (testing against the local build)
 
