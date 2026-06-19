@@ -30,6 +30,12 @@ const DEFAULT_ANTHROPIC_MAX_TOKENS = 4096;
 /** Model patterns for Anthropic models. Matches claude-* */
 export const ANTHROPIC_MODEL_PATTERNS = [/claude-.*/];
 
+/**
+ * Tracks whether the "thinking downgrades forced tool_choice" warning has
+ * already been emitted, so it is logged at most once per process.
+ */
+let warnedThinkingToolChoiceDowngrade = false;
+
 import type { AnthropicGenerationParams } from "./converters/request";
 import {
   applyAnthropicPromptCaching,
@@ -245,6 +251,15 @@ export class AnthropicLlm extends BaseProviderLlm {
       (toolChoice?.type === "any" || toolChoice?.type === "tool")
     ) {
       resolvedToolChoice = { type: "auto" };
+      if (!warnedThinkingToolChoiceDowngrade) {
+        warnedThinkingToolChoiceDowngrade = true;
+        console.warn(
+          "[adk-llm-bridge] Anthropic forbids a forced tool_choice while " +
+            "extended thinking is enabled; downgrading tool_choice to " +
+            "{ type: 'auto' }. Structured output / forced function calling " +
+            "is best-effort in this request. Disable thinking to force tool use.",
+        );
+      }
     }
 
     return {

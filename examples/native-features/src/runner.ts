@@ -181,9 +181,9 @@ export class AgentHarness {
     if (part.functionCall) {
       const name = part.functionCall.name ?? "(unnamed)";
       result.toolCalls.push({ name, args: part.functionCall.args });
-      // ADK's `outputSchema` path (Anthropic native) emits the structured
-      // result as a forced "json_output" tool call whose args ARE the object.
-      if (name === "json_output") result.structured = part.functionCall.args;
+      // (Structured output is no longer emitted as a json_output function call;
+      // the Anthropic bridge surfaces it as JSON text, captured below via
+      // outputKey/session.state or the looksLikeJsonObject(finalText) fallback.)
       return;
     }
     if (part.functionResponse) {

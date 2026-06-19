@@ -58,13 +58,13 @@ export const structuredOutputDemo: Demo = {
       agent,
       buildMessage("Give me facts about Kyoto."),
       // Lets the harness read the auto-parsed object from session.state when ADK
-      // returns it as JSON text (the Anthropic path returns a json_output call
-      // instead — the harness normalizes both into result.structured).
+      // returns it as JSON text. The Anthropic path returns JSON text too (the
+      // bridge surfaces its synthetic json_output tool result as text).
       { outputKey: "cityFact" },
     );
 
-    // `result.structured` is the normalized object (from the json_output tool
-    // call, session.state[outputKey], or JSON text — whichever ADK produced).
+    // `result.structured` is the normalized object (from session.state[outputKey]
+    // or the JSON final text — whichever ADK produced).
     const raw = result.structured ?? safeParse(result.finalText);
 
     if (raw === undefined) {

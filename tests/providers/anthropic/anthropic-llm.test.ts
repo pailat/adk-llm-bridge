@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "bun:test";
+import { beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { resetAllConfigs } from "../../../src/config";
 import {
   ANTHROPIC_MODEL_PATTERNS,
@@ -229,6 +229,70 @@ describe("AnthropicLlm", () => {
           type: "tool",
           name: "json_output",
         });
+      });
+
+      // Counts warn calls whose first arg mentions the downgrade. Insensitive
+      // to the module-level one-time flag (which may already be tripped by an
+      // earlier test) because it measures a DELTA around the action.
+      const downgradeWarnCount = (
+        spy: ReturnType<typeof spyOn<typeof console, "warn">>,
+      ) =>
+        spy.mock.calls.filter((c) =>
+          String(c[0]).includes("downgrading tool_choice"),
+        ).length;
+
+      it("warns at most once when downgrading a forced tool_choice under thinking", () => {
+        const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
+        try {
+          const llm = newLlm();
+          const first = llm.callBuild(
+            { thinking: { type: "enabled", budget_tokens: 2048 } },
+            { tools: [tool], toolChoice: { type: "tool", name: "json_output" } },
+          );
+          expect(first.tool_choice).toEqual({ type: "auto" });
+
+          // A second identical call must NOT add another downgrade warning.
+          const before = downgradeWarnCount(warnSpy);
+          const second = llm.callBuild(
+            { thinking: { type: "enabled", budget_tokens: 2048 } },
+            { tools: [tool], toolChoice: { type: "tool", name: "json_output" } },
+          );
+          expect(second.tool_choice).toEqual({ type: "auto" });
+          expect(downgradeWarnCount(warnSpy)).toBe(before);
+        } finally {
+          warnSpy.mockRestore();
+        }
+      });
+
+      it("does NOT warn when tool_choice is {type:'none'} under thinking", () => {
+        const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
+        try {
+          const result = newLlm().callBuild(
+            { thinking: { type: "enabled", budget_tokens: 2048 } },
+            { tools: [tool], toolChoice: { type: "none" } },
+          );
+          expect(result.tool_choice).toEqual({ type: "none" });
+          expect(downgradeWarnCount(warnSpy)).toBe(0);
+        } finally {
+          warnSpy.mockRestore();
+        }
+      });
+
+      it("does NOT warn when thinking is OFF even with a forced tool_choice", () => {
+        const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
+        try {
+          const result = newLlm().callBuild(
+            {},
+            { tools: [tool], toolChoice: { type: "tool", name: "json_output" } },
+          );
+          expect(result.tool_choice).toEqual({
+            type: "tool",
+            name: "json_output",
+          });
+          expect(downgradeWarnCount(warnSpy)).toBe(0);
+        } finally {
+          warnSpy.mockRestore();
+        }
       });
     });
 

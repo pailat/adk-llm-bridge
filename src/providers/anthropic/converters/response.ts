@@ -17,6 +17,7 @@ import type Anthropic from "@anthropic-ai/sdk";
 import type { LlmResponse } from "@google/adk";
 import { FinishReason, type Part } from "@google/genai";
 import { safeJsonParse } from "../../../utils";
+import { JSON_OUTPUT_TOOL_NAME } from "./request";
 
 /**
  * Maps an Anthropic `stop_reason` to the ADK/genai {@link FinishReason} enum.
@@ -133,13 +134,22 @@ export function convertAnthropicResponse(
         typeof block.input === "object" && block.input !== null
           ? (block.input as Record<string, unknown>)
           : {};
-      parts.push({
-        functionCall: {
-          id: block.id,
-          name: block.name,
-          args: input,
-        },
-      });
+      // Structured output is emulated via a forced synthetic `json_output`
+      // tool. ADK's outputKey/outputSchema path reads parts.map(p=>p.text) and
+      // JSON.parses it, and isFinalResponse is false when a functionCall is
+      // present. So surface the synthetic tool's args as a TEXT part (the JSON
+      // object) rather than a functionCall the agent would try to dispatch.
+      if (block.name === JSON_OUTPUT_TOOL_NAME) {
+        parts.push({ text: JSON.stringify(input) });
+      } else {
+        parts.push({
+          functionCall: {
+            id: block.id,
+            name: block.name,
+            args: input,
+          },
+        });
+      }
     }
   }
 
@@ -323,13 +333,21 @@ export function convertAnthropicStreamEvent(
 
       for (const toolUse of acc.toolUses.values()) {
         if (toolUse.name) {
-          parts.push({
-            functionCall: {
-              id: toolUse.id,
-              name: toolUse.name,
-              args: safeJsonParse(toolUse.input),
-            },
-          });
+          const args = safeJsonParse(toolUse.input);
+          // See convertAnthropicResponse: the synthetic json_output tool must
+          // surface as TEXT so ADK's outputKey/text-parse and isFinalResponse
+          // work, not as a dispatchable functionCall.
+          if (toolUse.name === JSON_OUTPUT_TOOL_NAME) {
+            parts.push({ text: JSON.stringify(args) });
+          } else {
+            parts.push({
+              functionCall: {
+                id: toolUse.id,
+                name: toolUse.name,
+                args,
+              },
+            });
+          }
         }
       }
 

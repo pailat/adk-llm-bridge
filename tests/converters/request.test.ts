@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import type { LlmRequest } from "@google/adk";
 import { FunctionCallingConfigMode } from "@google/genai";
 import {
@@ -117,6 +117,73 @@ describe("convertRequest", () => {
           },
         ],
       });
+    });
+
+    it("drops image parts on a model/assistant turn and warns", () => {
+      const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const request = createLlmRequest({
+          contents: [
+            {
+              role: "model",
+              parts: [
+                { text: "Here is the image" },
+                { inlineData: { mimeType: "image/png", data: "AAAA" } },
+              ],
+            },
+          ],
+        });
+
+        const result = convertRequest(request);
+
+        // Assistant message keeps text only; the image is dropped.
+        expect(result.messages[0]).toEqual({
+          role: "assistant",
+          content: "Here is the image",
+        });
+        const warned = warnSpy.mock.calls.some((c) =>
+          String(c[0]).includes("dropping image part"),
+        );
+        expect(warned).toBe(true);
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it("keeps image parts on a user turn (regression guard)", () => {
+      const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const request = createLlmRequest({
+          contents: [
+            {
+              role: "user",
+              parts: [
+                { text: "What is this?" },
+                { inlineData: { mimeType: "image/png", data: "AAAA" } },
+              ],
+            },
+          ],
+        });
+
+        const result = convertRequest(request);
+
+        expect(result.messages[0]).toEqual({
+          role: "user",
+          content: [
+            { type: "text", text: "What is this?" },
+            {
+              type: "image_url",
+              image_url: { url: "data:image/png;base64,AAAA" },
+            },
+          ],
+        });
+        const warned = warnSpy.mock.calls.some((c) =>
+          String(c[0]).includes("dropping image part"),
+        );
+        expect(warned).toBe(false);
+      } finally {
+        warnSpy.mockRestore();
+      }
     });
   });
 
@@ -733,6 +800,26 @@ describe("convertRequest", () => {
         expect(result.top_p).toBe(0.8);
       });
 
+      it("drops n (candidateCount) for gpt-5 reasoning models", () => {
+        const request = createLlmRequest({ config: { candidateCount: 2 } });
+        const result = convertGenerationConfig(request, "gpt-5");
+        expect(result).not.toHaveProperty("n");
+      });
+
+      it("drops n for o-series and provider-prefixed reasoning models", () => {
+        for (const model of ["o1", "o3-mini", "o4-mini", "openai/gpt-5-mini"]) {
+          const request = createLlmRequest({ config: { candidateCount: 3 } });
+          const result = convertGenerationConfig(request, model);
+          expect(result).not.toHaveProperty("n");
+        }
+      });
+
+      it("keeps n (candidateCount) for non-reasoning models (gpt-4.1)", () => {
+        const request = createLlmRequest({ config: { candidateCount: 2 } });
+        const result = convertGenerationConfig(request, "gpt-4.1");
+        expect(result.n).toBe(2);
+      });
+
       it("end-to-end: gpt-5 request carries no temperature/top_p/logprobs but keeps reasoning_effort", () => {
         const request = createLlmRequest({
           contents: [{ role: "user", parts: [{ text: "Hi" }] }],
@@ -882,6 +969,30 @@ describe("convertRequest", () => {
       const request = createLlmRequest({ config: { logprobs: 0 } });
       expect(convertLogprobsConfig(request)).toEqual({
         top_logprobs: 0,
+        logprobs: true,
+      });
+    });
+
+    it("clamps top_logprobs above 20 to 20", () => {
+      const request = createLlmRequest({ config: { logprobs: 50 } });
+      expect(convertLogprobsConfig(request)).toEqual({
+        top_logprobs: 20,
+        logprobs: true,
+      });
+    });
+
+    it("clamps a negative top_logprobs to 0", () => {
+      const request = createLlmRequest({ config: { logprobs: -3 } });
+      expect(convertLogprobsConfig(request)).toEqual({
+        top_logprobs: 0,
+        logprobs: true,
+      });
+    });
+
+    it("keeps an in-range top_logprobs (boundary 20)", () => {
+      const request = createLlmRequest({ config: { logprobs: 20 } });
+      expect(convertLogprobsConfig(request)).toEqual({
+        top_logprobs: 20,
         logprobs: true,
       });
     });
