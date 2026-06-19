@@ -67,10 +67,10 @@ model: OpenRouter('anthropic/claude-sonnet-4')
 model: OpenAI('gpt-4.1')
 
 // Anthropic - Direct API  
-model: Anthropic('claude-sonnet-4-5')
+model: Anthropic('claude-sonnet-4-6')
 
 // xAI - Direct API
-model: XAI('grok-3-beta')
+model: XAI('grok-4.3')
 
 // Local models (LM Studio, Ollama, etc.)
 model: Custom('your-model', { baseURL: 'http://localhost:1234/v1' })
@@ -90,7 +90,7 @@ LLMRegistry.register(AnthropicLlm);
 
 const agent = new LlmAgent({
   name: 'assistant',
-  model: 'claude-sonnet-4-5',  // String-based model name
+  model: 'claude-sonnet-4-6',  // String-based model name
   instruction: 'You are a helpful assistant.',
 });
 ```
@@ -140,7 +140,7 @@ model: OpenRouter('anthropic/claude-sonnet-4', {
 })
 
 // Anthropic with custom max tokens
-model: Anthropic('claude-sonnet-4-5', {
+model: Anthropic('claude-sonnet-4-6', {
   apiKey: process.env.ANTHROPIC_API_KEY,
   maxTokens: 8192,
 })
@@ -205,7 +205,7 @@ const getWeather = new FunctionTool({
 
 const agent = new LlmAgent({
   name: 'weather-assistant',
-  model: Anthropic('claude-sonnet-4-5'),
+  model: Anthropic('claude-sonnet-4-6'),
   instruction: 'You help users check the weather.',
   tools: [getWeather],
 });
@@ -298,12 +298,13 @@ See the [examples](./examples) directory:
 - **[basic-agent-anthropic](./examples/basic-agent-anthropic)** - Multi-agent HelpDesk with Anthropic
 - **[basic-agent-xai](./examples/basic-agent-xai)** - Multi-agent HelpDesk with xAI
 - **[basic-agent-lmstudio](./examples/basic-agent-lmstudio)** - Multi-agent HelpDesk with LM Studio
+- **[native-features](./examples/native-features)** - Showcase of native model capabilities (sampling, reasoning, structured output, multimodal, tool_choice, streaming) across all 5 providers
 - **[express-server](./examples/express-server)** - Production HTTP API with sessions, streaming, tools
 
 ## Requirements
 
 - Node.js >= 18.0.0
-- `@google/adk` >= 0.2.2
+- `@google/adk` >= 0.5.0 (peer range `>=0.5.0 <2`; tested against 1.2.0)
 
 ## Contributing
 
