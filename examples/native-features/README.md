@@ -218,11 +218,14 @@ plain models are unaffected.
 ### Validated across all five providers
 
 Every feature passes on every provider with an appropriate model. Notes on
-model behavior (not bridge limitations): OpenAI/AI-Gateway reasoning models
-report `thoughtsTokenCount` but hide the reasoning *text* (Anthropic, Grok and
-DeepSeek-R1 surface thought parts); `grok-4.3` reasons on every turn, so giving
-the `sampling` demo a tiny `maxOutputTokens` can leave no room for an answer,
-and `grok-4.3` does not reliably honor JSON-schema structured output.
+model behavior (not bridge limitations):
+
+- OpenAI / AI-Gateway reasoning models report `thoughtsTokenCount` but hide the
+  reasoning *text*; Anthropic, Grok and DeepSeek-R1 surface thought parts.
+- **xAI Grok returns an empty response whenever `stop`/`stopSequences` is set**,
+  so the `sampling` demo omits `stopSequences` on xAI (the bridge forwards it
+  correctly; it works on the other four providers).
+- `grok-4.3` does not reliably honor JSON-schema structured output.
 
 ## Local development (testing against the local build)
 

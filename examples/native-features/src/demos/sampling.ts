@@ -26,10 +26,18 @@ export const samplingDemo: Demo = {
 
     const generateContentConfig: GenerateContentConfig = {
       temperature: 0.2, // low → more deterministic
-      maxOutputTokens: 120, // cap the response length
-      stopSequences: ["END"], // model stops if it emits this token
+      // Cap the response length. Kept generous (not tiny) so reasoning-capable
+      // defaults still have room for an answer after thinking.
+      maxOutputTokens: 512,
     };
 
+    // stopSequences works on every provider EXCEPT xAI: grok returns an EMPTY
+    // response whenever `stop` is set (an xAI API quirk, not a bridge issue —
+    // the bridge forwards `stop` correctly, and it works on the other four).
+    const useStop = config.provider !== "xai";
+    if (useStop) {
+      generateContentConfig.stopSequences = ["END"];
+    }
     // topP is only safe to pair with temperature on OpenAI (see note above).
     if (config.provider === "openai") {
       generateContentConfig.topP = 0.9;
@@ -39,8 +47,8 @@ export const samplingDemo: Demo = {
       name: "sampler",
       model: makeModel(config),
       instruction:
-        "You are concise. Answer in at most two short sentences. " +
-        'Append the literal token "END" after your answer.',
+        "You are concise. Answer in at most two short sentences." +
+        (useStop ? ' Append the literal token "END" after your answer.' : ""),
       generateContentConfig,
     });
 
