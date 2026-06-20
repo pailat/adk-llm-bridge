@@ -71,9 +71,9 @@ export { BaseLlm } from "@google/adk";
 // Core (for building custom providers)
 // =============================================================================
 
-export { BaseProviderLlm } from "./core/base-provider-llm";
-export type { OpenAIClientConfig } from "./core/openai-compatible-llm";
-export { OpenAICompatibleLlm } from "./core/openai-compatible-llm";
+export { BaseProviderLlm } from "./core/base-provider-llm.js";
+export type { OpenAIClientConfig } from "./core/openai-compatible-llm.js";
+export { OpenAICompatibleLlm } from "./core/openai-compatible-llm.js";
 
 // =============================================================================
 // AI Gateway Provider
@@ -84,7 +84,7 @@ export {
   AIGatewayLlm,
   isAIGatewayRegistered,
   registerAIGateway,
-} from "./providers/ai-gateway";
+} from "./providers/ai-gateway/index.js";
 
 // =============================================================================
 // OpenRouter Provider
@@ -95,7 +95,7 @@ export {
   OpenRouter,
   OpenRouterLlm,
   registerOpenRouter,
-} from "./providers/openrouter";
+} from "./providers/openrouter/index.js";
 
 // =============================================================================
 // OpenAI Provider
@@ -106,13 +106,13 @@ export {
   OpenAI,
   OpenAILlm,
   registerOpenAI,
-} from "./providers/openai";
+} from "./providers/openai/index.js";
 
 // =============================================================================
 // xAI Provider
 // =============================================================================
 
-export { isXAIRegistered, registerXAI, XAI, XAILlm } from "./providers/xai";
+export { isXAIRegistered, registerXAI, XAI, XAILlm } from "./providers/xai/index.js";
 
 // =============================================================================
 // Anthropic Provider
@@ -123,7 +123,7 @@ export {
   AnthropicLlm,
   isAnthropicRegistered,
   registerAnthropic,
-} from "./providers/anthropic";
+} from "./providers/anthropic/index.js";
 
 // =============================================================================
 // Custom LLM Provider (Any Compatible API)
@@ -134,7 +134,7 @@ export {
   CustomLlm,
   type CustomLlmProviderConfig,
   createCustomLlm,
-} from "./providers/custom";
+} from "./providers/custom/index.js";
 
 // =============================================================================
 // Types
@@ -165,7 +165,7 @@ export type {
   // xAI types
   XAIProviderConfig,
   XAIRegisterOptions,
-} from "./types";
+} from "./types.js";
 
 // =============================================================================
 // Constants
@@ -177,7 +177,7 @@ export {
   OPENROUTER_BASE_URL,
   OPENROUTER_MODEL_PATTERNS,
   PROVIDER_IDS,
-} from "./constants";
+} from "./constants.js";
 
 // =============================================================================
 // Configuration
@@ -193,7 +193,7 @@ export {
   setConfig,
   // Multi-provider API
   setProviderConfig,
-} from "./config";
+} from "./config.js";
 
 // =============================================================================
 // Converters (for building custom providers)
@@ -204,10 +204,10 @@ export {
   convertRequest,
   convertStructuredOutput,
   convertToolChoice,
-} from "./converters/request";
+} from "./converters/request.js";
 export {
   convertResponse,
   convertStreamChunk,
   createStreamAccumulator,
-} from "./converters/response";
-export { normalizeSchema } from "./converters/schema";
+} from "./converters/response.js";
+export { normalizeSchema } from "./converters/schema.js";

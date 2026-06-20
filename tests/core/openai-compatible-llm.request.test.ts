@@ -13,8 +13,8 @@
 import { describe, expect, it } from "bun:test";
 import type { LlmRequest, LlmResponse } from "@google/adk";
 import type OpenAI from "openai";
-import { OpenAICompatibleLlm } from "../../src/core/openai-compatible-llm";
-import { OPENAI_DEFINITION } from "../../src/providers/openai/definition";
+import { OpenAICompatibleLlm } from "../../src/core/openai-compatible-llm.js";
+import { OPENAI_DEFINITION } from "../../src/providers/openai/definition.js";
 
 type CreateParams = Parameters<
   OpenAI["chat"]["completions"]["create"]

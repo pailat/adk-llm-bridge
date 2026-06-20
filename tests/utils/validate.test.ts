@@ -3,7 +3,7 @@ import {
   clampPositive,
   requireNonEmpty,
   requireValidURL,
-} from "../../src/utils/validate";
+} from "../../src/utils/validate.js";
 
 describe("requireNonEmpty", () => {
   it("returns value when non-empty", () => {

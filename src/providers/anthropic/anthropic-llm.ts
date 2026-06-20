@@ -15,12 +15,11 @@
 
 import AnthropicSDK from "@anthropic-ai/sdk";
 import type { LlmRequest, LlmResponse } from "@google/adk";
-import { getProviderConfig } from "../../config";
-import { DEFAULT_MAX_RETRIES, DEFAULT_TIMEOUT } from "../../constants";
-import { BaseProviderLlm } from "../../core/base-provider-llm";
-import type { AnthropicProviderConfig } from "../../types";
-import { clampPositive } from "../../utils/validate";
-
+import { getProviderConfig } from "../../config.js";
+import { DEFAULT_MAX_RETRIES, DEFAULT_TIMEOUT } from "../../constants.js";
+import { BaseProviderLlm } from "../../core/base-provider-llm.js";
+import type { AnthropicProviderConfig } from "../../types.js";
+import { clampPositive } from "../../utils/validate.js";
 /** Environment variable names for Anthropic configuration. */
 const ANTHROPIC_ENV = { API_KEY: "ANTHROPIC_API_KEY" } as const;
 
@@ -36,16 +35,16 @@ export const ANTHROPIC_MODEL_PATTERNS = [/claude-.*/];
  */
 let warnedThinkingToolChoiceDowngrade = false;
 
-import type { AnthropicGenerationParams } from "./converters/request";
+import type { AnthropicGenerationParams } from "./converters/request.js";
 import {
   applyAnthropicPromptCaching,
   convertAnthropicRequest,
-} from "./converters/request";
+} from "./converters/request.js";
 import {
   convertAnthropicResponse,
   convertAnthropicStreamEvent,
   createAnthropicStreamAccumulator,
-} from "./converters/response";
+} from "./converters/response.js";
 
 /**
  * Anthropic (Claude) LLM provider.

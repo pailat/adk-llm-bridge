@@ -25,7 +25,7 @@ import {
   FunctionCallingConfigMode,
   type Part,
 } from "@google/genai";
-import { normalizeSchema as normalizeSharedSchema } from "../../../converters/schema";
+import { normalizeSchema as normalizeSharedSchema } from "../../../converters/schema.js";
 
 /** Name of the synthetic tool used to emulate structured JSON output. */
 export const JSON_OUTPUT_TOOL_NAME = "json_output";

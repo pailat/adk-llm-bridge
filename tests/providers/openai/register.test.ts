@@ -2,8 +2,8 @@ import {
   _resetOpenAIRegistration,
   isOpenAIRegistered,
   registerOpenAI,
-} from "../../../src/providers/openai";
-import { describeProviderRegistration } from "../../helpers/provider-test-helpers";
+} from "../../../src/providers/openai/index.js";
+import { describeProviderRegistration } from "../../helpers/provider-test-helpers.js";
 
 describeProviderRegistration({
   name: "OpenAI",

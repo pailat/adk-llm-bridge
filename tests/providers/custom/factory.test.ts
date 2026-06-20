@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
-import { CustomLlm } from "../../../src/providers/custom/custom-llm";
-import { Custom, createCustomLlm } from "../../../src/providers/custom/factory";
+import { CustomLlm } from "../../../src/providers/custom/custom-llm.js";
+import { Custom, createCustomLlm } from "../../../src/providers/custom/factory.js";
 
 describe("createCustomLlm", () => {
   it("creates a CustomLlm instance", () => {

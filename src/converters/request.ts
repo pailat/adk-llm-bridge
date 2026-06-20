@@ -20,7 +20,7 @@ import {
   type Part,
 } from "@google/genai";
 import type OpenAI from "openai";
-import { normalizeSchema } from "./schema";
+import { normalizeSchema } from "./schema.js";
 
 /**
  * Extracts the bare model name from a possibly provider-prefixed id.

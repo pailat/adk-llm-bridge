@@ -16,8 +16,8 @@
 import type Anthropic from "@anthropic-ai/sdk";
 import type { LlmResponse } from "@google/adk";
 import { FinishReason, type Part } from "@google/genai";
-import { safeJsonParse } from "../../../utils";
-import { JSON_OUTPUT_TOOL_NAME } from "./request";
+import { safeJsonParse } from "../../../utils/index.js";
+import { JSON_OUTPUT_TOOL_NAME } from "./request.js";
 
 /**
  * Maps an Anthropic `stop_reason` to the ADK/genai {@link FinishReason} enum.

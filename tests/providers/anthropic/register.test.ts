@@ -2,8 +2,8 @@ import {
   _resetAnthropicRegistration,
   isAnthropicRegistered,
   registerAnthropic,
-} from "../../../src/providers/anthropic";
-import { describeProviderRegistration } from "../../helpers/provider-test-helpers";
+} from "../../../src/providers/anthropic/index.js";
+import { describeProviderRegistration } from "../../helpers/provider-test-helpers.js";
 
 describeProviderRegistration({
   name: "Anthropic",

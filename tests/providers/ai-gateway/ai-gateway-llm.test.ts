@@ -1,11 +1,11 @@
 import { beforeEach, describe, expect, it } from "bun:test";
-import { resetConfig } from "../../../src/config";
-import { AI_GATEWAY_DEFINITION } from "../../../src/providers/ai-gateway/definition";
-import { AIGatewayLlm } from "../../../src/providers/ai-gateway";
+import { resetConfig } from "../../../src/config.js";
+import { AI_GATEWAY_DEFINITION } from "../../../src/providers/ai-gateway/definition.js";
+import { AIGatewayLlm } from "../../../src/providers/ai-gateway/index.js";
 import {
   describeModelPatterns,
   describeConnectError,
-} from "../../helpers/provider-test-helpers";
+} from "../../helpers/provider-test-helpers.js";
 
 describe("AIGatewayLlm", () => {
   beforeEach(() => {

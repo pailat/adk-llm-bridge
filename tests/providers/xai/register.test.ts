@@ -2,8 +2,8 @@ import {
   _resetXAIRegistration,
   isXAIRegistered,
   registerXAI,
-} from "../../../src/providers/xai";
-import { describeProviderRegistration } from "../../helpers/provider-test-helpers";
+} from "../../../src/providers/xai/index.js";
+import { describeProviderRegistration } from "../../helpers/provider-test-helpers.js";
 
 describeProviderRegistration({
   name: "XAI",
