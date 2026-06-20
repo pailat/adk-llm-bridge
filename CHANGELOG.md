@@ -4,6 +4,41 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-06-20
+
+### Added
+
+- **External agents bridge** (`adk-llm-bridge/agents`). A new subsystem that wraps
+  full external coding agents as native ADK agents, preserving multi-agent
+  orchestration, tool calling, and streaming:
+  - Anthropic Claude via the Claude Agent SDK (`ClaudeAgent`).
+  - OpenAI Codex via the Codex SDK/CLI (`CodexAgent`).
+  - Google Gemini via the Gemini CLI (`GeminiCliAgent`).
+  - A driver abstraction (SDK / CLI / subprocess modes), credential providers,
+    permission-policy mapping, runtime sessions, a tool gateway, and a native
+    ADK event stream (`ExternalAgentEvent`).
+- Examples: `basic-agent-claude`, `basic-agent-codex`, `basic-agent-gemini`, and
+  the combined `external-agents` showcase.
+
+### Changed
+
+- SDK pins: `@openai/codex-sdk` `^0.141.0` and
+  `@anthropic-ai/claude-agent-sdk` `^0.3.183`.
+
+### Fixed
+
+- **Codex driver:** availability detection now keys on `CODEX_API_KEY` /
+  `$CODEX_HOME/auth.json` instead of a `codex` binary on `PATH` (the SDK bundles
+  its own); errors are classified (auth/billing/missing-binary non-recoverable,
+  transport/rate-limit recoverable); the thread id is captured from
+  `thread.started` so resumability survives a mid-turn failure; and proxy/cert/
+  `CODEX_HOME`/`CODEX_ACCESS_TOKEN` vars are forwarded through the replacement env.
+- **Claude driver:** a read-only policy maps to `permissionMode: "default"`
+  (no longer the interactive `"plan"` mode); `settingSources` defaults to `[]`
+  (SDK isolation) so host `~/.claude`/project settings no longer leak in; the
+  spawned CLI is cancelled via `abortController` + `interrupt()`/`return()` on
+  early break or error; and errors are classified from the SDK's typed subtypes.
+
 ## [0.5.3] - 2026-06-19
 
 ### Added
