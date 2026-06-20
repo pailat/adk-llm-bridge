@@ -8,7 +8,7 @@ import {
   convertRequest,
   convertStructuredOutput,
   convertToolChoice,
-} from "../../src/converters/request";
+} from "../../src/converters/request.js";
 
 function createLlmRequest(overrides: Partial<LlmRequest> = {}): LlmRequest {
   return {

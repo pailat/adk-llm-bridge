@@ -1,11 +1,11 @@
 import { beforeEach, describe, expect, it } from "bun:test";
-import { resetAllConfigs } from "../../../src/config";
-import { XAI_DEFINITION } from "../../../src/providers/xai/definition";
-import { XAILlm } from "../../../src/providers/xai";
+import { resetAllConfigs } from "../../../src/config.js";
+import { XAI_DEFINITION } from "../../../src/providers/xai/definition.js";
+import { XAILlm } from "../../../src/providers/xai/index.js";
 import {
   describeModelPatterns,
   describeConnectError,
-} from "../../helpers/provider-test-helpers";
+} from "../../helpers/provider-test-helpers.js";
 
 describe("XAILlm", () => {
   beforeEach(() => {

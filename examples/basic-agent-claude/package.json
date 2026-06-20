@@ -1,0 +1,22 @@
+{
+  "name": "basic-agent-claude",
+  "private": true,
+  "type": "module",
+  "main": "agent.ts",
+  "scripts": {
+    "dev": "bunx @google/adk-devtools run agent.ts",
+    "web": "bunx @google/adk-devtools web",
+    "start": "bun agent.ts",
+    "smoke": "bun agent.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.183",
+    "@google/adk": "^1.1.0",
+    "adk-llm-bridge": "file:../.."
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.9.3"
+  }
+}

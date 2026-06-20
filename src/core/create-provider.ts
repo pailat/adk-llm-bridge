@@ -12,9 +12,9 @@
  */
 
 import type { BaseLlm } from "@google/adk";
-import type { BaseProviderConfig } from "../types";
-import { OpenAICompatibleLlm } from "./openai-compatible-llm";
-import type { ProviderDefinition } from "./provider-definition";
+import type { BaseProviderConfig } from "../types.js";
+import { OpenAICompatibleLlm } from "./openai-compatible-llm.js";
+import type { ProviderDefinition } from "./provider-definition.js";
 
 /** Type compatible with LLMRegistry.register(). */
 type RegisterableLlm = (new (params: { model: string }) => BaseLlm) & {

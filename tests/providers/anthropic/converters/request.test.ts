@@ -8,7 +8,7 @@ import {
   convertAnthropicRequest,
   convertAnthropicStructuredOutput,
   convertAnthropicToolChoice,
-} from "../../../../src/providers/anthropic/converters/request";
+} from "../../../../src/providers/anthropic/converters/request.js";
 
 function createLlmRequest(overrides: Partial<LlmRequest> = {}): LlmRequest {
   return {

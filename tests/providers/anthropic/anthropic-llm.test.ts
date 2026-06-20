@@ -1,13 +1,13 @@
 import { beforeEach, describe, expect, it, spyOn } from "bun:test";
-import { resetAllConfigs } from "../../../src/config";
+import { resetAllConfigs } from "../../../src/config.js";
 import {
   ANTHROPIC_MODEL_PATTERNS,
   AnthropicLlm,
-} from "../../../src/providers/anthropic";
+} from "../../../src/providers/anthropic/index.js";
 import {
   describeConnectError,
   describeModelPatterns,
-} from "../../helpers/provider-test-helpers";
+} from "../../helpers/provider-test-helpers.js";
 
 describe("AnthropicLlm", () => {
   beforeEach(() => {

@@ -5,7 +5,7 @@ import {
   convertAnthropicResponse,
   convertAnthropicStreamEvent,
   createAnthropicStreamAccumulator,
-} from "../../../../src/providers/anthropic/converters/response";
+} from "../../../../src/providers/anthropic/converters/response.js";
 
 // Helper to create Anthropic Message with required fields
 function createMessage(overrides: {

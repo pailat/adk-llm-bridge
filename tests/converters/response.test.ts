@@ -5,7 +5,7 @@ import {
   convertResponse,
   convertStreamChunk,
   createStreamAccumulator,
-} from "../../src/converters/response";
+} from "../../src/converters/response.js";
 
 type ChatCompletion = OpenAI.ChatCompletion;
 type ChatCompletionChunk = OpenAI.ChatCompletionChunk;

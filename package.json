@@ -29,13 +29,17 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./agents": {
+      "types": "./dist/agents/index.d.ts",
+      "import": "./dist/agents/index.js"
     }
   },
   "files": [
     "dist"
   ],
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=20.0.0"
   },
   "scripts": {
     "build": "bunup",
@@ -50,23 +54,37 @@
     "check:fix": "biome check --write ./src ./tests",
     "lint:publish": "publint --strict && attw --pack --profile esm-only",
     "ci": "bun run typecheck:all && bun run lint && bun test && bun run build && bun run lint:publish",
-    "prepublishOnly": "bun run build && bun run lint:publish"
+    "prepublishOnly": "bun run build && bun run lint:publish",
+    "typecheck:compat:nodenext": "bun run build && bunx tsc -p tests/compat/nodenext-consumer/tsconfig.json"
   },
   "peerDependencies": {
-    "@google/adk": ">=0.5.0 <2"
+    "@anthropic-ai/claude-agent-sdk": ">=0.2.138 <0.4",
+    "@google/adk": ">=0.6.1 <2",
+    "@openai/codex-sdk": ">=0.130.0 <0.142"
+  },
+  "peerDependenciesMeta": {
+    "@anthropic-ai/claude-agent-sdk": {
+      "optional": true
+    },
+    "@openai/codex-sdk": {
+      "optional": true
+    }
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.78.0",
-    "openai": "^6.27.0"
+    "@anthropic-ai/sdk": "^0.95.1",
+    "@opentelemetry/api": "^1.9.1",
+    "openai": "^6.37.0"
   },
   "devDependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.183",
     "@arethetypeswrong/cli": "^0.18.3",
     "@biomejs/biome": "^2.3.10",
     "@google/adk": "^1.2.0",
-    "@google/genai": "^1.40.0",
+    "@google/genai": "^2.0.1",
+    "@openai/codex-sdk": "^0.141.0",
     "@types/bun": "latest",
     "bunup": "^0.16.32",
     "publint": "^0.3.21",
-    "typescript": "^5.3.0"
+    "typescript": "^5.9.3"
   }
 }

@@ -1,0 +1,22 @@
+{
+  "name": "basic-agent-codex",
+  "private": true,
+  "type": "module",
+  "main": "agent.ts",
+  "scripts": {
+    "dev": "bunx @google/adk-devtools run agent.ts",
+    "web": "bunx @google/adk-devtools web",
+    "smoke": "bun agent.ts",
+    "start": "bun agent.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@google/adk": "^1.1.0",
+    "@openai/codex-sdk": "^0.141.0",
+    "adk-llm-bridge": "file:../.."
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.9.3"
+  }
+}

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { normalizeSchema } from "../../src/converters/schema";
+import { normalizeSchema } from "../../src/converters/schema.js";
 
 describe("normalizeSchema", () => {
   it("normalizes nested OBJECT/STRING/ARRAY types to lowercase", () => {

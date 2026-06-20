@@ -14,10 +14,10 @@
  * @module providers/custom/custom-llm
  */
 
-import { DEFAULT_MAX_RETRIES, DEFAULT_TIMEOUT } from "../../constants";
-import { OpenAICompatibleLlm } from "../../core/openai-compatible-llm";
-import type { CustomLlmConfig } from "../../types";
-import { clampPositive, requireValidURL } from "../../utils/validate";
+import { DEFAULT_MAX_RETRIES, DEFAULT_TIMEOUT } from "../../constants.js";
+import { OpenAICompatibleLlm } from "../../core/openai-compatible-llm.js";
+import type { CustomLlmConfig } from "../../types.js";
+import { clampPositive, requireValidURL } from "../../utils/validate.js";
 
 /**
  * Configuration type with required baseURL for custom providers.

@@ -17,16 +17,16 @@
 
 import type { LlmRequest, LlmResponse } from "@google/adk";
 import OpenAI from "openai";
-import { convertRequest } from "../converters/request";
+import { convertRequest } from "../converters/request.js";
 import {
   convertResponse,
   convertStreamChunk,
   createStreamAccumulator,
-} from "../converters/response";
-import type { BaseProviderConfig } from "../types";
-import { BaseProviderLlm } from "./base-provider-llm";
-import { resolveConfig } from "./config-resolver";
-import type { ProviderDefinition } from "./provider-definition";
+} from "../converters/response.js";
+import type { BaseProviderConfig } from "../types.js";
+import { BaseProviderLlm } from "./base-provider-llm.js";
+import { resolveConfig } from "./config-resolver.js";
+import type { ProviderDefinition } from "./provider-definition.js";
 
 /**
  * Configuration for the underlying OpenAI client.
@@ -122,7 +122,11 @@ export class OpenAICompatibleLlm extends BaseProviderLlm {
       this._errorPrefix = "CUSTOM";
       this.client = new OpenAI({
         baseURL: clientConfig.baseURL,
-        apiKey: clientConfig.apiKey,
+        // OpenAI SDK v6.37 requires a non-empty credential at construction
+        // time. Custom OpenAI-compatible providers such as Ollama, vLLM, and
+        // LM Studio often do not require API keys, so use a harmless dummy key
+        // only for manual/custom mode when the caller intentionally omitted one.
+        apiKey: clientConfig.apiKey || "adk-llm-bridge-custom-provider",
         timeout: clientConfig.timeout,
         maxRetries: clientConfig.maxRetries,
         defaultHeaders: clientConfig.defaultHeaders,

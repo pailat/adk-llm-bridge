@@ -1,0 +1,42 @@
+/**
+ * @license
+ * Copyright 2025 PAI
+ * SPDX-License-Identifier: MIT
+ */
+
+export type ExternalAgentProviderId =
+  | "codex"
+  | "claude"
+  | "gemini-cli"
+  | (string & {});
+
+export interface ExternalAgentProviderDefinition {
+  /** Stable provider id used in events, registries, and configuration. */
+  id: ExternalAgentProviderId;
+  /** Human-readable provider name. */
+  name: string;
+  /** Optional executable name. The foundation does not execute it at import time. */
+  command?: string;
+  /** Environment variables this provider is allowed to read for auth/config. */
+  envAllowlist?: readonly string[];
+}
+
+export { CODEX_PROVIDER } from "./codex.js";
+
+export const CLAUDE_PROVIDER: ExternalAgentProviderDefinition = {
+  id: "claude",
+  name: "Claude Code",
+  command: "claude",
+  envAllowlist: [
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "CLAUDE_API_KEY",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "CLAUDE_CODE_EXECUTABLE",
+    "CLAUDE_CODE_PATH",
+    "CLAUDE_CONFIG_DIR",
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
+    "CLAUDE_CODE_USE_FOUNDRY",
+  ],
+};
