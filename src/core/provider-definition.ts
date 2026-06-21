@@ -25,6 +25,34 @@ export interface ProviderEnvKeys {
 }
 
 /**
+ * Declarative reasoning capability for a provider.
+ *
+ * Controls how ADK `config.thinkingConfig` is mapped onto the request body and
+ * whether provider reasoning is round-tripped across turns. This is the
+ * provider-aware switch that lets OpenRouter / AI Gateway honor reasoning
+ * intent while OpenAI / xAI keep their strict, model-name-gated behavior.
+ *
+ * - `"openai-effort"` (strict, the default when `reasoning` is undefined):
+ *   Emit `reasoning_effort` ONLY when the resolved model is reasoning-capable
+ *   (the {@link supportsReasoningEffort} model-name gate). Direct OpenAI
+ *   (gpt-5*, o-series) and xAI return a 400 if `reasoning_effort` is sent to a
+ *   non-reasoning model, so the name gate MUST be preserved for them.
+ *
+ * - `"openrouter"` (permissive / native object): ALWAYS emit the native
+ *   OpenRouter `reasoning` object (no model-name gate). OpenRouter / AI Gateway
+ *   return HTTP 200 and silently ignore reasoning params on non-reasoning
+ *   models, so it is safe to always send them — this both enables opt-in
+ *   reasoners and steers depth on default reasoners. This style also opts into
+ *   capturing `reasoning_details` and echoing the signed reasoning back across
+ *   turns (required by signature-strict upstreams like Anthropic / Gemini
+ *   thinking routed through OpenRouter).
+ */
+export interface ReasoningCapability {
+  /** Reasoning mapping style (see {@link ReasoningCapability}). */
+  style: "openai-effort" | "openrouter";
+}
+
+/**
  * Declarative definition for an OpenAI-compatible LLM provider.
  *
  * Instead of creating a subclass for each provider, define the provider
@@ -74,4 +102,17 @@ export interface ProviderDefinition {
    * @default false
    */
   requireApiKey?: boolean;
+
+  /**
+   * Declarative reasoning capability for this provider.
+   *
+   * When omitted, the strict `"openai-effort"` behavior applies (model-name
+   * gated `reasoning_effort`). Providers that proxy arbitrary vendor/model ids
+   * and tolerate reasoning params on non-reasoning models (OpenRouter, AI
+   * Gateway) should set `{ style: "openrouter" }` to honor `thinkingConfig`
+   * (enable + steer + exclude) and round-trip signed reasoning across turns.
+   *
+   * @see {@link ReasoningCapability}
+   */
+  reasoning?: ReasoningCapability;
 }

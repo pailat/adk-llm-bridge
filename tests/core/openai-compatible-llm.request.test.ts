@@ -15,6 +15,7 @@ import type { LlmRequest, LlmResponse } from "@google/adk";
 import type OpenAI from "openai";
 import { OpenAICompatibleLlm } from "../../src/core/openai-compatible-llm.js";
 import { OPENAI_DEFINITION } from "../../src/providers/openai/definition.js";
+import { OPENROUTER_DEFINITION } from "../../src/providers/openrouter/definition.js";
 
 type CreateParams = Parameters<
   OpenAI["chat"]["completions"]["create"]
@@ -208,6 +209,30 @@ describe("OpenAICompatibleLlm request body", () => {
 
     expect(calls[0]).not.toHaveProperty("reasoning_effort");
     expect(calls[0].max_tokens).toBe(128);
+  });
+
+  it("sends a native reasoning object for an openrouter non-reasoning vendor id", async () => {
+    const llm = new OpenAICompatibleLlm(OPENROUTER_DEFINITION, {
+      model: "openai/gpt-4o-mini",
+      apiKey: "test-key",
+    });
+    const { calls } = spyCreate(llm, SIMPLE_COMPLETION);
+
+    await drain(
+      llm.generateContentAsync(
+        userRequest({
+          config: { thinkingConfig: { thinkingBudget: 4096 } },
+        }),
+        false,
+      ),
+    );
+
+    // openrouter style: always send the native reasoning object (no name gate),
+    // and never the strict reasoning_effort scalar.
+    expect(
+      (calls[0] as unknown as { reasoning?: unknown }).reasoning,
+    ).toEqual({ max_tokens: 4096 });
+    expect(calls[0]).not.toHaveProperty("reasoning_effort");
   });
 });
 

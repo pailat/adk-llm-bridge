@@ -12,6 +12,9 @@ export const OPENAI_DEFINITION: ProviderDefinition = {
   envKeys: { apiKey: ["OPENAI_API_KEY"] },
   modelPatterns: [/gpt-.+/, /o\d+.*/, /chatgpt-.+/],
   requireApiKey: true,
+  // Direct OpenAI 400s if reasoning_effort is sent to a non-reasoning model,
+  // so keep the strict, model-name-gated effort path.
+  reasoning: { style: "openai-effort" },
   buildHeaders: (config) => {
     const headers: Record<string, string> = {};
     const org =

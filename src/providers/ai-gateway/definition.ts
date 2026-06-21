@@ -15,4 +15,7 @@ export const AI_GATEWAY_DEFINITION: ProviderDefinition = {
   },
   modelPatterns: [/.+\/.+/],
   requireApiKey: true,
+  // AI Gateway proxies arbitrary vendor/model ids (same permissive reasoning
+  // semantics as OpenRouter): always send the native reasoning object.
+  reasoning: { style: "openrouter" },
 };
