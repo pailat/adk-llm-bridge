@@ -296,7 +296,7 @@ describe("ExternalAgent ADK event formatting", () => {
     });
   });
 
-  test("emits native ToolGateway function events through Runner sessions and state", async () => {
+  test("emits native transfer_to_agent delegation through Runner sessions and state", async () => {
     const sessionService = new InMemorySessionService();
     const session = await sessionService.createSession({
       appName: "app",
@@ -327,36 +327,104 @@ describe("ExternalAgent ADK event formatting", () => {
 
     expect(streamed.some((event) => event.partial)).toBe(true);
     expect(updated?.events.some((event) => event.partial)).toBe(false);
+
+    // Delegation is shaped as a native transfer_to_agent call.
     expect(
       updated?.events.some((event) =>
-        event.content?.parts?.some((part) => part.functionCall?.name === "run_adk_subagent"),
+        event.content?.parts?.some((part) => part.functionCall?.name === "transfer_to_agent"),
       ),
     ).toBe(true);
+
+    // The sub-agent's turn is surfaced on the root branch with no external-agent
+    // metadata (renders as the sub-agent's own turn on the shared timeline).
     expect(
       updated?.events.some(
         (event) =>
           event.author === "state_agent" &&
           event.content?.parts?.[0]?.text === "child output" &&
-          event.customMetadata?.subAgentEvent === true,
+          event.customMetadata === undefined,
       ),
     ).toBe(true);
+
+    // The transfer response carries the agent-switch signal.
+    const transferResponse = updated?.events.find((event) =>
+      event.content?.parts?.some((part) => part.functionResponse?.name === "transfer_to_agent"),
+    );
+    expect(transferResponse).toBeDefined();
+    expect(transferResponse?.actions?.transferToAgent).toBe("state_agent");
+
+    // No legacy run_adk_subagent event leaks through.
     expect(
       updated?.events.some((event) =>
-        event.content?.parts?.some((part) => part.functionResponse?.name === "run_adk_subagent"),
+        event.content?.parts?.some(
+          (part) =>
+            part.functionCall?.name === "run_adk_subagent" ||
+            part.functionResponse?.name === "run_adk_subagent",
+        ),
       ),
-    ).toBe(true);
+    ).toBe(false);
+
+    // Native ordering: call -> transfer response (with the agent-switch signal,
+    // fired BEFORE the sub-agent runs) -> sub-agent turn.
     const functionCallIndex = updated?.events.findIndex((event) =>
-      event.content?.parts?.some((part) => part.functionCall?.name === "run_adk_subagent"),
-    );
-    const childEventIndex = updated?.events.findIndex(
-      (event) => event.author === "state_agent" && event.customMetadata?.subAgentEvent === true,
+      event.content?.parts?.some((part) => part.functionCall?.name === "transfer_to_agent"),
     );
     const functionResponseIndex = updated?.events.findIndex((event) =>
-      event.content?.parts?.some((part) => part.functionResponse?.name === "run_adk_subagent"),
+      event.content?.parts?.some((part) => part.functionResponse?.name === "transfer_to_agent"),
+    );
+    const childEventIndex = updated?.events.findIndex(
+      (event) => event.author === "state_agent" && event.content?.parts?.[0]?.text === "child output",
     );
     expect(functionCallIndex).toBeGreaterThanOrEqual(0);
-    expect(childEventIndex).toBeGreaterThan(functionCallIndex ?? -1);
-    expect(functionResponseIndex).toBeGreaterThan(childEventIndex ?? -1);
+    expect(functionResponseIndex).toBeGreaterThan(functionCallIndex ?? -1);
+    expect(childEventIndex).toBeGreaterThan(functionResponseIndex ?? -1);
+
+    // Root does NOT re-narrate the sub-agent's answer: the only terminal model
+    // text authored by the root is "starting" was partial; the final "child
+    // output" re-narration is suppressed.
+    const rootFinalText = updated?.events.filter(
+      (event) =>
+        event.author === "root_external" &&
+        !event.partial &&
+        event.content?.parts?.some((part) => typeof part.text === "string" && part.text.length > 0),
+    );
+    expect(rootFinalText).toHaveLength(0);
+
     expect(updated?.state.architectureSummary).toBe("done");
+  });
+
+  test("suppresses the root re-narration only when a delegation just produced the final answer", async () => {
+    // A driver that delegates, then re-narrates — and on a SECOND turn produces
+    // legitimate root text with no delegation (must NOT be suppressed).
+    class TwoPhaseDriver implements ExternalAgentDriver {
+      readonly providerId = CODEX_PROVIDER.id;
+
+      async *run(request: ExternalAgentRunRequest): AsyncIterable<ExternalAgentEvent> {
+        await request.toolGateway?.runSubAgent({
+          agentName: "state_agent",
+          task: "summarize",
+        });
+        // Root re-narration of the delegated answer — should be suppressed.
+        yield { type: "output", content: "child output (re-narrated)" };
+        // Independent root text after the delegation flag is consumed — kept.
+        yield { type: "output", content: "additional root commentary" };
+      }
+    }
+
+    const agent = new ExternalAgent({
+      name: "root_external",
+      provider: CODEX_PROVIDER,
+      driver: new TwoPhaseDriver(),
+      subAgents: [new StateAgent()],
+    });
+
+    const events = await collect(agent, { branch: undefined });
+    const rootTexts = events
+      .filter((event) => event.author === "root_external")
+      .map((event) => event.content?.parts?.[0]?.text)
+      .filter((text): text is string => typeof text === "string");
+
+    expect(rootTexts).not.toContain("child output (re-narrated)");
+    expect(rootTexts).toContain("additional root commentary");
   });
 });

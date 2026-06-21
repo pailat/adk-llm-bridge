@@ -12,7 +12,7 @@ import {
   type InvocationContext,
   type Session,
 } from "@google/adk";
-import type { Content } from "@google/genai";
+import { FinishReason, type Content } from "@google/genai";
 import { deriveSubAgentPermissionPolicy } from "../permissions/inheritance.js";
 import type { ExternalAgentPermissionPolicy } from "../permissions/schema.js";
 
@@ -40,6 +40,28 @@ export interface RunSubAgentResult {
 
 export type ToolGatewayEventSink = (event: Event) => void;
 
+/**
+ * Marker set by the ToolGateway on the shared invocation context whenever a
+ * delegation produced a terminal answer authored by the sub-agent. The
+ * ExternalAgent uses this signal to suppress the root model's redundant
+ * re-narration turn, matching native ADK transfer (the coordinator stays silent
+ * after the sub-agent answers).
+ */
+export const DELEGATION_FINAL_ANSWER_FLAG = "__adkDelegationProducedFinalAnswer";
+
+export function markDelegationFinalAnswer(context: InvocationContext): void {
+  (context as unknown as Record<string, unknown>)[DELEGATION_FINAL_ANSWER_FLAG] = true;
+}
+
+export function consumeDelegationFinalAnswer(context: InvocationContext): boolean {
+  const record = context as unknown as Record<string, unknown>;
+  const flagged = record[DELEGATION_FINAL_ANSWER_FLAG] === true;
+  if (flagged) {
+    record[DELEGATION_FINAL_ANSWER_FLAG] = false;
+  }
+  return flagged;
+}
+
 export interface ToolGatewayConfig {
   rootAgent: BaseAgent;
   subAgents: readonly BaseAgent[];
@@ -47,6 +69,15 @@ export interface ToolGatewayConfig {
   parentPermissions?: ExternalAgentPermissionPolicy;
   eventSink?: ToolGatewayEventSink;
   exposeSubAgentEvents?: boolean;
+  /**
+   * When true (default) the gateway emits events shaped like native ADK
+   * `transfer_to_agent` delegation: a `transfer_to_agent` functionCall, a
+   * functionResponse carrying `actions.transferToAgent`, sub-agent events on
+   * the root branch with no external-agent metadata, and a suppressed root
+   * re-narration. When false the legacy metadata-rich `run_adk_subagent`
+   * shape is emitted instead.
+   */
+  nativeDelegationShape?: boolean;
 }
 
 export class ToolGateway {
@@ -56,6 +87,7 @@ export class ToolGateway {
   readonly #parentPermissions?: ExternalAgentPermissionPolicy;
   readonly #eventSink?: ToolGatewayEventSink;
   readonly #exposeSubAgentEvents: boolean;
+  readonly #nativeDelegationShape: boolean;
 
   constructor(config: ToolGatewayConfig) {
     this.#rootAgent = config.rootAgent;
@@ -64,6 +96,7 @@ export class ToolGateway {
     this.#parentPermissions = config.parentPermissions;
     this.#eventSink = config.eventSink;
     this.#exposeSubAgentEvents = config.exposeSubAgentEvents ?? true;
+    this.#nativeDelegationShape = config.nativeDelegationShape ?? true;
   }
 
   listSubAgents(): readonly BaseAgent[] {
@@ -91,6 +124,17 @@ export class ToolGateway {
     const callId = createBridgeCallId();
     this.emit(this.createFunctionCallEvent(input, callId));
 
+    // In native mode the transfer signal must fire BEFORE the sub-agent runs
+    // (native ADK emits the transfer functionResponse carrying
+    // actions.transferToAgent immediately, then the sub-agent's turns follow).
+    // The codex_thread/resume stateDelta no longer rides on this response; it
+    // is surfaced via the sub-agent's own state_delta event instead (see
+    // shouldSurfaceSubAgentEvent), so this response stays byte-clean with no
+    // stateDelta — identical to native nat_billing#1/nat_support#1.
+    if (this.#nativeDelegationShape) {
+      this.emit(this.createFunctionResponseEvent({ agentName: agent.name }, callId));
+    }
+
     const startedAt = Date.now();
     const events: Event[] = [];
     const text: string[] = [];
@@ -106,15 +150,14 @@ export class ToolGateway {
       for await (const event of agent.runAsync(childContext)) {
         childContext.session.events.push(event);
         events.push(event);
-        if (this.#exposeSubAgentEvents) {
-          this.emit(enrichSubAgentEvent({
+        Object.assign(stateDelta, event.actions?.stateDelta ?? {});
+        if (this.#exposeSubAgentEvents && this.shouldSurfaceSubAgentEvent(event)) {
+          this.emit(this.prepareSubAgentEvent({
             event,
-            rootAgentName: this.#rootAgent.name,
             subAgentName: agent.name,
             parentToolCallId: callId,
           }));
         }
-        Object.assign(stateDelta, event.actions?.stateDelta ?? {});
         const visible = event.partial ? undefined : extractVisibleText(event);
         if (visible) {
           textEvents++;
@@ -150,9 +193,54 @@ export class ToolGateway {
       ...(Object.keys(stateDelta).length > 0 ? { stateDelta } : {}),
       ...(error ? { error } : {}),
     };
-    this.emit(this.createFunctionResponseEvent(result, callId));
+
+    // Legacy mode keeps the loop-then-response order with the aggregated
+    // stateDelta attached to the response. Native mode already emitted its
+    // (clean) transfer response before the loop.
+    if (!this.#nativeDelegationShape) {
+      this.emit(this.createFunctionResponseEvent(result, callId));
+    }
+
+    // In native-shape mode, a successful delegation that produced a terminal
+    // sub-agent answer is the final answer. Signal the ExternalAgent to drop
+    // the root model's redundant re-narration turn (native coordinators stay
+    // silent after transfer).
+    if (this.#nativeDelegationShape && !error && textEvents > 0) {
+      markDelegationFinalAnswer(this.#parentContext);
+    }
 
     return result;
+  }
+
+  /**
+   * Decide whether a sub-agent event should surface on the shared timeline.
+   * Legacy mode surfaces everything. Native mode drops content-less events
+   * (blank bubbles) EXCEPT those carrying a non-empty `actions.stateDelta`
+   * (e.g. the codex driver's `codex_thread` marker emitted the moment the
+   * thread starts). Surfacing the state-only event lets the ADK runner commit
+   * its stateDelta to session.state exactly as native sub-agents commit their
+   * own state, so codex resume keeps working without the transfer response
+   * having to carry the delta.
+   */
+  private shouldSurfaceSubAgentEvent(event: Event): boolean {
+    if (!this.#nativeDelegationShape) {
+      return true;
+    }
+    if (event.errorMessage) {
+      return true;
+    }
+    const parts = event.content?.parts ?? [];
+    const hasRenderableContent = parts.some(
+      (part) =>
+        (typeof part.text === "string" && part.text.length > 0) ||
+        part.functionCall ||
+        part.functionResponse ||
+        part.inlineData,
+    );
+    if (hasRenderableContent) {
+      return true;
+    }
+    return Object.keys(event.actions?.stateDelta ?? {}).length > 0;
   }
 
   private findSubAgent(agentName: string): BaseAgent | undefined {
@@ -161,12 +249,18 @@ export class ToolGateway {
   }
 
   private createChildContext(agent: BaseAgent, task: string): InvocationContext {
-    const branch = childBranch(this.#parentContext.branch, agent.name);
+    // Native ADK transfer reuses the SAME invocationContext, so sub-agent
+    // events inherit the root branch. We mirror that in native mode; legacy
+    // mode keeps a named sub-branch for traceability.
+    const branch = this.#nativeDelegationShape
+      ? this.#parentContext.branch
+      : childBranch(this.#parentContext.branch, agent.name);
     const userContent = taskToContent(task);
     const syntheticUserEvent = createDelegatedTaskEvent({
       invocationId: this.#parentContext.invocationId,
       branch,
       content: userContent,
+      nativeDelegationShape: this.#nativeDelegationShape,
     });
 
     return {
@@ -182,7 +276,66 @@ export class ToolGateway {
     } as unknown as InvocationContext;
   }
 
+  /**
+   * In native mode, sub-agent events are surfaced verbatim on the root branch
+   * with no external-agent metadata so DevTools renders them as the
+   * sub-agent's own turns on the shared timeline. Legacy mode enriches them
+   * with run_adk_subagent titles/flags.
+   */
+  private prepareSubAgentEvent({
+    event,
+    subAgentName,
+    parentToolCallId,
+  }: {
+    event: Event;
+    subAgentName: string;
+    parentToolCallId: string;
+  }): Event {
+    if (this.#nativeDelegationShape) {
+      // Native sub-agent events carry no customMetadata. Strip any leaked from
+      // nested ExternalAgent/CodexAgent self-stamping (metadataForExternalEvent)
+      // so the surfaced timeline matches native exactly. Preserve all other
+      // fields (content/actions/finishReason/turnComplete/...) via spread.
+      const { customMetadata: _drop, ...rest } = event as Event & {
+        customMetadata?: unknown;
+      };
+      return rest as Event;
+    }
+    return enrichSubAgentEvent({
+      event,
+      rootAgentName: this.#rootAgent.name,
+      subAgentName,
+      parentToolCallId,
+    });
+  }
+
   private createFunctionCallEvent(input: RunSubAgentInput, callId: string): Event {
+    if (this.#nativeDelegationShape) {
+      // Native `transfer_to_agent` call: single { agentName } arg, no metadata.
+      // A completed synthetic transfer turn legitimately is STOP/turnComplete,
+      // matching native nat_billing#0/nat_support#0 so DevTools renders it as a
+      // finished model turn. usageMetadata is intentionally omitted (no real
+      // token usage backs a bridge-synthesized transfer).
+      return createEvent({
+        invocationId: this.#parentContext.invocationId,
+        author: this.#parentContext.agent?.name ?? this.#rootAgent.name,
+        branch: this.#parentContext.branch,
+        finishReason: FinishReason.STOP,
+        turnComplete: true,
+        content: {
+          role: "model",
+          parts: [
+            {
+              functionCall: {
+                id: callId,
+                name: "transfer_to_agent",
+                args: { agentName: input.agentName },
+              },
+            },
+          ],
+        },
+      });
+    }
     return createEvent({
       invocationId: this.#parentContext.invocationId,
       author: this.#parentContext.agent?.name ?? this.#rootAgent.name,
@@ -209,9 +362,37 @@ export class ToolGateway {
   }
 
   private createFunctionResponseEvent(
-    result: RunSubAgentResult,
+    result: Pick<RunSubAgentResult, "agentName"> & Partial<RunSubAgentResult>,
     callId: string,
   ): Event {
+    if (this.#nativeDelegationShape) {
+      // Native `transfer_to_agent` response: actions.transferToAgent is the
+      // only agent-switch signal DevTools reads; response is just
+      // { result: "Transfer queued" }. NO stateDelta here — the codex_thread /
+      // resume delta rides on the sub-agent's own surfaced state_delta event
+      // (see shouldSurfaceSubAgentEvent), keeping this response byte-identical
+      // to native nat_billing#1/nat_support#1 (stateDelta absent).
+      return createEvent({
+        invocationId: this.#parentContext.invocationId,
+        author: this.#parentContext.agent?.name ?? this.#rootAgent.name,
+        branch: this.#parentContext.branch,
+        actions: createEventActions({
+          transferToAgent: result.agentName,
+        }),
+        content: {
+          role: "user",
+          parts: [
+            {
+              functionResponse: {
+                id: callId,
+                name: "transfer_to_agent",
+                response: { result: "Transfer queued" },
+              },
+            },
+          ],
+        },
+      });
+    }
     const { stateDelta: _stateDelta, ...response } = result;
     return createEvent({
       invocationId: this.#parentContext.invocationId,
@@ -263,21 +444,27 @@ function createDelegatedTaskEvent({
   invocationId,
   branch,
   content,
+  nativeDelegationShape,
 }: {
   invocationId: string;
-  branch: string;
+  branch: string | undefined;
   content: Content;
+  nativeDelegationShape: boolean;
 }): Event {
   return createEvent({
     invocationId,
     author: "user",
     branch,
     content,
-    customMetadata: {
-      externalAgent: true,
-      delegatedTask: true,
-      toolName: "run_adk_subagent",
-    },
+    ...(nativeDelegationShape
+      ? {}
+      : {
+          customMetadata: {
+            externalAgent: true,
+            delegatedTask: true,
+            toolName: "run_adk_subagent",
+          },
+        }),
   });
 }
 
