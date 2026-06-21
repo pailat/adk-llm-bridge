@@ -12,6 +12,10 @@ export const OPENROUTER_DEFINITION: ProviderDefinition = {
   envKeys: { apiKey: ["OPENROUTER_API_KEY"] },
   modelPatterns: [/.+\/.+/],
   requireApiKey: true,
+  // OpenRouter proxies arbitrary vendor/model ids and tolerates reasoning
+  // params on non-reasoning models (HTTP 200, silently ignored), so always
+  // send the native reasoning object and round-trip signed reasoning details.
+  reasoning: { style: "openrouter" },
   buildHeaders: (config) => {
     const headers: Record<string, string> = {};
     const siteUrl =

@@ -26,7 +26,10 @@ import {
 import type { BaseProviderConfig } from "../types.js";
 import { BaseProviderLlm } from "./base-provider-llm.js";
 import { resolveConfig } from "./config-resolver.js";
-import type { ProviderDefinition } from "./provider-definition.js";
+import type {
+  ProviderDefinition,
+  ReasoningCapability,
+} from "./provider-definition.js";
 
 /**
  * Configuration for the underlying OpenAI client.
@@ -79,6 +82,13 @@ export class OpenAICompatibleLlm extends BaseProviderLlm {
 
   private readonly _errorPrefix: string;
   private readonly _getRequestOptions?: () => Record<string, unknown>;
+  /**
+   * Declarative reasoning capability from the provider definition.
+   *
+   * Undefined in manual/CustomLlm mode, which falls back to the strict
+   * `"openai-effort"` default in the request converter.
+   */
+  private readonly _reasoning?: ReasoningCapability;
 
   /** Declarative constructor: definition + config */
   constructor(definition: ProviderDefinition, config: BaseProviderConfig);
@@ -96,6 +106,7 @@ export class OpenAICompatibleLlm extends BaseProviderLlm {
 
       super(config);
       this._errorPrefix = definition.errorPrefix;
+      this._reasoning = definition.reasoning;
 
       const resolved = resolveConfig(definition, config);
       this.client = new OpenAI({
@@ -152,6 +163,7 @@ export class OpenAICompatibleLlm extends BaseProviderLlm {
       const { messages, tools, params, toolChoice } = convertRequest(
         llmRequest,
         this.model,
+        { reasoning: this._reasoning },
       );
 
       if (stream) {

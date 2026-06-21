@@ -13,7 +13,7 @@
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.138",
-    "@google/adk": "^1.1.0",
+    "@google/adk": "^1.2.0",
     "@openai/codex-sdk": "^0.130.0",
     "adk-llm-bridge": "file:../.."
   },

@@ -3,17 +3,33 @@
 [![npm version](https://img.shields.io/npm/v/adk-llm-bridge.svg)](https://www.npmjs.com/package/adk-llm-bridge)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Use **any LLM** with [Google ADK TypeScript](https://github.com/google/adk-js) in just a few lines of code.
+Use **any LLM** — and now **any coding agent** — with [Google ADK TypeScript](https://github.com/google/adk-js) in just a few lines of code.
+
+> **🆕 New in 0.6.0 — External Coding Agents.** Run provider-owned coding runtimes — **Claude Code**, **OpenAI Codex**, and **Gemini CLI** — as native ADK sub-agents, with shared credential, permission, and runtime drivers. [Jump to the agents guide →](#external-coding-agents)
+
+## Contents
+
+- [Why?](#why)
+- [Supported Providers](#supported-providers)
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [**External Coding Agents** 🆕](#external-coding-agents)
+- [Configuration](#configuration)
+- [Model Format](#model-format)
+- [Features](#features)
+- [API Reference](#api-reference)
+- [Examples](#examples)
 
 ## Why?
 
-Google ADK TypeScript comes with built-in Gemini support. This bridge extends it to work with **any model** from providers like Anthropic, OpenAI, Meta, and more—while keeping all ADK features like multi-agent orchestration, tool calling, and streaming.
+Google ADK TypeScript comes with built-in Gemini support. This bridge extends it to work with **any model** from providers like Anthropic, OpenAI, Meta, and more — and to embed **provider-owned coding agents** (Claude Code, Codex, Gemini CLI) directly in your agent graph — all while keeping ADK features like multi-agent orchestration, tool calling, and streaming.
 
 ### Key Benefits
 
 - **Simple** — 3 lines to integrate any model
 - **Battle-tested** — Built on the official OpenAI and Anthropic SDKs
 - **Compatible** — Works with any OpenAI-compatible API (AI Gateway, OpenRouter, etc.)
+- **Agent-ready** 🆕 — Wrap external coding agents as ADK `BaseAgent` sub-agents
 
 ## Supported Providers
 
@@ -25,6 +41,18 @@ Google ADK TypeScript comes with built-in Gemini support. This bridge extends it
 | **[Anthropic](https://anthropic.com/)** | Claude models | Direct API access |
 | **[xAI](https://x.ai/)** | Grok models | Direct API access |
 | **Custom (OpenAI-compatible)** | Any model | Ollama, vLLM, Azure OpenAI, LM Studio, etc. |
+
+### Coding Agents 🆕
+
+Beyond chat models, you can embed full **coding agents** as ADK `BaseAgent` sub-agents via the `adk-llm-bridge/agents` subpath:
+
+| Agent | Runtime | Import |
+|-------|---------|--------|
+| **Claude Code** | `@anthropic-ai/claude-agent-sdk` | `ClaudeAgent` |
+| **OpenAI Codex** | `@openai/codex-sdk` (or `codex` CLI) | `CodexAgent` |
+| **Gemini CLI** | `gemini` CLI | `GeminiCliAgent` |
+
+See [External Coding Agents](#external-coding-agents) for the full guide.
 
 ## Installation
 
@@ -95,15 +123,25 @@ const agent = new LlmAgent({
 });
 ```
 
-## External Agent Runtimes (Opt-in)
+## External Coding Agents
 
-`adk-llm-bridge` keeps its root import focused on LLM providers. Existing code that imports from `adk-llm-bridge` is unchanged. External agent runtime helpers are available from the explicit `/agents` subpath:
+> 🆕 **New in 0.6.0.** Embed provider-owned coding agents — Claude Code, OpenAI Codex, and Gemini CLI — as native ADK sub-agents.
+
+Most bridges stop at chat models. `adk-llm-bridge` also lets an ADK agent graph delegate to **full coding agents** that own their own tools, sandbox, and auth — so a coordinator LLM can hand a task to Claude Code, Codex, or Gemini CLI and get the result back as a normal ADK agent response.
+
+| Agent | Default driver | CLI fallback |
+|-------|----------------|--------------|
+| `ClaudeAgent` | `@anthropic-ai/claude-agent-sdk` | `ClaudeCliDriver` |
+| `CodexAgent` | `@openai/codex-sdk` | `CodexCliDriver` |
+| `GeminiCliAgent` | `gemini` CLI | — |
+
+The agents API lives behind an explicit subpath, so the root import stays focused on LLM providers and existing code is unchanged:
 
 ```typescript
 import { CodexAgent, ClaudeAgent, GeminiCliAgent } from "adk-llm-bridge/agents";
 ```
 
-Use this API when you want an ADK agent graph to include provider-owned coding CLIs/runtimes as `BaseAgent`-compatible sub-agents. The agent layer exposes shared configuration, credential, permission, provider registry, and runtime drivers while keeping provider auth/configuration owned by each external runtime. `CodexAgent` uses the official `@openai/codex-sdk` driver by default; pass `new CodexCliDriver()` explicitly when you need the lower-level CLI fallback.
+The agent layer provides shared configuration, credential, permission, provider-registry, and runtime drivers, while each external runtime keeps ownership of its own auth and sandbox. `CodexAgent` uses the official `@openai/codex-sdk` driver by default; pass `new CodexCliDriver()` explicitly when you need the lower-level CLI fallback.
 
 ```typescript
 import { LlmAgent } from "@google/adk";
@@ -137,7 +175,14 @@ export const rootAgent = new LlmAgent({
 - **Optional runtime dependencies** — importing `adk-llm-bridge/agents` does not install or execute provider CLIs. Wire a driver/runtime explicitly in applications that need one.
 - **Permission presets** — use `read-only`, `ask`, `workspace-write`, or `full-access` policies, plus optional `allowNetwork` and `allowedPaths`, so provider drivers can map ADK intent to provider-specific sandbox flags.
 
-See [examples/external-agents](./examples/external-agents) for a shape-only example.
+### Runnable examples
+
+Each example typechecks and builds without credentials, and prints a clear "set `<KEY>` to run" hint when run without one:
+
+- **[basic-agent-claude](./examples/basic-agent-claude)** — Claude Code as an ADK agent (Claude Agent SDK)
+- **[basic-agent-codex](./examples/basic-agent-codex)** — OpenAI Codex as an ADK agent (Codex SDK)
+- **[basic-agent-gemini](./examples/basic-agent-gemini)** — Gemini CLI as an ADK agent
+- **[external-agents](./examples/external-agents)** — coordinator + external sub-agents (HelpDesk / architecture review)
 
 ## Configuration
 
@@ -227,6 +272,7 @@ Browse all models:
 - **Tool calling** - Function calling with automatic conversion
 - **Multi-turn** - Full conversation history support
 - **Multi-agent** - Sub-agents and agent transfer
+- **External coding agents** 🆕 - Claude Code, Codex, and Gemini CLI as ADK sub-agents
 - **Usage metadata** - Token counts for monitoring
 
 ## Tool Calling Example
@@ -344,12 +390,22 @@ See the [examples](./examples) directory:
 - **[basic-agent-lmstudio](./examples/basic-agent-lmstudio)** - Multi-agent HelpDesk with LM Studio
 - **[native-features](./examples/native-features)** - Showcase of native model capabilities (sampling, reasoning, structured output, multimodal, tool_choice, streaming) across all 5 providers
 - **[express-server](./examples/express-server)** - Production HTTP API with sessions, streaming, tools
-- **[external-agents](./examples/external-agents)** - Opt-in `/agents` API shape for external runtime sub-agents
+
+### External coding agents 🆕
+
+- **[basic-agent-claude](./examples/basic-agent-claude)** - Claude Code as an ADK agent (Claude Agent SDK)
+- **[basic-agent-codex](./examples/basic-agent-codex)** - OpenAI Codex as an ADK agent (Codex SDK)
+- **[basic-agent-gemini](./examples/basic-agent-gemini)** - Gemini CLI as an ADK agent
+- **[external-agents](./examples/external-agents)** - Coordinator + external runtime sub-agents
 
 ## Requirements
 
-- Node.js >= 18.0.0
-- `@google/adk` >= 0.5.0 (peer range `>=0.5.0 <2`; tested against 1.2.0)
+- Node.js >= 20.0.0
+- `@google/adk` (peer range `>=0.6.1 <2`; tested against 1.2.0)
+- **Optional, for external coding agents** (installed only if you use `adk-llm-bridge/agents`):
+  - `@anthropic-ai/claude-agent-sdk` (peer `>=0.2.138 <0.4`) — for `ClaudeAgent`
+  - `@openai/codex-sdk` (peer `>=0.130.0 <0.142`) — for `CodexAgent`
+  - `gemini` CLI on `PATH` — for `GeminiCliAgent`
 
 ## Contributing
 

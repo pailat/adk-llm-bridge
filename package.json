@@ -1,6 +1,6 @@
 {
   "name": "adk-llm-bridge",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "Use any LLM with Google ADK TypeScript - supports AI Gateway, OpenRouter, and 100+ models",
   "keywords": [
     "adk",
@@ -22,6 +22,9 @@
   "bugs": {
     "url": "https://github.com/pailat/adk-llm-bridge/issues"
   },
+  "workspaces": [
+    "examples/*"
+  ],
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -60,13 +63,17 @@
   "peerDependencies": {
     "@anthropic-ai/claude-agent-sdk": ">=0.2.138 <0.4",
     "@google/adk": ">=0.6.1 <2",
-    "@openai/codex-sdk": ">=0.130.0 <0.142"
+    "@openai/codex-sdk": ">=0.130.0 <0.142",
+    "zod": ">=3.25.0"
   },
   "peerDependenciesMeta": {
     "@anthropic-ai/claude-agent-sdk": {
       "optional": true
     },
     "@openai/codex-sdk": {
+      "optional": true
+    },
+    "zod": {
       "optional": true
     }
   },
@@ -85,6 +92,7 @@
     "@types/bun": "latest",
     "bunup": "^0.16.32",
     "publint": "^0.3.21",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "zod": "^4.2.1"
   }
 }
