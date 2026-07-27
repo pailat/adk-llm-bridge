@@ -192,6 +192,7 @@ export function convertRequest(
   opts?: ConvertRequestOptions,
 ): ConvertedRequest {
   const messages: OpenAI.ChatCompletionMessageParam[] = [];
+  const toolCallIdCorrelation: ToolCallIdCorrelation = { pendingCalls: [] };
 
   const systemContent = extractSystemInstruction(llmRequest);
   if (systemContent) {
@@ -199,7 +200,7 @@ export function convertRequest(
   }
 
   for (const content of llmRequest.contents ?? []) {
-    processContent(content, messages, opts?.reasoning);
+    processContent(content, messages, toolCallIdCorrelation, opts?.reasoning);
   }
 
   const tools = convertTools(llmRequest);
@@ -655,6 +656,66 @@ function parseReasoningDetails(
   }
 }
 
+/** Generates a collision-safe ID accepted by OpenAI-compatible tool calls. */
+function generateToolCallId(): string {
+  return `call_${crypto.randomUUID().replaceAll("-", "")}`;
+}
+
+interface PendingToolCall {
+  id: string;
+  name: string;
+  generated: boolean;
+}
+
+interface ToolCallIdCorrelation {
+  pendingCalls: PendingToolCall[];
+}
+
+/** Resolves a call ID, treating an empty string the same as a missing ID. */
+function resolveToolCallId(id: string | undefined): string {
+  return id || generateToolCallId();
+}
+
+/**
+ * Correlates a tool response with a previously emitted call. Names are used
+ * when available so parallel responses may arrive in a different order. A
+ * missing response ID prefers a generated call with the same name before an
+ * explicit call, while an unmatched name leaves pending calls untouched. An
+ * explicit response ID always wins and is removed from the pending set when
+ * present.
+ */
+function resolveToolResponseId(
+  id: string | undefined,
+  name: string | undefined,
+  correlation: ToolCallIdCorrelation,
+): string {
+  if (id) {
+    const pendingIndex = correlation.pendingCalls.findIndex(
+      (call) => call.id === id,
+    );
+    if (pendingIndex >= 0) correlation.pendingCalls.splice(pendingIndex, 1);
+    return id;
+  }
+
+  let pendingIndex: number;
+  if (name) {
+    pendingIndex = correlation.pendingCalls.findIndex(
+      (call) => call.name === name && call.generated,
+    );
+    if (pendingIndex < 0) {
+      pendingIndex = correlation.pendingCalls.findIndex(
+        (call) => call.name === name,
+      );
+    }
+    if (pendingIndex < 0) return generateToolCallId();
+  } else {
+    pendingIndex = correlation.pendingCalls.findIndex((call) => call.generated);
+    if (pendingIndex < 0) pendingIndex = 0;
+  }
+  const pendingCall = correlation.pendingCalls.splice(pendingIndex, 1)[0];
+  return pendingCall?.id ?? generateToolCallId();
+}
+
 /**
  * Processes a Content object and adds appropriate messages.
  *
@@ -668,13 +729,19 @@ function parseReasoningDetails(
 function processContent(
   content: Content,
   messages: OpenAI.ChatCompletionMessageParam[],
+  correlation: ToolCallIdCorrelation,
   reasoning?: ReasoningCapability,
 ): void {
   if (!content.parts?.length) return;
 
   const texts: string[] = [];
   const images: OpenAI.ChatCompletionContentPartImage[] = [];
-  const calls: { id: string; name: string; arguments: string }[] = [];
+  const calls: {
+    id: string;
+    name: string;
+    arguments: string;
+    generated: boolean;
+  }[] = [];
   const responses: { id: string; content: string }[] = [];
   // reasoning_details arrays parsed from thought parts' thoughtSignature, to be
   // echoed verbatim on the assistant turn (openrouter style only).
@@ -705,9 +772,10 @@ function processContent(
         console.warn("[adk-llm-bridge] functionCall missing name");
       }
       calls.push({
-        id: part.functionCall.id ?? `call_${Date.now()}`,
+        id: resolveToolCallId(part.functionCall.id),
         name: part.functionCall.name ?? "",
         arguments: JSON.stringify(part.functionCall.args ?? {}),
+        generated: !part.functionCall.id,
       });
     }
     if (part.functionResponse) {
@@ -715,7 +783,14 @@ function processContent(
         console.warn("[adk-llm-bridge] functionResponse missing id");
       }
       responses.push({
-        id: part.functionResponse.id ?? "",
+        id:
+          content.role === "user"
+            ? resolveToolResponseId(
+                part.functionResponse.id,
+                part.functionResponse.name,
+                correlation,
+              )
+            : resolveToolCallId(part.functionResponse.id),
         content: JSON.stringify(part.functionResponse.response ?? {}),
       });
     }
@@ -751,6 +826,9 @@ function processContent(
         content: texts.length ? texts.join("\n") : null,
       };
       if (calls.length) {
+        correlation.pendingCalls.push(
+          ...calls.map(({ id, name, generated }) => ({ id, name, generated })),
+        );
         msg.tool_calls = calls.map((c) => ({
           id: c.id,
           type: "function" as const,
