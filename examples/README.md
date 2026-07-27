@@ -14,6 +14,7 @@ Examples of using `adk-llm-bridge` with Google ADK and multiple LLM providers.
 | [basic-agent-lmstudio](./basic-agent-lmstudio) | LM Studio | Multi-agent HelpDesk with local models |
 | [express-server](./express-server) | AI Gateway | Full HTTP API with tools, state & streaming |
 | [native-features](./native-features) | Anthropic / OpenAI | CLI showcasing sampling, reasoning, structured output, multimodal, tool choice & streaming |
+| [codex-workflow](./codex-workflow) | OpenAI Codex | Dynamic planner → implementer → reviewer workflow using only Codex agents |
 
 ## Known limitations
 
