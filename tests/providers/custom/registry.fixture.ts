@@ -132,6 +132,61 @@ async function main(): Promise<void> {
       return;
     }
 
+    case "issue85-configuration": {
+      process.env.CUSTOM_LLM_BASE_URL =
+        "https://captured-environment.example.test/v1";
+      process.env.CUSTOM_LLM_API_KEY = "captured-environment-key";
+      registerCustomProvider("issue85-environment", {
+        models: ["model"],
+      });
+
+      registerCustomProvider("issue85-explicit", {
+        baseURL: "https://explicit.example.test/v1",
+        apiKey: "explicit-key",
+        models: ["model"],
+      });
+
+      process.env.CUSTOM_LLM_BASE_URL =
+        "https://mutated-environment.example.test/v1";
+      process.env.CUSTOM_LLM_API_KEY = "mutated-environment-key";
+
+      const environmentLlm = LLMRegistry.newLlm("issue85-environment/model");
+      const explicitLlm = LLMRegistry.newLlm("issue85-explicit/model");
+      const environmentClient = (
+        environmentLlm as CustomLlm & { client: OpenAI }
+      ).client;
+      const explicitClient = (explicitLlm as CustomLlm & { client: OpenAI })
+        .client;
+
+      writeResult({
+        environmentBaseURL: environmentClient.baseURL,
+        environmentApiKey: environmentClient.apiKey,
+        explicitBaseURL: explicitClient.baseURL,
+        explicitApiKey: explicitClient.apiKey,
+      });
+      return;
+    }
+
+    case "issue85-url-errors": {
+      delete process.env.CUSTOM_LLM_BASE_URL;
+      const missing = errorMessage(() =>
+        registerCustomProvider("issue85-missing-url", {
+          models: ["model"],
+        }),
+      );
+
+      const secret = "issue85-registry-secret";
+      process.env.CUSTOM_LLM_BASE_URL = `https://user:${secret}@[`;
+      const invalid = errorMessage(() =>
+        registerCustomProvider("issue85-invalid-url", {
+          models: ["model"],
+        }),
+      );
+
+      writeResult({ invalid, missing, secret });
+      return;
+    }
+
     case "validation": {
       registerCustomProvider("issue84-duplicate", {
         baseURL: "http://localhost:1234/v1",
