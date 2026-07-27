@@ -668,7 +668,6 @@ describe("convertRequest", () => {
           seed: 42,
           presencePenalty: 0.5,
           frequencyPenalty: 0.3,
-          candidateCount: 2,
         },
       });
 
@@ -680,7 +679,52 @@ describe("convertRequest", () => {
         seed: 42,
         presence_penalty: 0.5,
         frequency_penalty: 0.3,
-        n: 2,
+      });
+    });
+
+    describe("candidateCount", () => {
+      it.each([
+        ["zero", 0],
+        ["null", null],
+        ["a negative integer", -1],
+        ["a fractional value", 1.5],
+        ["NaN", Number.NaN],
+        ["positive infinity", Number.POSITIVE_INFINITY],
+        ["negative infinity", Number.NEGATIVE_INFINITY],
+        ["more than one", 2],
+      ])("rejects %s instead of treating it as one candidate", (_, value) => {
+        const request = createLlmRequest({ config: { candidateCount: value } });
+
+        expect(() => convertGenerationConfig(request, "gpt-4.1")).toThrow(
+          "candidateCount must be exactly 1 when provided: adk-llm-bridge returns one ADK LlmResponse per provider response and cannot represent multiple Chat Completions choices. Set candidateCount to 1 or omit it.",
+        );
+      });
+
+      it("rejects multiple candidates for reasoning models instead of silently dropping them", () => {
+        const request = createLlmRequest({ config: { candidateCount: 3 } });
+
+        expect(() => convertGenerationConfig(request, "gpt-5")).toThrow(
+          /candidateCount must be exactly 1 when provided/,
+        );
+      });
+
+      it("rejects through the request converter shared by streaming and non-streaming providers", () => {
+        const request = createLlmRequest({ config: { candidateCount: 2 } });
+
+        expect(() => convertRequest(request, "gpt-4.1")).toThrow(
+          /Set candidateCount to 1 or omit it/,
+        );
+      });
+
+      it("supports one candidate without sending an unnecessary n parameter", () => {
+        for (const model of ["gpt-4.1", "gpt-5"]) {
+          const request = createLlmRequest({ config: { candidateCount: 1 } });
+
+          expect(convertGenerationConfig(request, model)).not.toHaveProperty(
+            "n",
+          );
+          expect(convertRequest(request, model).params).toBeUndefined();
+        }
       });
     });
 
@@ -1132,26 +1176,6 @@ describe("convertRequest", () => {
         const result = convertGenerationConfig(request, "x-ai/grok-4");
         expect(result.temperature).toBe(0.7);
         expect(result.top_p).toBe(0.8);
-      });
-
-      it("drops n (candidateCount) for gpt-5 reasoning models", () => {
-        const request = createLlmRequest({ config: { candidateCount: 2 } });
-        const result = convertGenerationConfig(request, "gpt-5");
-        expect(result).not.toHaveProperty("n");
-      });
-
-      it("drops n for o-series and provider-prefixed reasoning models", () => {
-        for (const model of ["o1", "o3-mini", "o4-mini", "openai/gpt-5-mini"]) {
-          const request = createLlmRequest({ config: { candidateCount: 3 } });
-          const result = convertGenerationConfig(request, model);
-          expect(result).not.toHaveProperty("n");
-        }
-      });
-
-      it("keeps n (candidateCount) for non-reasoning models (gpt-4.1)", () => {
-        const request = createLlmRequest({ config: { candidateCount: 2 } });
-        const result = convertGenerationConfig(request, "gpt-4.1");
-        expect(result.n).toBe(2);
       });
 
       it("end-to-end: gpt-5 request carries no temperature/top_p/logprobs but keeps reasoning_effort", () => {

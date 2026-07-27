@@ -243,6 +243,8 @@ export function convertGenerationConfig(
   const config = req.config;
   if (!config) return {};
 
+  assertSupportedCandidateCount(config.candidateCount);
+
   const resolvedModel = model ?? req.model;
   const reasoningModel = usesMaxCompletionTokens(resolvedModel);
 
@@ -276,14 +278,39 @@ export function convertGenerationConfig(
     params.presence_penalty = config.presencePenalty;
   if (config.frequencyPenalty !== undefined && !reasoningModel)
     params.frequency_penalty = config.frequencyPenalty;
-  // n>1 stays cosmetic: convertResponse reads choices[0] only. Reasoning
-  // models (gpt-5*, o-series) reject n>1 with a 400, so drop it for them.
-  if (config.candidateCount !== undefined && !reasoningModel)
-    params.n = config.candidateCount;
   // topK intentionally dropped — no OpenAI Chat Completions equivalent.
   // Reasoning is handled separately in convertReasoningConfig.
 
   return params;
+}
+
+/**
+ * Rejects unsupported ADK response-candidate counts.
+ *
+ * The bridge produces one ADK `LlmResponse` for each provider response, so it
+ * cannot faithfully represent multiple Chat Completions choices from a single
+ * response. The shared request converter runs before both streaming and
+ * non-streaming provider calls; rejecting here prevents providers from
+ * generating paid choices that the bridge would discard. A `candidateCount`
+ * of `1` remains supported and is omitted because Chat Completions defaults to
+ * one choice.
+ *
+ * @param candidateCount - Requested number of ADK response candidates
+ * @throws {Error} When a provided value is anything other than integer `1`
+ * @internal
+ */
+function assertSupportedCandidateCount(candidateCount: unknown): void {
+  if (candidateCount === undefined) return;
+
+  if (
+    typeof candidateCount !== "number" ||
+    !Number.isInteger(candidateCount) ||
+    candidateCount !== 1
+  ) {
+    throw new Error(
+      "candidateCount must be exactly 1 when provided: adk-llm-bridge returns one ADK LlmResponse per provider response and cannot represent multiple Chat Completions choices. Set candidateCount to 1 or omit it.",
+    );
+  }
 }
 
 /**
