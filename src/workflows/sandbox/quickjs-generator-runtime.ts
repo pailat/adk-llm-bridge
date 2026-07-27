@@ -43,7 +43,7 @@ export const QUICKJS_SYNC_CAPABILITIES: WorkflowScriptRuntimeCapabilities =
     interruptHandler: true,
   });
 
-interface QuickJSSyncGeneratorRuntimeOptions {
+export interface QuickJSSyncGeneratorRuntimeOptions {
   loader?: QuickJSModuleLoader;
   limits?: WorkflowExecutionLimits;
   /** Test/diagnostic hook invoked after every created VM is disposed. */
