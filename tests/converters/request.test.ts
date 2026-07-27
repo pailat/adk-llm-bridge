@@ -119,6 +119,67 @@ describe("convertRequest", () => {
       });
     });
 
+    it("generates an OpenAI-compatible ID and warns when an ID is missing", () => {
+      const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const request = createLlmRequest({
+          contents: [
+            {
+              role: "model",
+              parts: [
+                {
+                  functionCall: {
+                    name: "get_weather",
+                    args: { city: "Tokyo" },
+                  },
+                },
+              ],
+            },
+          ],
+        });
+
+        const result = convertRequest(request);
+        const message = result.messages[0] as {
+          tool_calls: Array<{ id: string }>;
+        };
+
+        expect(message.tool_calls[0].id).toMatch(/^call_[0-9a-f]{32}$/);
+        expect(warnSpy).toHaveBeenCalledWith(
+          "[adk-llm-bridge] functionCall missing id, using generated ID",
+        );
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it("generates distinct IDs for multiple missing-ID calls in one message", () => {
+      const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const request = createLlmRequest({
+          contents: [
+            {
+              role: "model",
+              parts: [
+                { functionCall: { name: "first_tool", args: {} } },
+                { functionCall: { name: "second_tool", args: {} } },
+              ],
+            },
+          ],
+        });
+
+        const result = convertRequest(request);
+        const message = result.messages[0] as {
+          tool_calls: Array<{ id: string }>;
+        };
+        const ids = message.tool_calls.map((call) => call.id);
+
+        expect(ids).toHaveLength(2);
+        expect(new Set(ids).size).toBe(2);
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
     it("drops image parts on a model/assistant turn and warns", () => {
       const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
       try {
@@ -213,6 +274,279 @@ describe("convertRequest", () => {
         tool_call_id: "call_789",
         content: '{"temperature":22}',
       });
+    });
+
+    it("round-trips multiple missing and empty IDs across the request", () => {
+      const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const request = createLlmRequest({
+          contents: [
+            {
+              role: "model",
+              parts: [
+                {
+                  functionCall: {
+                    name: "get_weather",
+                    args: { city: "Tokyo" },
+                  },
+                },
+                {
+                  functionCall: {
+                    id: "call_explicit",
+                    name: "get_time",
+                    args: { city: "London" },
+                  },
+                },
+                {
+                  functionCall: {
+                    id: "",
+                    name: "get_weather",
+                    args: { city: "Paris" },
+                  },
+                },
+                {
+                  functionCall: {
+                    id: "",
+                    name: "get_stock",
+                    args: { symbol: "ADK" },
+                  },
+                },
+              ],
+            },
+            {
+              role: "user",
+              parts: [
+                {
+                  functionResponse: {
+                    id: "",
+                    name: "get_stock",
+                    response: { price: 87 },
+                  },
+                },
+                {
+                  functionResponse: {
+                    name: "get_weather",
+                    response: { city: "Tokyo", temperature: 22 },
+                  },
+                },
+                {
+                  functionResponse: {
+                    id: "call_explicit",
+                    name: "get_time",
+                    response: { time: "12:00" },
+                  },
+                },
+                {
+                  functionResponse: {
+                    id: "",
+                    name: "get_weather",
+                    response: { city: "Paris", temperature: 18 },
+                  },
+                },
+              ],
+            },
+          ],
+        });
+
+        const result = convertRequest(request);
+        const assistant = result.messages[0] as {
+          tool_calls: Array<{ id: string }>;
+        };
+        const [tokyoWeatherId, explicitId, parisWeatherId, stockId] =
+          assistant.tool_calls.map((call) => call.id);
+        const responseIds = result.messages
+          .slice(1)
+          .map(
+            (message) =>
+              (message as { role: "tool"; tool_call_id: string }).tool_call_id,
+          );
+
+        expect(tokyoWeatherId).toMatch(/^call_[0-9a-f]{32}$/);
+        expect(explicitId).toBe("call_explicit");
+        expect(parisWeatherId).toMatch(/^call_[0-9a-f]{32}$/);
+        expect(stockId).toMatch(/^call_[0-9a-f]{32}$/);
+        expect(responseIds).toEqual([
+          stockId,
+          tokyoWeatherId,
+          explicitId,
+          parisWeatherId,
+        ]);
+        expect(responseIds.every(Boolean)).toBe(true);
+        expect(
+          warnSpy.mock.calls.filter(
+            ([message]) =>
+              message ===
+              "[adk-llm-bridge] functionCall missing id, using generated ID",
+          ),
+        ).toHaveLength(3);
+        expect(
+          warnSpy.mock.calls.filter(
+            ([message]) =>
+              message === "[adk-llm-bridge] functionResponse missing id",
+          ),
+        ).toHaveLength(3);
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it("prefers a generated same-name call for an out-of-order missing-ID response", () => {
+      const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const request = createLlmRequest({
+          contents: [
+            {
+              role: "model",
+              parts: [
+                {
+                  functionCall: {
+                    id: "call_explicit",
+                    name: "get_weather",
+                    args: { city: "Tokyo" },
+                  },
+                },
+                {
+                  functionCall: {
+                    name: "get_weather",
+                    args: { city: "Paris" },
+                  },
+                },
+              ],
+            },
+            {
+              role: "user",
+              parts: [
+                {
+                  functionResponse: {
+                    name: "get_weather",
+                    response: { city: "Paris", temperature: 18 },
+                  },
+                },
+                {
+                  functionResponse: {
+                    id: "call_explicit",
+                    name: "get_weather",
+                    response: { city: "Tokyo", temperature: 22 },
+                  },
+                },
+              ],
+            },
+          ],
+        });
+
+        const result = convertRequest(request);
+        const assistant = result.messages[0] as {
+          tool_calls: Array<{ id: string }>;
+        };
+        const [explicitId, generatedId] = assistant.tool_calls.map(
+          (call) => call.id,
+        );
+
+        expect(explicitId).toBe("call_explicit");
+        expect(generatedId).toMatch(/^call_[0-9a-f]{32}$/);
+        expect(
+          result.messages
+            .slice(1)
+            .map(
+              (message) =>
+                (message as { role: "tool"; tool_call_id: string })
+                  .tool_call_id,
+            ),
+        ).toEqual([generatedId, explicitId]);
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it("does not consume an unrelated pending call for an unmatched response name", () => {
+      const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const request = createLlmRequest({
+          contents: [
+            {
+              role: "model",
+              parts: [
+                {
+                  functionCall: {
+                    name: "get_weather",
+                    args: { city: "Tokyo" },
+                  },
+                },
+              ],
+            },
+            {
+              role: "user",
+              parts: [
+                {
+                  functionResponse: {
+                    name: "get_time",
+                    response: { time: "12:00" },
+                  },
+                },
+                {
+                  functionResponse: {
+                    name: "get_weather",
+                    response: { city: "Tokyo", temperature: 22 },
+                  },
+                },
+              ],
+            },
+          ],
+        });
+
+        const result = convertRequest(request);
+        const assistant = result.messages[0] as {
+          tool_calls: Array<{ id: string }>;
+        };
+        const generatedCallId = assistant.tool_calls[0].id;
+        const [unmatchedResponseId, matchingResponseId] = result.messages
+          .slice(1)
+          .map(
+            (message) =>
+              (message as { role: "tool"; tool_call_id: string }).tool_call_id,
+          );
+
+        expect(unmatchedResponseId).toMatch(/^call_[0-9a-f]{32}$/);
+        expect(unmatchedResponseId).not.toBe(generatedCallId);
+        expect(matchingResponseId).toBe(generatedCallId);
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it("replaces an unmatched empty response ID after warning", () => {
+      const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const request = createLlmRequest({
+          contents: [
+            {
+              role: "user",
+              parts: [
+                {
+                  functionResponse: {
+                    id: "",
+                    name: "orphan_tool",
+                    response: { ok: true },
+                  },
+                },
+              ],
+            },
+          ],
+        });
+
+        const result = convertRequest(request);
+        const toolMessage = result.messages[0] as {
+          role: "tool";
+          tool_call_id: string;
+        };
+
+        expect(toolMessage.tool_call_id).toMatch(/^call_[0-9a-f]{32}$/);
+        expect(warnSpy).toHaveBeenCalledWith(
+          "[adk-llm-bridge] functionResponse missing id",
+        );
+      } finally {
+        warnSpy.mockRestore();
+      }
     });
   });
 
