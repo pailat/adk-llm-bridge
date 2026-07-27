@@ -7,6 +7,7 @@
 import {
   type BaseAgent,
   createEvent,
+  createEventActions,
   type Event,
   type InvocationContext,
 } from "@google/adk";
@@ -15,6 +16,11 @@ import type {
   AgentInvocationGateway,
   AgentInvocationResult,
 } from "../../runtime/agent-invocation-gateway.js";
+import type {
+  WorkflowCheckpointStore,
+  WorkflowCheckpointWrite,
+} from "../checkpoint/store.js";
+import { ADKSessionCheckpointStore } from "../checkpoint/store.js";
 import {
   DEFAULT_WORKFLOW_EXECUTION_LIMITS,
   type WorkflowContext,
@@ -30,6 +36,7 @@ import {
 } from "../contracts.js";
 import type { TrustedWorkflowDefinition } from "../definition.js";
 import type {
+  WorkflowCheckpointSavedEvent,
   WorkflowCompletedEvent,
   WorkflowCustomEvent,
   WorkflowErrorEvent,
@@ -43,6 +50,11 @@ import type {
   WorkflowUserEvent,
 } from "../events.js";
 import { AsyncSemaphore } from "./async-semaphore.js";
+import { WorkflowCheckpointCoordinator } from "./workflow-checkpoint-coordinator.js";
+
+export type WorkflowExecutionIdResolver = (
+  context: InvocationContext,
+) => string | Promise<string>;
 
 export interface WorkflowStepHookContext {
   definition: TrustedWorkflowDefinition;
@@ -73,6 +85,8 @@ export interface WorkflowRuntimeConfig {
   gateway: AgentInvocationGateway;
   eventSink: (event: Event) => void | Promise<void>;
   hooks?: WorkflowRuntimeHooks;
+  checkpointStore?: WorkflowCheckpointStore;
+  resolveExecutionId?: WorkflowExecutionIdResolver;
 }
 
 /** Executes one trusted workflow definition inside an ADK invocation. */
@@ -84,11 +98,15 @@ export class WorkflowRuntime {
   readonly #gateway: AgentInvocationGateway;
   readonly #eventSink: (event: Event) => void | Promise<void>;
   readonly #hooks?: WorkflowRuntimeHooks;
+  readonly #checkpointStore: WorkflowCheckpointStore;
+  readonly #resolveExecutionId: WorkflowExecutionIdResolver;
   readonly #limits: Required<WorkflowExecutionLimits>;
   readonly #globalSemaphore: AsyncSemaphore;
   readonly #agentSemaphores = new WeakMap<BaseAgent, AsyncSemaphore>();
   readonly #seenStepIds = new Set<string>();
   #executionSignal?: AbortSignal;
+  #executionId?: string;
+  #checkpointCoordinator?: WorkflowCheckpointCoordinator;
   #stepCount = 0;
   #replayedStepCount = 0;
 
@@ -100,6 +118,10 @@ export class WorkflowRuntime {
     this.#gateway = config.gateway;
     this.#eventSink = config.eventSink;
     this.#hooks = config.hooks;
+    this.#checkpointStore =
+      config.checkpointStore ?? new ADKSessionCheckpointStore();
+    this.#resolveExecutionId =
+      config.resolveExecutionId ?? ((context) => context.invocationId);
     this.#limits = validateLimits(config.definition.limits);
     this.#globalSemaphore = new AsyncSemaphore(this.#limits.maxConcurrency);
   }
@@ -111,15 +133,30 @@ export class WorkflowRuntime {
       this.#limits.timeoutMs,
     );
     this.#executionSignal = abortScope.signal;
-    await this.emitWorkflowEvent({
-      ...this.envelope(startedAt),
-      type: "workflow_started",
-    } satisfies WorkflowStartedEvent);
+    let checkpointInitialized = false;
 
     try {
       throwIfAborted(abortScope.signal);
+      this.#executionId = await this.#resolveExecutionId(this.#parentContext);
+      validateExecutionId(this.#executionId);
+      this.#checkpointCoordinator = new WorkflowCheckpointCoordinator({
+        definition: this.#definition,
+        executionId: this.#executionId,
+        input: this.workflowInput(),
+        context: this.#parentContext,
+        store: this.#checkpointStore,
+        onWrite: (write, stepId) => this.emitCheckpointSaved(write, stepId),
+      });
+      await this.#checkpointCoordinator.initialize();
+      checkpointInitialized = true;
+      await this.emitWorkflowEvent({
+        ...this.envelope(startedAt),
+        type: "workflow_started",
+      } satisfies WorkflowStartedEvent);
+
       const output = await this.#definition.handler(this.createContext());
       throwIfAborted(abortScope.signal);
+      await this.#checkpointCoordinator.completeWorkflow(output);
       if (output !== undefined) await this.emitOutput(output);
       const summary = this.summary("completed", startedAt);
       await this.emitWorkflowEvent({
@@ -130,6 +167,12 @@ export class WorkflowRuntime {
       return summary;
     } catch (caught) {
       const error = asWorkflowError(caught);
+      if (checkpointInitialized) {
+        await this.#checkpointCoordinator?.failWorkflow(
+          error.toJSON(),
+          error.code === "WORKFLOW_ABORTED" ? "cancelled" : "failed",
+        );
+      }
       await this.emitWorkflowEvent(
         {
           ...this.envelope(),
@@ -145,14 +188,13 @@ export class WorkflowRuntime {
     } finally {
       abortScope.dispose();
       this.#executionSignal = undefined;
+      this.#checkpointCoordinator = undefined;
+      this.#executionId = undefined;
     }
   }
 
   private createContext(): WorkflowContext {
-    const input = this.#parentContext.userContent ?? {
-      role: "user",
-      parts: [],
-    };
+    const input = this.workflowInput();
     return Object.freeze({
       input,
       inputText: contentText(input),
@@ -242,16 +284,33 @@ export class WorkflowRuntime {
 
     const hookContext = {
       definition: this.#definition,
-      executionId: this.#parentContext.invocationId,
+      executionId: this.executionId(),
       step,
     } satisfies WorkflowStepHookContext;
-    const replayed = await this.#hooks?.beforeStep?.(hookContext);
+    const prepared = await this.checkpointCoordinator().prepareStep(step);
     throwIfAborted(signal);
-    if (replayed) {
+    if (prepared.resolution.action === "replay") {
       const result = {
-        ...replayed,
+        ...prepared.resolution.result,
         replayed: true,
       } satisfies WorkflowStepResult;
+      this.#replayedStepCount++;
+      await this.emitWorkflowEvent({
+        ...this.envelope(),
+        type: "step_replayed",
+        result,
+      } satisfies WorkflowStepReplayedEvent);
+      return result;
+    }
+
+    const hookResult = await this.#hooks?.beforeStep?.(hookContext);
+    throwIfAborted(signal);
+    if (hookResult) {
+      const result = {
+        ...hookResult,
+        replayed: true,
+      } satisfies WorkflowStepResult;
+      await this.checkpointCoordinator().completeStep(result);
       this.#replayedStepCount++;
       await this.emitWorkflowEvent({
         ...this.envelope(),
@@ -264,7 +323,16 @@ export class WorkflowRuntime {
     const maxAttempts = validateRetry(step, this.#limits.maxAttemptsPerStep);
     const startedAt = Date.now();
     let lastError: WorkflowError | undefined;
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    for (let attemptIndex = 0; attemptIndex < maxAttempts; attemptIndex++) {
+      const attempt = prepared.resolution.attempt + attemptIndex;
+      if (attemptIndex > 0) {
+        await retryDelay(step, attemptIndex, signal);
+        await this.checkpointCoordinator().startAttempt(
+          step,
+          prepared.inputHash,
+          attempt,
+        );
+      }
       await this.emitWorkflowEvent({
         ...this.envelope(),
         type: "step_started",
@@ -276,6 +344,7 @@ export class WorkflowRuntime {
       throwIfAborted(signal);
       if (!result.error) {
         const completed = stepResult(step, result, attempt, startedAt);
+        await this.checkpointCoordinator().completeStep(completed);
         await this.#hooks?.afterStep?.(hookContext, completed);
         await this.emitWorkflowEvent({
           ...this.envelope(),
@@ -290,13 +359,14 @@ export class WorkflowRuntime {
         `Workflow step ${step.id} failed: ${result.error}`,
         { agentName: step.agentName, stepId: step.id, attempt },
       );
-      if (attempt < maxAttempts) await retryDelay(step, attempt, signal);
+      const failure = failureFromError(step, lastError, attempt, startedAt);
+      await this.checkpointCoordinator().failStep(failure);
     }
 
     const failure = failureFromError(
       step,
       lastError ?? new Error(`Workflow step ${step.id} failed`),
-      maxAttempts,
+      prepared.resolution.attempt + maxAttempts - 1,
       startedAt,
     );
     await this.#hooks?.stepFailed?.(hookContext, failure);
@@ -342,6 +412,46 @@ export class WorkflowRuntime {
     return this.#executionSignal;
   }
 
+  private executionId(): string {
+    return this.#executionId?.trim()
+      ? this.#executionId
+      : this.#parentContext.invocationId;
+  }
+
+  private checkpointCoordinator(): WorkflowCheckpointCoordinator {
+    if (!this.#checkpointCoordinator) {
+      throw new WorkflowError(
+        "WORKFLOW_EXECUTION_ERROR",
+        "Workflow checkpoint coordinator is not initialized",
+      );
+    }
+    return this.#checkpointCoordinator;
+  }
+
+  private workflowInput(): Content {
+    return (
+      this.#parentContext.userContent ?? {
+        role: "user",
+        parts: [],
+      }
+    );
+  }
+
+  private async emitCheckpointSaved(
+    write: WorkflowCheckpointWrite,
+    stepId?: string,
+  ): Promise<void> {
+    await this.emitWorkflowEvent(
+      {
+        ...this.envelope(),
+        type: "checkpoint_saved",
+        checkpointKey: write.checkpointKey,
+        ...(stepId ? { stepId } : {}),
+      } satisfies WorkflowCheckpointSavedEvent,
+      { actions: createEventActions({ stateDelta: write.stateDelta }) },
+    );
+  }
+
   private async emitOutput(
     output: Exclude<WorkflowOutput, undefined>,
   ): Promise<void> {
@@ -385,7 +495,7 @@ export class WorkflowRuntime {
     return {
       workflowId: this.#definition.id,
       workflowVersion: this.#definition.version,
-      executionId: this.#parentContext.invocationId,
+      executionId: this.executionId(),
       timestamp,
     };
   }
@@ -397,7 +507,7 @@ export class WorkflowRuntime {
     return {
       workflowId: this.#definition.id,
       workflowVersion: this.#definition.version,
-      executionId: this.#parentContext.invocationId,
+      executionId: this.executionId(),
       status,
       steps: this.#stepCount,
       replayedSteps: this.#replayedStepCount,
@@ -433,6 +543,15 @@ function validateLimits(
     }
   }
   return merged;
+}
+
+function validateExecutionId(executionId: string): void {
+  if (typeof executionId !== "string" || !executionId.trim()) {
+    throw new WorkflowError(
+      "WORKFLOW_EXECUTION_ERROR",
+      "Workflow execution id resolver must return a non-empty string",
+    );
+  }
 }
 
 function validateStep(step: WorkflowStep): void {

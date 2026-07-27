@@ -6,9 +6,11 @@
 
 import { BaseAgent, type Event, type InvocationContext } from "@google/adk";
 import { AgentInvocationGateway } from "../runtime/agent-invocation-gateway.js";
+import type { WorkflowCheckpointStore } from "./checkpoint/store.js";
 import type { TrustedWorkflowDefinition } from "./definition.js";
 import { AsyncEventQueue } from "./runtime/async-event-queue.js";
 import {
+  type WorkflowExecutionIdResolver,
   WorkflowRuntime,
   type WorkflowRuntimeHooks,
 } from "./runtime/workflow-runtime.js";
@@ -20,6 +22,10 @@ export interface WorkflowAgentConfig {
   subAgents?: BaseAgent[];
   /** Optional gateway injection for instrumentation and deterministic tests. */
   gateway?: AgentInvocationGateway;
+  /** Checkpoint persistence adapter. Defaults to ADK session state deltas. */
+  checkpointStore?: WorkflowCheckpointStore;
+  /** Stable durable identity. Defaults to the ADK invocation id. */
+  resolveExecutionId?: WorkflowExecutionIdResolver;
   /** Internal durability extension point; not required by trusted workflows. */
   runtimeHooks?: WorkflowRuntimeHooks;
 }
@@ -28,6 +34,8 @@ export interface WorkflowAgentConfig {
 export class WorkflowAgent extends BaseAgent {
   readonly definition: TrustedWorkflowDefinition;
   readonly #gateway: AgentInvocationGateway;
+  readonly #checkpointStore?: WorkflowCheckpointStore;
+  readonly #resolveExecutionId?: WorkflowExecutionIdResolver;
   readonly #runtimeHooks?: WorkflowRuntimeHooks;
   readonly #declaredAgents: ReadonlyMap<string, BaseAgent>;
 
@@ -39,6 +47,8 @@ export class WorkflowAgent extends BaseAgent {
       subAgents,
     });
     this.definition = config.definition;
+    this.#checkpointStore = config.checkpointStore;
+    this.#resolveExecutionId = config.resolveExecutionId;
     this.#runtimeHooks = config.runtimeHooks;
     this.#declaredAgents = new Map(
       subAgents.map((agent) => [agent.name, agent]),
@@ -62,6 +72,8 @@ export class WorkflowAgent extends BaseAgent {
       gateway: this.#gateway,
       eventSink: (event) => queue.push(event),
       hooks: this.#runtimeHooks,
+      checkpointStore: this.#checkpointStore,
+      resolveExecutionId: this.#resolveExecutionId,
     });
 
     void runtime.execute().then(
