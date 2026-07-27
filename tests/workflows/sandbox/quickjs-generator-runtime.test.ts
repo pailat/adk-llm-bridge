@@ -104,7 +104,7 @@ describe("QuickJSSyncGeneratorRuntime limits", () => {
     const runtime = new QuickJSSyncGeneratorRuntime({ loader: releaseLoader });
     const session = await runtime.createSession({
       source: "while (true) {}",
-      limits: { cpuTimeMs: 10 },
+      limits: { cpuTimeMs: 250 },
     });
     try {
       expect(() => session.next()).toThrow(WorkflowError);

@@ -15,6 +15,10 @@ import {
   type WorkflowExecutionLimits,
 } from "../contracts.js";
 import {
+  WORKFLOW_SCRIPT_PROTOCOL,
+  WORKFLOW_SCRIPT_PROTOCOL_VERSION,
+} from "./protocol.js";
+import {
   loadReleaseQuickJS,
   type QuickJSModuleLoader,
 } from "./quickjs-loader.js";
@@ -74,6 +78,15 @@ function resolveLimits(
 
 function byteLength(value: string): number {
   return encoder.encode(value).byteLength;
+}
+
+function rejectModuleSyntax(source: string): void {
+  if (/\bimport\b/u.test(source)) {
+    throw new WorkflowError(
+      "WORKFLOW_SCRIPT_INVALID",
+      "Workflow scripts cannot import modules",
+    );
+  }
 }
 
 function serializeMessage(value: unknown, maxBytes: number): string {
@@ -256,6 +269,7 @@ export class QuickJSSyncGeneratorRuntime implements WorkflowScriptRuntime {
         { actualBytes: sourceSize, maxBytes: limits.maxSourceBytes },
       );
     }
+    rejectModuleSyntax(options.source);
     if (options.signal?.aborted) {
       throw new WorkflowError(
         "WORKFLOW_ABORTED",
@@ -291,7 +305,29 @@ export class QuickJSSyncGeneratorRuntime implements WorkflowScriptRuntime {
         (() => {
           "use strict";
           const __input = JSON.parse(${JSON.stringify(serializedInput)});
-          const __ctx = Object.freeze({ input: __input });
+          const __inputText = typeof __input === "string"
+            ? __input
+            : Array.isArray(__input?.parts)
+              ? __input.parts
+                  .map((part) => typeof part?.text === "string" ? part.text : "")
+                  .join("")
+              : "";
+          const __operation = (op, payload) => Object.freeze({
+            protocol: ${JSON.stringify(WORKFLOW_SCRIPT_PROTOCOL)},
+            version: ${WORKFLOW_SCRIPT_PROTOCOL_VERSION},
+            op,
+            ...payload,
+          });
+          const __ctx = Object.freeze({
+            input: __input,
+            inputText: __inputText,
+            run: (step) => __operation("run", { step }),
+            parallel: (steps, options) => __operation("parallel", {
+              steps,
+              ...(options === undefined ? {} : { options }),
+            }),
+            emit: (event) => __operation("emit", { event }),
+          });
           const __factory = function* (__workflowContext) {
             const ctx = __workflowContext;
             ${options.source}\n
@@ -315,6 +351,12 @@ export class QuickJSSyncGeneratorRuntime implements WorkflowScriptRuntime {
           throw new WorkflowError(
             "WORKFLOW_ABORTED",
             "Workflow script was aborted",
+          );
+        }
+        if (/interrupted|out of memory|stack overflow/i.test(message)) {
+          throw new WorkflowError(
+            "WORKFLOW_LIMIT_EXCEEDED",
+            `QuickJS initialization limit exceeded: ${message}`,
           );
         }
         throw new WorkflowError(
