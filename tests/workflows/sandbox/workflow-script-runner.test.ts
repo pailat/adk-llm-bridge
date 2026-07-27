@@ -1,0 +1,223 @@
+/**
+ * @license
+ * Copyright 2025 PAI
+ * SPDX-License-Identifier: MIT
+ */
+
+import { describe, expect, test } from "bun:test";
+import type {
+  WorkflowStep,
+  WorkflowStepOutcome,
+  WorkflowStepResult,
+} from "../../../src/workflows/contracts.js";
+import type { WorkflowUserEvent } from "../../../src/workflows/events.js";
+import type { WorkflowScriptHost } from "../../../src/workflows/sandbox/protocol.js";
+import { QuickJSSyncGeneratorRuntime } from "../../../src/workflows/sandbox/quickjs-generator-runtime.js";
+import { runWorkflowScript } from "../../../src/workflows/sandbox/workflow-script-runner.js";
+
+function result(step: WorkflowStep, output: string): WorkflowStepResult {
+  return {
+    status: "completed",
+    id: step.id,
+    agentName: step.agentName,
+    output,
+    attempts: 1,
+    startedAt: 1,
+    completedAt: 2,
+  };
+}
+
+function createHost(log: string[]): WorkflowScriptHost {
+  return {
+    async run(step) {
+      log.push(`run:${step.id}:${step.input}`);
+      return result(step, `output:${step.id}`);
+    },
+    async parallel(steps, options): Promise<WorkflowStepOutcome[]> {
+      log.push(
+        `parallel:${steps.map((step) => step.id).join(",")}:${options?.failureMode ?? "default"}`,
+      );
+      return steps.map((step) => result(step, `output:${step.id}`));
+    },
+    emit(event) {
+      log.push(`emit:${event.name}:${String(event.data)}`);
+    },
+  };
+}
+
+describe("runWorkflowScript", () => {
+  test("bridges multiple run, parallel, emit, and final turns", async () => {
+    const log: string[] = [];
+    const execution = await runWorkflowScript(
+      new QuickJSSyncGeneratorRuntime(),
+      {
+        input: { parts: [{ text: "build feature" }] },
+        source: `
+          const plan = yield ctx.run({
+            id: "plan",
+            agentName: "planner",
+            input: ctx.inputText,
+          });
+          yield ctx.emit({ type: "custom", name: "planned", data: plan.output });
+          const implementations = yield ctx.parallel([
+            { id: "left", agentName: "codex", input: plan.output },
+            { id: "right", agentName: "codex", input: plan.output },
+          ], { failureMode: "all-settled", concurrency: 2 });
+          const review = yield ctx.run({
+            id: "review",
+            agentName: "reviewer",
+            input: implementations.map((item) => item.output).join(","),
+          });
+          return review.output;
+        `,
+        host: createHost(log),
+      },
+    );
+
+    expect(execution).toEqual({
+      output: "output:review",
+      steps: 4,
+      messages: 4,
+    });
+    expect(log).toEqual([
+      "run:plan:build feature",
+      "emit:planned:output:plan",
+      "parallel:left,right:all-settled",
+      "run:review:output:left,output:right",
+    ]);
+  });
+
+  test.each([
+    ["malformed", "yield { nope: true };", "unsupported RPC protocol"],
+    [
+      "unknown",
+      `yield { protocol: "adk-llm-bridge/workflow-rpc", version: 1, op: "nope" };`,
+      "unknown operation",
+    ],
+    ["bad run", "yield ctx.run({ id: 1 });", "malformed run operation"],
+    [
+      "bad parallel",
+      "yield ctx.parallel([{ id: 'x' }]);",
+      "malformed parallel operation",
+    ],
+    [
+      "bad emit",
+      "yield ctx.emit({ type: 'custom' });",
+      "malformed emit operation",
+    ],
+  ])("rejects %s operations", async (_name, source, message) => {
+    await expect(
+      runWorkflowScript(new QuickJSSyncGeneratorRuntime(), {
+        source,
+        host: createHost([]),
+      }),
+    ).rejects.toThrow(message);
+  });
+
+  test("enforces total steps and yielded message count", async () => {
+    const source = `
+      yield ctx.emit({ type: "custom", name: "one" });
+      yield ctx.emit({ type: "custom", name: "two" });
+      return "done";
+    `;
+    await expect(
+      runWorkflowScript(new QuickJSSyncGeneratorRuntime(), {
+        source,
+        host: createHost([]),
+        maxMessages: 1,
+      }),
+    ).rejects.toMatchObject({ code: "WORKFLOW_LIMIT_EXCEEDED" });
+
+    await expect(
+      runWorkflowScript(new QuickJSSyncGeneratorRuntime(), {
+        source: `
+          yield ctx.parallel([
+            { id: "one", agentName: "agent", input: "one" },
+            { id: "two", agentName: "agent", input: "two" },
+          ]);
+        `,
+        host: createHost([]),
+        limits: { maxSteps: 1 },
+      }),
+    ).rejects.toMatchObject({ code: "WORKFLOW_LIMIT_EXCEEDED" });
+  });
+
+  test("aborts while awaiting a host operation and disposes the VM", async () => {
+    const controller = new AbortController();
+    let disposed = 0;
+    const runtime = new QuickJSSyncGeneratorRuntime({
+      onDispose: () => {
+        disposed += 1;
+      },
+    });
+    const host = createHost([]);
+    host.run = async () => await new Promise<WorkflowStepResult>(() => {});
+    const execution = runWorkflowScript(runtime, {
+      source: `yield ctx.run({ id: "wait", agentName: "agent", input: "wait" });`,
+      signal: controller.signal,
+      host,
+    });
+    setTimeout(() => controller.abort(), 5);
+    await expect(execution).rejects.toMatchObject({ code: "WORKFLOW_ABORTED" });
+    expect(disposed).toBe(1);
+  });
+
+  test("does not expose host globals and rejects imports", async () => {
+    const execution = await runWorkflowScript(
+      new QuickJSSyncGeneratorRuntime(),
+      {
+        source: `
+          return [typeof Bun, typeof process, typeof require, typeof fetch]
+            .join(",");
+        `,
+        host: createHost([]),
+      },
+    );
+    expect(execution.output).toBe("undefined,undefined,undefined,undefined");
+
+    await expect(
+      runWorkflowScript(new QuickJSSyncGeneratorRuntime(), {
+        source: `return import("node:fs");`,
+        host: createHost([]),
+      }),
+    ).rejects.toMatchObject({ code: "WORKFLOW_SCRIPT_INVALID" });
+  });
+
+  test("rejects invalid final output and oversized host responses", async () => {
+    await expect(
+      runWorkflowScript(new QuickJSSyncGeneratorRuntime(), {
+        source: "return { arbitrary: true };",
+        host: createHost([]),
+      }),
+    ).rejects.toMatchObject({ code: "WORKFLOW_SCRIPT_INVALID" });
+
+    const host = createHost([]);
+    host.run = async (step) => result(step, "x".repeat(1024));
+    await expect(
+      runWorkflowScript(new QuickJSSyncGeneratorRuntime(), {
+        source: `
+          yield ctx.run({ id: "large", agentName: "agent", input: "go" });
+          return "done";
+        `,
+        host,
+        limits: { maxMessageBytes: 256 },
+      }),
+    ).rejects.toMatchObject({ code: "WORKFLOW_LIMIT_EXCEEDED" });
+  });
+
+  test("maps host failures without exposing host objects", async () => {
+    const host = createHost([]);
+    host.emit = (_event: WorkflowUserEvent) => {
+      throw new Error("sensitive object failed");
+    };
+    await expect(
+      runWorkflowScript(new QuickJSSyncGeneratorRuntime(), {
+        source: `yield ctx.emit({ type: "custom", name: "event" });`,
+        host,
+      }),
+    ).rejects.toMatchObject({
+      code: "WORKFLOW_EXECUTION_ERROR",
+      message: expect.stringContaining("sensitive object failed"),
+    });
+  });
+});
