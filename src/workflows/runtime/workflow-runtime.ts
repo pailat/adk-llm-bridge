@@ -1,0 +1,526 @@
+/**
+ * @license
+ * Copyright 2025 PAI
+ * SPDX-License-Identifier: MIT
+ */
+
+import { createEvent, type Event, type InvocationContext } from "@google/adk";
+import type { Content } from "@google/genai";
+import type {
+  AgentInvocationGateway,
+  AgentInvocationResult,
+} from "../../runtime/agent-invocation-gateway.js";
+import {
+  DEFAULT_WORKFLOW_EXECUTION_LIMITS,
+  type WorkflowContext,
+  WorkflowError,
+  type WorkflowExecutionLimits,
+  type WorkflowExecutionSummary,
+  type WorkflowOutput,
+  type WorkflowParallelOptions,
+  type WorkflowStep,
+  type WorkflowStepFailure,
+  type WorkflowStepOutcome,
+  type WorkflowStepResult,
+} from "../contracts.js";
+import type { TrustedWorkflowDefinition } from "../definition.js";
+import type {
+  WorkflowCompletedEvent,
+  WorkflowCustomEvent,
+  WorkflowErrorEvent,
+  WorkflowEvent,
+  WorkflowOutputEvent,
+  WorkflowStartedEvent,
+  WorkflowStepCompletedEvent,
+  WorkflowStepFailedEvent,
+  WorkflowStepReplayedEvent,
+  WorkflowStepStartedEvent,
+  WorkflowUserEvent,
+} from "../events.js";
+
+export interface WorkflowStepHookContext {
+  definition: TrustedWorkflowDefinition;
+  executionId: string;
+  step: WorkflowStep;
+}
+
+/** Internal extension point used by durable runtimes without coupling the gateway. */
+export interface WorkflowRuntimeHooks {
+  beforeStep?(
+    context: WorkflowStepHookContext,
+  ): WorkflowStepResult | undefined | Promise<WorkflowStepResult | undefined>;
+  afterStep?(
+    context: WorkflowStepHookContext,
+    result: WorkflowStepResult,
+  ): void | Promise<void>;
+  stepFailed?(
+    context: WorkflowStepHookContext,
+    failure: WorkflowStepFailure,
+  ): void | Promise<void>;
+}
+
+export interface WorkflowRuntimeConfig {
+  definition: TrustedWorkflowDefinition;
+  parentContext: InvocationContext;
+  agentName: string;
+  declaredAgentNames: ReadonlySet<string>;
+  gateway: AgentInvocationGateway;
+  eventSink: (event: Event) => void | Promise<void>;
+  hooks?: WorkflowRuntimeHooks;
+}
+
+/** Executes one trusted workflow definition inside an ADK invocation. */
+export class WorkflowRuntime {
+  readonly #definition: TrustedWorkflowDefinition;
+  readonly #parentContext: InvocationContext;
+  readonly #agentName: string;
+  readonly #declaredAgentNames: ReadonlySet<string>;
+  readonly #gateway: AgentInvocationGateway;
+  readonly #eventSink: (event: Event) => void | Promise<void>;
+  readonly #hooks?: WorkflowRuntimeHooks;
+  readonly #limits: Required<WorkflowExecutionLimits>;
+  readonly #seenStepIds = new Set<string>();
+  #stepCount = 0;
+  #replayedStepCount = 0;
+
+  constructor(config: WorkflowRuntimeConfig) {
+    this.#definition = config.definition;
+    this.#parentContext = config.parentContext;
+    this.#agentName = config.agentName;
+    this.#declaredAgentNames = config.declaredAgentNames;
+    this.#gateway = config.gateway;
+    this.#eventSink = config.eventSink;
+    this.#hooks = config.hooks;
+    this.#limits = validateLimits(config.definition.limits);
+  }
+
+  async execute(): Promise<WorkflowExecutionSummary> {
+    const startedAt = Date.now();
+    await this.emitWorkflowEvent({
+      ...this.envelope(startedAt),
+      type: "workflow_started",
+    } satisfies WorkflowStartedEvent);
+
+    try {
+      const output = await this.#definition.handler(this.createContext());
+      if (output !== undefined) await this.emitOutput(output);
+      const summary = this.summary("completed", startedAt);
+      await this.emitWorkflowEvent({
+        ...this.envelope(),
+        type: "workflow_completed",
+        summary,
+      } satisfies WorkflowCompletedEvent);
+      return summary;
+    } catch (caught) {
+      const error = asWorkflowError(caught);
+      await this.emitWorkflowEvent(
+        {
+          ...this.envelope(),
+          type: "error",
+          error: error.toJSON(),
+        } satisfies WorkflowErrorEvent,
+        {
+          errorCode: error.code,
+          errorMessage: error.message,
+        },
+      );
+      throw error;
+    }
+  }
+
+  private createContext(): WorkflowContext {
+    const input = this.#parentContext.userContent ?? {
+      role: "user",
+      parts: [],
+    };
+    return Object.freeze({
+      input,
+      inputText: contentText(input),
+      signal: this.#parentContext.abortSignal ?? new AbortController().signal,
+      run: (step: WorkflowStep) => this.runStep(step),
+      parallel: (
+        steps: readonly WorkflowStep[],
+        options?: WorkflowParallelOptions,
+      ) => this.runSequentialParallel(steps, options),
+      emit: (event: WorkflowUserEvent) => {
+        void this.emitWorkflowEvent({
+          ...this.envelope(),
+          type: "custom",
+          name: event.name,
+          ...(event.data === undefined ? {} : { data: event.data }),
+        } satisfies WorkflowCustomEvent);
+      },
+    });
+  }
+
+  private async runSequentialParallel(
+    steps: readonly WorkflowStep[],
+    options: WorkflowParallelOptions = {},
+  ): Promise<WorkflowStepOutcome[]> {
+    validateParallelOptions(options, this.#limits.maxConcurrency);
+    const outcomes: WorkflowStepOutcome[] = [];
+    for (const step of steps) {
+      try {
+        outcomes.push(await this.runStep(step));
+      } catch (caught) {
+        if ((options.failureMode ?? "fail-fast") === "fail-fast") throw caught;
+        outcomes.push(failureFromError(step, caught));
+      }
+    }
+    return outcomes;
+  }
+
+  private async runStep(step: WorkflowStep): Promise<WorkflowStepResult> {
+    validateStep(step);
+    if (this.#seenStepIds.has(step.id)) {
+      throw new WorkflowError(
+        "WORKFLOW_STEP_MISMATCH",
+        `Workflow step id must be unique: ${step.id}`,
+        { stepId: step.id },
+      );
+    }
+    this.#seenStepIds.add(step.id);
+    this.#stepCount++;
+    if (this.#stepCount > this.#limits.maxSteps) {
+      throw new WorkflowError(
+        "WORKFLOW_LIMIT_EXCEEDED",
+        `Workflow exceeded the maximum of ${this.#limits.maxSteps} steps`,
+        { limit: this.#limits.maxSteps, stepId: step.id },
+      );
+    }
+    if (!this.#declaredAgentNames.has(step.agentName)) {
+      throw new WorkflowError(
+        "WORKFLOW_UNKNOWN_AGENT",
+        `Workflow may only invoke a directly declared sub-agent: ${step.agentName}`,
+        { agentName: step.agentName, stepId: step.id },
+      );
+    }
+
+    const hookContext = {
+      definition: this.#definition,
+      executionId: this.#parentContext.invocationId,
+      step,
+    } satisfies WorkflowStepHookContext;
+    const replayed = await this.#hooks?.beforeStep?.(hookContext);
+    if (replayed) {
+      const result = {
+        ...replayed,
+        replayed: true,
+      } satisfies WorkflowStepResult;
+      this.#replayedStepCount++;
+      await this.emitWorkflowEvent({
+        ...this.envelope(),
+        type: "step_replayed",
+        result,
+      } satisfies WorkflowStepReplayedEvent);
+      return result;
+    }
+
+    const maxAttempts = validateRetry(step, this.#limits.maxAttemptsPerStep);
+    const startedAt = Date.now();
+    let lastError: WorkflowError | undefined;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      await this.emitWorkflowEvent({
+        ...this.envelope(),
+        type: "step_started",
+        step,
+        attempt,
+      } satisfies WorkflowStepStartedEvent);
+
+      const result = await this.#gateway.run({
+        agentName: step.agentName,
+        input: stepInputContent(step),
+        parentContext: this.#parentContext,
+        branch: childBranch(this.#parentContext.branch, step.agentName),
+        abortSignal: this.#parentContext.abortSignal,
+        eventSink: (event) => this.#eventSink(event),
+      });
+      if (!result.error) {
+        const completed = stepResult(step, result, attempt, startedAt);
+        await this.#hooks?.afterStep?.(hookContext, completed);
+        await this.emitWorkflowEvent({
+          ...this.envelope(),
+          type: "step_completed",
+          result: completed,
+        } satisfies WorkflowStepCompletedEvent);
+        return completed;
+      }
+
+      lastError = new WorkflowError(
+        "WORKFLOW_EXECUTION_ERROR",
+        `Workflow step ${step.id} failed: ${result.error}`,
+        { agentName: step.agentName, stepId: step.id, attempt },
+      );
+      if (attempt < maxAttempts) await retryDelay(step, attempt);
+    }
+
+    const failure = failureFromError(
+      step,
+      lastError ?? new Error(`Workflow step ${step.id} failed`),
+      maxAttempts,
+      startedAt,
+    );
+    await this.#hooks?.stepFailed?.(hookContext, failure);
+    await this.emitWorkflowEvent({
+      ...this.envelope(),
+      type: "step_failed",
+      failure,
+    } satisfies WorkflowStepFailedEvent);
+    throw lastError;
+  }
+
+  private async emitOutput(
+    output: Exclude<WorkflowOutput, undefined>,
+  ): Promise<void> {
+    const content =
+      typeof output === "string"
+        ? { role: "model", parts: [{ text: output }] }
+        : output;
+    const workflowEvent = {
+      ...this.envelope(),
+      type: "output",
+      content: output,
+    } satisfies WorkflowOutputEvent;
+    await this.#eventSink(
+      createEvent({
+        invocationId: this.#parentContext.invocationId,
+        author: this.#agentName,
+        branch: this.#parentContext.branch,
+        content,
+        turnComplete: true,
+        customMetadata: workflowMetadata(workflowEvent),
+      }),
+    );
+  }
+
+  private async emitWorkflowEvent(
+    event: WorkflowEvent,
+    extra: Partial<Event> = {},
+  ): Promise<void> {
+    await this.#eventSink(
+      createEvent({
+        invocationId: this.#parentContext.invocationId,
+        author: this.#agentName,
+        branch: this.#parentContext.branch,
+        customMetadata: workflowMetadata(event),
+        ...extra,
+      }),
+    );
+  }
+
+  private envelope(timestamp = Date.now()) {
+    return {
+      workflowId: this.#definition.id,
+      workflowVersion: this.#definition.version,
+      executionId: this.#parentContext.invocationId,
+      timestamp,
+    };
+  }
+
+  private summary(
+    status: WorkflowExecutionSummary["status"],
+    startedAt: number,
+  ): WorkflowExecutionSummary {
+    return {
+      workflowId: this.#definition.id,
+      workflowVersion: this.#definition.version,
+      executionId: this.#parentContext.invocationId,
+      status,
+      steps: this.#stepCount,
+      replayedSteps: this.#replayedStepCount,
+      startedAt,
+      completedAt: Date.now(),
+    };
+  }
+}
+
+function validateLimits(
+  limits: WorkflowExecutionLimits | undefined,
+): Required<WorkflowExecutionLimits> {
+  const merged = { ...DEFAULT_WORKFLOW_EXECUTION_LIMITS, ...limits };
+  for (const [name, value] of Object.entries(merged)) {
+    if (!Number.isFinite(value) || value <= 0) {
+      throw new WorkflowError(
+        "WORKFLOW_DEFINITION_INVALID",
+        `Workflow limit ${name} must be greater than zero`,
+        { limit: name, value },
+      );
+    }
+  }
+  for (const name of [
+    "maxSteps",
+    "maxConcurrency",
+    "maxAttemptsPerStep",
+  ] as const) {
+    if (!Number.isInteger(merged[name])) {
+      throw new WorkflowError(
+        "WORKFLOW_DEFINITION_INVALID",
+        `Workflow limit ${name} must be an integer`,
+      );
+    }
+  }
+  return merged;
+}
+
+function validateStep(step: WorkflowStep): void {
+  if (!step.id?.trim()) {
+    throw new WorkflowError(
+      "WORKFLOW_STEP_MISMATCH",
+      "Workflow step id is required",
+    );
+  }
+  if (!step.agentName?.trim()) {
+    throw new WorkflowError(
+      "WORKFLOW_UNKNOWN_AGENT",
+      "Workflow step agentName is required",
+      { stepId: step.id },
+    );
+  }
+}
+
+function validateRetry(step: WorkflowStep, limit: number): number {
+  const attempts = step.retry?.maxAttempts ?? 1;
+  if (!Number.isInteger(attempts) || attempts < 1 || attempts > limit) {
+    throw new WorkflowError(
+      "WORKFLOW_LIMIT_EXCEEDED",
+      `Step ${step.id} maxAttempts must be between 1 and ${limit}`,
+      { stepId: step.id, maxAttempts: attempts, limit },
+    );
+  }
+  for (const [name, value] of Object.entries(step.retry ?? {})) {
+    if (name !== "maxAttempts" && value !== undefined && value < 0) {
+      throw new WorkflowError(
+        "WORKFLOW_DEFINITION_INVALID",
+        `Step ${step.id} retry ${name} cannot be negative`,
+      );
+    }
+  }
+  return attempts;
+}
+
+function validateParallelOptions(
+  options: WorkflowParallelOptions,
+  maxConcurrency: number,
+): void {
+  if (
+    options.concurrency !== undefined &&
+    (!Number.isInteger(options.concurrency) ||
+      options.concurrency < 1 ||
+      options.concurrency > maxConcurrency)
+  ) {
+    throw new WorkflowError(
+      "WORKFLOW_LIMIT_EXCEEDED",
+      `Parallel concurrency must be between 1 and ${maxConcurrency}`,
+      { concurrency: options.concurrency, limit: maxConcurrency },
+    );
+  }
+}
+
+function stepInputContent(step: WorkflowStep): Content {
+  return typeof step.input === "string"
+    ? { role: "user", parts: [{ text: step.input }] }
+    : step.input;
+}
+
+function stepResult(
+  step: WorkflowStep,
+  invocation: AgentInvocationResult,
+  attempts: number,
+  startedAt: number,
+): WorkflowStepResult {
+  const content = [...invocation.events]
+    .reverse()
+    .find((event) => !event.partial && event.content)?.content;
+  return {
+    status: "completed",
+    id: step.id,
+    agentName: invocation.agentName,
+    output: invocation.output,
+    ...(content ? { content } : {}),
+    events: invocation.events,
+    ...(invocation.stateDelta ? { stateDelta: invocation.stateDelta } : {}),
+    attempts,
+    startedAt,
+    completedAt: Date.now(),
+  };
+}
+
+function failureFromError(
+  step: WorkflowStep,
+  caught: unknown,
+  attempts = 1,
+  startedAt = Date.now(),
+): WorkflowStepFailure {
+  return {
+    status: "failed",
+    id: step.id,
+    agentName: step.agentName,
+    error: asWorkflowError(caught).toJSON(),
+    attempts,
+    startedAt,
+    completedAt: Date.now(),
+  };
+}
+
+function asWorkflowError(caught: unknown): WorkflowError {
+  if (caught instanceof WorkflowError) return caught;
+  return new WorkflowError(
+    "WORKFLOW_EXECUTION_ERROR",
+    caught instanceof Error ? caught.message : String(caught),
+  );
+}
+
+function contentText(content: Content): string {
+  return (content.parts ?? [])
+    .map((part) => part.text)
+    .filter((text): text is string => typeof text === "string")
+    .join("");
+}
+
+function childBranch(parent: string | undefined, agentName: string): string {
+  return parent ? `${parent}.${agentName}` : agentName;
+}
+
+async function retryDelay(
+  step: WorkflowStep,
+  failedAttempt: number,
+): Promise<void> {
+  const base = step.retry?.delayMs ?? 0;
+  const multiplier = step.retry?.backoffMultiplier ?? 1;
+  const calculated = base * multiplier ** Math.max(0, failedAttempt - 1);
+  const delay = Math.min(calculated, step.retry?.maxDelayMs ?? calculated);
+  if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
+}
+
+function workflowMetadata(event: WorkflowEvent): Record<string, unknown> {
+  return {
+    title: workflowEventTitle(event),
+    workflow: true,
+    workflowEvent: event,
+  };
+}
+
+function workflowEventTitle(event: WorkflowEvent): string {
+  switch (event.type) {
+    case "workflow_started":
+      return `Workflow ${event.workflowId}: started`;
+    case "step_started":
+      return `Workflow ${event.workflowId}: ${event.step.id} started`;
+    case "step_completed":
+      return `Workflow ${event.workflowId}: ${event.result.id} completed`;
+    case "step_failed":
+      return `Workflow ${event.workflowId}: ${event.failure.id} failed`;
+    case "step_replayed":
+      return `Workflow ${event.workflowId}: ${event.result.id} replayed`;
+    case "checkpoint_saved":
+      return `Workflow ${event.workflowId}: checkpoint saved`;
+    case "output":
+      return `Workflow ${event.workflowId}: output`;
+    case "error":
+      return `Workflow ${event.workflowId}: error`;
+    case "workflow_completed":
+      return `Workflow ${event.workflowId}: completed`;
+    case "custom":
+      return `Workflow ${event.workflowId}: ${event.name}`;
+  }
+}
