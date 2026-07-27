@@ -58,7 +58,7 @@ export class WorkflowAgent extends BaseAgent {
       definition: this.definition,
       parentContext: context,
       agentName: this.name,
-      declaredAgentNames: new Set(this.#declaredAgents.keys()),
+      declaredAgents: this.#declaredAgents,
       gateway: this.#gateway,
       eventSink: (event) => queue.push(event),
       hooks: this.#runtimeHooks,
