@@ -64,6 +64,8 @@
     "@anthropic-ai/claude-agent-sdk": ">=0.2.138 <0.4",
     "@google/adk": ">=0.6.1 <2",
     "@openai/codex-sdk": ">=0.130.0 <0.142",
+    "@jitl/quickjs-wasmfile-release-sync": ">=0.32.0 <0.33.0",
+    "quickjs-emscripten-core": ">=0.32.0 <0.33.0",
     "zod": ">=3.25.0"
   },
   "peerDependenciesMeta": {
@@ -71,6 +73,12 @@
       "optional": true
     },
     "@openai/codex-sdk": {
+      "optional": true
+    },
+    "@jitl/quickjs-wasmfile-release-sync": {
+      "optional": true
+    },
+    "quickjs-emscripten-core": {
       "optional": true
     },
     "zod": {
@@ -89,9 +97,12 @@
     "@google/adk": "^1.2.0",
     "@google/genai": "^2.0.1",
     "@openai/codex-sdk": "^0.141.0",
+    "@jitl/quickjs-wasmfile-debug-sync": "^0.32.0",
+    "@jitl/quickjs-wasmfile-release-sync": "^0.32.0",
     "@types/bun": "latest",
     "bunup": "^0.16.32",
     "publint": "^0.3.21",
+    "quickjs-emscripten-core": "^0.32.0",
     "typescript": "^5.9.3",
     "zod": "^4.2.1"
   }
