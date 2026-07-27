@@ -5,7 +5,7 @@
 
 Use **any LLM** — and now **any coding agent** — with [Google ADK TypeScript](https://github.com/google/adk-js) in just a few lines of code.
 
-> **🆕 New in 0.7.0 — First-class Dynamic Workflows.** Compose ADK agents with trusted TypeScript handlers or bounded QuickJS generator scripts, including checkpoints, replay, retries, cancellation, and parallel steps. [Jump to the workflows guide →](#dynamic-workflows)
+> **🆕 New in 0.6.1 — First-class Dynamic Workflows.** Compose ADK agents with trusted TypeScript handlers or bounded QuickJS generator scripts, including checkpoints, replay, retries, cancellation, and parallel steps. [Jump to the workflows guide →](#dynamic-workflows)
 
 ## Contents
 
@@ -188,7 +188,7 @@ Each example typechecks and builds without credentials, and prints a clear "set 
 
 ## Dynamic Workflows
 
-> 🆕 **New in 0.7.0.** A workflow is itself an ADK `BaseAgent`, so it can be used
+> 🆕 **New in 0.6.1.** A workflow is itself an ADK `BaseAgent`, so it can be used
 > anywhere a normal agent can. Its steps may invoke any direct subagent,
 > including `CodexAgent`, `ClaudeAgent`, `GeminiCliAgent`, or an ADK `LlmAgent`.
 
