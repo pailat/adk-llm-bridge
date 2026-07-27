@@ -4,7 +4,12 @@
  * SPDX-License-Identifier: MIT
  */
 
-import { createEvent, type Event, type InvocationContext } from "@google/adk";
+import {
+  type BaseAgent,
+  createEvent,
+  type Event,
+  type InvocationContext,
+} from "@google/adk";
 import type { Content } from "@google/genai";
 import type {
   AgentInvocationGateway,
@@ -37,6 +42,7 @@ import type {
   WorkflowStepStartedEvent,
   WorkflowUserEvent,
 } from "../events.js";
+import { AsyncSemaphore } from "./async-semaphore.js";
 
 export interface WorkflowStepHookContext {
   definition: TrustedWorkflowDefinition;
@@ -63,7 +69,7 @@ export interface WorkflowRuntimeConfig {
   definition: TrustedWorkflowDefinition;
   parentContext: InvocationContext;
   agentName: string;
-  declaredAgentNames: ReadonlySet<string>;
+  declaredAgents: ReadonlyMap<string, BaseAgent>;
   gateway: AgentInvocationGateway;
   eventSink: (event: Event) => void | Promise<void>;
   hooks?: WorkflowRuntimeHooks;
@@ -74,12 +80,15 @@ export class WorkflowRuntime {
   readonly #definition: TrustedWorkflowDefinition;
   readonly #parentContext: InvocationContext;
   readonly #agentName: string;
-  readonly #declaredAgentNames: ReadonlySet<string>;
+  readonly #declaredAgents: ReadonlyMap<string, BaseAgent>;
   readonly #gateway: AgentInvocationGateway;
   readonly #eventSink: (event: Event) => void | Promise<void>;
   readonly #hooks?: WorkflowRuntimeHooks;
   readonly #limits: Required<WorkflowExecutionLimits>;
+  readonly #globalSemaphore: AsyncSemaphore;
+  readonly #agentSemaphores = new WeakMap<BaseAgent, AsyncSemaphore>();
   readonly #seenStepIds = new Set<string>();
+  #executionSignal?: AbortSignal;
   #stepCount = 0;
   #replayedStepCount = 0;
 
@@ -87,22 +96,30 @@ export class WorkflowRuntime {
     this.#definition = config.definition;
     this.#parentContext = config.parentContext;
     this.#agentName = config.agentName;
-    this.#declaredAgentNames = config.declaredAgentNames;
+    this.#declaredAgents = config.declaredAgents;
     this.#gateway = config.gateway;
     this.#eventSink = config.eventSink;
     this.#hooks = config.hooks;
     this.#limits = validateLimits(config.definition.limits);
+    this.#globalSemaphore = new AsyncSemaphore(this.#limits.maxConcurrency);
   }
 
   async execute(): Promise<WorkflowExecutionSummary> {
     const startedAt = Date.now();
+    const abortScope = createExecutionAbortScope(
+      this.#parentContext.abortSignal,
+      this.#limits.timeoutMs,
+    );
+    this.#executionSignal = abortScope.signal;
     await this.emitWorkflowEvent({
       ...this.envelope(startedAt),
       type: "workflow_started",
     } satisfies WorkflowStartedEvent);
 
     try {
+      throwIfAborted(abortScope.signal);
       const output = await this.#definition.handler(this.createContext());
+      throwIfAborted(abortScope.signal);
       if (output !== undefined) await this.emitOutput(output);
       const summary = this.summary("completed", startedAt);
       await this.emitWorkflowEvent({
@@ -125,6 +142,9 @@ export class WorkflowRuntime {
         },
       );
       throw error;
+    } finally {
+      abortScope.dispose();
+      this.#executionSignal = undefined;
     }
   }
 
@@ -136,12 +156,12 @@ export class WorkflowRuntime {
     return Object.freeze({
       input,
       inputText: contentText(input),
-      signal: this.#parentContext.abortSignal ?? new AbortController().signal,
-      run: (step: WorkflowStep) => this.runStep(step),
+      signal: this.executionSignal(),
+      run: (step: WorkflowStep) => this.runStep(step, this.executionSignal()),
       parallel: (
         steps: readonly WorkflowStep[],
         options?: WorkflowParallelOptions,
-      ) => this.runSequentialParallel(steps, options),
+      ) => this.runParallel(steps, options),
       emit: (event: WorkflowUserEvent) => {
         void this.emitWorkflowEvent({
           ...this.envelope(),
@@ -153,24 +173,47 @@ export class WorkflowRuntime {
     });
   }
 
-  private async runSequentialParallel(
+  private async runParallel(
     steps: readonly WorkflowStep[],
     options: WorkflowParallelOptions = {},
   ): Promise<WorkflowStepOutcome[]> {
     validateParallelOptions(options, this.#limits.maxConcurrency);
-    const outcomes: WorkflowStepOutcome[] = [];
-    for (const step of steps) {
-      try {
-        outcomes.push(await this.runStep(step));
-      } catch (caught) {
-        if ((options.failureMode ?? "fail-fast") === "fail-fast") throw caught;
-        outcomes.push(failureFromError(step, caught));
-      }
+    const failureMode = options.failureMode ?? "fail-fast";
+    const concurrency = options.concurrency ?? this.#limits.maxConcurrency;
+    const localSemaphore = new AsyncSemaphore(concurrency);
+    const parallelAbort = new AbortController();
+    const scope = combineAbortSignals([
+      this.executionSignal(),
+      parallelAbort.signal,
+    ]);
+
+    const pending = steps.map((step) =>
+      localSemaphore.use(scope.signal, async () => {
+        try {
+          return await this.runStep(step, scope.signal);
+        } catch (caught) {
+          if (failureMode === "fail-fast") throw caught;
+          return failureFromError(step, caught);
+        }
+      }),
+    );
+
+    try {
+      return await Promise.all(pending);
+    } catch (caught) {
+      parallelAbort.abort(caught);
+      await Promise.allSettled(pending);
+      throw caught;
+    } finally {
+      scope.dispose();
     }
-    return outcomes;
   }
 
-  private async runStep(step: WorkflowStep): Promise<WorkflowStepResult> {
+  private async runStep(
+    step: WorkflowStep,
+    signal: AbortSignal,
+  ): Promise<WorkflowStepResult> {
+    throwIfAborted(signal);
     validateStep(step);
     if (this.#seenStepIds.has(step.id)) {
       throw new WorkflowError(
@@ -188,7 +231,8 @@ export class WorkflowRuntime {
         { limit: this.#limits.maxSteps, stepId: step.id },
       );
     }
-    if (!this.#declaredAgentNames.has(step.agentName)) {
+    const declaredAgent = this.#declaredAgents.get(step.agentName);
+    if (!declaredAgent) {
       throw new WorkflowError(
         "WORKFLOW_UNKNOWN_AGENT",
         `Workflow may only invoke a directly declared sub-agent: ${step.agentName}`,
@@ -202,6 +246,7 @@ export class WorkflowRuntime {
       step,
     } satisfies WorkflowStepHookContext;
     const replayed = await this.#hooks?.beforeStep?.(hookContext);
+    throwIfAborted(signal);
     if (replayed) {
       const result = {
         ...replayed,
@@ -227,14 +272,8 @@ export class WorkflowRuntime {
         attempt,
       } satisfies WorkflowStepStartedEvent);
 
-      const result = await this.#gateway.run({
-        agentName: step.agentName,
-        input: stepInputContent(step),
-        parentContext: this.#parentContext,
-        branch: childBranch(this.#parentContext.branch, step.agentName),
-        abortSignal: this.#parentContext.abortSignal,
-        eventSink: (event) => this.#eventSink(event),
-      });
+      const result = await this.runAgentAttempt(step, declaredAgent, signal);
+      throwIfAborted(signal);
       if (!result.error) {
         const completed = stepResult(step, result, attempt, startedAt);
         await this.#hooks?.afterStep?.(hookContext, completed);
@@ -251,7 +290,7 @@ export class WorkflowRuntime {
         `Workflow step ${step.id} failed: ${result.error}`,
         { agentName: step.agentName, stepId: step.id, attempt },
       );
-      if (attempt < maxAttempts) await retryDelay(step, attempt);
+      if (attempt < maxAttempts) await retryDelay(step, attempt, signal);
     }
 
     const failure = failureFromError(
@@ -267,6 +306,40 @@ export class WorkflowRuntime {
       failure,
     } satisfies WorkflowStepFailedEvent);
     throw lastError;
+  }
+
+  private async runAgentAttempt(
+    step: WorkflowStep,
+    agent: BaseAgent,
+    signal: AbortSignal,
+  ): Promise<AgentInvocationResult> {
+    let agentSemaphore = this.#agentSemaphores.get(agent);
+    if (!agentSemaphore) {
+      agentSemaphore = new AsyncSemaphore(1);
+      this.#agentSemaphores.set(agent, agentSemaphore);
+    }
+    return agentSemaphore.use(signal, () =>
+      this.#globalSemaphore.use(signal, () =>
+        this.#gateway.run({
+          agentName: step.agentName,
+          input: stepInputContent(step),
+          parentContext: this.#parentContext,
+          branch: childBranch(this.#parentContext.branch, step.agentName),
+          abortSignal: signal,
+          eventSink: (event) => this.#eventSink(event),
+        }),
+      ),
+    );
+  }
+
+  private executionSignal(): AbortSignal {
+    if (!this.#executionSignal) {
+      throw new WorkflowError(
+        "WORKFLOW_EXECUTION_ERROR",
+        "Workflow runtime is not executing",
+      );
+    }
+    return this.#executionSignal;
   }
 
   private async emitOutput(
@@ -484,12 +557,102 @@ function childBranch(parent: string | undefined, agentName: string): string {
 async function retryDelay(
   step: WorkflowStep,
   failedAttempt: number,
+  signal: AbortSignal,
 ): Promise<void> {
   const base = step.retry?.delayMs ?? 0;
   const multiplier = step.retry?.backoffMultiplier ?? 1;
   const calculated = base * multiplier ** Math.max(0, failedAttempt - 1);
   const delay = Math.min(calculated, step.retry?.maxDelayMs ?? calculated);
-  if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
+  if (delay > 0) await abortableDelay(delay, signal);
+}
+
+function createExecutionAbortScope(
+  parentSignal: AbortSignal | undefined,
+  timeoutMs: number,
+): { signal: AbortSignal; dispose: () => void } {
+  const controller = new AbortController();
+  const abortFromParent = () =>
+    controller.abort(
+      parentSignal?.reason ??
+        new WorkflowError("WORKFLOW_ABORTED", "Workflow execution aborted"),
+    );
+  if (parentSignal?.aborted) abortFromParent();
+  else parentSignal?.addEventListener("abort", abortFromParent, { once: true });
+
+  const timeout = setTimeout(() => {
+    controller.abort(
+      new WorkflowError(
+        "WORKFLOW_ABORTED",
+        `Workflow execution timed out after ${timeoutMs}ms`,
+        { timeoutMs },
+      ),
+    );
+  }, timeoutMs);
+
+  return {
+    signal: controller.signal,
+    dispose: () => {
+      clearTimeout(timeout);
+      parentSignal?.removeEventListener("abort", abortFromParent);
+    },
+  };
+}
+
+function combineAbortSignals(signals: readonly AbortSignal[]): {
+  signal: AbortSignal;
+  dispose: () => void;
+} {
+  const controller = new AbortController();
+  const listeners = new Map<AbortSignal, () => void>();
+  for (const signal of signals) {
+    const abort = () => controller.abort(signal.reason);
+    if (signal.aborted) {
+      abort();
+      break;
+    }
+    listeners.set(signal, abort);
+    signal.addEventListener("abort", abort, { once: true });
+  }
+  return {
+    signal: controller.signal,
+    dispose: () => {
+      for (const [signal, listener] of listeners) {
+        signal.removeEventListener("abort", listener);
+      }
+    },
+  };
+}
+
+function throwIfAborted(signal: AbortSignal): void {
+  if (!signal.aborted) return;
+  if (signal.reason instanceof WorkflowError) throw signal.reason;
+  throw new WorkflowError(
+    "WORKFLOW_ABORTED",
+    signal.reason instanceof Error
+      ? signal.reason.message
+      : typeof signal.reason === "string"
+        ? signal.reason
+        : "Workflow execution aborted",
+  );
+}
+
+function abortableDelay(delayMs: number, signal: AbortSignal): Promise<void> {
+  throwIfAborted(signal);
+  return new Promise<void>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      signal.removeEventListener("abort", abort);
+      resolve();
+    }, delayMs);
+    const abort = () => {
+      clearTimeout(timeout);
+      try {
+        throwIfAborted(signal);
+      } catch (error) {
+        reject(error);
+      }
+    };
+    signal.addEventListener("abort", abort, { once: true });
+  });
 }
 
 function workflowMetadata(event: WorkflowEvent): Record<string, unknown> {
