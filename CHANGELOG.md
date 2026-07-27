@@ -4,6 +4,36 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-07-26
+
+### Added
+
+- **First-class workflows** (`adk-llm-bridge/workflows`) as native ADK
+  `BaseAgent` implementations:
+  - `WorkflowAgent` for trusted TypeScript handlers.
+  - `ScriptWorkflowAgent` for dynamic synchronous-generator scripts in a
+    bounded QuickJS VM.
+  - Sequential and bounded-parallel agent steps, ordered results, retries,
+    fail-fast/all-settled behavior, cancellation, timeouts, and normalized
+    workflow lifecycle events.
+- Durable checkpoints through ADK session `stateDelta`, with injectable stores,
+  stable execution IDs, crash-safe replay, and explicit input/version/step/source
+  mismatch protection.
+- A reusable ADK agent invocation gateway shared by workflows and the external
+  agent tool gateway.
+- A runnable Codex-only planner → implementer → reviewer workflow smoke example.
+
+### Security
+
+- Dynamic scripts have no imports or host globals. Each execution receives a
+  fresh QuickJS runtime with CPU, memory, stack, source, message, and step limits;
+  ADK work runs outside the VM through a JSON generator/yield protocol.
+
+### Changed
+
+- Package version bumped to `0.7.0`; the existing root and `/agents` exports
+  remain unchanged while `/workflows` is additive.
+
 ## [0.6.0] - 2026-06-20
 
 ### Added
@@ -137,6 +167,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `scripts/build.ts` and `scripts/fix-declaration-imports.mjs` (superseded by
   `bunup`, which emits correct ESM import specifiers).
 
+[0.7.0]: https://github.com/pailat/adk-llm-bridge/releases/tag/v0.7.0
+[0.6.0]: https://github.com/pailat/adk-llm-bridge/releases/tag/v0.6.0
 [0.5.3]: https://github.com/pailat/adk-llm-bridge/releases/tag/v0.5.3
 [0.5.2]: https://github.com/pailat/adk-llm-bridge/releases/tag/v0.5.2
 [#73]: https://github.com/pailat/adk-llm-bridge/issues/73

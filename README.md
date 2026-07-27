@@ -5,7 +5,7 @@
 
 Use **any LLM** — and now **any coding agent** — with [Google ADK TypeScript](https://github.com/google/adk-js) in just a few lines of code.
 
-> **🆕 New in 0.6.0 — External Coding Agents.** Run provider-owned coding runtimes — **Claude Code**, **OpenAI Codex**, and **Gemini CLI** — as native ADK sub-agents, with shared credential, permission, and runtime drivers. [Jump to the agents guide →](#external-coding-agents)
+> **🆕 New in 0.7.0 — First-class Dynamic Workflows.** Compose ADK agents with trusted TypeScript handlers or bounded QuickJS generator scripts, including checkpoints, replay, retries, cancellation, and parallel steps. [Jump to the workflows guide →](#dynamic-workflows)
 
 ## Contents
 
@@ -14,6 +14,7 @@ Use **any LLM** — and now **any coding agent** — with [Google ADK TypeScript
 - [Installation](#installation)
 - [Quick Start](#quick-start)
 - [**External Coding Agents** 🆕](#external-coding-agents)
+- [**Dynamic Workflows** 🆕](#dynamic-workflows)
 - [Configuration](#configuration)
 - [Model Format](#model-format)
 - [Features](#features)
@@ -30,6 +31,7 @@ Google ADK TypeScript comes with built-in Gemini support. This bridge extends it
 - **Battle-tested** — Built on the official OpenAI and Anthropic SDKs
 - **Compatible** — Works with any OpenAI-compatible API (AI Gateway, OpenRouter, etc.)
 - **Agent-ready** 🆕 — Wrap external coding agents as ADK `BaseAgent` sub-agents
+- **Workflow-ready** 🆕 — Orchestrate versioned, durable agent workflows as ADK agents
 
 ## Supported Providers
 
@@ -183,6 +185,107 @@ Each example typechecks and builds without credentials, and prints a clear "set 
 - **[basic-agent-codex](./examples/basic-agent-codex)** — OpenAI Codex as an ADK agent (Codex SDK)
 - **[basic-agent-gemini](./examples/basic-agent-gemini)** — Gemini CLI as an ADK agent
 - **[external-agents](./examples/external-agents)** — coordinator + external sub-agents (HelpDesk / architecture review)
+
+## Dynamic Workflows
+
+> 🆕 **New in 0.7.0.** A workflow is itself an ADK `BaseAgent`, so it can be used
+> anywhere a normal agent can. Its steps may invoke any direct subagent,
+> including `CodexAgent`, `ClaudeAgent`, `GeminiCliAgent`, or an ADK `LlmAgent`.
+
+The stable API lives at `adk-llm-bridge/workflows`; the root import remains
+focused on model providers.
+
+### Trusted TypeScript workflows
+
+Use `WorkflowAgent` when the workflow is application-owned code:
+
+```typescript
+import { defineWorkflow, WorkflowAgent } from "adk-llm-bridge/workflows";
+
+const workflow = new WorkflowAgent({
+  name: "ImplementationWorkflow",
+  subAgents: [planner, implementer, reviewer],
+  definition: defineWorkflow({
+    id: "implementation",
+    version: "1",
+    handler: async (ctx) => {
+      const plan = await ctx.run({
+        id: "plan",
+        agentName: "Planner",
+        input: ctx.input,
+      });
+      const implementation = await ctx.run({
+        id: "implement",
+        agentName: "Implementer",
+        input: plan.output,
+      });
+      const review = await ctx.run({
+        id: "review",
+        agentName: "Reviewer",
+        input: implementation.output,
+      });
+      return review.output;
+    },
+  }),
+});
+```
+
+`ctx.parallel(steps, options)` adds bounded concurrency with ordered results and
+`fail-fast` or `all-settled` behavior. Step IDs are durable identities: keep them
+stable across retries and resumes.
+
+### Dynamic script workflows
+
+Use `ScriptWorkflowAgent` when the sequence is supplied dynamically. Scripts
+run inside a fresh bounded QuickJS VM and communicate with the host only by
+yielding JSON operations:
+
+```typescript
+import {
+  defineScriptWorkflow,
+  ScriptWorkflowAgent,
+} from "adk-llm-bridge/workflows";
+
+const workflow = new ScriptWorkflowAgent({
+  name: "DynamicWorkflow",
+  subAgents: [planner, implementer],
+  definition: defineScriptWorkflow({
+    id: "dynamic-implementation",
+    version: "1",
+    source: `
+      const plan = yield ctx.run({
+        id: "plan",
+        agentName: "Planner",
+        input: ctx.input
+      });
+      const result = yield ctx.run({
+        id: "implement",
+        agentName: "Implementer",
+        input: plan.output
+      });
+      return result.output;
+    `,
+  }),
+});
+```
+
+Script bodies are synchronous generators: use `yield ctx.run(...)`,
+`yield ctx.parallel(...)`, and `yield ctx.emit(...)`. Imports, host globals, and
+async callbacks are unavailable inside the VM. Install the optional sandbox
+peers when using script workflows:
+
+```bash
+bun add quickjs-emscripten-core @jitl/quickjs-wasmfile-release-sync
+```
+
+Both workflow agents persist checkpoints through ADK session `stateDelta` by
+default. Completed steps replay without reinvoking their agents; changed input,
+version, step identity, or script source is rejected explicitly. A custom
+`WorkflowCheckpointStore` and stable `resolveExecutionId` may be injected for
+external durability.
+
+See **[codex-workflow](./examples/codex-workflow)** for a runnable dynamic
+planner → implementer → reviewer flow using only Codex agents.
 
 ## Configuration
 
@@ -398,6 +501,10 @@ See the [examples](./examples) directory:
 - **[basic-agent-gemini](./examples/basic-agent-gemini)** - Gemini CLI as an ADK agent
 - **[external-agents](./examples/external-agents)** - Coordinator + external runtime sub-agents
 
+### Dynamic workflows 🆕
+
+- **[codex-workflow](./examples/codex-workflow)** - Dynamic planner → implementer → reviewer workflow using only Codex agents
+
 ## Requirements
 
 - Node.js >= 20.0.0
@@ -406,6 +513,9 @@ See the [examples](./examples) directory:
   - `@anthropic-ai/claude-agent-sdk` (peer `>=0.2.138 <0.4`) — for `ClaudeAgent`
   - `@openai/codex-sdk` (peer `>=0.130.0 <0.142`) — for `CodexAgent`
   - `gemini` CLI on `PATH` — for `GeminiCliAgent`
+- **Optional, for dynamic script workflows** (installed only if you use `ScriptWorkflowAgent`):
+  - `quickjs-emscripten-core` (peer `>=0.32 <0.33`)
+  - `@jitl/quickjs-wasmfile-release-sync` (peer `>=0.32 <0.33`)
 
 ## Contributing
 
