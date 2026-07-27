@@ -34,3 +34,7 @@
 
 export { CustomLlm, type CustomLlmProviderConfig } from "./custom-llm.js";
 export { Custom, createCustomLlm } from "./factory.js";
+export {
+  type CustomProviderRegistrationConfig,
+  registerCustomProvider,
+} from "./registry.js";
