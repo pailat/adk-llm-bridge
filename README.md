@@ -11,6 +11,7 @@ Use **any LLM** — and now **any coding agent** — with [Google ADK TypeScript
 
 - [Why?](#why)
 - [Supported Providers](#supported-providers)
+- [Compatibility and Feature Degradation](#compatibility-and-feature-degradation)
 - [Installation](#installation)
 - [Quick Start](#quick-start)
 - [**External Coding Agents** 🆕](#external-coding-agents)
@@ -44,7 +45,22 @@ Google ADK TypeScript comes with built-in Gemini support. This bridge extends it
 | **[xAI](https://x.ai/)** | Grok models | Direct API access |
 | **Custom (OpenAI-compatible)** | Any model | Ollama, vLLM, Azure OpenAI, LM Studio, etc. |
 
-### Coding Agents 🆕
+## Compatibility and Feature Degradation
+
+Provider availability is not the same as feature parity. See the
+**[OpenAI-compatible feature degradation and capability matrix](./docs/openai-compatible-feature-matrix.md)**
+for the canonical comparison across OpenAI, OpenRouter, xAI, AI Gateway,
+Ollama, vLLM, LM Studio, and native Anthropic.
+
+The matrix separates deterministic bridge behavior from runtime/model
+capability. It records dropped Gemini-only fields and media, reasoning-model
+restrictions, structured-output and tool-choice variation, `candidateCount`,
+`providerOptions`, and the unsupported bidirectional `connect()` API. It is
+updated with the project's
+[conformance fixtures and exact runtime profiles](./docs/runtime-conformance.md);
+a fixture pass does not claim support for every model a runtime can serve.
+
+## Coding Agents 🆕
 
 Beyond chat models, you can embed full **coding agents** as ADK `BaseAgent` sub-agents via the `adk-llm-bridge/agents` subpath:
 
@@ -83,7 +99,12 @@ const agent = new LlmAgent({
 });
 ```
 
-That's it. All ADK features work: tools, streaming, multi-agent, etc.
+That's it for core text generation. Tools, streaming, multi-agent orchestration,
+and other ADK features remain available where the selected provider/runtime and
+model support their mapped wire behavior. Check the
+[capability matrix](./docs/openai-compatible-feature-matrix.md) before relying
+on structured output, forced tool choice, reasoning, logprobs, or multimodal
+input.
 
 ### Other Providers
 
@@ -96,7 +117,7 @@ model: OpenRouter('anthropic/claude-sonnet-4')
 // OpenAI - Direct API
 model: OpenAI('gpt-4.1')
 
-// Anthropic - Direct API  
+// Anthropic - Direct API
 model: Anthropic('claude-sonnet-4-6')
 
 // xAI - Direct API
@@ -307,9 +328,32 @@ OPENROUTER_APP_NAME=Your App Name          # optional, for ranking
 **Direct Providers:**
 ```bash
 OPENAI_API_KEY=your-openai-key
+OPENAI_BASE_URL=https://api.openai.com/v1  # optional
 ANTHROPIC_API_KEY=your-anthropic-key
 XAI_API_KEY=your-xai-key
 ```
+
+**Custom OpenAI-compatible endpoints:**
+```bash
+CUSTOM_LLM_BASE_URL=http://localhost:11434/v1
+CUSTOM_LLM_API_KEY=optional-key
+```
+
+For Custom and OpenAI endpoint settings, precedence is:
+
+1. explicit constructor or named-registration configuration;
+2. global provider configuration, where exposed;
+3. environment variables;
+4. the provider default.
+
+A defined higher-priority value is authoritative: an invalid explicit URL
+fails instead of falling through to an environment value. Custom has no default
+URL, so `baseURL` or `CUSTOM_LLM_BASE_URL` is required; its API key may be
+omitted for unauthenticated local servers. OpenAI reads `OPENAI_BASE_URL` after
+explicit/global configuration and otherwise uses
+`https://api.openai.com/v1`. See
+[Custom provider configuration](./docs/custom-provider-configuration.md) for
+the complete precedence and security behavior.
 
 ### Programmatic Configuration
 
@@ -337,6 +381,37 @@ model: Anthropic('claude-sonnet-4-6', {
   maxTokens: 8192,
 })
 ```
+
+### Safe Named Custom Providers
+
+Use `registerCustomProvider` only when an ADK agent must resolve a Custom model
+from a string. Each registration owns a finite allowlist of exact remote model
+IDs; open-ended prefix ownership is intentionally unsupported because ADK's
+public registry cannot prove arbitrary regular-expression routes do not
+overlap.
+
+```typescript
+import { LlmAgent } from "@google/adk";
+import { registerCustomProvider } from "adk-llm-bridge";
+
+registerCustomProvider("ollama", {
+  baseURL: "http://localhost:11434/v1",
+  models: ["llama3", "qwen2.5:1.5b"],
+});
+
+const agent = new LlmAgent({
+  name: "local-assistant",
+  model: "ollama/llama3",
+  instruction: "You are helpful.",
+});
+```
+
+Registration validates every exact route before changing `LLMRegistry`, rejects
+reserved or already claimed routes, and captures a deep-copied, fully resolved
+endpoint configuration. Register named custom providers **before** broad
+AI Gateway or OpenRouter registrations; ADK uses first-match ordering, and a
+broad provider registered first makes overlap safety impossible to prove. See
+[Custom provider configuration](./docs/custom-provider-configuration.md).
 
 ## Model Format
 
@@ -377,6 +452,19 @@ Browse all models:
 - **Multi-agent** - Sub-agents and agent transfer
 - **External coding agents** 🆕 - Claude Code, Codex, and Gemini CLI as ADK sub-agents
 - **Usage metadata** - Token counts for monitoring
+
+Feature support is not uniform across runtimes and models. The
+[capability matrix](./docs/openai-compatible-feature-matrix.md) is the source of
+truth for supported, degraded, provider-dependent, and unsupported behavior.
+Notably, OpenAI-compatible requests accept `candidateCount` only when it is
+omitted or exactly `1`; use separate requests when multiple independent
+candidates are required.
+
+For local servers, consult the
+[runtime conformance matrix](./docs/runtime-conformance.md). Deterministic
+fixtures run in normal CI, Ollama and vLLM have scheduled exact-version/model
+profiles, and LM Studio uses the same runner manually. Conformance results are
+fed back into the capability matrix.
 
 ## Tool Calling Example
 
