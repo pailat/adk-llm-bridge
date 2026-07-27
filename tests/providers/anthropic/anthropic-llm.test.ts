@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, spyOn } from "bun:test";
+import type { LlmRequest, LlmResponse } from "@google/adk";
 import { resetAllConfigs } from "../../../src/config.js";
 import {
   ANTHROPIC_MODEL_PATTERNS,
@@ -8,6 +9,63 @@ import {
   describeConnectError,
   describeModelPatterns,
 } from "../../helpers/provider-test-helpers.js";
+
+type AnthropicRequestOptions = { signal?: AbortSignal | null };
+
+function userRequest(): LlmRequest {
+  return {
+    contents: [{ role: "user", parts: [{ text: "Hi" }] }],
+    liveConnectConfig: {},
+    toolsDict: {},
+  } as LlmRequest;
+}
+
+function makeLlm(): AnthropicLlm {
+  return new AnthropicLlm({
+    model: "claude-sonnet-4-5-20250929",
+    apiKey: "sk-ant-test",
+  });
+}
+
+function messagesClient(llm: AnthropicLlm): {
+  create: (body: unknown, options?: AnthropicRequestOptions) => unknown;
+  stream: (body: unknown, options?: AnthropicRequestOptions) => unknown;
+} {
+  return (
+    llm as unknown as {
+      client: {
+        messages: {
+          create: (body: unknown, options?: AnthropicRequestOptions) => unknown;
+          stream: (body: unknown, options?: AnthropicRequestOptions) => unknown;
+        };
+      };
+    }
+  ).client.messages;
+}
+
+async function drain(
+  gen: AsyncGenerator<LlmResponse, void>,
+): Promise<LlmResponse[]> {
+  const out: LlmResponse[] = [];
+  for await (const response of gen) out.push(response);
+  return out;
+}
+
+function abortableNever(signal?: AbortSignal | null): Promise<never> {
+  return new Promise((_, reject) => {
+    if (!signal) return;
+
+    const abort = () => {
+      signal.removeEventListener("abort", abort);
+      const error = new Error("Request was aborted");
+      error.name = "AbortError";
+      reject(error);
+    };
+
+    if (signal.aborted) abort();
+    else signal.addEventListener("abort", abort, { once: true });
+  });
+}
 
 describe("AnthropicLlm", () => {
   beforeEach(() => {
@@ -247,7 +305,10 @@ describe("AnthropicLlm", () => {
           const llm = newLlm();
           const first = llm.callBuild(
             { thinking: { type: "enabled", budget_tokens: 2048 } },
-            { tools: [tool], toolChoice: { type: "tool", name: "json_output" } },
+            {
+              tools: [tool],
+              toolChoice: { type: "tool", name: "json_output" },
+            },
           );
           expect(first.tool_choice).toEqual({ type: "auto" });
 
@@ -255,7 +316,10 @@ describe("AnthropicLlm", () => {
           const before = downgradeWarnCount(warnSpy);
           const second = llm.callBuild(
             { thinking: { type: "enabled", budget_tokens: 2048 } },
-            { tools: [tool], toolChoice: { type: "tool", name: "json_output" } },
+            {
+              tools: [tool],
+              toolChoice: { type: "tool", name: "json_output" },
+            },
           );
           expect(second.tool_choice).toEqual({ type: "auto" });
           expect(downgradeWarnCount(warnSpy)).toBe(before);
@@ -283,7 +347,10 @@ describe("AnthropicLlm", () => {
         try {
           const result = newLlm().callBuild(
             {},
-            { tools: [tool], toolChoice: { type: "tool", name: "json_output" } },
+            {
+              tools: [tool],
+              toolChoice: { type: "tool", name: "json_output" },
+            },
           );
           expect(result.tool_choice).toEqual({
             type: "tool",
@@ -326,6 +393,80 @@ describe("AnthropicLlm", () => {
         expect(result.system).toBe("sys");
         expect(result.tools?.[0].cache_control).toBeUndefined();
       });
+    });
+  });
+
+  describe("cancellation", () => {
+    it("passes a pre-aborted signal without yielding a provider error", async () => {
+      const llm = makeLlm();
+      const controller = new AbortController();
+      controller.abort();
+      let capturedSignal: AbortSignal | null | undefined;
+      messagesClient(llm).create = (_body, options) => {
+        capturedSignal = options?.signal;
+        return abortableNever(options?.signal);
+      };
+
+      const responses = await drain(
+        llm.generateContentAsync(userRequest(), false, controller.signal),
+      );
+
+      expect(capturedSignal).toBe(controller.signal);
+      expect(responses).toEqual([]);
+    });
+
+    it("cancels an active non-streaming request without yielding a provider error", async () => {
+      const llm = makeLlm();
+      const controller = new AbortController();
+      let capturedSignal: AbortSignal | null | undefined;
+      let markStarted: () => void = () => {};
+      const started = new Promise<void>((resolve) => {
+        markStarted = resolve;
+      });
+      messagesClient(llm).create = (_body, options) => {
+        capturedSignal = options?.signal;
+        markStarted();
+        return abortableNever(options?.signal);
+      };
+
+      const pending = drain(
+        llm.generateContentAsync(userRequest(), false, controller.signal),
+      );
+      await started;
+      controller.abort();
+
+      expect(capturedSignal).toBe(controller.signal);
+      expect(await pending).toEqual([]);
+    });
+
+    it("cancels an active stream without turning the abort into a provider error", async () => {
+      const llm = makeLlm();
+      const controller = new AbortController();
+      let capturedSignal: AbortSignal | null | undefined;
+      messagesClient(llm).stream = (_body, options) => {
+        capturedSignal = options?.signal;
+        return (async function* () {
+          yield {
+            type: "content_block_delta",
+            index: 0,
+            delta: { type: "text_delta", text: "Hello" },
+          };
+          await abortableNever(options?.signal);
+        })();
+      };
+
+      const responses = llm.generateContentAsync(
+        userRequest(),
+        true,
+        controller.signal,
+      );
+      const first = await responses.next();
+      controller.abort();
+      const final = await responses.next();
+
+      expect(capturedSignal).toBe(controller.signal);
+      expect(first.value).toMatchObject({ partial: true });
+      expect(final).toEqual({ value: undefined, done: true });
     });
   });
 

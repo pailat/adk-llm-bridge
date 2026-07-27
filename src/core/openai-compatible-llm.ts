@@ -158,6 +158,7 @@ export class OpenAICompatibleLlm extends BaseProviderLlm {
   async *generateContentAsync(
     llmRequest: LlmRequest,
     stream = false,
+    abortSignal?: AbortSignal,
   ): AsyncGenerator<LlmResponse, void> {
     try {
       const { messages, tools, params, toolChoice } = convertRequest(
@@ -167,11 +168,24 @@ export class OpenAICompatibleLlm extends BaseProviderLlm {
       );
 
       if (stream) {
-        yield* this.streamResponse(messages, tools, params, toolChoice);
+        yield* this.streamResponse(
+          messages,
+          tools,
+          params,
+          toolChoice,
+          abortSignal,
+        );
       } else {
-        yield await this.singleResponse(messages, tools, params, toolChoice);
+        yield await this.singleResponse(
+          messages,
+          tools,
+          params,
+          toolChoice,
+          abortSignal,
+        );
       }
     } catch (error) {
+      if (abortSignal?.aborted) return;
       yield this.createErrorResponse(error, this.getErrorPrefix());
     }
   }
@@ -181,15 +195,19 @@ export class OpenAICompatibleLlm extends BaseProviderLlm {
     tools?: OpenAI.ChatCompletionTool[],
     params?: Record<string, unknown>,
     toolChoice?: OpenAI.ChatCompletionToolChoiceOption,
+    abortSignal?: AbortSignal,
   ): Promise<LlmResponse> {
-    const response = await this.client.chat.completions.create({
-      model: this.model,
-      messages,
-      ...params,
-      ...(tools?.length ? { tools } : {}),
-      ...(toolChoice && tools?.length ? { tool_choice: toolChoice } : {}),
-      ...this.getProviderRequestOptions(),
-    });
+    const response = await this.client.chat.completions.create(
+      {
+        model: this.model,
+        messages,
+        ...params,
+        ...(tools?.length ? { tools } : {}),
+        ...(toolChoice && tools?.length ? { tool_choice: toolChoice } : {}),
+        ...this.getProviderRequestOptions(),
+      },
+      abortSignal ? { signal: abortSignal } : undefined,
+    );
     return convertResponse(response);
   }
 
@@ -198,17 +216,21 @@ export class OpenAICompatibleLlm extends BaseProviderLlm {
     tools?: OpenAI.ChatCompletionTool[],
     params?: Record<string, unknown>,
     toolChoice?: OpenAI.ChatCompletionToolChoiceOption,
+    abortSignal?: AbortSignal,
   ): AsyncGenerator<LlmResponse, void> {
-    const stream = await this.client.chat.completions.create({
-      model: this.model,
-      messages,
-      stream: true,
-      stream_options: { include_usage: true },
-      ...params,
-      ...(tools?.length ? { tools } : {}),
-      ...(toolChoice && tools?.length ? { tool_choice: toolChoice } : {}),
-      ...this.getProviderRequestOptions(),
-    });
+    const stream = await this.client.chat.completions.create(
+      {
+        model: this.model,
+        messages,
+        stream: true,
+        stream_options: { include_usage: true },
+        ...params,
+        ...(tools?.length ? { tools } : {}),
+        ...(toolChoice && tools?.length ? { tool_choice: toolChoice } : {}),
+        ...this.getProviderRequestOptions(),
+      },
+      abortSignal ? { signal: abortSignal } : undefined,
+    );
 
     const acc = createStreamAccumulator();
 
