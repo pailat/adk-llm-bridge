@@ -22,7 +22,7 @@ From the repository root:
 ```bash
 git worktree add /tmp/adk-llm-bridge-codex-smoke HEAD
 WORKFLOW_TARGET=/tmp/adk-llm-bridge-codex-smoke \
-  bun --cwd examples/codex-workflow run smoke
+  bun run --cwd examples/codex-workflow smoke
 ```
 
 Authentication may come from `CODEX_API_KEY`, `OPENAI_API_KEY`, or a readable
