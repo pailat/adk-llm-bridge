@@ -33,7 +33,8 @@ import type { BaseProviderConfig } from "../types.js";
  *
  *   async *generateContentAsync(
  *     llmRequest: LlmRequest,
- *     stream?: boolean
+ *     stream?: boolean,
+ *     abortSignal?: AbortSignal
  *   ): AsyncGenerator<LlmResponse, void> {
  *     try {
  *       // Implementation here
@@ -80,6 +81,7 @@ export abstract class BaseProviderLlm extends BaseLlm {
    *
    * @param llmRequest - The ADK LLM request containing messages and tools
    * @param stream - Whether to stream the response (default: false)
+   * @param abortSignal - Optional signal used to cancel the provider request
    * @returns An async generator yielding LLM responses
    *
    * @abstract
@@ -87,6 +89,7 @@ export abstract class BaseProviderLlm extends BaseLlm {
   abstract generateContentAsync(
     llmRequest: LlmRequest,
     stream?: boolean,
+    abortSignal?: AbortSignal,
   ): AsyncGenerator<LlmResponse, void>;
 
   /**
