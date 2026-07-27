@@ -105,10 +105,14 @@ describe("WorkflowAgent", () => {
       parts: [{ text: "final: implemented" }],
     });
     expect(lifecycle.map((event) => event.type)).toEqual([
+      "checkpoint_saved",
       "workflow_started",
       "custom",
+      "checkpoint_saved",
       "step_started",
+      "checkpoint_saved",
       "step_completed",
+      "checkpoint_saved",
       "output",
       "workflow_completed",
     ]);
