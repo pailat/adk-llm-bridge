@@ -53,6 +53,8 @@
     "test": "bun test",
     "typecheck": "bunx tsc --noEmit",
     "typecheck:all": "bunx tsc --noEmit -p tsconfig.test.json",
+    "typecheck:conformance": "bunx tsc --noEmit --skipLibCheck --target ESNext --module NodeNext --moduleResolution NodeNext --esModuleInterop --types bun scripts/conformance/run-runtime.ts",
+    "check:conformance": "bunx biome check ./tests/conformance && bunx biome check --stdin-file-path=scripts/conformance/run-runtime.ts < scripts/conformance/run-runtime.ts > /dev/null && bunx biome check --stdin-file-path=.github/workflows/conformance.yml < .github/workflows/conformance.yml > /dev/null && bunx biome check --stdin-file-path=docs/runtime-conformance.md < docs/runtime-conformance.md > /dev/null && bunx biome check --stdin-file-path=package.json < package.json > /dev/null",
     "lint": "biome lint ./src ./tests",
     "lint:fix": "biome lint --write ./src ./tests",
     "format": "biome format ./src ./tests",
@@ -60,7 +62,7 @@
     "check": "biome check ./src ./tests",
     "check:fix": "biome check --write ./src ./tests",
     "lint:publish": "publint --strict && attw --pack --profile esm-only",
-    "ci": "bun run typecheck:all && bun run lint && bun test && bun run build && bun run lint:publish",
+    "ci": "bun run typecheck:all && bun run typecheck:conformance && bun run check:conformance && bun run lint && bun test && bun run build && bun run lint:publish",
     "prepublishOnly": "bun run build && bun run lint:publish",
     "typecheck:compat:nodenext": "bun run build && bunx tsc -p tests/compat/nodenext-consumer/tsconfig.json"
   },
