@@ -34,7 +34,10 @@ import {
   type WorkflowStepOutcome,
   type WorkflowStepResult,
 } from "../contracts.js";
-import type { TrustedWorkflowDefinition } from "../definition.js";
+import type {
+  TrustedWorkflowDefinition,
+  WorkflowDefinition,
+} from "../definition.js";
 import type {
   WorkflowCheckpointSavedEvent,
   WorkflowCompletedEvent,
@@ -79,6 +82,11 @@ export interface WorkflowRuntimeHooks {
 
 export interface WorkflowRuntimeConfig {
   definition: TrustedWorkflowDefinition;
+  /**
+   * Durable identity used by checkpoints. Defaults to the executable trusted
+   * definition, but script adapters provide their original source definition.
+   */
+  checkpointDefinition?: WorkflowDefinition;
   parentContext: InvocationContext;
   agentName: string;
   declaredAgents: ReadonlyMap<string, BaseAgent>;
@@ -92,6 +100,7 @@ export interface WorkflowRuntimeConfig {
 /** Executes one trusted workflow definition inside an ADK invocation. */
 export class WorkflowRuntime {
   readonly #definition: TrustedWorkflowDefinition;
+  readonly #checkpointDefinition: WorkflowDefinition;
   readonly #parentContext: InvocationContext;
   readonly #agentName: string;
   readonly #declaredAgents: ReadonlyMap<string, BaseAgent>;
@@ -112,6 +121,8 @@ export class WorkflowRuntime {
 
   constructor(config: WorkflowRuntimeConfig) {
     this.#definition = config.definition;
+    this.#checkpointDefinition =
+      config.checkpointDefinition ?? config.definition;
     this.#parentContext = config.parentContext;
     this.#agentName = config.agentName;
     this.#declaredAgents = config.declaredAgents;
@@ -140,7 +151,7 @@ export class WorkflowRuntime {
       this.#executionId = await this.#resolveExecutionId(this.#parentContext);
       validateExecutionId(this.#executionId);
       this.#checkpointCoordinator = new WorkflowCheckpointCoordinator({
-        definition: this.#definition,
+        definition: this.#checkpointDefinition,
         executionId: this.#executionId,
         input: this.workflowInput(),
         context: this.#parentContext,

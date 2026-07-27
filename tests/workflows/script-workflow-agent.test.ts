@@ -12,6 +12,13 @@ import {
   InvocationContext,
 } from "@google/adk";
 import type { Content } from "@google/genai";
+import { hashWorkflowSource } from "../../src/workflows/checkpoint/hash.js";
+import type { WorkflowCheckpointV1 } from "../../src/workflows/checkpoint/schema.js";
+import type {
+  LoadWorkflowCheckpointInput,
+  SaveWorkflowCheckpointInput,
+  WorkflowCheckpointStore,
+} from "../../src/workflows/checkpoint/store.js";
 import { WorkflowError } from "../../src/workflows/contracts.js";
 import { defineScriptWorkflow } from "../../src/workflows/definition.js";
 import type { WorkflowEvent } from "../../src/workflows/events.js";
@@ -81,6 +88,22 @@ class GeneratorScriptRuntime implements WorkflowScriptRuntime {
         disposed = true;
         generator.return(undefined);
       },
+    };
+  }
+}
+
+class MemoryCheckpointStore implements WorkflowCheckpointStore {
+  checkpoint?: WorkflowCheckpointV1;
+
+  async load(_input: LoadWorkflowCheckpointInput) {
+    return this.checkpoint;
+  }
+
+  async save(input: SaveWorkflowCheckpointInput) {
+    this.checkpoint = input.checkpoint;
+    return {
+      checkpointKey: `script:${input.checkpoint.executionId}`,
+      stateDelta: { scriptCheckpoint: input.checkpoint },
     };
   }
 }
@@ -184,15 +207,22 @@ describe("ScriptWorkflowAgent", () => {
       },
       turnComplete: true,
     });
-    expect(workflowEvents(events).map((event) => event.type)).toEqual([
+    const lifecycle = workflowEvents(events).filter(
+      (event) => event.type !== "checkpoint_saved",
+    );
+    expect(lifecycle.slice(0, 4).map((event) => event.type)).toEqual([
       "workflow_started",
       "step_started",
       "step_completed",
       "custom",
-      "step_started",
-      "step_started",
-      "step_completed",
-      "step_completed",
+    ]);
+    expect(
+      lifecycle.filter((event) => event.type === "step_started"),
+    ).toHaveLength(3);
+    expect(
+      lifecycle.filter((event) => event.type === "step_completed"),
+    ).toHaveLength(3);
+    expect(lifecycle.slice(-2).map((event) => event.type)).toEqual([
       "output",
       "workflow_completed",
     ]);
@@ -314,5 +344,65 @@ describe("ScriptWorkflowAgent", () => {
       code: "WORKFLOW_SANDBOX_UNAVAILABLE",
       message: "QuickJS sandbox dependencies are unavailable",
     });
+  });
+
+  test("checkpoints script source identity and replays completed steps", async () => {
+    const source = "yield ctx.run(worker); return result.output;";
+    const worker = new ReplyAgent("worker", ["implemented"]);
+    const store = new MemoryCheckpointStore();
+    const runtime = new GeneratorScriptRuntime(function* () {
+      const result = (yield operation("run", {
+        step: { id: "implement", agentName: "worker", input: "task" },
+      })) as { output: string };
+      return result.output;
+    });
+    const workflow = new ScriptWorkflowAgent({
+      name: "script_workflow",
+      definition: defineScriptWorkflow({
+        id: "durable-script",
+        version: "1",
+        source,
+      }),
+      subAgents: [worker],
+      runtime,
+      checkpointStore: store,
+      resolveExecutionId: () => "business-script-42",
+    });
+
+    const firstEvents = await collect(workflow);
+    expect(worker.calls).toBe(1);
+    expect(store.checkpoint).toMatchObject({
+      workflowId: "durable-script",
+      executionId: "business-script-42",
+      sourceHash: await hashWorkflowSource(source),
+      status: "completed",
+    });
+
+    const replayEvents = await collect(workflow);
+    expect(worker.calls).toBe(1);
+    expect(
+      workflowEvents(replayEvents).some(
+        (event) => event.type === "step_replayed",
+      ),
+    ).toBe(true);
+    expect(replayEvents.at(-2)?.content?.parts?.[0]?.text).toBe("implemented");
+    expect(firstEvents.at(-2)?.content?.parts?.[0]?.text).toBe("implemented");
+
+    const changed = new ScriptWorkflowAgent({
+      name: "changed_script_workflow",
+      definition: defineScriptWorkflow({
+        id: "durable-script",
+        version: "1",
+        source: `${source}\n// changed`,
+      }),
+      subAgents: [new ReplyAgent("worker", ["must-not-run"])],
+      runtime,
+      checkpointStore: store,
+      resolveExecutionId: () => "business-script-42",
+    });
+    await expect(collect(changed)).rejects.toMatchObject({
+      code: "WORKFLOW_SOURCE_MISMATCH",
+    });
+    expect(worker.calls).toBe(1);
   });
 });
