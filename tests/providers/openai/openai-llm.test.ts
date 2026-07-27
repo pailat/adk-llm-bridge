@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it } from "bun:test";
+import type OpenAI from "openai";
 import { resetAllConfigs } from "../../../src/config.js";
 import { OPENAI_DEFINITION } from "../../../src/providers/openai/definition.js";
 import { OpenAILlm } from "../../../src/providers/openai/index.js";
@@ -11,6 +12,7 @@ describe("OpenAILlm", () => {
   beforeEach(() => {
     resetAllConfigs();
     delete process.env.OPENAI_API_KEY;
+    delete process.env.OPENAI_BASE_URL;
     delete process.env.OPENAI_ORGANIZATION;
     delete process.env.OPENAI_PROJECT;
   });
@@ -51,6 +53,29 @@ describe("OpenAILlm", () => {
 
       const llm = new OpenAILlm({ model: "gpt-4o" });
       expect(llm.model).toBe("gpt-4o");
+    });
+
+    it("uses OPENAI_BASE_URL when no explicit URL is provided", () => {
+      process.env.OPENAI_API_KEY = "test-openai-key";
+      process.env.OPENAI_BASE_URL = "https://openai-proxy.example.test/v1";
+
+      const llm = new OpenAILlm({ model: "gpt-4o" });
+      const client = (llm as typeof llm & { client: OpenAI }).client;
+
+      expect(client.baseURL).toBe("https://openai-proxy.example.test/v1");
+    });
+
+    it("keeps an explicit base URL ahead of OPENAI_BASE_URL", () => {
+      process.env.OPENAI_BASE_URL = "https://environment.example.test/v1";
+
+      const llm = new OpenAILlm({
+        model: "gpt-4o",
+        apiKey: "test-openai-key",
+        baseURL: "https://explicit.example.test/v1",
+      });
+      const client = (llm as typeof llm & { client: OpenAI }).client;
+
+      expect(client.baseURL).toBe("https://explicit.example.test/v1");
     });
 
     it("throws when no API key provided", () => {

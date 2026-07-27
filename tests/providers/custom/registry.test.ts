@@ -57,6 +57,36 @@ describe("registerCustomProvider", () => {
     });
   });
 
+  it("captures environment fallbacks and keeps registration values explicit", () => {
+    const result = runFixture<{
+      environmentBaseURL: string;
+      environmentApiKey: string;
+      explicitBaseURL: string;
+      explicitApiKey: string;
+    }>("issue85-configuration");
+
+    expect(result.environmentBaseURL).toBe(
+      "https://captured-environment.example.test/v1",
+    );
+    expect(result.environmentApiKey).toBe("captured-environment-key");
+    expect(result.explicitBaseURL).toBe("https://explicit.example.test/v1");
+    expect(result.explicitApiKey).toBe("explicit-key");
+  });
+
+  it("fails unresolved or invalid registration URLs without exposing secrets", () => {
+    const result = runFixture<{
+      invalid: string;
+      missing: string;
+      secret: string;
+    }>("issue85-url-errors");
+
+    expect(result.missing).toContain("set CUSTOM_LLM_BASE_URL");
+    expect(result.invalid).toContain(
+      "Invalid baseURL from the CUSTOM_LLM_BASE_URL environment variable",
+    );
+    expect(result.invalid).not.toContain(result.secret);
+  });
+
   it("rejects invalid prefixes deterministically", () => {
     for (const prefix of ["", "UPPER", "has space", "/leading", "trailing/"]) {
       expect(() =>

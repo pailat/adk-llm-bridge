@@ -15,8 +15,11 @@
  */
 
 import { LLMRegistry } from "@google/adk";
-import { requireValidURL } from "../../utils/validate.js";
-import { CustomLlm, type CustomLlmProviderConfig } from "./custom-llm.js";
+import {
+  CustomLlm,
+  type CustomLlmProviderConfig,
+  resolveCustomConfig,
+} from "./custom-llm.js";
 
 /** Configuration captured by a named custom-provider registration. */
 export type CustomProviderRegistrationConfig = Omit<
@@ -163,7 +166,6 @@ export function registerCustomProvider(
   }
 
   const { models, ...capturedConfig } = copyConfig(config);
-  requireValidURL(capturedConfig.baseURL, "baseURL", `custom:${prefix}`);
 
   const remoteModels = [...models];
   for (const model of remoteModels) {
@@ -179,6 +181,21 @@ export function registerCustomProvider(
       `[adk-llm-bridge] Custom provider ${JSON.stringify(prefix)} contains duplicate model IDs.`,
     );
   }
+
+  // Resolve before touching ADK's registry, then capture the result. Named
+  // registrations therefore keep a stable endpoint/key even if process.env is
+  // changed later, while retaining the deep-copy guarantees from issue #84.
+  const resolved = resolveCustomConfig({
+    ...capturedConfig,
+    model: remoteModels[0],
+  });
+  const resolvedCapturedConfig = copyConfig({
+    ...capturedConfig,
+    apiKey: resolved.apiKey,
+    baseURL: resolved.baseURL,
+    maxRetries: resolved.maxRetries,
+    timeout: resolved.timeout,
+  });
 
   const routes = new Map<string, string>(
     remoteModels.map((model) => [`${prefix}/${model}`, model] as const),
@@ -204,8 +221,8 @@ export function registerCustomProvider(
       }
 
       super({
-        ...copyConfig(capturedConfig),
-        name: capturedConfig.name ?? prefix,
+        ...copyConfig(resolvedCapturedConfig),
+        name: resolvedCapturedConfig.name ?? prefix,
         model: remoteModel,
       });
     }
