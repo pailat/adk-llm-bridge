@@ -7,7 +7,7 @@
 import {
   normalizeAcceptedChangeReceipt,
   verifyWorkflowChangeSet,
-  type WorkflowAcceptedChangeReceipt,
+  type WorkflowAuthoritativeChangeReceipt,
   type WorkflowChangeEntryKind,
   type WorkflowChangeSet,
   type WorkflowExpectedTarget,
@@ -22,7 +22,10 @@ import {
 } from "./contracts.js";
 import { workflowPathClaimsOverlap } from "./json.js";
 import type { WorkflowOwnershipController } from "./ownership-controller.js";
-import type { WorkflowPlanStore } from "./stores.js";
+import type {
+  WorkflowChangeReceiptStore,
+  WorkflowPlanStore,
+} from "./stores.js";
 
 export type WorkflowChangeValidationErrorCode =
   | "WORKFLOW_CHANGE_BASE_REVISION_MISMATCH"
@@ -58,6 +61,7 @@ export interface WorkflowOwnershipChangeSetValidationRequest {
 export interface WorkflowOwnershipChangeSetValidatorConfig {
   ownership: WorkflowOwnershipController;
   plans: WorkflowPlanStore;
+  receipts?: WorkflowChangeReceiptStore;
   createReceiptId?: () => string;
   now?: () => number;
   /** File and directory entries are allowed by default. */
@@ -71,6 +75,7 @@ export interface WorkflowOwnershipChangeSetValidatorConfig {
 export class WorkflowOwnershipChangeSetValidator {
   readonly #ownership: WorkflowOwnershipController;
   readonly #plans: WorkflowPlanStore;
+  readonly #receipts?: WorkflowChangeReceiptStore;
   readonly #createReceiptId: () => string;
   readonly #now: () => number;
   readonly #allowedEntryKinds: ReadonlySet<WorkflowChangeEntryKind>;
@@ -83,6 +88,7 @@ export class WorkflowOwnershipChangeSetValidator {
     }
     this.#ownership = config.ownership;
     this.#plans = config.plans;
+    this.#receipts = config.receipts;
     this.#createReceiptId = config.createReceiptId ?? defaultReceiptId;
     this.#now = config.now ?? Date.now;
     this.#allowedEntryKinds = normalizeAllowedEntryKinds(
@@ -93,7 +99,7 @@ export class WorkflowOwnershipChangeSetValidator {
   async validate(
     request: WorkflowOwnershipChangeSetValidationRequest,
     actor: WorkflowActorContext,
-  ): Promise<WorkflowAcceptedChangeReceipt> {
+  ): Promise<WorkflowAuthoritativeChangeReceipt> {
     if (!request || typeof request !== "object") {
       throw new TypeError("Workflow change validation request is required");
     }
@@ -155,24 +161,20 @@ export class WorkflowOwnershipChangeSetValidator {
     validateEntryKinds(changeSet, this.#allowedEntryKinds);
 
     const fences = normalizeFences(request.ownership);
-    const grants = await Promise.all(
-      fences.map((fence) =>
-        this.#ownership.validateAuthority(
-          {
-            executionId: changeSet.executionId,
-            planRevision: changeSet.planRevision,
-            grantId: fence.grantId,
-            taskId: changeSet.taskId,
-            agentId: request.agentId,
-            fencingToken: fence.fencingToken,
-          },
-          actor,
-        ),
-      ),
+    const authority = await this.#ownership.validateAuthoritySnapshot(
+      {
+        executionId: changeSet.executionId,
+        planRevision: changeSet.planRevision,
+        taskId: changeSet.taskId,
+        agentId: request.agentId,
+        authorities: fences,
+      },
+      actor,
     );
+    const grants = authority.grants;
     validateAffectedPaths(changeSet, plan, lane.role, grants);
 
-    return normalizeAcceptedChangeReceipt({
+    const receipt = normalizeAcceptedChangeReceipt({
       receiptId: this.#receiptId(),
       verdict: "accepted",
       executionId: changeSet.executionId,
@@ -184,7 +186,10 @@ export class WorkflowOwnershipChangeSetValidator {
       ownership: fences,
       issuedAt: this.#timestamp(),
       expectedTarget: request.expectedTarget,
-    });
+      agentId: request.agentId,
+      orchestrationRevision: authority.orchestrationRevision,
+    }) as WorkflowAuthoritativeChangeReceipt;
+    return (await this.#receipts?.put(receipt)) ?? receipt;
   }
 
   #receiptId(): string {
