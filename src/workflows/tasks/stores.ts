@@ -5,12 +5,16 @@
  */
 
 import {
+  type WorkflowTaskAppendFromClaimCommand,
+  type WorkflowTaskCancelFromClaimCommand,
   type WorkflowTaskClaim,
   type WorkflowTaskClaimedTransitionRequest,
   type WorkflowTaskClaimGuard,
   type WorkflowTaskClaimRequest,
   type WorkflowTaskCancelExpiredClaimRequest,
   type WorkflowTaskCancellationRequest,
+  type WorkflowTaskCreateChildCommand,
+  type WorkflowTaskCreateRootCommand,
   WorkflowTaskControlError,
   type WorkflowTaskListRequest,
   type WorkflowTaskListResult,
@@ -32,6 +36,8 @@ export const DEFAULT_WORKFLOW_TASK_MESSAGE_READ_LIMIT = 100;
 export const MAX_WORKFLOW_TASK_MESSAGE_READ_LIMIT = 1_000;
 export const DEFAULT_WORKFLOW_TASK_MAILBOX_CAPACITY = 10_000;
 export const MAX_WORKFLOW_TASK_MAILBOX_CAPACITY = 100_000;
+export const DEFAULT_WORKFLOW_TASK_COMMAND_LEDGER_CAPACITY = 10_000;
+export const MAX_WORKFLOW_TASK_COMMAND_LEDGER_CAPACITY = 100_000;
 
 const TASK_STATUSES = new Set<WorkflowTaskStatus>([
   "queued",
@@ -41,6 +47,9 @@ const TASK_STATUSES = new Set<WorkflowTaskStatus>([
   "failed",
   "cancelled",
 ]);
+
+const IN_MEMORY_TASK_ATOMIC = Symbol("workflow-task-atomic");
+const IN_MEMORY_MESSAGE_APPEND = Symbol("workflow-message-append");
 
 export interface WorkflowTaskStore {
   create(record: WorkflowTaskRecord): Promise<WorkflowTaskRecord>;
@@ -114,6 +123,33 @@ export interface WorkflowTaskMessageStore {
   ): Promise<WorkflowTaskMessageReadResult>;
 }
 
+/** Atomic, fenced and idempotent mutations used by durable task controllers. */
+export interface WorkflowTaskCommandStore {
+  createRoot(
+    command: WorkflowTaskCreateRootCommand,
+  ): Promise<WorkflowTaskRecord>;
+  createChildClaimed(
+    command: WorkflowTaskCreateChildCommand,
+  ): Promise<WorkflowTaskRecord>;
+  appendFromClaim(
+    command: WorkflowTaskAppendFromClaimCommand,
+  ): Promise<WorkflowTaskMessage>;
+  requestCancellationClaimed(
+    command: WorkflowTaskCancelFromClaimCommand,
+  ): Promise<WorkflowTaskRecord>;
+}
+
+interface InMemoryTaskAtomicAccess {
+  timestamp(): number;
+  required(handle: { executionId: string; taskId: string }): WorkflowTaskRecord;
+  assertRunningClaim(claim: WorkflowTaskClaimGuard): WorkflowTaskRecord;
+  create(record: WorkflowTaskRecord): WorkflowTaskRecord;
+  requestCancellation(handle: {
+    executionId: string;
+    taskId: string;
+  }): WorkflowTaskRecord;
+}
+
 export interface InMemoryWorkflowTaskStoreConfig {
   now?: () => number;
 }
@@ -137,6 +173,10 @@ export class InMemoryWorkflowTaskStore
   }
 
   async create(record: WorkflowTaskRecord): Promise<WorkflowTaskRecord> {
+    return this.#create(record);
+  }
+
+  #create(record: WorkflowTaskRecord): WorkflowTaskRecord {
     validateTaskRecord(record);
     if (record.revision !== 1) invalid("Initial task revision must be 1");
     const key = taskKey(record.executionId, record.taskId);
@@ -146,6 +186,63 @@ export class InMemoryWorkflowTaskStore
     this.#order.push(key);
     this.#wakeRevisionWaiters(key, snapshot);
     return snapshot;
+  }
+
+  [IN_MEMORY_TASK_ATOMIC]<T>(
+    operation: (access: InMemoryTaskAtomicAccess) => T,
+  ): T {
+    return operation({
+      timestamp: () => this.#timestamp(),
+      required: (handle) => {
+        validateTaskHandle(handle);
+        const current = this.#records.get(
+          taskKey(handle.executionId, handle.taskId),
+        );
+        if (!current) notFound(handle.executionId, handle.taskId);
+        return current;
+      },
+      assertRunningClaim: (claim) => {
+        validateClaimGuard(claim);
+        const current = this.#records.get(
+          taskKey(claim.executionId, claim.taskId),
+        );
+        if (!current) notFound(claim.executionId, claim.taskId);
+        if (current.status !== "running") claimConflict(claim, current);
+        assertCurrentClaim(current, claim, this.#timestamp());
+        return current;
+      },
+      create: (record) => this.#create(record),
+      requestCancellation: (handle) => {
+        validateTaskHandle(handle);
+        const key = taskKey(handle.executionId, handle.taskId);
+        const current = this.#records.get(key);
+        if (!current) notFound(handle.executionId, handle.taskId);
+        if (isTerminalTaskStatus(current.status)) return current;
+        if (current.status === "queued" && current.claim === undefined) {
+          const now = this.#timestamp();
+          const snapshot = immutableTaskJson({
+            ...current,
+            status: "cancelled",
+            revision: current.revision + 1,
+            updatedAt: now,
+            cancelRequestedAt: now,
+            completedAt: now,
+            error: {
+              code: "WORKFLOW_TASK_CANCELLED",
+              message: "Workflow task was cancelled",
+            },
+          } satisfies WorkflowTaskRecord);
+          validateTaskRecord(snapshot);
+          this.#records.set(key, snapshot);
+          this.#wakeRevisionWaiters(key, snapshot);
+          return snapshot;
+        }
+        return this.#requestCancellation({
+          ...handle,
+          expectedRevision: current.revision,
+        });
+      },
+    });
   }
 
   async get(
@@ -308,6 +405,12 @@ export class InMemoryWorkflowTaskStore
   async requestCancellation(
     request: WorkflowTaskCancellationRequest,
   ): Promise<WorkflowTaskRecord> {
+    return this.#requestCancellation(request);
+  }
+
+  #requestCancellation(
+    request: WorkflowTaskCancellationRequest,
+  ): WorkflowTaskRecord {
     validateTaskHandle(request);
     validateExpectedRevision(request.expectedRevision);
     const key = taskKey(request.executionId, request.taskId);
@@ -526,6 +629,12 @@ export class InMemoryWorkflowTaskMessageStore
   async append(
     request: WorkflowTaskMessageAppendRequest & { sentAt: number },
   ): Promise<WorkflowTaskMessage> {
+    return this[IN_MEMORY_MESSAGE_APPEND](request);
+  }
+
+  [IN_MEMORY_MESSAGE_APPEND](
+    request: WorkflowTaskMessageAppendRequest & { sentAt: number },
+  ): WorkflowTaskMessage {
     validateMessageAppend(request);
     const key = taskKey(request.executionId, request.taskId);
     const stream = this.#streams.get(key) ?? [];
@@ -640,6 +749,160 @@ export class InMemoryWorkflowTaskMessageStore
   }
 }
 
+export interface InMemoryWorkflowTaskCommandStoreConfig {
+  taskStore: InMemoryWorkflowTaskStore;
+  messageStore: InMemoryWorkflowTaskMessageStore;
+  ledgerCapacity?: number;
+}
+
+interface CommandLedgerEntry {
+  intent: string;
+  result: WorkflowTaskRecord | WorkflowTaskMessage;
+}
+
+/**
+ * Single-process reference command store. Fence verification, mutation and
+ * ledger publication execute synchronously in one critical section. The
+ * bounded ledger provides at-least-once retry deduplication while retained.
+ */
+export class InMemoryWorkflowTaskCommandStore
+  implements WorkflowTaskCommandStore
+{
+  readonly #taskStore: InMemoryWorkflowTaskStore;
+  readonly #messageStore: InMemoryWorkflowTaskMessageStore;
+  readonly #ledger = new Map<string, CommandLedgerEntry>();
+  readonly #ledgerCapacity: number;
+
+  constructor(config: InMemoryWorkflowTaskCommandStoreConfig) {
+    this.#taskStore = config.taskStore;
+    this.#messageStore = config.messageStore;
+    this.#ledgerCapacity = boundedLimit(
+      config.ledgerCapacity,
+      DEFAULT_WORKFLOW_TASK_COMMAND_LEDGER_CAPACITY,
+      MAX_WORKFLOW_TASK_COMMAND_LEDGER_CAPACITY,
+      "task command ledger capacity",
+    );
+  }
+
+  async createRoot(
+    command: WorkflowTaskCreateRootCommand,
+  ): Promise<WorkflowTaskRecord> {
+    return this.#execute(command.operationId, command, () =>
+      this.#taskStore[IN_MEMORY_TASK_ATOMIC]((access) => {
+        assertOperationHint(command.operationId, command.request.operationId);
+        if (command.request.parentTaskId !== undefined) {
+          invalid("A root workflow task cannot contain parentTaskId");
+        }
+        const now = access.timestamp();
+        return access.create({
+          executionId: command.request.executionId,
+          taskId: command.request.taskId,
+          agentId: command.request.agentId,
+          status: "queued",
+          revision: 1,
+          attempt: 1,
+          createdAt: now,
+          updatedAt: now,
+          orchestration: command.authority,
+          ...(command.request.input !== undefined
+            ? { input: command.request.input }
+            : {}),
+        });
+      }),
+    );
+  }
+
+  async createChildClaimed(
+    command: WorkflowTaskCreateChildCommand,
+  ): Promise<WorkflowTaskRecord> {
+    return this.#execute(command.operationId, command, () =>
+      this.#taskStore[IN_MEMORY_TASK_ATOMIC]((access) => {
+        assertOperationHint(command.operationId, command.request.operationId);
+        const parent = access.assertRunningClaim(command.parentClaim);
+        const now = access.timestamp();
+        return access.create({
+          executionId: parent.executionId,
+          taskId: command.request.taskId,
+          parentTaskId: parent.taskId,
+          agentId: command.request.agentId,
+          status: "queued",
+          revision: 1,
+          attempt: 1,
+          createdAt: now,
+          updatedAt: now,
+          orchestration: command.authority,
+          ...(command.request.input !== undefined
+            ? { input: command.request.input }
+            : {}),
+        });
+      }),
+    );
+  }
+
+  async appendFromClaim(
+    command: WorkflowTaskAppendFromClaimCommand,
+  ): Promise<WorkflowTaskMessage> {
+    return this.#execute(command.operationId, command, () =>
+      this.#taskStore[IN_MEMORY_TASK_ATOMIC]((access) => {
+        assertOperationHint(command.operationId, command.request.operationId);
+        const parent = access.assertRunningClaim(command.parentClaim);
+        access.required({
+          executionId: parent.executionId,
+          taskId: command.request.taskId,
+        });
+        return this.#messageStore[IN_MEMORY_MESSAGE_APPEND]({
+          executionId: parent.executionId,
+          taskId: command.request.taskId,
+          senderTaskId: parent.taskId,
+          payload: command.request.payload,
+          sentAt: access.timestamp(),
+        });
+      }),
+    );
+  }
+
+  async requestCancellationClaimed(
+    command: WorkflowTaskCancelFromClaimCommand,
+  ): Promise<WorkflowTaskRecord> {
+    return this.#execute(command.operationId, command, () =>
+      this.#taskStore[IN_MEMORY_TASK_ATOMIC]((access) => {
+        const parent = access.assertRunningClaim(command.parentClaim);
+        if (command.target.executionId !== parent.executionId) {
+          invalid("A claimed task cannot cancel across workflow executions");
+        }
+        return access.requestCancellation(command.target);
+      }),
+    );
+  }
+
+  #execute<T extends WorkflowTaskRecord | WorkflowTaskMessage>(
+    operationId: string,
+    intent: unknown,
+    operation: () => T,
+  ): T {
+    validateIdentifier(operationId, "operationId");
+    const normalizedIntent = JSON.stringify(immutableTaskJson(intent));
+    const existing = this.#ledger.get(operationId);
+    if (existing) {
+      if (existing.intent !== normalizedIntent) {
+        throw new WorkflowTaskControlError(
+          "WORKFLOW_TASK_CONFLICT",
+          `Workflow task operation intent conflict: ${operationId}`,
+          { operationId },
+        );
+      }
+      return existing.result as T;
+    }
+    const result = operation();
+    this.#ledger.set(operationId, { intent: normalizedIntent, result });
+    if (this.#ledger.size > this.#ledgerCapacity) {
+      const oldest = this.#ledger.keys().next().value;
+      if (oldest !== undefined) this.#ledger.delete(oldest);
+    }
+    return result;
+  }
+}
+
 interface MailboxWaiter {
   request: WorkflowTaskMessageReadRequest;
   resolve(result: WorkflowTaskMessageReadResult): void;
@@ -693,6 +956,15 @@ function normalizedTaskRecordSnapshot(
       ownership,
     },
   } satisfies WorkflowTaskRecord);
+}
+
+function assertOperationHint(
+  operationId: string,
+  hint: string | undefined,
+): void {
+  if (hint !== undefined && hint !== operationId) {
+    invalid("Workflow task operationId does not match its request hint");
+  }
 }
 
 function validateTaskRecord(record: WorkflowTaskRecord): void {
