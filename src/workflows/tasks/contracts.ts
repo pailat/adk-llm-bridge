@@ -118,6 +118,11 @@ export interface WorkflowTaskRequeueExpiredRequest extends WorkflowTaskHandle {
   expectedRevision: number;
 }
 
+/** Administrative cancellation intent; it never transfers worker ownership. */
+export interface WorkflowTaskCancellationRequest extends WorkflowTaskHandle {
+  expectedRevision: number;
+}
+
 /** Store-authoritative recovery of an expired cancelling attempt. */
 export interface WorkflowTaskCancelExpiredClaimRequest
   extends WorkflowTaskHandle {
