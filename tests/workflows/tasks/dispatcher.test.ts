@@ -147,6 +147,133 @@ describe("WorkflowTaskDispatcher", () => {
     expect(driverCalls).toBe(1);
     gate.resolve({});
   });
+
+  test("rotates across multi-page statuses without starving expired work", async () => {
+    let now = 10;
+    const store = new InMemoryWorkflowTaskStore({ now: () => now });
+    for (let index = 0; index < 6; index++) {
+      await store.create(record(`queued-${index}`, now));
+    }
+    for (let index = 0; index < 6; index++) {
+      const taskId = `live-${index}`;
+      await store.create(record(taskId, now));
+      await store.claim({
+        executionId: "execution-1",
+        taskId,
+        workerId: "live-worker",
+        leaseId: `live-${index}`,
+        leaseDurationMs: 100,
+      });
+    }
+    await store.create(record("expired-running", now));
+    await store.claim({
+      executionId: "execution-1",
+      taskId: "expired-running",
+      workerId: "old-worker",
+      leaseId: "expired-running",
+      leaseDurationMs: 5,
+    });
+    await store.create(record("expired-cancelling", now));
+    const cancelling = await store.claim({
+      executionId: "execution-1",
+      taskId: "expired-cancelling",
+      workerId: "old-worker",
+      leaseId: "expired-cancelling",
+      leaseDurationMs: 5,
+    });
+    await store.requestCancellation({
+      executionId: cancelling.executionId,
+      taskId: cancelling.taskId,
+      expectedRevision: cancelling.revision,
+    });
+
+    const gate = deferred<WorkflowTaskDriverResult>();
+    const controller = controllerFor(store, () => now, "new-worker", {
+      execute: async () => await gate.promise,
+    });
+    const dispatcher = new WorkflowTaskDispatcher({
+      controller,
+      now: () => now,
+    });
+    now = 20;
+    let cursor: string | undefined;
+    const actions = new Set<string>();
+    const cursors = new Set<string>();
+    for (let sweep = 0; sweep < 20; sweep++) {
+      const result = await dispatcher.sweep({
+        executionId: "execution-1",
+        limit: 2,
+        ...(cursor ? { cursor } : {}),
+      });
+      expect(result.inspected).toBeLessThanOrEqual(2);
+      cursor = result.nextCursor;
+      cursors.add(cursor);
+      for (const outcome of result.outcomes) {
+        actions.add(`${outcome.taskId}:${outcome.action}`);
+      }
+      if (
+        actions.has("expired-running:recovered") &&
+        actions.has("expired-cancelling:cancelled-expired")
+      ) {
+        break;
+      }
+    }
+    expect(cursors.size).toBeGreaterThan(3);
+    expect(actions).toContain("expired-running:recovered");
+    expect(actions).toContain("expired-cancelling:cancelled-expired");
+    gate.resolve({});
+    await controller.waitForIdle();
+  });
+
+  test("validates scoped cursors and explicitly wraps completed rounds", async () => {
+    const now = 10;
+    const store = new InMemoryWorkflowTaskStore({ now: () => now });
+    await store.create(record("live", now));
+    await store.claim({
+      executionId: "execution-1",
+      taskId: "live",
+      workerId: "old-worker",
+      leaseId: "live",
+      leaseDurationMs: 100,
+    });
+    const dispatcher = new WorkflowTaskDispatcher({
+      controller: controllerFor(store, () => now, "new-worker", {
+        async execute() {
+          return {};
+        },
+      }),
+      now: () => now,
+    });
+
+    await expect(
+      dispatcher.sweep({ executionId: "execution-1", cursor: "malformed" }),
+    ).rejects.toBeInstanceOf(TypeError);
+
+    const first = await dispatcher.sweep({
+      executionId: "execution-1",
+      limit: 1,
+    });
+    expect(first.inspected).toBe(1);
+    const wrapped = await dispatcher.sweep({
+      executionId: "execution-1",
+      limit: 1,
+      cursor: first.nextCursor,
+    });
+    expect(wrapped.inspected).toBe(0);
+    const nextRound = await dispatcher.sweep({
+      executionId: "execution-1",
+      limit: 1,
+      cursor: wrapped.nextCursor,
+    });
+    expect(nextRound.inspected).toBe(1);
+
+    await expect(
+      dispatcher.sweep({
+        executionId: "execution-2",
+        cursor: first.nextCursor,
+      }),
+    ).rejects.toThrow("belongs to another execution");
+  });
 });
 
 function controllerFor(
