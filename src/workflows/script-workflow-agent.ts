@@ -24,6 +24,7 @@ import { AsyncEventQueue } from "./runtime/async-event-queue.js";
 import {
   type WorkflowExecutionIdResolver,
   WorkflowRuntime,
+  type WorkflowRuntimeHooks,
 } from "./runtime/workflow-runtime.js";
 import { QuickJSSyncGeneratorRuntime } from "./sandbox/quickjs-generator-runtime.js";
 import type { WorkflowScriptRuntime } from "./sandbox/types.js";
@@ -51,6 +52,8 @@ export interface ScriptWorkflowAgentConfig {
   checkpointStore?: WorkflowCheckpointStore;
   /** Stable durable identity. Defaults to the ADK invocation id. */
   resolveExecutionId?: WorkflowExecutionIdResolver;
+  /** Durable attempt journal/outbox hooks shared with trusted workflows. */
+  runtimeHooks?: WorkflowRuntimeHooks;
   /** Optional host-side coordination for steps that declare write paths. */
   workspace?: WorkflowWorkspaceConfig;
 }
@@ -67,6 +70,7 @@ export class ScriptWorkflowAgent extends BaseAgent {
     | undefined;
   readonly #checkpointStore: WorkflowCheckpointStore | undefined;
   readonly #resolveExecutionId: WorkflowExecutionIdResolver | undefined;
+  readonly #runtimeHooks: WorkflowRuntimeHooks | undefined;
   readonly #workspace: WorkflowWorkspaceConfig | undefined;
   readonly #declaredAgents: ReadonlyMap<string, BaseAgent>;
   readonly #limits: WorkflowExecutionLimits | undefined;
@@ -84,6 +88,7 @@ export class ScriptWorkflowAgent extends BaseAgent {
     this.definition = config.definition;
     this.#checkpointStore = config.checkpointStore;
     this.#resolveExecutionId = config.resolveExecutionId;
+    this.#runtimeHooks = config.runtimeHooks;
     this.#workspace = config.workspace;
     this.#limits = mergeLimits(config.definition.limits, config.limits);
     this.#onEvent = config.onEvent;
@@ -135,6 +140,7 @@ export class ScriptWorkflowAgent extends BaseAgent {
         },
         checkpointStore: this.#checkpointStore,
         resolveExecutionId: this.#resolveExecutionId,
+        hooks: this.#runtimeHooks,
         workspace: this.#workspace,
       });
 

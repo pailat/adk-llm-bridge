@@ -299,6 +299,30 @@ peers when using script workflows:
 bun add quickjs-emscripten-core @jitl/quickjs-wasmfile-release-sync
 ```
 
+The host can also opt into per-invocation dynamic agents. The script receives
+only secret-free descriptors; agent handles and provider credentials remain on
+the host:
+
+```typescript
+import { ExternalAgentWorkflowFactory } from "adk-llm-bridge/workflows";
+
+const workflow = new ScriptWorkflowAgent({
+  name: "DynamicWorkflow",
+  definition,
+  createAgentFactory: () =>
+    new ExternalAgentWorkflowFactory({
+      registry: externalAgentRegistry,
+      allowedProviderIds: ["codex"],
+      policy: { workingDirectoryRoots: ["/srv/worktrees"] },
+    }),
+});
+```
+
+Guest scripts can then `yield ctx.spawnAgent(request)`,
+`yield ctx.listAgents()`, invoke the returned name with `ctx.run`, and
+`yield ctx.releaseAgent(name)`. Factories and names are isolated per ADK
+invocation; all remaining dynamic handles are released when execution ends.
+
 Both workflow agents persist checkpoints through ADK session `stateDelta` by
 default. Completed steps replay without reinvoking their agents; changed input,
 version, step identity, or script source is rejected explicitly. A custom

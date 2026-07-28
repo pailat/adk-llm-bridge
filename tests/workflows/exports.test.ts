@@ -33,6 +33,9 @@ describe("workflows public exports", () => {
     expect(workflows.WorkflowDefinitionRegistry).toBeFunction();
     expect(workflows.ADKSessionCheckpointStore).toBeFunction();
     expect(workflows.FileSystemWorkflowCheckpointStore).toBeFunction();
+    expect(
+      workflows.collectFileSystemCheckpointTombstonesOffline,
+    ).toBeFunction();
     expect(workflows.QuickJSSyncGeneratorRuntime).toBeFunction();
     expect(workflows.runWorkflowScript).toBeFunction();
     expect(workflows.ExternalAgentWorkflowFactory).toBeFunction();
@@ -40,6 +43,9 @@ describe("workflows public exports", () => {
     expect(workflows.DEFAULT_WORKFLOW_AGENT_FACTORY_LIMITS).toBeObject();
     expect(workflows.InMemoryWorkspaceAdapter).toBeFunction();
     expect(workflows.FileSystemWorkspaceAdapter).toBeFunction();
+    expect(
+      workflows.collectFileSystemWorkspaceTombstonesOffline,
+    ).toBeFunction();
     expect(workflows.normalizeWorkspacePath).toBeFunction();
     expect(workflows.normalizeWorkspaceLeaseRequest).toBeFunction();
     expect(workflows.workspacePathsOverlap).toBeFunction();

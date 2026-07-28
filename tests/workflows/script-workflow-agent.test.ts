@@ -588,6 +588,42 @@ describe("ScriptWorkflowAgent", () => {
     expect(worker.calls).toBe(1);
   });
 
+  test("forwards durable attempt hooks to script-created steps", async () => {
+    const observed: Array<{ key: string; attempt: number; output: string }> =
+      [];
+    const workflow = new ScriptWorkflowAgent({
+      name: "script_attempt_hooks",
+      definition: defineScriptWorkflow({
+        id: "script-attempt-hooks",
+        version: "1",
+        source: "yield ctx.run(step); return 'done';",
+      }),
+      subAgents: [new ReplyAgent("worker", ["implemented"])],
+      runtime: new GeneratorScriptRuntime(function* () {
+        yield operation("run", {
+          step: { id: "implement", agentName: "worker", input: "task" },
+        });
+        return "done";
+      }),
+      resolveExecutionId: () => "script-attempt-execution",
+      runtimeHooks: {
+        afterAttempt(context, result) {
+          observed.push({
+            key: context.idempotencyKey,
+            attempt: context.attempt,
+            output: result.output,
+          });
+        },
+      },
+    });
+
+    await collect(workflow);
+
+    expect(observed).toHaveLength(1);
+    expect(observed[0]).toMatchObject({ attempt: 1, output: "implemented" });
+    expect(observed[0]?.key).toMatch(/^workflow-attempt-v1:/u);
+  });
+
   test("spawns, lists, runs, and idempotently releases dynamic agents", async () => {
     const factory = new TrackingAgentFactory();
     const staticAgent = new ReplyAgent("static_worker", ["static"]);
