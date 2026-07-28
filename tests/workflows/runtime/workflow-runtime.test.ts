@@ -13,6 +13,7 @@ import {
 } from "@google/adk";
 import { defineWorkflow } from "../../../src/workflows/definition.js";
 import { WorkflowAgent } from "../../../src/workflows/workflow-agent.js";
+import { InMemoryWorkspaceAdapter } from "../../../src/workflows/workspace/in-memory-workspace-adapter.js";
 
 interface Activity {
   active: number;
@@ -69,6 +70,30 @@ class FailingAgent extends BaseAgent {
   protected async *runAsyncImpl() {
     await new Promise((resolve) => setTimeout(resolve, 5));
     throw new Error("planned failure");
+  }
+
+  protected async *runLiveImpl() {}
+}
+
+class ControlledAgent extends BaseAgent {
+  readonly started = deferred<void>();
+  readonly proceed = deferred<void>();
+  hasStarted = false;
+
+  constructor(name: string) {
+    super({ name });
+  }
+
+  protected async *runAsyncImpl(context: InvocationContext) {
+    this.hasStarted = true;
+    this.started.resolve();
+    await waitFor(this.proceed.promise, context.abortSignal);
+    yield createEvent({
+      invocationId: context.invocationId,
+      author: this.name,
+      branch: context.branch,
+      content: { role: "model", parts: [{ text: `${this.name}-done` }] },
+    });
   }
 
   protected async *runLiveImpl() {}
@@ -253,7 +278,190 @@ describe("WorkflowRuntime parallel execution", () => {
     });
     expect(timeoutSlow.aborted).toBe(true);
   });
+
+  test("serializes overlapping write paths while disjoint paths remain concurrent", async () => {
+    const workspace = new InMemoryWorkspaceAdapter();
+    const first = new ControlledAgent("first");
+    const overlapping = new ControlledAgent("overlapping");
+    const disjoint = new ControlledAgent("disjoint");
+    const workflow = new WorkflowAgent({
+      name: "workspace_workflow",
+      definition: defineWorkflow({
+        id: "workspace-parallel",
+        version: "1",
+        limits: { maxConcurrency: 3 },
+        handler: (ctx) =>
+          ctx.parallel([
+            {
+              id: "first",
+              agentName: "first",
+              input: "first",
+              writePaths: ["src/shared"],
+            },
+            {
+              id: "overlapping",
+              agentName: "overlapping",
+              input: "overlapping",
+              writePaths: ["src/shared/file.ts"],
+            },
+            {
+              id: "disjoint",
+              agentName: "disjoint",
+              input: "disjoint",
+              writePaths: ["docs"],
+            },
+          ]),
+      }),
+      subAgents: [first, overlapping, disjoint],
+      workspace: { workspaceId: "repo", adapter: workspace },
+    });
+
+    const execution = collect(workflow);
+    await Promise.all([first.started.promise, disjoint.started.promise]);
+    expect(overlapping.hasStarted).toBe(false);
+
+    disjoint.proceed.resolve();
+    first.proceed.resolve();
+    await overlapping.started.promise;
+    overlapping.proceed.resolve();
+    await execution;
+
+    const lease = await workspace.acquire({
+      workspaceId: "repo",
+      ownerId: "verification",
+      writePaths: ["src/shared", "docs"],
+    });
+    expect(await lease.release()).toBe(true);
+  });
+
+  test("releases write ownership after step failure", async () => {
+    const workspace = new InMemoryWorkspaceAdapter();
+    const failing = new FailingAgent("failing");
+    const recovery = new DelayedAgent("recovery", 1, "recovered");
+    let output: string | undefined;
+    const workflow = new WorkflowAgent({
+      name: "workspace_workflow",
+      definition: defineWorkflow({
+        id: "workspace-failure",
+        version: "1",
+        limits: { timeoutMs: 250 },
+        handler: async (ctx) => {
+          try {
+            await ctx.run({
+              id: "failing",
+              agentName: "failing",
+              input: "fail",
+              writePaths: ["src/shared"],
+            });
+          } catch {
+            const result = await ctx.run({
+              id: "recovery",
+              agentName: "recovery",
+              input: "recover",
+              writePaths: ["src/shared"],
+            });
+            output = result.output;
+          }
+        },
+      }),
+      subAgents: [failing, recovery],
+      workspace: { workspaceId: "repo", adapter: workspace },
+    });
+
+    await collect(workflow);
+    expect(output).toBe("recovered");
+  });
+
+  test("releases write ownership when execution is aborted", async () => {
+    const workspace = new InMemoryWorkspaceAdapter();
+    const waiting = new ControlledAgent("waiting");
+    const controller = new AbortController();
+    const workflow = new WorkflowAgent({
+      name: "workspace_workflow",
+      definition: defineWorkflow({
+        id: "workspace-abort",
+        version: "1",
+        handler: (ctx) =>
+          ctx.run({
+            id: "waiting",
+            agentName: "waiting",
+            input: "wait",
+            writePaths: ["src/shared"],
+          }),
+      }),
+      subAgents: [waiting],
+      workspace: { workspaceId: "repo", adapter: workspace },
+    });
+
+    const execution = collect(
+      workflow,
+      invocation(workflow, controller.signal),
+    );
+    await waiting.started.promise;
+    controller.abort(new Error("stop workspace step"));
+    await expect(execution).rejects.toMatchObject({ code: "WORKFLOW_ABORTED" });
+
+    const lease = await workspace.acquire(
+      {
+        workspaceId: "repo",
+        ownerId: "verification",
+        writePaths: ["src/shared"],
+      },
+      { signal: AbortSignal.timeout(250) },
+    );
+    expect(await lease.release()).toBe(true);
+  });
+
+  test("requires workspace configuration when a step declares write paths", async () => {
+    const worker = new DelayedAgent("worker", 1, "never");
+    const workflow = new WorkflowAgent({
+      name: "workspace_workflow",
+      definition: defineWorkflow({
+        id: "workspace-required",
+        version: "1",
+        handler: (ctx) =>
+          ctx.run({
+            id: "writer",
+            agentName: "worker",
+            input: "write",
+            writePaths: ["src"],
+          }),
+      }),
+      subAgents: [worker],
+    });
+
+    await expect(collect(workflow)).rejects.toMatchObject({
+      code: "WORKFLOW_DEFINITION_INVALID",
+      message:
+        "Workflow step writer declares writePaths without a workspace adapter",
+    });
+  });
 });
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+async function waitFor(
+  promise: Promise<void>,
+  signal: AbortSignal | undefined,
+): Promise<void> {
+  if (!signal) return promise;
+  if (signal.aborted) throw signal.reason ?? new Error("aborted");
+  await new Promise<void>((resolve, reject) => {
+    const abort = () => reject(signal.reason ?? new Error("aborted"));
+    signal.addEventListener("abort", abort, { once: true });
+    void promise.then(resolve, reject).finally(() => {
+      signal.removeEventListener("abort", abort);
+    });
+  });
+}
 
 function wait(
   delayMs: number,

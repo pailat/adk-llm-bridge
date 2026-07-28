@@ -33,6 +33,11 @@ export interface WorkflowStep {
   /** Name of a sub-agent declared by the containing WorkflowAgent. */
   agentName: string;
   input: WorkflowStepInputContent;
+  /**
+   * Relative workspace paths this step may write while its agent is running.
+   * Declaring paths requires a workspace adapter on the containing workflow.
+   */
+  writePaths?: readonly string[];
   retry?: WorkflowRetryPolicy;
   /** Defaults to `fail`, preventing accidental duplicate side effects. */
   resumePolicy?: WorkflowResumePolicy;

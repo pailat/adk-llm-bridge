@@ -52,6 +52,10 @@ import type {
   WorkflowStepStartedEvent,
   WorkflowUserEvent,
 } from "../events.js";
+import type {
+  WorkflowWorkspaceConfig,
+  WorkspaceLease,
+} from "../workspace/workspace-adapter.js";
 import { AsyncSemaphore } from "./async-semaphore.js";
 import { WorkflowCheckpointCoordinator } from "./workflow-checkpoint-coordinator.js";
 
@@ -95,6 +99,7 @@ export interface WorkflowRuntimeConfig {
   hooks?: WorkflowRuntimeHooks;
   checkpointStore?: WorkflowCheckpointStore;
   resolveExecutionId?: WorkflowExecutionIdResolver;
+  workspace?: WorkflowWorkspaceConfig;
 }
 
 /** Executes one trusted workflow definition inside an ADK invocation. */
@@ -109,6 +114,7 @@ export class WorkflowRuntime {
   readonly #hooks?: WorkflowRuntimeHooks;
   readonly #checkpointStore: WorkflowCheckpointStore;
   readonly #resolveExecutionId: WorkflowExecutionIdResolver;
+  readonly #workspace?: WorkflowWorkspaceConfig;
   readonly #limits: Required<WorkflowExecutionLimits>;
   readonly #globalSemaphore: AsyncSemaphore;
   readonly #agentSemaphores = new WeakMap<BaseAgent, AsyncSemaphore>();
@@ -133,6 +139,7 @@ export class WorkflowRuntime {
       config.checkpointStore ?? new ADKSessionCheckpointStore();
     this.#resolveExecutionId =
       config.resolveExecutionId ?? ((context) => context.invocationId);
+    this.#workspace = config.workspace;
     this.#limits = validateLimits(config.definition.limits);
     this.#globalSemaphore = new AsyncSemaphore(this.#limits.maxConcurrency);
   }
@@ -331,62 +338,95 @@ export class WorkflowRuntime {
       return result;
     }
 
-    const maxAttempts = validateRetry(step, this.#limits.maxAttemptsPerStep);
-    const startedAt = Date.now();
-    let lastError: WorkflowError | undefined;
-    for (let attemptIndex = 0; attemptIndex < maxAttempts; attemptIndex++) {
-      const attempt = prepared.resolution.attempt + attemptIndex;
-      if (attemptIndex > 0) {
-        await retryDelay(step, attemptIndex, signal);
-        await this.checkpointCoordinator().startAttempt(
-          step,
-          prepared.inputHash,
-          attempt,
-        );
-      }
-      await this.emitWorkflowEvent({
-        ...this.envelope(),
-        type: "step_started",
-        step,
-        attempt,
-      } satisfies WorkflowStepStartedEvent);
-
-      const result = await this.runAgentAttempt(step, declaredAgent, signal);
-      throwIfAborted(signal);
-      if (!result.error) {
-        const completed = stepResult(step, result, attempt, startedAt);
-        await this.checkpointCoordinator().completeStep(completed);
-        await this.#hooks?.afterStep?.(hookContext, completed);
+    const lease = await this.acquireWorkspaceLease(step, signal);
+    try {
+      const maxAttempts = validateRetry(step, this.#limits.maxAttemptsPerStep);
+      const startedAt = Date.now();
+      let lastError: WorkflowError | undefined;
+      for (let attemptIndex = 0; attemptIndex < maxAttempts; attemptIndex++) {
+        const attempt = prepared.resolution.attempt + attemptIndex;
+        if (attemptIndex > 0) {
+          await retryDelay(step, attemptIndex, signal);
+          await this.checkpointCoordinator().startAttempt(
+            step,
+            prepared.inputHash,
+            attempt,
+          );
+        }
         await this.emitWorkflowEvent({
           ...this.envelope(),
-          type: "step_completed",
-          result: completed,
-        } satisfies WorkflowStepCompletedEvent);
-        return completed;
+          type: "step_started",
+          step,
+          attempt,
+        } satisfies WorkflowStepStartedEvent);
+
+        const result = await this.runAgentAttempt(step, declaredAgent, signal);
+        throwIfAborted(signal);
+        if (!result.error) {
+          const completed = stepResult(step, result, attempt, startedAt);
+          await this.checkpointCoordinator().completeStep(completed);
+          await this.#hooks?.afterStep?.(hookContext, completed);
+          await this.emitWorkflowEvent({
+            ...this.envelope(),
+            type: "step_completed",
+            result: completed,
+          } satisfies WorkflowStepCompletedEvent);
+          return completed;
+        }
+
+        lastError = new WorkflowError(
+          "WORKFLOW_EXECUTION_ERROR",
+          `Workflow step ${step.id} failed: ${result.error}`,
+          { agentName: step.agentName, stepId: step.id, attempt },
+        );
+        const failure = failureFromError(step, lastError, attempt, startedAt);
+        await this.checkpointCoordinator().failStep(failure);
       }
 
-      lastError = new WorkflowError(
-        "WORKFLOW_EXECUTION_ERROR",
-        `Workflow step ${step.id} failed: ${result.error}`,
-        { agentName: step.agentName, stepId: step.id, attempt },
+      const failure = failureFromError(
+        step,
+        lastError ?? new Error(`Workflow step ${step.id} failed`),
+        prepared.resolution.attempt + maxAttempts - 1,
+        startedAt,
       );
-      const failure = failureFromError(step, lastError, attempt, startedAt);
-      await this.checkpointCoordinator().failStep(failure);
+      await this.#hooks?.stepFailed?.(hookContext, failure);
+      await this.emitWorkflowEvent({
+        ...this.envelope(),
+        type: "step_failed",
+        failure,
+      } satisfies WorkflowStepFailedEvent);
+      throw lastError;
+    } finally {
+      await lease?.release();
+    }
+  }
+
+  private async acquireWorkspaceLease(
+    step: WorkflowStep,
+    signal: AbortSignal,
+  ): Promise<WorkspaceLease | undefined> {
+    if (step.writePaths === undefined) return undefined;
+    if (!this.#workspace) {
+      throw new WorkflowError(
+        "WORKFLOW_DEFINITION_INVALID",
+        `Workflow step ${step.id} declares writePaths without a workspace adapter`,
+        { stepId: step.id },
+      );
     }
 
-    const failure = failureFromError(
-      step,
-      lastError ?? new Error(`Workflow step ${step.id} failed`),
-      prepared.resolution.attempt + maxAttempts - 1,
-      startedAt,
+    const lease = await this.#workspace.adapter.acquire(
+      {
+        workspaceId: this.#workspace.workspaceId,
+        ownerId: `${this.#definition.id}:${this.executionId()}:${step.id}`,
+        writePaths: step.writePaths,
+      },
+      { signal },
     );
-    await this.#hooks?.stepFailed?.(hookContext, failure);
-    await this.emitWorkflowEvent({
-      ...this.envelope(),
-      type: "step_failed",
-      failure,
-    } satisfies WorkflowStepFailedEvent);
-    throw lastError;
+    if (signal.aborted) {
+      await lease.release();
+      throwIfAborted(signal);
+    }
+    return lease;
   }
 
   private async runAgentAttempt(
@@ -576,6 +616,16 @@ function validateStep(step: WorkflowStep): void {
     throw new WorkflowError(
       "WORKFLOW_UNKNOWN_AGENT",
       "Workflow step agentName is required",
+      { stepId: step.id },
+    );
+  }
+  if (
+    step.writePaths !== undefined &&
+    (!Array.isArray(step.writePaths) || step.writePaths.length === 0)
+  ) {
+    throw new WorkflowError(
+      "WORKFLOW_DEFINITION_INVALID",
+      `Workflow step ${step.id} writePaths must contain at least one path`,
       { stepId: step.id },
     );
   }
