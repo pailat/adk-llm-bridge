@@ -99,6 +99,85 @@ describe("AgentInvocationGateway", () => {
     expect(context.session.events).toHaveLength(1);
   });
 
+  test("replace mode projects state without inheriting parent secrets", async () => {
+    const worker = new CaptureAgent();
+    const root = new CaptureAgent("root");
+    const context = parentContext(root);
+    context.session.state = {
+      secret: "parent-only",
+      workflowTask: { taskId: "parent-task" },
+    };
+    const gateway = new AgentInvocationGateway({ resolveAgent: () => worker });
+
+    await gateway.run({
+      agentName: "worker",
+      input: { role: "user", parts: [{ text: "task" }] },
+      parentContext: context,
+      sessionState: { workflowTask: { taskId: "child-task" } },
+      sessionStateMode: "replace",
+    });
+
+    expect(worker.context?.session.state).toEqual({
+      workflowTask: { taskId: "child-task" },
+    });
+    expect(context.session.state).toEqual({
+      secret: "parent-only",
+      workflowTask: { taskId: "parent-task" },
+    });
+  });
+
+  test("propagates typed validation errors before resolution", async () => {
+    class StaleAttemptError extends Error {}
+    const stale = new StaleAttemptError("stale attempt");
+    let resolutions = 0;
+    const gateway = new AgentInvocationGateway({
+      resolveAgent: () => {
+        resolutions++;
+        return new CaptureAgent();
+      },
+    });
+
+    await expect(
+      gateway.run({
+        agentName: "worker",
+        input: { role: "user", parts: [{ text: "task" }] },
+        parentContext: parentContext(new CaptureAgent("root")),
+        validateInvocation: (phase) => {
+          expect(phase).toBe("before-resolve");
+          throw stale;
+        },
+      }),
+    ).rejects.toBe(stale);
+    expect(resolutions).toBe(0);
+  });
+
+  test("revalidates after resolution and before context preparation or execution", async () => {
+    class StaleAttemptError extends Error {}
+    const stale = new StaleAttemptError("ownership transferred");
+    const worker = new CaptureAgent();
+    const phases: string[] = [];
+    let preparations = 0;
+    const gateway = new AgentInvocationGateway({ resolveAgent: () => worker });
+
+    await expect(
+      gateway.run({
+        agentName: "worker",
+        input: { role: "user", parts: [{ text: "task" }] },
+        parentContext: parentContext(new CaptureAgent("root")),
+        validateInvocation: (phase) => {
+          phases.push(phase);
+          if (phase === "before-execute") throw stale;
+        },
+        prepareContext: () => {
+          preparations++;
+        },
+      }),
+    ).rejects.toBe(stale);
+    expect(phases).toEqual(["before-resolve", "before-execute"]);
+    expect(preparations).toBe(0);
+    expect(worker.context).toBeUndefined();
+  });
+
   test("streams events and aggregates text, tools, errors, and state", async () => {
     const events = [
       createEvent({

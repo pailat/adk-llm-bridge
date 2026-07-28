@@ -17,6 +17,7 @@ import {
   AdkWorkflowTaskDriver,
   AdkWorkflowTaskDriverError,
 } from "../../../src/workflows/tasks/adk-workflow-task-driver.js";
+import type { WorkflowTaskAttemptAuthorityRequest } from "../../../src/workflows/tasks/authority.js";
 import type {
   WorkflowTaskDriverRequest,
   WorkflowTaskJsonValue,
@@ -147,6 +148,14 @@ function request(
   };
 }
 
+function attemptAuthority(
+  validate: (
+    request: WorkflowTaskAttemptAuthorityRequest,
+  ) => void | Promise<void> = () => undefined,
+) {
+  return { validateAttempt: validate };
+}
+
 describe("AdkWorkflowTaskDriver", () => {
   test("runs a real ADK agent with projected input, authority, and bound capabilities", async () => {
     const worker = new TestAgent();
@@ -154,6 +163,7 @@ describe("AdkWorkflowTaskDriver", () => {
     const context = parentContext(root);
     const lifecycle: string[] = [];
     const sent: WorkflowTaskJsonValue[] = [];
+    const validations: WorkflowTaskAttemptAuthorityRequest[] = [];
     let binderContext: InvocationContext | undefined;
     const binder: AdkWorkflowTaskCapabilityBinder = {
       bind: async (binding) => {
@@ -181,6 +191,9 @@ describe("AdkWorkflowTaskDriver", () => {
           release: () => lifecycle.push("release-context"),
         }),
       },
+      attemptAuthority: attemptAuthority((validation) => {
+        validations.push(validation);
+      }),
       capabilityBinder: binder,
     });
 
@@ -197,7 +210,6 @@ describe("AdkWorkflowTaskDriver", () => {
       parts: [{ text: '{"instruction":"inspect","iteration":2}' }],
     });
     expect(worker.context?.session.state).toEqual({
-      existing: "kept",
       workflowTask: {
         executionId: "execution-1",
         taskId: "task-1",
@@ -211,6 +223,20 @@ describe("AdkWorkflowTaskDriver", () => {
         },
       },
     });
+    expect(worker.context?.session.state).not.toHaveProperty("existing");
+    expect(Object.isFrozen(worker.context?.session.state)).toBe(true);
+    expect(Object.isFrozen(worker.context?.session.state.workflowTask)).toBe(
+      true,
+    );
+    expect(
+      Object.isFrozen(
+        (
+          worker.context?.session.state.workflowTask as {
+            ownership: readonly unknown[];
+          }
+        ).ownership,
+      ),
+    ).toBe(true);
     expect(JSON.parse(JSON.stringify(worker.context?.session.state))).toEqual(
       worker.context?.session.state,
     );
@@ -220,6 +246,14 @@ describe("AdkWorkflowTaskDriver", () => {
       ).some((value) => typeof value === "function"),
     ).toBe(false);
     expect(lifecycle).toEqual(["bind", "release-binder", "release-context"]);
+    expect(validations).toHaveLength(3);
+    expect(validations[0]?.claim).toEqual({
+      executionId: "execution-1",
+      taskId: "task-1",
+      workerId: "host-1",
+      leaseId: "lease-1",
+      fencingToken: 19,
+    });
   });
 
   test("supports an explicit task-aware agent and a host-only output projector", async () => {
@@ -228,6 +262,7 @@ describe("AdkWorkflowTaskDriver", () => {
     const driver = new AdkWorkflowTaskDriver({
       gateway: new AgentInvocationGateway({ resolveAgent: () => worker }),
       contextProvider: { acquire: () => ({ context }) },
+      attemptAuthority: attemptAuthority(),
       capabilityMode: "task-aware",
       outputProjector: (result, record) => ({
         answer: result.output,
@@ -267,6 +302,31 @@ describe("AdkWorkflowTaskDriver", () => {
     expect(acquired).toBe(0);
   });
 
+  test("keeps explicit unbound legacy execution independent of attempt authority", async () => {
+    const worker = new TestAgent();
+    const driver = new AdkWorkflowTaskDriver({
+      gateway: new AgentInvocationGateway({ resolveAgent: () => worker }),
+      contextProvider: {
+        acquire: () => ({ context: parentContext(new TestAgent("root")) }),
+      },
+      capabilityMode: "task-aware",
+      allowUnboundLegacyTask: true,
+    });
+
+    await expect(
+      driver.execute(
+        request(task({ orchestration: undefined, claim: undefined })),
+      ),
+    ).resolves.toEqual({ output: "done" });
+    expect(worker.context?.session.state).toEqual({
+      workflowTask: {
+        executionId: "execution-1",
+        taskId: "task-1",
+        parentTaskId: "parent-1",
+      },
+    });
+  });
+
   test("propagates abort into ADK and releases both leases exactly once", async () => {
     const controller = new AbortController();
     let started!: () => void;
@@ -295,6 +355,7 @@ describe("AdkWorkflowTaskDriver", () => {
           },
         }),
       },
+      attemptAuthority: attemptAuthority(),
       capabilityBinder: {
         bind: () => ({
           release: () => {
@@ -330,6 +391,7 @@ describe("AdkWorkflowTaskDriver", () => {
           },
         }),
       },
+      attemptAuthority: attemptAuthority(),
       capabilityBinder: {
         bind: () => ({
           release: () => {
@@ -369,6 +431,7 @@ describe("AdkWorkflowTaskDriver", () => {
           },
         }),
       },
+      attemptAuthority: attemptAuthority(),
       capabilityMode: "task-aware",
     });
 
@@ -377,5 +440,171 @@ describe("AdkWorkflowTaskDriver", () => {
       message: "ADK workflow task cleanup failed",
       errors: [expect.objectContaining({ message: "context cleanup failed" })],
     });
+  });
+
+  test("requires a live claim and attempt authority for bound tasks", async () => {
+    const worker = new TestAgent();
+    let acquired = 0;
+    const config = {
+      gateway: new AgentInvocationGateway({ resolveAgent: () => worker }),
+      contextProvider: {
+        acquire: () => {
+          acquired++;
+          return { context: parentContext(worker) };
+        },
+      },
+      capabilityMode: "task-aware" as const,
+    };
+
+    await expect(
+      new AdkWorkflowTaskDriver({
+        ...config,
+        attemptAuthority: attemptAuthority(),
+      }).execute(request(task({ claim: undefined }))),
+    ).rejects.toMatchObject({
+      code: "ADK_WORKFLOW_TASK_UNBOUND",
+      message: expect.stringContaining("live claim"),
+    });
+    await expect(
+      new AdkWorkflowTaskDriver(config).execute(request(task())),
+    ).rejects.toMatchObject({
+      code: "ADK_WORKFLOW_TASK_INVALID_CONFIG",
+      message: expect.stringContaining("attempt authority"),
+    });
+    expect(acquired).toBe(0);
+  });
+
+  test("rejects stale authority before acquiring or resolving host resources", async () => {
+    class StaleAttemptError extends Error {}
+    const stale = new StaleAttemptError("stale before acquire");
+    let acquired = 0;
+    let resolved = 0;
+    const driver = new AdkWorkflowTaskDriver({
+      gateway: new AgentInvocationGateway({
+        resolveAgent: () => {
+          resolved++;
+          return new TestAgent();
+        },
+      }),
+      contextProvider: {
+        acquire: () => {
+          acquired++;
+          return { context: parentContext(new TestAgent("root")) };
+        },
+      },
+      attemptAuthority: attemptAuthority(() => {
+        throw stale;
+      }),
+      capabilityMode: "task-aware",
+    });
+
+    await expect(driver.execute(request(task()))).rejects.toBe(stale);
+    expect(acquired).toBe(0);
+    expect(resolved).toBe(0);
+  });
+
+  test("revalidates before resolution and releases an acquired context on failure", async () => {
+    class StaleAttemptError extends Error {}
+    const stale = new StaleAttemptError("stale before resolve");
+    let valid = true;
+    let resolved = 0;
+    let released = 0;
+    const driver = new AdkWorkflowTaskDriver({
+      gateway: new AgentInvocationGateway({
+        resolveAgent: () => {
+          resolved++;
+          return new TestAgent();
+        },
+      }),
+      contextProvider: {
+        acquire: () => {
+          valid = false;
+          return {
+            context: parentContext(new TestAgent("root")),
+            release: () => {
+              released++;
+            },
+          };
+        },
+      },
+      attemptAuthority: attemptAuthority(() => {
+        if (!valid) throw stale;
+      }),
+      capabilityMode: "task-aware",
+    });
+
+    await expect(driver.execute(request(task()))).rejects.toBe(stale);
+    expect(resolved).toBe(0);
+    expect(released).toBe(1);
+  });
+
+  test("revalidates task-aware attempts after resolution and before execution", async () => {
+    class StaleAttemptError extends Error {}
+    const stale = new StaleAttemptError("stale before execution");
+    let valid = true;
+    let released = 0;
+    const worker = new TestAgent();
+    const driver = new AdkWorkflowTaskDriver({
+      gateway: new AgentInvocationGateway({
+        resolveAgent: () => {
+          valid = false;
+          return worker;
+        },
+      }),
+      contextProvider: {
+        acquire: () => ({
+          context: parentContext(new TestAgent("root")),
+          release: () => {
+            released++;
+          },
+        }),
+      },
+      attemptAuthority: attemptAuthority(() => {
+        if (!valid) throw stale;
+      }),
+      capabilityMode: "task-aware",
+    });
+
+    await expect(driver.execute(request(task()))).rejects.toBe(stale);
+    expect(worker.context).toBeUndefined();
+    expect(released).toBe(1);
+  });
+
+  test("does not bind capabilities when authority becomes stale after resolution", async () => {
+    class StaleAttemptError extends Error {}
+    const stale = new StaleAttemptError("stale before binder");
+    let valid = true;
+    let bindings = 0;
+    let released = 0;
+    const worker = new TestAgent();
+    const driver = new AdkWorkflowTaskDriver({
+      gateway: new AgentInvocationGateway({
+        resolveAgent: () => {
+          valid = false;
+          return worker;
+        },
+      }),
+      contextProvider: {
+        acquire: () => ({
+          context: parentContext(new TestAgent("root")),
+          release: () => {
+            released++;
+          },
+        }),
+      },
+      attemptAuthority: attemptAuthority(() => {
+        if (!valid) throw stale;
+      }),
+      capabilityBinder: {
+        bind: () => {
+          bindings++;
+        },
+      },
+    });
+
+    await expect(driver.execute(request(task()))).rejects.toBe(stale);
+    expect(bindings).toBe(0);
+    expect(worker.context).toBeUndefined();
+    expect(released).toBe(1);
   });
 });

@@ -38,7 +38,14 @@ export interface AgentInvocationRequest {
   abortSignal?: AbortSignal;
   /** JSON-safe state projected into the isolated child session only. */
   sessionState?: Readonly<Record<string, unknown>>;
+  /** Merge is the compatibility default; replace prevents parent-state inheritance. */
+  sessionStateMode?: "merge" | "replace";
   eventSink?: AgentInvocationEventSink;
+  /**
+   * Host authorization fence invoked around agent resolution. Rejections escape
+   * as their original typed error rather than becoming agent output.
+   */
+  validateInvocation?: AgentInvocationValidator;
   prepareContext?: AgentInvocationContextPreparer;
 }
 
@@ -55,6 +62,14 @@ export type AgentInvocationEventSink = (
 export type AgentInvocationContextPreparer = (
   childContext: InvocationContext,
   agent: BaseAgent,
+) => void | Promise<void>;
+
+export type AgentInvocationValidationPhase =
+  | "before-resolve"
+  | "before-execute";
+
+export type AgentInvocationValidator = (
+  phase: AgentInvocationValidationPhase,
 ) => void | Promise<void>;
 
 export interface AgentInvocationGatewayConfig {
@@ -82,6 +97,8 @@ export class AgentInvocationGateway {
   async run(request: AgentInvocationRequest): Promise<AgentInvocationResult> {
     const startedAt = Date.now();
     let agent: BaseAgent | undefined;
+
+    await request.validateInvocation?.("before-resolve");
 
     try {
       agent = await this.#resolveAgent(
@@ -111,6 +128,7 @@ export class AgentInvocationGateway {
       branch: request.branch,
       abortSignal: combinedAbort.signal,
       sessionState: request.sessionState,
+      sessionStateMode: request.sessionStateMode ?? "merge",
     });
 
     const events: Event[] = [];
@@ -122,6 +140,13 @@ export class AgentInvocationGateway {
     let toolCalls = 0;
     let errors = 0;
     let error: string | undefined;
+
+    try {
+      await request.validateInvocation?.("before-execute");
+    } catch (caught) {
+      combinedAbort.dispose();
+      throw caught;
+    }
 
     try {
       throwIfAborted(combinedAbort.signal);
@@ -187,6 +212,7 @@ function createChildInvocationContext({
   branch,
   abortSignal,
   sessionState,
+  sessionStateMode,
 }: {
   agent: BaseAgent;
   parentContext: InvocationContext;
@@ -194,6 +220,7 @@ function createChildInvocationContext({
   branch: string | undefined;
   abortSignal: AbortSignal | undefined;
   sessionState: Readonly<Record<string, unknown>> | undefined;
+  sessionStateMode: "merge" | "replace";
 }): InvocationContext {
   const syntheticUserEvent = createEvent({
     invocationId: parentContext.invocationId,
@@ -215,6 +242,7 @@ function createChildInvocationContext({
       parentContext.session,
       syntheticUserEvent,
       sessionState,
+      sessionStateMode,
     ),
     endInvocation: parentContext.endInvocation,
     transcriptionCache: parentContext.transcriptionCache,
@@ -230,12 +258,16 @@ function createChildSessionView(
   parentSession: Session,
   syntheticUserEvent: Event,
   sessionState: Readonly<Record<string, unknown>> | undefined,
+  sessionStateMode: "merge" | "replace",
 ): Session {
   return {
     id: parentSession.id,
     appName: parentSession.appName,
     userId: parentSession.userId,
-    state: { ...parentSession.state, ...sessionState },
+    state:
+      sessionStateMode === "replace"
+        ? Object.freeze({ ...sessionState })
+        : { ...parentSession.state, ...sessionState },
     events: [...parentSession.events, syntheticUserEvent],
     lastUpdateTime: parentSession.lastUpdateTime,
   };
