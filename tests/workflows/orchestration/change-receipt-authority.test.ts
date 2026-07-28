@@ -32,7 +32,7 @@ const INTEGRATION_INTENT = `sha256:${"b".repeat(64)}`;
 const CONTENT_DIGEST = `sha256:${"c".repeat(64)}`;
 
 describe("WorkflowLiveChangeReceiptAuthority", () => {
-  test("gives exactly one racing caller a live commit reservation", async () => {
+  test("makes racing acquire retries idempotent on one durable reservation", async () => {
     const context = await harness();
     const request = commitRequest(context);
     const outcomes = await Promise.allSettled([
@@ -41,11 +41,8 @@ describe("WorkflowLiveChangeReceiptAuthority", () => {
     ]);
 
     expect(outcomes.filter((item) => item.status === "fulfilled")).toHaveLength(
-      1,
+      2,
     );
-    expect(outcomes.find((item) => item.status === "rejected")).toMatchObject({
-      reason: { code: "WORKFLOW_CHANGE_AUTHORITY_INVALID" },
-    });
     expect((await context.state.get("execution-1"))?.reservations).toHaveLength(
       1,
     );
@@ -95,6 +92,17 @@ describe("WorkflowLiveChangeReceiptAuthority", () => {
     const commit = commitResult(context);
     await context.authority.completeCommit(commitLease, commit);
     await context.authority.release(commitLease);
+    await expect(
+      context.ownership.transfer(
+        {
+          executionId: "execution-1",
+          planRevision: 1,
+          sourceGrantId: context.grantId,
+          targetTaskId: "task-b",
+        },
+        actor("coordinator", "integration"),
+      ),
+    ).rejects.toMatchObject({ code: "WORKFLOW_MUTATION_RESERVATION_ACTIVE" });
     expect(
       await context.authority.reconcile({
         kind: "commit",
@@ -129,6 +137,160 @@ describe("WorkflowLiveChangeReceiptAuthority", () => {
         intentDigest: INTEGRATION_INTENT,
       }),
     ).toEqual({ status: "completed" });
+
+    await expect(
+      context.ownership.transfer(
+        {
+          executionId: "execution-1",
+          planRevision: 1,
+          sourceGrantId: context.grantId,
+          targetTaskId: "task-b",
+        },
+        actor("coordinator", "integration"),
+      ),
+    ).resolves.toMatchObject({ taskId: "task-b" });
+  });
+
+  test("reconstructs a lease after restart and replays exact completion", async () => {
+    const context = await harness();
+    const original = await context.authority.acquireCommit(
+      commitRequest(context),
+    );
+    const restarted = context.createAuthority();
+    const recovered = await restarted.acquireCommit(commitRequest(context));
+
+    expect(recovered).not.toBe(original);
+    expect(recovered).toEqual(original);
+    await restarted.completeCommit(recovered, commitResult(context));
+
+    const replayed = context.createAuthority();
+    const completedLease = await replayed.acquireCommit(commitRequest(context));
+    await replayed.completeCommit(completedLease, commitResult(context));
+    await expect(
+      replayed.completeCommit(completedLease, {
+        ...commitResult(context),
+        commitId: "different-commit",
+      }),
+    ).rejects.toMatchObject({ code: "WORKFLOW_CHANGE_AUTHORITY_INVALID" });
+  });
+
+  test("keeps completed commits fenced until explicit abandonment", async () => {
+    const context = await harness();
+    const lease = await context.authority.acquireCommit(commitRequest(context));
+    await context.authority.completeCommit(lease, commitResult(context));
+
+    await context.authority.abandonCommit(lease);
+    await expect(
+      context.ownership.transfer(
+        {
+          executionId: "execution-1",
+          planRevision: 1,
+          sourceGrantId: context.grantId,
+          targetTaskId: "task-b",
+        },
+        actor("coordinator", "integration"),
+      ),
+    ).resolves.toMatchObject({ taskId: "task-b" });
+  });
+
+  test("renews an expired reservation by CAS when authority is still live", async () => {
+    let now = 100;
+    const context = await harness(() => now);
+    const first = await context.authority.acquireCommit(commitRequest(context));
+    now = 111;
+    const recovered = await context
+      .createAuthority()
+      .acquireCommit(commitRequest(context));
+
+    expect(recovered).toEqual(first);
+    expect(
+      (await context.state.get("execution-1"))?.reservations?.[0]?.expiresAt,
+    ).toBe(121);
+    await expect(
+      context.ownership.transfer(
+        {
+          executionId: "execution-1",
+          planRevision: 1,
+          sourceGrantId: context.grantId,
+          targetTaskId: "task-b",
+        },
+        actor("coordinator", "integration"),
+      ),
+    ).rejects.toMatchObject({ code: "WORKFLOW_MUTATION_RESERVATION_ACTIVE" });
+  });
+
+  test("accepts a deterministic late completion while fences remain live", async () => {
+    let now = 100;
+    const context = await harness(() => now);
+    const lease = await context.authority.acquireCommit(commitRequest(context));
+    now = 111;
+
+    await expect(
+      context.authority.completeCommit(lease, commitResult(context)),
+    ).resolves.toBeUndefined();
+    expect(
+      (await context.state.get("execution-1"))?.reservations?.[0]?.status,
+    ).toBe("completed");
+  });
+
+  test("marks a late host result ambiguous when expired authority moved", async () => {
+    let now = 100;
+    const context = await harness(() => now);
+    const lease = await context.authority.acquireCommit(commitRequest(context));
+    now = 111;
+    await context.ownership.transfer(
+      {
+        executionId: "execution-1",
+        planRevision: 1,
+        sourceGrantId: context.grantId,
+        targetTaskId: "task-b",
+      },
+      actor("coordinator", "integration"),
+    );
+
+    await expect(
+      context.authority.completeCommit(lease, commitResult(context)),
+    ).rejects.toThrow("ambiguous");
+    await expect(context.authority.release(lease)).resolves.toBeUndefined();
+    expect(
+      await context.authority.reconcile({
+        kind: "commit",
+        operationId: "commit-op",
+        intentDigest: COMMIT_INTENT,
+      }),
+    ).toEqual({ status: "ambiguous" });
+  });
+
+  test("makes a superseded late result ambiguous without breaking release", async () => {
+    let now = 100;
+    const context = await harness(() => now);
+    const lease = await context.authority.acquireCommit(commitRequest(context));
+    now = 111;
+    const current = await context.state.get("execution-1");
+    if (!current) throw new Error("expected orchestration state");
+    await context.state.compareAndSet(
+      {
+        ...current,
+        revision: current.revision + 1,
+        activePlanRevision: 2,
+        grants: [],
+        reservations: [],
+        updatedAt: now,
+      },
+      current.revision,
+    );
+
+    await expect(
+      context.authority.completeCommit(lease, commitResult(context)),
+    ).rejects.toThrow("ambiguous");
+    await expect(context.authority.release(lease)).resolves.toBeUndefined();
+    expect(
+      await context.authority.reconcile({
+        kind: "commit",
+        operationId: "commit-op",
+        intentDigest: COMMIT_INTENT,
+      }),
+    ).toEqual({ status: "ambiguous" });
   });
 
   test("expires abandoned reservations and reconciles them as ambiguous", async () => {
@@ -173,7 +335,7 @@ async function harness(now: () => number = () => 100) {
     plans,
     state,
     createId: (kind) => `${kind}-${++id}`,
-    now: () => 10 + id,
+    now,
     authorizer: { authorize: () => true },
   });
   const grant = await ownership.claim(
@@ -217,14 +379,17 @@ async function harness(now: () => number = () => 100) {
     },
     actor("coordinator", "integration"),
   );
-  return {
-    authority: new WorkflowLiveChangeReceiptAuthority({
+  const createAuthority = () =>
+    new WorkflowLiveChangeReceiptAuthority({
       state,
       receipts,
       journal,
       now,
       reservationTtlMs: 10,
-    }),
+    });
+  return {
+    authority: createAuthority(),
+    createAuthority,
     ownership,
     state,
     receipt,
