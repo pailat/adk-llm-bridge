@@ -18,6 +18,7 @@ import {
 import {
   InMemoryWorkflowTaskMessageStore,
   InMemoryWorkflowTaskStore,
+  type WorkflowTaskClaimStore,
 } from "../../../src/workflows/tasks/stores.js";
 
 describe("WorkflowTaskController durable recovery", () => {
@@ -225,7 +226,7 @@ describe("WorkflowTaskController durable recovery", () => {
     });
   });
 
-  test("rejects recovery of cancelling expiry until the store defines it", async () => {
+  test("finalizes an expired cancelling claim without relaunching it", async () => {
     let now = 10;
     const gate = deferred<WorkflowTaskDriverResult>();
     const store = new InMemoryWorkflowTaskStore({ now: () => now });
@@ -244,11 +245,168 @@ describe("WorkflowTaskController durable recovery", () => {
     await controller.cancel(handle);
     now = 30;
 
-    await expect(controller.recoverExpired(handle)).rejects.toMatchObject({
-      code: "WORKFLOW_TASK_INVALID_TRANSITION",
+    await expect(controller.recoverExpired(handle)).resolves.toEqual(handle);
+    expect(await controller.status(handle)).toMatchObject({
+      status: "cancelled",
+      attempt: 1,
+      error: { code: "WORKFLOW_TASK_CANCELLED" },
     });
     gate.resolve({});
     await controller.waitForIdle();
+  });
+
+  test("observes remote cancellation on heartbeat and finishes as cancelled", async () => {
+    let now = 10;
+    const store = new InMemoryWorkflowTaskStore({ now: () => now });
+    const messages = new InMemoryWorkflowTaskMessageStore();
+    const ownerScheduler = new ManualHeartbeatScheduler();
+    let ownerSignal: AbortSignal | undefined;
+    const owner = durableController({
+      store,
+      messageStore: messages,
+      now: () => now,
+      scheduler: ownerScheduler,
+      workerId: "worker-owner",
+      leaseId: "lease-owner",
+      driver: {
+        async execute(request) {
+          ownerSignal = request.signal;
+          await new Promise<void>((_resolve, reject) => {
+            request.signal.addEventListener(
+              "abort",
+              () => reject(request.signal.reason),
+              { once: true },
+            );
+          });
+          return { output: "must-not-complete" };
+        },
+      },
+    });
+    const remote = durableController({
+      store,
+      messageStore: messages,
+      now: () => now,
+      scheduler: new ManualHeartbeatScheduler(),
+      workerId: "worker-remote",
+      leaseId: "lease-remote",
+      driver: { execute: async () => ({}) },
+    });
+
+    const handle = await owner.spawn(spawn("task-1"));
+    await flushUntil(() => expect(ownerSignal).toBeDefined());
+    now = 11;
+    await expect(remote.cancel(handle)).resolves.toMatchObject({
+      status: "cancelling",
+      revision: 3,
+      claim: { workerId: "worker-owner" },
+    });
+    expect(ownerSignal?.aborted).toBe(false);
+
+    now = 12;
+    await ownerScheduler.heartbeat();
+    expect(ownerSignal?.aborted).toBe(true);
+    await expect(remote.join(handle)).resolves.toMatchObject({
+      status: "cancelled",
+      revision: 5,
+      error: { code: "WORKFLOW_TASK_CANCELLED" },
+    });
+  });
+
+  test("joins and awaits tasks completed by another durable controller", async () => {
+    const now = 10;
+    const store = new InMemoryWorkflowTaskStore({ now: () => now });
+    const messages = new InMemoryWorkflowTaskMessageStore();
+    const gates = new Map<
+      string,
+      ReturnType<typeof deferred<WorkflowTaskDriverResult>>
+    >();
+    const owner = durableController({
+      store,
+      messageStore: messages,
+      now: () => now,
+      scheduler: new ManualHeartbeatScheduler(),
+      workerId: "worker-owner",
+      leaseId: "lease-owner",
+      driver: {
+        async execute({ task }) {
+          const gate = deferred<WorkflowTaskDriverResult>();
+          gates.set(task.taskId, gate);
+          return await gate.promise;
+        },
+      },
+    });
+    const observer = durableController({
+      store,
+      messageStore: messages,
+      now: () => now,
+      scheduler: new ManualHeartbeatScheduler(),
+      workerId: "worker-observer",
+      leaseId: "lease-observer",
+      driver: { execute: async () => ({}) },
+    });
+
+    const first = await owner.spawn(spawn("first"));
+    const second = await owner.spawn(spawn("second"));
+    await flushUntil(() => expect(gates.size).toBe(2));
+    const joined = observer.join(first);
+    const selected = observer.awaitAny([first, second]);
+    gates.get("second")?.resolve({ output: "second" });
+    await expect(selected).resolves.toMatchObject({
+      handle: second,
+      record: { status: "completed", output: "second" },
+    });
+    gates.get("first")?.resolve({ output: "first" });
+    await expect(joined).resolves.toMatchObject({
+      status: "completed",
+      output: "first",
+    });
+  });
+
+  test("uses the configured polling fallback when revision waits are absent", async () => {
+    const now = 10;
+    const delegate = new InMemoryWorkflowTaskStore({ now: () => now });
+    const store = claimStoreWithoutRevisionWait(delegate);
+    const gate = deferred<WorkflowTaskDriverResult>();
+    const started = deferred<void>();
+    const owner = new WorkflowTaskController({
+      store,
+      messageStore: new InMemoryWorkflowTaskMessageStore(),
+      driver: {
+        async execute() {
+          started.resolve(undefined);
+          return await gate.promise;
+        },
+      },
+      now: () => now,
+      durable: durableOptions("worker-owner", "lease-owner"),
+    });
+    let polls = 0;
+    const observer = new WorkflowTaskController({
+      store,
+      messageStore: new InMemoryWorkflowTaskMessageStore(),
+      driver: { execute: async () => ({}) },
+      now: () => now,
+      durable: {
+        ...durableOptions("worker-observer", "lease-observer"),
+        pollIntervalMs: 7,
+        waitForPoll: async (intervalMs, signal) => {
+          expect(intervalMs).toBe(7);
+          if (signal.aborted) throw signal.reason;
+          polls++;
+          await Promise.resolve();
+        },
+      },
+    });
+
+    const handle = await owner.spawn(spawn("task-1"));
+    await started.promise;
+    const joined = observer.join(handle);
+    await flushUntil(() => expect(polls).toBeGreaterThan(0));
+    gate.resolve({ output: "polled" });
+    await expect(joined).resolves.toMatchObject({
+      status: "completed",
+      output: "polled",
+    });
   });
 });
 
@@ -280,6 +438,33 @@ function durableController(options: DurableControllerOptions) {
     },
     onBackgroundError: options.onBackgroundError,
   });
+}
+
+function durableOptions(workerId: string, leaseId: string) {
+  return {
+    workerId,
+    leaseDurationMs: 20,
+    heartbeatIntervalMs: 5,
+    createLeaseId: () => leaseId,
+    scheduleHeartbeat: () => ({ cancel() {} }),
+  };
+}
+
+function claimStoreWithoutRevisionWait(
+  delegate: InMemoryWorkflowTaskStore,
+): WorkflowTaskClaimStore {
+  return {
+    create: delegate.create.bind(delegate),
+    get: delegate.get.bind(delegate),
+    compareAndSet: delegate.compareAndSet.bind(delegate),
+    list: delegate.list.bind(delegate),
+    claim: delegate.claim.bind(delegate),
+    renewClaim: delegate.renewClaim.bind(delegate),
+    compareAndSetClaimed: delegate.compareAndSetClaimed.bind(delegate),
+    requestCancellation: delegate.requestCancellation.bind(delegate),
+    requeueExpired: delegate.requeueExpired.bind(delegate),
+    cancelExpiredClaim: delegate.cancelExpiredClaim.bind(delegate),
+  };
 }
 
 class ManualHeartbeatScheduler {

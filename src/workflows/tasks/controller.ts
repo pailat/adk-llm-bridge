@@ -29,10 +29,12 @@ import {
   validateTaskHandle,
   type WorkflowTaskClaimStore,
   type WorkflowTaskMessageStore,
+  type WorkflowTaskRevisionWaitStore,
   type WorkflowTaskStore,
 } from "./stores.js";
 
 export const MAX_WORKFLOW_TASK_AWAIT_HANDLES = 1_000;
+export const DEFAULT_WORKFLOW_TASK_POLL_INTERVAL_MS = 100;
 
 export interface WorkflowTaskHeartbeatHandle {
   cancel(): void;
@@ -49,6 +51,10 @@ export interface WorkflowTaskDurableExecutionConfig {
     heartbeat: () => Promise<void>,
     intervalMs: number,
   ) => WorkflowTaskHeartbeatHandle;
+  /** Poll interval used only when the store has no revision-wait capability. */
+  pollIntervalMs?: number;
+  /** Injectable, abortable polling delay for hosts and deterministic tests. */
+  waitForPoll?: (intervalMs: number, signal: AbortSignal) => Promise<void>;
 }
 
 export interface WorkflowTaskControllerConfig {
@@ -67,6 +73,7 @@ interface ActiveTask {
   task: Promise<void>;
   claimSettled: Promise<void>;
   settleClaim(): void;
+  claimError?: unknown;
   durable?: DurableAttempt;
 }
 
@@ -88,6 +95,8 @@ interface NormalizedDurableExecutionConfig {
     heartbeat: () => Promise<void>,
     intervalMs: number,
   ): WorkflowTaskHeartbeatHandle;
+  pollIntervalMs: number;
+  waitForPoll(intervalMs: number, signal: AbortSignal): Promise<void>;
 }
 
 /** Durable task and mailbox coordinator suitable for a thin JSON/MCP adapter. */
@@ -196,6 +205,28 @@ export class WorkflowTaskController {
     return await this.#required(handle);
   }
 
+  /** Claims and starts an existing queued task without creating a new record. */
+  async dispatch(handle: WorkflowTaskHandle): Promise<WorkflowTaskRecord> {
+    validateExactHandle(handle);
+    this.#requiredClaimStore();
+    const key = taskKey(handle);
+    let active = this.#active.get(key);
+    if (!active) {
+      const current = await this.#required(handle);
+      if (current.status !== "queued" || current.claim !== undefined) {
+        invalidTransition(
+          handle,
+          `Workflow task cannot dispatch from ${current.status}`,
+        );
+      }
+      active = this.#launch(current, current.attempt > 1);
+    }
+    await active.claimSettled;
+    if (active.claimError !== undefined) throw active.claimError;
+    if (!active.durable) notOwned(handle);
+    return active.durable.record;
+  }
+
   /**
    * Requeues one expired running attempt and starts a new fenced attempt.
    *
@@ -209,22 +240,25 @@ export class WorkflowTaskController {
     validateExactHandle(handle);
     const claimStore = this.#requiredClaimStore();
     const current = await this.#required(handle);
-    if (current.status === "cancelling") {
-      invalidTransition(
-        handle,
-        "Expired cancelling tasks are not recoverable by the configured claim store",
-      );
-    }
-    if (current.status !== "running" || current.claim === undefined) {
+    if (
+      (current.status !== "running" && current.status !== "cancelling") ||
+      current.claim === undefined
+    ) {
       invalidTransition(
         handle,
         `Workflow task cannot recover from ${current.status}`,
       );
     }
-    const queued = await claimStore.requeueExpired({
-      ...handle,
-      expectedRevision: current.revision,
-    });
+    const recovered =
+      current.status === "cancelling"
+        ? await claimStore.cancelExpiredClaim({
+            ...handle,
+            expectedRevision: current.revision,
+          })
+        : await claimStore.requeueExpired({
+            ...handle,
+            expectedRevision: current.revision,
+          });
     const previous = this.#active.get(taskKey(handle));
     if (previous?.durable) {
       this.#loseClaim(
@@ -236,8 +270,8 @@ export class WorkflowTaskController {
         ),
       );
     }
-    this.#launch(queued, true);
-    return taskHandle(queued);
+    if (recovered.status === "queued") this.#launch(recovered, true);
+    return taskHandle(recovered);
   }
 
   async list(
@@ -257,11 +291,22 @@ export class WorkflowTaskController {
         return await this.#cancelDurable(handle, active);
       }
       if (current.claim !== undefined) {
-        if (!active || active.durable?.lost) notOwned(handle);
-        // claim() may publish remotely before its response installs the local
-        // guard. Wait for that response rather than attempting unfenced CAS.
-        await active.claimSettled;
-        continue;
+        if (active && !active.durable && active.claimError === undefined) {
+          // claim() may publish remotely before its response installs the
+          // local guard. Wait rather than attempting unfenced cancellation.
+          await active.claimSettled;
+          continue;
+        }
+        if (!this.#claimStore || !this.#durable) notOwned(handle);
+        try {
+          return await this.#claimStore.requestCancellation({
+            ...handle,
+            expectedRevision: current.revision,
+          });
+        } catch (error) {
+          if (!isConflict(error)) throw error;
+          continue;
+        }
       }
       if (current.status === "cancelling") {
         if (!active) {
@@ -344,6 +389,7 @@ export class WorkflowTaskController {
     signal?: AbortSignal,
   ): Promise<WorkflowTaskRecord> {
     validateExactHandle(handle);
+    if (this.#durable) return await this.#joinDurable(handle, signal);
     const current = await this.#required(handle);
     if (isTerminalTaskStatus(current.status)) return current;
     const active = this.#active.get(taskKey(handle));
@@ -367,6 +413,7 @@ export class WorkflowTaskController {
     signal?: AbortSignal,
   ): Promise<WorkflowTaskAwaitAnyResult> {
     const normalized = normalizeHandles(handles);
+    if (this.#durable) return await this.#awaitAnyDurable(normalized, signal);
     const terminal = await this.#firstTerminal(normalized);
     if (terminal) return terminal;
     const activeTasks: Promise<void>[] = [];
@@ -396,7 +443,77 @@ export class WorkflowTaskController {
     }
   }
 
-  #launch(record: WorkflowTaskRecord, resumed: boolean): void {
+  async #joinDurable(
+    handle: WorkflowTaskHandle,
+    signal?: AbortSignal,
+  ): Promise<WorkflowTaskRecord> {
+    let current = await this.#required(handle);
+    while (!isTerminalTaskStatus(current.status)) {
+      current = await this.#waitForRevision(handle, current.revision, signal);
+    }
+    return current;
+  }
+
+  async #awaitAnyDurable(
+    handles: readonly WorkflowTaskHandle[],
+    signal?: AbortSignal,
+  ): Promise<WorkflowTaskAwaitAnyResult> {
+    while (true) {
+      const records = await Promise.all(
+        handles.map(async (handle) => await this.#required(handle)),
+      );
+      for (let index = 0; index < records.length; index++) {
+        const record = records[index] as WorkflowTaskRecord;
+        if (isTerminalTaskStatus(record.status)) {
+          return immutableTaskJson({
+            handle: handles[index] as WorkflowTaskHandle,
+            record,
+          });
+        }
+      }
+      const round = linkedAbortController(signal);
+      try {
+        await Promise.race(
+          records.map(
+            async (record) =>
+              await this.#waitForRevision(
+                taskHandle(record),
+                record.revision,
+                round.signal,
+              ),
+          ),
+        );
+      } finally {
+        round.abort();
+      }
+    }
+  }
+
+  async #waitForRevision(
+    handle: WorkflowTaskHandle,
+    afterRevision: number,
+    signal?: AbortSignal,
+  ): Promise<WorkflowTaskRecord> {
+    if (signal?.aborted) throw waitAborted(handle);
+    if (isWorkflowTaskRevisionWaitStore(this.#store)) {
+      return await this.#store.waitForRevision(
+        handle.executionId,
+        handle.taskId,
+        afterRevision,
+        signal,
+      );
+    }
+    const durable = this.#durable;
+    if (!durable) notOwned(handle);
+    const pollingSignal = signal ?? new AbortController().signal;
+    while (true) {
+      await durable.waitForPoll(durable.pollIntervalMs, pollingSignal);
+      const current = await this.#required(handle);
+      if (current.revision > afterRevision) return current;
+    }
+  }
+
+  #launch(record: WorkflowTaskRecord, resumed: boolean): ActiveTask {
     const abort = new AbortController();
     const token = {};
     const key = taskKey(record);
@@ -425,6 +542,7 @@ export class WorkflowTaskController {
         active.durable?.heartbeat?.cancel();
         if (this.#active.get(key)?.token === token) this.#active.delete(key);
       });
+    return active;
   }
 
   async #run(
@@ -436,6 +554,9 @@ export class WorkflowTaskController {
     let current: WorkflowTaskRecord | undefined;
     try {
       current = await this.#claim(handle, active);
+    } catch (error) {
+      active.claimError = error;
+      throw error;
     } finally {
       active.settleClaim();
     }
@@ -662,14 +783,21 @@ export class WorkflowTaskController {
       this.#assertAttemptOwns(attempt, current);
       const now = this.#timestamp();
       const { claim: _claim, ...unclaimed } = current;
+      const effectiveStatus =
+        current.status === "cancelling" ? "cancelled" : status;
+      const effectiveFields =
+        effectiveStatus === "cancelled"
+          ? { error: cancellationError() }
+          : fields;
       const candidate = immutableTaskJson({
         ...unclaimed,
-        ...fields,
-        status,
+        ...effectiveFields,
+        status: effectiveStatus,
         revision: current.revision + 1,
         updatedAt: now,
         completedAt: now,
-        ...(status === "cancelled" && current.cancelRequestedAt === undefined
+        ...(effectiveStatus === "cancelled" &&
+        current.cancelRequestedAt === undefined
           ? { cancelRequestedAt: now }
           : {}),
       } satisfies WorkflowTaskRecord);
@@ -732,12 +860,28 @@ export class WorkflowTaskController {
   async #heartbeat(active: ActiveTask): Promise<void> {
     try {
       await this.#withAttempt(active, async (attempt) => {
-        const renewed = await this.#requiredClaimStore().renewClaim({
-          ...attempt.guard,
-          expectedRevision: attempt.record.revision,
-          leaseDurationMs: this.#durable?.leaseDurationMs ?? 0,
-        });
+        let renewed: WorkflowTaskRecord;
+        try {
+          renewed = await this.#requiredClaimStore().renewClaim({
+            ...attempt.guard,
+            expectedRevision: attempt.record.revision,
+            leaseDurationMs: this.#durable?.leaseDurationMs ?? 0,
+          });
+        } catch (error) {
+          if (!isConflict(error)) throw error;
+          const latest = await this.#required(attempt.guard);
+          this.#assertAttemptOwns(attempt, latest);
+          if (latest.status !== "cancelling") throw error;
+          renewed = await this.#requiredClaimStore().renewClaim({
+            ...attempt.guard,
+            expectedRevision: latest.revision,
+            leaseDurationMs: this.#durable?.leaseDurationMs ?? 0,
+          });
+        }
         attempt.record = renewed;
+        if (renewed.status === "cancelling") {
+          active.abort.abort(cancellationError());
+        }
       });
     } catch (error) {
       this.#loseClaim(active, error);
@@ -1133,7 +1277,18 @@ function isWorkflowTaskClaimStore(
     typeof candidate.claim === "function" &&
     typeof candidate.renewClaim === "function" &&
     typeof candidate.compareAndSetClaimed === "function" &&
-    typeof candidate.requeueExpired === "function"
+    typeof candidate.requestCancellation === "function" &&
+    typeof candidate.requeueExpired === "function" &&
+    typeof candidate.cancelExpiredClaim === "function"
+  );
+}
+
+function isWorkflowTaskRevisionWaitStore(
+  store: WorkflowTaskStore,
+): store is WorkflowTaskRevisionWaitStore {
+  return (
+    typeof (store as Partial<WorkflowTaskRevisionWaitStore>).waitForRevision ===
+    "function"
   );
 }
 
@@ -1174,12 +1329,27 @@ function normalizeDurableConfig(
       "Workflow task durable scheduleHeartbeat must be a function",
     );
   }
+  const pollIntervalMs =
+    config.pollIntervalMs ?? DEFAULT_WORKFLOW_TASK_POLL_INTERVAL_MS;
+  if (!Number.isSafeInteger(pollIntervalMs) || pollIntervalMs <= 0) {
+    throw new TypeError(
+      "Workflow task durable pollIntervalMs must be a positive integer",
+    );
+  }
+  if (
+    config.waitForPoll !== undefined &&
+    typeof config.waitForPoll !== "function"
+  ) {
+    throw new TypeError("Workflow task durable waitForPoll must be a function");
+  }
   return {
     workerId: config.workerId,
     leaseDurationMs: config.leaseDurationMs,
     heartbeatIntervalMs: config.heartbeatIntervalMs,
     createLeaseId: config.createLeaseId ?? defaultCreateLeaseId,
     scheduleHeartbeat: config.scheduleHeartbeat ?? defaultScheduleHeartbeat,
+    pollIntervalMs,
+    waitForPoll: config.waitForPoll ?? defaultWaitForPoll,
   };
 }
 
@@ -1205,6 +1375,41 @@ function defaultScheduleHeartbeat(
       timer = undefined;
     },
   });
+}
+
+async function defaultWaitForPoll(
+  intervalMs: number,
+  signal: AbortSignal,
+): Promise<void> {
+  if (signal.aborted) throw waitAborted(undefined);
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, intervalMs);
+    timer.unref?.();
+    const onAbort = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
+      reject(waitAborted(undefined));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) onAbort();
+  });
+}
+
+function linkedAbortController(signal?: AbortSignal): AbortController {
+  const controller = new AbortController();
+  if (!signal) return controller;
+  const forwardAbort = () => controller.abort(signal.reason);
+  if (signal.aborted) forwardAbort();
+  else signal.addEventListener("abort", forwardAbort, { once: true });
+  controller.signal.addEventListener(
+    "abort",
+    () => signal.removeEventListener("abort", forwardAbort),
+    { once: true },
+  );
+  return controller;
 }
 
 function notOwned(handle: WorkflowTaskHandle): never {
