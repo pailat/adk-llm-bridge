@@ -1,0 +1,165 @@
+/**
+ * @license
+ * Copyright 2025 PAI
+ * SPDX-License-Identifier: MIT
+ */
+
+export type WorkflowTaskJsonPrimitive = string | number | boolean | null;
+export type WorkflowTaskJsonValue =
+  | WorkflowTaskJsonPrimitive
+  | { readonly [key: string]: WorkflowTaskJsonValue }
+  | readonly WorkflowTaskJsonValue[];
+
+export type WorkflowTaskStatus =
+  | "queued"
+  | "running"
+  | "cancelling"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+/** Serializable durable reference. It intentionally contains no Promise or closure. */
+export interface WorkflowTaskHandle {
+  executionId: string;
+  taskId: string;
+}
+
+export interface WorkflowTaskError {
+  code: string;
+  message: string;
+  details?: Readonly<Record<string, WorkflowTaskJsonValue>>;
+}
+
+export interface WorkflowTaskRecord extends WorkflowTaskHandle {
+  parentTaskId?: string;
+  agentId: string;
+  status: WorkflowTaskStatus;
+  revision: number;
+  attempt: number;
+  createdAt: number;
+  updatedAt: number;
+  startedAt?: number;
+  completedAt?: number;
+  cancelRequestedAt?: number;
+  input?: WorkflowTaskJsonValue;
+  output?: WorkflowTaskJsonValue;
+  error?: WorkflowTaskError;
+}
+
+export interface WorkflowTaskSpawnRequest extends WorkflowTaskHandle {
+  parentTaskId?: string;
+  agentId: string;
+  input?: WorkflowTaskJsonValue;
+}
+
+export interface WorkflowTaskResumeRequest extends WorkflowTaskHandle {
+  /** Explicit acknowledgement that the driver resumes from durable state. */
+  strategy: "checkpoint";
+}
+
+export interface WorkflowTaskListRequest {
+  executionId: string;
+  parentTaskId?: string;
+  agentId?: string;
+  status?: WorkflowTaskStatus;
+  cursor?: string;
+  limit?: number;
+}
+
+export interface WorkflowTaskListResult {
+  records: readonly WorkflowTaskRecord[];
+  nextCursor?: string;
+}
+
+export interface WorkflowTaskMessageAppendRequest extends WorkflowTaskHandle {
+  senderTaskId?: string;
+  payload: WorkflowTaskJsonValue;
+}
+
+export interface WorkflowTaskMessage extends WorkflowTaskMessageAppendRequest {
+  sequence: number;
+  sentAt: number;
+}
+
+export interface WorkflowTaskMessageCursor extends WorkflowTaskHandle {
+  afterSequence: number;
+}
+
+export interface WorkflowTaskMessageReadRequest extends WorkflowTaskHandle {
+  cursor?: WorkflowTaskMessageCursor;
+  limit?: number;
+}
+
+export interface WorkflowTaskMessageReadResult {
+  messages: readonly WorkflowTaskMessage[];
+  cursor: WorkflowTaskMessageCursor;
+  hasMore: boolean;
+}
+
+export interface WorkflowTaskDriverChildRequest {
+  taskId: string;
+  agentId: string;
+  input?: WorkflowTaskJsonValue;
+}
+
+export interface WorkflowTaskDriverSendRequest {
+  taskId: string;
+  payload: WorkflowTaskJsonValue;
+}
+
+export interface WorkflowTaskDriverRequest {
+  task: WorkflowTaskRecord;
+  signal: AbortSignal;
+  resumed: boolean;
+  spawn(request: WorkflowTaskDriverChildRequest): Promise<WorkflowTaskHandle>;
+  send(request: WorkflowTaskDriverSendRequest): Promise<WorkflowTaskMessage>;
+  readMailbox(
+    request?: Pick<WorkflowTaskMessageReadRequest, "cursor" | "limit">,
+  ): Promise<WorkflowTaskMessageReadResult>;
+  /** Cancelable long-poll bound to this driver's AbortSignal. */
+  waitForMailbox(
+    request?: Pick<WorkflowTaskMessageReadRequest, "cursor" | "limit">,
+  ): Promise<WorkflowTaskMessageReadResult>;
+}
+
+export interface WorkflowTaskDriverResult {
+  output?: WorkflowTaskJsonValue;
+}
+
+/** Host-injected task executor. Provider delivery is intentionally out of scope. */
+export interface WorkflowTaskDriver {
+  execute(
+    request: WorkflowTaskDriverRequest,
+  ): Promise<WorkflowTaskDriverResult>;
+}
+
+export interface WorkflowTaskAwaitAnyResult {
+  handle: WorkflowTaskHandle;
+  record: WorkflowTaskRecord;
+}
+
+export type WorkflowTaskControlErrorCode =
+  | "WORKFLOW_TASK_INVALID_REQUEST"
+  | "WORKFLOW_TASK_NOT_FOUND"
+  | "WORKFLOW_TASK_DUPLICATE"
+  | "WORKFLOW_TASK_CONFLICT"
+  | "WORKFLOW_TASK_INVALID_TRANSITION"
+  | "WORKFLOW_TASK_NOT_OWNED"
+  | "WORKFLOW_TASK_MAILBOX_FULL"
+  | "WORKFLOW_TASK_WAIT_ABORTED";
+
+export class WorkflowTaskControlError extends Error {
+  readonly code: WorkflowTaskControlErrorCode;
+  readonly details?: Readonly<Record<string, WorkflowTaskJsonValue>>;
+
+  constructor(
+    code: WorkflowTaskControlErrorCode,
+    message: string,
+    details?: Readonly<Record<string, WorkflowTaskJsonValue>>,
+  ) {
+    super(message);
+    this.name = "WorkflowTaskControlError";
+    this.code = code;
+    this.details = details;
+  }
+}
