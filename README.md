@@ -305,6 +305,38 @@ version, step identity, or script source is rejected explicitly. A custom
 `WorkflowCheckpointStore` and stable `resolveExecutionId` may be injected for
 external durability.
 
+For multiple Node processes on one host, use the dependency-free filesystem
+adapters instead of the process-local defaults:
+
+```typescript
+import {
+  FileSystemWorkflowCheckpointStore,
+  FileSystemWorkspaceAdapter,
+  WorkflowAgent,
+} from "adk-llm-bridge/workflows";
+
+const workflow = new WorkflowAgent({
+  name: "DurableImplementationWorkflow",
+  subAgents: [planner, implementer, reviewer],
+  definition,
+  checkpointStore: new FileSystemWorkflowCheckpointStore({
+    root: "/var/lib/my-app/workflow-checkpoints",
+  }),
+  workspace: {
+    workspaceId: "repository-main",
+    adapter: new FileSystemWorkspaceAdapter({
+      stateDirectory: "/var/lib/my-app/workspace-leases",
+    }),
+  },
+});
+```
+
+These adapters coordinate cooperating processes on one local filesystem. They
+are not distributed database adapters, and workspace fencing tokens must be
+enforced by the host that performs external writes. See the
+**[workflow durability guide](./docs/workflow-durability.md)** for recovery,
+filesystem, and tombstone requirements.
+
 See **[codex-workflow](./examples/codex-workflow)** for a runnable dynamic
 planner → implementer → reviewer flow using only Codex agents.
 
