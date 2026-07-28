@@ -47,6 +47,19 @@ describe("InMemoryWorkflowHostMutationJournal", () => {
     expect((await journal.begin(intent())).record).toBe(completed);
   });
 
+  test("atomically identifies only the first host mutation attempt", async () => {
+    const journal = new InMemoryWorkflowHostMutationJournal();
+    await journal.begin(intent());
+    const attempts = await Promise.all([
+      journal.beginHostMutation(intent()),
+      journal.beginHostMutation(intent()),
+    ]);
+    expect(attempts.filter((attempt) => attempt.created)).toHaveLength(1);
+    expect(
+      attempts.every((attempt) => attempt.record.hostStartedAt === 1000),
+    ).toBe(true);
+  });
+
   test("rejects operation id reuse with another intent or result", async () => {
     const journal = new InMemoryWorkflowHostMutationJournal();
     await journal.begin(intent());

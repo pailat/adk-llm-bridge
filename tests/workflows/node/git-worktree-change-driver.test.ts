@@ -7,6 +7,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import {
+  chmod,
   mkdir,
   mkdtemp,
   rename,
@@ -18,6 +19,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  FileSystemWorkflowRepositoryMutationLock,
   NodeGitWorktreeChangeDriver,
   type NodeGitWorktreeHost,
 } from "../../../src/workflows/node/git-worktree-change-driver.js";
@@ -260,6 +262,33 @@ describe("NodeGitWorktreeChangeDriver", () => {
     expect(await workspace.release()).toBe(false);
   });
 
+  test("binds executable mode into the accepted and prepared tree", async () => {
+    const repository = await createRepository();
+    const workspace = await provision(repository);
+    const tracked = join(workspace.host.worktreePath, "tracked.txt");
+    await writeFile(tracked, "accepted\n");
+    const accepted = await repository.driver.inspect(
+      workspace.host,
+      inspectionRequest(repository),
+    );
+    expect(
+      accepted.entries.find((entry) => entry.kind === "modified")?.mode,
+    ).toBe("100644");
+    await chmod(tracked, 0o755);
+
+    await expect(
+      new WorkflowValidatedCommitter(
+        repository.driver,
+        repository.driver,
+        authority(repository.journal),
+      ).commit(workspace.host, {
+        receipt: receiptFor(accepted, repository.baseRevision),
+        message: "mode must be reviewed",
+        operationId: "commit-mode-race",
+      }),
+    ).rejects.toMatchObject({ code: "CHANGE_RECEIPT_MISMATCH" });
+  });
+
   test("validated committer refuses a changed snapshot before Git mutation", async () => {
     const repository = await createRepository();
     const workspace = await provision(repository);
@@ -451,6 +480,46 @@ describe("NodeGitWorktreeChangeDriver", () => {
     ).resolves.toBeDefined();
   });
 
+  test("rejects an altered descriptor before reusing an active host capability", async () => {
+    const repository = await createRepository();
+    const workspace = await provision(repository);
+    await expect(
+      repository.driver.attach({
+        ...workspace.descriptor,
+        executionId: "forged-execution",
+      }),
+    ).rejects.toMatchObject({ code: "GIT_WORKTREE_STALE" });
+  });
+
+  test("reconciles provision and cleanup after a previous Git mutation succeeded", async () => {
+    const repository = await createRepository();
+    const first = await provision(repository);
+    const restarted = await NodeGitWorktreeChangeDriver.create({
+      repoRoot: repository.repoRoot,
+      worktreesRoot: repository.worktreesRoot,
+      baseRevision: repository.baseRevision,
+      createWorkspaceId: () => "workspace-1",
+      mutationJournal: repository.journal,
+    });
+    const replay = await restarted.provision({
+      executionId: "execution-1",
+      taskId: "task-1",
+    });
+    expect(replay.host.worktreePath).toBe(first.host.worktreePath);
+
+    git(
+      repository.repoRoot,
+      "worktree",
+      "remove",
+      "--force",
+      replay.host.worktreePath,
+    );
+    await expect(restarted.cleanup(replay.host)).resolves.toBe(true);
+    await expect(
+      restarted.inspect(replay.host, inspectionRequest(repository)),
+    ).rejects.toMatchObject({ code: "GIT_WORKTREE_STALE" });
+  });
+
   test("reconciles an ambiguous commit journal entry and returns it idempotently", async () => {
     const repository = await createRepository();
     const workspace = await provision(repository);
@@ -550,6 +619,146 @@ describe("NodeGitWorktreeChangeDriver", () => {
     expect(git(repository.repoRoot, "rev-parse", "refs/heads/main")).toBe(
       repository.baseRevision,
     );
+  });
+
+  test("does not attribute a pre-existing target commit to a new integration", async () => {
+    const repository = await createRepository();
+    const workspace = await provision(repository);
+    await writeFile(
+      join(workspace.host.worktreePath, "tracked.txt"),
+      "ready\n",
+    );
+    const changeSet = await repository.driver.inspect(
+      workspace.host,
+      inspectionRequest(repository),
+    );
+    const receipt = receiptFor(changeSet, repository.baseRevision);
+    const liveAuthority = authority(repository.journal);
+    const commit = await new WorkflowValidatedCommitter(
+      repository.driver,
+      repository.driver,
+      liveAuthority,
+    ).commit(workspace.host, {
+      receipt,
+      message: "pre-existing target",
+      operationId: "commit-pre-existing",
+    });
+    git(
+      repository.repoRoot,
+      "update-ref",
+      repository.targetId,
+      commit.commitId,
+      repository.baseRevision,
+    );
+
+    await expect(
+      new WorkflowValidatedIntegrator(
+        repository.driver,
+        liveAuthority,
+      ).integrate(repository.driver.repository, {
+        executionId: receipt.executionId,
+        taskId: receipt.taskId,
+        commitId: commit.commitId,
+        receiptId: receipt.receiptId,
+        changeSetDigest: receipt.changeSetDigest,
+        expectedTarget: receipt.expectedTarget,
+        operationId: "integration-pre-existing",
+        receipt,
+        commit,
+      }),
+    ).rejects.toMatchObject({ code: "GIT_MUTATION_AMBIGUOUS" });
+  });
+
+  test("replays completed integration after the target legitimately advances", async () => {
+    const repository = await createRepository();
+    const workspace = await provision(repository);
+    await writeFile(
+      join(workspace.host.worktreePath, "tracked.txt"),
+      "ready\n",
+    );
+    const changeSet = await repository.driver.inspect(
+      workspace.host,
+      inspectionRequest(repository),
+    );
+    const receipt = receiptFor(changeSet, repository.baseRevision);
+    const liveAuthority = authority(repository.journal);
+    const commit = await new WorkflowValidatedCommitter(
+      repository.driver,
+      repository.driver,
+      liveAuthority,
+    ).commit(workspace.host, {
+      receipt,
+      message: "historical replay",
+      operationId: "commit-historical",
+    });
+    const integrator = new WorkflowValidatedIntegrator(
+      repository.driver,
+      liveAuthority,
+    );
+    const request = {
+      executionId: receipt.executionId,
+      taskId: receipt.taskId,
+      commitId: commit.commitId,
+      receiptId: receipt.receiptId,
+      changeSetDigest: receipt.changeSetDigest,
+      expectedTarget: receipt.expectedTarget,
+      operationId: "integration-historical",
+      receipt,
+      commit,
+    };
+    const first = await integrator.integrate(
+      repository.driver.repository,
+      request,
+    );
+    const tree = git(
+      repository.repoRoot,
+      "rev-parse",
+      `${commit.commitId}^{tree}`,
+    );
+    const later = git(
+      repository.repoRoot,
+      "commit-tree",
+      tree,
+      "-p",
+      commit.commitId,
+      "-m",
+      "later publication",
+    );
+    git(
+      repository.repoRoot,
+      "update-ref",
+      repository.targetId,
+      later,
+      commit.commitId,
+    );
+
+    await expect(
+      integrator.integrate(repository.driver.repository, request),
+    ).resolves.toEqual(first);
+  });
+
+  test("serializes repository mutations across lock instances", async () => {
+    const repository = await createRepository();
+    const firstLock = new FileSystemWorkflowRepositoryMutationLock({
+      lockRoot: repository.worktreesRoot,
+    });
+    const secondLock = new FileSystemWorkflowRepositoryMutationLock({
+      lockRoot: repository.worktreesRoot,
+    });
+    const first = await firstLock.acquire(repository.repoRoot);
+    let acquired = false;
+    const secondPending = secondLock
+      .acquire(repository.repoRoot)
+      .then((lease) => {
+        acquired = true;
+        return lease;
+      });
+    await Bun.sleep(20);
+    expect(acquired).toBe(false);
+    await first.release();
+    const second = await secondPending;
+    expect(acquired).toBe(true);
+    await second.release();
   });
 
   test("rejects stale receipt authority before publishing a commit", async () => {

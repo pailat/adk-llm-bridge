@@ -121,6 +121,40 @@ describe("workspace change ports", () => {
     await expect(verifyWorkflowChangeSet(first)).resolves.toEqual(first);
   });
 
+  test("binds exact host modes while preserving mode-less legacy adapters", async () => {
+    const legacy = await exampleChangeSet();
+    const executable = await createWorkflowChangeSet({
+      executionId: legacy.executionId,
+      taskId: legacy.taskId,
+      planRevision: legacy.planRevision,
+      workspaceRevision: legacy.workspaceRevision,
+      baseRevision: legacy.baseRevision,
+      entries: legacy.entries.map((entry) => ({ ...entry, mode: "100755" })),
+    });
+    expect(executable.changeSetDigest).not.toBe(legacy.changeSetDigest);
+    expect(executable.entries.every((entry) => entry.mode === "100755")).toBe(
+      true,
+    );
+    await expect(
+      createWorkflowChangeSet({
+        executionId: "execution-1",
+        taskId: "task-1",
+        planRevision: 1,
+        workspaceRevision: "workspace-1",
+        baseRevision: "base-1",
+        entries: [
+          {
+            kind: "added",
+            path: "link",
+            entryKind: "symlink",
+            mode: "100755",
+            contentDigest: FILE_DIGEST,
+          },
+        ],
+      }),
+    ).rejects.toThrow("Entry mode does not match symlink");
+  });
+
   test("rejects forged digests and host handles in serialized values", async () => {
     const changeSet = await exampleChangeSet();
     await expect(

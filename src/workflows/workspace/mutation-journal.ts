@@ -30,6 +30,8 @@ export interface WorkflowHostMutationRecord extends WorkflowHostMutationIntent {
   updatedAt: number;
   result?: WorkflowResourceJsonValue;
   ambiguity?: string;
+  /** Set atomically when the host mutation driver first crosses its boundary. */
+  hostStartedAt?: number;
 }
 
 export interface WorkflowHostMutationBeginResult {
@@ -40,6 +42,9 @@ export interface WorkflowHostMutationBeginResult {
 /** Durable implementations provide idempotency by operationId + intentDigest. */
 export interface WorkflowHostMutationJournal {
   begin(
+    intent: WorkflowHostMutationIntent,
+  ): Promise<WorkflowHostMutationBeginResult>;
+  beginHostMutation(
     intent: WorkflowHostMutationIntent,
   ): Promise<WorkflowHostMutationBeginResult>;
   get(operationId: string): Promise<WorkflowHostMutationRecord | undefined>;
@@ -54,6 +59,22 @@ export interface WorkflowHostMutationJournal {
     reason: string,
   ): Promise<WorkflowHostMutationRecord>;
   list(executionId: string): Promise<readonly WorkflowHostMutationRecord[]>;
+}
+
+/**
+ * Cross-instance repository critical section. Every host operation that can
+ * checkout or move a publication target must participate in the same lock.
+ */
+export interface WorkflowRepositoryMutationLock {
+  acquire(
+    repositoryId: string,
+    options?: WorkflowChangeOperationOptions,
+  ): Promise<WorkflowRepositoryMutationLease>;
+}
+
+export interface WorkflowRepositoryMutationLease {
+  readonly repositoryId: string;
+  release(): Promise<boolean>;
 }
 
 export class WorkflowHostMutationConflictError extends Error {
@@ -74,6 +95,10 @@ export class InMemoryWorkflowHostMutationJournal
   async begin(
     intent: WorkflowHostMutationIntent,
   ): Promise<WorkflowHostMutationBeginResult> {
+    return this.#begin(intent);
+  }
+
+  #begin(intent: WorkflowHostMutationIntent): WorkflowHostMutationBeginResult {
     const normalized = normalizeIntent(intent);
     const current = this.#records.get(normalized.operationId);
     if (current) {
@@ -85,6 +110,23 @@ export class InMemoryWorkflowHostMutationJournal
       revision: 1,
       status: "pending",
       updatedAt: normalized.startedAt,
+    });
+    this.#records.set(record.operationId, record);
+    return Object.freeze({ record, created: true });
+  }
+
+  async beginHostMutation(
+    intent: WorkflowHostMutationIntent,
+  ): Promise<WorkflowHostMutationBeginResult> {
+    const begun = this.#begin(intent);
+    if (begun.record.hostStartedAt !== undefined) {
+      return Object.freeze({ record: begun.record, created: false });
+    }
+    const record = freezeRecord({
+      ...begun.record,
+      revision: begun.record.revision + 1,
+      hostStartedAt: begun.record.startedAt,
+      updatedAt: nextTimestamp(begun.record.updatedAt),
     });
     this.#records.set(record.operationId, record);
     return Object.freeze({ record, created: true });
