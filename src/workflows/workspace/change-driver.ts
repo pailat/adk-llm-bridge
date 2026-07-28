@@ -83,6 +83,17 @@ export interface WorkflowAcceptedChangeReceipt {
   ownership: readonly WorkflowOwnershipFence[];
   issuedAt: number;
   expectedTarget: WorkflowExpectedTarget;
+  /** @deprecated Required by authoritative publication APIs. */
+  agentId?: string;
+  /** @deprecated Required by authoritative publication APIs. */
+  orchestrationRevision?: number;
+}
+
+/** Receipt shape required at every live mutation boundary. */
+export interface WorkflowAuthoritativeChangeReceipt
+  extends WorkflowAcceptedChangeReceipt {
+  agentId: string;
+  orchestrationRevision: number;
 }
 
 export interface WorkflowChangeInspectionRequest {
@@ -109,31 +120,64 @@ export interface WorkflowChangeInspector<HostWorkspace = unknown> {
 export interface WorkflowCommitRequest {
   receipt: WorkflowAcceptedChangeReceipt;
   message: string;
+  /** Required at runtime. Optional only while legacy callers migrate. */
+  operationId?: string;
 }
 
 /** Input visible to a host commit implementation after reinspection. */
-export interface WorkflowCommitDriverInput {
+export interface WorkflowCommitPreparationInput {
   changeSet: WorkflowChangeSet;
-  receipt: WorkflowAcceptedChangeReceipt;
+  receipt: WorkflowAuthoritativeChangeReceipt;
   message: string;
+  operationId: string;
+}
+
+/** JSON evidence for a host-prepared tree; host temp handles stay internal. */
+export interface WorkflowCommitPreparation {
+  preparationId: string;
+  treeId: string;
+}
+
+export interface WorkflowCommitDriverInput
+  extends WorkflowCommitPreparationInput {
+  intentDigest: string;
+  preparation: WorkflowCommitPreparation;
 }
 
 export interface WorkflowCommitResult {
   commitId: string;
   receiptId: string;
   changeSetDigest: string;
+  /** Required at runtime. Optional only while legacy drivers migrate. */
+  treeId?: string;
   workspaceRevision: string;
   baseRevision: string;
   committedAt: number;
 }
 
+export interface WorkflowAuthoritativeCommitResult
+  extends WorkflowCommitResult {
+  treeId: string;
+}
+
 /** Mutation port. Call through WorkflowValidatedCommitter. */
 export interface WorkflowCommitDriver<HostWorkspace = unknown> {
+  /** Required at runtime; optional only while legacy host drivers migrate. */
+  prepareCommit?(
+    workspace: HostWorkspace,
+    input: WorkflowCommitPreparationInput,
+    options?: WorkflowChangeOperationOptions,
+  ): Promise<WorkflowCommitPreparation>;
   commit(
     workspace: HostWorkspace,
     input: WorkflowCommitDriverInput,
     options?: WorkflowChangeOperationOptions,
   ): Promise<WorkflowCommitResult>;
+  discardPreparation?(
+    workspace: HostWorkspace,
+    preparation: WorkflowCommitPreparation,
+    options?: WorkflowChangeOperationOptions,
+  ): Promise<void>;
 }
 
 export interface WorkflowIntegrationRequest {
@@ -143,6 +187,19 @@ export interface WorkflowIntegrationRequest {
   receiptId: string;
   changeSetDigest: string;
   expectedTarget: WorkflowExpectedTarget;
+  /** Required by authoritative integration callers. */
+  operationId?: string;
+  /** Full validation evidence; scalar fields above are legacy projections. */
+  receipt?: WorkflowAcceptedChangeReceipt;
+  /** Full immutable commit evidence. */
+  commit?: WorkflowCommitResult;
+}
+
+export interface WorkflowAuthoritativeIntegrationRequest
+  extends WorkflowIntegrationRequest {
+  operationId: string;
+  receipt: WorkflowAuthoritativeChangeReceipt;
+  commit: WorkflowAuthoritativeCommitResult;
 }
 
 export interface WorkflowIntegrationResult {
@@ -167,6 +224,136 @@ export interface WorkflowIntegrationDriver<HostRepository = unknown> {
   ): Promise<WorkflowIntegrationResult>;
 }
 
+/** Enforces full evidence and live authority around host integration. */
+export class WorkflowValidatedIntegrator<HostRepository = unknown> {
+  readonly #driver: WorkflowIntegrationDriver<HostRepository>;
+  readonly #authority: WorkflowChangeReceiptAuthority;
+
+  constructor(
+    driver: WorkflowIntegrationDriver<HostRepository>,
+    authority: WorkflowChangeReceiptAuthority,
+  ) {
+    if (!authority) {
+      throw new TypeError("Workflow integration requires receipt authority");
+    }
+    this.#driver = driver;
+    this.#authority = authority;
+  }
+
+  async integrate(
+    repository: HostRepository,
+    request: WorkflowIntegrationRequest,
+    options: WorkflowChangeOperationOptions = {},
+  ): Promise<WorkflowIntegrationResult> {
+    throwIfAborted(options.signal);
+    const normalized = normalizeAuthoritativeIntegrationRequest(request);
+    const intentDigest = await digestCanonicalJson({
+      operationId: normalized.operationId,
+      receiptId: normalized.receipt.receiptId,
+      commitId: normalized.commit.commitId,
+      treeId: normalized.commit.treeId,
+      expectedTarget: normalized.expectedTarget,
+    });
+    const lease = await this.#authority.acquireIntegration(
+      Object.freeze({
+        operationId: normalized.operationId,
+        intentDigest,
+        receipt: normalized.receipt,
+        commit: normalized.commit,
+        expectedTarget: normalized.expectedTarget,
+      }),
+      options,
+    );
+    assertAuthorityLease(lease, normalized.operationId, intentDigest);
+    try {
+      throwIfAborted(options.signal);
+      const result = await this.#driver.integrate(
+        repository,
+        normalized,
+        options,
+      );
+      throwIfAborted(options.signal);
+      const verified = normalizeIntegrationResult(result, normalized);
+      await this.#authority.completeIntegration(lease, verified, options);
+      return verified;
+    } finally {
+      await this.#authority.release(lease, options);
+    }
+  }
+}
+
+export const WORKFLOW_CHANGE_AUTHORITY_LEASE = Symbol(
+  "WorkflowChangeAuthorityLease",
+);
+
+/** Opaque host-only authority capability. Symbols are not JSON-serializable. */
+export interface WorkflowChangeAuthorityLease {
+  readonly [WORKFLOW_CHANGE_AUTHORITY_LEASE]: true;
+  readonly leaseId: string;
+  readonly reservationId: string;
+  readonly operationId: string;
+  readonly intentDigest: string;
+}
+
+export interface WorkflowCommitAuthorityRequest {
+  operationId: string;
+  intentDigest: string;
+  receipt: WorkflowAuthoritativeChangeReceipt;
+  changeSet: WorkflowChangeSet;
+  treeId: string;
+}
+
+export interface WorkflowIntegrationAuthorityRequest {
+  operationId: string;
+  intentDigest: string;
+  receipt: WorkflowAuthoritativeChangeReceipt;
+  commit: WorkflowAuthoritativeCommitResult;
+  expectedTarget: WorkflowExpectedTarget;
+}
+
+export interface WorkflowMutationReconcileRequest {
+  kind: "commit" | "integration";
+  operationId: string;
+  intentDigest: string;
+}
+
+export interface WorkflowMutationReconcileResult {
+  status: "pending" | "completed" | "ambiguous" | "absent";
+}
+
+/**
+ * Trusted host authority. Implementations must validate the receipt against
+ * live orchestration state while acquiring each mutation lease.
+ */
+export interface WorkflowChangeReceiptAuthority {
+  acquireCommit(
+    request: WorkflowCommitAuthorityRequest,
+    options?: WorkflowChangeOperationOptions,
+  ): Promise<WorkflowChangeAuthorityLease>;
+  completeCommit(
+    lease: WorkflowChangeAuthorityLease,
+    result: WorkflowAuthoritativeCommitResult,
+    options?: WorkflowChangeOperationOptions,
+  ): Promise<void>;
+  acquireIntegration(
+    request: WorkflowIntegrationAuthorityRequest,
+    options?: WorkflowChangeOperationOptions,
+  ): Promise<WorkflowChangeAuthorityLease>;
+  completeIntegration(
+    lease: WorkflowChangeAuthorityLease,
+    result: WorkflowIntegrationResult,
+    options?: WorkflowChangeOperationOptions,
+  ): Promise<void>;
+  release(
+    lease: WorkflowChangeAuthorityLease,
+    options?: WorkflowChangeOperationOptions,
+  ): Promise<void>;
+  reconcile(
+    request: WorkflowMutationReconcileRequest,
+    options?: WorkflowChangeOperationOptions,
+  ): Promise<WorkflowMutationReconcileResult>;
+}
+
 /**
  * Enforces the anti-TOCTOU boundary before a host commit can run.
  * The inspector is invoked for every commit, even when the receipt is fresh.
@@ -174,22 +361,32 @@ export interface WorkflowIntegrationDriver<HostRepository = unknown> {
 export class WorkflowValidatedCommitter<HostWorkspace = unknown> {
   readonly #inspector: WorkflowChangeInspector<HostWorkspace>;
   readonly #driver: WorkflowCommitDriver<HostWorkspace>;
+  readonly #authority?: WorkflowChangeReceiptAuthority;
 
   constructor(
     inspector: WorkflowChangeInspector<HostWorkspace>,
     driver: WorkflowCommitDriver<HostWorkspace>,
+    authority?: WorkflowChangeReceiptAuthority,
   ) {
     this.#inspector = inspector;
     this.#driver = driver;
+    this.#authority = authority;
   }
 
   async commit(
     workspace: HostWorkspace,
     request: WorkflowCommitRequest,
     options: WorkflowChangeOperationOptions = {},
-  ): Promise<WorkflowCommitResult> {
+  ): Promise<WorkflowAuthoritativeCommitResult> {
     throwIfAborted(options.signal);
-    const receipt = normalizeAcceptedChangeReceipt(request.receipt);
+    if (!this.#authority) {
+      throw new WorkflowChangeAuthorityError(
+        "WORKFLOW_CHANGE_AUTHORITY_REQUIRED",
+        "Workflow commits require a live change receipt authority",
+      );
+    }
+    const operationId = requiredIdentity(request.operationId, "operationId");
+    const receipt = normalizeAuthoritativeChangeReceipt(request.receipt);
     const message = requiredNonEmptyString(request.message, "commit message");
     const changeSet = await this.#inspector.inspect(
       workspace,
@@ -199,13 +396,72 @@ export class WorkflowValidatedCommitter<HostWorkspace = unknown> {
     throwIfAborted(options.signal);
     const verified = await verifyWorkflowChangeSet(changeSet);
     assertChangeSetMatchesReceipt(verified, receipt);
-    const result = await this.#driver.commit(
-      workspace,
-      Object.freeze({ changeSet: verified, receipt, message }),
-      options,
+    if (!this.#driver.prepareCommit) {
+      throw new WorkflowChangeAuthorityError(
+        "WORKFLOW_CHANGE_AUTHORITY_REQUIRED",
+        "Workflow commit driver must prepare an immutable tree before reservation",
+      );
+    }
+    const preparation = normalizeCommitPreparation(
+      await this.#driver.prepareCommit(
+        workspace,
+        Object.freeze({
+          changeSet: verified,
+          receipt,
+          message,
+          operationId,
+        }),
+        options,
+      ),
     );
-    throwIfAborted(options.signal);
-    return normalizeCommitResult(result, verified, receipt);
+    try {
+      const intentDigest = await digestCanonicalJson({
+        operationId,
+        receiptId: receipt.receiptId,
+        changeSetDigest: verified.changeSetDigest,
+        treeId: preparation.treeId,
+        message,
+      });
+      const lease = await this.#authority.acquireCommit(
+        Object.freeze({
+          operationId,
+          intentDigest,
+          receipt,
+          changeSet: verified,
+          treeId: preparation.treeId,
+        }),
+        options,
+      );
+      assertAuthorityLease(lease, operationId, intentDigest);
+      try {
+        throwIfAborted(options.signal);
+        const result = await this.#driver.commit(
+          workspace,
+          Object.freeze({
+            changeSet: verified,
+            receipt,
+            message,
+            operationId,
+            intentDigest,
+            preparation,
+          }),
+          options,
+        );
+        throwIfAborted(options.signal);
+        const normalized = normalizeCommitResult(
+          result,
+          verified,
+          receipt,
+          preparation,
+        );
+        await this.#authority.completeCommit(lease, normalized, options);
+        return normalized;
+      } finally {
+        await this.#authority.release(lease, options);
+      }
+    } finally {
+      await this.#driver.discardPreparation?.(workspace, preparation, options);
+    }
   }
 }
 
@@ -248,7 +504,13 @@ export async function verifyWorkflowChangeSet(
 export function normalizeAcceptedChangeReceipt(
   input: WorkflowAcceptedChangeReceipt,
 ): WorkflowAcceptedChangeReceipt {
-  assertExactObject(input, RECEIPT_KEYS, "accepted change receipt");
+  const hasAuthorityFields =
+    input.agentId !== undefined || input.orchestrationRevision !== undefined;
+  assertExactObject(
+    input,
+    hasAuthorityFields ? AUTHORITATIVE_RECEIPT_KEYS : RECEIPT_KEYS,
+    "accepted change receipt",
+  );
   if (input.verdict !== "accepted") {
     throw new TypeError("Change receipt verdict must be accepted");
   }
@@ -273,7 +535,7 @@ export function normalizeAcceptedChangeReceipt(
     });
   });
   const expectedTarget = normalizeExpectedTarget(input.expectedTarget);
-  return Object.freeze({
+  const normalized: WorkflowAcceptedChangeReceipt = {
     receiptId: requiredIdentity(input.receiptId, "receiptId"),
     verdict: "accepted",
     executionId: requiredIdentity(input.executionId, "executionId"),
@@ -288,7 +550,31 @@ export function normalizeAcceptedChangeReceipt(
     ownership: Object.freeze(ownership),
     issuedAt: requiredNonNegativeInteger(input.issuedAt, "issuedAt"),
     expectedTarget,
-  });
+  };
+  if (hasAuthorityFields) {
+    normalized.agentId = requiredIdentity(input.agentId, "agentId");
+    normalized.orchestrationRevision = requiredPositiveInteger(
+      input.orchestrationRevision,
+      "orchestrationRevision",
+    );
+  }
+  return Object.freeze(normalized);
+}
+
+export function normalizeAuthoritativeChangeReceipt(
+  input: WorkflowAcceptedChangeReceipt,
+): WorkflowAuthoritativeChangeReceipt {
+  const normalized = normalizeAcceptedChangeReceipt(input);
+  if (
+    normalized.agentId === undefined ||
+    normalized.orchestrationRevision === undefined
+  ) {
+    throw new WorkflowChangeAuthorityError(
+      "WORKFLOW_CHANGE_AUTHORITY_REQUIRED",
+      "Authoritative change receipt requires agentId and orchestrationRevision",
+    );
+  }
+  return normalized as WorkflowAuthoritativeChangeReceipt;
 }
 
 export function assertChangeSetMatchesReceipt(
@@ -319,17 +605,38 @@ export class WorkflowChangeMismatchError extends Error {
   readonly code:
     | "CHANGE_SET_DIGEST_MISMATCH"
     | "CHANGE_RECEIPT_MISMATCH"
-    | "COMMIT_RESULT_MISMATCH";
+    | "COMMIT_RESULT_MISMATCH"
+    | "INTEGRATION_REQUEST_MISMATCH"
+    | "INTEGRATION_RESULT_MISMATCH";
 
   constructor(
     code:
       | "CHANGE_SET_DIGEST_MISMATCH"
       | "CHANGE_RECEIPT_MISMATCH"
-      | "COMMIT_RESULT_MISMATCH",
+      | "COMMIT_RESULT_MISMATCH"
+      | "INTEGRATION_REQUEST_MISMATCH"
+      | "INTEGRATION_RESULT_MISMATCH",
     message: string,
   ) {
     super(message);
     this.name = "WorkflowChangeMismatchError";
+    this.code = code;
+  }
+}
+
+export class WorkflowChangeAuthorityError extends Error {
+  readonly code:
+    | "WORKFLOW_CHANGE_AUTHORITY_REQUIRED"
+    | "WORKFLOW_CHANGE_AUTHORITY_INVALID";
+
+  constructor(
+    code:
+      | "WORKFLOW_CHANGE_AUTHORITY_REQUIRED"
+      | "WORKFLOW_CHANGE_AUTHORITY_INVALID",
+    message: string,
+  ) {
+    super(message);
+    this.name = "WorkflowChangeAuthorityError";
     this.code = code;
   }
 }
@@ -424,11 +731,43 @@ function inspectionRequestFromReceipt(
 function normalizeCommitResult(
   input: WorkflowCommitResult,
   changeSet: WorkflowChangeSet,
-  receipt: WorkflowAcceptedChangeReceipt,
-): WorkflowCommitResult {
-  assertExactObject(input, COMMIT_RESULT_KEYS, "commit result");
+  receipt: WorkflowAuthoritativeChangeReceipt,
+  preparation: WorkflowCommitPreparation,
+): WorkflowAuthoritativeCommitResult {
+  const normalized = normalizeCommitEvidence(input, receipt);
+  if (
+    normalized.receiptId !== receipt.receiptId ||
+    normalized.changeSetDigest !== changeSet.changeSetDigest ||
+    normalized.workspaceRevision !== changeSet.workspaceRevision ||
+    normalized.baseRevision !== changeSet.baseRevision ||
+    normalized.treeId !== preparation.treeId
+  ) {
+    throw new WorkflowChangeMismatchError(
+      "COMMIT_RESULT_MISMATCH",
+      "Commit result does not match the accepted change receipt",
+    );
+  }
+  return normalized;
+}
+
+function normalizeCommitPreparation(
+  input: WorkflowCommitPreparation,
+): WorkflowCommitPreparation {
+  assertExactObject(input, COMMIT_PREPARATION_KEYS, "commit preparation");
+  return Object.freeze({
+    preparationId: requiredIdentity(input.preparationId, "preparationId"),
+    treeId: requiredRevision(input.treeId, "treeId"),
+  });
+}
+
+function normalizeCommitEvidence(
+  input: WorkflowCommitResult,
+  receipt: WorkflowAuthoritativeChangeReceipt,
+): WorkflowAuthoritativeCommitResult {
+  assertExactObject(input, AUTHORITATIVE_COMMIT_RESULT_KEYS, "commit result");
   const normalized = Object.freeze({
     commitId: requiredRevision(input.commitId, "commitId"),
+    treeId: requiredRevision(input.treeId, "treeId"),
     receiptId: requiredIdentity(input.receiptId, "receiptId"),
     changeSetDigest: requiredDigest(input.changeSetDigest, "changeSetDigest"),
     workspaceRevision: requiredRevision(
@@ -440,13 +779,92 @@ function normalizeCommitResult(
   });
   if (
     normalized.receiptId !== receipt.receiptId ||
-    normalized.changeSetDigest !== changeSet.changeSetDigest ||
-    normalized.workspaceRevision !== changeSet.workspaceRevision ||
-    normalized.baseRevision !== changeSet.baseRevision
+    normalized.changeSetDigest !== receipt.changeSetDigest ||
+    normalized.workspaceRevision !== receipt.workspaceRevision ||
+    normalized.baseRevision !== receipt.baseRevision
   ) {
     throw new WorkflowChangeMismatchError(
       "COMMIT_RESULT_MISMATCH",
-      "Commit result does not match the accepted change receipt",
+      "Commit evidence does not match the accepted change receipt",
+    );
+  }
+  return normalized;
+}
+
+export function normalizeAuthoritativeIntegrationRequest(
+  input: WorkflowIntegrationRequest,
+): WorkflowAuthoritativeIntegrationRequest {
+  assertExactObject(
+    input,
+    AUTHORITATIVE_INTEGRATION_REQUEST_KEYS,
+    "integration request",
+  );
+  const receipt = normalizeAuthoritativeChangeReceipt(
+    input.receipt as WorkflowAcceptedChangeReceipt,
+  );
+  const commit = normalizeCommitEvidence(
+    input.commit as WorkflowCommitResult,
+    receipt,
+  );
+  const expectedTarget = normalizeExpectedTarget(input.expectedTarget);
+  const normalized = Object.freeze({
+    executionId: requiredIdentity(input.executionId, "executionId"),
+    taskId: requiredIdentity(input.taskId, "taskId"),
+    commitId: requiredRevision(input.commitId, "commitId"),
+    receiptId: requiredIdentity(input.receiptId, "receiptId"),
+    changeSetDigest: requiredDigest(input.changeSetDigest, "changeSetDigest"),
+    expectedTarget,
+    operationId: requiredIdentity(input.operationId, "operationId"),
+    receipt,
+    commit,
+  });
+  if (
+    normalized.executionId !== receipt.executionId ||
+    normalized.taskId !== receipt.taskId ||
+    normalized.commitId !== commit.commitId ||
+    normalized.receiptId !== receipt.receiptId ||
+    normalized.changeSetDigest !== receipt.changeSetDigest ||
+    normalized.expectedTarget.targetId !== receipt.expectedTarget.targetId ||
+    normalized.expectedTarget.revision !== receipt.expectedTarget.revision
+  ) {
+    throw new WorkflowChangeMismatchError(
+      "INTEGRATION_REQUEST_MISMATCH",
+      "Integration request evidence is not linked to one immutable publication",
+    );
+  }
+  return normalized;
+}
+
+function normalizeIntegrationResult(
+  input: WorkflowIntegrationResult,
+  request: WorkflowAuthoritativeIntegrationRequest,
+): WorkflowIntegrationResult {
+  assertExactObject(input, INTEGRATION_RESULT_KEYS, "integration result");
+  const normalized = Object.freeze({
+    integrationId: requiredIdentity(input.integrationId, "integrationId"),
+    commitId: requiredRevision(input.commitId, "commitId"),
+    targetId: requiredIdentity(input.targetId, "targetId"),
+    previousRevision: requiredRevision(
+      input.previousRevision,
+      "previousRevision",
+    ),
+    integratedRevision: requiredRevision(
+      input.integratedRevision,
+      "integratedRevision",
+    ),
+    integratedAt: requiredNonNegativeInteger(
+      input.integratedAt,
+      "integratedAt",
+    ),
+  });
+  if (
+    normalized.commitId !== request.commit.commitId ||
+    normalized.targetId !== request.expectedTarget.targetId ||
+    normalized.previousRevision !== request.expectedTarget.revision
+  ) {
+    throw new WorkflowChangeMismatchError(
+      "INTEGRATION_RESULT_MISMATCH",
+      "Integration result does not match commit or target evidence",
     );
   }
   return normalized;
@@ -462,14 +880,34 @@ function normalizeExpectedTarget(
   });
 }
 
-async function digestCanonicalJson(
-  value: WorkflowChangeSetInput,
-): Promise<string> {
+async function digestCanonicalJson(value: unknown): Promise<string> {
   const encoded = new TextEncoder().encode(JSON.stringify(value));
   const digest = await crypto.subtle.digest("SHA-256", encoded);
   return `sha256:${Array.from(new Uint8Array(digest), (byte) =>
     byte.toString(16).padStart(2, "0"),
   ).join("")}`;
+}
+
+function assertAuthorityLease(
+  lease: WorkflowChangeAuthorityLease,
+  operationId: string,
+  intentDigest: string,
+): void {
+  if (
+    !lease ||
+    typeof lease !== "object" ||
+    lease[WORKFLOW_CHANGE_AUTHORITY_LEASE] !== true ||
+    requiredIdentity(lease.leaseId, "authority leaseId") !== lease.leaseId ||
+    requiredIdentity(lease.reservationId, "reservationId") !==
+      lease.reservationId ||
+    lease.operationId !== operationId ||
+    lease.intentDigest !== intentDigest
+  ) {
+    throw new WorkflowChangeAuthorityError(
+      "WORKFLOW_CHANGE_AUTHORITY_INVALID",
+      "Change receipt authority returned an invalid mutation lease",
+    );
+  }
 }
 
 function changeEntryKey(entry: WorkflowChangeEntry): string {
@@ -482,7 +920,10 @@ function normalizePortablePath(input: string): string {
   if (typeof input !== "string" || !input.trim() || input.includes("\0")) {
     throw new TypeError("Change paths must be non-empty portable strings");
   }
-  const path = input.replaceAll("\\", "/");
+  if (input.includes("\\")) {
+    throw new TypeError("Change paths must use forward slashes");
+  }
+  const path = input;
   if (path.startsWith("/") || /^[A-Za-z]:\//u.test(path)) {
     throw new TypeError(`Change paths must be relative: ${input}`);
   }
@@ -622,6 +1063,11 @@ const RECEIPT_KEYS = [
   "issuedAt",
   "expectedTarget",
 ] as const;
+const AUTHORITATIVE_RECEIPT_KEYS = [
+  ...RECEIPT_KEYS,
+  "agentId",
+  "orchestrationRevision",
+] as const;
 const COMMIT_RESULT_KEYS = [
   "commitId",
   "receiptId",
@@ -629,4 +1075,28 @@ const COMMIT_RESULT_KEYS = [
   "workspaceRevision",
   "baseRevision",
   "committedAt",
+] as const;
+const AUTHORITATIVE_COMMIT_RESULT_KEYS = [
+  ...COMMIT_RESULT_KEYS,
+  "treeId",
+] as const;
+const COMMIT_PREPARATION_KEYS = ["preparationId", "treeId"] as const;
+const AUTHORITATIVE_INTEGRATION_REQUEST_KEYS = [
+  "executionId",
+  "taskId",
+  "commitId",
+  "receiptId",
+  "changeSetDigest",
+  "expectedTarget",
+  "operationId",
+  "receipt",
+  "commit",
+] as const;
+const INTEGRATION_RESULT_KEYS = [
+  "integrationId",
+  "commitId",
+  "targetId",
+  "previousRevision",
+  "integratedRevision",
+  "integratedAt",
 ] as const;

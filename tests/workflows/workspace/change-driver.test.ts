@@ -8,10 +8,13 @@ import { describe, expect, test } from "bun:test";
 import {
   createWorkflowChangeSet,
   normalizeAcceptedChangeReceipt,
+  normalizeAuthoritativeIntegrationRequest,
   verifyWorkflowChangeSet,
+  WORKFLOW_CHANGE_AUTHORITY_LEASE,
   type WorkflowAcceptedChangeReceipt,
   type WorkflowChangeInspector,
   WorkflowChangeMismatchError,
+  type WorkflowChangeReceiptAuthority,
   type WorkflowCommitDriver,
   WorkflowValidatedCommitter,
 } from "../../../src/workflows/workspace/change-driver.js";
@@ -61,6 +64,38 @@ function receiptFor(
     ],
     issuedAt: 1234,
     expectedTarget: { targetId: "refs/heads/main", revision: "head-1" },
+    agentId: "agent-1",
+    orchestrationRevision: 9,
+  };
+}
+
+function authority(events: string[] = []): WorkflowChangeReceiptAuthority {
+  return {
+    acquireCommit: async (request) => {
+      events.push("acquire-commit");
+      return {
+        [WORKFLOW_CHANGE_AUTHORITY_LEASE]: true,
+        leaseId: "lease-1",
+        reservationId: "reservation-1",
+        operationId: request.operationId,
+        intentDigest: request.intentDigest,
+      };
+    },
+    completeCommit: async () => {
+      events.push("complete-commit");
+    },
+    acquireIntegration: async (request) => ({
+      [WORKFLOW_CHANGE_AUTHORITY_LEASE]: true,
+      leaseId: "lease-integration",
+      reservationId: "reservation-integration",
+      operationId: request.operationId,
+      intentDigest: request.intentDigest,
+    }),
+    completeIntegration: async () => {},
+    release: async () => {
+      events.push("release");
+    },
+    reconcile: async () => ({ status: "absent" }),
   };
 }
 
@@ -106,6 +141,26 @@ describe("workspace change ports", () => {
         host: { process: 42 },
       } as never),
     ).toThrow("unknown or non-JSON properties");
+  });
+
+  test("rejects backslashes instead of changing their path semantics", async () => {
+    await expect(
+      createWorkflowChangeSet({
+        executionId: "execution-1",
+        taskId: "task-1",
+        planRevision: 3,
+        workspaceRevision: "workspace-revision-1",
+        baseRevision: "base-revision-1",
+        entries: [
+          {
+            kind: "added",
+            path: "src\\index.ts",
+            entryKind: "file",
+            contentDigest: FILE_DIGEST,
+          },
+        ],
+      }),
+    ).rejects.toThrow("must use forward slashes");
   });
 
   test("normalizes accepted receipts with immutable fencing and target evidence", async () => {
@@ -169,9 +224,9 @@ describe("workspace change ports", () => {
     };
 
     await expect(
-      new WorkflowValidatedCommitter(inspector, driver).commit(
+      new WorkflowValidatedCommitter(inspector, driver, authority()).commit(
         { id: "host-only" },
-        { receipt, message: "atomic change" },
+        { receipt, message: "atomic change", operationId: "operation-1" },
       ),
     ).rejects.toBeInstanceOf(WorkflowChangeMismatchError);
     expect(commitCalls).toBe(0);
@@ -181,6 +236,7 @@ describe("workspace change ports", () => {
     const changeSet = await exampleChangeSet();
     const receipt = receiptFor(changeSet);
     let inspected = 0;
+    const events: string[] = [];
     const committer = new WorkflowValidatedCommitter(
       {
         inspect: async () => {
@@ -189,6 +245,10 @@ describe("workspace change ports", () => {
         },
       },
       {
+        prepareCommit: async () => ({
+          preparationId: "preparation-1",
+          treeId: "tree-1",
+        }),
         commit: async (_workspace, input) => {
           expect(input.changeSet).toEqual(changeSet);
           expect(input.receipt).toEqual(
@@ -196,6 +256,7 @@ describe("workspace change ports", () => {
           );
           return {
             commitId: "commit-1",
+            treeId: "tree-1",
             receiptId: input.receipt.receiptId,
             changeSetDigest: input.changeSet.changeSetDigest,
             workspaceRevision: input.changeSet.workspaceRevision,
@@ -204,15 +265,21 @@ describe("workspace change ports", () => {
           };
         },
       },
+      authority(events),
     );
 
     await expect(
       committer.commit(
         { hostHandle: "not-serialized" },
-        { receipt, message: "  atomic change  " },
+        {
+          receipt,
+          message: "  atomic change  ",
+          operationId: "operation-1",
+        },
       ),
     ).resolves.toEqual({
       commitId: "commit-1",
+      treeId: "tree-1",
       receiptId: "receipt-1",
       changeSetDigest: changeSet.changeSetDigest,
       workspaceRevision: "workspace-revision-1",
@@ -220,5 +287,111 @@ describe("workspace change ports", () => {
       committedAt: 2000,
     });
     expect(inspected).toBe(1);
+    expect(events).toEqual(["acquire-commit", "complete-commit", "release"]);
+  });
+
+  test("denies legacy shape-only receipts without live authority", async () => {
+    const changeSet = await exampleChangeSet();
+    let inspected = 0;
+    let committed = 0;
+    const committer = new WorkflowValidatedCommitter(
+      {
+        inspect: async () => {
+          inspected++;
+          return changeSet;
+        },
+      },
+      {
+        commit: async () => {
+          committed++;
+          throw new Error("unsafe commit");
+        },
+      },
+    );
+
+    await expect(
+      committer.commit(
+        {},
+        {
+          receipt: receiptFor(changeSet),
+          message: "must be denied",
+          operationId: "operation-1",
+        },
+      ),
+    ).rejects.toMatchObject({ code: "WORKFLOW_CHANGE_AUTHORITY_REQUIRED" });
+    expect(inspected).toBe(0);
+    expect(committed).toBe(0);
+  });
+
+  test("releases live authority when the host mutation fails", async () => {
+    const changeSet = await exampleChangeSet();
+    const events: string[] = [];
+    const committer = new WorkflowValidatedCommitter(
+      { inspect: async () => changeSet },
+      {
+        prepareCommit: async () => ({
+          preparationId: "preparation-failure",
+          treeId: "tree-failure",
+        }),
+        commit: async () => {
+          events.push("host-commit");
+          throw new Error("host failed after invocation");
+        },
+        discardPreparation: async () => {
+          events.push("discard-preparation");
+        },
+      },
+      authority(events),
+    );
+
+    await expect(
+      committer.commit(
+        {},
+        {
+          receipt: receiptFor(changeSet),
+          message: "atomic change",
+          operationId: "operation-failure",
+        },
+      ),
+    ).rejects.toThrow("host failed after invocation");
+    expect(events).toEqual([
+      "acquire-commit",
+      "host-commit",
+      "release",
+      "discard-preparation",
+    ]);
+  });
+
+  test("requires full receipt and commit linkage for integration", async () => {
+    const changeSet = await exampleChangeSet();
+    const receipt = receiptFor(changeSet);
+    const commit = {
+      commitId: "commit-1",
+      treeId: "tree-1",
+      receiptId: receipt.receiptId,
+      changeSetDigest: receipt.changeSetDigest,
+      workspaceRevision: receipt.workspaceRevision,
+      baseRevision: receipt.baseRevision,
+      committedAt: 2000,
+    };
+    const request = {
+      executionId: receipt.executionId,
+      taskId: receipt.taskId,
+      commitId: commit.commitId,
+      receiptId: receipt.receiptId,
+      changeSetDigest: receipt.changeSetDigest,
+      expectedTarget: receipt.expectedTarget,
+      operationId: "integrate-1",
+      receipt,
+      commit,
+    };
+
+    expect(normalizeAuthoritativeIntegrationRequest(request)).toEqual(request);
+    expect(() =>
+      normalizeAuthoritativeIntegrationRequest({
+        ...request,
+        commitId: "commit-forged",
+      }),
+    ).toThrow("not linked");
   });
 });
