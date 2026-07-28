@@ -5,6 +5,10 @@
  */
 
 import {
+  normalizeAuthoritativeChangeReceipt,
+  type WorkflowAuthoritativeChangeReceipt,
+} from "../workspace/change-driver.js";
+import {
   WorkflowOrchestrationControlError,
   type WorkflowOrchestrationState,
   type WorkflowPlan,
@@ -33,6 +37,50 @@ export interface WorkflowOrchestrationStateStore {
     state: WorkflowOrchestrationState,
     expectedRevision: number,
   ): Promise<WorkflowOrchestrationState>;
+}
+
+/** Durable evidence registry. Mutation authority accepts only issued receipts. */
+export interface WorkflowChangeReceiptStore {
+  put(
+    receipt: WorkflowAuthoritativeChangeReceipt,
+  ): Promise<WorkflowAuthoritativeChangeReceipt>;
+  get(
+    executionId: string,
+    receiptId: string,
+  ): Promise<WorkflowAuthoritativeChangeReceipt | undefined>;
+}
+
+export class InMemoryWorkflowChangeReceiptStore
+  implements WorkflowChangeReceiptStore
+{
+  readonly #receipts = new Map<string, WorkflowAuthoritativeChangeReceipt>();
+
+  async put(
+    receipt: WorkflowAuthoritativeChangeReceipt,
+  ): Promise<WorkflowAuthoritativeChangeReceipt> {
+    const snapshot = normalizeAuthoritativeChangeReceipt(receipt);
+    const key = receiptKey(snapshot.executionId, snapshot.receiptId);
+    const existing = this.#receipts.get(key);
+    if (existing) {
+      if (JSON.stringify(existing) !== JSON.stringify(snapshot)) {
+        invalid(
+          "Workflow receipt identity already contains different evidence",
+        );
+      }
+      return existing;
+    }
+    this.#receipts.set(key, snapshot);
+    return snapshot;
+  }
+
+  async get(
+    executionId: string,
+    receiptId: string,
+  ): Promise<WorkflowAuthoritativeChangeReceipt | undefined> {
+    validateExecutionId(executionId);
+    validateReceiptId(receiptId);
+    return this.#receipts.get(receiptKey(executionId, receiptId));
+  }
 }
 
 /** Immutable plan records keyed by executionId and planRevision. */
@@ -171,6 +219,19 @@ function validateExecutionId(executionId: string): void {
   ) {
     invalid("Workflow executionId is invalid");
   }
+}
+
+function validateReceiptId(receiptId: string): void {
+  if (
+    typeof receiptId !== "string" ||
+    !/^[A-Za-z0-9][A-Za-z0-9._:+/-]{0,255}$/u.test(receiptId)
+  ) {
+    invalid("Workflow receiptId is invalid");
+  }
+}
+
+function receiptKey(executionId: string, receiptId: string): string {
+  return `${executionId}\0${receiptId}`;
 }
 
 function invalid(message: string): never {

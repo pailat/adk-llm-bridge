@@ -86,6 +86,21 @@ export interface WorkflowOwnershipAuthorityRequest
   claims?: readonly WorkflowPathClaim[];
 }
 
+export interface WorkflowOwnershipAuthoritySnapshotRequest
+  extends WorkflowOwnershipScope {
+  taskId: string;
+  agentId: string;
+  authorities: readonly Pick<
+    WorkflowOwnershipAuthorityRequest,
+    "grantId" | "fencingToken" | "claims"
+  >[];
+}
+
+export interface WorkflowOwnershipAuthoritySnapshot {
+  orchestrationRevision: number;
+  grants: readonly WorkflowOwnershipGrant[];
+}
+
 const OWNERSHIP_MANAGEMENT_ROLES = new Set<WorkflowActorRole>([
   "architect",
   "integration",
@@ -251,6 +266,7 @@ export class WorkflowOwnershipController {
       const { state, plan } = await this.#active(request);
       assertManager(plan, actor);
       const source = requiredGrant(state, request.sourceGrantId);
+      assertGrantNotReserved(state, source.grantId);
       const target = requiredLane(plan, request.targetTaskId);
       assertClaimsAllowed(plan, target, source.claims, true);
       assertAvailable(state.grants, source.claims, source.grantId);
@@ -295,6 +311,7 @@ export class WorkflowOwnershipController {
       const { state, plan } = await this.#active(request);
       const grant = requiredGrant(state, request.grantId);
       assertGrantOwnerOrManager(plan, actor, grant);
+      assertGrantNotReserved(state, grant.grantId);
       try {
         await this.#replace(state, {
           grants: state.grants.filter((item) => item.grantId !== grant.grantId),
@@ -329,35 +346,52 @@ export class WorkflowOwnershipController {
     request: WorkflowOwnershipAuthorityRequest,
     actor: WorkflowActorContext,
   ): Promise<WorkflowOwnershipGrant> {
-    const claims = snapshotClaims(request.claims ?? [], false);
+    const snapshot = await this.validateAuthoritySnapshot(
+      {
+        executionId: request.executionId,
+        planRevision: request.planRevision,
+        taskId: request.taskId,
+        agentId: request.agentId,
+        authorities: [
+          {
+            grantId: request.grantId,
+            fencingToken: request.fencingToken,
+            ...(request.claims === undefined ? {} : { claims: request.claims }),
+          },
+        ],
+      },
+      actor,
+    );
+    return snapshot.grants[0] as WorkflowOwnershipGrant;
+  }
+
+  /** Validates every fence against one immutable orchestration snapshot. */
+  async validateAuthoritySnapshot(
+    request: WorkflowOwnershipAuthoritySnapshotRequest,
+    actor: WorkflowActorContext,
+  ): Promise<WorkflowOwnershipAuthoritySnapshot> {
+    if (!Array.isArray(request.authorities) || request.authorities.length === 0)
+      invalid("Workflow ownership authority snapshot requires fences");
     const { state } = await this.#context(
       request,
       actor,
       "ownership.validate",
       "changes:validate",
     );
-    const grant = requiredGrant(state, request.grantId);
-    if (
-      grant.planRevision !== request.planRevision ||
-      grant.taskId !== request.taskId ||
-      grant.agentId !== request.agentId ||
-      grant.fencingToken !== request.fencingToken ||
-      claims.some(
-        (claim) =>
-          !grant.claims.some((owned) => claimContainedBy(claim, owned)),
-      )
-    ) {
-      throw new WorkflowOrchestrationControlError(
-        "WORKFLOW_OWNERSHIP_STALE",
-        `Workflow ownership authority is stale: ${request.grantId}`,
-        {
-          executionId: request.executionId,
-          planRevision: request.planRevision,
-          grantId: request.grantId,
-        },
-      );
-    }
-    return grant;
+    const seen = new Set<string>();
+    const grants = request.authorities.map((authority) => {
+      if (seen.has(authority.grantId))
+        invalid("Workflow ownership authority fences must be unique");
+      seen.add(authority.grantId);
+      const claims = snapshotClaims(authority.claims ?? [], false);
+      const grant = requiredGrant(state, authority.grantId);
+      assertAuthorityGrant(grant, request, authority.fencingToken, claims);
+      return grant;
+    });
+    return Object.freeze({
+      orchestrationRevision: state.revision,
+      grants: Object.freeze(grants),
+    });
   }
 
   async #decide(
@@ -430,6 +464,7 @@ export class WorkflowOwnershipController {
   ): Pick<WorkflowOrchestrationState, "grants" | "nextFencingToken"> {
     if (proposal.kind === "release") {
       const source = requiredGrant(state, proposal.sourceGrantId as string);
+      assertGrantNotReserved(state, source.grantId);
       return {
         grants: state.grants.filter(
           (grant) => grant.grantId !== source.grantId,
@@ -456,6 +491,7 @@ export class WorkflowOwnershipController {
     }
 
     const source = requiredGrant(state, proposal.sourceGrantId as string);
+    assertGrantNotReserved(state, source.grantId);
     const claims =
       proposal.claims.length === 0 ? source.claims : proposal.claims;
     if (!sameClaims(claims, source.claims))
@@ -796,6 +832,54 @@ function requiredGrant(
     );
   }
   return grant;
+}
+
+function assertAuthorityGrant(
+  grant: WorkflowOwnershipGrant,
+  request: Pick<
+    WorkflowOwnershipAuthoritySnapshotRequest,
+    "executionId" | "planRevision" | "taskId" | "agentId"
+  >,
+  fencingToken: number,
+  claims: readonly WorkflowPathClaim[],
+): void {
+  if (
+    grant.planRevision !== request.planRevision ||
+    grant.taskId !== request.taskId ||
+    grant.agentId !== request.agentId ||
+    grant.fencingToken !== fencingToken ||
+    claims.some(
+      (claim) => !grant.claims.some((owned) => claimContainedBy(claim, owned)),
+    )
+  ) {
+    throw new WorkflowOrchestrationControlError(
+      "WORKFLOW_OWNERSHIP_STALE",
+      `Workflow ownership authority is stale: ${grant.grantId}`,
+      {
+        executionId: request.executionId,
+        planRevision: request.planRevision,
+        grantId: grant.grantId,
+      },
+    );
+  }
+}
+
+function assertGrantNotReserved(
+  state: WorkflowOrchestrationState,
+  grantId: string,
+): void {
+  const reservation = (state.reservations ?? []).find(
+    (candidate) =>
+      candidate.status === "reserved" &&
+      candidate.grants.some((grant) => grant.grantId === grantId),
+  );
+  if (reservation) {
+    throw new WorkflowOrchestrationControlError(
+      "WORKFLOW_MUTATION_RESERVATION_ACTIVE",
+      `Ownership grant is reserved by an active host mutation: ${grantId}`,
+      { grantId, reservationId: reservation.reservationId },
+    );
+  }
 }
 
 function requiredProposal(

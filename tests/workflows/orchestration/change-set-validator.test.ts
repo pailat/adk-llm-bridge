@@ -19,6 +19,7 @@ import {
 } from "../../../src/workflows/orchestration/contracts.js";
 import { WorkflowOwnershipController } from "../../../src/workflows/orchestration/ownership-controller.js";
 import {
+  InMemoryWorkflowChangeReceiptStore,
   InMemoryWorkflowOrchestrationStateStore,
   InMemoryWorkflowPlanStore,
 } from "../../../src/workflows/orchestration/stores.js";
@@ -53,6 +54,8 @@ describe("WorkflowOwnershipChangeSetValidator", () => {
       executionId: "execution-1",
       taskId: "task-a",
       planRevision: 1,
+      agentId: "builder",
+      orchestrationRevision: before?.revision,
       baseRevision: "base-1",
       issuedAt: 100,
       ownership: [
@@ -63,6 +66,9 @@ describe("WorkflowOwnershipChangeSetValidator", () => {
     });
     expect(Object.isFrozen(receipt)).toBe(true);
     expect(Object.isFrozen(receipt.ownership)).toBe(true);
+    expect(await context.receipts.get("execution-1", receipt.receiptId)).toBe(
+      receipt,
+    );
     expect(await context.state.get("execution-1")).toEqual(before);
   });
 
@@ -284,6 +290,7 @@ async function harness(
 ) {
   const plans = new InMemoryWorkflowPlanStore();
   const state = new InMemoryWorkflowOrchestrationStateStore();
+  const receipts = new InMemoryWorkflowChangeReceiptStore();
   await plans.put(plan());
   await state.create({
     protocol: WORKFLOW_ORCHESTRATION_STATE_PROTOCOL,
@@ -310,6 +317,7 @@ async function harness(
   const validator = new WorkflowOwnershipChangeSetValidator({
     plans,
     ownership: controller,
+    receipts,
     createReceiptId: () => "receipt-1",
     now: () => 100,
     ...(allowedEntryKinds === undefined ? {} : { allowedEntryKinds }),
@@ -318,6 +326,7 @@ async function harness(
   return {
     plans,
     state,
+    receipts,
     controller,
     validator,
     validatorActor,
