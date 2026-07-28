@@ -11,6 +11,22 @@ import type {
   WorkflowExecutionResumeRequest,
 } from "../execution/contracts.js";
 import type { WorkflowExecutionController } from "../execution/controller.js";
+import { WorkflowActorContext } from "../orchestration/authorization.js";
+import type {
+  WorkflowOwnershipClaimRequest,
+  WorkflowOwnershipDecisionRequest,
+  WorkflowOwnershipProposalRequest,
+  WorkflowOwnershipReleaseRequest,
+  WorkflowOwnershipScope,
+  WorkflowOwnershipTransferRequest,
+} from "../orchestration/ownership-controller.js";
+import type { WorkflowOwnershipController } from "../orchestration/ownership-controller.js";
+import type { WorkflowPlan } from "../orchestration/contracts.js";
+import type { WorkflowPlanController } from "../orchestration/plan-controller.js";
+import type {
+  WorkflowOwnershipChangeSetValidationRequest,
+  WorkflowOwnershipChangeSetValidator,
+} from "../orchestration/change-set-validator.js";
 import type {
   IntegrationGate,
   IntegrationGateRequest,
@@ -29,6 +45,10 @@ import type {
   WorkflowTaskSpawnRequest,
 } from "../tasks/contracts.js";
 import type { WorkflowTaskController } from "../tasks/controller.js";
+import type {
+  WorkflowTaskDispatcher,
+  WorkflowTaskSweepRequest,
+} from "../tasks/dispatcher.js";
 
 export const WORKFLOW_CONTROL_PROTOCOL =
   "adk-llm-bridge/workflow-control" as const;
@@ -52,6 +72,9 @@ export type WorkflowControlPlaneRequest = WorkflowControlPlaneEnvelope &
       }
     | { operation: "task.spawn"; payload: WorkflowTaskSpawnRequest }
     | { operation: "task.resume"; payload: WorkflowTaskResumeRequest }
+    | { operation: "task.dispatch"; payload: WorkflowTaskHandle }
+    | { operation: "task.recover"; payload: WorkflowTaskHandle }
+    | { operation: "task.sweep"; payload: WorkflowTaskSweepRequest }
     | { operation: "task.status"; payload: WorkflowTaskHandle }
     | { operation: "task.cancel"; payload: WorkflowTaskHandle }
     | { operation: "task.list"; payload: WorkflowTaskListRequest }
@@ -79,6 +102,34 @@ export type WorkflowControlPlaneRequest = WorkflowControlPlaneEnvelope &
         payload: Omit<WorkflowArtifactListInput, "signal">;
       }
     | { operation: "integration.validate"; payload: IntegrationGateRequest }
+    | { operation: "plan.put"; payload: WorkflowPlan }
+    | {
+        operation: "plan.get" | "plan.activate";
+        payload: { executionId: string; planRevision: number };
+      }
+    | { operation: "plan.list"; payload: { executionId: string } }
+    | { operation: "ownership.claim"; payload: WorkflowOwnershipClaimRequest }
+    | {
+        operation: "ownership.propose";
+        payload: WorkflowOwnershipProposalRequest;
+      }
+    | {
+        operation: "ownership.approve" | "ownership.reject";
+        payload: WorkflowOwnershipDecisionRequest;
+      }
+    | {
+        operation: "ownership.transfer";
+        payload: WorkflowOwnershipTransferRequest;
+      }
+    | {
+        operation: "ownership.release";
+        payload: WorkflowOwnershipReleaseRequest;
+      }
+    | { operation: "ownership.list"; payload: WorkflowOwnershipScope }
+    | {
+        operation: "ownership.validate";
+        payload: WorkflowOwnershipChangeSetValidationRequest;
+      }
   );
 
 export interface WorkflowControlPlaneConfig {
@@ -86,16 +137,23 @@ export interface WorkflowControlPlaneConfig {
   tasks: WorkflowTaskController;
   artifacts: WorkflowArtifactStore;
   integration: IntegrationGate;
+  plans?: WorkflowPlanController;
+  ownership?: WorkflowOwnershipController;
+  changeValidation?: WorkflowOwnershipChangeSetValidator;
+  dispatcher?: WorkflowTaskDispatcher;
 }
 
 export interface WorkflowControlPlaneDispatchOptions {
   /** Host-only cancellation for long-poll operations. Never serialized. */
   signal?: AbortSignal;
+  /** Host-authenticated orchestration identity. Never accepted from JSON. */
+  actor?: WorkflowActorContext;
 }
 
 export type WorkflowControlPlaneErrorCode =
   | "WORKFLOW_CONTROL_INVALID_REQUEST"
-  | "WORKFLOW_CONTROL_UNKNOWN_OPERATION";
+  | "WORKFLOW_CONTROL_UNKNOWN_OPERATION"
+  | "WORKFLOW_CONTROL_CAPABILITY_UNAVAILABLE";
 
 export class WorkflowControlPlaneError extends Error {
   readonly code: WorkflowControlPlaneErrorCode;
@@ -118,6 +176,10 @@ export class WorkflowControlPlane {
   readonly #tasks: WorkflowTaskController;
   readonly #artifacts: WorkflowArtifactStore;
   readonly #integration: IntegrationGate;
+  readonly #plans: WorkflowPlanController | undefined;
+  readonly #ownership: WorkflowOwnershipController | undefined;
+  readonly #changeValidation: WorkflowOwnershipChangeSetValidator | undefined;
+  readonly #dispatcher: WorkflowTaskDispatcher | undefined;
 
   constructor(config: WorkflowControlPlaneConfig) {
     if (
@@ -135,6 +197,10 @@ export class WorkflowControlPlane {
     this.#tasks = config.tasks;
     this.#artifacts = config.artifacts;
     this.#integration = config.integration;
+    this.#plans = config.plans;
+    this.#ownership = config.ownership;
+    this.#changeValidation = config.changeValidation;
+    this.#dispatcher = config.dispatcher;
   }
 
   async dispatch(
@@ -163,6 +229,20 @@ export class WorkflowControlPlane {
         return await this.#tasks.spawn(normalized.payload);
       case "task.resume":
         return await this.#tasks.resume(normalized.payload);
+      case "task.dispatch":
+        return await this.#tasks.dispatch(
+          taskHandlePayload(normalized.payload),
+        );
+      case "task.recover":
+        return await this.#tasks.recoverExpired(
+          taskHandlePayload(normalized.payload),
+        );
+      case "task.sweep": {
+        const payload = taskSweepPayload(normalized.payload);
+        return await requiredCapability(this.#dispatcher, "task.sweep").sweep(
+          payload,
+        );
+      }
       case "task.status":
         return await this.#tasks.status(taskHandlePayload(normalized.payload));
       case "task.cancel":
@@ -209,6 +289,93 @@ export class WorkflowControlPlane {
             signal: options.signal,
           },
         );
+      case "plan.put": {
+        const payload = planPutPayload(normalized.payload);
+        return await requiredCapability(this.#plans, "plan.put").put(
+          payload,
+          requiredActor(options.actor),
+        );
+      }
+      case "plan.get": {
+        const payload = planRevisionPayload(normalized.payload, "plan get");
+        return await requiredCapability(this.#plans, "plan.get").get(
+          payload.executionId,
+          payload.planRevision,
+          requiredActor(options.actor),
+        );
+      }
+      case "plan.list": {
+        const executionId = executionIdPayload(normalized.payload);
+        return await requiredCapability(this.#plans, "plan.list").list(
+          executionId,
+          requiredActor(options.actor),
+        );
+      }
+      case "plan.activate": {
+        const payload = planRevisionPayload(
+          normalized.payload,
+          "plan activate",
+        );
+        return await requiredCapability(this.#plans, "plan.activate").activate(
+          payload.executionId,
+          payload.planRevision,
+          requiredActor(options.actor),
+        );
+      }
+      case "ownership.claim": {
+        const payload = ownershipClaimPayload(normalized.payload);
+        return await requiredCapability(
+          this.#ownership,
+          "ownership.claim",
+        ).claim(payload, requiredActor(options.actor));
+      }
+      case "ownership.propose": {
+        const payload = ownershipProposalPayload(normalized.payload);
+        return await requiredCapability(
+          this.#ownership,
+          "ownership.propose",
+        ).propose(payload, requiredActor(options.actor));
+      }
+      case "ownership.approve":
+      case "ownership.reject": {
+        const payload = ownershipDecisionPayload(normalized.payload);
+        const controller = requiredCapability(
+          this.#ownership,
+          normalized.operation,
+        );
+        const actor = requiredActor(options.actor);
+        return normalized.operation === "ownership.approve"
+          ? await controller.approve(payload, actor)
+          : await controller.reject(payload, actor);
+      }
+      case "ownership.transfer": {
+        const payload = ownershipTransferPayload(normalized.payload);
+        return await requiredCapability(
+          this.#ownership,
+          "ownership.transfer",
+        ).transfer(payload, requiredActor(options.actor));
+      }
+      case "ownership.release": {
+        const payload = ownershipReleasePayload(normalized.payload);
+        return await requiredCapability(
+          this.#ownership,
+          "ownership.release",
+        ).release(payload, requiredActor(options.actor));
+      }
+      case "ownership.list": {
+        const payload = ownershipScopePayload(normalized.payload);
+        return await requiredCapability(this.#ownership, "ownership.list").list(
+          payload,
+          requiredActor(options.actor),
+        );
+      }
+      case "ownership.validate": {
+        const payload = ownershipValidationPayload(normalized.payload);
+        return await requiredCapability(
+          this.#changeValidation,
+          "ownership.validate",
+        ).validate(payload, requiredActor(options.actor));
+      }
       default:
         return unknownOperation(normalized);
     }
@@ -292,6 +459,332 @@ function integrationPayload(payload: unknown): IntegrationGateRequest {
     "integration gate",
   );
   return payload as unknown as IntegrationGateRequest;
+}
+
+function taskSweepPayload(payload: unknown): WorkflowTaskSweepRequest {
+  exactPayload(payload, ["executionId", "limit"], "task sweep");
+  requiredString(payload.executionId, "task sweep executionId");
+  if (
+    payload.limit !== undefined &&
+    (!Number.isSafeInteger(payload.limit) || (payload.limit as number) <= 0)
+  ) {
+    invalid("Workflow control task sweep limit is invalid");
+  }
+  return payload as unknown as WorkflowTaskSweepRequest;
+}
+
+function planPutPayload(payload: unknown): WorkflowPlan {
+  exactPayload(
+    payload,
+    [
+      "protocol",
+      "version",
+      "executionId",
+      "planRevision",
+      "baseRevision",
+      "objective",
+      "status",
+      "createdAt",
+      "agents",
+      "lanes",
+      "waves",
+      "invariants",
+      "reservedPaths",
+    ],
+    "plan put",
+  );
+  for (const field of [
+    "agents",
+    "lanes",
+    "waves",
+    "invariants",
+    "reservedPaths",
+  ])
+    requiredArray(payload[field], `plan ${field}`);
+  for (const agent of payload.agents as unknown[]) {
+    exactPayload(agent, ["agentId", "policy", "metadata"], "plan agent");
+    exactPayload(
+      agent.policy,
+      [
+        "role",
+        "permissions",
+        "canDelegate",
+        "allowedDelegateRoles",
+        "maxChildren",
+      ],
+      "plan agent policy",
+    );
+  }
+  for (const lane of payload.lanes as unknown[]) {
+    exactPayload(
+      lane,
+      [
+        "taskId",
+        "agentId",
+        "role",
+        "ownedPaths",
+        "mayCreateUnder",
+        "dependsOn",
+        "acceptance",
+      ],
+      "plan lane",
+    );
+    validateClaims(lane.ownedPaths, "plan lane ownership", false);
+  }
+  for (const wave of payload.waves as unknown[])
+    exactPayload(wave, ["waveId", "taskIds"], "plan wave");
+  for (const invariant of payload.invariants as unknown[])
+    exactPayload(
+      invariant,
+      ["invariantId", "description", "appliesTo", "enforcedBy"],
+      "plan invariant",
+    );
+  validateClaims(payload.reservedPaths, "plan reserved paths", false);
+  return payload as unknown as WorkflowPlan;
+}
+
+function planRevisionPayload(
+  payload: unknown,
+  label: string,
+): { executionId: string; planRevision: number } {
+  exactPayload(payload, ["executionId", "planRevision"], label);
+  requiredString(payload.executionId, `${label} executionId`);
+  positiveInteger(payload.planRevision, `${label} planRevision`);
+  return payload as { executionId: string; planRevision: number };
+}
+
+function ownershipScopePayload(payload: unknown): WorkflowOwnershipScope {
+  return planRevisionPayload(payload, "ownership scope");
+}
+
+function ownershipClaimPayload(
+  payload: unknown,
+): WorkflowOwnershipClaimRequest {
+  exactPayload(
+    payload,
+    ["executionId", "planRevision", "claims"],
+    "ownership claim",
+  );
+  validateOwnershipScope(payload, "ownership claim");
+  validateClaims(payload.claims, "ownership claim", true);
+  return payload as unknown as WorkflowOwnershipClaimRequest;
+}
+
+function ownershipProposalPayload(
+  payload: unknown,
+): WorkflowOwnershipProposalRequest {
+  exactPayload(
+    payload,
+    [
+      "executionId",
+      "planRevision",
+      "kind",
+      "targetTaskId",
+      "sourceGrantId",
+      "claims",
+    ],
+    "ownership proposal",
+  );
+  validateOwnershipScope(payload, "ownership proposal");
+  requiredString(payload.kind, "ownership proposal kind");
+  optionalString(payload.targetTaskId, "ownership proposal targetTaskId");
+  optionalString(payload.sourceGrantId, "ownership proposal sourceGrantId");
+  if (payload.claims !== undefined)
+    validateClaims(payload.claims, "ownership proposal", false);
+  return payload as unknown as WorkflowOwnershipProposalRequest;
+}
+
+function ownershipDecisionPayload(
+  payload: unknown,
+): WorkflowOwnershipDecisionRequest {
+  exactPayload(
+    payload,
+    ["executionId", "planRevision", "proposalId", "reason"],
+    "ownership decision",
+  );
+  validateOwnershipScope(payload, "ownership decision");
+  requiredString(payload.proposalId, "ownership decision proposalId");
+  optionalString(payload.reason, "ownership decision reason");
+  return payload as unknown as WorkflowOwnershipDecisionRequest;
+}
+
+function ownershipTransferPayload(
+  payload: unknown,
+): WorkflowOwnershipTransferRequest {
+  exactPayload(
+    payload,
+    ["executionId", "planRevision", "sourceGrantId", "targetTaskId"],
+    "ownership transfer",
+  );
+  validateOwnershipScope(payload, "ownership transfer");
+  requiredString(payload.sourceGrantId, "ownership transfer sourceGrantId");
+  requiredString(payload.targetTaskId, "ownership transfer targetTaskId");
+  return payload as unknown as WorkflowOwnershipTransferRequest;
+}
+
+function ownershipReleasePayload(
+  payload: unknown,
+): WorkflowOwnershipReleaseRequest {
+  exactPayload(
+    payload,
+    ["executionId", "planRevision", "grantId"],
+    "ownership release",
+  );
+  validateOwnershipScope(payload, "ownership release");
+  requiredString(payload.grantId, "ownership release grantId");
+  return payload as unknown as WorkflowOwnershipReleaseRequest;
+}
+
+function ownershipValidationPayload(
+  payload: unknown,
+): WorkflowOwnershipChangeSetValidationRequest {
+  exactPayload(
+    payload,
+    [
+      "changeSet",
+      "expectedBaseRevision",
+      "expectedPlanRevision",
+      "agentId",
+      "ownership",
+      "expectedTarget",
+    ],
+    "ownership validation",
+  );
+  requiredString(
+    payload.expectedBaseRevision,
+    "ownership validation expectedBaseRevision",
+  );
+  positiveInteger(
+    payload.expectedPlanRevision,
+    "ownership validation expectedPlanRevision",
+  );
+  requiredString(payload.agentId, "ownership validation agentId");
+  requiredArray(payload.ownership, "ownership validation ownership");
+  for (const fence of payload.ownership as unknown[]) {
+    exactPayload(
+      fence,
+      ["grantId", "fencingToken"],
+      "ownership validation fence",
+    );
+    requiredString(fence.grantId, "ownership validation grantId");
+    positiveInteger(fence.fencingToken, "ownership validation fencingToken");
+  }
+  validateChangeSet(payload.changeSet);
+  exactPayload(
+    payload.expectedTarget,
+    ["targetId", "revision"],
+    "ownership validation expected target",
+  );
+  requiredString(
+    payload.expectedTarget.targetId,
+    "ownership validation targetId",
+  );
+  requiredString(
+    payload.expectedTarget.revision,
+    "ownership validation target revision",
+  );
+  return payload as unknown as WorkflowOwnershipChangeSetValidationRequest;
+}
+
+function validateChangeSet(value: unknown): void {
+  exactPayload(
+    value,
+    [
+      "executionId",
+      "taskId",
+      "planRevision",
+      "workspaceRevision",
+      "baseRevision",
+      "entries",
+      "changeSetDigest",
+    ],
+    "ownership validation change set",
+  );
+  requiredArray(value.entries, "ownership validation change set entries");
+  for (const entry of value.entries as unknown[]) {
+    if (!isRecord(entry) || typeof entry.kind !== "string")
+      invalid("Workflow control ownership validation change entry is invalid");
+    exactPayload(
+      entry,
+      entry.kind === "renamed"
+        ? ["kind", "entryKind", "fromPath", "toPath", "contentDigest"]
+        : ["kind", "entryKind", "path", "contentDigest"],
+      "ownership validation change entry",
+    );
+  }
+}
+
+function validateOwnershipScope(
+  payload: Record<string, unknown>,
+  label: string,
+): void {
+  requiredString(payload.executionId, `${label} executionId`);
+  positiveInteger(payload.planRevision, `${label} planRevision`);
+}
+
+function validateClaims(
+  value: unknown,
+  label: string,
+  required: boolean,
+): void {
+  requiredArray(value, `${label} claims`);
+  if (required && value.length === 0)
+    invalid(`Workflow control ${label} claims are required`);
+  for (const claim of value) {
+    exactPayload(claim, ["path", "scope"], `${label} claim`);
+    requiredString(claim.path, `${label} claim path`);
+    if (claim.scope !== "exact" && claim.scope !== "subtree")
+      invalid(`Workflow control ${label} claim scope is invalid`);
+  }
+}
+
+function requiredArray(
+  value: unknown,
+  label: string,
+): asserts value is unknown[] {
+  if (!Array.isArray(value)) invalid(`Workflow control ${label} is invalid`);
+}
+
+function requiredString(
+  value: unknown,
+  label: string,
+): asserts value is string {
+  if (typeof value !== "string" || value.length === 0)
+    invalid(`Workflow control ${label} is invalid`);
+}
+
+function optionalString(
+  value: unknown,
+  label: string,
+): asserts value is string | undefined {
+  if (value !== undefined) requiredString(value, label);
+}
+
+function positiveInteger(
+  value: unknown,
+  label: string,
+): asserts value is number {
+  if (!Number.isSafeInteger(value) || (value as number) <= 0)
+    invalid(`Workflow control ${label} is invalid`);
+}
+
+function requiredActor(actor: unknown): WorkflowActorContext {
+  if (!(actor instanceof WorkflowActorContext))
+    invalid("Workflow control operation requires a host-authenticated actor");
+  return actor;
+}
+
+function requiredCapability<T>(
+  capability: T | undefined,
+  operation: string,
+): T {
+  if (capability === undefined) {
+    throw new WorkflowControlPlaneError(
+      "WORKFLOW_CONTROL_CAPABILITY_UNAVAILABLE",
+      `Workflow control capability is unavailable: ${operation}`,
+    );
+  }
+  return capability;
 }
 
 function artifactIdPayload(payload: unknown): string {

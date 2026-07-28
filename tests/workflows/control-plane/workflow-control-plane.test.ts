@@ -105,6 +105,10 @@ describe("WorkflowControlPlane", () => {
         executionId: "execution-1",
         taskId: "review",
         agentId: "codex",
+        orchestration: {
+          planRevision: 1,
+          ownership: [{ grantId: "grant-review", fencingToken: 1 }],
+        },
         input: { patch: "artifact-1" },
       },
     })) as { executionId: string; taskId: string };
@@ -208,6 +212,14 @@ describe("WorkflowControlPlane", () => {
         ...envelope,
         operation: "execution.status",
         payload: { executionId: "execution-1", extra: true },
+      } as never),
+    ).rejects.toMatchObject({ code: "WORKFLOW_CONTROL_INVALID_REQUEST" });
+
+    await expect(
+      control.dispatch({
+        ...envelope,
+        operation: "plan.list",
+        payload: { executionId: "execution-1", actor: { actorId: "forged" } },
       } as never),
     ).rejects.toMatchObject({ code: "WORKFLOW_CONTROL_INVALID_REQUEST" });
   });
