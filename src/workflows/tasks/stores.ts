@@ -9,6 +9,7 @@ import {
   type WorkflowTaskClaimedTransitionRequest,
   type WorkflowTaskClaimGuard,
   type WorkflowTaskClaimRequest,
+  type WorkflowTaskCancelExpiredClaimRequest,
   WorkflowTaskControlError,
   type WorkflowTaskListRequest,
   type WorkflowTaskListResult,
@@ -70,6 +71,14 @@ export interface WorkflowTaskClaimStore extends WorkflowTaskStore {
   ): Promise<WorkflowTaskRecord>;
   requeueExpired(
     request: WorkflowTaskRequeueExpiredRequest,
+  ): Promise<WorkflowTaskRecord>;
+  /**
+   * Finalizes an expired cancelling attempt without granting its old worker
+   * authority. This is an at-least-once recovery transition, not an
+   * exactly-once guarantee for effects performed before cancellation.
+   */
+  cancelExpiredClaim(
+    request: WorkflowTaskCancelExpiredClaimRequest,
   ): Promise<WorkflowTaskRecord>;
 }
 
@@ -313,6 +322,40 @@ export class InMemoryWorkflowTaskStore
       revision: current.revision + 1,
       attempt: current.attempt + 1,
       updatedAt: now,
+    } satisfies WorkflowTaskRecord);
+    validateTaskRecord(snapshot);
+    this.#records.set(key, snapshot);
+    this.#wakeRevisionWaiters(key, snapshot);
+    return snapshot;
+  }
+
+  async cancelExpiredClaim(
+    request: WorkflowTaskCancelExpiredClaimRequest,
+  ): Promise<WorkflowTaskRecord> {
+    validateTaskHandle(request);
+    validateExpectedRevision(request.expectedRevision);
+    const key = taskKey(request.executionId, request.taskId);
+    const current = this.#records.get(key);
+    if (!current) notFound(request.executionId, request.taskId);
+    assertExpectedRevision(current, request.expectedRevision);
+    const now = this.#timestamp();
+    if (current.status !== "cancelling" || current.claim === undefined) {
+      claimConflict(request, current);
+    }
+    if (current.claim.expiresAt > now) {
+      leaseNotExpired(request, current.claim);
+    }
+    const { claim: _claim, ...durable } = current;
+    const snapshot = immutableTaskJson({
+      ...durable,
+      status: "cancelled",
+      revision: current.revision + 1,
+      updatedAt: now,
+      completedAt: now,
+      error: {
+        code: "WORKFLOW_TASK_CANCELLED",
+        message: "Workflow task was cancelled",
+      },
     } satisfies WorkflowTaskRecord);
     validateTaskRecord(snapshot);
     this.#records.set(key, snapshot);
