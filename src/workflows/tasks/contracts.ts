@@ -30,6 +30,22 @@ export interface WorkflowTaskError {
   details?: Readonly<Record<string, WorkflowTaskJsonValue>>;
 }
 
+/**
+ * Durable ownership of one running task attempt.
+ *
+ * Claims provide fencing for at-least-once execution. They do not make agent
+ * effects exactly-once: drivers must keep externally visible effects
+ * idempotent because an expired attempt may have executed before recovery.
+ */
+export interface WorkflowTaskClaim {
+  workerId: string;
+  leaseId: string;
+  fencingToken: number;
+  claimedAt: number;
+  heartbeatAt: number;
+  expiresAt: number;
+}
+
 export interface WorkflowTaskRecord extends WorkflowTaskHandle {
   parentTaskId?: string;
   agentId: string;
@@ -41,6 +57,8 @@ export interface WorkflowTaskRecord extends WorkflowTaskHandle {
   startedAt?: number;
   completedAt?: number;
   cancelRequestedAt?: number;
+  /** Present only while a durable worker owns the running attempt. */
+  claim?: WorkflowTaskClaim;
   input?: WorkflowTaskJsonValue;
   output?: WorkflowTaskJsonValue;
   error?: WorkflowTaskError;
@@ -69,6 +87,35 @@ export interface WorkflowTaskListRequest {
 export interface WorkflowTaskListResult {
   records: readonly WorkflowTaskRecord[];
   nextCursor?: string;
+}
+
+export interface WorkflowTaskClaimRequest extends WorkflowTaskHandle {
+  workerId: string;
+  leaseId: string;
+  leaseDurationMs: number;
+  /** Optional read revision used to reject a stale dispatcher. */
+  expectedRevision?: number;
+}
+
+export interface WorkflowTaskClaimGuard extends WorkflowTaskHandle {
+  workerId: string;
+  leaseId: string;
+  fencingToken: number;
+}
+
+export interface WorkflowTaskRenewClaimRequest extends WorkflowTaskClaimGuard {
+  expectedRevision: number;
+  leaseDurationMs: number;
+}
+
+export interface WorkflowTaskClaimedTransitionRequest {
+  record: WorkflowTaskRecord;
+  expectedRevision: number;
+  claim: WorkflowTaskClaimGuard;
+}
+
+export interface WorkflowTaskRequeueExpiredRequest extends WorkflowTaskHandle {
+  expectedRevision: number;
 }
 
 export interface WorkflowTaskMessageAppendRequest extends WorkflowTaskHandle {
@@ -148,6 +195,8 @@ export type WorkflowTaskControlErrorCode =
   | "WORKFLOW_TASK_NOT_FOUND"
   | "WORKFLOW_TASK_DUPLICATE"
   | "WORKFLOW_TASK_CONFLICT"
+  | "WORKFLOW_TASK_CLAIM_CONFLICT"
+  | "WORKFLOW_TASK_LEASE_EXPIRED"
   | "WORKFLOW_TASK_INVALID_TRANSITION"
   | "WORKFLOW_TASK_NOT_OWNED"
   | "WORKFLOW_TASK_MAILBOX_FULL"

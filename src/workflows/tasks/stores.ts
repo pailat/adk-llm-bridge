@@ -5,6 +5,10 @@
  */
 
 import {
+  type WorkflowTaskClaim,
+  type WorkflowTaskClaimedTransitionRequest,
+  type WorkflowTaskClaimGuard,
+  type WorkflowTaskClaimRequest,
   WorkflowTaskControlError,
   type WorkflowTaskListRequest,
   type WorkflowTaskListResult,
@@ -13,6 +17,8 @@ import {
   type WorkflowTaskMessageReadRequest,
   type WorkflowTaskMessageReadResult,
   type WorkflowTaskRecord,
+  type WorkflowTaskRenewClaimRequest,
+  type WorkflowTaskRequeueExpiredRequest,
   type WorkflowTaskStatus,
 } from "./contracts.js";
 import { immutableTaskJson } from "./json.js";
@@ -46,6 +52,37 @@ export interface WorkflowTaskStore {
   list(request: WorkflowTaskListRequest): Promise<WorkflowTaskListResult>;
 }
 
+/**
+ * Optional durable claim capability for distributed task workers.
+ *
+ * Implementations must make every operation atomic and monotonically increase
+ * fencing tokens per task. Delivery is at-least-once: expiry permits a later
+ * worker to repeat an attempt, so this interface never promises exactly-once
+ * execution or effects.
+ */
+export interface WorkflowTaskClaimStore extends WorkflowTaskStore {
+  claim(request: WorkflowTaskClaimRequest): Promise<WorkflowTaskRecord>;
+  renewClaim(
+    request: WorkflowTaskRenewClaimRequest,
+  ): Promise<WorkflowTaskRecord>;
+  compareAndSetClaimed(
+    request: WorkflowTaskClaimedTransitionRequest,
+  ): Promise<WorkflowTaskRecord>;
+  requeueExpired(
+    request: WorkflowTaskRequeueExpiredRequest,
+  ): Promise<WorkflowTaskRecord>;
+}
+
+/** Optional long-poll capability; adapters may use ordinary polling instead. */
+export interface WorkflowTaskRevisionWaitStore extends WorkflowTaskStore {
+  waitForRevision(
+    executionId: string,
+    taskId: string,
+    afterRevision: number,
+    signal?: AbortSignal,
+  ): Promise<WorkflowTaskRecord>;
+}
+
 export interface WorkflowTaskMessageStore {
   append(
     request: WorkflowTaskMessageAppendRequest & { sentAt: number },
@@ -59,10 +96,27 @@ export interface WorkflowTaskMessageStore {
   ): Promise<WorkflowTaskMessageReadResult>;
 }
 
-/** Single-process reference store; it does not claim distributed exactly-once. */
-export class InMemoryWorkflowTaskStore implements WorkflowTaskStore {
+export interface InMemoryWorkflowTaskStoreConfig {
+  now?: () => number;
+}
+
+/**
+ * Single-process reference store with atomic durable-claim semantics.
+ * It models at-least-once recovery and intentionally does not claim
+ * distributed durability or exactly-once execution.
+ */
+export class InMemoryWorkflowTaskStore
+  implements WorkflowTaskClaimStore, WorkflowTaskRevisionWaitStore
+{
   readonly #records = new Map<string, WorkflowTaskRecord>();
   readonly #order: string[] = [];
+  readonly #nextFencingTokens = new Map<string, number>();
+  readonly #revisionWaiters = new Map<string, Set<TaskRevisionWaiter>>();
+  readonly #now: () => number;
+
+  constructor(config: InMemoryWorkflowTaskStoreConfig = {}) {
+    this.#now = config.now ?? Date.now;
+  }
 
   async create(record: WorkflowTaskRecord): Promise<WorkflowTaskRecord> {
     validateTaskRecord(record);
@@ -72,6 +126,7 @@ export class InMemoryWorkflowTaskStore implements WorkflowTaskStore {
     const snapshot = immutableTaskJson(record);
     this.#records.set(key, snapshot);
     this.#order.push(key);
+    this.#wakeRevisionWaiters(key, snapshot);
     return snapshot;
   }
 
@@ -106,10 +161,229 @@ export class InMemoryWorkflowTaskStore implements WorkflowTaskStore {
       invalid("Replacement task revision must increment by one");
     }
     assertImmutableIdentity(current, record);
+    if (current.claim !== undefined || record.claim !== undefined) {
+      throw new WorkflowTaskControlError(
+        "WORKFLOW_TASK_CLAIM_CONFLICT",
+        `Claimed workflow tasks require a fenced transition: ${record.taskId}`,
+        {
+          executionId: record.executionId,
+          taskId: record.taskId,
+          actualRevision: current.revision,
+        },
+      );
+    }
     assertTransition(current, record);
     const snapshot = immutableTaskJson(record);
     this.#records.set(key, snapshot);
+    this.#wakeRevisionWaiters(key, snapshot);
     return snapshot;
+  }
+
+  async claim(request: WorkflowTaskClaimRequest): Promise<WorkflowTaskRecord> {
+    validateClaimRequest(request);
+    const key = taskKey(request.executionId, request.taskId);
+    const current = this.#records.get(key);
+    if (!current) notFound(request.executionId, request.taskId);
+    if (
+      request.expectedRevision !== undefined &&
+      current.revision !== request.expectedRevision
+    ) {
+      conflict(
+        request.executionId,
+        request.taskId,
+        request.expectedRevision,
+        current.revision,
+      );
+    }
+    if (current.status !== "queued" || current.claim !== undefined) {
+      claimConflict(request, current);
+    }
+    const now = this.#timestamp();
+    const fencingToken = this.#nextFencingTokens.get(key) ?? 1;
+    this.#nextFencingTokens.set(key, fencingToken + 1);
+    const snapshot = immutableTaskJson({
+      ...current,
+      status: "running",
+      revision: current.revision + 1,
+      updatedAt: now,
+      startedAt: now,
+      claim: {
+        workerId: request.workerId,
+        leaseId: request.leaseId,
+        fencingToken,
+        claimedAt: now,
+        heartbeatAt: now,
+        expiresAt: now + request.leaseDurationMs,
+      },
+    } satisfies WorkflowTaskRecord);
+    validateTaskRecord(snapshot);
+    this.#records.set(key, snapshot);
+    this.#wakeRevisionWaiters(key, snapshot);
+    return snapshot;
+  }
+
+  async renewClaim(
+    request: WorkflowTaskRenewClaimRequest,
+  ): Promise<WorkflowTaskRecord> {
+    validateClaimGuard(request);
+    validateExpectedRevision(request.expectedRevision);
+    validateLeaseDuration(request.leaseDurationMs);
+    const key = taskKey(request.executionId, request.taskId);
+    const current = this.#records.get(key);
+    if (!current) notFound(request.executionId, request.taskId);
+    assertExpectedRevision(current, request.expectedRevision);
+    const now = this.#timestamp();
+    assertCurrentClaim(current, request, now);
+    const snapshot = immutableTaskJson({
+      ...current,
+      revision: current.revision + 1,
+      updatedAt: now,
+      claim: {
+        ...current.claim,
+        heartbeatAt: now,
+        expiresAt: now + request.leaseDurationMs,
+      },
+    } satisfies WorkflowTaskRecord);
+    validateTaskRecord(snapshot);
+    this.#records.set(key, snapshot);
+    this.#wakeRevisionWaiters(key, snapshot);
+    return snapshot;
+  }
+
+  async compareAndSetClaimed(
+    request: WorkflowTaskClaimedTransitionRequest,
+  ): Promise<WorkflowTaskRecord> {
+    validateClaimGuard(request.claim);
+    validateExpectedRevision(request.expectedRevision);
+    validateTaskRecord(request.record);
+    const key = taskKey(request.record.executionId, request.record.taskId);
+    if (
+      request.claim.executionId !== request.record.executionId ||
+      request.claim.taskId !== request.record.taskId
+    ) {
+      invalid("Workflow task claim guard belongs to another task");
+    }
+    const current = this.#records.get(key);
+    if (!current) notFound(request.record.executionId, request.record.taskId);
+    assertExpectedRevision(current, request.expectedRevision);
+    assertCurrentClaim(current, request.claim, this.#timestamp());
+    if (request.record.revision !== request.expectedRevision + 1) {
+      invalid("Replacement task revision must increment by one");
+    }
+    assertImmutableIdentity(current, request.record);
+    assertTransition(current, request.record);
+    if (isTerminalTaskStatus(request.record.status)) {
+      if (request.record.claim !== undefined) {
+        invalid("Terminal workflow tasks cannot retain a durable claim");
+      }
+    } else {
+      assertClaimUnchanged(current.claim, request.record.claim);
+    }
+    const snapshot = immutableTaskJson(request.record);
+    this.#records.set(key, snapshot);
+    this.#wakeRevisionWaiters(key, snapshot);
+    return snapshot;
+  }
+
+  async requeueExpired(
+    request: WorkflowTaskRequeueExpiredRequest,
+  ): Promise<WorkflowTaskRecord> {
+    validateTaskHandle(request);
+    validateExpectedRevision(request.expectedRevision);
+    const key = taskKey(request.executionId, request.taskId);
+    const current = this.#records.get(key);
+    if (!current) notFound(request.executionId, request.taskId);
+    assertExpectedRevision(current, request.expectedRevision);
+    const now = this.#timestamp();
+    if (current.status !== "running" || current.claim === undefined) {
+      claimConflict(request, current);
+    }
+    if (current.claim.expiresAt > now) {
+      leaseNotExpired(request, current.claim);
+    }
+    const {
+      claim: _claim,
+      startedAt: _startedAt,
+      cancelRequestedAt: _cancelRequestedAt,
+      ...durable
+    } = current;
+    const snapshot = immutableTaskJson({
+      ...durable,
+      status: "queued",
+      revision: current.revision + 1,
+      attempt: current.attempt + 1,
+      updatedAt: now,
+    } satisfies WorkflowTaskRecord);
+    validateTaskRecord(snapshot);
+    this.#records.set(key, snapshot);
+    this.#wakeRevisionWaiters(key, snapshot);
+    return snapshot;
+  }
+
+  async waitForRevision(
+    executionId: string,
+    taskId: string,
+    afterRevision: number,
+    signal?: AbortSignal,
+  ): Promise<WorkflowTaskRecord> {
+    validateTaskHandle({ executionId, taskId });
+    if (!Number.isSafeInteger(afterRevision) || afterRevision < 0) {
+      invalid("Workflow task wait revision must be a non-negative integer");
+    }
+    const key = taskKey(executionId, taskId);
+    const current = this.#records.get(key);
+    if (!current) notFound(executionId, taskId);
+    if (current.revision > afterRevision) return current;
+    if (signal?.aborted) taskWaitAborted(executionId, taskId);
+    return await new Promise<WorkflowTaskRecord>((resolve, reject) => {
+      const waiters = this.#revisionWaiters.get(key) ?? new Set();
+      const waiter: TaskRevisionWaiter = {
+        afterRevision,
+        resolve,
+        reject,
+        signal,
+        onAbort: () => {
+          this.#settleRevisionWaiter(key, waiter);
+          reject(taskWaitAbortedError(executionId, taskId));
+        },
+      };
+      if (!this.#revisionWaiters.has(key)) {
+        this.#revisionWaiters.set(key, waiters);
+      }
+      waiters.add(waiter);
+      signal?.addEventListener("abort", waiter.onAbort, { once: true });
+
+      const afterRegistration = this.#records.get(key);
+      if (afterRegistration && afterRegistration.revision > afterRevision) {
+        this.#settleRevisionWaiter(key, waiter);
+        resolve(afterRegistration);
+      }
+    });
+  }
+
+  #timestamp(): number {
+    const timestamp = this.#now();
+    if (!validTimestamp(timestamp)) {
+      invalid("Workflow task store clock returned an invalid timestamp");
+    }
+    return timestamp;
+  }
+
+  #wakeRevisionWaiters(key: string, record: WorkflowTaskRecord): void {
+    const waiters = this.#revisionWaiters.get(key);
+    if (!waiters) return;
+    for (const waiter of [...waiters]) {
+      if (record.revision <= waiter.afterRevision) continue;
+      this.#settleRevisionWaiter(key, waiter);
+      waiter.resolve(record);
+    }
+  }
+
+  #settleRevisionWaiter(key: string, waiter: TaskRevisionWaiter): void {
+    const waiters = this.#revisionWaiters.get(key);
+    waiters?.delete(waiter);
+    if (waiters?.size === 0) this.#revisionWaiters.delete(key);
+    waiter.signal?.removeEventListener("abort", waiter.onAbort);
   }
 
   async list(
@@ -290,6 +564,14 @@ interface MailboxWaiter {
   onAbort(): void;
 }
 
+interface TaskRevisionWaiter {
+  afterRevision: number;
+  resolve(record: WorkflowTaskRecord): void;
+  reject(error: unknown): void;
+  signal?: AbortSignal;
+  onAbort(): void;
+}
+
 export function validateTaskHandle(handle: {
   executionId: string;
   taskId: string;
@@ -346,6 +628,12 @@ function validateTaskRecord(record: WorkflowTaskRecord): void {
   if (record.input !== undefined) immutableTaskJson(record.input);
   if (record.output !== undefined) immutableTaskJson(record.output);
   if (record.error) validateTaskError(record.error);
+  if (record.claim !== undefined) {
+    validateTaskClaim(record.claim, record);
+    if (record.status !== "running" && record.status !== "cancelling") {
+      invalid("Only active workflow tasks can contain a durable claim");
+    }
+  }
   const terminal = isTerminalTaskStatus(record.status);
   if (terminal !== (record.completedAt !== undefined)) {
     invalid("Terminal workflow tasks must have completedAt exclusively");
@@ -389,6 +677,117 @@ function validateTaskRecord(record: WorkflowTaskRecord): void {
     invalid(
       "Cancelling and cancelled workflow tasks require cancelRequestedAt",
     );
+  }
+}
+
+function validateTaskClaim(
+  claim: WorkflowTaskClaim,
+  record?: WorkflowTaskRecord,
+): void {
+  if (!claim || typeof claim !== "object" || Array.isArray(claim)) {
+    invalid("Workflow task claim must be an object");
+  }
+  validateIdentifier(claim.workerId, "claim.workerId");
+  validateIdentifier(claim.leaseId, "claim.leaseId");
+  if (!positiveSafeInteger(claim.fencingToken)) {
+    invalid("Workflow task claim fencingToken must be a positive integer");
+  }
+  if (
+    !validTimestamp(claim.claimedAt) ||
+    !validTimestamp(claim.heartbeatAt) ||
+    !validTimestamp(claim.expiresAt) ||
+    claim.heartbeatAt < claim.claimedAt ||
+    claim.expiresAt <= claim.heartbeatAt ||
+    (record !== undefined &&
+      (claim.claimedAt < record.createdAt ||
+        claim.heartbeatAt > record.updatedAt))
+  ) {
+    invalid("Workflow task claim timestamps are invalid");
+  }
+}
+
+function validateClaimRequest(request: WorkflowTaskClaimRequest): void {
+  validateTaskHandle(request);
+  validateIdentifier(request.workerId, "claim.workerId");
+  validateIdentifier(request.leaseId, "claim.leaseId");
+  validateLeaseDuration(request.leaseDurationMs);
+  if (request.expectedRevision !== undefined) {
+    validateExpectedRevision(request.expectedRevision);
+  }
+}
+
+function validateClaimGuard(request: WorkflowTaskClaimGuard): void {
+  validateTaskHandle(request);
+  validateIdentifier(request.workerId, "claim.workerId");
+  validateIdentifier(request.leaseId, "claim.leaseId");
+  if (!positiveSafeInteger(request.fencingToken)) {
+    invalid("Workflow task claim fencingToken must be a positive integer");
+  }
+}
+
+function validateLeaseDuration(leaseDurationMs: number): void {
+  if (!positiveSafeInteger(leaseDurationMs)) {
+    invalid("Workflow task claim leaseDurationMs must be a positive integer");
+  }
+}
+
+function validateExpectedRevision(expectedRevision: number): void {
+  if (!positiveSafeInteger(expectedRevision)) {
+    invalid("Expected task revision must be a positive integer");
+  }
+}
+
+function assertExpectedRevision(
+  current: WorkflowTaskRecord,
+  expectedRevision: number,
+): void {
+  if (current.revision !== expectedRevision) {
+    conflict(
+      current.executionId,
+      current.taskId,
+      expectedRevision,
+      current.revision,
+    );
+  }
+}
+
+function assertCurrentClaim(
+  current: WorkflowTaskRecord,
+  expected: WorkflowTaskClaimGuard,
+  now: number,
+): asserts current is WorkflowTaskRecord & { claim: WorkflowTaskClaim } {
+  const claim = current.claim;
+  if (
+    claim === undefined ||
+    claim.workerId !== expected.workerId ||
+    claim.leaseId !== expected.leaseId ||
+    claim.fencingToken !== expected.fencingToken
+  ) {
+    claimConflict(expected, current);
+  }
+  if (claim.expiresAt <= now) {
+    throw new WorkflowTaskControlError(
+      "WORKFLOW_TASK_LEASE_EXPIRED",
+      `Workflow task claim has expired: ${current.taskId}`,
+      {
+        executionId: current.executionId,
+        taskId: current.taskId,
+        workerId: expected.workerId,
+        leaseId: expected.leaseId,
+        fencingToken: expected.fencingToken,
+        expiresAt: claim.expiresAt,
+        now,
+      },
+    );
+  }
+}
+
+function assertClaimUnchanged(
+  current: WorkflowTaskClaim | undefined,
+  replacement: WorkflowTaskClaim | undefined,
+): void {
+  if (JSON.stringify(current) !== JSON.stringify(replacement)) {
+    invalid("A claimed transition cannot replace its durable claim");
   }
 }
 
@@ -646,6 +1045,44 @@ function conflict(
   );
 }
 
+function claimConflict(
+  handle: { executionId: string; taskId: string },
+  current: WorkflowTaskRecord,
+): never {
+  throw new WorkflowTaskControlError(
+    "WORKFLOW_TASK_CLAIM_CONFLICT",
+    `Workflow task claim conflict: ${handle.taskId}`,
+    {
+      executionId: handle.executionId,
+      taskId: handle.taskId,
+      actualRevision: current.revision,
+      status: current.status,
+      ...(current.claim
+        ? {
+            actualWorkerId: current.claim.workerId,
+            actualLeaseId: current.claim.leaseId,
+            actualFencingToken: current.claim.fencingToken,
+          }
+        : {}),
+    },
+  );
+}
+
+function leaseNotExpired(
+  handle: { executionId: string; taskId: string },
+  claim: WorkflowTaskClaim,
+): never {
+  throw new WorkflowTaskControlError(
+    "WORKFLOW_TASK_CLAIM_CONFLICT",
+    `Workflow task claim has not expired: ${handle.taskId}`,
+    {
+      executionId: handle.executionId,
+      taskId: handle.taskId,
+      expiresAt: claim.expiresAt,
+    },
+  );
+}
+
 function invalid(message: string): never {
   throw new WorkflowTaskControlError("WORKFLOW_TASK_INVALID_REQUEST", message);
 }
@@ -661,5 +1098,20 @@ function waitAbortedError(
     "WORKFLOW_TASK_WAIT_ABORTED",
     `Workflow task mailbox wait was aborted: ${request.taskId}`,
     { executionId: request.executionId, taskId: request.taskId },
+  );
+}
+
+function taskWaitAborted(executionId: string, taskId: string): never {
+  throw taskWaitAbortedError(executionId, taskId);
+}
+
+function taskWaitAbortedError(
+  executionId: string,
+  taskId: string,
+): WorkflowTaskControlError {
+  return new WorkflowTaskControlError(
+    "WORKFLOW_TASK_WAIT_ABORTED",
+    `Workflow task revision wait was aborted: ${taskId}`,
+    { executionId, taskId },
   );
 }
