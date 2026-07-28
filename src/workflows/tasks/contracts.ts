@@ -46,6 +46,22 @@ export interface WorkflowTaskClaim {
   expiresAt: number;
 }
 
+/** Serializable ownership authority captured when a task is spawned. */
+export interface WorkflowTaskOrchestrationGrant {
+  readonly grantId: string;
+  readonly fencingToken: number;
+}
+
+/**
+ * Immutable link from a task to the plan revision and ownership grants that
+ * authorized it. Runtime agent or host handles intentionally do not belong
+ * here.
+ */
+export interface WorkflowTaskOrchestrationBinding {
+  readonly planRevision: number;
+  readonly ownership: readonly WorkflowTaskOrchestrationGrant[];
+}
+
 export interface WorkflowTaskRecord extends WorkflowTaskHandle {
   parentTaskId?: string;
   agentId: string;
@@ -59,6 +75,7 @@ export interface WorkflowTaskRecord extends WorkflowTaskHandle {
   cancelRequestedAt?: number;
   /** Present only while a durable worker owns the running attempt. */
   claim?: WorkflowTaskClaim;
+  orchestration?: WorkflowTaskOrchestrationBinding;
   input?: WorkflowTaskJsonValue;
   output?: WorkflowTaskJsonValue;
   error?: WorkflowTaskError;
@@ -67,6 +84,7 @@ export interface WorkflowTaskRecord extends WorkflowTaskHandle {
 export interface WorkflowTaskSpawnRequest extends WorkflowTaskHandle {
   parentTaskId?: string;
   agentId: string;
+  orchestration?: WorkflowTaskOrchestrationBinding;
   input?: WorkflowTaskJsonValue;
 }
 
