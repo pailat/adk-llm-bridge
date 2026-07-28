@@ -9,12 +9,29 @@ import {
   authorizeWorkflowActor,
   DENY_ALL_WORKFLOW_AUTHORIZER,
   WorkflowActorContext,
+  type WorkflowAuthorizationOperation,
 } from "../../../src/workflows/orchestration/authorization.js";
+import type { WorkflowActorPermission } from "../../../src/workflows/orchestration/contracts.js";
+
+const OWNERSHIP_OPERATIONS = [
+  ["ownership.claim", "ownership:claim"],
+  ["ownership.propose", "ownership:propose"],
+  ["ownership.approve", "ownership:approve"],
+  ["ownership.transfer", "ownership:transfer"],
+  ["ownership.release", "ownership:release"],
+  ["ownership.list", "plan:read"],
+  ["ownership.validate", "changes:validate"],
+  ["changes.validate", "changes:validate"],
+  ["integration.publish", "integration:publish"],
+] as const satisfies readonly (readonly [
+  WorkflowAuthorizationOperation,
+  WorkflowActorPermission,
+])[];
 
 describe("workflow host authorization", () => {
   test("rejects a caller-controlled JSON actor instead of treating it as authentication", async () => {
     const serializedActor = JSON.parse(
-      '{"actorId":"principal-1","agentId":"coordinator","executionId":"execution-1"}',
+      '{"senderTaskId":"integration","actorId":"principal-1","agentId":"coordinator","executionId":"execution-1"}',
     );
     let calls = 0;
 
@@ -68,6 +85,45 @@ describe("workflow host authorization", () => {
         planRevision: 2,
       }),
     ).rejects.toMatchObject({ details: { reason: "unauthorized" } });
+    await expect(
+      authorizeWorkflowActor({ authorize: () => true }, actor, {
+        operation: "ownership.claim",
+        permission: "ownership:claim",
+        executionId: "execution-1",
+        taskId: "implementation",
+        planRevision: 1,
+      }),
+    ).rejects.toMatchObject({ details: { reason: "unauthorized" } });
+  });
+
+  test.each(
+    OWNERSHIP_OPERATIONS,
+  )("passes %s through the authenticated host boundary", async (operation, permission) => {
+    const actor = context();
+    const requests: WorkflowAuthorizationOperation[] = [];
+
+    await authorizeWorkflowActor(
+      {
+        authorize(request) {
+          requests.push(request.operation);
+          return (
+            request.actor === actor &&
+            request.actorId === "principal-1" &&
+            request.agentId === "coordinator"
+          );
+        },
+      },
+      actor,
+      {
+        operation,
+        permission,
+        executionId: "execution-1",
+        taskId: "integration",
+        planRevision: 1,
+      },
+    );
+
+    expect(requests).toEqual([operation]);
   });
 
   test("passes authenticated identities to the host policy but cannot serialize the capability", async () => {
