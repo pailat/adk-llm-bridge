@@ -5,6 +5,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import type { WorkflowTaskAuthorityPort } from "../../../src/workflows/tasks/authority.js";
 import type {
   WorkflowTaskDriver,
   WorkflowTaskDriverRequest,
@@ -14,12 +15,157 @@ import type {
 } from "../../../src/workflows/tasks/contracts.js";
 import { WorkflowTaskController } from "../../../src/workflows/tasks/controller.js";
 import {
+  InMemoryWorkflowTaskCommandStore,
   InMemoryWorkflowTaskMessageStore,
   InMemoryWorkflowTaskStore,
   type WorkflowTaskStore,
 } from "../../../src/workflows/tasks/stores.js";
 
 describe("WorkflowTaskController", () => {
+  test("derives root authority from the host capability and discards forged bindings", async () => {
+    const trustedCapability = Object.freeze({ execution: "trusted" });
+    let validations = 0;
+    const authority: WorkflowTaskAuthorityPort = {
+      async resolveRoot({ capability, request }) {
+        expect(capability).toBe(trustedCapability);
+        expect(request.orchestration).toEqual({
+          planRevision: 999,
+          ownership: [{ grantId: "forged", fencingToken: 999 }],
+        });
+        return binding("root-grant", 7, 11);
+      },
+      async deriveChild() {
+        return binding("child-grant", 7, 12);
+      },
+      async validateAttempt({ task }) {
+        validations++;
+        expect(task.orchestration).toEqual(binding("root-grant", 7, 11));
+      },
+      async validateAuthenticatedSender() {},
+    };
+    const { controller } = orchestratedHarness({
+      authority,
+      driver: {
+        async execute() {
+          expect(validations).toBe(2);
+          return { output: "authorized" };
+        },
+      },
+    });
+
+    const forged = {
+      ...spawn("root"),
+      operationId: "root-create",
+      orchestration: binding("forged", 999, 999),
+    };
+    await expect(controller.spawn(forged)).rejects.toMatchObject({
+      code: "WORKFLOW_TASK_INVALID_REQUEST",
+    });
+    const handle = await controller.spawn(forged, {
+      capability: trustedCapability,
+    });
+
+    await expect(controller.join(handle)).resolves.toMatchObject({
+      status: "completed",
+      orchestration: binding("root-grant", 7, 11),
+      output: "authorized",
+    });
+  });
+
+  test("derives child authority independently and fences driver commands", async () => {
+    let child: WorkflowTaskHandle | undefined;
+    const authority: WorkflowTaskAuthorityPort = {
+      async resolveRoot() {
+        return binding("root-grant", 7, 11);
+      },
+      async deriveChild({ parent, request }) {
+        expect(parent.orchestration).toEqual(binding("root-grant", 7, 11));
+        expect(request.operationId).toBe("spawn-child");
+        return binding("child-grant", 7, 22);
+      },
+      async validateAttempt() {},
+      async validateAuthenticatedSender() {},
+    };
+    const { controller } = orchestratedHarness({
+      authority,
+      driver: {
+        async execute(request) {
+          if (request.task.taskId === "root") {
+            child = await request.spawn({
+              operationId: "spawn-child",
+              taskId: "child",
+              agentId: "reviewer",
+            });
+            return { output: child };
+          }
+          return { output: "child-done" };
+        },
+      },
+    });
+
+    const root = await controller.spawn(
+      { ...spawn("root"), operationId: "spawn-root" },
+      { capability: { host: true } },
+    );
+    await controller.join(root);
+    expect(child).toBeDefined();
+    await expect(
+      controller.join(child as WorkflowTaskHandle),
+    ).resolves.toMatchObject({
+      status: "completed",
+      orchestration: binding("child-grant", 7, 22),
+      output: "child-done",
+    });
+  });
+
+  test("authenticates external mailbox send and appends through the claimed sender fence", async () => {
+    const gate = deferred<WorkflowTaskDriverResult>();
+    const actor = Object.freeze({ task: "sender" });
+    let authenticated = 0;
+    const authority: WorkflowTaskAuthorityPort = {
+      async resolveRoot() {
+        return binding("grant", 7, 1);
+      },
+      async deriveChild() {
+        return binding("child", 7, 2);
+      },
+      async validateAttempt() {},
+      async validateAuthenticatedSender({ actor: actual, sender }) {
+        expect(actual).toBe(actor);
+        expect(sender.taskId).toBe("sender");
+        authenticated++;
+      },
+    };
+    const { controller } = orchestratedHarness({
+      authority,
+      driver: { execute: async () => await gate.promise },
+    });
+    const target = await controller.spawn(
+      { ...spawn("target"), operationId: "spawn-target" },
+      { capability: {} },
+    );
+    const sender = await controller.spawn(
+      { ...spawn("sender"), operationId: "spawn-sender" },
+      { capability: {} },
+    );
+    await eventually(async () => {
+      expect((await controller.status(sender)).status).toBe("running");
+    });
+
+    await expect(
+      controller.send({ ...target, senderTaskId: sender.taskId, payload: "x" }),
+    ).rejects.toMatchObject({ code: "WORKFLOW_TASK_INVALID_REQUEST" });
+    const message = await controller.send(
+      { ...target, senderTaskId: sender.taskId, payload: "hello" },
+      { actor, operationId: "send-1" },
+    );
+    expect(message).toMatchObject({ senderTaskId: "sender", payload: "hello" });
+    expect(authenticated).toBe(1);
+
+    gate.resolve({});
+    await controller.waitForIdle();
+  });
+
   test("starts promptly and returns a serializable durable handle", async () => {
     const gate = deferred<WorkflowTaskDriverResult>();
     const { controller } = harness({ execute: async () => await gate.promise });
@@ -435,6 +581,42 @@ function harness(driver: WorkflowTaskDriver) {
     store,
     messageStore,
     controller: new WorkflowTaskController({ store, messageStore, driver }),
+  };
+}
+
+function orchestratedHarness(options: {
+  authority: WorkflowTaskAuthorityPort;
+  driver: WorkflowTaskDriver;
+}) {
+  const store = new InMemoryWorkflowTaskStore();
+  const messageStore = new InMemoryWorkflowTaskMessageStore();
+  const commandStore = new InMemoryWorkflowTaskCommandStore({
+    taskStore: store,
+    messageStore,
+  });
+  return {
+    store,
+    messageStore,
+    controller: new WorkflowTaskController({
+      store,
+      messageStore,
+      commandStore,
+      authorityPort: options.authority,
+      driver: options.driver,
+      durable: {
+        workerId: "worker-test",
+        leaseDurationMs: 60_000,
+        heartbeatIntervalMs: 10_000,
+        scheduleHeartbeat: () => ({ cancel() {} }),
+      },
+    }),
+  };
+}
+
+function binding(grantId: string, planRevision: number, fencingToken: number) {
+  return {
+    planRevision,
+    ownership: [{ grantId, fencingToken }],
   };
 }
 

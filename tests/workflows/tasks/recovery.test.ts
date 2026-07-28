@@ -5,6 +5,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import type { WorkflowTaskAuthorityPort } from "../../../src/workflows/tasks/authority.js";
 import type {
   WorkflowTaskDriver,
   WorkflowTaskDriverRequest,
@@ -16,6 +17,7 @@ import {
   type WorkflowTaskHeartbeatHandle,
 } from "../../../src/workflows/tasks/controller.js";
 import {
+  InMemoryWorkflowTaskCommandStore,
   InMemoryWorkflowTaskMessageStore,
   InMemoryWorkflowTaskStore,
   type WorkflowTaskClaimStore,
@@ -132,6 +134,88 @@ describe("WorkflowTaskController durable recovery", () => {
     });
   });
 
+  test("fences stale orchestrated driver commands before mailbox side effects", async () => {
+    let now = 10;
+    const store = new InMemoryWorkflowTaskStore({ now: () => now });
+    const messages = new InMemoryWorkflowTaskMessageStore();
+    const commandStore = new InMemoryWorkflowTaskCommandStore({
+      taskStore: store,
+      messageStore: messages,
+    });
+    const authority: WorkflowTaskAuthorityPort = {
+      async resolveRoot() {
+        return orchestrationBinding();
+      },
+      async deriveChild() {
+        return orchestrationBinding();
+      },
+      async validateAttempt() {},
+      async validateAuthenticatedSender() {},
+    };
+    const oldGate = deferred<WorkflowTaskDriverResult>();
+    const newGate = deferred<WorkflowTaskDriverResult>();
+    let staleDriver: WorkflowTaskDriverRequest | undefined;
+    const oldController = new WorkflowTaskController({
+      store,
+      messageStore: messages,
+      commandStore,
+      authorityPort: authority,
+      now: () => now,
+      durable: scheduledDurableOptions(
+        "worker-old",
+        "lease-old",
+        new ManualHeartbeatScheduler(),
+      ),
+      driver: {
+        async execute(request) {
+          staleDriver = request;
+          return await oldGate.promise;
+        },
+      },
+    });
+    const recoveryController = new WorkflowTaskController({
+      store,
+      messageStore: messages,
+      commandStore,
+      authorityPort: authority,
+      now: () => now,
+      durable: scheduledDurableOptions(
+        "worker-new",
+        "lease-new",
+        new ManualHeartbeatScheduler(),
+      ),
+      driver: { execute: async () => await newGate.promise },
+    });
+
+    const handle = await oldController.spawn(
+      { ...spawn("task-1"), operationId: "spawn-root" },
+      { capability: { host: true } },
+    );
+    await flushUntil(() => expect(staleDriver).toBeDefined());
+    now = 30;
+    await recoveryController.recoverExpired(handle);
+    await flushUntil(async () => {
+      expect((await recoveryController.status(handle)).claim?.workerId).toBe(
+        "worker-new",
+      );
+    });
+
+    await expect(
+      staleDriver?.send({
+        operationId: "stale-send",
+        taskId: handle.taskId,
+        payload: "must-not-append",
+      }),
+    ).rejects.toMatchObject({ code: "WORKFLOW_TASK_NOT_OWNED" });
+    expect((await messages.read(handle)).messages).toEqual([]);
+
+    oldGate.resolve({});
+    await oldController.waitForIdle();
+    now = 31;
+    newGate.resolve({});
+    await recoveryController.join(handle);
+  });
+
   test("aborts the local driver when heartbeat renewal loses its fence", async () => {
     let now = 10;
     const store = new InMemoryWorkflowTaskStore({ now: () => now });
@@ -226,14 +310,15 @@ describe("WorkflowTaskController durable recovery", () => {
     });
   });
 
-  test("finalizes an expired cancelling claim without relaunching it", async () => {
+  test("stops heartbeats so a noncooperative cancelled driver can be recovered", async () => {
     let now = 10;
     const gate = deferred<WorkflowTaskDriverResult>();
     const store = new InMemoryWorkflowTaskStore({ now: () => now });
+    const scheduler = new ManualHeartbeatScheduler();
     const controller = durableController({
       store,
       now: () => now,
-      scheduler: new ManualHeartbeatScheduler(),
+      scheduler,
       workerId: "worker-1",
       leaseId: "lease-1",
       driver: { execute: async () => await gate.promise },
@@ -243,6 +328,7 @@ describe("WorkflowTaskController durable recovery", () => {
       expect((await controller.status(handle)).status).toBe("running"),
     );
     await controller.cancel(handle);
+    expect(scheduler.cancelled).toBe(true);
     now = 30;
 
     await expect(controller.recoverExpired(handle)).resolves.toEqual(handle);
@@ -307,7 +393,7 @@ describe("WorkflowTaskController durable recovery", () => {
     expect(ownerSignal?.aborted).toBe(true);
     await expect(remote.join(handle)).resolves.toMatchObject({
       status: "cancelled",
-      revision: 5,
+      revision: 4,
       error: { code: "WORKFLOW_TASK_CANCELLED" },
     });
   });
@@ -447,6 +533,28 @@ function durableOptions(workerId: string, leaseId: string) {
     heartbeatIntervalMs: 5,
     createLeaseId: () => leaseId,
     scheduleHeartbeat: () => ({ cancel() {} }),
+  };
+}
+
+function scheduledDurableOptions(
+  workerId: string,
+  leaseId: string,
+  scheduler: ManualHeartbeatScheduler,
+) {
+  return {
+    workerId,
+    leaseDurationMs: 20,
+    heartbeatIntervalMs: 5,
+    createLeaseId: () => leaseId,
+    scheduleHeartbeat: (heartbeat: () => Promise<void>, intervalMs: number) =>
+      scheduler.schedule(heartbeat, intervalMs),
+  };
+}
+
+function orchestrationBinding() {
+  return {
+    planRevision: 7,
+    ownership: [{ grantId: "grant-1", fencingToken: 1 }],
   };
 }
 

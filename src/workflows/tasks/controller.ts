@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 
+import type { WorkflowTaskAuthorityPort } from "./authority.js";
 import {
   type WorkflowTaskAwaitAnyResult,
   type WorkflowTaskClaimGuard,
@@ -28,6 +29,7 @@ import {
   validateIdentifier,
   validateTaskHandle,
   type WorkflowTaskClaimStore,
+  type WorkflowTaskCommandStore,
   type WorkflowTaskMessageStore,
   type WorkflowTaskRevisionWaitStore,
   type WorkflowTaskStore,
@@ -63,8 +65,29 @@ export interface WorkflowTaskControllerConfig {
   driver: WorkflowTaskDriver;
   /** Opt-in durable execution. Omitting this preserves local legacy behavior. */
   durable?: WorkflowTaskDurableExecutionConfig;
+  /**
+   * Derives orchestration bindings from authenticated host capabilities.
+   * Must be configured together with commandStore and durable execution.
+   */
+  authorityPort?: WorkflowTaskAuthorityPort;
+  /** Atomic, fenced mutations used by orchestrated durable drivers. */
+  commandStore?: WorkflowTaskCommandStore;
   now?: () => number;
   onBackgroundError?: (error: unknown, handle: WorkflowTaskHandle) => void;
+}
+
+export interface WorkflowTaskRootSpawnOptions {
+  /** Opaque authenticated host capability. It is never persisted. */
+  capability: unknown;
+  /** Stable idempotency key. It must match a serializable request hint. */
+  operationId?: string;
+}
+
+export interface WorkflowTaskAuthenticatedSendOptions {
+  /** Authenticated host actor corresponding to request.senderTaskId. */
+  actor: unknown;
+  /** Stable idempotency key for the mailbox append. */
+  operationId: string;
 }
 
 interface ActiveTask {
@@ -106,6 +129,8 @@ export class WorkflowTaskController {
   readonly #driver: WorkflowTaskDriver;
   readonly #claimStore: WorkflowTaskClaimStore | undefined;
   readonly #durable: NormalizedDurableExecutionConfig | undefined;
+  readonly #authorityPort: WorkflowTaskAuthorityPort | undefined;
+  readonly #commandStore: WorkflowTaskCommandStore | undefined;
   readonly #now: () => number;
   readonly #onBackgroundError:
     | ((error: unknown, handle: WorkflowTaskHandle) => void)
@@ -119,6 +144,21 @@ export class WorkflowTaskController {
     this.#driver = config.driver;
     this.#now = config.now ?? Date.now;
     this.#onBackgroundError = config.onBackgroundError;
+    if (
+      (config.authorityPort === undefined) !==
+      (config.commandStore === undefined)
+    ) {
+      throw new TypeError(
+        "Orchestrated workflow task execution requires authorityPort and commandStore together",
+      );
+    }
+    if (config.authorityPort !== undefined && config.durable === undefined) {
+      throw new TypeError(
+        "Orchestrated workflow task execution requires durable execution",
+      );
+    }
+    this.#authorityPort = config.authorityPort;
+    this.#commandStore = config.commandStore;
     if (config.durable !== undefined) {
       if (!isWorkflowTaskClaimStore(config.store)) {
         throw new TypeError(
@@ -133,18 +173,44 @@ export class WorkflowTaskController {
     }
   }
 
-  async spawn(request: WorkflowTaskSpawnRequest): Promise<WorkflowTaskHandle> {
+  async spawn(
+    request: WorkflowTaskSpawnRequest,
+    options?: WorkflowTaskRootSpawnOptions,
+  ): Promise<WorkflowTaskHandle> {
     const normalized = normalizeSpawnRequest(request);
+    if (this.#authorityPort && this.#commandStore) {
+      if (normalized.parentTaskId !== undefined) {
+        invalid("External orchestrated task spawn cannot contain parentTaskId");
+      }
+      if (!options || !("capability" in options)) {
+        invalid("Orchestrated root task spawn requires a host capability");
+      }
+      const operationId = requiredOperationId(
+        options.operationId ?? normalized.operationId,
+      );
+      const authority = await this.#authorityPort.resolveRoot({
+        capability: options.capability,
+        request: normalized,
+      });
+      const record = await this.#commandStore.createRoot({
+        operationId,
+        request: withoutOrchestrationHint(normalized),
+        authority,
+      });
+      this.#launch(record, false);
+      return taskHandle(record);
+    }
     if (normalized.parentTaskId !== undefined) {
       await this.#required({
         executionId: normalized.executionId,
         taskId: normalized.parentTaskId,
       });
     }
+    const { operationId: _operationId, ...persisted } = normalized;
     const now = this.#timestamp();
     const record = await this.#store.create(
       immutableTaskJson({
-        ...normalized,
+        ...persisted,
         status: "queued",
         revision: 1,
         attempt: 1,
@@ -157,8 +223,11 @@ export class WorkflowTaskController {
   }
 
   /** Alias for hosts that expose a start-oriented control API. */
-  async start(request: WorkflowTaskSpawnRequest): Promise<WorkflowTaskHandle> {
-    return await this.spawn(request);
+  async start(
+    request: WorkflowTaskSpawnRequest,
+    options?: WorkflowTaskRootSpawnOptions,
+  ): Promise<WorkflowTaskHandle> {
+    return await this.spawn(request, options);
   }
 
   async resume(
@@ -354,9 +423,40 @@ export class WorkflowTaskController {
 
   async send(
     request: WorkflowTaskMessageAppendRequest,
+    options?: WorkflowTaskAuthenticatedSendOptions,
   ): Promise<WorkflowTaskMessage> {
     validateSendRequest(request);
     await this.#required(request);
+    if (this.#authorityPort && this.#commandStore) {
+      if (request.senderTaskId === undefined) {
+        invalid("Authenticated workflow task send requires senderTaskId");
+      }
+      if (!options || !("actor" in options)) {
+        invalid("Authenticated workflow task send requires a host actor");
+      }
+      const sender = await this.#required({
+        executionId: request.executionId,
+        taskId: request.senderTaskId,
+      });
+      if (sender.claim === undefined || sender.status !== "running") {
+        notOwned(sender);
+      }
+      const claimedSender = sender as WorkflowTaskRecord & {
+        claim: NonNullable<WorkflowTaskRecord["claim"]>;
+      };
+      await this.#authorityPort.validateAuthenticatedSender({
+        actor: options.actor,
+        sender: claimedSender,
+      });
+      return await this.#commandStore.appendFromClaim({
+        operationId: requiredOperationId(options.operationId),
+        parentClaim: claimGuard(claimedSender),
+        request: {
+          taskId: request.taskId,
+          payload: request.payload,
+        },
+      });
+    }
     if (request.senderTaskId !== undefined) {
       await this.#required({
         executionId: request.executionId,
@@ -568,12 +668,35 @@ export class WorkflowTaskController {
       return;
     }
     try {
+      await this.#validateAttempt(handle, active);
+      current = active.durable?.record ?? current;
       const result = await this.#driver.execute({
         task: current,
         signal,
         resumed,
         spawn: async (request) => {
           await this.#assertDriverActive(handle, active);
+          if (this.#authorityPort && this.#commandStore) {
+            const parent = await this.#requiredClaimedParent(handle, active);
+            const authority = await this.#authorityPort.deriveChild({
+              parent,
+              parentClaim: claimGuard(parent),
+              request,
+            });
+            const child = await this.#commandStore.createChildClaimed({
+              operationId: driverOperationId(
+                parent,
+                "spawn",
+                request.taskId,
+                request.operationId,
+              ),
+              parentClaim: claimGuard(parent),
+              request,
+              authority,
+            });
+            this.#launch(child, false);
+            return taskHandle(child);
+          }
           return await this.spawn({
             ...request,
             executionId: handle.executionId,
@@ -582,6 +705,14 @@ export class WorkflowTaskController {
         },
         send: async (request) => {
           await this.#assertDriverActive(handle, active);
+          if (this.#commandStore) {
+            const parent = await this.#requiredClaimedParent(handle, active);
+            return await this.#commandStore.appendFromClaim({
+              operationId: requiredOperationId(request.operationId),
+              parentClaim: claimGuard(parent),
+              request,
+            });
+          }
           return await this.send({
             executionId: handle.executionId,
             taskId: request.taskId,
@@ -610,6 +741,17 @@ export class WorkflowTaskController {
         cancel: async (child) => {
           await this.#assertDriverActive(handle, active);
           assertSameExecution(handle, child);
+          if (this.#commandStore) {
+            const parent = await this.#requiredClaimedParent(handle, active);
+            const cancelled =
+              await this.#commandStore.requestCancellationClaimed({
+                operationId: driverOperationId(parent, "cancel", child.taskId),
+                parentClaim: claimGuard(parent),
+                target: child,
+              });
+            this.#abortLocallyOwned(cancelled);
+            return cancelled;
+          }
           return await this.cancel(child);
         },
       });
@@ -693,6 +835,7 @@ export class WorkflowTaskController {
             tail: Promise.resolve(),
             lost: false,
           };
+          await this.#validateAttempt(handle, active);
           this.#startHeartbeat(active);
           return claimed;
         }
@@ -843,6 +986,7 @@ export class WorkflowTaskController {
       attempt.record = transitioned;
       return transitioned;
     });
+    active.durable?.heartbeat?.cancel();
     active.abort.abort(cancellationError());
     return saved;
   }
@@ -872,14 +1016,14 @@ export class WorkflowTaskController {
           const latest = await this.#required(attempt.guard);
           this.#assertAttemptOwns(attempt, latest);
           if (latest.status !== "cancelling") throw error;
-          renewed = await this.#requiredClaimStore().renewClaim({
-            ...attempt.guard,
-            expectedRevision: latest.revision,
-            leaseDurationMs: this.#durable?.leaseDurationMs ?? 0,
-          });
+          attempt.record = latest;
+          attempt.heartbeat?.cancel();
+          active.abort.abort(cancellationError());
+          return;
         }
         attempt.record = renewed;
         if (renewed.status === "cancelling") {
+          attempt.heartbeat?.cancel();
           active.abort.abort(cancellationError());
         }
       });
@@ -1016,6 +1160,51 @@ export class WorkflowTaskController {
     }
   }
 
+  async #validateAttempt(
+    handle: WorkflowTaskHandle,
+    active: ActiveTask,
+  ): Promise<void> {
+    if (!this.#authorityPort) return;
+    const attempt = active.durable;
+    if (!attempt) notOwned(handle);
+    const current = await this.#required(handle);
+    this.#assertAttemptOwns(attempt, current);
+    await this.#authorityPort.validateAttempt({
+      task: current,
+      claim: attempt.guard,
+    });
+    attempt.record = current;
+  }
+
+  async #requiredClaimedParent(
+    handle: WorkflowTaskHandle,
+    active: ActiveTask,
+  ): Promise<
+    WorkflowTaskRecord & { claim: NonNullable<WorkflowTaskRecord["claim"]> }
+  > {
+    const attempt = active.durable;
+    if (!attempt) notOwned(handle);
+    const current = await this.#required(handle);
+    this.#assertAttemptOwns(attempt, current);
+    if (current.status !== "running" || current.claim === undefined) {
+      invalidTransition(
+        handle,
+        `Workflow task cannot mutate while ${current.status}`,
+      );
+    }
+    return current as WorkflowTaskRecord & {
+      claim: NonNullable<WorkflowTaskRecord["claim"]>;
+    };
+  }
+
+  #abortLocallyOwned(record: WorkflowTaskRecord): void {
+    if (record.status !== "cancelling") return;
+    const active = this.#active.get(taskKey(record));
+    if (!active?.durable) return;
+    active.durable.heartbeat?.cancel();
+    active.abort.abort(cancellationError());
+  }
+
   async #firstTerminal(
     handles: readonly WorkflowTaskHandle[],
   ): Promise<WorkflowTaskAwaitAnyResult | undefined> {
@@ -1053,6 +1242,7 @@ function normalizeSpawnRequest(
         key !== "taskId" &&
         key !== "parentTaskId" &&
         key !== "agentId" &&
+        key !== "operationId" &&
         key !== "orchestration" &&
         key !== "input",
     )
@@ -1068,6 +1258,64 @@ function normalizeSpawnRequest(
     }
   }
   return immutableTaskJson(request);
+}
+
+function withoutOrchestrationHint(
+  request: WorkflowTaskSpawnRequest,
+): WorkflowTaskSpawnRequest {
+  const { orchestration: _orchestration, ...trusted } = request;
+  return immutableTaskJson(trusted);
+}
+
+function requiredOperationId(operationId: string | undefined): string {
+  if (operationId === undefined) {
+    invalid("Orchestrated workflow task mutation requires operationId");
+  }
+  validateIdentifier(operationId, "operationId");
+  return operationId;
+}
+
+function driverOperationId(
+  parent: WorkflowTaskRecord,
+  operation: "spawn" | "cancel",
+  targetTaskId: string,
+  hint?: string,
+): string {
+  if (hint !== undefined) return requiredOperationId(hint);
+  const intent = [
+    parent.executionId,
+    parent.taskId,
+    String(parent.attempt),
+    operation,
+    targetTaskId,
+  ].join("\u0000");
+  return `taskcmd:${stableHash(intent, 2_166_136_261)}${stableHash(
+    intent,
+    3_332_465_707,
+  )}`;
+}
+
+function stableHash(value: string, seed: number): string {
+  let hash = seed;
+  for (let index = 0; index < value.length; index++) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16_777_619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+function claimGuard(
+  record: WorkflowTaskRecord & {
+    claim: NonNullable<WorkflowTaskRecord["claim"]>;
+  },
+): WorkflowTaskClaimGuard {
+  return immutableTaskJson({
+    executionId: record.executionId,
+    taskId: record.taskId,
+    workerId: record.claim.workerId,
+    leaseId: record.claim.leaseId,
+    fencingToken: record.claim.fencingToken,
+  });
 }
 
 function validateResumeRequest(request: WorkflowTaskResumeRequest): void {
