@@ -40,6 +40,10 @@
     "./workflows": {
       "types": "./dist/workflows/index.d.ts",
       "import": "./dist/workflows/index.js"
+    },
+    "./workflows/node": {
+      "types": "./dist/workflows/node/index.d.ts",
+      "import": "./dist/workflows/node/index.js"
     }
   },
   "files": [

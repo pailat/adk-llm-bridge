@@ -16,6 +16,7 @@ import type {
   WorkspaceAdapter,
 } from "../../src/workflows/index.js";
 import * as workflows from "../../src/workflows/index.js";
+import * as workflowNode from "../../src/workflows/node/index.js";
 
 describe("workflows public exports", () => {
   test("root export remains LLM-focused", () => {
@@ -48,6 +49,17 @@ describe("workflows public exports", () => {
     expect(workflows.InMemoryWorkflowTaskStore).toBeFunction();
     expect(workflows.InMemoryWorkflowTaskMessageStore).toBeFunction();
     expect(workflows.WorkflowControlPlane).toBeFunction();
+    expect(workflows.WorkflowPlanController).toBeFunction();
+    expect(workflows.WorkflowOwnershipController).toBeFunction();
+    expect(workflows.WorkflowOrchestrationTaskAuthorityPort).toBeFunction();
+    expect(workflows.WorkflowOwnershipChangeSetValidator).toBeFunction();
+    expect(workflows.WorkflowLiveChangeReceiptAuthority).toBeFunction();
+    expect(workflows.WorkflowTaskDispatcher).toBeFunction();
+    expect(workflows.AdkWorkflowTaskDriver).toBeFunction();
+    expect(workflows.AgentInvocationGateway).toBeFunction();
+    expect(workflows.WorkflowValidatedCommitter).toBeFunction();
+    expect(workflows.WorkflowValidatedIntegrator).toBeFunction();
+    expect(workflows.InMemoryWorkflowHostMutationJournal).toBeFunction();
     expect(workflows.InMemoryWorkspaceProvisioner).toBeFunction();
     expect(workflows.InMemoryWorkflowArtifactStore).toBeFunction();
     expect(workflows.IntegrationGate).toBeFunction();
@@ -98,5 +110,10 @@ describe("workflows public exports", () => {
       types: "./dist/workflows/index.d.ts",
       import: "./dist/workflows/index.js",
     });
+    expect(packageJson.exports["./workflows/node"]).toEqual({
+      types: "./dist/workflows/node/index.d.ts",
+      import: "./dist/workflows/node/index.js",
+    });
+    expect(workflowNode.NodeGitWorktreeChangeDriver).toBeFunction();
   });
 });

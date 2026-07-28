@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 
+export * from "./change-driver.js";
 export type {
   DurableWorkspaceLease,
   FileSystemWorkspaceAdapterOptions,
@@ -16,6 +17,7 @@ export {
 } from "./file-system-workspace-adapter.js";
 export type { InMemoryWorkspaceAdapterOptions } from "./in-memory-workspace-adapter.js";
 export { InMemoryWorkspaceAdapter } from "./in-memory-workspace-adapter.js";
+export * from "./mutation-journal.js";
 export type {
   WorkflowWorkspaceConfig,
   WorkspaceAcquireOptions,

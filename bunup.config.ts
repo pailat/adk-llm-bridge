@@ -1,7 +1,12 @@
 import { defineConfig } from "bunup";
 
 export default defineConfig({
-  entry: ["src/index.ts", "src/agents/index.ts", "src/workflows/index.ts"],
+  entry: [
+    "src/index.ts",
+    "src/agents/index.ts",
+    "src/workflows/index.ts",
+    "src/workflows/node/index.ts",
+  ],
   format: ["esm"],
   target: "node",
   external: [

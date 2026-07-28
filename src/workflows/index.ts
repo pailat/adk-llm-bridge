@@ -6,6 +6,8 @@
 
 export { BaseAgent } from "@google/adk";
 
+export * from "../runtime/agent-invocation-gateway.js";
+
 export * from "./agents/index.js";
 export * from "./checkpoint/index.js";
 export * from "./contracts.js";
@@ -13,6 +15,7 @@ export * from "./control-plane/index.js";
 export * from "./definition.js";
 export * from "./events.js";
 export * from "./execution/index.js";
+export * from "./orchestration/index.js";
 export * from "./registry.js";
 export * from "./resources/index.js";
 export type {
