@@ -10,7 +10,9 @@ import {
   AgentInvocationGateway,
   type AgentInvocationResult,
 } from "../../runtime/agent-invocation-gateway.js";
+import type { WorkflowTaskAuthorityPort } from "./authority.js";
 import type {
+  WorkflowTaskClaimGuard,
   WorkflowTaskDriver,
   WorkflowTaskDriverRequest,
   WorkflowTaskDriverResult,
@@ -99,6 +101,8 @@ export type AdkWorkflowTaskOutputProjector = (
 interface AdkWorkflowTaskDriverConfigBase {
   gateway: AgentInvocationGateway;
   contextProvider: AdkWorkflowInvocationContextProvider;
+  /** Live authority for the exact claimed attempt; required for bound tasks. */
+  attemptAuthority?: Pick<WorkflowTaskAuthorityPort, "validateAttempt">;
   /** Deny by default: tasks normally require a durable plan/ownership binding. */
   allowUnboundLegacyTask?: boolean;
   outputProjector?: AdkWorkflowTaskOutputProjector;
@@ -135,6 +139,10 @@ export type AdkWorkflowTaskDriverConfig = AdkWorkflowTaskDriverConfigBase &
 export class AdkWorkflowTaskDriver implements WorkflowTaskDriver {
   readonly #gateway: AgentInvocationGateway;
   readonly #contextProvider: AdkWorkflowInvocationContextProvider;
+  readonly #attemptAuthority?: Pick<
+    WorkflowTaskAuthorityPort,
+    "validateAttempt"
+  >;
   readonly #capabilityBinder?: AdkWorkflowTaskCapabilityBinder;
   readonly #allowUnboundLegacyTask: boolean;
   readonly #outputProjector: AdkWorkflowTaskOutputProjector;
@@ -153,6 +161,13 @@ export class AdkWorkflowTaskDriver implements WorkflowTaskDriver {
       throw invalidConfig(
         "ADK workflow task driver context provider is required",
       );
+    }
+    if (
+      config.attemptAuthority !== undefined &&
+      (!config.attemptAuthority ||
+        typeof config.attemptAuthority.validateAttempt !== "function")
+    ) {
+      throw invalidConfig("ADK workflow task attempt authority is invalid");
     }
     if (
       config.capabilityMode !== undefined &&
@@ -193,6 +208,7 @@ export class AdkWorkflowTaskDriver implements WorkflowTaskDriver {
 
     this.#gateway = config.gateway;
     this.#contextProvider = config.contextProvider;
+    this.#attemptAuthority = config.attemptAuthority;
     this.#capabilityBinder = config.capabilityBinder;
     this.#allowUnboundLegacyTask = config.allowUnboundLegacyTask ?? false;
     this.#outputProjector = config.outputProjector ?? defaultOutputProjector;
@@ -207,6 +223,9 @@ export class AdkWorkflowTaskDriver implements WorkflowTaskDriver {
         `Workflow task requires an orchestration binding: ${request.task.executionId}/${request.task.taskId}`,
       );
     }
+
+    const validateAttempt = this.#attemptValidator(request.task);
+    await validateAttempt?.();
 
     let contextLease: AdkWorkflowInvocationContextLease | undefined;
     let capabilityLease: AdkWorkflowTaskCapabilityBindingLease | undefined;
@@ -227,6 +246,8 @@ export class AdkWorkflowTaskDriver implements WorkflowTaskDriver {
         parentContext: contextLease.context,
         abortSignal: request.signal,
         sessionState: taskSessionState(request.task),
+        sessionStateMode: "replace",
+        validateInvocation: validateAttempt,
         prepareContext: async (context, agent) => {
           if (!this.#capabilityBinder) return;
           capabilityLease = validateCapabilityLease(
@@ -271,6 +292,26 @@ export class AdkWorkflowTaskDriver implements WorkflowTaskDriver {
       );
     }
     return output === undefined ? {} : { output };
+  }
+
+  #attemptValidator(
+    task: WorkflowTaskRecord,
+  ): (() => Promise<void>) | undefined {
+    if (!task.orchestration) return undefined;
+    if (!task.claim) {
+      throw new AdkWorkflowTaskDriverError(
+        "ADK_WORKFLOW_TASK_UNBOUND",
+        `Bound workflow task requires a live claim: ${task.executionId}/${task.taskId}`,
+      );
+    }
+    const attemptAuthority = this.#attemptAuthority;
+    if (!attemptAuthority) {
+      throw invalidConfig(
+        "ADK workflow task attempt authority is required for bound tasks",
+      );
+    }
+    const claim = claimGuard(task);
+    return () => attemptAuthority.validateAttempt({ task, claim });
   }
 }
 
@@ -322,7 +363,24 @@ function taskSessionState(
       fencingToken: task.claim.fencingToken,
     };
   }
-  return Object.freeze({ workflowTask: Object.freeze(workflowTask) });
+  return immutableTaskJson({ workflowTask });
+}
+
+function claimGuard(task: WorkflowTaskRecord): WorkflowTaskClaimGuard {
+  const claim = task.claim;
+  if (!claim) {
+    throw new AdkWorkflowTaskDriverError(
+      "ADK_WORKFLOW_TASK_UNBOUND",
+      `Bound workflow task requires a live claim: ${task.executionId}/${task.taskId}`,
+    );
+  }
+  return Object.freeze({
+    executionId: task.executionId,
+    taskId: task.taskId,
+    workerId: claim.workerId,
+    leaseId: claim.leaseId,
+    fencingToken: claim.fencingToken,
+  });
 }
 
 function defaultOutputProjector(
