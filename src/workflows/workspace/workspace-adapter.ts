@@ -24,6 +24,15 @@ export interface WorkspaceAcquireOptions {
 export interface WorkspaceLease extends WorkspaceLeaseRequest {
   leaseId: string;
   acquiredAt: number;
+  /**
+   * Monotonic metadata for host-side fencing. The adapter does not fence
+   * writes to external resources; the resource writer must enforce this token.
+   */
+  fencingToken?: number;
+  /** Current durable expiry, when the adapter supports expiring leases. */
+  expiresAt?: number;
+  /** Renews a durable lease. Returns false when ownership is already stale. */
+  renew?(): Promise<boolean>;
   /** Returns true once, and false for every later release. */
   release(): Promise<boolean>;
 }
@@ -37,6 +46,8 @@ export interface WorkspaceLeaseConflict {
   leaseId: string;
   workspaceId: string;
   ownerId: string;
+  fencingToken?: number;
+  expiresAt?: number;
   overlaps: readonly WorkspacePathOverlap[];
 }
 
