@@ -8,10 +8,18 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { once } from "node:events";
-import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readdir,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  collectFileSystemWorkspaceTombstonesOffline,
   FileSystemWorkspaceAdapter,
   type FileSystemWorkspaceAdapterOptions,
 } from "../../../src/workflows/workspace/file-system-workspace-adapter.js";
@@ -141,6 +149,86 @@ describe("FileSystemWorkspaceAdapter", () => {
     expect(await lease.release()).toBe(true);
   });
 
+  test("reports lease loss after expiry and adapter disposal", async () => {
+    const directory = await stateDirectory();
+    let now = 3_000;
+    const expiringAdapter = adapter(directory, {
+      leaseTtlMs: 100,
+      heartbeatIntervalMs: 20,
+      now: () => now,
+    });
+    const expired = await expiringAdapter.acquire(
+      request("agent-expired", ["expired"]),
+    );
+    now = 3_101;
+
+    expect(await expired.renew()).toBe(false);
+    expect(expired.lossSignal.aborted).toBe(true);
+    expect(expired.lossSignal.reason).toMatchObject({
+      code: "workspace_lease_lost",
+      workspaceId: "repo",
+      leaseId: expired.leaseId,
+      fencingToken: expired.fencingToken,
+    });
+
+    const disposed = await expiringAdapter.acquire(
+      request("agent-disposed", ["disposed"]),
+    );
+    expiringAdapter.dispose();
+    expect(disposed.lossSignal.aborted).toBe(true);
+    expect(disposed.lossSignal.reason).toMatchObject({
+      code: "workspace_adapter_disposed",
+      leaseId: disposed.leaseId,
+    });
+  });
+
+  test("does not report loss after successful renew and release", async () => {
+    const directory = await stateDirectory();
+    let now = 4_000;
+    const instance = adapter(directory, {
+      leaseTtlMs: 100,
+      heartbeatIntervalMs: 20,
+      now: () => now,
+    });
+    const lease = await instance.acquire(request("agent-a", ["src"]));
+    now = 4_050;
+
+    expect(await lease.renew()).toBe(true);
+    expect(lease.lossSignal.aborted).toBe(false);
+    expect(await lease.release()).toBe(true);
+    now = 5_000;
+    await delay(25);
+    expect(lease.lossSignal.aborted).toBe(false);
+  });
+
+  test("reports loss when heartbeat cannot renew before expiry", async () => {
+    const directory = await stateDirectory();
+    const instance = adapter(directory, {
+      leaseTtlMs: 60,
+      heartbeatIntervalMs: 10,
+      lockAcquireTimeoutMs: 20,
+      pollIntervalMs: 2,
+    });
+    const lease = await instance.acquire(request("agent-a", ["src"]));
+    const workspaceDirectory = workspaceDirectoryFor(directory);
+    await mkdir(join(workspaceDirectory, "lock"), { mode: 0o700 });
+    await writeFile(
+      join(workspaceDirectory, "lock", "owner.json"),
+      JSON.stringify({
+        token: "live-heartbeat-blocker",
+        pid: process.pid,
+        acquiredAt: Date.now(),
+      }),
+    );
+
+    await delay(80);
+    expect(lease.lossSignal.aborted).toBe(true);
+    expect(lease.lossSignal.reason).toMatchObject({
+      code: "workspace_lease_lost",
+      leaseId: lease.leaseId,
+    });
+  });
+
   test("auto-renews with an unref heartbeat while the adapter is live", async () => {
     const directory = await stateDirectory();
     const instance = adapter(directory, {
@@ -213,6 +301,7 @@ describe("FileSystemWorkspaceAdapter", () => {
     expect(
       (await Promise.all([first.release(), first.release()])).sort(),
     ).toEqual([false, true]);
+    expect(first.lossSignal.aborted).toBe(false);
     const second = await secondAdapter.acquire(request("agent-b", ["src"]));
     expect(second.fencingToken).toBeGreaterThan(first.fencingToken);
     expect(await second.release()).toBe(true);
@@ -256,7 +345,75 @@ describe("FileSystemWorkspaceAdapter", () => {
     expect(await first.release()).toBe(true);
     expect(await second.release()).toBe(true);
   });
+
+  test("collects only valid workspace tombstones while offline", async () => {
+    const directory = await stateDirectory();
+    const instance = adapter(directory);
+    const lease = await instance.acquire(request("agent-a", ["src"]));
+    expect(await lease.release()).toBe(true);
+    const workspaceDirectory = workspaceDirectoryFor(directory);
+    const unknownPath = join(workspaceDirectory, "keep.unknown");
+    await writeFile(unknownPath, "keep", "utf8");
+
+    const result = collectFileSystemWorkspaceTombstonesOffline({
+      root: directory,
+      confirmNoActiveWriters: true,
+    });
+
+    expect(result.removedTombstones).toBeGreaterThan(0);
+    expect(await Bun.file(unknownPath).text()).toBe("keep");
+    expect(
+      (await readdir(workspaceDirectory)).filter((entry) =>
+        ["lock.retired.", "lock.candidate-", "state.json.tmp-"].some((prefix) =>
+          entry.startsWith(prefix),
+        ),
+      ),
+    ).toEqual([]);
+  });
+
+  test("offline workspace collection requires confirmation and no active lock", async () => {
+    const directory = await stateDirectory();
+    expect(() =>
+      collectFileSystemWorkspaceTombstonesOffline({
+        root: directory,
+        confirmNoActiveWriters: false as true,
+      }),
+    ).toThrow("confirmNoActiveWriters: true");
+    expect(() =>
+      collectFileSystemWorkspaceTombstonesOffline({
+        root: "relative",
+        confirmNoActiveWriters: true,
+      }),
+    ).toThrow("root must be absolute");
+
+    const workspaceDirectory = workspaceDirectoryFor(directory);
+    await mkdir(workspaceDirectory, { recursive: true });
+    await mkdir(join(workspaceDirectory, "lock"));
+    expect(() =>
+      collectFileSystemWorkspaceTombstonesOffline({
+        root: directory,
+        confirmNoActiveWriters: true,
+      }),
+    ).toThrow("active lock or candidate");
+  });
+
+  test("offline workspace collection rejects symlinks", async () => {
+    const directory = await stateDirectory();
+    const outside = await stateDirectory();
+    await symlink(outside, join(directory, "unsafe-link"));
+
+    expect(() =>
+      collectFileSystemWorkspaceTombstonesOffline({
+        root: directory,
+        confirmNoActiveWriters: true,
+      }),
+    ).toThrow("rejects symlinks");
+  });
 });
+
+function workspaceDirectoryFor(root: string): string {
+  return join(root, createHash("sha256").update("repo").digest("hex"));
+}
 
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolvePromise) =>

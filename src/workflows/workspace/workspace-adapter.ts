@@ -20,6 +20,15 @@ export interface WorkspaceAcquireOptions {
   signal?: AbortSignal;
 }
 
+/** JSON-safe reason exposed when a durable workspace lease is lost. */
+export interface WorkspaceLeaseLossReason {
+  code: "workspace_lease_lost" | "workspace_adapter_disposed";
+  message: string;
+  workspaceId: string;
+  leaseId: string;
+  fencingToken?: number;
+}
+
 /** Immutable ownership granted by the host-side workspace coordinator. */
 export interface WorkspaceLease extends WorkspaceLeaseRequest {
   leaseId: string;
@@ -31,6 +40,8 @@ export interface WorkspaceLease extends WorkspaceLeaseRequest {
   fencingToken?: number;
   /** Current durable expiry, when the adapter supports expiring leases. */
   expiresAt?: number;
+  /** Aborts if durable ownership is lost; a normal release does not abort it. */
+  lossSignal?: AbortSignal;
   /** Renews a durable lease. Returns false when ownership is already stale. */
   renew?(): Promise<boolean>;
   /** Returns true once, and false for every later release. */

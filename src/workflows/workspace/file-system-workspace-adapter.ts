@@ -8,14 +8,16 @@ import { createHash, randomUUID } from "node:crypto";
 import {
   closeSync,
   fsyncSync,
+  lstatSync,
   mkdirSync,
   openSync,
+  readdirSync,
   readFileSync,
   renameSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import {
   findWorkspacePathOverlaps,
   normalizeWorkspaceLeaseRequest,
@@ -23,6 +25,7 @@ import {
   type WorkspaceAdapter,
   type WorkspaceLease,
   type WorkspaceLeaseConflict,
+  type WorkspaceLeaseLossReason,
   type WorkspaceLeaseRequest,
 } from "./workspace-adapter.js";
 
@@ -32,6 +35,9 @@ const DEFAULT_LEASE_TTL_MS = 30_000;
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 10_000;
 const DEFAULT_POLL_INTERVAL_MS = 25;
 const DEFAULT_LOCK_ACQUIRE_TIMEOUT_MS = 10_000;
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
+const SAFE_WORKSPACE_DIRECTORY = /^[a-f0-9]{64}$/u;
+const SAFE_WORKSPACE_TOMBSTONE = /^lock\.retired\.([a-f0-9]{64})$/u;
 
 export interface FileSystemWorkspaceAdapterOptions {
   /** Absolute host directory used only for coordination metadata. */
@@ -47,7 +53,19 @@ export interface FileSystemWorkspaceAdapterOptions {
 export interface DurableWorkspaceLease extends WorkspaceLease {
   fencingToken: number;
   expiresAt: number;
+  lossSignal: AbortSignal;
   renew(): Promise<boolean>;
+}
+
+export interface OfflineWorkspaceTombstoneCollectionOptions {
+  /** Absolute host-controlled workspace coordination root. */
+  root: string;
+  /** Nominal acknowledgement that no adapter or writer is active. */
+  confirmNoActiveWriters: true;
+}
+
+export interface OfflineWorkspaceTombstoneCollectionResult {
+  removedTombstones: number;
 }
 
 interface PersistedLease extends WorkspaceLeaseRequest {
@@ -85,7 +103,10 @@ interface LocalLease {
   record: PersistedLease;
   expiresAt: number;
   closed: boolean;
+  releasing: boolean;
+  lossController: AbortController;
   heartbeat?: ReturnType<typeof setInterval>;
+  expiryTimer?: ReturnType<typeof setTimeout>;
   renewal?: Promise<boolean>;
 }
 
@@ -97,6 +118,34 @@ interface NormalizedOptions {
   lockAcquireTimeoutMs: number;
   createLeaseId: () => string;
   now: () => number;
+}
+
+interface OfflineTombstone {
+  path: string;
+  device: number;
+  inode: number;
+}
+
+/**
+ * OFFLINE ONLY: removes retired workspace-lock tombstones after proving that
+ * the host-controlled tree has no lock or candidate. This is not safe to run
+ * concurrently with adapters or writers, and intentionally has no age-based
+ * mode.
+ */
+export function collectFileSystemWorkspaceTombstonesOffline(
+  options: OfflineWorkspaceTombstoneCollectionOptions,
+): OfflineWorkspaceTombstoneCollectionResult {
+  const root = offlineRoot(
+    options?.root,
+    options?.confirmNoActiveWriters,
+    "workspace",
+  );
+  const tombstones: OfflineTombstone[] = [];
+  scanWorkspaceOfflineTree(root, root, tombstones);
+  for (const tombstone of tombstones) {
+    removeOfflineTombstone(tombstone, "workspace");
+  }
+  return Object.freeze({ removedTombstones: tombstones.length });
 }
 
 /**
@@ -170,13 +219,18 @@ export class FileSystemWorkspaceAdapter implements WorkspaceAdapter {
   }
 
   /**
-   * Stops local heartbeats without releasing durable state. Calling it twice
-   * is safe. Process death has the same persistence behavior: leases expire.
+   * Reports local leases lost and stops their timers without releasing durable
+   * state. Calling it twice is safe. Process death has the same persistence
+   * behavior: leases expire.
    */
   dispose(): void {
     if (this.#disposed) return;
     this.#disposed = true;
-    for (const lease of this.#localLeases) this.stopHeartbeat(lease);
+    for (const lease of this.#localLeases) {
+      this.reportLoss(lease, "workspace_adapter_disposed");
+      this.stopLifecycle(lease);
+    }
+    this.#localLeases.clear();
   }
 
   private createLease(record: PersistedLease): DurableWorkspaceLease {
@@ -187,6 +241,8 @@ export class FileSystemWorkspaceAdapter implements WorkspaceAdapter {
       }),
       expiresAt: record.expiresAt,
       closed: false,
+      releasing: false,
+      lossController: new AbortController(),
     };
     this.#localLeases.add(local);
     const lease = Object.freeze({
@@ -194,10 +250,12 @@ export class FileSystemWorkspaceAdapter implements WorkspaceAdapter {
       get expiresAt() {
         return local.expiresAt;
       },
+      lossSignal: local.lossController.signal,
       renew: () => this.renewLocal(local),
       release: () => this.releaseLocal(local),
     });
     this.startHeartbeat(local);
+    this.scheduleExpiry(local);
     return lease;
   }
 
@@ -210,7 +268,10 @@ export class FileSystemWorkspaceAdapter implements WorkspaceAdapter {
         },
         () => {
           // A transient filesystem failure must not create an unhandled
-          // rejection. The TTL remains the ultimate recovery boundary.
+          // rejection. The expiry timer remains the recovery boundary.
+          if (this.#options.now() >= local.expiresAt) {
+            this.markLost(local);
+          }
         },
       );
     }, this.#options.heartbeatIntervalMs);
@@ -221,6 +282,32 @@ export class FileSystemWorkspaceAdapter implements WorkspaceAdapter {
     if (!local.heartbeat) return;
     clearInterval(local.heartbeat);
     local.heartbeat = undefined;
+  }
+
+  private scheduleExpiry(local: LocalLease): void {
+    if (local.closed || local.lossController.signal.aborted) return;
+    if (local.expiryTimer) clearTimeout(local.expiryTimer);
+    const delay = Math.min(
+      MAX_TIMER_DELAY_MS,
+      Math.max(0, local.expiresAt - this.#options.now()),
+    );
+    local.expiryTimer = setTimeout(() => {
+      local.expiryTimer = undefined;
+      if (local.closed || local.lossController.signal.aborted) return;
+      if (this.#options.now() >= local.expiresAt) {
+        this.markLost(local);
+        return;
+      }
+      this.scheduleExpiry(local);
+    }, delay);
+    local.expiryTimer.unref?.();
+  }
+
+  private stopLifecycle(local: LocalLease): void {
+    this.stopHeartbeat(local);
+    if (!local.expiryTimer) return;
+    clearTimeout(local.expiryTimer);
+    local.expiryTimer = undefined;
   }
 
   private renewLocal(local: LocalLease): Promise<boolean> {
@@ -246,36 +333,67 @@ export class FileSystemWorkspaceAdapter implements WorkspaceAdapter {
       },
     );
     if (renewed === undefined) {
-      local.closed = true;
-      this.stopHeartbeat(local);
-      this.#localLeases.delete(local);
+      this.markLost(local);
       return false;
     }
     local.expiresAt = renewed;
+    this.scheduleExpiry(local);
     return true;
   }
 
   private async releaseLocal(local: LocalLease): Promise<boolean> {
-    if (local.closed) return false;
-    const released = await this.withLockedState(
-      local.record.workspaceId,
-      undefined,
-      (state) => {
-        const dirty = purgeExpired(state, this.#options.now());
-        const index = state.leases.findIndex(
-          (lease) =>
-            lease.leaseId === local.record.leaseId &&
-            lease.fencingToken === local.record.fencingToken,
-        );
-        if (index < 0) return { value: false, dirty };
-        state.leases.splice(index, 1);
-        return { value: true, dirty: true };
-      },
-    );
+    if (local.closed || local.releasing) return false;
+    local.releasing = true;
+    try {
+      const released = await this.withLockedState(
+        local.record.workspaceId,
+        undefined,
+        (state) => {
+          const dirty = purgeExpired(state, this.#options.now());
+          const index = state.leases.findIndex(
+            (lease) =>
+              lease.leaseId === local.record.leaseId &&
+              lease.fencingToken === local.record.fencingToken,
+          );
+          if (index < 0) return { value: false, dirty };
+          state.leases.splice(index, 1);
+          return { value: true, dirty: true };
+        },
+      );
+      local.closed = true;
+      this.stopLifecycle(local);
+      this.#localLeases.delete(local);
+      if (!released) this.reportLoss(local, "workspace_lease_lost");
+      return released;
+    } finally {
+      local.releasing = false;
+    }
+  }
+
+  private markLost(local: LocalLease): void {
+    if (local.closed) return;
     local.closed = true;
-    this.stopHeartbeat(local);
+    this.reportLoss(local, "workspace_lease_lost");
+    this.stopLifecycle(local);
     this.#localLeases.delete(local);
-    return released;
+  }
+
+  private reportLoss(
+    local: LocalLease,
+    code: WorkspaceLeaseLossReason["code"],
+  ): void {
+    if (local.lossController.signal.aborted) return;
+    const reason: WorkspaceLeaseLossReason = Object.freeze({
+      code,
+      message:
+        code === "workspace_adapter_disposed"
+          ? "Workspace adapter was disposed while the lease was active"
+          : "Durable workspace lease ownership was lost",
+      workspaceId: local.record.workspaceId,
+      leaseId: local.record.leaseId,
+      fencingToken: local.record.fencingToken,
+    });
+    local.lossController.abort(reason);
   }
 
   private async withLockedState<T>(
@@ -355,6 +473,120 @@ function ensureWorkspaceFilesSync(
   const files = workspaceFiles(stateDirectory, workspaceId);
   mkdirSync(files.directory, { recursive: true, mode: 0o700 });
   return files;
+}
+
+function offlineRoot(
+  value: string | undefined,
+  confirmed: boolean | undefined,
+  kind: string,
+): string {
+  if (confirmed !== true) {
+    throw new TypeError(
+      `Offline ${kind} tombstone collection requires confirmNoActiveWriters: true`,
+    );
+  }
+  if (typeof value !== "string" || !isAbsolute(value)) {
+    throw new TypeError(
+      `Offline ${kind} tombstone collection root must be absolute`,
+    );
+  }
+  const root = resolve(value);
+  const info = lstatSync(root);
+  if (info.isSymbolicLink() || !info.isDirectory()) {
+    throw new Error(
+      `Offline ${kind} tombstone collection root is not a safe directory`,
+    );
+  }
+  return root;
+}
+
+function scanWorkspaceOfflineTree(
+  root: string,
+  directory: string,
+  tombstones: OfflineTombstone[],
+): void {
+  for (const entry of readdirSync(directory)) {
+    const path = join(directory, entry);
+    const info = lstatSync(path);
+    if (info.isSymbolicLink()) {
+      throw new Error(
+        `Offline workspace tombstone collection rejects symlinks: ${path}`,
+      );
+    }
+    if (entry === "lock" || entry.startsWith("lock.candidate-")) {
+      throw new Error(
+        `Offline workspace tombstone collection found an active lock or candidate: ${path}`,
+      );
+    }
+    if (!info.isDirectory() && !info.isFile()) {
+      throw new Error(
+        `Offline workspace tombstone collection found an unsafe entry: ${path}`,
+      );
+    }
+    const match = SAFE_WORKSPACE_TOMBSTONE.exec(entry);
+    if (
+      match &&
+      info.isDirectory() &&
+      dirname(directory) === root &&
+      SAFE_WORKSPACE_DIRECTORY.test(basename(directory))
+    ) {
+      assertValidWorkspaceTombstone(path, match[1] as string);
+      tombstones.push({ path, device: info.dev, inode: info.ino });
+      continue;
+    }
+    if (entry.startsWith("lock.retired.")) {
+      throw new Error(
+        `Offline workspace tombstone is malformed or misplaced: ${path}`,
+      );
+    }
+    if (info.isDirectory()) {
+      scanWorkspaceOfflineTree(root, path, tombstones);
+    }
+  }
+}
+
+function assertValidWorkspaceTombstone(
+  tombstonePath: string,
+  expectedTokenKey: string,
+): void {
+  const entries = readdirSync(tombstonePath);
+  if (entries.length !== 1 || entries[0] !== LOCK_OWNER_FILE) {
+    throw new Error(
+      `Offline workspace tombstone has unsafe contents: ${tombstonePath}`,
+    );
+  }
+  const ownerPath = join(tombstonePath, LOCK_OWNER_FILE);
+  const ownerInfo = lstatSync(ownerPath);
+  if (ownerInfo.isSymbolicLink() || !ownerInfo.isFile()) {
+    throw new Error(
+      `Offline workspace tombstone has an unsafe owner: ${tombstonePath}`,
+    );
+  }
+  const owner = parseLockOwner(readFileSync(ownerPath, "utf8"));
+  if (tokenKey(owner.token) !== expectedTokenKey) {
+    throw new Error(
+      `Offline workspace tombstone token does not match its owner: ${tombstonePath}`,
+    );
+  }
+}
+
+function removeOfflineTombstone(
+  tombstone: OfflineTombstone,
+  kind: string,
+): void {
+  const current = lstatSync(tombstone.path);
+  if (
+    current.isSymbolicLink() ||
+    !current.isDirectory() ||
+    current.dev !== tombstone.device ||
+    current.ino !== tombstone.inode
+  ) {
+    throw new Error(
+      `Offline ${kind} tombstone changed during collection: ${tombstone.path}`,
+    );
+  }
+  rmSync(tombstone.path, { recursive: true });
+  fsyncDirectorySync(dirname(tombstone.path));
 }
 
 async function acquireLock(

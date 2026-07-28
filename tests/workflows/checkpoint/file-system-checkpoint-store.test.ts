@@ -14,16 +14,20 @@ import {
   readdir,
   readFile,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import type { InvocationContext } from "@google/adk";
 import {
   createWorkflowCheckpoint,
   withWorkflowCompleted,
 } from "../../../src/workflows/checkpoint/checkpoint.js";
-import { FileSystemWorkflowCheckpointStore } from "../../../src/workflows/checkpoint/file-system-checkpoint-store.js";
+import {
+  collectFileSystemCheckpointTombstonesOffline,
+  FileSystemWorkflowCheckpointStore,
+} from "../../../src/workflows/checkpoint/file-system-checkpoint-store.js";
 import type { WorkflowCheckpointV1 } from "../../../src/workflows/checkpoint/schema.js";
 import {
   WorkflowCheckpointConflictError,
@@ -333,6 +337,90 @@ describe("FileSystemWorkflowCheckpointStore", () => {
       expect((await lstat(lockPath)).isDirectory()).toBe(true);
     });
   });
+
+  test("collects only valid checkpoint tombstones while offline", async () => {
+    await withTemporaryRoot(async (root) => {
+      const checkpoint = await initialCheckpoint();
+      await new FileSystemWorkflowCheckpointStore({ root }).save({
+        context: invocationContext(),
+        checkpoint,
+        expectedRevision: null,
+      });
+      const unknownPath = join(root, "keep.unknown");
+      await writeFile(unknownPath, "keep", "utf8");
+
+      const result = await collectFileSystemCheckpointTombstonesOffline({
+        root,
+        confirmNoActiveWriters: true,
+      });
+
+      expect(result.removedTombstones).toBeGreaterThan(0);
+      expect(await readFile(unknownPath, "utf8")).toBe("keep");
+      expect(
+        (await allEntryNames(root)).filter(
+          (entry) =>
+            entry.includes(".lock.retired.") ||
+            entry.includes(".lock.candidate.") ||
+            entry.endsWith(".tmp"),
+        ),
+      ).toEqual([]);
+      expect(await loadCheckpoint(root, checkpoint)).toEqual(checkpoint);
+    });
+  });
+
+  test("offline checkpoint collection requires confirmation and no active candidate", async () => {
+    await withTemporaryRoot(async (root) => {
+      await expect(
+        collectFileSystemCheckpointTombstonesOffline({
+          root,
+          confirmNoActiveWriters: false as true,
+        }),
+      ).rejects.toThrow("confirmNoActiveWriters: true");
+      await expect(
+        collectFileSystemCheckpointTombstonesOffline({
+          root: "relative",
+          confirmNoActiveWriters: true,
+        }),
+      ).rejects.toThrow("root must be absolute");
+
+      const checkpoint = await initialCheckpoint();
+      await new FileSystemWorkflowCheckpointStore({ root }).save({
+        context: invocationContext(),
+        checkpoint,
+        expectedRevision: null,
+      });
+      const checkpointPath = await findCheckpointPath(root);
+      const candidate = join(
+        dirname(checkpointPath),
+        `.${basename(checkpointPath)}.lock.candidate.${process.pid}.active`,
+      );
+      await mkdir(candidate);
+
+      await expect(
+        collectFileSystemCheckpointTombstonesOffline({
+          root,
+          confirmNoActiveWriters: true,
+        }),
+      ).rejects.toThrow("active lock or candidate");
+    });
+  });
+
+  test("offline checkpoint collection rejects symlinks", async () => {
+    await withTemporaryRoot(async (root) => {
+      const outside = await mkdtemp(join(tmpdir(), "adk-checkpoint-outside-"));
+      try {
+        await symlink(outside, join(root, "unsafe-link"));
+        await expect(
+          collectFileSystemCheckpointTombstonesOffline({
+            root,
+            confirmNoActiveWriters: true,
+          }),
+        ).rejects.toThrow("rejects symlinks");
+      } finally {
+        await rm(outside, { recursive: true, force: true });
+      }
+    });
+  });
 });
 
 async function writeLock(
@@ -381,6 +469,17 @@ async function findCheckpointPath(root: string): Promise<string> {
     }
   }
   throw new Error("checkpoint file not found");
+}
+
+async function allEntryNames(root: string): Promise<string[]> {
+  const names: string[] = [];
+  for (const entry of await readdir(root)) {
+    names.push(entry);
+    const path = join(root, entry);
+    const info = await lstat(path);
+    if (info.isDirectory()) names.push(...(await allEntryNames(path)));
+  }
+  return names;
 }
 
 async function exitedProcessId(): Promise<number> {
