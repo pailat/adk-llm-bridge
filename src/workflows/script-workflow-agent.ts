@@ -13,7 +13,11 @@ import type {
   WorkflowAgentHandle,
 } from "./agents/workflow-agent-factory.js";
 import type { WorkflowCheckpointStore } from "./checkpoint/store.js";
-import { WorkflowError, type WorkflowExecutionLimits } from "./contracts.js";
+import {
+  MAX_WORKFLOW_AGENT_REVISION_LENGTH,
+  WorkflowError,
+  type WorkflowExecutionLimits,
+} from "./contracts.js";
 import type {
   ScriptWorkflowDefinition,
   TrustedWorkflowDefinition,
@@ -387,6 +391,11 @@ function validateHandle(
       descriptor === null ||
       descriptor.providerId !== request.providerId ||
       descriptor.name !== request.name ||
+      typeof descriptor.revision !== "string" ||
+      descriptor.revision.length === 0 ||
+      descriptor.revision !== descriptor.revision.trim() ||
+      descriptor.revision.includes("\0") ||
+      descriptor.revision.length > MAX_WORKFLOW_AGENT_REVISION_LENGTH ||
       !(agent instanceof BaseAgent) ||
       agent.name !== request.name
     ) {
@@ -404,6 +413,7 @@ function projectDescriptor(
   return Object.freeze({
     providerId: descriptor.providerId,
     name: descriptor.name,
+    revision: descriptor.revision,
   });
 }
 

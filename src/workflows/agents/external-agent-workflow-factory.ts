@@ -4,10 +4,12 @@
  * SPDX-License-Identifier: MIT
  */
 
+import { createHash } from "node:crypto";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import type { ExternalAgentDefinitionRegistry } from "../../agents/agent-registry.js";
 import type { ExternalAgentDefinitionConfig } from "../../agents/agent-schema.js";
 import type { ExternalAgentPermissionPolicy } from "../../agents/permissions/schema.js";
+import { stableSerializeWorkflowValue } from "../checkpoint/hash.js";
 import {
   DEFAULT_WORKFLOW_AGENT_FACTORY_LIMITS,
   type WorkflowAgentDescriptor,
@@ -109,6 +111,7 @@ export class ExternalAgentWorkflowFactory implements WorkflowAgentFactory {
     const descriptor = Object.freeze({
       providerId: normalized.providerId,
       name: normalized.name,
+      revision: agentRevision(normalized),
     });
     const agent = this.#registry.create(
       normalized.providerId,
@@ -144,6 +147,14 @@ export class ExternalAgentWorkflowFactory implements WorkflowAgentFactory {
       );
     }
   }
+}
+
+function agentRevision(request: WorkflowAgentFactoryRequest): string {
+  const serialized = stableSerializeWorkflowValue({
+    providerId: request.providerId,
+    config: request.config ?? {},
+  });
+  return `sha256:${createHash("sha256").update(serialized).digest("hex")}`;
 }
 
 function normalizeRequest(

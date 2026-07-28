@@ -12,6 +12,12 @@ import type { WorkflowUserEvent } from "./events.js";
 export const WORKFLOW_ATTEMPT_CONTEXT_STATE_KEY =
   "__adk_llm_bridge_workflow_attempt_v1";
 
+/** Stable identity used by legacy and explicitly unversioned agents. */
+export const WORKFLOW_AGENT_REVISION_UNVERSIONED = "unversioned";
+
+/** Maximum durable agent revision length accepted across host/guest boundaries. */
+export const MAX_WORKFLOW_AGENT_REVISION_LENGTH = 256;
+
 /** Input accepted by a workflow step. */
 export type WorkflowStepInputContent = string | Content;
 
@@ -36,6 +42,11 @@ export interface WorkflowStep {
   id: string;
   /** Name of a sub-agent declared by the containing WorkflowAgent. */
   agentName: string;
+  /**
+   * Stable revision or configuration fingerprint for the selected agent.
+   * Changing it prevents replay of work produced by a different agent build.
+   */
+  agentRevision?: string;
   input: WorkflowStepInputContent;
   /**
    * Relative workspace paths this step may write while its agent is running.
@@ -94,6 +105,7 @@ export interface WorkflowAttemptContext {
   executionId: string;
   stepId: string;
   agentName: string;
+  agentRevision: string;
   attempt: number;
   inputHash: string;
   idempotencyKey: string;
@@ -106,6 +118,8 @@ export interface WorkflowAttemptContext {
  */
 export interface WorkflowAttemptReplay {
   idempotencyKey: string;
+  /** Omitted legacy records are interpreted as `unversioned`. */
+  agentRevision?: string;
   result: WorkflowStepResult;
 }
 

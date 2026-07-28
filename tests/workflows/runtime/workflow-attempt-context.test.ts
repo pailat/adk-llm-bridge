@@ -120,6 +120,54 @@ describe("workflow attempt durability context", () => {
     expect(new Set([stepA, stepB, otherExecution, otherInput]).size).toBe(4);
   });
 
+  test("binds attempt context, idempotency, and replay to agent revision", async () => {
+    const unversioned = await captureKey("execution-1", "step-a", "same");
+    const versioned = await captureKey(
+      "execution-1",
+      "step-a",
+      "same",
+      "sha256:agent-v1",
+    );
+    expect(versioned).not.toBe(unversioned);
+
+    const agent = new RecordingAgent();
+    let captured: WorkflowAttemptContext | undefined;
+    const workflow = workflowAgent({
+      id: "revision-replay",
+      executionId: "execution-1",
+      agent,
+      hooks: {
+        beforeAttempt: (context) => {
+          captured = context;
+          return {
+            idempotencyKey: context.idempotencyKey,
+            agentRevision: "sha256:agent-v1",
+            result: completedResult(context),
+          };
+        },
+      },
+      handler: (ctx) =>
+        ctx.run({
+          id: "publish",
+          agentName: agent.name,
+          agentRevision: "sha256:agent-v2",
+          input: "payload",
+        }),
+    });
+
+    await expect(
+      collect(workflow, invocation(workflow, "inv-revision")),
+    ).rejects.toMatchObject({
+      code: "WORKFLOW_ATTEMPT_MISMATCH",
+      details: {
+        expectedAgentRevision: "sha256:agent-v2",
+        actualAgentRevision: "sha256:agent-v1",
+      },
+    });
+    expect(captured?.agentRevision).toBe("sha256:agent-v2");
+    expect(agent.calls).toBe(0);
+  });
+
   test("replays a confirmed outbox result on resume without invoking the agent", async () => {
     const agent = new RecordingAgent();
     const store = new MemoryCheckpointStore();
@@ -139,6 +187,7 @@ describe("workflow attempt durability context", () => {
         } = result;
         journal = {
           idempotencyKey: context.idempotencyKey,
+          agentRevision: context.agentRevision,
           result: durableResult,
         };
         if (failAfterOutbox) {
@@ -446,6 +495,7 @@ async function captureKey(
   executionId: string,
   stepId: string,
   input: string,
+  agentRevision?: string,
 ): Promise<string> {
   const agent = new RecordingAgent();
   let captured: WorkflowAttemptContext | undefined;
@@ -458,7 +508,13 @@ async function captureKey(
         captured = context;
       },
     },
-    handler: (ctx) => ctx.run({ id: stepId, agentName: agent.name, input }),
+    handler: (ctx) =>
+      ctx.run({
+        id: stepId,
+        agentName: agent.name,
+        ...(agentRevision ? { agentRevision } : {}),
+        input,
+      }),
   });
   await collect(workflow, invocation(workflow, `inv-${executionId}-${stepId}`));
   if (!captured) throw new Error("attempt context was not captured");

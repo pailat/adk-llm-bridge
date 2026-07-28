@@ -139,6 +139,47 @@ describe("workflow checkpoints", () => {
     expect(checkpoint.steps.plan.result).not.toHaveProperty("replayed");
   });
 
+  test("binds checkpoint replay to the agent revision while keeping legacy compatibility", async () => {
+    const inputHash = await hashWorkflowInput(step.input);
+    const original = await createWorkflowCheckpoint({
+      definition,
+      executionId: "inv-revision",
+      input: "workflow input",
+    });
+    const versionedStep = { ...step, agentRevision: "sha256:agent-v1" };
+    const versioned = withWorkflowStepRunning(
+      original,
+      versionedStep,
+      inputHash,
+      1,
+      10,
+    );
+
+    expect(versioned.steps.plan.agentRevision).toBe("sha256:agent-v1");
+    expectWorkflowCode(
+      () =>
+        resolveWorkflowStep(
+          versioned,
+          { ...versionedStep, agentRevision: "sha256:agent-v2" },
+          inputHash,
+        ),
+      "WORKFLOW_STEP_MISMATCH",
+    );
+    expectWorkflowCode(
+      () => resolveWorkflowStep(versioned, step, inputHash),
+      "WORKFLOW_STEP_MISMATCH",
+    );
+
+    const legacy = withWorkflowStepRunning(original, step, inputHash, 1, 10);
+    expect(
+      resolveWorkflowStep(
+        legacy,
+        { ...step, resumePolicy: "retry" },
+        inputHash,
+      ),
+    ).toEqual({ action: "execute", attempt: 2 });
+  });
+
   test("treats a running step as indeterminate unless retry is explicit", async () => {
     const inputHash = await hashWorkflowInput(step.input);
     let checkpoint = await createWorkflowCheckpoint({

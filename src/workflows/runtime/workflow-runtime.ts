@@ -24,6 +24,8 @@ import type {
 import { ADKSessionCheckpointStore } from "../checkpoint/store.js";
 import {
   DEFAULT_WORKFLOW_EXECUTION_LIMITS,
+  MAX_WORKFLOW_AGENT_REVISION_LENGTH,
+  WORKFLOW_AGENT_REVISION_UNVERSIONED,
   WORKFLOW_ATTEMPT_CONTEXT_STATE_KEY,
   type WorkflowAttemptContext,
   type WorkflowAttemptReplay,
@@ -380,6 +382,7 @@ export class WorkflowRuntime {
       executionId: this.executionId(),
       stepId: step.id,
       agentName: step.agentName,
+      agentRevision: normalizedAgentRevision(step.agentRevision),
       inputHash: prepared.inputHash,
     });
     let operationError: unknown;
@@ -674,6 +677,7 @@ interface WorkflowAttemptIdentity {
   executionId: string;
   stepId: string;
   agentName: string;
+  agentRevision: string;
   inputHash: string;
 }
 
@@ -723,6 +727,7 @@ function createWorkflowAttemptContext({
     executionId,
     stepId: step.id,
     agentName: step.agentName,
+    agentRevision: normalizedAgentRevision(step.agentRevision),
     attempt,
     inputHash,
     idempotencyKey,
@@ -759,6 +764,8 @@ function validateAttemptReplay(
   if (
     !isRecord(replay) ||
     replay.idempotencyKey !== context.idempotencyKey ||
+    (replay.agentRevision ?? WORKFLOW_AGENT_REVISION_UNVERSIONED) !==
+      context.agentRevision ||
     !isRecord(result) ||
     result.status !== "completed" ||
     result.id !== context.stepId ||
@@ -779,6 +786,10 @@ function validateAttemptReplay(
       {
         stepId: context.stepId,
         agentName: context.agentName,
+        expectedAgentRevision: context.agentRevision,
+        actualAgentRevision: isRecord(replay)
+          ? String(replay.agentRevision ?? WORKFLOW_AGENT_REVISION_UNVERSIONED)
+          : "",
         expectedIdempotencyKey: context.idempotencyKey,
         actualIdempotencyKey: isRecord(replay)
           ? String(replay.idempotencyKey ?? "")
@@ -915,6 +926,20 @@ function validateStep(step: WorkflowStep): void {
     );
   }
   if (
+    step.agentRevision !== undefined &&
+    (typeof step.agentRevision !== "string" ||
+      !step.agentRevision ||
+      step.agentRevision !== step.agentRevision.trim() ||
+      step.agentRevision.includes("\0") ||
+      step.agentRevision.length > MAX_WORKFLOW_AGENT_REVISION_LENGTH)
+  ) {
+    throw new WorkflowError(
+      "WORKFLOW_STEP_MISMATCH",
+      `Workflow step ${step.id} agentRevision must be a non-empty trimmed string of at most ${MAX_WORKFLOW_AGENT_REVISION_LENGTH} characters`,
+      { stepId: step.id },
+    );
+  }
+  if (
     step.writePaths !== undefined &&
     (!Array.isArray(step.writePaths) || step.writePaths.length === 0)
   ) {
@@ -924,6 +949,10 @@ function validateStep(step: WorkflowStep): void {
       { stepId: step.id },
     );
   }
+}
+
+function normalizedAgentRevision(revision: string | undefined): string {
+  return revision ?? WORKFLOW_AGENT_REVISION_UNVERSIONED;
 }
 
 function validateRetry(step: WorkflowStep, limit: number): number {

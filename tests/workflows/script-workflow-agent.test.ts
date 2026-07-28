@@ -150,6 +150,7 @@ class TrackingAgentFactory implements WorkflowAgentFactory {
     const descriptor = {
       providerId: request.providerId,
       name: request.name,
+      revision: `sha256:${request.providerId}-test`,
     } satisfies WorkflowAgentDescriptor;
     const handle = {
       descriptor,
@@ -202,6 +203,7 @@ class AsyncTrackingAgentFactory implements WorkflowAgentFactory {
       descriptor: {
         providerId: request.providerId,
         name: request.name,
+        revision: `sha256:${request.providerId}-async-test`,
       },
       agent: new ReplyAgent(
         this.#invalidHandle ? `${request.name}_invalid` : request.name,
@@ -662,15 +664,27 @@ describe("ScriptWorkflowAgent", () => {
       expect(spawned).toEqual({
         providerId: "codex",
         name: "dynamic_worker",
+        revision: "sha256:codex-test",
       });
-      expect(Object.keys(spawned).sort()).toEqual(["name", "providerId"]);
+      expect(Object.keys(spawned).sort()).toEqual([
+        "name",
+        "providerId",
+        "revision",
+      ]);
       const listed = (yield operation("listAgents")) as unknown[];
-      expect(listed).toEqual([{ providerId: "codex", name: "dynamic_worker" }]);
+      expect(listed).toEqual([
+        {
+          providerId: "codex",
+          name: "dynamic_worker",
+          revision: "sha256:codex-test",
+        },
+      ]);
       expect(JSON.stringify(listed)).not.toContain("static_worker");
       const result = (yield operation("run", {
         step: {
           id: "implement",
           agentName: "dynamic_worker",
+          agentRevision: spawned.revision,
           input: "task",
         },
       })) as { output: string };
