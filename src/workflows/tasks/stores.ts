@@ -10,6 +10,7 @@ import {
   type WorkflowTaskClaimGuard,
   type WorkflowTaskClaimRequest,
   type WorkflowTaskCancelExpiredClaimRequest,
+  type WorkflowTaskCancellationRequest,
   WorkflowTaskControlError,
   type WorkflowTaskListRequest,
   type WorkflowTaskListResult,
@@ -68,6 +69,13 @@ export interface WorkflowTaskClaimStore extends WorkflowTaskStore {
   ): Promise<WorkflowTaskRecord>;
   compareAndSetClaimed(
     request: WorkflowTaskClaimedTransitionRequest,
+  ): Promise<WorkflowTaskRecord>;
+  /**
+   * Persists remote cancellation intent without acquiring or changing the
+   * active worker claim. Effects remain at-least-once and worker-fenced.
+   */
+  requestCancellation(
+    request: WorkflowTaskCancellationRequest,
   ): Promise<WorkflowTaskRecord>;
   requeueExpired(
     request: WorkflowTaskRequeueExpiredRequest,
@@ -289,6 +297,36 @@ export class InMemoryWorkflowTaskStore
       assertClaimUnchanged(current.claim, request.record.claim);
     }
     const snapshot = immutableTaskJson(request.record);
+    this.#records.set(key, snapshot);
+    this.#wakeRevisionWaiters(key, snapshot);
+    return snapshot;
+  }
+
+  async requestCancellation(
+    request: WorkflowTaskCancellationRequest,
+  ): Promise<WorkflowTaskRecord> {
+    validateTaskHandle(request);
+    validateExpectedRevision(request.expectedRevision);
+    const key = taskKey(request.executionId, request.taskId);
+    const current = this.#records.get(key);
+    if (!current) notFound(request.executionId, request.taskId);
+    assertExpectedRevision(current, request.expectedRevision);
+    if (current.status === "cancelling" && current.claim !== undefined) {
+      return current;
+    }
+    if (current.status !== "running" || current.claim === undefined) {
+      claimConflict(request, current);
+    }
+    const now = this.#timestamp();
+    const snapshot = immutableTaskJson({
+      ...current,
+      status: "cancelling",
+      revision: current.revision + 1,
+      updatedAt: now,
+      cancelRequestedAt: now,
+    } satisfies WorkflowTaskRecord);
+    validateTaskRecord(snapshot);
+    assertClaimUnchanged(current.claim, snapshot.claim);
     this.#records.set(key, snapshot);
     this.#wakeRevisionWaiters(key, snapshot);
     return snapshot;

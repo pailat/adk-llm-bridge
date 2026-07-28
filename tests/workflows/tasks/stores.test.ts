@@ -251,6 +251,120 @@ describe("InMemoryWorkflowTaskStore", () => {
     expect(completed.claim).toBeUndefined();
   });
 
+  test("persists remote cancellation without changing the worker fence", async () => {
+    let now = 10;
+    const store = new InMemoryWorkflowTaskStore({ now: () => now });
+    await store.create(record("task-1"));
+    const claimed = await store.claim({
+      executionId: "execution-1",
+      taskId: "task-1",
+      workerId: "worker-1",
+      leaseId: "lease-1",
+      leaseDurationMs: 10,
+    });
+    const ownerClaim = claimOf(claimed);
+
+    now = 12;
+    const cancelling = await store.requestCancellation({
+      executionId: claimed.executionId,
+      taskId: claimed.taskId,
+      expectedRevision: claimed.revision,
+    });
+    expect(cancelling).toMatchObject({
+      status: "cancelling",
+      revision: 3,
+      updatedAt: 12,
+      cancelRequestedAt: 12,
+    });
+    expect(cancelling.claim).toEqual(ownerClaim);
+
+    await expect(
+      store.requestCancellation({
+        executionId: cancelling.executionId,
+        taskId: cancelling.taskId,
+        expectedRevision: claimed.revision,
+      }),
+    ).rejects.toMatchObject({ code: "WORKFLOW_TASK_CONFLICT" });
+
+    now = 13;
+    const idempotent = await store.requestCancellation({
+      executionId: cancelling.executionId,
+      taskId: cancelling.taskId,
+      expectedRevision: cancelling.revision,
+    });
+    expect(idempotent).toBe(cancelling);
+    expect(idempotent.updatedAt).toBe(12);
+
+    await expect(
+      store.renewClaim({
+        executionId: cancelling.executionId,
+        taskId: cancelling.taskId,
+        workerId: "worker-old",
+        leaseId: "lease-old",
+        fencingToken: ownerClaim.fencingToken,
+        expectedRevision: cancelling.revision,
+        leaseDurationMs: 10,
+      }),
+    ).rejects.toMatchObject({ code: "WORKFLOW_TASK_CLAIM_CONFLICT" });
+
+    const renewed = await store.renewClaim({
+      executionId: cancelling.executionId,
+      taskId: cancelling.taskId,
+      workerId: ownerClaim.workerId,
+      leaseId: ownerClaim.leaseId,
+      fencingToken: ownerClaim.fencingToken,
+      expectedRevision: cancelling.revision,
+      leaseDurationMs: 10,
+    });
+    expect(renewed).toMatchObject({
+      status: "cancelling",
+      revision: 4,
+      cancelRequestedAt: 12,
+      claim: { heartbeatAt: 13, fencingToken: ownerClaim.fencingToken },
+    });
+
+    const renewedClaim = claimOf(renewed);
+    const { claim: _claim, ...withoutClaim } = renewed;
+    now = 14;
+    const cancelled = await store.compareAndSetClaimed({
+      expectedRevision: renewed.revision,
+      claim: {
+        executionId: renewed.executionId,
+        taskId: renewed.taskId,
+        workerId: renewedClaim.workerId,
+        leaseId: renewedClaim.leaseId,
+        fencingToken: renewedClaim.fencingToken,
+      },
+      record: {
+        ...withoutClaim,
+        status: "cancelled",
+        revision: renewed.revision + 1,
+        updatedAt: now,
+        completedAt: now,
+        error: {
+          code: "WORKFLOW_TASK_CANCELLED",
+          message: "Workflow task was cancelled",
+        },
+      },
+    });
+    await expect(
+      store.requestCancellation({
+        executionId: cancelled.executionId,
+        taskId: cancelled.taskId,
+        expectedRevision: cancelled.revision,
+      }),
+    ).rejects.toMatchObject({ code: "WORKFLOW_TASK_CLAIM_CONFLICT" });
+
+    await store.create(record("task-queued"));
+    await expect(
+      store.requestCancellation({
+        executionId: "execution-1",
+        taskId: "task-queued",
+        expectedRevision: 1,
+      }),
+    ).rejects.toMatchObject({ code: "WORKFLOW_TASK_CLAIM_CONFLICT" });
+  });
+
   test("requeues only expired claims and rejects the old worker after reclaim", async () => {
     let now = 10;
     const store = new InMemoryWorkflowTaskStore({ now: () => now });
