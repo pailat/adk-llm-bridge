@@ -37,6 +37,9 @@ occurs after that store commit and does not roll it back.
 The filesystem store writes and syncs a temporary file, verifies lock
 ownership, atomically renames the file, and syncs the containing directory.
 Checkpoint contents and their deterministic revision are validated on load.
+New writes remove runtime-only step events and replay markers before hashing or
+persistence. Both bundled checkpoint stores reject malformed durable graphs
+and enforce a configurable 4 MiB UTF-8 JSON limit by default.
 
 ## Workspace leases and fencing
 
@@ -106,10 +109,10 @@ attempt journal:
   checkpoint.
 
 `context.idempotencyKey` is stable across retries and resumes for the same
-workflow version, execution, step, agent, and input. It intentionally excludes
-the attempt number. The same JSON-safe context is projected into the child ADK
-session under `WORKFLOW_ATTEMPT_CONTEXT_STATE_KEY`; the parent session is not
-mutated.
+workflow version, execution, step, agent, agent revision, and input. It
+intentionally excludes the attempt number. The same JSON-safe context is
+projected into the child ADK session under
+`WORKFLOW_ATTEMPT_CONTEXT_STATE_KEY`; the parent session is not mutated.
 
 For side-effecting agents, atomically store the external outcome under that key
 and return it from `beforeAttempt` after a crash. `afterAttempt` must not report
@@ -117,3 +120,13 @@ success until the host can durably replay the result. This makes the uncertain
 window recoverable, but true exactly-once still depends on the external system
 honoring the idempotency key or on a transactional outbox controlled by the
 host.
+
+## Execution, task, and artifact stores
+
+The execution controller, recursive task controller, mailbox, artifact store,
+and integration gate are transport-neutral ports. Their bundled in-memory
+implementations are bounded test/development references, not process-restart
+durability. Production adapters must preserve CAS transitions, monotonic
+cursors, mailbox capacity, and immutable artifact revisions. See the
+[workflow control-plane guide](./workflow-control-plane.md) for the JSON/MCP
+boundary and the exact single-process limitations.
