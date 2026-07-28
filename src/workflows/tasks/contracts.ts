@@ -82,6 +82,7 @@ export interface WorkflowTaskRecord extends WorkflowTaskHandle {
 }
 
 export interface WorkflowTaskSpawnRequest extends WorkflowTaskHandle {
+  operationId?: string;
   parentTaskId?: string;
   agentId: string;
   orchestration?: WorkflowTaskOrchestrationBinding;
@@ -138,6 +139,7 @@ export interface WorkflowTaskRequeueExpiredRequest extends WorkflowTaskHandle {
 
 /** Administrative cancellation intent; it never transfers worker ownership. */
 export interface WorkflowTaskCancellationRequest extends WorkflowTaskHandle {
+  operationId?: string;
   expectedRevision: number;
 }
 
@@ -173,12 +175,14 @@ export interface WorkflowTaskMessageReadResult {
 }
 
 export interface WorkflowTaskDriverChildRequest {
+  operationId?: string;
   taskId: string;
   agentId: string;
   input?: WorkflowTaskJsonValue;
 }
 
 export interface WorkflowTaskDriverSendRequest {
+  operationId?: string;
   taskId: string;
   payload: WorkflowTaskJsonValue;
 }
@@ -217,6 +221,33 @@ export interface WorkflowTaskDriver {
 export interface WorkflowTaskAwaitAnyResult {
   handle: WorkflowTaskHandle;
   record: WorkflowTaskRecord;
+}
+
+export interface WorkflowTaskCreateRootCommand {
+  operationId: string;
+  request: WorkflowTaskSpawnRequest;
+  /** Binding derived by WorkflowTaskAuthorityPort, never copied from a hint. */
+  authority: WorkflowTaskOrchestrationBinding;
+}
+
+export interface WorkflowTaskCreateChildCommand {
+  operationId: string;
+  parentClaim: WorkflowTaskClaimGuard;
+  request: WorkflowTaskDriverChildRequest;
+  /** Binding derived by WorkflowTaskAuthorityPort from the claimed parent. */
+  authority: WorkflowTaskOrchestrationBinding;
+}
+
+export interface WorkflowTaskAppendFromClaimCommand {
+  operationId: string;
+  parentClaim: WorkflowTaskClaimGuard;
+  request: WorkflowTaskDriverSendRequest;
+}
+
+export interface WorkflowTaskCancelFromClaimCommand {
+  operationId: string;
+  parentClaim: WorkflowTaskClaimGuard;
+  target: WorkflowTaskHandle;
 }
 
 export type WorkflowTaskControlErrorCode =
