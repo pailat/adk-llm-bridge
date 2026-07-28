@@ -35,6 +35,12 @@ const FILE_FORMAT = "adk-llm-bridge/workflow-checkpoint-file";
 const FILE_FORMAT_VERSION = 1;
 const LOCK_OWNER_FILE = "owner.json";
 const SAFE_LOCK_TOKEN = /^[A-Za-z0-9_-]{1,128}$/u;
+const SAFE_CHECKPOINT_SHARD = /^[a-f0-9]{2}$/u;
+const SAFE_CHECKPOINT_LOCK = /^[a-f0-9]{64}\.json\.lock$/u;
+const SAFE_CHECKPOINT_CANDIDATE =
+  /^\.[a-f0-9]{64}\.json\.lock\.candidate\.[1-9][0-9]*\.[A-Za-z0-9_-]{1,128}$/u;
+const SAFE_CHECKPOINT_TOMBSTONE =
+  /^[a-f0-9]{64}\.json\.lock\.retired\.([A-Za-z0-9_-]{1,128})$/u;
 
 export interface FileSystemWorkflowCheckpointStoreOptions {
   /** Absolute host-controlled directory for checkpoint data and locks. */
@@ -45,6 +51,17 @@ export interface FileSystemWorkflowCheckpointStoreOptions {
   lockRetryMs?: number;
   /** Optional lifetime signal for pending lock acquisition. */
   signal?: AbortSignal;
+}
+
+export interface OfflineCheckpointTombstoneCollectionOptions {
+  /** Absolute host-controlled checkpoint root. */
+  root: string;
+  /** Nominal acknowledgement that no store or writer is active. */
+  confirmNoActiveWriters: true;
+}
+
+export interface OfflineCheckpointTombstoneCollectionResult {
+  removedTombstones: number;
 }
 
 interface CheckpointFileV1 {
@@ -64,6 +81,30 @@ interface LockMetadata {
 interface HeldCheckpointLock {
   assertOwned(): Promise<void>;
   release(): Promise<void>;
+}
+
+interface OfflineCheckpointTombstone {
+  path: string;
+  device: number;
+  inode: number;
+}
+
+/**
+ * OFFLINE ONLY: removes retired checkpoint-lock tombstones after proving that
+ * the host-controlled tree has no lock or candidate. This is not safe to run
+ * concurrently with stores or writers, and intentionally has no age-based
+ * mode.
+ */
+export async function collectFileSystemCheckpointTombstonesOffline(
+  options: OfflineCheckpointTombstoneCollectionOptions,
+): Promise<OfflineCheckpointTombstoneCollectionResult> {
+  const root = await checkpointOfflineRoot(options);
+  const tombstones: OfflineCheckpointTombstone[] = [];
+  await scanCheckpointOfflineTree(root, root, tombstones);
+  for (const tombstone of tombstones) {
+    await removeCheckpointTombstone(tombstone);
+  }
+  return Object.freeze({ removedTombstones: tombstones.length });
 }
 
 /**
@@ -242,6 +283,129 @@ export class FileSystemWorkflowCheckpointStore
       await abortableDelay(this.#lockRetryMs, this.#signal, checkpointKey);
     }
   }
+}
+
+async function checkpointOfflineRoot(
+  options: OfflineCheckpointTombstoneCollectionOptions | undefined,
+): Promise<string> {
+  if (options?.confirmNoActiveWriters !== true) {
+    throw new TypeError(
+      "Offline checkpoint tombstone collection requires confirmNoActiveWriters: true",
+    );
+  }
+  if (typeof options.root !== "string" || !isAbsolute(options.root)) {
+    throw new TypeError(
+      "Offline checkpoint tombstone collection root must be absolute",
+    );
+  }
+  const root = resolve(options.root);
+  const info = await lstat(root);
+  if (info.isSymbolicLink() || !info.isDirectory()) {
+    throw new Error(
+      "Offline checkpoint tombstone collection root is not a safe directory",
+    );
+  }
+  return root;
+}
+
+async function scanCheckpointOfflineTree(
+  root: string,
+  directory: string,
+  tombstones: OfflineCheckpointTombstone[],
+): Promise<void> {
+  for (const entry of await readdir(directory)) {
+    const path = join(directory, entry);
+    const info = await lstat(path);
+    if (info.isSymbolicLink()) {
+      throw new Error(
+        `Offline checkpoint tombstone collection rejects symlinks: ${path}`,
+      );
+    }
+    if (
+      SAFE_CHECKPOINT_LOCK.test(entry) ||
+      SAFE_CHECKPOINT_CANDIDATE.test(entry) ||
+      entry.includes(".json.lock.candidate.")
+    ) {
+      throw new Error(
+        `Offline checkpoint tombstone collection found an active lock or candidate: ${path}`,
+      );
+    }
+    if (!info.isDirectory() && !info.isFile()) {
+      throw new Error(
+        `Offline checkpoint tombstone collection found an unsafe entry: ${path}`,
+      );
+    }
+    const match = SAFE_CHECKPOINT_TOMBSTONE.exec(entry);
+    if (
+      match &&
+      info.isDirectory() &&
+      dirname(directory) === root &&
+      SAFE_CHECKPOINT_SHARD.test(basename(directory))
+    ) {
+      const token = match[1] as string;
+      await assertValidCheckpointTombstone(path, token);
+      tombstones.push({ path, device: info.dev, inode: info.ino });
+      continue;
+    }
+    if (entry.includes(".json.lock.retired.")) {
+      throw new Error(
+        `Offline checkpoint tombstone is malformed or misplaced: ${path}`,
+      );
+    }
+    if (info.isDirectory()) {
+      await scanCheckpointOfflineTree(root, path, tombstones);
+    }
+  }
+}
+
+async function assertValidCheckpointTombstone(
+  tombstonePath: string,
+  expectedToken: string,
+): Promise<void> {
+  const entries = await readdir(tombstonePath);
+  if (entries.length !== 1 || entries[0] !== LOCK_OWNER_FILE) {
+    throw new Error(
+      `Offline checkpoint tombstone has unsafe contents: ${tombstonePath}`,
+    );
+  }
+  const ownerPath = join(tombstonePath, LOCK_OWNER_FILE);
+  const ownerInfo = await lstat(ownerPath);
+  if (ownerInfo.isSymbolicLink() || !ownerInfo.isFile()) {
+    throw new Error(
+      `Offline checkpoint tombstone has an unsafe owner: ${tombstonePath}`,
+    );
+  }
+  const owner = parseLockMetadata(await readFile(ownerPath, "utf8"));
+  if (owner?.token !== expectedToken) {
+    throw new Error(
+      `Offline checkpoint tombstone token does not match its owner: ${tombstonePath}`,
+    );
+  }
+}
+
+async function removeCheckpointTombstone(
+  tombstone: OfflineCheckpointTombstone,
+): Promise<void> {
+  const current = await lstat(tombstone.path);
+  if (
+    current.isSymbolicLink() ||
+    !current.isDirectory() ||
+    current.dev !== tombstone.device ||
+    current.ino !== tombstone.inode
+  ) {
+    throw new Error(
+      `Offline checkpoint tombstone changed during collection: ${tombstone.path}`,
+    );
+  }
+  const match = SAFE_CHECKPOINT_TOMBSTONE.exec(basename(tombstone.path));
+  if (!match) {
+    throw new Error(
+      `Offline checkpoint tombstone became unsafe: ${tombstone.path}`,
+    );
+  }
+  await assertValidCheckpointTombstone(tombstone.path, match[1] as string);
+  await rm(tombstone.path, { recursive: true });
+  await syncDirectory(dirname(tombstone.path));
 }
 
 async function readCheckpointFile(
