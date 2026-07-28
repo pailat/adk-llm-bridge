@@ -130,3 +130,23 @@ durability. Production adapters must preserve CAS transitions, monotonic
 cursors, mailbox capacity, and immutable artifact revisions. See the
 [workflow control-plane guide](./workflow-control-plane.md) for the JSON/MCP
 boundary and the exact single-process limitations.
+
+## Multi-agent authority and publication
+
+Durable orchestration additionally requires transactional plan/ownership
+state, task claims, the task command ledger, accepted-receipt storage,
+publication reservations, and the host mutation journal. A persistent task
+command adapter must validate `expectedParentAuthority` in the same transaction
+as child creation, mailbox append, or cancellation. Splitting that check and
+mutation across non-transactional stores reintroduces an authority TOCTOU.
+
+`WorkflowTaskDispatcher.sweep()` uses an opaque resumable cursor and a bounded
+global budget so queued, expired-running, and expired-cancelling pages cannot
+starve one another. After a crash, a new worker requeues an expired claim; later
+commands and terminal writes remain fenced by both claim and live ownership.
+
+Git publication is a separate durable boundary. The Node adapter prepares an
+immutable tree, commits exactly that tree, and journals intent before mutating
+Git. Production hosts inject a durable journal and route ref-moving/check-out
+operations through its repository mutation lock. Arbitrary external Git
+processes cannot be forced to honour an application lock.

@@ -51,6 +51,9 @@ const control = new WorkflowControlPlane({
   tasks,
   artifacts,
   integration,
+  // Private, fully trusted in-process transport only. Agent-facing MCP/RPC
+  // hosts must configure taskAccess and pass a host-authenticated actor.
+  trustedHostMode: true,
 });
 ```
 
@@ -73,10 +76,16 @@ async function workflowControlTool(
     payload: Record<string, unknown>;
   },
   signal: AbortSignal,
+  actor: WorkflowActorContext,
 ) {
-  return await control.dispatch(args as never, { signal });
+  return await control.dispatch(args as never, { signal, actor });
 }
 ```
+
+The host creates `actor` only after authenticating the connection. It is an
+opaque capability and never comes from `args`. Agent-facing hosts configure
+`taskAccess` and remain deny-by-default; never use `trustedHostMode` for an MCP
+tool reachable by untrusted agents.
 
 Use one JSON schema whose `operation` is an enum and whose `payload` is the
 matching object. The core rejects unknown envelopes and stable controller error
@@ -89,20 +98,25 @@ Representative calls are:
 ```
 
 ```json
-{"protocol":"adk-llm-bridge/workflow-control","version":1,"operation":"task.spawn","payload":{"executionId":"issue-82","taskId":"review-api","agentId":"codex","input":{"scope":"src/api"}}}
+{"protocol":"adk-llm-bridge/workflow-control","version":1,"operation":"task.spawn","payload":{"executionId":"issue-82","taskId":"review-api","agentId":"codex","input":{"scope":"src/api"},"operationId":"spawn-review-api-1"}}
 ```
 
 ```json
-{"protocol":"adk-llm-bridge/workflow-control","version":1,"operation":"task.mailbox.send","payload":{"executionId":"issue-82","taskId":"review-api","senderTaskId":"implement-api","payload":{"need":"contract artifact"}}}
+{"protocol":"adk-llm-bridge/workflow-control","version":1,"operation":"task.mailbox.send","payload":{"executionId":"issue-82","taskId":"review-api","payload":{"need":"contract artifact"},"operationId":"send-contract-1"}}
 ```
+
+The sender is derived from the authenticated actor. `orchestration`,
+`parentTaskId`, and `senderTaskId` are rejected at this JSON boundary.
 
 The complete operation families are:
 
 - `execution.start|resume|status|cancel|list|events`
-- `task.spawn|resume|status|cancel|list|join|awaitAny`
+- `task.spawn|resume|dispatch|recover|sweep|status|cancel|list|join|awaitAny`
 - `task.mailbox.send|read|wait`
 - `artifact.put|get|list`
 - `integration.validate`
+- `plan.put|get|list|activate`
+- `ownership.claim|propose|approve|reject|transfer|release|list|validate`
 
 `task.mailbox.wait`, `task.join`, and `task.awaitAny` use the host cancellation
 signal. Mailbox wait is a long-poll: it returns immediately for unread messages
@@ -144,7 +158,8 @@ const taskDriver = {
 };
 ```
 
-Handles and mailbox cursors are plain JSON. `join` and `cancel` refuse to claim
+Handles and mailbox cursors are plain JSON. Knowing their IDs is not authority;
+task reads and mutations still require the host actor. `join` and `cancel` refuse to claim
 ownership of an in-flight task running in another process; a distributed host
 must route those operations to the current owner or implement its own durable
 driver/store coordination.
@@ -185,6 +200,9 @@ database or queue. Preserve atomic compare-and-set, monotonic event/message
 sequence numbers, immutable artifact revisions, and scoped cursors. The
 filesystem checkpoint and workspace adapters solve local checkpoint and lease
 coordination; they are not substitutes for a distributed task database.
+
+See [Multi-agent workflow orchestration](./workflow-orchestration.md) for the
+versioned ownership, publication, and recovery architecture.
 
 Checkpoint payloads are compacted before persistence, deeply validated, and
 limited to 4 MiB by default. Runtime-only event histories are excluded. See

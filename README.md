@@ -329,11 +329,12 @@ agent configuration changes.
 For a JSON or MCP-facing orchestration service, compose
 `WorkflowControlPlane` with execution, task/mailbox, artifact, and integration
 services. Its single versioned `dispatch({ protocol, version, operation,
-payload }, { signal })` entry point
+payload }, { signal, actor })` entry point
 lets an agent start executions, create additional tasks at runtime, wait for
 them, exchange long-polled messages, and validate immutable artifacts without
-exposing host handles. See the
-**[workflow control-plane guide](./docs/workflow-control-plane.md)**.
+exposing host handles. The actor is a host-authenticated capability, never JSON.
+See the **[workflow control-plane guide](./docs/workflow-control-plane.md)** and
+**[multi-agent orchestration architecture](./docs/workflow-orchestration.md)**.
 
 Both workflow agents persist checkpoints through ADK session `stateDelta` by
 default. Completed steps replay without reinvoking their agents; changed input,
