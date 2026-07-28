@@ -322,6 +322,18 @@ Guest scripts can then `yield ctx.spawnAgent(request)`,
 `yield ctx.listAgents()`, invoke the returned name with `ctx.run`, and
 `yield ctx.releaseAgent(name)`. Factories and names are isolated per ADK
 invocation; all remaining dynamic handles are released when execution ends.
+The returned descriptor includes a deterministic `revision`; pass it as the
+step's `agentRevision` to prevent checkpoint or outbox replay after the dynamic
+agent configuration changes.
+
+For a JSON or MCP-facing orchestration service, compose
+`WorkflowControlPlane` with execution, task/mailbox, artifact, and integration
+services. Its single versioned `dispatch({ protocol, version, operation,
+payload }, { signal })` entry point
+lets an agent start executions, create additional tasks at runtime, wait for
+them, exchange long-polled messages, and validate immutable artifacts without
+exposing host handles. See the
+**[workflow control-plane guide](./docs/workflow-control-plane.md)**.
 
 Both workflow agents persist checkpoints through ADK session `stateDelta` by
 default. Completed steps replay without reinvoking their agents; changed input,

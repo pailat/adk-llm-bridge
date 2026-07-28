@@ -41,6 +41,16 @@ describe("workflows public exports", () => {
     expect(workflows.ExternalAgentWorkflowFactory).toBeFunction();
     expect(workflows.WorkflowAgentFactoryError).toBeFunction();
     expect(workflows.DEFAULT_WORKFLOW_AGENT_FACTORY_LIMITS).toBeObject();
+    expect(workflows.WorkflowExecutionController).toBeFunction();
+    expect(workflows.InMemoryWorkflowExecutionStore).toBeFunction();
+    expect(workflows.InMemoryWorkflowExecutionEventStore).toBeFunction();
+    expect(workflows.WorkflowTaskController).toBeFunction();
+    expect(workflows.InMemoryWorkflowTaskStore).toBeFunction();
+    expect(workflows.InMemoryWorkflowTaskMessageStore).toBeFunction();
+    expect(workflows.WorkflowControlPlane).toBeFunction();
+    expect(workflows.InMemoryWorkspaceProvisioner).toBeFunction();
+    expect(workflows.InMemoryWorkflowArtifactStore).toBeFunction();
+    expect(workflows.IntegrationGate).toBeFunction();
     expect(workflows.InMemoryWorkspaceAdapter).toBeFunction();
     expect(workflows.FileSystemWorkspaceAdapter).toBeFunction();
     expect(
@@ -64,12 +74,17 @@ describe("workflows public exports", () => {
     const descriptor = {
       providerId: "codex",
       name: "reviewer",
+      revision: "sha256:revision",
     } satisfies WorkflowAgentDescriptor;
     const listDescriptors = (factory: WorkflowAgentFactory) => factory.list();
     const getHostAgent = (handle: WorkflowAgentHandle) => handle.agent;
 
     expect(workspace.adapter).toBe(adapter);
-    expect(descriptor).toEqual({ providerId: "codex", name: "reviewer" });
+    expect(descriptor).toEqual({
+      providerId: "codex",
+      name: "reviewer",
+      revision: "sha256:revision",
+    });
     expect(listDescriptors).toBeFunction();
     expect(getHostAgent).toBeFunction();
     expect("WorkspaceAdapter" in workflows).toBe(false);
