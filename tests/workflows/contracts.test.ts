@@ -8,6 +8,7 @@ import { describe, expect, test } from "bun:test";
 import {
   DEFAULT_WORKFLOW_EXECUTION_LIMITS,
   WorkflowError,
+  type WorkflowStep,
 } from "../../src/workflows/contracts.js";
 import {
   defineScriptWorkflow,
@@ -62,6 +63,26 @@ describe("workflow contracts", () => {
       maxMessageBytes: 1_048_576,
     });
     expect(Object.isFrozen(DEFAULT_WORKFLOW_EXECUTION_LIMITS)).toBe(true);
+  });
+
+  test("allows steps to opt into workspace write ownership", () => {
+    const legacyStep: WorkflowStep = {
+      id: "read-only",
+      agentName: "reader",
+      input: "inspect",
+    };
+    const writingStep: WorkflowStep = {
+      id: "implementation",
+      agentName: "implementer",
+      input: "edit",
+      writePaths: ["src/workflows", "tests/workflows"],
+    };
+
+    expect(legacyStep.writePaths).toBeUndefined();
+    expect(writingStep.writePaths).toEqual([
+      "src/workflows",
+      "tests/workflows",
+    ]);
   });
 
   test("serializes stable workflow error codes", () => {

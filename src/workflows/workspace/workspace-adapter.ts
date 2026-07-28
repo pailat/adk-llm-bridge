@@ -40,6 +40,13 @@ export interface WorkspaceLeaseConflict {
   overlaps: readonly WorkspacePathOverlap[];
 }
 
+/** Workspace coordination injected into one workflow runtime. */
+export interface WorkflowWorkspaceConfig {
+  /** Stable coordination scope shared by steps in the same workspace. */
+  workspaceId: string;
+  adapter: WorkspaceAdapter;
+}
+
 /**
  * Host-controlled capability for coordinating write ownership.
  *

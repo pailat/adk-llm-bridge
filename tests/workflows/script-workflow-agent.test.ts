@@ -33,6 +33,7 @@ import type {
   WorkflowScriptSessionOptions,
 } from "../../src/workflows/sandbox/types.js";
 import { ScriptWorkflowAgent } from "../../src/workflows/script-workflow-agent.js";
+import { InMemoryWorkspaceAdapter } from "../../src/workflows/workspace/in-memory-workspace-adapter.js";
 
 class ReplyAgent extends BaseAgent {
   calls = 0;
@@ -260,6 +261,43 @@ describe("ScriptWorkflowAgent", () => {
     const events = await collect(workflow);
     expect(events.at(-2)?.author).toBe("script_workflow");
     expect(events.at(-2)?.content).toEqual(output);
+  });
+
+  test("propagates workspace coordination to script steps", async () => {
+    const workspace = new InMemoryWorkspaceAdapter();
+    const worker = new ReplyAgent("worker", ["implemented"]);
+    const runtime = new GeneratorScriptRuntime(function* () {
+      const result = (yield operation("run", {
+        step: {
+          id: "implement",
+          agentName: "worker",
+          input: "task",
+          writePaths: ["src/workflows"],
+        },
+      })) as { output: string };
+      return result.output;
+    });
+    const workflow = new ScriptWorkflowAgent({
+      name: "script_workflow",
+      definition: defineScriptWorkflow({
+        id: "workspace-script",
+        version: "1",
+        source: "yield ctx.run(implement);",
+      }),
+      subAgents: [worker],
+      runtime,
+      workspace: { workspaceId: "repo", adapter: workspace },
+    });
+
+    const events = await collect(workflow);
+    expect(events.at(-2)?.content?.parts?.[0]?.text).toBe("implemented");
+    expect(
+      workspace.conflicts({
+        workspaceId: "repo",
+        ownerId: "verification",
+        writePaths: ["src/workflows"],
+      }),
+    ).toEqual([]);
   });
 
   test("rejects agents that are not directly declared", async () => {

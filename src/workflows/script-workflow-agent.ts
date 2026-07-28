@@ -22,6 +22,7 @@ import {
 import { QuickJSSyncGeneratorRuntime } from "./sandbox/quickjs-generator-runtime.js";
 import type { WorkflowScriptRuntime } from "./sandbox/types.js";
 import { runWorkflowScript } from "./sandbox/workflow-script-runner.js";
+import type { WorkflowWorkspaceConfig } from "./workspace/workspace-adapter.js";
 
 export interface ScriptWorkflowAgentConfig {
   name: string;
@@ -40,6 +41,8 @@ export interface ScriptWorkflowAgentConfig {
   checkpointStore?: WorkflowCheckpointStore;
   /** Stable durable identity. Defaults to the ADK invocation id. */
   resolveExecutionId?: WorkflowExecutionIdResolver;
+  /** Optional host-side coordination for steps that declare write paths. */
+  workspace?: WorkflowWorkspaceConfig;
 }
 
 /** A sandboxed, versioned script workflow that participates in ADK as an agent. */
@@ -49,6 +52,7 @@ export class ScriptWorkflowAgent extends BaseAgent {
   readonly #gateway: AgentInvocationGateway;
   readonly #checkpointStore: WorkflowCheckpointStore | undefined;
   readonly #resolveExecutionId: WorkflowExecutionIdResolver | undefined;
+  readonly #workspace: WorkflowWorkspaceConfig | undefined;
   readonly #declaredAgents: ReadonlyMap<string, BaseAgent>;
   readonly #limits: WorkflowExecutionLimits | undefined;
   readonly #onEvent:
@@ -65,6 +69,7 @@ export class ScriptWorkflowAgent extends BaseAgent {
     this.definition = config.definition;
     this.#checkpointStore = config.checkpointStore;
     this.#resolveExecutionId = config.resolveExecutionId;
+    this.#workspace = config.workspace;
     this.#limits = mergeLimits(config.definition.limits, config.limits);
     this.#onEvent = config.onEvent;
     this.#scriptRuntime = config.runtime ?? new QuickJSSyncGeneratorRuntime();
@@ -99,6 +104,7 @@ export class ScriptWorkflowAgent extends BaseAgent {
       },
       checkpointStore: this.#checkpointStore,
       resolveExecutionId: this.#resolveExecutionId,
+      workspace: this.#workspace,
     });
 
     void runtime.execute().then(

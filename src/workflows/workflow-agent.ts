@@ -14,6 +14,7 @@ import {
   WorkflowRuntime,
   type WorkflowRuntimeHooks,
 } from "./runtime/workflow-runtime.js";
+import type { WorkflowWorkspaceConfig } from "./workspace/workspace-adapter.js";
 
 export interface WorkflowAgentConfig {
   name: string;
@@ -28,6 +29,8 @@ export interface WorkflowAgentConfig {
   resolveExecutionId?: WorkflowExecutionIdResolver;
   /** Internal durability extension point; not required by trusted workflows. */
   runtimeHooks?: WorkflowRuntimeHooks;
+  /** Optional host-side coordination for steps that declare write paths. */
+  workspace?: WorkflowWorkspaceConfig;
 }
 
 /** A trusted, versioned workflow that participates in ADK as a BaseAgent. */
@@ -37,6 +40,7 @@ export class WorkflowAgent extends BaseAgent {
   readonly #checkpointStore?: WorkflowCheckpointStore;
   readonly #resolveExecutionId?: WorkflowExecutionIdResolver;
   readonly #runtimeHooks?: WorkflowRuntimeHooks;
+  readonly #workspace?: WorkflowWorkspaceConfig;
   readonly #declaredAgents: ReadonlyMap<string, BaseAgent>;
 
   constructor(config: WorkflowAgentConfig) {
@@ -50,6 +54,7 @@ export class WorkflowAgent extends BaseAgent {
     this.#checkpointStore = config.checkpointStore;
     this.#resolveExecutionId = config.resolveExecutionId;
     this.#runtimeHooks = config.runtimeHooks;
+    this.#workspace = config.workspace;
     this.#declaredAgents = new Map(
       subAgents.map((agent) => [agent.name, agent]),
     );
@@ -74,6 +79,7 @@ export class WorkflowAgent extends BaseAgent {
       hooks: this.#runtimeHooks,
       checkpointStore: this.#checkpointStore,
       resolveExecutionId: this.#resolveExecutionId,
+      workspace: this.#workspace,
     });
 
     void runtime.execute().then(
