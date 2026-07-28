@@ -226,7 +226,10 @@ export class WorkflowTaskController {
   }
 
   /** Joins a terminal task or one currently owned by this controller. */
-  async join(handle: WorkflowTaskHandle): Promise<WorkflowTaskRecord> {
+  async join(
+    handle: WorkflowTaskHandle,
+    signal?: AbortSignal,
+  ): Promise<WorkflowTaskRecord> {
     validateExactHandle(handle);
     const current = await this.#required(handle);
     if (isTerminalTaskStatus(current.status)) return current;
@@ -236,7 +239,7 @@ export class WorkflowTaskController {
       if (isTerminalTaskStatus(latest.status)) return latest;
       notOwned(handle);
     }
-    await active.task;
+    await waitForTask(active.task, signal, handle);
     const settled = await this.#required(handle);
     if (!isTerminalTaskStatus(settled.status)) notOwned(handle);
     return settled;
@@ -248,6 +251,7 @@ export class WorkflowTaskController {
    */
   async awaitAny(
     handles: readonly WorkflowTaskHandle[],
+    signal?: AbortSignal,
   ): Promise<WorkflowTaskAwaitAnyResult> {
     const normalized = normalizeHandles(handles);
     const terminal = await this.#firstTerminal(normalized);
@@ -264,7 +268,7 @@ export class WorkflowTaskController {
       if (rescanned) return rescanned;
       notOwned(missing);
     }
-    await Promise.race(activeTasks);
+    await waitForTask(Promise.race(activeTasks), signal, normalized[0]);
     const settled = await this.#firstTerminal(normalized);
     if (settled) return settled;
     // A local infrastructure failure may settle without changing durable state.
@@ -344,6 +348,21 @@ export class WorkflowTaskController {
         waitForMailbox: async (request = {}) => {
           await this.#assertDriverOwned(handle, token);
           return await this.waitForMessages({ ...request, ...handle }, signal);
+        },
+        join: async (child) => {
+          await this.#assertDriverActive(handle, token, signal);
+          assertSameExecution(handle, child);
+          return await this.join(child, signal);
+        },
+        awaitAny: async (children) => {
+          await this.#assertDriverActive(handle, token, signal);
+          for (const child of children) assertSameExecution(handle, child);
+          return await this.awaitAny(children, signal);
+        },
+        cancel: async (child) => {
+          await this.#assertDriverActive(handle, token, signal);
+          assertSameExecution(handle, child);
+          return await this.cancel(child);
         },
       });
       const output =
@@ -687,6 +706,53 @@ function taskHandle(handle: WorkflowTaskHandle): WorkflowTaskHandle {
 
 function taskKey(handle: WorkflowTaskHandle): string {
   return `${handle.executionId}\u0000${handle.taskId}`;
+}
+
+function assertSameExecution(
+  owner: WorkflowTaskHandle,
+  target: WorkflowTaskHandle,
+): void {
+  validateExactHandle(target);
+  if (owner.executionId !== target.executionId) {
+    invalid("Workflow task capability cannot cross execution boundaries");
+  }
+}
+
+async function waitForTask(
+  task: Promise<void>,
+  signal: AbortSignal | undefined,
+  handle: WorkflowTaskHandle | undefined,
+): Promise<void> {
+  if (!signal) return await task;
+  if (signal.aborted) throw waitAborted(handle);
+  await new Promise<void>((resolve, reject) => {
+    const onAbort = () => {
+      signal.removeEventListener("abort", onAbort);
+      reject(waitAborted(handle));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) onAbort();
+    task.then(
+      () => {
+        signal.removeEventListener("abort", onAbort);
+        resolve();
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      },
+    );
+  });
+}
+
+function waitAborted(
+  handle: WorkflowTaskHandle | undefined,
+): WorkflowTaskControlError {
+  return new WorkflowTaskControlError(
+    "WORKFLOW_TASK_WAIT_ABORTED",
+    `Workflow task wait was aborted${handle ? `: ${handle.taskId}` : ""}`,
+    handle ? taskDetails(handle) : undefined,
+  );
 }
 
 function isConflict(error: unknown): boolean {
