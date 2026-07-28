@@ -6,6 +6,7 @@
 
 export { BaseAgent } from "@google/adk";
 
+export * from "./agents/index.js";
 export * from "./checkpoint/index.js";
 export * from "./contracts.js";
 export * from "./definition.js";
@@ -31,3 +32,4 @@ export type { ScriptWorkflowAgentConfig } from "./script-workflow-agent.js";
 export { ScriptWorkflowAgent } from "./script-workflow-agent.js";
 export type { WorkflowAgentConfig } from "./workflow-agent.js";
 export { WorkflowAgent } from "./workflow-agent.js";
+export * from "./workspace/index.js";
