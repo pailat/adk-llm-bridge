@@ -12,6 +12,14 @@ import {
   InvocationContext,
 } from "@google/adk";
 import type { Content } from "@google/genai";
+import { AgentInvocationGateway } from "../../src/runtime/agent-invocation-gateway.js";
+import {
+  type WorkflowAgentDescriptor,
+  type WorkflowAgentFactory,
+  WorkflowAgentFactoryError,
+  type WorkflowAgentFactoryRequest,
+  type WorkflowAgentHandle,
+} from "../../src/workflows/agents/workflow-agent-factory.js";
 import { hashWorkflowSource } from "../../src/workflows/checkpoint/hash.js";
 import type { WorkflowCheckpointV1 } from "../../src/workflows/checkpoint/schema.js";
 import type {
@@ -32,7 +40,10 @@ import type {
   WorkflowScriptRuntime,
   WorkflowScriptSessionOptions,
 } from "../../src/workflows/sandbox/types.js";
-import { ScriptWorkflowAgent } from "../../src/workflows/script-workflow-agent.js";
+import {
+  ScriptWorkflowAgent,
+  type ScriptWorkflowAgentConfig,
+} from "../../src/workflows/script-workflow-agent.js";
 import { InMemoryWorkspaceAdapter } from "../../src/workflows/workspace/in-memory-workspace-adapter.js";
 
 class ReplyAgent extends BaseAgent {
@@ -109,6 +120,118 @@ class MemoryCheckpointStore implements WorkflowCheckpointStore {
   }
 }
 
+class TrackingAgentFactory implements WorkflowAgentFactory {
+  readonly created: WorkflowAgentFactoryRequest[] = [];
+  readonly released: string[] = [];
+  readonly #handles = new Map<string, WorkflowAgentHandle>();
+  readonly #createAgent: (request: WorkflowAgentFactoryRequest) => BaseAgent;
+
+  constructor(
+    createAgent: (request: WorkflowAgentFactoryRequest) => BaseAgent = (
+      request,
+    ) => new ReplyAgent(request.name, [`output:${request.name}`]),
+  ) {
+    this.#createAgent = createAgent;
+  }
+
+  create(request: WorkflowAgentFactoryRequest): WorkflowAgentHandle {
+    if (request.providerId === "unknown") {
+      throw new WorkflowAgentFactoryError(
+        "WORKFLOW_AGENT_UNKNOWN_PROVIDER",
+        "secret provider credential leaked",
+      );
+    }
+    if (this.#handles.has(request.name)) {
+      throw new WorkflowAgentFactoryError(
+        "WORKFLOW_AGENT_DUPLICATE_NAME",
+        "duplicate",
+      );
+    }
+    const descriptor = {
+      providerId: request.providerId,
+      name: request.name,
+    } satisfies WorkflowAgentDescriptor;
+    const handle = {
+      descriptor,
+      agent: this.#createAgent(request),
+    } satisfies WorkflowAgentHandle;
+    this.created.push(request);
+    this.#handles.set(request.name, handle);
+    return handle;
+  }
+
+  get(name: string): WorkflowAgentHandle | undefined {
+    return this.#handles.get(name);
+  }
+
+  list(): readonly WorkflowAgentDescriptor[] {
+    return [...this.#handles.values()].map((handle) => handle.descriptor);
+  }
+
+  release(handle: WorkflowAgentHandle): boolean {
+    if (this.#handles.get(handle.descriptor.name) !== handle) return false;
+    this.#handles.delete(handle.descriptor.name);
+    this.released.push(handle.descriptor.name);
+    return true;
+  }
+}
+
+class DynamicWaitingAgent extends BaseAgent {
+  readonly started: Promise<void>;
+  #markStarted!: () => void;
+
+  constructor(name: string) {
+    super({ name });
+    this.started = new Promise((resolve) => {
+      this.#markStarted = resolve;
+    });
+  }
+
+  protected async *runAsyncImpl(context: InvocationContext) {
+    this.#markStarted();
+    await new Promise<void>((resolve) => {
+      context.abortSignal?.addEventListener("abort", () => resolve(), {
+        once: true,
+      });
+    });
+  }
+
+  protected async *runLiveImpl() {}
+}
+
+class ControlledDynamicAgent extends BaseAgent {
+  readonly started: Promise<void>;
+  #markStarted!: () => void;
+  #proceed!: () => void;
+  readonly #proceedPromise: Promise<void>;
+
+  constructor(name: string) {
+    super({ name });
+    this.started = new Promise((resolve) => {
+      this.#markStarted = resolve;
+    });
+    this.#proceedPromise = new Promise((resolve) => {
+      this.#proceed = resolve;
+    });
+  }
+
+  finish(): void {
+    this.#proceed();
+  }
+
+  protected async *runAsyncImpl(context: InvocationContext) {
+    this.#markStarted();
+    await this.#proceedPromise;
+    yield createEvent({
+      invocationId: context.invocationId,
+      author: this.name,
+      content: { role: "model", parts: [{ text: "finished" }] },
+    });
+  }
+
+  protected async *runLiveImpl() {}
+}
+
 function operation(op: string, payload: Record<string, unknown> = {}) {
   return {
     protocol: WORKFLOW_SCRIPT_PROTOCOL,
@@ -122,14 +245,15 @@ function invocation(
   agent: BaseAgent,
   input = "build it",
   abortSignal?: AbortSignal,
+  invocationId = "inv-script-workflow",
 ): InvocationContext {
   return new InvocationContext({
-    invocationId: "inv-script-workflow",
+    invocationId,
     branch: "root",
     agent,
     userContent: { role: "user", parts: [{ text: input }] },
     session: {
-      id: "session-1",
+      id: `session-${invocationId}`,
       appName: "app",
       userId: "user",
       state: {},
@@ -150,6 +274,26 @@ function workflowEvents(events: readonly Event[]) {
   return events
     .map((event) => event.customMetadata?.workflowEvent)
     .filter(Boolean) as WorkflowEvent[];
+}
+
+function dynamicWorkflow(
+  runtime: WorkflowScriptRuntime,
+  createAgentFactory: NonNullable<
+    ScriptWorkflowAgentConfig["createAgentFactory"]
+  >,
+  subAgents: BaseAgent[] = [],
+): ScriptWorkflowAgent {
+  return new ScriptWorkflowAgent({
+    name: "dynamic_script_workflow",
+    definition: defineScriptWorkflow({
+      id: "dynamic-agents",
+      version: "1",
+      source: "/* executed by the injected runtime */",
+    }),
+    subAgents,
+    runtime,
+    createAgentFactory,
+  });
 }
 
 describe("ScriptWorkflowAgent", () => {
@@ -442,5 +586,289 @@ describe("ScriptWorkflowAgent", () => {
       code: "WORKFLOW_SOURCE_MISMATCH",
     });
     expect(worker.calls).toBe(1);
+  });
+
+  test("spawns, lists, runs, and idempotently releases dynamic agents", async () => {
+    const factory = new TrackingAgentFactory();
+    const staticAgent = new ReplyAgent("static_worker", ["static"]);
+    const runtime = new GeneratorScriptRuntime(function* () {
+      const spawned = (yield operation("spawnAgent", {
+        request: {
+          providerId: "codex",
+          name: "dynamic_worker",
+          config: { instruction: "implement safely" },
+        },
+      })) as Record<string, unknown>;
+      expect(spawned).toEqual({
+        providerId: "codex",
+        name: "dynamic_worker",
+      });
+      expect(Object.keys(spawned).sort()).toEqual(["name", "providerId"]);
+      const listed = (yield operation("listAgents")) as unknown[];
+      expect(listed).toEqual([{ providerId: "codex", name: "dynamic_worker" }]);
+      expect(JSON.stringify(listed)).not.toContain("static_worker");
+      const result = (yield operation("run", {
+        step: {
+          id: "implement",
+          agentName: "dynamic_worker",
+          input: "task",
+        },
+      })) as { output: string };
+      expect(yield operation("releaseAgent", { name: "dynamic_worker" })).toBe(
+        true,
+      );
+      expect(yield operation("releaseAgent", { name: "dynamic_worker" })).toBe(
+        false,
+      );
+      expect(yield operation("listAgents")).toEqual([]);
+      return result.output;
+    });
+    const workflow = dynamicWorkflow(runtime, () => factory, [staticAgent]);
+
+    const events = await collect(workflow);
+
+    expect(events.at(-2)?.content?.parts?.[0]?.text).toBe(
+      "output:dynamic_worker",
+    );
+    expect(factory.created).toHaveLength(1);
+    expect(factory.released).toEqual(["dynamic_worker"]);
+  });
+
+  test("cleans up dynamic handles after success, error, and abort", async () => {
+    const successfulFactory = new TrackingAgentFactory();
+    const successful = dynamicWorkflow(
+      new GeneratorScriptRuntime(function* () {
+        yield operation("spawnAgent", {
+          request: { providerId: "codex", name: "success_worker" },
+        });
+        return "done";
+      }),
+      () => successfulFactory,
+    );
+    await collect(successful);
+    expect(successfulFactory.released).toEqual(["success_worker"]);
+
+    const failedFactory = new TrackingAgentFactory();
+    const failed = dynamicWorkflow(
+      new GeneratorScriptRuntime(function* () {
+        yield operation("spawnAgent", {
+          request: { providerId: "codex", name: "failed_worker" },
+        });
+        yield operation("unsupported");
+      }),
+      () => failedFactory,
+    );
+    await expect(collect(failed)).rejects.toMatchObject({
+      code: "WORKFLOW_SCRIPT_INVALID",
+    });
+    expect(failedFactory.released).toEqual(["failed_worker"]);
+
+    const waiting = new DynamicWaitingAgent("waiting_worker");
+    const abortedFactory = new TrackingAgentFactory(() => waiting);
+    const aborted = dynamicWorkflow(
+      new GeneratorScriptRuntime(function* () {
+        yield operation("spawnAgent", {
+          request: { providerId: "codex", name: "waiting_worker" },
+        });
+        yield operation("run", {
+          step: {
+            id: "wait",
+            agentName: "waiting_worker",
+            input: "wait",
+          },
+        });
+      }),
+      () => abortedFactory,
+    );
+    const controller = new AbortController();
+    const abortedExecution = collect(
+      aborted,
+      invocation(aborted, "wait", controller.signal, "dynamic-abort"),
+    );
+    await waiting.started;
+    controller.abort();
+    await expect(abortedExecution).rejects.toMatchObject({
+      code: "WORKFLOW_ABORTED",
+    });
+    expect(abortedFactory.released).toEqual(["waiting_worker"]);
+  });
+
+  test("waits for runtime completion before cleanup on early iterator return", async () => {
+    const controlled = new ControlledDynamicAgent("controlled_worker");
+    const factory = new TrackingAgentFactory(() => controlled);
+    const workflow = dynamicWorkflow(
+      new GeneratorScriptRuntime(function* () {
+        yield operation("spawnAgent", {
+          request: { providerId: "codex", name: "controlled_worker" },
+        });
+        yield operation("run", {
+          step: {
+            id: "controlled",
+            agentName: "controlled_worker",
+            input: "wait",
+          },
+        });
+        return "done";
+      }),
+      () => factory,
+    );
+    const iterator = workflow.runAsync(
+      invocation(workflow, "wait", undefined, "early-return"),
+    );
+    await iterator.next();
+    await controlled.started;
+
+    let returned = false;
+    const closing = iterator.return().then(() => {
+      returned = true;
+    });
+    await Promise.resolve();
+    expect(returned).toBe(false);
+    expect(factory.released).toEqual([]);
+
+    controlled.finish();
+    await closing;
+    expect(factory.released).toEqual(["controlled_worker"]);
+  });
+
+  test("rejects unknown, duplicate, static shadow, and static release operations", async () => {
+    const shadowFactory = new TrackingAgentFactory();
+    const shadow = dynamicWorkflow(
+      new GeneratorScriptRuntime(function* () {
+        yield operation("spawnAgent", {
+          request: { providerId: "codex", name: "static_worker" },
+        });
+      }),
+      () => shadowFactory,
+      [new ReplyAgent("static_worker", ["static"])],
+    );
+    await expect(collect(shadow)).rejects.toThrow("cannot shadow static agent");
+    expect(shadowFactory.created).toHaveLength(0);
+
+    const duplicateFactory = new TrackingAgentFactory();
+    const duplicate = dynamicWorkflow(
+      new GeneratorScriptRuntime(function* () {
+        yield operation("spawnAgent", {
+          request: { providerId: "codex", name: "worker" },
+        });
+        yield operation("spawnAgent", {
+          request: { providerId: "codex", name: "worker" },
+        });
+      }),
+      () => duplicateFactory,
+    );
+    await expect(collect(duplicate)).rejects.toThrow("already exists");
+    expect(duplicateFactory.released).toEqual(["worker"]);
+
+    const releaseFactory = new TrackingAgentFactory();
+    const staticRelease = dynamicWorkflow(
+      new GeneratorScriptRuntime(function* () {
+        yield operation("releaseAgent", { name: "static_worker" });
+      }),
+      () => releaseFactory,
+      [new ReplyAgent("static_worker", ["static"])],
+    );
+    await expect(collect(staticRelease)).rejects.toThrow(
+      "Static workflow agent cannot be released",
+    );
+
+    const unknownRelease = dynamicWorkflow(
+      new GeneratorScriptRuntime(function* () {
+        yield operation("releaseAgent", { name: "missing" });
+      }),
+      () => new TrackingAgentFactory(),
+    );
+    await expect(collect(unknownRelease)).rejects.toThrow(
+      "Unknown dynamic workflow agent",
+    );
+
+    const unknownProvider = dynamicWorkflow(
+      new GeneratorScriptRuntime(function* () {
+        yield operation("spawnAgent", {
+          request: { providerId: "unknown", name: "worker" },
+        });
+      }),
+      () => new TrackingAgentFactory(),
+    );
+    const providerError = await collect(unknownProvider).catch(
+      (error: unknown) => error,
+    );
+    expect(providerError).toMatchObject({
+      code: "WORKFLOW_EXECUTION_ERROR",
+      message: "Workflow dynamic agent spawn failed",
+      details: { factoryCode: "WORKFLOW_AGENT_UNKNOWN_PROVIDER" },
+    });
+    expect(String(providerError)).not.toContain("secret provider credential");
+  });
+
+  test("isolates the same dynamic name across concurrent invocations", async () => {
+    const factories: TrackingAgentFactory[] = [];
+    const runtime = new GeneratorScriptRuntime(function* () {
+      yield operation("spawnAgent", {
+        request: { providerId: "codex", name: "shared_worker" },
+      });
+      const result = (yield operation("run", {
+        step: {
+          id: "work",
+          agentName: "shared_worker",
+          input: "task",
+        },
+      })) as { output: string };
+      return result.output;
+    });
+    const workflow = dynamicWorkflow(runtime, () => {
+      const number = factories.length + 1;
+      const factory = new TrackingAgentFactory(
+        (request) => new ReplyAgent(request.name, [`factory-${number}`]),
+      );
+      factories.push(factory);
+      return factory;
+    });
+
+    const [first, second] = await Promise.all([
+      collect(
+        workflow,
+        invocation(workflow, "first", undefined, "dynamic-first"),
+      ),
+      collect(
+        workflow,
+        invocation(workflow, "second", undefined, "dynamic-second"),
+      ),
+    ]);
+
+    expect(factories).toHaveLength(2);
+    expect(factories.map((factory) => factory.created[0]?.name)).toEqual([
+      "shared_worker",
+      "shared_worker",
+    ]);
+    expect(factories.map((factory) => factory.released)).toEqual([
+      ["shared_worker"],
+      ["shared_worker"],
+    ]);
+    expect(
+      [first, second]
+        .map((events) => events.at(-2)?.content?.parts?.[0]?.text)
+        .sort(),
+    ).toEqual(["factory-1", "factory-2"]);
+  });
+
+  test("rejects dynamic factories with a custom gateway", () => {
+    const gateway = new AgentInvocationGateway({
+      resolveAgent: () => undefined,
+    });
+
+    expect(
+      () =>
+        new ScriptWorkflowAgent({
+          name: "unsafe_dynamic_gateway",
+          definition: defineScriptWorkflow({
+            id: "unsafe-dynamic-gateway",
+            version: "1",
+            source: "return 'never';",
+          }),
+          gateway,
+          createAgentFactory: () => new TrackingAgentFactory(),
+        }),
+    ).toThrow("cannot be combined with a custom gateway");
   });
 });

@@ -6,6 +6,11 @@
 
 import type { Content } from "@google/genai";
 import {
+  DEFAULT_WORKFLOW_AGENT_FACTORY_LIMITS,
+  type WorkflowAgentDescriptor,
+  type WorkflowAgentFactoryRequest,
+} from "../agents/workflow-agent-factory.js";
+import {
   DEFAULT_WORKFLOW_EXECUTION_LIMITS,
   WorkflowError,
   type WorkflowParallelOptions,
@@ -33,6 +38,8 @@ export interface WorkflowScriptExecutionOptions
   host: WorkflowScriptHost;
   /** Maximum yielded RPC messages, including emit operations. */
   maxMessages?: number;
+  /** Maximum simultaneously active guest-created agents. */
+  maxAgents?: number;
 }
 
 export interface WorkflowScriptExecutionResult {
@@ -43,6 +50,14 @@ export interface WorkflowScriptExecutionResult {
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function hasOnlyKeys(
+  value: Record<string, unknown>,
+  allowed: readonly string[],
+): boolean {
+  const keys = new Set(allowed);
+  return Object.keys(value).every((key) => keys.has(key));
 }
 
 function isContent(value: unknown): value is Content {
@@ -82,6 +97,54 @@ function isUserEvent(value: unknown): value is WorkflowUserEvent {
     value.type === "custom" &&
     typeof value.name === "string" &&
     value.name.length > 0
+  );
+}
+
+function isAgentFactoryRequest(
+  value: unknown,
+): value is WorkflowAgentFactoryRequest {
+  if (
+    !isObject(value) ||
+    !hasOnlyKeys(value, ["providerId", "name", "config"]) ||
+    typeof value.providerId !== "string" ||
+    value.providerId.length === 0 ||
+    typeof value.name !== "string" ||
+    value.name.length === 0
+  ) {
+    return false;
+  }
+  if (value.config === undefined) return true;
+  if (
+    !isObject(value.config) ||
+    !hasOnlyKeys(value.config, [
+      "description",
+      "instruction",
+      "workingDirectory",
+      "permissions",
+    ]) ||
+    (value.config.description !== undefined &&
+      typeof value.config.description !== "string") ||
+    (value.config.instruction !== undefined &&
+      typeof value.config.instruction !== "string") ||
+    (value.config.workingDirectory !== undefined &&
+      typeof value.config.workingDirectory !== "string")
+  ) {
+    return false;
+  }
+  const permissions = value.config.permissions;
+  if (permissions === undefined) return true;
+  return (
+    isObject(permissions) &&
+    hasOnlyKeys(permissions, ["mode", "allowNetwork", "allowedPaths"]) &&
+    (permissions.mode === "read-only" ||
+      permissions.mode === "ask" ||
+      permissions.mode === "workspace-write" ||
+      permissions.mode === "full-access") &&
+    (permissions.allowNetwork === undefined ||
+      typeof permissions.allowNetwork === "boolean") &&
+    (permissions.allowedPaths === undefined ||
+      (Array.isArray(permissions.allowedPaths) &&
+        permissions.allowedPaths.every((path) => typeof path === "string")))
   );
 }
 
@@ -130,6 +193,34 @@ function decodeTurn(
     case "emit":
       if (!isUserEvent(value.event)) {
         return malformed("Workflow script yielded a malformed emit operation");
+      }
+      return value as unknown as WorkflowScriptOperation;
+    case "spawnAgent":
+      if (
+        !hasOnlyKeys(value, ["protocol", "version", "op", "request"]) ||
+        !isAgentFactoryRequest(value.request)
+      ) {
+        return malformed(
+          "Workflow script yielded a malformed spawnAgent operation",
+        );
+      }
+      return value as unknown as WorkflowScriptOperation;
+    case "listAgents":
+      if (!hasOnlyKeys(value, ["protocol", "version", "op"])) {
+        return malformed(
+          "Workflow script yielded a malformed listAgents operation",
+        );
+      }
+      return value as unknown as WorkflowScriptOperation;
+    case "releaseAgent":
+      if (
+        !hasOnlyKeys(value, ["protocol", "version", "op", "name"]) ||
+        typeof value.name !== "string" ||
+        value.name.length === 0
+      ) {
+        return malformed(
+          "Workflow script yielded a malformed releaseAgent operation",
+        );
       }
       return value as unknown as WorkflowScriptOperation;
     case "final":
@@ -244,6 +335,39 @@ function projectHostResponse(value: unknown): unknown {
   return value;
 }
 
+function projectAgentDescriptor(value: unknown): WorkflowAgentDescriptor {
+  if (
+    !isObject(value) ||
+    typeof value.providerId !== "string" ||
+    value.providerId.length === 0 ||
+    typeof value.name !== "string" ||
+    value.name.length === 0
+  ) {
+    throw new WorkflowError(
+      "WORKFLOW_EXECUTION_ERROR",
+      "Workflow dynamic agent host returned a malformed descriptor",
+    );
+  }
+  return { providerId: value.providerId, name: value.name };
+}
+
+function projectAgentDescriptors(value: unknown): WorkflowAgentDescriptor[] {
+  if (!Array.isArray(value)) {
+    throw new WorkflowError(
+      "WORKFLOW_EXECUTION_ERROR",
+      "Workflow dynamic agent host returned a malformed descriptor list",
+    );
+  }
+  return value.map(projectAgentDescriptor);
+}
+
+function unsupportedAgentOperation(operation: string): never {
+  throw new WorkflowError(
+    "WORKFLOW_EXECUTION_ERROR",
+    `Workflow dynamic agent operation is not configured: ${operation}`,
+  );
+}
+
 function throwIfAborted(signal: AbortSignal | undefined): void {
   if (signal?.aborted) {
     throw new WorkflowError("WORKFLOW_ABORTED", "Workflow script was aborted");
@@ -305,11 +429,20 @@ export async function runWorkflowScript(
       "maxMessages must be a positive safe integer",
     );
   }
+  const maxAgents =
+    options.maxAgents ?? DEFAULT_WORKFLOW_AGENT_FACTORY_LIMITS.maxAgents;
+  if (!Number.isSafeInteger(maxAgents) || maxAgents <= 0) {
+    throw new WorkflowError(
+      "WORKFLOW_DEFINITION_INVALID",
+      "maxAgents must be a positive safe integer",
+    );
+  }
 
   const session = await runtime.createSession(options);
   let steps = 0;
   let messages = 0;
   let response: unknown;
+  const activeAgents = new Set<string>();
   try {
     while (true) {
       throwIfAborted(options.signal);
@@ -366,6 +499,66 @@ export async function runWorkflowScript(
             );
             response = null;
             break;
+          case "spawnAgent": {
+            if (
+              !activeAgents.has(operation.request.name) &&
+              activeAgents.size >= maxAgents
+            ) {
+              throw new WorkflowError(
+                "WORKFLOW_LIMIT_EXCEEDED",
+                `Workflow script exceeded the ${maxAgents} dynamic agent limit`,
+              );
+            }
+            const spawned = await abortable(
+              Promise.resolve(
+                options.host.spawnAgent?.(operation.request) ??
+                  unsupportedAgentOperation("spawnAgent"),
+              ),
+              options.signal,
+            );
+            const descriptor = projectAgentDescriptor(spawned);
+            if (
+              descriptor.name !== operation.request.name ||
+              descriptor.providerId !== operation.request.providerId
+            ) {
+              throw new WorkflowError(
+                "WORKFLOW_EXECUTION_ERROR",
+                "Workflow dynamic agent host returned a mismatched descriptor",
+              );
+            }
+            activeAgents.add(descriptor.name);
+            response = descriptor;
+            break;
+          }
+          case "listAgents": {
+            const listed = await abortable(
+              Promise.resolve(
+                options.host.listAgents?.() ??
+                  unsupportedAgentOperation("listAgents"),
+              ),
+              options.signal,
+            );
+            response = projectAgentDescriptors(listed);
+            break;
+          }
+          case "releaseAgent": {
+            const released = await abortable(
+              Promise.resolve(
+                options.host.releaseAgent?.(operation.name) ??
+                  unsupportedAgentOperation("releaseAgent"),
+              ),
+              options.signal,
+            );
+            if (typeof released !== "boolean") {
+              throw new WorkflowError(
+                "WORKFLOW_EXECUTION_ERROR",
+                "Workflow dynamic agent host returned a malformed release result",
+              );
+            }
+            if (released) activeAgents.delete(operation.name);
+            response = released;
+            break;
+          }
         }
       } catch (error) {
         wrapHostError(error);

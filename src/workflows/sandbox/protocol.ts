@@ -5,6 +5,10 @@
  */
 
 import type {
+  WorkflowAgentDescriptor,
+  WorkflowAgentFactoryRequest,
+} from "../agents/workflow-agent-factory.js";
+import type {
   WorkflowParallelOptions,
   WorkflowStep,
   WorkflowStepOutcome,
@@ -39,6 +43,23 @@ export interface WorkflowScriptEmitOperation
   event: WorkflowUserEvent;
 }
 
+export interface WorkflowScriptSpawnAgentOperation
+  extends WorkflowScriptOperationBase {
+  op: "spawnAgent";
+  request: WorkflowAgentFactoryRequest;
+}
+
+export interface WorkflowScriptListAgentsOperation
+  extends WorkflowScriptOperationBase {
+  op: "listAgents";
+}
+
+export interface WorkflowScriptReleaseAgentOperation
+  extends WorkflowScriptOperationBase {
+  op: "releaseAgent";
+  name: string;
+}
+
 export interface WorkflowScriptFinalOperation
   extends WorkflowScriptOperationBase {
   op: "final";
@@ -49,6 +70,9 @@ export type WorkflowScriptOperation =
   | WorkflowScriptRunOperation
   | WorkflowScriptParallelOperation
   | WorkflowScriptEmitOperation
+  | WorkflowScriptSpawnAgentOperation
+  | WorkflowScriptListAgentsOperation
+  | WorkflowScriptReleaseAgentOperation
   | WorkflowScriptFinalOperation;
 
 /** Host capabilities invoked between synchronous QuickJS generator turns. */
@@ -59,4 +83,11 @@ export interface WorkflowScriptHost {
     options?: WorkflowParallelOptions,
   ): Promise<WorkflowStepOutcome[]>;
   emit(event: WorkflowUserEvent): void | Promise<void>;
+  spawnAgent?(
+    request: WorkflowAgentFactoryRequest,
+  ): WorkflowAgentDescriptor | Promise<WorkflowAgentDescriptor>;
+  listAgents?():
+    | readonly WorkflowAgentDescriptor[]
+    | Promise<readonly WorkflowAgentDescriptor[]>;
+  releaseAgent?(name: string): boolean | Promise<boolean>;
 }

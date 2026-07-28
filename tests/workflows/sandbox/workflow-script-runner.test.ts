@@ -237,6 +237,66 @@ describe("runWorkflowScript", () => {
     expect(history).toHaveLength(32);
   });
 
+  test("bridges dynamic agent operations without exposing host handles", async () => {
+    const log: string[] = [];
+    const host = createHost(log);
+    host.spawnAgent = async (request) => {
+      log.push(`spawn:${request.providerId}:${request.name}`);
+      return {
+        providerId: request.providerId,
+        name: request.name,
+        agent: { secret: "host-handle" },
+        credential: "host-secret",
+      } as never;
+    };
+    host.listAgents = async () => [
+      {
+        providerId: "codex",
+        name: "worker",
+        agent: { secret: "host-handle" },
+      } as never,
+    ];
+    let releases = 0;
+    host.releaseAgent = async (name) => {
+      log.push(`release:${name}`);
+      releases++;
+      return releases === 1;
+    };
+
+    const execution = await runWorkflowScript(
+      new QuickJSSyncGeneratorRuntime(),
+      {
+        source: `
+          const spawned = yield ctx.spawnAgent({
+            providerId: "codex",
+            name: "worker",
+            config: { instruction: "implement" },
+          });
+          const listed = yield ctx.listAgents();
+          const released = yield ctx.releaseAgent("worker");
+          const releasedAgain = yield ctx.releaseAgent("worker");
+          return JSON.stringify({ spawned, listed, released, releasedAgain });
+        `,
+        host,
+      },
+    );
+
+    expect(JSON.parse(execution.output as string)).toEqual({
+      spawned: { providerId: "codex", name: "worker" },
+      listed: [{ providerId: "codex", name: "worker" }],
+      released: true,
+      releasedAgain: false,
+    });
+    expect(execution.messages).toBe(4);
+    expect(log).toEqual([
+      "spawn:codex:worker",
+      "release:worker",
+      "release:worker",
+    ]);
+    expect(execution.output).not.toContain("host-secret");
+    expect(execution.output).not.toContain("host-handle");
+  });
+
   test.each([
     ["malformed", "yield { nope: true };", "unsupported RPC protocol"],
     [
@@ -254,6 +314,26 @@ describe("runWorkflowScript", () => {
       "bad emit",
       "yield ctx.emit({ type: 'custom' });",
       "malformed emit operation",
+    ],
+    [
+      "bad spawn",
+      `yield ctx.spawnAgent({ providerId: "codex", name: "worker", secret: true });`,
+      "malformed spawnAgent operation",
+    ],
+    [
+      "bad spawn permissions",
+      `yield ctx.spawnAgent({ providerId: "codex", name: "worker", config: { permissions: { mode: "read-only", secret: true } } });`,
+      "malformed spawnAgent operation",
+    ],
+    [
+      "bad list",
+      `yield { protocol: "adk-llm-bridge/workflow-rpc", version: 1, op: "listAgents", extra: true };`,
+      "malformed listAgents operation",
+    ],
+    [
+      "bad release",
+      `yield { protocol: "adk-llm-bridge/workflow-rpc", version: 1, op: "releaseAgent", name: 1 };`,
+      "malformed releaseAgent operation",
     ],
   ])("rejects %s operations", async (_name, source, message) => {
     await expect(
@@ -288,6 +368,22 @@ describe("runWorkflowScript", () => {
         `,
         host: createHost([]),
         limits: { maxSteps: 1 },
+      }),
+    ).rejects.toMatchObject({ code: "WORKFLOW_LIMIT_EXCEEDED" });
+  });
+
+  test("enforces the active dynamic agent limit", async () => {
+    const host = createHost([]);
+    host.spawnAgent = async ({ providerId, name }) => ({ providerId, name });
+
+    await expect(
+      runWorkflowScript(new QuickJSSyncGeneratorRuntime(), {
+        source: `
+          yield ctx.spawnAgent({ providerId: "codex", name: "one" });
+          yield ctx.spawnAgent({ providerId: "codex", name: "two" });
+        `,
+        host,
+        maxAgents: 1,
       }),
     ).rejects.toMatchObject({ code: "WORKFLOW_LIMIT_EXCEEDED" });
   });
