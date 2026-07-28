@@ -11,6 +11,7 @@ import {
   WORKFLOW_PLAN_VERSION,
   type WorkflowActorPermission,
   type WorkflowActorRole,
+  type WorkflowMutationReservation,
   WorkflowOrchestrationControlError,
   type WorkflowOrchestrationJsonValue,
   type WorkflowOrchestrationState,
@@ -46,6 +47,8 @@ const ACTOR_ROLES = new Set<WorkflowActorRole>([
 const ACTOR_PERMISSIONS = new Set<WorkflowActorPermission>([
   "plan:read",
   "plan:activate",
+  "task:spawn",
+  "task:mailbox:send",
   "ownership:claim",
   "ownership:propose",
   "ownership:approve",
@@ -183,6 +186,7 @@ export function validateWorkflowOrchestrationState(
       "nextFencingToken",
       "grants",
       "proposals",
+      "reservations",
       "updatedAt",
     ],
     "Workflow orchestration state",
@@ -201,9 +205,13 @@ export function validateWorkflowOrchestrationState(
   identifier(state.executionId, "executionId");
   array(state.grants, "grants");
   array(state.proposals, "proposals");
+  const reservations = state.reservations ?? [];
+  array(reservations, "reservations");
   if (
     state.activePlanRevision === undefined &&
-    (state.grants.length > 0 || state.proposals.length > 0)
+    (state.grants.length > 0 ||
+      state.proposals.length > 0 ||
+      reservations.length > 0)
   ) {
     invalid("Ownership state requires an active plan revision");
   }
@@ -213,7 +221,22 @@ export function validateWorkflowOrchestrationState(
   assertNoOverlappingGrants(state.grants);
   uniqueBy(state.proposals, (proposal) => proposal.proposalId, "proposalId");
   for (const proposal of state.proposals) validateProposal(proposal, state);
+  uniqueBy(
+    reservations,
+    (reservation) => reservation.reservationId,
+    "reservationId",
+  );
+  uniqueBy(reservations, (reservation) => reservation.receiptId, "receiptId");
+  for (const reservation of reservations)
+    validateReservation(reservation, state);
   immutableWorkflowOrchestrationJson(state);
+}
+
+/** Backward-compatible projection for state records created before v1 reservations. */
+export function workflowMutationReservations(
+  state: WorkflowOrchestrationState,
+): readonly WorkflowMutationReservation[] {
+  return state.reservations ?? Object.freeze([]);
 }
 
 export function validateWorkflowPath(path: string, field = "path"): void {
@@ -580,6 +603,124 @@ function validateProposal(
   }
 }
 
+function validateReservation(
+  reservation: WorkflowMutationReservation,
+  state: WorkflowOrchestrationState,
+): void {
+  objectWithFields(
+    reservation,
+    [
+      "reservationId",
+      "receiptId",
+      "phase",
+      "taskId",
+      "agentId",
+      "planRevision",
+      "orchestrationRevision",
+      "grants",
+      "changeSetDigest",
+      "treeId",
+      "commitId",
+      "targetId",
+      "targetRevision",
+      "status",
+      "createdAt",
+      "expiresAt",
+      "completedAt",
+    ],
+    "Workflow mutation reservation",
+  );
+  identifier(reservation.reservationId, "reservationId");
+  identifier(reservation.receiptId, "receiptId");
+  identifier(reservation.taskId, "taskId");
+  identifier(reservation.agentId, "agentId");
+  if (
+    !["commit", "integration"].includes(reservation.phase) ||
+    !["reserved", "completed", "released", "expired"].includes(
+      reservation.status,
+    ) ||
+    !positiveSafeInteger(reservation.planRevision) ||
+    reservation.planRevision !== state.activePlanRevision ||
+    !positiveSafeInteger(reservation.orchestrationRevision) ||
+    reservation.orchestrationRevision > state.revision ||
+    !validTimestamp(reservation.createdAt) ||
+    !validTimestamp(reservation.expiresAt) ||
+    reservation.expiresAt <= reservation.createdAt ||
+    reservation.createdAt > state.updatedAt
+  ) {
+    invalid("Workflow mutation reservation is invalid");
+  }
+  array(reservation.grants, "reservation grants");
+  if (reservation.grants.length === 0)
+    invalid("Workflow mutation reservation requires ownership fences");
+  uniqueBy(reservation.grants, (grant) => grant.grantId, "reservation grantId");
+  for (const grant of reservation.grants) {
+    objectWithFields(
+      grant,
+      ["grantId", "fencingToken"],
+      "Workflow mutation reservation grant",
+    );
+    identifier(grant.grantId, "grantId");
+    if (!positiveSafeInteger(grant.fencingToken))
+      invalid("Workflow mutation reservation fencing token is invalid");
+    if (
+      reservation.status === "reserved" &&
+      !state.grants.some(
+        (authority) =>
+          authority.grantId === grant.grantId &&
+          authority.fencingToken === grant.fencingToken &&
+          authority.taskId === reservation.taskId &&
+          authority.agentId === reservation.agentId &&
+          authority.planRevision === reservation.planRevision,
+      )
+    ) {
+      invalid("Active mutation reservation has stale ownership authority");
+    }
+  }
+  digest(reservation.changeSetDigest, "changeSetDigest");
+  optionalOpaqueRevision(reservation.treeId, "treeId");
+  optionalOpaqueRevision(reservation.commitId, "commitId");
+  optionalOpaqueRevision(reservation.targetId, "targetId");
+  optionalOpaqueRevision(reservation.targetRevision, "targetRevision");
+  if (
+    reservation.phase === "commit" &&
+    reservation.status === "reserved" &&
+    reservation.commitId !== undefined
+  ) {
+    invalid("Commit reservations cannot bind a commit before completion");
+  }
+  if (reservation.phase === "commit" && !reservation.treeId) {
+    invalid("Commit reservations require an immutable tree revision");
+  }
+  if (
+    reservation.phase === "commit" &&
+    reservation.status === "completed" &&
+    !reservation.commitId
+  ) {
+    invalid("Completed commit reservations require a commit revision");
+  }
+  if (
+    reservation.phase === "integration" &&
+    (!reservation.commitId ||
+      !reservation.targetId ||
+      !reservation.targetRevision)
+  ) {
+    invalid("Integration reservations require commit and target revisions");
+  }
+  if (reservation.status === "completed") {
+    if (
+      reservation.completedAt === undefined ||
+      !validTimestamp(reservation.completedAt) ||
+      reservation.completedAt < reservation.createdAt ||
+      reservation.completedAt > state.updatedAt
+    ) {
+      invalid("Completed mutation reservations require completedAt");
+    }
+  } else if (reservation.completedAt !== undefined) {
+    invalid("Incomplete mutation reservations cannot include completedAt");
+  }
+}
+
 function validateClaimSet(
   claims: readonly WorkflowPathClaim[],
   field: string,
@@ -700,6 +841,19 @@ function nonEmptyText(value: string, field: string, maximum: number): void {
   ) {
     invalid(`Workflow ${field} is invalid`);
   }
+}
+
+function digest(value: string, field: string): void {
+  if (!/^sha256:[a-f0-9]{64}$/u.test(value)) {
+    invalid(`Workflow ${field} is invalid`);
+  }
+}
+
+function optionalOpaqueRevision(
+  value: string | undefined,
+  field: string,
+): void {
+  if (value !== undefined) nonEmptyText(value, field, 512);
 }
 
 function positiveSafeInteger(value: number): boolean {

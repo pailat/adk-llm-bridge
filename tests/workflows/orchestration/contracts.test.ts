@@ -19,6 +19,7 @@ import {
   validateWorkflowOrchestrationState,
   validateWorkflowPath,
   validateWorkflowPlan,
+  workflowMutationReservations,
   workflowPathClaimsOverlap,
 } from "../../../src/workflows/orchestration/json.js";
 
@@ -168,6 +169,46 @@ describe("workflow orchestration contracts", () => {
         ],
         nextFencingToken: 3,
       }),
+    ).toThrow(WorkflowOrchestrationControlError);
+  });
+
+  test("validates durable mutation reservations and normalizes legacy state", () => {
+    const legacy = state();
+    expect(workflowMutationReservations(legacy)).toEqual([]);
+
+    const reserved: WorkflowOrchestrationState = {
+      ...legacy,
+      revision: 2,
+      reservations: [
+        {
+          reservationId: "reservation-1",
+          receiptId: "receipt-1",
+          phase: "commit",
+          taskId: "implementation",
+          agentId: "builder",
+          planRevision: 1,
+          orchestrationRevision: 2,
+          grants: [{ grantId: "grant-1", fencingToken: 1 }],
+          changeSetDigest: `sha256:${"a".repeat(64)}`,
+          treeId: "tree-1",
+          status: "reserved",
+          createdAt: 1,
+          expiresAt: 10,
+        },
+      ],
+      updatedAt: 2,
+    };
+    expect(() => validateWorkflowOrchestrationState(reserved)).not.toThrow();
+    expect(() =>
+      validateWorkflowOrchestrationState({
+        ...reserved,
+        reservations: [
+          {
+            ...reserved.reservations?.[0],
+            grants: [{ grantId: "grant-1", fencingToken: 99 }],
+          },
+        ],
+      } as WorkflowOrchestrationState),
     ).toThrow(WorkflowOrchestrationControlError);
   });
 

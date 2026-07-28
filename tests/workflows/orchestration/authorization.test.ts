@@ -23,6 +23,8 @@ const OWNERSHIP_OPERATIONS = [
   ["ownership.validate", "changes:validate"],
   ["changes.validate", "changes:validate"],
   ["integration.publish", "integration:publish"],
+  ["task.spawn", "task:spawn"],
+  ["task.mailbox.send", "task:mailbox:send"],
 ] as const satisfies readonly (readonly [
   WorkflowAuthorizationOperation,
   WorkflowActorPermission,

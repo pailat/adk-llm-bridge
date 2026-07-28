@@ -29,6 +29,8 @@ export type WorkflowActorRole =
 export type WorkflowActorPermission =
   | "plan:read"
   | "plan:activate"
+  | "task:spawn"
+  | "task:mailbox:send"
   | "ownership:claim"
   | "ownership:propose"
   | "ownership:approve"
@@ -131,6 +133,43 @@ export interface WorkflowOwnershipProposal {
   reason?: string;
 }
 
+export type WorkflowMutationReservationPhase = "commit" | "integration";
+export type WorkflowMutationReservationStatus =
+  | "reserved"
+  | "completed"
+  | "released"
+  | "expired";
+
+export interface WorkflowMutationReservationGrant {
+  grantId: string;
+  fencingToken: number;
+}
+
+/**
+ * Durable CAS authority for a single host mutation. Receipts remain evidence;
+ * this record is the right to consume that evidence once at a fenced state
+ * revision. Host workspace/repository handles intentionally never appear here.
+ */
+export interface WorkflowMutationReservation {
+  reservationId: string;
+  receiptId: string;
+  phase: WorkflowMutationReservationPhase;
+  taskId: string;
+  agentId: string;
+  planRevision: number;
+  orchestrationRevision: number;
+  grants: readonly WorkflowMutationReservationGrant[];
+  changeSetDigest: string;
+  treeId?: string;
+  commitId?: string;
+  targetId?: string;
+  targetRevision?: string;
+  status: WorkflowMutationReservationStatus;
+  createdAt: number;
+  expiresAt: number;
+  completedAt?: number;
+}
+
 /** CAS aggregate for plan activation and all live ownership authority. */
 export interface WorkflowOrchestrationState {
   protocol: typeof WORKFLOW_ORCHESTRATION_STATE_PROTOCOL;
@@ -141,6 +180,8 @@ export interface WorkflowOrchestrationState {
   nextFencingToken: number;
   grants: readonly WorkflowOwnershipGrant[];
   proposals: readonly WorkflowOwnershipProposal[];
+  /** Optional on v1 reads; writers normalize it to an empty array. */
+  reservations?: readonly WorkflowMutationReservation[];
   updatedAt: number;
 }
 
@@ -155,6 +196,7 @@ export type WorkflowOrchestrationControlErrorCode =
   | "WORKFLOW_OWNERSHIP_CONFLICT"
   | "WORKFLOW_OWNERSHIP_NOT_FOUND"
   | "WORKFLOW_OWNERSHIP_STALE"
+  | "WORKFLOW_MUTATION_RESERVATION_ACTIVE"
   | "WORKFLOW_PATH_NOT_OWNED"
   | "WORKFLOW_RESERVED_PATH";
 
