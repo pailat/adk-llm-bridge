@@ -151,7 +151,7 @@ describe("AgentInvocationGateway", () => {
     expect(resolutions).toBe(0);
   });
 
-  test("revalidates after resolution and before context preparation or execution", async () => {
+  test("revalidates after resolution and before context preparation", async () => {
     class StaleAttemptError extends Error {}
     const stale = new StaleAttemptError("ownership transferred");
     const worker = new CaptureAgent();
@@ -166,15 +166,46 @@ describe("AgentInvocationGateway", () => {
         parentContext: parentContext(new CaptureAgent("root")),
         validateInvocation: (phase) => {
           phases.push(phase);
-          if (phase === "before-execute") throw stale;
+          if (phase === "before-prepare") throw stale;
         },
         prepareContext: () => {
           preparations++;
         },
       }),
     ).rejects.toBe(stale);
-    expect(phases).toEqual(["before-resolve", "before-execute"]);
+    expect(phases).toEqual(["before-resolve", "before-prepare"]);
     expect(preparations).toBe(0);
+    expect(worker.context).toBeUndefined();
+  });
+
+  test("revalidates after context preparation and immediately before execution", async () => {
+    class StaleAttemptError extends Error {}
+    const stale = new StaleAttemptError("revoked during preparation");
+    const worker = new CaptureAgent();
+    const phases: string[] = [];
+    let valid = true;
+    const gateway = new AgentInvocationGateway({ resolveAgent: () => worker });
+
+    await expect(
+      gateway.run({
+        agentName: "worker",
+        input: { role: "user", parts: [{ text: "task" }] },
+        parentContext: parentContext(new CaptureAgent("root")),
+        validateInvocation: (phase) => {
+          phases.push(phase);
+          if (!valid) throw stale;
+        },
+        prepareContext: async () => {
+          await Promise.resolve();
+          valid = false;
+        },
+      }),
+    ).rejects.toBe(stale);
+    expect(phases).toEqual([
+      "before-resolve",
+      "before-prepare",
+      "before-execute",
+    ]);
     expect(worker.context).toBeUndefined();
   });
 

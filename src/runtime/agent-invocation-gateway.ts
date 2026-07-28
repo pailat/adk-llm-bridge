@@ -66,6 +66,7 @@ export type AgentInvocationContextPreparer = (
 
 export type AgentInvocationValidationPhase =
   | "before-resolve"
+  | "before-prepare"
   | "before-execute";
 
 export type AgentInvocationValidator = (
@@ -142,49 +143,64 @@ export class AgentInvocationGateway {
     let error: string | undefined;
 
     try {
-      await request.validateInvocation?.("before-execute");
+      await request.validateInvocation?.("before-prepare");
     } catch (caught) {
       combinedAbort.dispose();
       throw caught;
     }
 
+    let preparationFailed = false;
     try {
       throwIfAborted(combinedAbort.signal);
       await request.prepareContext?.(childContext, agent);
-
-      for await (const event of agent.runAsync(childContext)) {
-        throwIfAborted(combinedAbort.signal);
-        childContext.session.events.push(event);
-        events.push(event);
-        Object.assign(stateDelta, event.actions?.stateDelta ?? {});
-        await this.#eventSink?.(event, childContext);
-        await request.eventSink?.(event, childContext);
-
-        const visible = event.partial ? undefined : extractVisibleText(event);
-        if (visible) {
-          textEvents++;
-          text.push(visible);
-          if (event.turnComplete === true) {
-            terminalText = visible;
-          }
-        } else {
-          const fallback = extractFallbackOutput(event);
-          if (fallback) {
-            fallbackOutput.push(fallback);
-          }
-        }
-        toolCalls += countFunctionCalls(event);
-        if (event.errorMessage) {
-          errors++;
-          error = event.errorMessage;
-        }
-      }
     } catch (caught) {
+      preparationFailed = true;
       errors++;
       error = errorMessage(caught);
-    } finally {
-      combinedAbort.dispose();
     }
+
+    if (!preparationFailed) {
+      try {
+        await request.validateInvocation?.("before-execute");
+      } catch (caught) {
+        combinedAbort.dispose();
+        throw caught;
+      }
+
+      try {
+        for await (const event of agent.runAsync(childContext)) {
+          throwIfAborted(combinedAbort.signal);
+          childContext.session.events.push(event);
+          events.push(event);
+          Object.assign(stateDelta, event.actions?.stateDelta ?? {});
+          await this.#eventSink?.(event, childContext);
+          await request.eventSink?.(event, childContext);
+
+          const visible = event.partial ? undefined : extractVisibleText(event);
+          if (visible) {
+            textEvents++;
+            text.push(visible);
+            if (event.turnComplete === true) {
+              terminalText = visible;
+            }
+          } else {
+            const fallback = extractFallbackOutput(event);
+            if (fallback) {
+              fallbackOutput.push(fallback);
+            }
+          }
+          toolCalls += countFunctionCalls(event);
+          if (event.errorMessage) {
+            errors++;
+            error = event.errorMessage;
+          }
+        }
+      } catch (caught) {
+        errors++;
+        error = errorMessage(caught);
+      }
+    }
+    combinedAbort.dispose();
 
     return {
       agentName: agent.name,

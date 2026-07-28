@@ -246,7 +246,7 @@ describe("AdkWorkflowTaskDriver", () => {
       ).some((value) => typeof value === "function"),
     ).toBe(false);
     expect(lifecycle).toEqual(["bind", "release-binder", "release-context"]);
-    expect(validations).toHaveLength(3);
+    expect(validations).toHaveLength(4);
     expect(validations[0]?.claim).toEqual({
       executionId: "execution-1",
       taskId: "task-1",
@@ -606,5 +606,45 @@ describe("AdkWorkflowTaskDriver", () => {
     expect(bindings).toBe(0);
     expect(worker.context).toBeUndefined();
     expect(released).toBe(1);
+  });
+
+  test("releases a completed binder when authority is revoked before agent execution", async () => {
+    class StaleAttemptError extends Error {}
+    const stale = new StaleAttemptError("revoked during binder");
+    let valid = true;
+    let bindings = 0;
+    const releases = { binder: 0, context: 0 };
+    const worker = new TestAgent();
+    const driver = new AdkWorkflowTaskDriver({
+      gateway: new AgentInvocationGateway({ resolveAgent: () => worker }),
+      contextProvider: {
+        acquire: () => ({
+          context: parentContext(new TestAgent("root")),
+          release: () => {
+            releases.context++;
+          },
+        }),
+      },
+      attemptAuthority: attemptAuthority(() => {
+        if (!valid) throw stale;
+      }),
+      capabilityBinder: {
+        bind: async () => {
+          bindings++;
+          await Promise.resolve();
+          valid = false;
+          return {
+            release: () => {
+              releases.binder++;
+            },
+          };
+        },
+      },
+    });
+
+    await expect(driver.execute(request(task()))).rejects.toBe(stale);
+    expect(bindings).toBe(1);
+    expect(worker.context).toBeUndefined();
+    expect(releases).toEqual({ binder: 1, context: 1 });
   });
 });
