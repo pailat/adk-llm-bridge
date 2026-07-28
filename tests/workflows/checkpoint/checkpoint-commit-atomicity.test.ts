@@ -208,6 +208,29 @@ describe("workflow checkpoint coordinator commit atomicity", () => {
       steps: { build: { status: "completed", attempts: 1 } },
     });
   });
+
+  test("commits and hashes only the compact durable step result", async () => {
+    const store = new ControlledCheckpointStore();
+    const subject = coordinator(store);
+    await subject.initialize();
+    await subject.prepareStep(step);
+    const result: WorkflowStepResult = {
+      ...completedStep(1),
+      replayed: false,
+      events: [{ id: "runtime-only" }] as WorkflowStepResult["events"],
+    };
+
+    await subject.completeStep(result);
+
+    const completion = requiredSave(store, 2);
+    const savedResult = completion.checkpoint.steps.build?.result;
+    expect(result.events).toHaveLength(1);
+    expect(savedResult).not.toHaveProperty("events");
+    expect(savedResult).not.toHaveProperty("replayed");
+    expect(completion.revision).toBe(
+      await workflowCheckpointRevision(completion.checkpoint),
+    );
+  });
 });
 
 class ControlledCheckpointStore implements WorkflowCheckpointStore {

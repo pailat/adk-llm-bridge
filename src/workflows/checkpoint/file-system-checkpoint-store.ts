@@ -19,8 +19,13 @@ import {
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { WorkflowError } from "../contracts.js";
 import type { WorkflowCheckpointV1 } from "./schema.js";
-import { isWorkflowCheckpointV1 } from "./schema.js";
 import {
+  isWorkflowCheckpointV1,
+  toDurableWorkflowCheckpoint,
+} from "./schema.js";
+import {
+  assertWorkflowCheckpointSize,
+  DEFAULT_WORKFLOW_CHECKPOINT_MAX_BYTES,
   type LoadWorkflowCheckpointInput,
   type SaveWorkflowCheckpointInput,
   WorkflowCheckpointConflictError,
@@ -29,6 +34,7 @@ import {
   type WorkflowCheckpointWrite,
   workflowCheckpointKey,
   workflowCheckpointRevision,
+  workflowCheckpointSizeLimitError,
 } from "./store.js";
 
 const FILE_FORMAT = "adk-llm-bridge/workflow-checkpoint-file";
@@ -51,6 +57,8 @@ export interface FileSystemWorkflowCheckpointStoreOptions {
   lockRetryMs?: number;
   /** Optional lifetime signal for pending lock acquisition. */
   signal?: AbortSignal;
+  /** Maximum UTF-8 JSON size of one durable checkpoint. Defaults to 4 MiB. */
+  maxCheckpointBytes?: number;
 }
 
 export interface OfflineCheckpointTombstoneCollectionOptions {
@@ -121,6 +129,7 @@ export class FileSystemWorkflowCheckpointStore
   readonly #lockTimeoutMs: number;
   readonly #lockRetryMs: number;
   readonly #signal: AbortSignal | undefined;
+  readonly #maxCheckpointBytes: number;
 
   constructor(options: FileSystemWorkflowCheckpointStoreOptions) {
     if (!isAbsolute(options.root)) {
@@ -140,6 +149,10 @@ export class FileSystemWorkflowCheckpointStore
       options.lockRetryMs ?? 25,
     );
     this.#signal = options.signal;
+    this.#maxCheckpointBytes = positiveInteger(
+      "maxCheckpointBytes",
+      options.maxCheckpointBytes ?? DEFAULT_WORKFLOW_CHECKPOINT_MAX_BYTES,
+    );
   }
 
   async load(
@@ -150,7 +163,11 @@ export class FileSystemWorkflowCheckpointStore
       input.executionId,
     );
     const checkpointPath = this.#checkpointPath(checkpointKey);
-    const stored = await readCheckpointFile(checkpointPath, checkpointKey);
+    const stored = await readCheckpointFile(
+      checkpointPath,
+      checkpointKey,
+      this.#maxCheckpointBytes,
+    );
     return stored?.checkpoint;
   }
 
@@ -165,12 +182,19 @@ export class FileSystemWorkflowCheckpointStore
       );
     }
 
+    const durableCheckpoint = toDurableWorkflowCheckpoint(input.checkpoint);
     const checkpointKey = workflowCheckpointKey(
-      input.checkpoint.workflowId,
-      input.checkpoint.executionId,
+      durableCheckpoint.workflowId,
+      durableCheckpoint.executionId,
+    );
+    assertWorkflowCheckpointSize(
+      durableCheckpoint,
+      checkpointKey,
+      this.#maxCheckpointBytes,
+      "save",
     );
     const checkpointPath = this.#checkpointPath(checkpointKey);
-    const revision = await workflowCheckpointRevision(input.checkpoint);
+    const revision = await workflowCheckpointRevision(durableCheckpoint);
     if (input.revision !== undefined && input.revision !== revision) {
       throw checkpointFileError(
         "checkpoint_revision_invalid",
@@ -190,7 +214,11 @@ export class FileSystemWorkflowCheckpointStore
     }
     const lock = await this.#acquireLock(checkpointPath, checkpointKey);
     try {
-      const current = await readCheckpointFile(checkpointPath, checkpointKey);
+      const current = await readCheckpointFile(
+        checkpointPath,
+        checkpointKey,
+        this.#maxCheckpointBytes,
+      );
       const actualRevision = current?.revision ?? null;
       if (
         input.expectedRevision !== undefined &&
@@ -208,7 +236,7 @@ export class FileSystemWorkflowCheckpointStore
         formatVersion: FILE_FORMAT_VERSION,
         checkpointKey,
         revision,
-        checkpoint: input.checkpoint,
+        checkpoint: durableCheckpoint,
       };
       await atomicWriteCheckpoint(
         checkpointPath,
@@ -222,7 +250,7 @@ export class FileSystemWorkflowCheckpointStore
 
     return {
       checkpointKey,
-      stateDelta: { [checkpointKey]: input.checkpoint },
+      stateDelta: { [checkpointKey]: durableCheckpoint },
     };
   }
 
@@ -411,7 +439,9 @@ async function removeCheckpointTombstone(
 async function readCheckpointFile(
   checkpointPath: string,
   checkpointKey: string,
+  maxCheckpointBytes: number,
 ): Promise<CheckpointFileV1 | undefined> {
+  let fileBytes = 0;
   try {
     const info = await lstat(checkpointPath);
     if (info.isSymbolicLink() || !info.isFile()) {
@@ -419,6 +449,18 @@ async function readCheckpointFile(
         "checkpoint_file_unsafe",
         checkpointKey,
         `Workflow checkpoint path is not a regular file: ${checkpointKey}`,
+      );
+    }
+    fileBytes = info.size;
+    const envelopeOverheadBytes =
+      checkpointEnvelopeOverheadBytes(checkpointKey);
+    const maxFileBytes = maxCheckpointBytes + envelopeOverheadBytes;
+    if (fileBytes > maxFileBytes) {
+      throw workflowCheckpointSizeLimitError(
+        checkpointKey,
+        maxCheckpointBytes,
+        fileBytes - envelopeOverheadBytes,
+        "load",
       );
     }
   } catch (error) {
@@ -455,19 +497,45 @@ async function readCheckpointFile(
       `Workflow checkpoint file has an invalid envelope: ${checkpointKey}`,
     );
   }
-  const computedRevision = await workflowCheckpointRevision(parsed.checkpoint);
-  if (parsed.revision !== computedRevision) {
+  assertWorkflowCheckpointSize(
+    parsed.checkpoint,
+    checkpointKey,
+    maxCheckpointBytes,
+    "load",
+  );
+  const storedRevision = await workflowCheckpointRevision(parsed.checkpoint);
+  if (parsed.revision !== storedRevision) {
     throw checkpointFileError(
       "checkpoint_revision_invalid",
       checkpointKey,
       `Workflow checkpoint file revision is invalid: ${checkpointKey}`,
       {
         storedRevision: parsed.revision,
-        computedRevision,
+        computedRevision: storedRevision,
       },
     );
   }
-  return parsed;
+  const durableCheckpoint = toDurableWorkflowCheckpoint(parsed.checkpoint);
+  const canonicalRevision = await workflowCheckpointRevision(durableCheckpoint);
+  return {
+    ...parsed,
+    checkpoint: durableCheckpoint,
+    revision: canonicalRevision,
+  };
+}
+
+function checkpointEnvelopeOverheadBytes(checkpointKey: string): number {
+  const placeholder: CheckpointFileV1 = {
+    format: FILE_FORMAT,
+    formatVersion: FILE_FORMAT_VERSION,
+    checkpointKey,
+    revision: `sha256:${"0".repeat(64)}`,
+    checkpoint: null as unknown as WorkflowCheckpointV1,
+  };
+  const envelopeBytes = new TextEncoder().encode(
+    `${JSON.stringify(placeholder)}\n`,
+  ).byteLength;
+  return envelopeBytes - 4;
 }
 
 function isCheckpointFileV1(

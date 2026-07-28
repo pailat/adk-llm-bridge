@@ -23,17 +23,26 @@ import type { InvocationContext } from "@google/adk";
 import {
   createWorkflowCheckpoint,
   withWorkflowCompleted,
+  withWorkflowStepCompleted,
+  withWorkflowStepRunning,
 } from "../../../src/workflows/checkpoint/checkpoint.js";
 import {
   collectFileSystemCheckpointTombstonesOffline,
   FileSystemWorkflowCheckpointStore,
 } from "../../../src/workflows/checkpoint/file-system-checkpoint-store.js";
+import { hashWorkflowInput } from "../../../src/workflows/checkpoint/hash.js";
 import type { WorkflowCheckpointV1 } from "../../../src/workflows/checkpoint/schema.js";
 import {
+  DEFAULT_WORKFLOW_CHECKPOINT_MAX_BYTES,
   WorkflowCheckpointConflictError,
+  workflowCheckpointByteLength,
   workflowCheckpointKey,
   workflowCheckpointRevision,
 } from "../../../src/workflows/checkpoint/store.js";
+import type {
+  WorkflowStep,
+  WorkflowStepResult,
+} from "../../../src/workflows/contracts.js";
 import { defineWorkflow } from "../../../src/workflows/definition.js";
 
 const definition = defineWorkflow({
@@ -193,6 +202,121 @@ describe("FileSystemWorkflowCheckpointStore", () => {
         code: "WORKFLOW_EXECUTION_ERROR",
         details: { reason: "checkpoint_revision_invalid" },
       });
+    });
+  });
+
+  test("enforces the default 4 MiB limit before I/O and on envelope load", async () => {
+    expect(DEFAULT_WORKFLOW_CHECKPOINT_MAX_BYTES).toBe(4 * 1024 * 1024);
+    await withTemporaryRoot(async (root) => {
+      const initial = await initialCheckpoint();
+      const oversized = withWorkflowCompleted(
+        initial,
+        "x".repeat(DEFAULT_WORKFLOW_CHECKPOINT_MAX_BYTES + 1_024),
+        20,
+      );
+
+      await expect(
+        new FileSystemWorkflowCheckpointStore({ root }).save({
+          context: invocationContext(),
+          checkpoint: oversized,
+          expectedRevision: null,
+        }),
+      ).rejects.toMatchObject({
+        code: "WORKFLOW_EXECUTION_ERROR",
+        details: {
+          reason: "checkpoint_size_limit_exceeded",
+          direction: "save",
+          maxBytes: DEFAULT_WORKFLOW_CHECKPOINT_MAX_BYTES,
+        },
+      });
+      expect(await readdir(root)).toEqual([]);
+
+      const largeLimit = workflowCheckpointByteLength(oversized) + 1_024;
+      await new FileSystemWorkflowCheckpointStore({
+        root,
+        maxCheckpointBytes: largeLimit,
+      }).save({
+        context: invocationContext(),
+        checkpoint: oversized,
+        expectedRevision: null,
+      });
+
+      await expect(loadCheckpoint(root, oversized)).rejects.toMatchObject({
+        code: "WORKFLOW_EXECUTION_ERROR",
+        details: {
+          reason: "checkpoint_size_limit_exceeded",
+          direction: "load",
+          maxBytes: DEFAULT_WORKFLOW_CHECKPOINT_MAX_BYTES,
+        },
+      });
+    });
+  });
+
+  test("does not replace an existing file when an oversized save fails", async () => {
+    await withTemporaryRoot(async (root) => {
+      const initial = await initialCheckpoint();
+      const store = new FileSystemWorkflowCheckpointStore({ root });
+      const initialRevision = await workflowCheckpointRevision(initial);
+      await store.save({
+        context: invocationContext(),
+        checkpoint: initial,
+        expectedRevision: null,
+        revision: initialRevision,
+      });
+      const oversized = withWorkflowCompleted(
+        initial,
+        "x".repeat(DEFAULT_WORKFLOW_CHECKPOINT_MAX_BYTES + 1_024),
+        20,
+      );
+
+      await expect(
+        store.save({
+          context: invocationContext(),
+          checkpoint: oversized,
+          expectedRevision: initialRevision,
+        }),
+      ).rejects.toMatchObject({
+        details: { reason: "checkpoint_size_limit_exceeded" },
+      });
+      expect(await loadCheckpoint(root, initial)).toEqual(initial);
+    });
+  });
+
+  test("uses a compact canonical CAS revision for legacy runtime fields", async () => {
+    await withTemporaryRoot(async (root) => {
+      const legacy = await legacyCheckpoint();
+      const store = new FileSystemWorkflowCheckpointStore({ root });
+      await store.save({
+        context: invocationContext(),
+        checkpoint: legacy,
+        expectedRevision: null,
+      });
+      const checkpointPath = await findCheckpointPath(root);
+      const envelope = JSON.parse(
+        await readFile(checkpointPath, "utf8"),
+      ) as Record<string, unknown>;
+      envelope.checkpoint = legacy;
+      envelope.revision = await workflowCheckpointRevision(legacy);
+      await writeFile(checkpointPath, `${JSON.stringify(envelope)}\n`, "utf8");
+
+      const loaded = await store.load({
+        context: invocationContext(),
+        workflowId: legacy.workflowId,
+        executionId: legacy.executionId,
+      });
+      expect(loaded?.steps.plan?.result).not.toHaveProperty("events");
+      expect(loaded?.steps.plan?.result).not.toHaveProperty("replayed");
+      expect(await readFile(checkpointPath, "utf8")).toContain("events");
+      if (!loaded) throw new Error("missing legacy checkpoint");
+
+      const canonicalRevision = await workflowCheckpointRevision(loaded);
+      const next = withWorkflowCompleted(loaded, "done", 30);
+      await store.save({
+        context: invocationContext(),
+        checkpoint: next,
+        expectedRevision: canonicalRevision,
+      });
+      expect(await readFile(checkpointPath, "utf8")).not.toContain("events");
     });
   });
 
@@ -441,6 +565,39 @@ async function initialCheckpoint(): Promise<WorkflowCheckpointV1> {
     input: "build it",
     now: 10,
   });
+}
+
+async function legacyCheckpoint(): Promise<WorkflowCheckpointV1> {
+  const step = {
+    id: "plan",
+    agentName: "planner",
+    input: "plan it",
+  } satisfies WorkflowStep;
+  const inputHash = await hashWorkflowInput(step.input);
+  let checkpoint = await createWorkflowCheckpoint({
+    definition,
+    executionId: "execution-legacy",
+    input: "build it",
+    now: 10,
+  });
+  checkpoint = withWorkflowStepRunning(checkpoint, step, inputHash, 1, 10);
+  const result: WorkflowStepResult = {
+    status: "completed",
+    id: step.id,
+    agentName: step.agentName,
+    output: "planned",
+    attempts: 1,
+    startedAt: 10,
+    completedAt: 20,
+    replayed: false,
+    events: [{ id: "legacy" }] as WorkflowStepResult["events"],
+  };
+  const legacy = withWorkflowStepCompleted(checkpoint, result, 20);
+  const savedResult = legacy.steps.plan?.result;
+  if (!savedResult) throw new Error("missing legacy result");
+  savedResult.events = result.events;
+  savedResult.replayed = false;
+  return legacy;
 }
 
 async function loadCheckpoint(
