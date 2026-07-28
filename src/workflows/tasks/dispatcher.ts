@@ -33,12 +33,15 @@ export interface WorkflowTaskDispatchFailure extends WorkflowTaskHandle {
 export interface WorkflowTaskSweepRequest {
   executionId: string;
   limit?: number;
+  /** Opaque continuation returned by a previous sweep of this execution. */
+  cursor?: string;
 }
 
 export interface WorkflowTaskSweepResult {
   inspected: number;
   outcomes: readonly WorkflowTaskDispatchOutcome[];
   failures: readonly WorkflowTaskDispatchFailure[];
+  nextCursor: string;
 }
 
 export interface WorkflowTaskDispatcherConfig {
@@ -84,7 +87,12 @@ export class WorkflowTaskDispatcher {
       this.#maxSweepTasks,
       "limit",
     );
-    const records = await this.#candidates(request.executionId, limit);
+    const page = await this.#candidates(
+      request.executionId,
+      limit,
+      request.cursor,
+    );
+    const records = page.records;
     const outcomes: WorkflowTaskDispatchOutcome[] = [];
     const failures: WorkflowTaskDispatchFailure[] = [];
     const now = this.#timestamp();
@@ -126,25 +134,65 @@ export class WorkflowTaskDispatcher {
       inspected: records.length,
       outcomes: Object.freeze(outcomes),
       failures: Object.freeze(failures),
+      nextCursor: page.nextCursor,
     });
   }
 
   async #candidates(
     executionId: string,
     limit: number,
-  ): Promise<readonly WorkflowTaskRecord[]> {
+    cursor: string | undefined,
+  ): Promise<{
+    records: readonly WorkflowTaskRecord[];
+    nextCursor: string;
+  }> {
+    const state = decodeSweepCursor(cursor, executionId);
     const records: WorkflowTaskRecord[] = [];
-    for (const status of ["queued", "running", "cancelling"] as const) {
+    const seen = new Set<string>();
+    const quantum = Math.max(1, Math.ceil(limit / SWEEP_STATUSES.length));
+    while (
+      records.length < limit &&
+      state.done.some((completed) => !completed)
+    ) {
+      const statusIndex = state.phase;
+      if (state.done[statusIndex]) {
+        state.phase = nextStatus(statusIndex);
+        continue;
+      }
       const remaining = limit - records.length;
-      if (remaining === 0) break;
+      const status = SWEEP_STATUSES[statusIndex];
       const listed = await this.#controller.list({
         executionId,
         status,
-        limit: remaining,
+        limit: Math.min(remaining, quantum),
+        ...(state.cursors[statusIndex]
+          ? { cursor: state.cursors[statusIndex] as string }
+          : {}),
       });
-      records.push(...listed.records);
+      for (const record of listed.records) {
+        const key = `${record.executionId}\u0000${record.taskId}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        records.push(record);
+      }
+      if (listed.nextCursor) {
+        state.cursors[statusIndex] = listed.nextCursor;
+      } else {
+        state.cursors[statusIndex] = null;
+        state.done[statusIndex] = true;
+      }
+      state.phase = nextStatus(statusIndex);
     }
-    return records;
+    if (state.done.every(Boolean)) {
+      state.phase = 0;
+      state.cursors = [null, null, null];
+      state.done = [false, false, false];
+      state.round++;
+    }
+    return {
+      records,
+      nextCursor: encodeSweepCursor(executionId, state),
+    };
   }
 
   #timestamp(): number {
@@ -161,11 +209,112 @@ function validateSweepRequest(request: WorkflowTaskSweepRequest): void {
     !request ||
     typeof request !== "object" ||
     Array.isArray(request) ||
-    Object.keys(request).some((key) => key !== "executionId" && key !== "limit")
+    Object.keys(request).some(
+      (key) => key !== "executionId" && key !== "limit" && key !== "cursor",
+    )
   ) {
     throw new TypeError("Workflow task sweep request is invalid");
   }
   validateIdentifier(request.executionId, "executionId");
+  if (request.cursor !== undefined && typeof request.cursor !== "string") {
+    throw new TypeError("Workflow task sweep cursor is invalid");
+  }
+}
+
+const SWEEP_STATUSES = ["queued", "running", "cancelling"] as const;
+
+interface WorkflowTaskSweepCursorState {
+  phase: number;
+  cursors: Array<string | null>;
+  done: boolean[];
+  round: number;
+}
+
+function nextStatus(status: number): number {
+  return (status + 1) % SWEEP_STATUSES.length;
+}
+
+function encodeSweepCursor(
+  executionId: string,
+  state: WorkflowTaskSweepCursorState,
+): string {
+  return `workflow-task-sweep:v1:${encodeURIComponent(
+    JSON.stringify({
+      executionId,
+      phase: state.phase,
+      cursors: state.cursors,
+      done: state.done,
+      round: state.round,
+    }),
+  )}`;
+}
+
+function decodeSweepCursor(
+  cursor: string | undefined,
+  executionId: string,
+): WorkflowTaskSweepCursorState {
+  if (cursor === undefined) {
+    return {
+      phase: 0,
+      cursors: [null, null, null],
+      done: [false, false, false],
+      round: 0,
+    };
+  }
+  const match = /^workflow-task-sweep:v1:(.+)$/u.exec(cursor);
+  let candidate: unknown;
+  try {
+    candidate = match
+      ? JSON.parse(decodeURIComponent(match[1] as string))
+      : undefined;
+  } catch {
+    throw new TypeError("Workflow task sweep cursor is invalid");
+  }
+  if (
+    !candidate ||
+    typeof candidate !== "object" ||
+    Array.isArray(candidate) ||
+    Object.keys(candidate).length !== 5
+  ) {
+    throw new TypeError("Workflow task sweep cursor is invalid");
+  }
+  const value = candidate as Record<string, unknown>;
+  const cursors = value.cursors;
+  const done = value.done;
+  if (
+    value.executionId !== executionId ||
+    !Number.isSafeInteger(value.phase) ||
+    (value.phase as number) < 0 ||
+    (value.phase as number) >= SWEEP_STATUSES.length ||
+    !Number.isSafeInteger(value.round) ||
+    (value.round as number) < 0 ||
+    !Array.isArray(cursors) ||
+    cursors.length !== SWEEP_STATUSES.length ||
+    cursors.some((item) => item !== null && typeof item !== "string") ||
+    !Array.isArray(done) ||
+    done.length !== SWEEP_STATUSES.length ||
+    done.some((item) => typeof item !== "boolean") ||
+    Object.keys(value).some(
+      (key) =>
+        key !== "executionId" &&
+        key !== "phase" &&
+        key !== "cursors" &&
+        key !== "done" &&
+        key !== "round",
+    )
+  ) {
+    throw new TypeError(
+      value.executionId !== executionId
+        ? "Workflow task sweep cursor belongs to another execution"
+        : "Workflow task sweep cursor is invalid",
+    );
+  }
+  return {
+    phase: value.phase as number,
+    cursors: [...cursors] as Array<string | null>,
+    done: [...done] as boolean[],
+    round: value.round as number,
+  };
 }
 
 function boundedSweepLimit(
