@@ -8,6 +8,8 @@ import type {
   WorkflowTaskAttemptAuthorityRequest,
   WorkflowTaskAuthorityPort,
   WorkflowTaskChildAuthorityRequest,
+  WorkflowTaskControlAccessPort,
+  WorkflowTaskControlAuthorityRequest,
   WorkflowTaskRootAuthorityRequest,
   WorkflowTaskSenderAuthorityRequest,
 } from "../tasks/authority.js";
@@ -20,7 +22,7 @@ import { immutableTaskJson } from "../tasks/json.js";
 import {
   authorizeWorkflowActor,
   DENY_ALL_WORKFLOW_AUTHORIZER,
-  type WorkflowActorContext,
+  WorkflowActorContext,
   type WorkflowAuthorizer,
 } from "./authorization.js";
 import {
@@ -54,7 +56,8 @@ interface ActiveOrchestration {
  */
 export class WorkflowOrchestrationTaskAuthorityPort
   implements
-    WorkflowTaskAuthorityPort<WorkflowActorContext, WorkflowActorContext>
+    WorkflowTaskAuthorityPort<WorkflowActorContext, WorkflowActorContext>,
+    WorkflowTaskControlAccessPort<WorkflowActorContext>
 {
   readonly #plans: WorkflowPlanStore;
   readonly #state: WorkflowOrchestrationStateStore;
@@ -167,6 +170,59 @@ export class WorkflowOrchestrationTaskAuthorityPort
     assertAgentPermission(active.plan, lane.agentId, "task:mailbox:send");
   }
 
+  async authorizeControl(
+    request: WorkflowTaskControlAuthorityRequest<WorkflowActorContext>,
+  ): Promise<void> {
+    validateControlRequest(request);
+    const active = await this.#active(request.executionId);
+    const actor = request.actor;
+    const identity = actor.identity;
+    const self =
+      identity.taskId !== undefined &&
+      request.taskIds.length > 0 &&
+      request.taskIds.every((taskId) => taskId === identity.taskId);
+    const manager = isManager(active.plan, actor);
+    if (
+      ((request.access === "self-spawn" ||
+        request.access === "self-send" ||
+        request.access === "self-read") &&
+        !self) ||
+      (request.access === "self-or-manager" && !self && !manager) ||
+      (request.access === "manager" && !manager)
+    ) {
+      unauthorized(
+        "Workflow actor cannot control the requested workflow tasks",
+      );
+    }
+    const permission =
+      request.access === "self-spawn"
+        ? "task:spawn"
+        : request.access === "self-send"
+          ? "task:mailbox:send"
+          : request.access === "manager" ||
+              (request.access === "self-or-manager" && !self)
+            ? "task:manage"
+            : request.access === "self-or-manager"
+              ? "task:cancel"
+              : "task:read";
+    await authorizeWorkflowActor(this.#authorizer, actor, {
+      operation: request.operation,
+      permission,
+      executionId: request.executionId,
+      planRevision: active.plan.planRevision,
+    });
+    const agent = requiredAgent(active.plan, identity.agentId);
+    if (!agent.policy.permissions.includes(permission)) {
+      unauthorized(`Workflow agent lacks ${permission} permission`);
+    }
+    if (identity.planRevision !== active.plan.planRevision) {
+      unauthorized("Workflow control actor is bound to a stale plan revision");
+    }
+    if (identity.taskId !== undefined) {
+      requiredLane(active.plan, identity.taskId, identity.agentId);
+    }
+  }
+
   async #active(executionId: string): Promise<ActiveOrchestration> {
     identifier(executionId, "executionId");
     const state = await this.#state.get(executionId);
@@ -208,6 +264,7 @@ function bindingFor(
   active: ActiveOrchestration,
   lane: WorkflowPlanLane,
 ): WorkflowTaskOrchestrationBinding {
+  const agent = requiredAgent(active.plan, lane.agentId);
   const ownership = active.state.grants
     .filter(
       (grant) =>
@@ -223,6 +280,9 @@ function bindingFor(
   return immutableTaskJson({
     planRevision: active.plan.planRevision,
     ownership,
+    ...(agent.policy.maxChildren === undefined
+      ? {}
+      : { maxChildren: agent.policy.maxChildren }),
   });
 }
 
@@ -236,6 +296,7 @@ function assertRecordBinding(
   if (
     !actual ||
     actual.planRevision !== expected.planRevision ||
+    actual.maxChildren !== expected.maxChildren ||
     actual.ownership.length !== expected.ownership.length
   ) {
     stale(record, "Workflow task binding does not match active ownership");
@@ -250,6 +311,31 @@ function assertRecordBinding(
   ) {
     stale(record, "Workflow task ownership fencing is stale");
   }
+}
+
+function isManager(plan: WorkflowPlan, actor: WorkflowActorContext): boolean {
+  const agent = plan.agents.find(
+    (candidate) => candidate.agentId === actor.identity.agentId,
+  );
+  return (
+    agent !== undefined &&
+    (agent.policy.role === "architect" || agent.policy.role === "integration")
+  );
+}
+
+function validateControlRequest(
+  value: WorkflowTaskControlAuthorityRequest<WorkflowActorContext>,
+): void {
+  if (
+    !value ||
+    typeof value !== "object" ||
+    !(value.actor instanceof WorkflowActorContext) ||
+    !Array.isArray(value.taskIds)
+  ) {
+    unauthorized("Workflow task control authority request is invalid");
+  }
+  identifier(value.executionId, "executionId");
+  for (const taskId of value.taskIds) identifier(taskId, "taskId");
 }
 
 function assertCurrentClaim(

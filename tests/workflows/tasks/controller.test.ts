@@ -166,6 +166,151 @@ describe("WorkflowTaskController", () => {
     await controller.waitForIdle();
   });
 
+  test("revalidates live authority before a driver capability can create side effects", async () => {
+    const rootGate = deferred<void>();
+    const targetGate = deferred<WorkflowTaskDriverResult>();
+    const staleObserved = deferred<unknown>();
+    let rootLive = true;
+    const authority: WorkflowTaskAuthorityPort = {
+      async resolveRoot() {
+        return binding("grant", 1, 1);
+      },
+      async deriveChild() {
+        return binding("child", 1, 2);
+      },
+      async validateAttempt({ task }) {
+        if (task.taskId === "root" && !rootLive) {
+          throw Object.assign(new Error("stale authority"), {
+            code: "WORKFLOW_OWNERSHIP_STALE",
+          });
+        }
+      },
+      async validateAuthenticatedSender() {},
+    };
+    const { controller } = orchestratedHarness({
+      authority,
+      driver: {
+        async execute(request) {
+          if (request.task.taskId === "target") return await targetGate.promise;
+          await rootGate.promise;
+          try {
+            await request.send({
+              operationId: "stale-send",
+              taskId: "target",
+              payload: "must-not-append",
+            });
+          } catch (error) {
+            staleObserved.resolve(error);
+            throw error;
+          }
+          return { output: "must-not-complete" };
+        },
+      },
+    });
+    const target = await controller.spawn(
+      { ...spawn("target"), operationId: "create-target" },
+      { capability: {} },
+    );
+    const root = await controller.spawn(
+      { ...spawn("root"), operationId: "create-root" },
+      { capability: {} },
+    );
+    await eventually(async () => {
+      expect((await controller.status(root)).status).toBe("running");
+    });
+
+    rootLive = false;
+    rootGate.resolve(undefined);
+    await expect(staleObserved.promise).resolves.toMatchObject({
+      code: "WORKFLOW_OWNERSHIP_STALE",
+    });
+    await eventually(async () => {
+      expect((await controller.readMailbox(target)).messages).toHaveLength(0);
+      const status = await controller.status(root);
+      expect(status.status).toBe("running");
+      expect(status.output).toBeUndefined();
+    });
+    targetGate.resolve({});
+    await controller.waitForIdle();
+  });
+
+  test("does not replace an active runner on an idempotent spawn retry", async () => {
+    const gate = deferred<WorkflowTaskDriverResult>();
+    let executions = 0;
+    const authority: WorkflowTaskAuthorityPort = {
+      async resolveRoot() {
+        return binding("grant", 1, 1);
+      },
+      async deriveChild() {
+        return binding("child", 1, 2);
+      },
+      async validateAttempt() {},
+      async validateAuthenticatedSender() {},
+    };
+    const { controller } = orchestratedHarness({
+      authority,
+      driver: {
+        async execute() {
+          executions++;
+          return await gate.promise;
+        },
+      },
+    });
+    const request = { ...spawn("root"), operationId: "create-root" };
+    const capability = { host: true };
+    const first = await controller.spawn(request, { capability });
+    await eventually(() => expect(executions).toBe(1));
+    const retry = await controller.spawn(request, { capability });
+    expect(retry).toEqual(first);
+    expect(executions).toBe(1);
+
+    gate.resolve({ output: "done" });
+    await expect(controller.join(first)).resolves.toMatchObject({
+      status: "completed",
+      output: "done",
+    });
+    expect(executions).toBe(1);
+  });
+
+  test("does not publish a successful result after attempt authority becomes stale", async () => {
+    const gate = deferred<WorkflowTaskDriverResult>();
+    let live = true;
+    const authority: WorkflowTaskAuthorityPort = {
+      async resolveRoot() {
+        return binding("grant", 1, 1);
+      },
+      async deriveChild() {
+        return binding("child", 1, 2);
+      },
+      async validateAttempt() {
+        if (!live) {
+          throw Object.assign(new Error("stale authority"), {
+            code: "WORKFLOW_OWNERSHIP_STALE",
+          });
+        }
+      },
+      async validateAuthenticatedSender() {},
+    };
+    const { controller } = orchestratedHarness({
+      authority,
+      driver: { execute: async () => await gate.promise },
+    });
+    const handle = await controller.spawn(
+      { ...spawn("root"), operationId: "create-root" },
+      { capability: {} },
+    );
+    await eventually(async () => {
+      expect((await controller.status(handle)).status).toBe("running");
+    });
+
+    live = false;
+    gate.resolve({ output: "must-not-publish" });
+    await controller.waitForIdle();
+    const record = await controller.status(handle);
+    expect(record.status).toBe("running");
+    expect(record.output).toBeUndefined();
+  });
+
   test("starts promptly and returns a serializable durable handle", async () => {
     const gate = deferred<WorkflowTaskDriverResult>();
     const { controller } = harness({ execute: async () => await gate.promise });
@@ -540,7 +685,9 @@ describe("WorkflowTaskController", () => {
     expect(await controller.join(handle)).toMatchObject({
       status: "cancelled",
     });
-    expect(waitError).toMatchObject({ code: "WORKFLOW_TASK_WAIT_ABORTED" });
+    expect(waitError).toMatchObject({
+      code: "WORKFLOW_TASK_INVALID_TRANSITION",
+    });
   });
 
   test("keeps legacy CAS execution when durable mode is omitted", async () => {

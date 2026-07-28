@@ -248,6 +248,7 @@ function baseControl(
     integration: new IntegrationGate(artifacts, {
       validate: async () => ({ verdict: "accepted", result: null }),
     }),
+    trustedHostMode: true,
     ...optional,
   });
 }

@@ -60,6 +60,8 @@ export interface WorkflowTaskOrchestrationGrant {
 export interface WorkflowTaskOrchestrationBinding {
   readonly planRevision: number;
   readonly ownership: readonly WorkflowTaskOrchestrationGrant[];
+  /** Lifetime child budget derived from the active plan, never from agent JSON. */
+  readonly maxChildren?: number;
 }
 
 export interface WorkflowTaskRecord extends WorkflowTaskHandle {
@@ -233,6 +235,8 @@ export interface WorkflowTaskCreateRootCommand {
 export interface WorkflowTaskCreateChildCommand {
   operationId: string;
   parentClaim: WorkflowTaskClaimGuard;
+  /** Product stores must fence this against live parent authority atomically. */
+  expectedParentAuthority: WorkflowTaskOrchestrationBinding;
   request: WorkflowTaskDriverChildRequest;
   /** Binding derived by WorkflowTaskAuthorityPort from the claimed parent. */
   authority: WorkflowTaskOrchestrationBinding;
@@ -241,12 +245,16 @@ export interface WorkflowTaskCreateChildCommand {
 export interface WorkflowTaskAppendFromClaimCommand {
   operationId: string;
   parentClaim: WorkflowTaskClaimGuard;
+  /** Product stores must fence this against live parent authority atomically. */
+  expectedParentAuthority: WorkflowTaskOrchestrationBinding;
   request: WorkflowTaskDriverSendRequest;
 }
 
 export interface WorkflowTaskCancelFromClaimCommand {
   operationId: string;
   parentClaim: WorkflowTaskClaimGuard;
+  /** Product stores must fence this against live parent authority atomically. */
+  expectedParentAuthority: WorkflowTaskOrchestrationBinding;
   target: WorkflowTaskHandle;
 }
 
@@ -260,6 +268,7 @@ export type WorkflowTaskControlErrorCode =
   | "WORKFLOW_TASK_INVALID_TRANSITION"
   | "WORKFLOW_TASK_NOT_OWNED"
   | "WORKFLOW_TASK_MAILBOX_FULL"
+  | "WORKFLOW_TASK_DELEGATION_LIMIT"
   | "WORKFLOW_TASK_WAIT_ABORTED";
 
 export class WorkflowTaskControlError extends Error {

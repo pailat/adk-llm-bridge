@@ -6,16 +6,16 @@
 
 import {
   type WorkflowTaskAppendFromClaimCommand,
+  type WorkflowTaskCancelExpiredClaimRequest,
   type WorkflowTaskCancelFromClaimCommand,
+  type WorkflowTaskCancellationRequest,
   type WorkflowTaskClaim,
   type WorkflowTaskClaimedTransitionRequest,
   type WorkflowTaskClaimGuard,
   type WorkflowTaskClaimRequest,
-  type WorkflowTaskCancelExpiredClaimRequest,
-  type WorkflowTaskCancellationRequest,
+  WorkflowTaskControlError,
   type WorkflowTaskCreateChildCommand,
   type WorkflowTaskCreateRootCommand,
-  WorkflowTaskControlError,
   type WorkflowTaskListRequest,
   type WorkflowTaskListResult,
   type WorkflowTaskMessage,
@@ -123,7 +123,13 @@ export interface WorkflowTaskMessageStore {
   ): Promise<WorkflowTaskMessageReadResult>;
 }
 
-/** Atomic, fenced and idempotent mutations used by durable task controllers. */
+/**
+ * Atomic, fenced and idempotent mutations used by durable task controllers.
+ *
+ * Persistent adapters must compare `expectedParentAuthority` with the same
+ * transactional task/authority snapshot used by the mutation. Comparing it
+ * in controller code alone leaves an authority-to-command TOCTOU window.
+ */
 export interface WorkflowTaskCommandStore {
   createRoot(
     command: WorkflowTaskCreateRootCommand,
@@ -143,6 +149,7 @@ interface InMemoryTaskAtomicAccess {
   timestamp(): number;
   required(handle: { executionId: string; taskId: string }): WorkflowTaskRecord;
   assertRunningClaim(claim: WorkflowTaskClaimGuard): WorkflowTaskRecord;
+  countChildren(executionId: string, parentTaskId: string): number;
   create(record: WorkflowTaskRecord): WorkflowTaskRecord;
   requestCancellation(handle: {
     executionId: string;
@@ -210,6 +217,18 @@ export class InMemoryWorkflowTaskStore
         if (current.status !== "running") claimConflict(claim, current);
         assertCurrentClaim(current, claim, this.#timestamp());
         return current;
+      },
+      countChildren: (executionId, parentTaskId) => {
+        let count = 0;
+        for (const record of this.#records.values()) {
+          if (
+            record.executionId === executionId &&
+            record.parentTaskId === parentTaskId
+          ) {
+            count++;
+          }
+        }
+        return count;
       },
       create: (record) => this.#create(record),
       requestCancellation: (handle) => {
@@ -819,6 +838,22 @@ export class InMemoryWorkflowTaskCommandStore
       this.#taskStore[IN_MEMORY_TASK_ATOMIC]((access) => {
         assertOperationHint(command.operationId, command.request.operationId);
         const parent = access.assertRunningClaim(command.parentClaim);
+        assertExpectedParentAuthority(parent, command.expectedParentAuthority);
+        const maxChildren = parent.orchestration?.maxChildren;
+        if (
+          maxChildren !== undefined &&
+          access.countChildren(parent.executionId, parent.taskId) >= maxChildren
+        ) {
+          throw new WorkflowTaskControlError(
+            "WORKFLOW_TASK_DELEGATION_LIMIT",
+            `Workflow task lifetime child limit reached: ${parent.taskId}`,
+            {
+              executionId: parent.executionId,
+              taskId: parent.taskId,
+              maxChildren,
+            },
+          );
+        }
         const now = access.timestamp();
         return access.create({
           executionId: parent.executionId,
@@ -846,6 +881,7 @@ export class InMemoryWorkflowTaskCommandStore
       this.#taskStore[IN_MEMORY_TASK_ATOMIC]((access) => {
         assertOperationHint(command.operationId, command.request.operationId);
         const parent = access.assertRunningClaim(command.parentClaim);
+        assertExpectedParentAuthority(parent, command.expectedParentAuthority);
         access.required({
           executionId: parent.executionId,
           taskId: command.request.taskId,
@@ -867,6 +903,7 @@ export class InMemoryWorkflowTaskCommandStore
     return this.#execute(command.operationId, command, () =>
       this.#taskStore[IN_MEMORY_TASK_ATOMIC]((access) => {
         const parent = access.assertRunningClaim(command.parentClaim);
+        assertExpectedParentAuthority(parent, command.expectedParentAuthority);
         if (command.target.executionId !== parent.executionId) {
           invalid("A claimed task cannot cancel across workflow executions");
         }
@@ -954,6 +991,9 @@ function normalizedTaskRecordSnapshot(
     orchestration: {
       planRevision: orchestration.planRevision,
       ownership,
+      ...(orchestration.maxChildren === undefined
+        ? {}
+        : { maxChildren: orchestration.maxChildren }),
     },
   } satisfies WorkflowTaskRecord);
 }
@@ -1065,12 +1105,16 @@ function validateOrchestrationBinding(
     !orchestration ||
     typeof orchestration !== "object" ||
     Array.isArray(orchestration) ||
-    Object.keys(orchestration).length !== 2 ||
+    (Object.keys(orchestration).length !== 2 &&
+      Object.keys(orchestration).length !== 3) ||
     Object.keys(orchestration).some(
-      (key) => key !== "planRevision" && key !== "ownership",
+      (key) =>
+        key !== "planRevision" && key !== "ownership" && key !== "maxChildren",
     ) ||
     !positiveSafeInteger(orchestration.planRevision) ||
-    !Array.isArray(orchestration.ownership)
+    !Array.isArray(orchestration.ownership) ||
+    (orchestration.maxChildren !== undefined &&
+      !positiveSafeInteger(orchestration.maxChildren))
   ) {
     invalid("Workflow task orchestration binding is invalid");
   }
@@ -1099,6 +1143,23 @@ function validateOrchestrationBinding(
     grantIds.add(grant.grantId);
   }
   immutableTaskJson(orchestration);
+}
+
+function assertExpectedParentAuthority(
+  parent: WorkflowTaskRecord,
+  expected: WorkflowTaskOrchestrationBinding,
+): void {
+  validateOrchestrationBinding(expected);
+  if (
+    parent.orchestration === undefined ||
+    JSON.stringify(parent.orchestration) !== JSON.stringify(expected)
+  ) {
+    throw new WorkflowTaskControlError(
+      "WORKFLOW_TASK_CLAIM_CONFLICT",
+      `Workflow task authority fence is stale: ${parent.taskId}`,
+      { executionId: parent.executionId, taskId: parent.taskId },
+    );
+  }
 }
 
 function validateTaskClaim(

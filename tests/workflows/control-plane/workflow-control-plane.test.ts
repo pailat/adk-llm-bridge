@@ -70,6 +70,7 @@ describe("WorkflowControlPlane", () => {
       tasks,
       artifacts,
       integration,
+      trustedHostMode: true,
     });
 
     const started = await control.dispatch({
@@ -210,6 +211,20 @@ describe("WorkflowControlPlane", () => {
     await expect(
       control.dispatch({ ...envelope, operation: "execution.status" } as never),
     ).rejects.toMatchObject({ code: "WORKFLOW_CONTROL_INVALID_REQUEST" });
+
+    const statusRequest = {
+      ...envelope,
+      operation: "task.status",
+      payload: { executionId: "execution-1", taskId: "task-1" },
+    } as const;
+    await expect(control.dispatch(statusRequest)).rejects.toMatchObject({
+      code: "WORKFLOW_CONTROL_INVALID_REQUEST",
+    });
+    await expect(
+      control.dispatch(statusRequest, { actor: actor("codex", "task-1") }),
+    ).rejects.toMatchObject({
+      code: "WORKFLOW_CONTROL_CAPABILITY_UNAVAILABLE",
+    });
     await expect(
       control.dispatch({
         ...envelope,
@@ -332,6 +347,12 @@ describe("WorkflowControlPlane", () => {
       integration: new IntegrationGate(artifacts, {
         validate: async () => ({ verdict: "accepted", result: null }),
       }),
+      taskAccess: {
+        async authorizeControl({ actor: accessActor, executionId }) {
+          expect(accessActor).toBeInstanceOf(WorkflowActorContext);
+          expect(accessActor.identity.executionId).toBe(executionId);
+        },
+      },
     });
     const senderActor = actor("sender-agent", "sender");
     const targetActor = actor("target-agent", "target");
@@ -476,6 +497,7 @@ describe("WorkflowControlPlane", () => {
           return { nextCursor: cursor };
         },
       } as never,
+      trustedHostMode: true,
     });
 
     await control.dispatch({

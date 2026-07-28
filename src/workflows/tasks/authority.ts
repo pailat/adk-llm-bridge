@@ -37,6 +37,44 @@ export interface WorkflowTaskSenderAuthorityRequest<TActor = unknown> {
   sender: WorkflowTaskRecord;
 }
 
+export type WorkflowTaskControlOperation =
+  | "task.spawn"
+  | "task.mailbox.send"
+  | "task.status"
+  | "task.join"
+  | "task.awaitAny"
+  | "task.mailbox.read"
+  | "task.mailbox.wait"
+  | "task.cancel"
+  | "task.resume"
+  | "task.dispatch"
+  | "task.recover"
+  | "task.sweep"
+  | "task.list";
+
+export type WorkflowTaskControlAccess =
+  | "self-spawn"
+  | "self-send"
+  | "self-read"
+  | "self-or-manager"
+  | "manager";
+
+export interface WorkflowTaskControlAuthorityRequest<TActor = unknown> {
+  /** Opaque host-authenticated actor; never accepted from JSON. */
+  actor: TActor;
+  operation: WorkflowTaskControlOperation;
+  access: WorkflowTaskControlAccess;
+  executionId: string;
+  taskIds: readonly string[];
+}
+
+/** Authorization port for JSON/control-plane task reads and host mutations. */
+export interface WorkflowTaskControlAccessPort<TActor = unknown> {
+  authorizeControl(
+    request: WorkflowTaskControlAuthorityRequest<TActor>,
+  ): Promise<void>;
+}
+
 /** Host-neutral authority boundary. It derives authority instead of trusting hints. */
 export interface WorkflowTaskAuthorityPort<
   TCapability = unknown,
