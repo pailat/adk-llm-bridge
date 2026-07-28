@@ -294,6 +294,77 @@ describe("WorkflowPlanController", () => {
     await expect(
       controller.activate("execution-1", 2, coordinator),
     ).rejects.toMatchObject({ code: "WORKFLOW_MUTATION_RESERVATION_ACTIVE" });
+
+    const reserved = await state.get("execution-1");
+    if (!reserved) throw new Error("expected orchestration state");
+    await state.compareAndSet(
+      {
+        ...reserved,
+        revision: reserved.revision + 1,
+        reservations: reserved.reservations?.map((reservation) => ({
+          ...reservation,
+          status: "completed" as const,
+          commitId: "commit-1",
+          completedAt: 3,
+        })),
+        updatedAt: 3,
+      },
+      reserved.revision,
+    );
+    await expect(
+      controller.activate("execution-1", 2, coordinator),
+    ).rejects.toMatchObject({ code: "WORKFLOW_MUTATION_RESERVATION_ACTIVE" });
+  });
+
+  test("lazily ignores expired reservations during plan activation", async () => {
+    let now = 1;
+    const { controller, state } = harness({ now: () => now });
+    const coordinator = actor("coordinator", 1, "integration");
+    await controller.put(plan(), coordinator);
+    const active = await controller.activate("execution-1", 1, coordinator);
+    await controller.put(plan({ planRevision: 2, createdAt: 2 }), coordinator);
+    await state.compareAndSet(
+      {
+        ...active,
+        revision: 2,
+        nextFencingToken: 2,
+        grants: [
+          {
+            grantId: "grant-1",
+            taskId: "implementation",
+            agentId: "builder",
+            planRevision: 1,
+            fencingToken: 1,
+            claims: [{ path: "src/workflows/tasks", scope: "subtree" }],
+            grantedAt: 1,
+          },
+        ],
+        reservations: [
+          {
+            reservationId: "reservation-expired",
+            receiptId: "receipt-expired",
+            phase: "commit",
+            taskId: "implementation",
+            agentId: "builder",
+            planRevision: 1,
+            orchestrationRevision: 2,
+            grants: [{ grantId: "grant-1", fencingToken: 1 }],
+            changeSetDigest: `sha256:${"d".repeat(64)}`,
+            treeId: "tree-expired",
+            status: "reserved",
+            createdAt: 1,
+            expiresAt: 10,
+          },
+        ],
+        updatedAt: 2,
+      },
+      1,
+    );
+
+    now = 11;
+    await expect(
+      controller.activate("execution-1", 2, coordinator),
+    ).resolves.toMatchObject({ activePlanRevision: 2, reservations: [] });
   });
 });
 

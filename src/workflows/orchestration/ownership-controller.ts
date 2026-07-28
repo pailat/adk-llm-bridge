@@ -266,7 +266,11 @@ export class WorkflowOwnershipController {
       const { state, plan } = await this.#active(request);
       assertManager(plan, actor);
       const source = requiredGrant(state, request.sourceGrantId);
-      assertGrantNotReserved(state, source.grantId);
+      assertGrantNotReserved(
+        state,
+        source.grantId,
+        this.#timestamp(state.updatedAt),
+      );
       const target = requiredLane(plan, request.targetTaskId);
       assertClaimsAllowed(plan, target, source.claims, true);
       assertAvailable(state.grants, source.claims, source.grantId);
@@ -311,7 +315,11 @@ export class WorkflowOwnershipController {
       const { state, plan } = await this.#active(request);
       const grant = requiredGrant(state, request.grantId);
       assertGrantOwnerOrManager(plan, actor, grant);
-      assertGrantNotReserved(state, grant.grantId);
+      assertGrantNotReserved(
+        state,
+        grant.grantId,
+        this.#timestamp(state.updatedAt),
+      );
       try {
         await this.#replace(state, {
           grants: state.grants.filter((item) => item.grantId !== grant.grantId),
@@ -464,7 +472,7 @@ export class WorkflowOwnershipController {
   ): Pick<WorkflowOrchestrationState, "grants" | "nextFencingToken"> {
     if (proposal.kind === "release") {
       const source = requiredGrant(state, proposal.sourceGrantId as string);
-      assertGrantNotReserved(state, source.grantId);
+      assertGrantNotReserved(state, source.grantId, decidedAt);
       return {
         grants: state.grants.filter(
           (grant) => grant.grantId !== source.grantId,
@@ -491,7 +499,7 @@ export class WorkflowOwnershipController {
     }
 
     const source = requiredGrant(state, proposal.sourceGrantId as string);
-    assertGrantNotReserved(state, source.grantId);
+    assertGrantNotReserved(state, source.grantId, decidedAt);
     const claims =
       proposal.claims.length === 0 ? source.claims : proposal.claims;
     if (!sameClaims(claims, source.claims))
@@ -595,10 +603,21 @@ export class WorkflowOwnershipController {
     current: WorkflowOrchestrationState,
     changes: Partial<WorkflowOrchestrationState>,
   ): Promise<WorkflowOrchestrationState> {
+    const updatedAt = changes.updatedAt ?? current.updatedAt;
+    const reservations = (
+      changes.reservations ??
+      current.reservations ??
+      []
+    ).map((reservation) =>
+      reservation.status === "reserved" && reservation.expiresAt <= updatedAt
+        ? { ...reservation, status: "expired" as const }
+        : reservation,
+    );
     return await this.#state.compareAndSet(
       immutableWorkflowOrchestrationJson({
         ...current,
         ...changes,
+        reservations,
         revision: current.revision + 1,
       }),
       current.revision,
@@ -867,10 +886,12 @@ function assertAuthorityGrant(
 function assertGrantNotReserved(
   state: WorkflowOrchestrationState,
   grantId: string,
+  now: number,
 ): void {
   const reservation = (state.reservations ?? []).find(
     (candidate) =>
-      candidate.status === "reserved" &&
+      ((candidate.status === "reserved" && candidate.expiresAt > now) ||
+        (candidate.phase === "commit" && candidate.status === "completed")) &&
       candidate.grants.some((grant) => grant.grantId === grantId),
   );
   if (reservation) {

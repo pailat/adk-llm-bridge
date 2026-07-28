@@ -296,8 +296,12 @@ export class WorkflowPlanController {
           },
         );
       }
+      const now = this.#timestamp(current.updatedAt);
       const activeReservations = workflowMutationReservations(current).filter(
-        (reservation) => reservation.status === "reserved",
+        (reservation) =>
+          (reservation.status === "reserved" && reservation.expiresAt > now) ||
+          (reservation.phase === "commit" &&
+            reservation.status === "completed"),
       );
       if (activeReservations.length > 0) {
         throw new WorkflowOrchestrationControlError(
@@ -321,7 +325,7 @@ export class WorkflowPlanController {
             grants: [],
             proposals: [],
             reservations: [],
-            updatedAt: this.#timestamp(current.updatedAt),
+            updatedAt: now,
           } satisfies WorkflowOrchestrationState),
           current.revision,
         );

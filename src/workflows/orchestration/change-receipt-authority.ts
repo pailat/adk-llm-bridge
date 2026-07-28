@@ -62,7 +62,6 @@ export class WorkflowLiveChangeReceiptAuthority
   readonly #now: () => number;
   readonly #reservationTtlMs: number;
   readonly #maxCasRetries: number;
-  readonly #leases = new WeakMap<object, LeaseBinding>();
 
   constructor(config: WorkflowLiveChangeReceiptAuthorityConfig) {
     if (!config?.state || !config.receipts || !config.journal) {
@@ -114,7 +113,7 @@ export class WorkflowLiveChangeReceiptAuthority
     result: WorkflowAuthoritativeCommitResult,
     options: WorkflowChangeOperationOptions = {},
   ): Promise<void> {
-    const binding = this.#binding(lease, "commit");
+    const binding = await this.#binding(lease, "commit");
     const commitId = revision(result.commitId, "commitId");
     const treeId = revision(result.treeId, "treeId");
     await this.#complete(
@@ -124,7 +123,9 @@ export class WorkflowLiveChangeReceiptAuthority
           reservation.receiptId !== identity(result.receiptId, "receiptId") ||
           reservation.changeSetDigest !==
             digest(result.changeSetDigest, "changeSetDigest") ||
-          reservation.treeId !== treeId
+          reservation.treeId !== treeId ||
+          (reservation.commitId !== undefined &&
+            reservation.commitId !== commitId)
         ) {
           authorityInvalid("Commit result does not match its reservation");
         }
@@ -178,7 +179,7 @@ export class WorkflowLiveChangeReceiptAuthority
     result: WorkflowIntegrationResult,
     options: WorkflowChangeOperationOptions = {},
   ): Promise<void> {
-    const binding = this.#binding(lease, "integration");
+    const binding = await this.#binding(lease, "integration");
     await this.#complete(
       binding,
       (reservation) => {
@@ -204,16 +205,22 @@ export class WorkflowLiveChangeReceiptAuthority
     options: WorkflowChangeOperationOptions = {},
   ): Promise<void> {
     throwIfAborted(options.signal);
-    const binding = this.#binding(lease);
+    const binding = await this.#binding(lease);
     for (let retry = 0; retry < this.#maxCasRetries; retry++) {
       const state = await this.#requiredState(binding.executionId);
-      const reservation = requiredReservation(state, binding.reservationId);
+      const reservation = findReservation(state, binding.reservationId);
+      if (!reservation) {
+        await this.#markOperationAmbiguous(
+          binding,
+          "Mutation reservation was superseded before release",
+        );
+        return;
+      }
+      assertLeaseReservation(reservation, binding);
       if (reservation.status === "completed") {
-        this.#leases.delete(lease);
         return;
       }
       if (reservation.status !== "reserved") {
-        this.#leases.delete(lease);
         return;
       }
       try {
@@ -226,7 +233,40 @@ export class WorkflowLiveChangeReceiptAuthority
           binding.intentDigest,
           "Mutation lease was released before durable completion",
         );
-        this.#leases.delete(lease);
+        return;
+      } catch (error) {
+        if (isCasConflict(error)) continue;
+        throw error;
+      }
+    }
+    contended(binding.executionId);
+  }
+
+  /**
+   * Explicitly abandons a completed commit handoff. Normal `release()` cannot
+   * do this because committers call it after every successful completion.
+   */
+  async abandonCommit(
+    lease: WorkflowChangeAuthorityLease,
+    options: WorkflowChangeOperationOptions = {},
+  ): Promise<void> {
+    throwIfAborted(options.signal);
+    const binding = await this.#binding(lease, "commit");
+    for (let retry = 0; retry < this.#maxCasRetries; retry++) {
+      const state = await this.#requiredState(binding.executionId);
+      const reservation = findReservation(state, binding.reservationId);
+      if (!reservation) return;
+      assertLeaseReservation(reservation, binding);
+      if (reservation.status === "released") return;
+      if (reservation.status !== "completed") {
+        authorityInvalid("Only a completed commit handoff can be abandoned");
+      }
+      try {
+        await this.#replaceReservation(state, reservation.reservationId, {
+          ...reservation,
+          status: "released",
+          completedAt: undefined,
+        });
         return;
       } catch (error) {
         if (isCasConflict(error)) continue;
@@ -253,33 +293,48 @@ export class WorkflowLiveChangeReceiptAuthority
       return Object.freeze({ status: "completed" });
     if (journal.status === "ambiguous")
       return Object.freeze({ status: "ambiguous" });
-    const state = await this.#state.get(journal.executionId);
-    const reservation = state?.reservations?.find(
-      (item) =>
-        item.reservationId === reservationId(request.kind, intentDigest),
-    );
-    if (!state || !reservation) return Object.freeze({ status: "absent" });
-    if (reservation.status === "completed") {
-      await this.#journal.complete(operationId, intentDigest, {
-        reservationId: reservation.reservationId,
-        commitId: reservation.commitId ?? null,
-        status: "completed",
-      });
-      return Object.freeze({ status: "completed" });
-    }
-    if (reservation.status === "released" || reservation.status === "expired") {
-      await this.#markAmbiguous(
-        journal,
-        "Mutation reservation is no longer active",
+    for (let retry = 0; retry < this.#maxCasRetries; retry++) {
+      const state = await this.#state.get(journal.executionId);
+      const reservation = state?.reservations?.find(
+        (item) =>
+          item.reservationId === reservationId(request.kind, intentDigest),
       );
-      return Object.freeze({ status: "ambiguous" });
+      if (!state || !reservation) {
+        return await this.#reconcileAmbiguous(
+          journal,
+          "Mutation reservation was superseded while its journal was pending",
+        );
+      }
+      if (reservation.status === "completed") {
+        return Object.freeze({ status: "completed" });
+      }
+      if (
+        reservation.status === "released" ||
+        reservation.status === "expired"
+      ) {
+        return await this.#reconcileAmbiguous(
+          journal,
+          "Mutation reservation is no longer active",
+        );
+      }
+      if (reservation.expiresAt <= this.#timestamp()) {
+        try {
+          await this.#replaceReservation(state, reservation.reservationId, {
+            ...reservation,
+            status: "expired",
+          });
+        } catch (error) {
+          if (isCasConflict(error)) continue;
+          throw error;
+        }
+        return await this.#reconcileAmbiguous(
+          journal,
+          "Mutation reservation expired",
+        );
+      }
+      return Object.freeze({ status: "pending" });
     }
-    if (reservation.expiresAt <= this.#timestamp()) {
-      await this.#expire(state, reservation);
-      await this.#markAmbiguous(journal, "Mutation reservation expired");
-      return Object.freeze({ status: "ambiguous" });
-    }
-    return Object.freeze({ status: "pending" });
+    contended(journal.executionId);
   }
 
   async #acquire(
@@ -299,17 +354,35 @@ export class WorkflowLiveChangeReceiptAuthority
     for (let retry = 0; retry < this.#maxCasRetries; retry++) {
       throwIfAborted(options.signal);
       const state = await this.#liveReceiptState(input.receipt);
+      const now = this.#timestamp(state.updatedAt);
+      const begun = await this.#journal.begin({
+        operationId: input.operationId,
+        intentDigest: input.intentDigest,
+        kind: input.phase,
+        executionId: input.receipt.executionId,
+        taskId: input.receipt.taskId,
+        startedAt: now,
+      });
+      assertJournalAuthority(begun.record, input);
+      if (begun.record.status === "ambiguous") {
+        authorityInvalid("Mutation operation has an ambiguous durable outcome");
+      }
       const existing = state.reservations?.find(
         (item) => item.reservationId === reservationKey,
       );
       if (existing) {
         assertReservationMatches(existing, input);
-        authorityInvalid(
-          `Mutation operation already has reservation status ${existing.status}`,
-        );
+        if (
+          existing.status === "completed" ||
+          (existing.status === "reserved" && existing.expiresAt > now)
+        ) {
+          return this.#lease(input, reservationKey);
+        }
       }
       let replaceReservationId: string | undefined;
-      if (input.phase === "integration") {
+      if (existing) {
+        replaceReservationId = existing.reservationId;
+      } else if (input.phase === "integration") {
         const publishedCommit = state.reservations?.find(
           (item) =>
             item.phase === "commit" &&
@@ -331,15 +404,6 @@ export class WorkflowLiveChangeReceiptAuthority
         // immutable commit/tree evidence forward.
         replaceReservationId = publishedCommit.reservationId;
       }
-      const now = this.#timestamp(state.updatedAt);
-      await this.#journal.begin({
-        operationId: input.operationId,
-        intentDigest: input.intentDigest,
-        kind: input.phase,
-        executionId: input.receipt.executionId,
-        taskId: input.receipt.taskId,
-        startedAt: now,
-      });
       const reservation = immutableWorkflowOrchestrationJson({
         reservationId: reservationKey,
         receiptId: input.receipt.receiptId,
@@ -384,12 +448,63 @@ export class WorkflowLiveChangeReceiptAuthority
     throwIfAborted(options.signal);
     for (let retry = 0; retry < this.#maxCasRetries; retry++) {
       const state = await this.#requiredState(binding.executionId);
-      const reservation = requiredReservation(state, binding.reservationId);
+      const reservation = findReservation(state, binding.reservationId);
+      if (!reservation) {
+        const durable = await this.#journal.get(binding.operationId);
+        if (durable?.status === "completed") {
+          await this.#journal.complete(
+            binding.operationId,
+            binding.intentDigest,
+            JSON.parse(JSON.stringify(result)),
+          );
+          return;
+        }
+        await this.#markOperationAmbiguous(
+          binding,
+          "Mutation reservation was superseded before host completion",
+        );
+        authorityInvalid(
+          "Mutation outcome is ambiguous because its reservation was superseded",
+        );
+      }
       assertLeaseReservation(reservation, binding);
-      if (reservation.status === "completed") return;
+      if (reservation.status === "completed") {
+        link(reservation);
+        await this.#journal.complete(
+          binding.operationId,
+          binding.intentDigest,
+          JSON.parse(JSON.stringify(result)),
+        );
+        return;
+      }
       if (
-        reservation.status !== "reserved" ||
-        reservation.expiresAt <= this.#timestamp()
+        (reservation.status === "expired" ||
+          (reservation.status === "reserved" &&
+            reservation.expiresAt <= this.#timestamp())) &&
+        !reservationAuthorityIsLive(state, reservation)
+      ) {
+        if (reservation.status === "reserved") {
+          try {
+            await this.#replaceReservation(state, reservation.reservationId, {
+              ...reservation,
+              status: "expired",
+            });
+          } catch (error) {
+            if (isCasConflict(error)) continue;
+            throw error;
+          }
+        }
+        await this.#markOperationAmbiguous(
+          binding,
+          "Mutation authority changed after reservation expiry",
+        );
+        authorityInvalid(
+          "Mutation outcome is ambiguous because authority changed after reservation expiry",
+        );
+      }
+      if (
+        reservation.status !== "reserved" &&
+        reservation.status !== "expired"
       ) {
         authorityInvalid("Mutation reservation is no longer active");
       }
@@ -497,31 +612,33 @@ export class WorkflowLiveChangeReceiptAuthority
     );
   }
 
-  async #expire(
-    state: WorkflowOrchestrationState,
-    reservation: WorkflowMutationReservation,
-  ): Promise<void> {
-    if (reservation.status !== "reserved") return;
-    try {
-      await this.#replaceReservation(state, reservation.reservationId, {
-        ...reservation,
-        status: "expired",
-      });
-    } catch (error) {
-      if (!isCasConflict(error)) throw error;
-    }
-  }
-
   async #markAmbiguous(
     journal: WorkflowHostMutationRecord,
     reason: string,
   ): Promise<void> {
     if (journal.status !== "pending") return;
-    await this.#journal.markAmbiguous(
-      journal.operationId,
-      journal.intentDigest,
-      reason,
-    );
+    try {
+      await this.#journal.markAmbiguous(
+        journal.operationId,
+        journal.intentDigest,
+        reason,
+      );
+    } catch (error) {
+      const latest = await this.#journal.get(journal.operationId);
+      if (latest?.status === "completed") return;
+      throw error;
+    }
+  }
+
+  async #reconcileAmbiguous(
+    journal: WorkflowHostMutationRecord,
+    reason: string,
+  ): Promise<WorkflowMutationReconcileResult> {
+    await this.#markAmbiguous(journal, reason);
+    const latest = await this.#journal.get(journal.operationId);
+    return Object.freeze({
+      status: latest?.status === "completed" ? "completed" : "ambiguous",
+    });
   }
 
   #lease(
@@ -533,34 +650,58 @@ export class WorkflowLiveChangeReceiptAuthority
     },
     reservationKey: string,
   ): WorkflowChangeAuthorityLease {
-    const lease = Object.freeze({
+    return Object.freeze({
       [WORKFLOW_CHANGE_AUTHORITY_LEASE]: true as const,
       leaseId: `lease-${reservationKey}`,
       reservationId: reservationKey,
       operationId: input.operationId,
       intentDigest: input.intentDigest,
     });
-    this.#leases.set(lease, {
-      executionId: input.receipt.executionId,
-      phase: input.phase,
-      reservationId: reservationKey,
-      operationId: input.operationId,
-      intentDigest: input.intentDigest,
-    });
-    return lease;
   }
 
-  #binding(
+  async #binding(
     lease: WorkflowChangeAuthorityLease,
     phase?: "commit" | "integration",
-  ): LeaseBinding {
-    const binding = this.#leases.get(lease);
-    if (!binding || (phase !== undefined && binding.phase !== phase)) {
+  ): Promise<LeaseBinding> {
+    if (
+      !lease ||
+      typeof lease !== "object" ||
+      lease[WORKFLOW_CHANGE_AUTHORITY_LEASE] !== true
+    ) {
+      authorityInvalid("Mutation authority lease is forged");
+    }
+    const operationId = identity(lease.operationId, "operationId");
+    const intentDigest = digest(lease.intentDigest, "intentDigest");
+    const journal = await this.#journal.get(operationId);
+    if (!journal) authorityInvalid("Mutation authority lease has no journal");
+    assertJournalIntent(journal, intentDigest, journal.kind);
+    const reservationKey = reservationId(journal.kind, intentDigest);
+    if (
+      lease.reservationId !== reservationKey ||
+      lease.leaseId !== `lease-${reservationKey}` ||
+      (phase !== undefined && journal.kind !== phase)
+    ) {
       authorityInvalid(
         "Mutation authority lease is forged or has the wrong phase",
       );
     }
-    return binding;
+    return {
+      executionId: journal.executionId,
+      phase: journal.kind,
+      reservationId: reservationKey,
+      operationId,
+      intentDigest,
+    };
+  }
+
+  async #markOperationAmbiguous(
+    binding: LeaseBinding,
+    reason: string,
+  ): Promise<void> {
+    const journal = await this.#journal.get(binding.operationId);
+    if (journal?.status === "pending") {
+      await this.#markAmbiguous(journal, reason);
+    }
   }
 
   #timestamp(floor = 0): number {
@@ -571,15 +712,32 @@ export class WorkflowLiveChangeReceiptAuthority
   }
 }
 
-function requiredReservation(
+function findReservation(
   state: WorkflowOrchestrationState,
   reservationId: string,
-): WorkflowMutationReservation {
-  const reservation = state.reservations?.find(
+): WorkflowMutationReservation | undefined {
+  return state.reservations?.find(
     (item) => item.reservationId === reservationId,
   );
-  if (!reservation) authorityInvalid("Mutation reservation was not found");
-  return reservation;
+}
+
+function reservationAuthorityIsLive(
+  state: WorkflowOrchestrationState,
+  reservation: WorkflowMutationReservation,
+): boolean {
+  return (
+    state.activePlanRevision === reservation.planRevision &&
+    reservation.grants.every((fence) =>
+      state.grants.some(
+        (grant) =>
+          grant.grantId === fence.grantId &&
+          grant.fencingToken === fence.fencingToken &&
+          grant.taskId === reservation.taskId &&
+          grant.agentId === reservation.agentId &&
+          grant.planRevision === reservation.planRevision,
+      ),
+    )
+  );
 }
 
 function assertReservationMatches(
@@ -601,7 +759,8 @@ function assertReservationMatches(
     reservation.planRevision !== input.receipt.planRevision ||
     reservation.changeSetDigest !== input.receipt.changeSetDigest ||
     reservation.treeId !== input.treeId ||
-    reservation.commitId !== input.commitId ||
+    ((reservation.phase !== "commit" || reservation.status !== "completed") &&
+      reservation.commitId !== input.commitId) ||
     reservation.targetId !== input.targetId ||
     reservation.targetRevision !== input.targetRevision
   ) {
@@ -628,6 +787,25 @@ function assertJournalIntent(
 ): void {
   if (journal.intentDigest !== intentDigest || journal.kind !== kind) {
     authorityInvalid("Mutation operation was reused with different intent");
+  }
+}
+
+function assertJournalAuthority(
+  journal: WorkflowHostMutationRecord,
+  input: {
+    phase: "commit" | "integration";
+    operationId: string;
+    intentDigest: string;
+    receipt: WorkflowAuthoritativeChangeReceipt;
+  },
+): void {
+  assertJournalIntent(journal, input.intentDigest, input.phase);
+  if (
+    journal.operationId !== input.operationId ||
+    journal.executionId !== input.receipt.executionId ||
+    journal.taskId !== input.receipt.taskId
+  ) {
+    authorityInvalid("Mutation journal authority does not match its receipt");
   }
 }
 
