@@ -272,12 +272,14 @@ export class WorkflowValidatedIntegrator<HostRepository = unknown> {
         normalized,
         options,
       );
-      throwIfAborted(options.signal);
       const verified = normalizeIntegrationResult(result, normalized);
-      await this.#authority.completeIntegration(lease, verified, options);
+      // Once the host mutation has returned, cancellation can no longer make
+      // it safe to pretend that integration did not happen. Persist its
+      // verified outcome and clean up the lease without the caller's signal.
+      await this.#authority.completeIntegration(lease, verified);
       return verified;
     } finally {
-      await this.#authority.release(lease, options);
+      await this.#authority.release(lease);
     }
   }
 }
@@ -447,20 +449,22 @@ export class WorkflowValidatedCommitter<HostWorkspace = unknown> {
           }),
           options,
         );
-        throwIfAborted(options.signal);
         const normalized = normalizeCommitResult(
           result,
           verified,
           receipt,
           preparation,
         );
-        await this.#authority.completeCommit(lease, normalized, options);
+        // A returned commit is authoritative evidence even when the caller
+        // aborted while the host was mutating. Completion and cleanup must be
+        // uncancellable so the durable journal cannot be left ambiguous.
+        await this.#authority.completeCommit(lease, normalized);
         return normalized;
       } finally {
-        await this.#authority.release(lease, options);
+        await this.#authority.release(lease);
       }
     } finally {
-      await this.#driver.discardPreparation?.(workspace, preparation, options);
+      await this.#driver.discardPreparation?.(workspace, preparation);
     }
   }
 }
