@@ -87,6 +87,156 @@ describe("runWorkflowScript", () => {
     ]);
   });
 
+  test("projects single-step results without mutating host event history", async () => {
+    const events = [
+      { author: "agent", content: { parts: [{ text: "internal" }] } },
+    ] as WorkflowStepResult["events"];
+    const hostResult: WorkflowStepResult = {
+      status: "completed",
+      id: "single",
+      agentName: "agent",
+      output: "visible",
+      content: { parts: [{ text: "visible" }] },
+      events,
+      stateDelta: { approved: true },
+      attempts: 2,
+      startedAt: 10,
+      completedAt: 20,
+      replayed: true,
+    };
+    const host = createHost([]);
+    host.run = async () => hostResult;
+
+    const execution = await runWorkflowScript(
+      new QuickJSSyncGeneratorRuntime(),
+      {
+        source: `
+          const value = yield ctx.run({
+            id: "single",
+            agentName: "agent",
+            input: "go",
+          });
+          return JSON.stringify(value);
+        `,
+        host,
+      },
+    );
+
+    expect(JSON.parse(execution.output as string)).toEqual({
+      status: "completed",
+      id: "single",
+      agentName: "agent",
+      output: "visible",
+      content: { parts: [{ text: "visible" }] },
+      stateDelta: { approved: true },
+      attempts: 2,
+      startedAt: 10,
+      completedAt: 20,
+      replayed: true,
+    });
+    expect(hostResult.events).toBe(events);
+    expect(hostResult).toHaveProperty("events", events);
+  });
+
+  test("projects completed parallel outcomes and preserves failures", async () => {
+    const host = createHost([]);
+    host.parallel = async (steps): Promise<WorkflowStepOutcome[]> => {
+      const [left, right] = steps;
+      if (!left || !right) {
+        throw new Error("expected two parallel steps");
+      }
+      return [
+        {
+          ...result(left, "left output"),
+          events: [{ author: "left" }] as WorkflowStepResult["events"],
+        },
+        {
+          status: "failed",
+          id: right.id,
+          agentName: right.agentName,
+          error: {
+            code: "WORKFLOW_EXECUTION_ERROR",
+            message: "right failed",
+            details: { retryable: false },
+          },
+          attempts: 1,
+          startedAt: 1,
+          completedAt: 3,
+        },
+      ];
+    };
+
+    const execution = await runWorkflowScript(
+      new QuickJSSyncGeneratorRuntime(),
+      {
+        source: `
+          const values = yield ctx.parallel([
+            { id: "left", agentName: "agent", input: "left" },
+            { id: "right", agentName: "agent", input: "right" },
+          ], { failureMode: "all-settled" });
+          return JSON.stringify(values);
+        `,
+        host,
+      },
+    );
+
+    expect(JSON.parse(execution.output as string)).toEqual([
+      {
+        status: "completed",
+        id: "left",
+        agentName: "agent",
+        output: "left output",
+        attempts: 1,
+        startedAt: 1,
+        completedAt: 2,
+      },
+      {
+        status: "failed",
+        id: "right",
+        agentName: "agent",
+        error: {
+          code: "WORKFLOW_EXECUTION_ERROR",
+          message: "right failed",
+          details: { retryable: false },
+        },
+        attempts: 1,
+        startedAt: 1,
+        completedAt: 3,
+      },
+    ]);
+  });
+
+  test("keeps large host event histories outside the sandbox payload", async () => {
+    const history = Array.from({ length: 32 }, (_, index) => ({
+      author: `agent-${index}`,
+      content: { parts: [{ text: "x".repeat(128) }] },
+    })) as WorkflowStepResult["events"];
+    const host = createHost([]);
+    host.parallel = async (steps) =>
+      steps.map((step) => ({
+        ...result(step, `output:${step.id}`),
+        events: history,
+      }));
+
+    const execution = await runWorkflowScript(
+      new QuickJSSyncGeneratorRuntime(),
+      {
+        source: `
+          const values = yield ctx.parallel([
+            { id: "left", agentName: "agent", input: "left" },
+            { id: "right", agentName: "agent", input: "right" },
+          ]);
+          return values.map((value) => value.output).join(",");
+        `,
+        host,
+        limits: { maxMessageBytes: 512 },
+      },
+    );
+
+    expect(execution.output).toBe("output:left,output:right");
+    expect(history).toHaveLength(32);
+  });
+
   test.each([
     ["malformed", "yield { nope: true };", "unsupported RPC protocol"],
     [
