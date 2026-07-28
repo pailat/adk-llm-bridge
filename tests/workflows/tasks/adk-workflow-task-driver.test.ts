@@ -161,6 +161,12 @@ describe("AdkWorkflowTaskDriver", () => {
     const worker = new TestAgent();
     const root = new TestAgent("root");
     const context = parentContext(root);
+    const parentSecretEvent = createEvent({
+      invocationId: "parent-secret",
+      author: "root",
+      content: { role: "model", parts: [{ text: "host-only secret" }] },
+    });
+    context.session.events.push(parentSecretEvent);
     const lifecycle: string[] = [];
     const sent: WorkflowTaskJsonValue[] = [];
     const validations: WorkflowTaskAttemptAuthorityRequest[] = [];
@@ -224,6 +230,12 @@ describe("AdkWorkflowTaskDriver", () => {
       },
     });
     expect(worker.context?.session.state).not.toHaveProperty("existing");
+    expect(worker.context?.session.events).not.toContain(parentSecretEvent);
+    expect(worker.context?.session.events[0]?.content).toEqual({
+      role: "user",
+      parts: [{ text: '{"instruction":"inspect","iteration":2}' }],
+    });
+    expect(context.session.events).toEqual([parentSecretEvent]);
     expect(Object.isFrozen(worker.context?.session.state)).toBe(true);
     expect(Object.isFrozen(worker.context?.session.state.workflowTask)).toBe(
       true,

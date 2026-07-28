@@ -247,6 +247,7 @@ export class AdkWorkflowTaskDriver implements WorkflowTaskDriver {
         abortSignal: request.signal,
         sessionState: taskSessionState(request.task),
         sessionStateMode: "replace",
+        sessionHistoryMode: "replace",
         validateInvocation: validateAttempt,
         prepareContext: async (context, agent) => {
           if (!this.#capabilityBinder) return;

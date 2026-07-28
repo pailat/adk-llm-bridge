@@ -126,6 +126,29 @@ describe("AgentInvocationGateway", () => {
     });
   });
 
+  test("replace history mode hides parent events without mutating them", async () => {
+    const worker = new CaptureAgent();
+    const root = new CaptureAgent("root");
+    const context = parentContext(root);
+    const parentEvent = context.session.events[0];
+    const gateway = new AgentInvocationGateway({ resolveAgent: () => worker });
+
+    await gateway.run({
+      agentName: "worker",
+      input: { role: "user", parts: [{ text: "isolated task" }] },
+      parentContext: context,
+      sessionHistoryMode: "replace",
+    });
+
+    expect(worker.context?.session.events).toHaveLength(1);
+    expect(worker.context?.session.events[0]?.content).toEqual({
+      role: "user",
+      parts: [{ text: "isolated task" }],
+    });
+    expect(worker.context?.session.events).not.toContain(parentEvent);
+    expect(context.session.events).toEqual([parentEvent]);
+  });
+
   test("propagates typed validation errors before resolution", async () => {
     class StaleAttemptError extends Error {}
     const stale = new StaleAttemptError("stale attempt");

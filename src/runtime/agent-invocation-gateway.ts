@@ -40,6 +40,8 @@ export interface AgentInvocationRequest {
   sessionState?: Readonly<Record<string, unknown>>;
   /** Merge is the compatibility default; replace prevents parent-state inheritance. */
   sessionStateMode?: "merge" | "replace";
+  /** Inherit is the compatibility default; replace hides parent event history. */
+  sessionHistoryMode?: "inherit" | "replace";
   eventSink?: AgentInvocationEventSink;
   /**
    * Host authorization fence invoked around agent resolution. Rejections escape
@@ -130,6 +132,7 @@ export class AgentInvocationGateway {
       abortSignal: combinedAbort.signal,
       sessionState: request.sessionState,
       sessionStateMode: request.sessionStateMode ?? "merge",
+      sessionHistoryMode: request.sessionHistoryMode ?? "inherit",
     });
 
     const events: Event[] = [];
@@ -229,6 +232,7 @@ function createChildInvocationContext({
   abortSignal,
   sessionState,
   sessionStateMode,
+  sessionHistoryMode,
 }: {
   agent: BaseAgent;
   parentContext: InvocationContext;
@@ -237,6 +241,7 @@ function createChildInvocationContext({
   abortSignal: AbortSignal | undefined;
   sessionState: Readonly<Record<string, unknown>> | undefined;
   sessionStateMode: "merge" | "replace";
+  sessionHistoryMode: "inherit" | "replace";
 }): InvocationContext {
   const syntheticUserEvent = createEvent({
     invocationId: parentContext.invocationId,
@@ -259,6 +264,7 @@ function createChildInvocationContext({
       syntheticUserEvent,
       sessionState,
       sessionStateMode,
+      sessionHistoryMode,
     ),
     endInvocation: parentContext.endInvocation,
     transcriptionCache: parentContext.transcriptionCache,
@@ -275,6 +281,7 @@ function createChildSessionView(
   syntheticUserEvent: Event,
   sessionState: Readonly<Record<string, unknown>> | undefined,
   sessionStateMode: "merge" | "replace",
+  sessionHistoryMode: "inherit" | "replace",
 ): Session {
   return {
     id: parentSession.id,
@@ -284,7 +291,10 @@ function createChildSessionView(
       sessionStateMode === "replace"
         ? Object.freeze({ ...sessionState })
         : { ...parentSession.state, ...sessionState },
-    events: [...parentSession.events, syntheticUserEvent],
+    events:
+      sessionHistoryMode === "replace"
+        ? [syntheticUserEvent]
+        : [...parentSession.events, syntheticUserEvent],
     lastUpdateTime: parentSession.lastUpdateTime,
   };
 }
