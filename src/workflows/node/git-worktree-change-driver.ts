@@ -14,6 +14,8 @@ import {
   readlink,
   realpath,
   rm,
+  stat,
+  writeFile,
 } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { canonicalJson, optionalJsonObject } from "../resources/json.js";
@@ -30,6 +32,7 @@ import {
   normalizeAuthoritativeIntegrationRequest,
   type WorkflowChangeEntry,
   type WorkflowChangeEntryKind,
+  type WorkflowChangeEntryMode,
   type WorkflowChangeInspectionRequest,
   type WorkflowChangeInspector,
   type WorkflowChangeOperationOptions,
@@ -48,6 +51,8 @@ import {
   WORKFLOW_WORKSPACE_ATTACHMENT,
   type WorkflowHostMutationJournal,
   type WorkflowHostMutationRecord,
+  type WorkflowRepositoryMutationLease,
+  type WorkflowRepositoryMutationLock,
   type WorkflowWorkspaceAttachment,
   type WorkflowWorkspaceRecoveryPort,
 } from "../workspace/mutation-journal.js";
@@ -69,6 +74,11 @@ export interface NodeGitWorktreeChangeDriverOptions {
   now?: () => number;
   /** Share this durable journal with the live receipt authority. */
   mutationJournal?: WorkflowHostMutationJournal;
+  /**
+   * Shared with every host operation that checks out or moves target refs.
+   * Defaults to a cross-process lockfile under worktreesRoot.
+   */
+  repositoryMutationLock?: WorkflowRepositoryMutationLock;
 }
 
 export interface NodeGitRepositoryHost {
@@ -135,6 +145,95 @@ interface PreparedTree {
   tempRoot: string;
 }
 
+export interface FileSystemWorkflowRepositoryMutationLockOptions {
+  lockRoot: string;
+  acquireTimeoutMs?: number;
+  retryIntervalMs?: number;
+}
+
+/** Cross-process lock with dead-process recovery and token-fenced release. */
+export class FileSystemWorkflowRepositoryMutationLock
+  implements WorkflowRepositoryMutationLock
+{
+  readonly #lockRoot: string;
+  readonly #acquireTimeoutMs: number;
+  readonly #retryIntervalMs: number;
+
+  constructor(options: FileSystemWorkflowRepositoryMutationLockOptions) {
+    this.#lockRoot = resolve(options.lockRoot);
+    this.#acquireTimeoutMs = positiveInteger(
+      options.acquireTimeoutMs ?? DEFAULT_TIMEOUT_MS,
+      "acquireTimeoutMs",
+    );
+    this.#retryIntervalMs = positiveInteger(
+      options.retryIntervalMs ?? 10,
+      "retryIntervalMs",
+    );
+  }
+
+  async acquire(
+    repositoryId: string,
+    options: WorkflowChangeOperationOptions = {},
+  ): Promise<WorkflowRepositoryMutationLease> {
+    const token = randomUUID();
+    const lockPath = join(
+      this.#lockRoot,
+      `.repository-${createHash("sha256").update(repositoryId).digest("hex")}.lock`,
+    );
+    const ownerPath = join(lockPath, "owner.json");
+    const startedAt = Date.now();
+    await mkdir(this.#lockRoot, { recursive: true });
+    while (true) {
+      throwIfAborted(options.signal);
+      try {
+        await mkdir(lockPath);
+        try {
+          await writeFile(
+            ownerPath,
+            JSON.stringify({ token, pid: process.pid, createdAt: Date.now() }),
+            { flag: "wx" },
+          );
+        } catch (error) {
+          await rm(lockPath, { recursive: true, force: true });
+          throw error;
+        }
+        let released = false;
+        return Object.freeze({
+          repositoryId,
+          release: async () => {
+            if (released) return false;
+            const owner = await readLockOwner(ownerPath);
+            if (owner?.token !== token) return false;
+            await rm(lockPath, { recursive: true, force: true });
+            released = true;
+            return true;
+          },
+        });
+      } catch (error) {
+        if (!isAlreadyExists(error)) throw error;
+        const owner = await readLockOwner(ownerPath);
+        const age = await stat(lockPath)
+          .then((value) => Date.now() - value.mtimeMs)
+          .catch(() => 0);
+        if (
+          (owner && !processIsAlive(owner.pid)) ||
+          (!owner && age > this.#acquireTimeoutMs)
+        ) {
+          await rm(lockPath, { recursive: true, force: true });
+          continue;
+        }
+        if (Date.now() - startedAt >= this.#acquireTimeoutMs) {
+          throw new NodeGitWorktreeError(
+            "GIT_MUTATION_AMBIGUOUS",
+            "Timed out waiting for the shared repository mutation lock",
+          );
+        }
+        await abortableDelay(this.#retryIntervalMs, options.signal);
+      }
+    }
+  }
+}
+
 /**
  * Trusted Node host adapter for disposable Git worktrees.
  *
@@ -156,6 +255,7 @@ export class NodeGitWorktreeChangeDriver
   readonly #createWorkspaceId: () => string;
   readonly #now: () => number;
   readonly #journal: WorkflowHostMutationJournal;
+  readonly #repositoryMutationLock: WorkflowRepositoryMutationLock;
   readonly #active = new Map<string, NodeGitWorktreeHost>();
   readonly #issued = new WeakSet<NodeGitWorktreeHost>();
   readonly #preparations = new Map<string, PreparedTree>();
@@ -169,6 +269,7 @@ export class NodeGitWorktreeChangeDriver
     createWorkspaceId: () => string;
     now: () => number;
     mutationJournal: WorkflowHostMutationJournal;
+    repositoryMutationLock: WorkflowRepositoryMutationLock;
   }) {
     this.#repoRoot = input.repoRoot;
     this.#worktreesRoot = input.worktreesRoot;
@@ -177,6 +278,7 @@ export class NodeGitWorktreeChangeDriver
     this.#createWorkspaceId = input.createWorkspaceId;
     this.#now = input.now;
     this.#journal = input.mutationJournal;
+    this.#repositoryMutationLock = input.repositoryMutationLock;
     this.#repository = Object.freeze({
       kind: "git-repository",
       repoRoot: this.#repoRoot,
@@ -214,6 +316,16 @@ export class NodeGitWorktreeChangeDriver
         "repoRoot must identify the Git worktree root",
       );
     }
+    const gitCommonDirectory = await canonicalDirectory(
+      resolve(
+        repoRoot,
+        textOutput(
+          (await runGit(repoRoot, ["rev-parse", "--git-common-dir"], timeoutMs))
+            .stdout,
+        ),
+      ),
+      "gitCommonDirectory",
+    );
     const requestedRevision = requiredRevision(
       options.baseRevision,
       "baseRevision",
@@ -247,6 +359,12 @@ export class NodeGitWorktreeChangeDriver
       now: options.now ?? Date.now,
       mutationJournal:
         options.mutationJournal ?? new InMemoryWorkflowHostMutationJournal(),
+      repositoryMutationLock:
+        options.repositoryMutationLock ??
+        new FileSystemWorkflowRepositoryMutationLock({
+          lockRoot: join(gitCommonDirectory, "adk-workflow-locks"),
+          acquireTimeoutMs: timeoutMs,
+        }),
     });
   }
 
@@ -256,6 +374,11 @@ export class NodeGitWorktreeChangeDriver
 
   get baseRevision(): string {
     return this.#baseRevision;
+  }
+
+  /** Host checkout/reset operations must acquire this same lock contract. */
+  get repositoryMutationLock(): WorkflowRepositoryMutationLock {
+    return this.#repositoryMutationLock;
   }
 
   async provision(
@@ -284,13 +407,30 @@ export class NodeGitWorktreeChangeDriver
       parameters,
     });
     assertContained(this.#worktreesRoot, worktreePath);
-    await this.#git(
-      this.#repoRoot,
-      ["worktree", "add", "--detach", worktreePath, this.#baseRevision],
-      options,
-    );
+    try {
+      await this.#git(
+        this.#repoRoot,
+        ["worktree", "add", "--detach", worktreePath, this.#baseRevision],
+        options,
+      );
+    } catch (error) {
+      // execFile can report abort/timeout after Git has registered the
+      // worktree. Reconcile canonical host state before surfacing the error.
+      if (!(await this.#isRegisteredWorktree(worktreePath))) throw error;
+    }
     const canonicalWorktree = await realpath(worktreePath);
     assertContained(this.#worktreesRoot, canonicalWorktree);
+    const reconciledHead = await this.#resolveCommit(
+      canonicalWorktree,
+      "HEAD",
+      {},
+    );
+    if (reconciledHead !== this.#baseRevision) {
+      throw new NodeGitWorktreeError(
+        "GIT_WORKTREE_STALE",
+        "Provisioned worktree does not match its immutable base revision",
+      );
+    }
     const host = this.#issueHost({
       workspaceId,
       executionId,
@@ -326,8 +466,29 @@ export class NodeGitWorktreeChangeDriver
     throwIfAborted(options.signal);
     const normalized = this.#normalizeDescriptor(descriptor);
     const active = this.#active.get(normalized.workspaceId);
-    if (active) return this.#attachment(normalized, active);
     const expectedPath = this.#workspacePath(normalized);
+    if (active) {
+      if (
+        active.executionId !== normalized.executionId ||
+        active.taskId !== normalized.taskId ||
+        active.baseRevision !== normalized.revision ||
+        active.worktreePath !== expectedPath
+      ) {
+        throw new NodeGitWorktreeError(
+          "GIT_WORKTREE_STALE",
+          "Active workspace does not match the complete durable descriptor",
+        );
+      }
+      const canonical = await realpath(expectedPath).catch(() => undefined);
+      if (canonical !== expectedPath) {
+        throw new NodeGitWorktreeError(
+          "GIT_WORKTREE_PATH_ESCAPE",
+          "Active durable workspace path was replaced or redirected",
+        );
+      }
+      await this.#assertHead(active, options);
+      return this.#attachment(normalized, active);
+    }
     const canonical = await realpath(expectedPath).catch(() => undefined);
     if (!canonical) return undefined;
     if (canonical !== expectedPath) {
@@ -374,11 +535,30 @@ export class NodeGitWorktreeChangeDriver
     this.#assertOwnedWorkspace(workspace);
     if (!this.#active.has(workspace.workspaceId)) return false;
     throwIfAborted(options.signal);
-    await this.#git(
-      this.#repoRoot,
-      ["worktree", "remove", "--force", workspace.worktreePath],
-      options,
-    );
+    try {
+      await this.#git(
+        this.#repoRoot,
+        ["worktree", "remove", "--force", workspace.worktreePath],
+        options,
+      );
+    } catch (error) {
+      if (await this.#worktreeExists(workspace.worktreePath)) {
+        try {
+          // The caller's signal no longer decides the outcome once removal may
+          // have started. Finish the exact targeted cleanup and then inspect.
+          await this.#git(
+            this.#repoRoot,
+            ["worktree", "remove", "--force", workspace.worktreePath],
+            {},
+          );
+        } catch (retryError) {
+          if (await this.#worktreeExists(workspace.worktreePath)) {
+            throw retryError;
+          }
+        }
+      }
+      if (await this.#worktreeExists(workspace.worktreePath)) throw error;
+    }
     this.#active.delete(workspace.workspaceId);
     return true;
   }
@@ -474,7 +654,7 @@ export class NodeGitWorktreeChangeDriver
       );
     }
     throwIfAborted(options.signal);
-    const begun = await this.#journal.begin({
+    const begun = await this.#journal.beginHostMutation({
       operationId: input.operationId,
       intentDigest: input.intentDigest,
       kind: "commit",
@@ -687,7 +867,7 @@ export class NodeGitWorktreeChangeDriver
       );
     }
     throwIfAborted(options.signal);
-    const begun = await this.#journal.begin({
+    const begun = await this.#journal.beginHostMutation({
       operationId: normalized.operationId,
       intentDigest: await integrationIntentDigest(normalized),
       kind: "integration",
@@ -696,60 +876,36 @@ export class NodeGitWorktreeChangeDriver
       startedAt: nonNegativeTimestamp(this.#now()),
     });
     const completed = completedIntegrationResult(begun.record, normalized);
-    const currentRevision = await this.#resolveCommit(
-      repository.repoRoot,
-      targetId,
-      {},
-    );
     if (completed) {
-      if (currentRevision !== completed.integratedRevision) {
-        throw new NodeGitWorktreeError(
-          "GIT_MUTATION_AMBIGUOUS",
-          "Durable integration result no longer matches the target reference",
-        );
-      }
+      // The journal is historical evidence. A later legitimate publication may
+      // advance the branch without invalidating this operation's result.
       return completed;
     }
-    await this.#assertTargetNotCheckedOut(targetId, {});
-    if (currentRevision === commitId) {
-      return await this.#completeIntegrationJournal(
-        begun.record,
-        normalized,
-        expectedRevision,
-        commitId,
-        targetId,
-      );
-    }
-    if (currentRevision !== expectedRevision) {
-      throw new NodeGitWorktreeError(
-        "GIT_TARGET_STALE",
-        `Target ${targetId} moved from ${expectedRevision} to ${currentRevision}`,
-      );
-    }
-    const parent = await this.#resolveCommit(
+    const repositoryLease = await this.#repositoryMutationLock.acquire(
       repository.repoRoot,
-      `${commitId}^`,
-      {},
+      options,
     );
-    if (parent !== expectedRevision) {
-      throw new NodeGitWorktreeError(
-        "GIT_COMMIT_NOT_FAST_FORWARD",
-        "Integration commit must have the expected target as its sole parent",
-      );
-    }
     try {
-      await this.#git(
-        repository.repoRoot,
-        ["update-ref", targetId, commitId, expectedRevision],
-        {},
-      );
-    } catch (error) {
-      const latest = await this.#resolveCommit(
+      // All Git calls are uncancellable while the critical section owns the
+      // cross-instance lock. Participating checkout operations must use it too.
+      const currentRevision = await this.#resolveCommit(
         repository.repoRoot,
         targetId,
         {},
       );
-      if (latest === commitId) {
+      await this.#assertTargetNotCheckedOut(targetId, {});
+      if (currentRevision === commitId) {
+        if (begun.created) {
+          await this.#journal.markAmbiguous(
+            normalized.operationId,
+            begun.record.intentDigest,
+            "Target already contained the commit before this operation began",
+          );
+          throw new NodeGitWorktreeError(
+            "GIT_MUTATION_AMBIGUOUS",
+            "Cannot attribute a pre-existing target revision to a new integration",
+          );
+        }
         return await this.#completeIntegrationJournal(
           begun.record,
           normalized,
@@ -758,37 +914,78 @@ export class NodeGitWorktreeChangeDriver
           targetId,
         );
       }
-      if (latest !== expectedRevision) {
+      if (currentRevision !== expectedRevision) {
         throw new NodeGitWorktreeError(
           "GIT_TARGET_STALE",
-          `Target ${targetId} concurrently moved to ${latest}`,
+          `Target ${targetId} moved from ${expectedRevision} to ${currentRevision}`,
         );
       }
-      await this.#journal.markAmbiguous(
-        normalized.operationId,
-        begun.record.intentDigest,
-        "Git update-ref failed and the target still has its expected revision",
+      const parent = await this.#resolveCommit(
+        repository.repoRoot,
+        `${commitId}^`,
+        {},
       );
-      throw error;
-    }
-    const integratedRevision = await this.#resolveCommit(
-      repository.repoRoot,
-      targetId,
-      {},
-    );
-    if (integratedRevision !== commitId) {
-      throw new NodeGitWorktreeError(
-        "GIT_TARGET_STALE",
-        "Git did not update the target to the exact requested commit",
+      if (parent !== expectedRevision) {
+        throw new NodeGitWorktreeError(
+          "GIT_COMMIT_NOT_FAST_FORWARD",
+          "Integration commit must have the expected target as its sole parent",
+        );
+      }
+      try {
+        await this.#git(
+          repository.repoRoot,
+          ["update-ref", targetId, commitId, expectedRevision],
+          {},
+        );
+      } catch (error) {
+        const latest = await this.#resolveCommit(
+          repository.repoRoot,
+          targetId,
+          {},
+        );
+        if (latest === commitId) {
+          return await this.#completeIntegrationJournal(
+            begun.record,
+            normalized,
+            expectedRevision,
+            commitId,
+            targetId,
+          );
+        }
+        if (latest !== expectedRevision) {
+          throw new NodeGitWorktreeError(
+            "GIT_TARGET_STALE",
+            `Target ${targetId} concurrently moved to ${latest}`,
+          );
+        }
+        await this.#journal.markAmbiguous(
+          normalized.operationId,
+          begun.record.intentDigest,
+          "Git update-ref failed and the target still has its expected revision",
+        );
+        throw error;
+      }
+      const integratedRevision = await this.#resolveCommit(
+        repository.repoRoot,
+        targetId,
+        {},
       );
+      if (integratedRevision !== commitId) {
+        throw new NodeGitWorktreeError(
+          "GIT_TARGET_STALE",
+          "Git did not update the target to the exact requested commit",
+        );
+      }
+      return await this.#completeIntegrationJournal(
+        begun.record,
+        normalized,
+        currentRevision,
+        integratedRevision,
+        targetId,
+      );
+    } finally {
+      await repositoryLease.release();
     }
-    return await this.#completeIntegrationJournal(
-      begun.record,
-      normalized,
-      currentRevision,
-      integratedRevision,
-      targetId,
-    );
   }
 
   async #inspectTree(
@@ -863,7 +1060,11 @@ export class NodeGitWorktreeChangeDriver
     treeish: string,
     portablePath: string,
     options: WorkflowChangeOperationOptions,
-  ): Promise<{ entryKind: WorkflowChangeEntryKind; contentDigest: string }> {
+  ): Promise<{
+    entryKind: WorkflowChangeEntryKind;
+    mode: WorkflowChangeEntryMode;
+    contentDigest: string;
+  }> {
     const listing = textOutput(
       (await this.#git(cwd, ["ls-tree", treeish, "--", portablePath], options))
         .stdout,
@@ -879,6 +1080,7 @@ export class NodeGitWorktreeChangeDriver
     if (mode === "160000" || type === "commit") {
       return {
         entryKind: "submodule",
+        mode: "160000",
         contentDigest: digest(Buffer.from(objectId)),
       };
     }
@@ -894,9 +1096,19 @@ export class NodeGitWorktreeChangeDriver
           `Prepared symlink escapes the worktree: ${portablePath}`,
         );
       }
-      return { entryKind: "symlink", contentDigest: digest(content) };
+      return {
+        entryKind: "symlink",
+        mode: "120000",
+        contentDigest: digest(content),
+      };
     }
-    return { entryKind: "file", contentDigest: digest(content) };
+    if (mode !== "100644" && mode !== "100755") {
+      throw new NodeGitWorktreeError(
+        "GIT_CONFIGURATION_INVALID",
+        `Unsupported prepared Git mode: ${mode}`,
+      );
+    }
+    return { entryKind: "file", mode, contentDigest: digest(content) };
   }
 
   async #completeIntegrationJournal(
@@ -946,6 +1158,26 @@ export class NodeGitWorktreeChangeDriver
         );
       }
     }
+  }
+
+  async #isRegisteredWorktree(path: string): Promise<boolean> {
+    const output = textOutput(
+      (await this.#git(this.#repoRoot, ["worktree", "list", "--porcelain"], {}))
+        .stdout,
+    );
+    return output
+      .split("\n")
+      .some(
+        (line) =>
+          line.startsWith("worktree ") && resolve(line.slice(9)) === path,
+      );
+  }
+
+  async #worktreeExists(path: string): Promise<boolean> {
+    return (
+      (await realpath(path).catch(() => undefined)) !== undefined ||
+      (await this.#isRegisteredWorktree(path))
+    );
   }
 
   #workspacePath(descriptor: Omit<WorkspaceDescriptor, "providerId">): string {
@@ -1066,6 +1298,7 @@ export class NodeGitWorktreeChangeDriver
     portablePath: string,
   ): Promise<{
     entryKind: WorkflowChangeEntryKind;
+    mode: WorkflowChangeEntryMode;
     contentDigest: string;
   }> {
     const absolutePath = resolve(workspace.worktreePath, portablePath);
@@ -1081,6 +1314,7 @@ export class NodeGitWorktreeChangeDriver
       }
       return {
         entryKind: "symlink",
+        mode: "120000",
         contentDigest: digest(Buffer.from(await readlink(absolutePath))),
       };
     }
@@ -1088,12 +1322,14 @@ export class NodeGitWorktreeChangeDriver
     if (indexEntry?.mode === "160000") {
       return {
         entryKind: "submodule",
+        mode: "160000",
         contentDigest: digest(Buffer.from(indexEntry.objectId)),
       };
     }
     if (stat.isDirectory()) {
       return {
         entryKind: "directory",
+        mode: "040000",
         contentDigest: digest(Buffer.alloc(0)),
       };
     }
@@ -1105,6 +1341,7 @@ export class NodeGitWorktreeChangeDriver
     }
     return {
       entryKind: "file",
+      mode: stat.mode & 0o111 ? "100755" : "100644",
       contentDigest: digest(await readFile(absolutePath)),
     };
   }
@@ -1115,6 +1352,7 @@ export class NodeGitWorktreeChangeDriver
     signal?: AbortSignal,
   ): Promise<{
     entryKind: WorkflowChangeEntryKind;
+    mode: WorkflowChangeEntryMode;
     contentDigest: string;
   }> {
     const listing = textOutput(
@@ -1137,6 +1375,7 @@ export class NodeGitWorktreeChangeDriver
     if (mode === "160000" || type === "commit") {
       return {
         entryKind: "submodule",
+        mode: "160000",
         contentDigest: digest(Buffer.from(objectId)),
       };
     }
@@ -1149,6 +1388,7 @@ export class NodeGitWorktreeChangeDriver
     ).stdout;
     return {
       entryKind: mode === "120000" ? "symlink" : "file",
+      mode: requiredEntryMode(mode),
       contentDigest: digest(content),
     };
   }
@@ -1514,6 +1754,7 @@ function coalesceExactRenames(
       (candidate) =>
         !consumed.has(candidate) &&
         candidate.entryKind === deleted.entryKind &&
+        candidate.mode === deleted.mode &&
         candidate.contentDigest === deleted.contentDigest,
     );
     if (!added) continue;
@@ -1524,6 +1765,7 @@ function coalesceExactRenames(
       fromPath: deleted.path,
       toPath: added.path,
       entryKind: added.entryKind,
+      ...(added.mode === undefined ? {} : { mode: added.mode }),
       contentDigest: added.contentDigest,
     });
   }
@@ -1561,6 +1803,22 @@ function requiredRevision(value: unknown, field: string): string {
 function requiredGitObject(value: unknown, field: string): string {
   if (typeof value !== "string" || !GIT_OBJECT.test(value)) {
     throw new TypeError(`${field} must be a full Git object identity`);
+  }
+  return value;
+}
+
+function requiredEntryMode(value: string): WorkflowChangeEntryMode {
+  if (
+    value !== "040000" &&
+    value !== "100644" &&
+    value !== "100755" &&
+    value !== "120000" &&
+    value !== "160000"
+  ) {
+    throw new NodeGitWorktreeError(
+      "GIT_CONFIGURATION_INVALID",
+      `Unsupported Git entry mode: ${value}`,
+    );
   }
   return value;
 }
@@ -1628,5 +1886,65 @@ async function runGit(
         });
       },
     );
+  });
+}
+
+interface RepositoryLockOwner {
+  token: string;
+  pid: number;
+}
+
+async function readLockOwner(
+  ownerPath: string,
+): Promise<RepositoryLockOwner | undefined> {
+  try {
+    const value = JSON.parse(await readFile(ownerPath, "utf8")) as {
+      token?: unknown;
+      pid?: unknown;
+    };
+    if (
+      typeof value.token !== "string" ||
+      !value.token ||
+      !Number.isSafeInteger(value.pid) ||
+      (value.pid as number) <= 0
+    ) {
+      return undefined;
+    }
+    return { token: value.token, pid: value.pid as number };
+  } catch {
+    return undefined;
+  }
+}
+
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+function isAlreadyExists(error: unknown): boolean {
+  return (error as NodeJS.ErrnoException)?.code === "EEXIST";
+}
+
+async function abortableDelay(
+  milliseconds: number,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (signal?.aborted) throwIfAborted(signal);
+  await new Promise<void>((resolvePromise, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(
+        signal?.reason ?? new Error("Repository lock acquisition aborted"),
+      );
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolvePromise();
+    }, milliseconds);
+    signal?.addEventListener("abort", onAbort, { once: true });
   });
 }

@@ -10,8 +10,18 @@ export type WorkflowChangeEntryKind =
   | "symlink"
   | "submodule";
 
+/** Optional for legacy adapters; Git inspectors must always provide one. */
+export type WorkflowChangeEntryMode =
+  | "040000"
+  | "100644"
+  | "100755"
+  | "120000"
+  | "160000";
+
 interface WorkflowChangeEntryBase {
   entryKind: WorkflowChangeEntryKind;
+  /** Exact portable entry mode when the host filesystem exposes one. */
+  mode?: WorkflowChangeEntryMode;
   /** Digest of the entry at the side of the change being proposed. */
   contentDigest: string;
 }
@@ -688,9 +698,14 @@ function normalizeChangeEntry(
     throw new TypeError(`Change set entry[${index}] must be an object`);
   }
   const entryKind = requiredEntryKind(input.entryKind);
+  const mode = normalizeEntryMode(input.mode, entryKind);
   const contentDigest = requiredDigest(input.contentDigest, "contentDigest");
   if (input.kind === "renamed") {
-    assertExactObject(input, RENAMED_ENTRY_KEYS, `change set entry[${index}]`);
+    assertExactObject(
+      input,
+      mode === undefined ? RENAMED_ENTRY_KEYS : RENAMED_ENTRY_MODE_KEYS,
+      `change set entry[${index}]`,
+    );
     const fromPath = normalizePortablePath(input.fromPath);
     const toPath = normalizePortablePath(input.toPath);
     if (fromPath === toPath) {
@@ -701,6 +716,7 @@ function normalizeChangeEntry(
       fromPath,
       toPath,
       entryKind,
+      ...(mode === undefined ? {} : { mode }),
       contentDigest,
     });
   }
@@ -711,11 +727,16 @@ function normalizeChangeEntry(
   ) {
     throw new TypeError(`Unsupported change kind at entry[${index}]`);
   }
-  assertExactObject(input, PATH_ENTRY_KEYS, `change set entry[${index}]`);
+  assertExactObject(
+    input,
+    mode === undefined ? PATH_ENTRY_KEYS : PATH_ENTRY_MODE_KEYS,
+    `change set entry[${index}]`,
+  );
   return Object.freeze({
     kind: input.kind,
     path: normalizePortablePath(input.path),
     entryKind,
+    ...(mode === undefined ? {} : { mode }),
     contentDigest,
   });
 }
@@ -956,6 +977,26 @@ function requiredEntryKind(value: unknown): WorkflowChangeEntryKind {
   return value;
 }
 
+function normalizeEntryMode(
+  value: unknown,
+  entryKind: WorkflowChangeEntryKind,
+): WorkflowChangeEntryMode | undefined {
+  if (value === undefined) return undefined;
+  const allowed: Record<
+    WorkflowChangeEntryKind,
+    readonly WorkflowChangeEntryMode[]
+  > = {
+    file: ["100644", "100755"],
+    directory: ["040000"],
+    symlink: ["120000"],
+    submodule: ["160000"],
+  };
+  if (!allowed[entryKind].includes(value as WorkflowChangeEntryMode)) {
+    throw new TypeError(`Entry mode does not match ${entryKind}`);
+  }
+  return value as WorkflowChangeEntryMode;
+}
+
 const SAFE_IDENTITY = /^[A-Za-z0-9][A-Za-z0-9._:+/-]{0,255}$/u;
 const SAFE_REVISION = /^[A-Za-z0-9][A-Za-z0-9._:+/-]{0,511}$/u;
 const SHA256_DIGEST = /^sha256:[a-f0-9]{64}$/u;
@@ -1045,6 +1086,7 @@ const CHANGE_SET_INPUT_KEYS = [
 ] as const;
 const CHANGE_SET_KEYS = [...CHANGE_SET_INPUT_KEYS, "changeSetDigest"] as const;
 const PATH_ENTRY_KEYS = ["kind", "path", "entryKind", "contentDigest"] as const;
+const PATH_ENTRY_MODE_KEYS = [...PATH_ENTRY_KEYS, "mode"] as const;
 const RENAMED_ENTRY_KEYS = [
   "kind",
   "fromPath",
@@ -1052,6 +1094,7 @@ const RENAMED_ENTRY_KEYS = [
   "entryKind",
   "contentDigest",
 ] as const;
+const RENAMED_ENTRY_MODE_KEYS = [...RENAMED_ENTRY_KEYS, "mode"] as const;
 const OWNERSHIP_FENCE_KEYS = ["grantId", "fencingToken"] as const;
 const EXPECTED_TARGET_KEYS = ["targetId", "revision"] as const;
 const RECEIPT_KEYS = [
