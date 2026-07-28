@@ -115,7 +115,11 @@ export function resolveWorkflowStep(
   if (!saved) {
     return { action: "execute", attempt: 1 };
   }
-  if (saved.agentName !== step.agentName || saved.inputHash !== inputHash) {
+  if (
+    saved.agentName !== step.agentName ||
+    saved.agentRevision !== step.agentRevision ||
+    saved.inputHash !== inputHash
+  ) {
     throw new WorkflowError(
       "WORKFLOW_STEP_MISMATCH",
       `Checkpoint step does not match current step: ${step.id}`,
@@ -123,6 +127,8 @@ export function resolveWorkflowStep(
         stepId: step.id,
         savedAgentName: saved.agentName,
         agentName: step.agentName,
+        savedAgentRevision: saved.agentRevision,
+        agentRevision: step.agentRevision,
         savedInputHash: saved.inputHash,
         inputHash,
       },
@@ -170,6 +176,9 @@ export function withWorkflowStepRunning(
     [step.id]: {
       id: step.id,
       agentName: step.agentName,
+      ...(step.agentRevision === undefined
+        ? {}
+        : { agentRevision: step.agentRevision }),
       inputHash,
       status: "running",
       attempts: attempt,

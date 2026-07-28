@@ -51,6 +51,7 @@ describe("ExternalAgentWorkflowFactory", () => {
     expect(handle.descriptor).toEqual({
       providerId: "codex",
       name: "reviewer_1",
+      revision: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
     });
     expect(handle.agent.name).toBe("reviewer_1");
     expect((handle.agent as ExternalAgent).provider.id).toBe("codex");
@@ -59,6 +60,39 @@ describe("ExternalAgentWorkflowFactory", () => {
     );
     expect(factory.get("reviewer_1")).toBe(handle);
     expect(factory.list()).toEqual([handle.descriptor]);
+  });
+
+  test("fingerprints normalized effective configuration deterministically", () => {
+    const first = new ExternalAgentWorkflowFactory({ registry: registry() });
+    const second = new ExternalAgentWorkflowFactory({ registry: registry() });
+    const third = new ExternalAgentWorkflowFactory({ registry: registry() });
+
+    const ordered = first.create({
+      providerId: "codex",
+      name: "ordered",
+      config: { description: "review", instruction: "implement" },
+    });
+    const reordered = second.create({
+      providerId: "codex",
+      name: "reordered",
+      config: { instruction: "implement", description: "review" },
+    });
+    const changed = third.create({
+      providerId: "codex",
+      name: "changed",
+      config: { description: "review", instruction: "implement safely" },
+    });
+
+    expect(ordered.descriptor.revision).toBe(reordered.descriptor.revision);
+    expect(changed.descriptor.revision).not.toBe(ordered.descriptor.revision);
+
+    const noConfig = new ExternalAgentWorkflowFactory({
+      registry: registry(),
+    }).create({ providerId: "codex", name: "default" });
+    const emptyConfig = new ExternalAgentWorkflowFactory({
+      registry: registry(),
+    }).create({ providerId: "codex", name: "empty", config: {} });
+    expect(noConfig.descriptor.revision).toBe(emptyConfig.descriptor.revision);
   });
 
   test("enforces provider allowlists before registry lookup", () => {

@@ -245,6 +245,7 @@ describe("runWorkflowScript", () => {
       return {
         providerId: request.providerId,
         name: request.name,
+        revision: "sha256:worker-v1",
         agent: { secret: "host-handle" },
         credential: "host-secret",
       } as never;
@@ -253,6 +254,7 @@ describe("runWorkflowScript", () => {
       {
         providerId: "codex",
         name: "worker",
+        revision: "sha256:worker-v1",
         agent: { secret: "host-handle" },
       } as never,
     ];
@@ -282,8 +284,18 @@ describe("runWorkflowScript", () => {
     );
 
     expect(JSON.parse(execution.output as string)).toEqual({
-      spawned: { providerId: "codex", name: "worker" },
-      listed: [{ providerId: "codex", name: "worker" }],
+      spawned: {
+        providerId: "codex",
+        name: "worker",
+        revision: "sha256:worker-v1",
+      },
+      listed: [
+        {
+          providerId: "codex",
+          name: "worker",
+          revision: "sha256:worker-v1",
+        },
+      ],
       released: true,
       releasedAgain: false,
     });
@@ -374,7 +386,11 @@ describe("runWorkflowScript", () => {
 
   test("enforces the active dynamic agent limit", async () => {
     const host = createHost([]);
-    host.spawnAgent = async ({ providerId, name }) => ({ providerId, name });
+    host.spawnAgent = async ({ providerId, name }) => ({
+      providerId,
+      name,
+      revision: "sha256:test",
+    });
 
     await expect(
       runWorkflowScript(new QuickJSSyncGeneratorRuntime(), {

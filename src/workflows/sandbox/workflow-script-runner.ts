@@ -12,6 +12,7 @@ import {
 } from "../agents/workflow-agent-factory.js";
 import {
   DEFAULT_WORKFLOW_EXECUTION_LIMITS,
+  MAX_WORKFLOW_AGENT_REVISION_LENGTH,
   WorkflowError,
   type WorkflowParallelOptions,
   type WorkflowStep,
@@ -73,7 +74,19 @@ function isStep(value: unknown): value is WorkflowStep {
     value.id.length > 0 &&
     typeof value.agentName === "string" &&
     value.agentName.length > 0 &&
+    (value.agentRevision === undefined ||
+      isAgentRevision(value.agentRevision)) &&
     (typeof value.input === "string" || isContent(value.input))
+  );
+}
+
+function isAgentRevision(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value === value.trim() &&
+    !value.includes("\0") &&
+    value.length <= MAX_WORKFLOW_AGENT_REVISION_LENGTH
   );
 }
 
@@ -341,14 +354,19 @@ function projectAgentDescriptor(value: unknown): WorkflowAgentDescriptor {
     typeof value.providerId !== "string" ||
     value.providerId.length === 0 ||
     typeof value.name !== "string" ||
-    value.name.length === 0
+    value.name.length === 0 ||
+    !isAgentRevision(value.revision)
   ) {
     throw new WorkflowError(
       "WORKFLOW_EXECUTION_ERROR",
       "Workflow dynamic agent host returned a malformed descriptor",
     );
   }
-  return { providerId: value.providerId, name: value.name };
+  return {
+    providerId: value.providerId,
+    name: value.name,
+    revision: value.revision,
+  };
 }
 
 function projectAgentDescriptors(value: unknown): WorkflowAgentDescriptor[] {

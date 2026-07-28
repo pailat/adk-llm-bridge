@@ -47,6 +47,8 @@ export interface WorkflowAgentFactoryRequest {
 export interface WorkflowAgentDescriptor {
   providerId: string;
   name: string;
+  /** Secret-free deterministic fingerprint of the effective agent config. */
+  revision: string;
 }
 
 /** Host-only handle. The BaseAgent must never be serialized into a guest VM. */

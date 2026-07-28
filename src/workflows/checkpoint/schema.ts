@@ -9,6 +9,7 @@ import type {
   WorkflowSerializedError,
   WorkflowStepResult,
 } from "../contracts.js";
+import { MAX_WORKFLOW_AGENT_REVISION_LENGTH } from "../contracts.js";
 
 export const WORKFLOW_CHECKPOINT_SCHEMA_VERSION = 1 as const;
 
@@ -23,6 +24,7 @@ export type WorkflowCheckpointStepStatus = "running" | "completed" | "failed";
 export interface WorkflowCheckpointStepV1 {
   id: string;
   agentName: string;
+  agentRevision?: string;
   inputHash: string;
   status: WorkflowCheckpointStepStatus;
   attempts: number;
@@ -152,6 +154,8 @@ function isStep(
     value.id === stepId &&
     isNonEmptyString(value.id) &&
     isNonEmptyString(value.agentName) &&
+    (value.agentRevision === undefined ||
+      isBoundedRevision(value.agentRevision)) &&
     isNonEmptyString(value.inputHash) &&
     (value.status === "running" ||
       value.status === "completed" ||
@@ -190,6 +194,15 @@ function isStep(
     return true;
   }
   return false;
+}
+
+function isBoundedRevision(value: unknown): value is string {
+  return (
+    isNonEmptyString(value) &&
+    value === value.trim() &&
+    !value.includes("\0") &&
+    value.length <= MAX_WORKFLOW_AGENT_REVISION_LENGTH
+  );
 }
 
 function isStepResult(
