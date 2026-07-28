@@ -8,6 +8,10 @@ import type { Event } from "@google/adk";
 import type { Content } from "@google/genai";
 import type { WorkflowUserEvent } from "./events.js";
 
+/** Reserved child-session state key for the active workflow attempt. */
+export const WORKFLOW_ATTEMPT_CONTEXT_STATE_KEY =
+  "__adk_llm_bridge_workflow_attempt_v1";
+
 /** Input accepted by a workflow step. */
 export type WorkflowStepInputContent = string | Content;
 
@@ -68,6 +72,41 @@ export interface WorkflowStepFailure {
   attempts: number;
   startedAt: number;
   completedAt: number;
+}
+
+/** JSON-safe workspace capability granted to one workflow attempt. */
+export interface WorkflowAttemptWorkspaceContext {
+  workspaceId: string;
+  leaseId: string;
+  fencingToken?: number;
+  expiresAt?: number;
+}
+
+/**
+ * Durable identity and host capabilities for one workflow agent attempt.
+ *
+ * `idempotencyKey` intentionally excludes `attempt`, so retries and resumes of
+ * the same step input address the same durable outbox record.
+ */
+export interface WorkflowAttemptContext {
+  workflowId: string;
+  workflowVersion: string;
+  executionId: string;
+  stepId: string;
+  agentName: string;
+  attempt: number;
+  inputHash: string;
+  idempotencyKey: string;
+  workspace?: WorkflowAttemptWorkspaceContext;
+}
+
+/**
+ * JSON-safe durable result returned instead of invoking the agent.
+ * Runtime-only `events` must be omitted from the journaled result.
+ */
+export interface WorkflowAttemptReplay {
+  idempotencyKey: string;
+  result: WorkflowStepResult;
 }
 
 export type WorkflowStepOutcome = WorkflowStepResult | WorkflowStepFailure;
@@ -141,6 +180,7 @@ export interface WorkflowExecutionSummary {
 
 export type WorkflowErrorCode =
   | "WORKFLOW_ABORTED"
+  | "WORKFLOW_ATTEMPT_MISMATCH"
   | "WORKFLOW_DEFINITION_INVALID"
   | "WORKFLOW_EXECUTION_ERROR"
   | "WORKFLOW_INDETERMINATE_STEP"
@@ -151,7 +191,8 @@ export type WorkflowErrorCode =
   | "WORKFLOW_SOURCE_MISMATCH"
   | "WORKFLOW_STEP_MISMATCH"
   | "WORKFLOW_UNKNOWN_AGENT"
-  | "WORKFLOW_VERSION_MISMATCH";
+  | "WORKFLOW_VERSION_MISMATCH"
+  | "WORKFLOW_WORKSPACE_LEASE_LOST";
 
 export interface WorkflowSerializedError {
   code: WorkflowErrorCode;

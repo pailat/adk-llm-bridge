@@ -36,6 +36,8 @@ export interface AgentInvocationRequest {
   parentContext: InvocationContext;
   branch?: string;
   abortSignal?: AbortSignal;
+  /** JSON-safe state projected into the isolated child session only. */
+  sessionState?: Readonly<Record<string, unknown>>;
   eventSink?: AgentInvocationEventSink;
   prepareContext?: AgentInvocationContextPreparer;
 }
@@ -108,6 +110,7 @@ export class AgentInvocationGateway {
       input: request.input,
       branch: request.branch,
       abortSignal: combinedAbort.signal,
+      sessionState: request.sessionState,
     });
 
     const events: Event[] = [];
@@ -183,12 +186,14 @@ function createChildInvocationContext({
   input,
   branch,
   abortSignal,
+  sessionState,
 }: {
   agent: BaseAgent;
   parentContext: InvocationContext;
   input: Content;
   branch: string | undefined;
   abortSignal: AbortSignal | undefined;
+  sessionState: Readonly<Record<string, unknown>> | undefined;
 }): InvocationContext {
   const syntheticUserEvent = createEvent({
     invocationId: parentContext.invocationId,
@@ -206,7 +211,11 @@ function createChildInvocationContext({
     branch,
     agent,
     userContent: input,
-    session: createChildSessionView(parentContext.session, syntheticUserEvent),
+    session: createChildSessionView(
+      parentContext.session,
+      syntheticUserEvent,
+      sessionState,
+    ),
     endInvocation: parentContext.endInvocation,
     transcriptionCache: parentContext.transcriptionCache,
     runConfig: parentContext.runConfig,
@@ -220,12 +229,13 @@ function createChildInvocationContext({
 function createChildSessionView(
   parentSession: Session,
   syntheticUserEvent: Event,
+  sessionState: Readonly<Record<string, unknown>> | undefined,
 ): Session {
   return {
     id: parentSession.id,
     appName: parentSession.appName,
     userId: parentSession.userId,
-    state: parentSession.state,
+    state: { ...parentSession.state, ...sessionState },
     events: [...parentSession.events, syntheticUserEvent],
     lastUpdateTime: parentSession.lastUpdateTime,
   };

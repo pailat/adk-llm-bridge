@@ -75,6 +75,7 @@ describe("AgentInvocationGateway", () => {
       input: { role: "user", parts: [{ text: "delegated task" }] },
       parentContext: context,
       branch: "root.worker",
+      sessionState: { delegatedCapability: { fencingToken: 7 } },
     });
 
     expect(result.output).toBe("done");
@@ -84,7 +85,12 @@ describe("AgentInvocationGateway", () => {
     expect(worker.context?.branch).toBe("root.worker");
     expect(worker.context?.pluginManager).toBe(context.pluginManager);
     expect(worker.context?.session).not.toBe(context.session);
-    expect(worker.context?.session.state).toBe(context.session.state);
+    expect(worker.context?.session.state).not.toBe(context.session.state);
+    expect(worker.context?.session.state).toEqual({
+      shared: true,
+      delegatedCapability: { fencingToken: 7 },
+    });
+    expect(context.session.state).toEqual({ shared: true });
     expect(worker.context?.session.events.at(-2)?.content).toEqual({
       role: "user",
       parts: [{ text: "delegated task" }],
