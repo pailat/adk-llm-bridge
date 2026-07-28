@@ -54,22 +54,66 @@ Call `release()` in normal completion paths and `dispose()` when shutting down
 an adapter. Workflow runtime releases step leases in `finally`; `dispose()` is
 owned by the host that created the shared adapter.
 
+Durable leases expose `lossSignal`. The runtime combines it with workflow
+cancellation and stops the active attempt if ownership expires, renewal proves
+that the lease is stale, or the adapter is disposed. The resulting
+`WORKFLOW_WORKSPACE_LEASE_LOST` error includes the JSON-safe lease-loss reason.
+This closes the local execution window, but the external writer must still
+enforce `fencingToken` before every durable write.
+
 ## Retired lock tombstones
 
 Both filesystem adapters retire lock directories to deterministic, token-bound
 tombstones. Keeping those markers prevents a delayed release or recovery from
 removing a newer owner's lock (the ABA problem).
 
-Tombstones intentionally are not garbage-collected online. Remove them only
-while every writer using the coordination directory is stopped, or replace the
-filesystem adapter with a backend that provides native transactional locks.
-Monitor the coordination directories in long-lived installations.
+Tombstones intentionally are not garbage-collected online. After stopping
+every writer, use the explicit offline collectors:
 
-## Remaining failure semantics
+```typescript
+import {
+  collectFileSystemCheckpointTombstonesOffline,
+  collectFileSystemWorkspaceTombstonesOffline,
+} from "adk-llm-bridge/workflows";
+
+await collectFileSystemCheckpointTombstonesOffline({
+  root: "/var/lib/my-app/workflow-checkpoints",
+  confirmNoActiveWriters: true,
+});
+collectFileSystemWorkspaceTombstonesOffline({
+  root: "/var/lib/my-app/workspace-leases",
+  confirmNoActiveWriters: true,
+});
+```
+
+The collectors scan and validate the complete tree before deleting anything.
+They refuse active locks or candidates, symlinks, special files, malformed or
+misplaced tombstones, and owner/token changes. There is deliberately no
+age-based mode. Unknown safe entries are preserved.
+
+## Attempt idempotency and durable outboxes
 
 Durable checkpoints prevent stale coordinators from committing over newer
-state, but they cannot make arbitrary agent side effects exactly-once. Steps
-that call external systems should use idempotency keys derived from workflow,
-execution, step, and attempt identities. A process can still stop after an
-external side effect and before recording step completion; the resumed workflow
-will treat that step according to its configured resume policy.
+state, but they cannot make arbitrary agent side effects exactly-once. Both
+`WorkflowAgent` and `ScriptWorkflowAgent` accept `runtimeHooks` for a host-owned
+attempt journal:
+
+- `beforeAttempt(context)` may return a previously confirmed result and skip
+  agent invocation.
+- `afterAttempt(context, result)` is the durable outbox boundary and completes
+  before the successful workflow checkpoint is committed.
+- `attemptFailed(context, failure)` records a failed attempt before its failure
+  checkpoint.
+
+`context.idempotencyKey` is stable across retries and resumes for the same
+workflow version, execution, step, agent, and input. It intentionally excludes
+the attempt number. The same JSON-safe context is projected into the child ADK
+session under `WORKFLOW_ATTEMPT_CONTEXT_STATE_KEY`; the parent session is not
+mutated.
+
+For side-effecting agents, atomically store the external outcome under that key
+and return it from `beforeAttempt` after a crash. `afterAttempt` must not report
+success until the host can durably replay the result. This makes the uncertain
+window recoverable, but true exactly-once still depends on the external system
+honoring the idempotency key or on a transactional outbox controlled by the
+host.

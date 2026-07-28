@@ -7,8 +7,13 @@
 export type {
   DurableWorkspaceLease,
   FileSystemWorkspaceAdapterOptions,
+  OfflineWorkspaceTombstoneCollectionOptions,
+  OfflineWorkspaceTombstoneCollectionResult,
 } from "./file-system-workspace-adapter.js";
-export { FileSystemWorkspaceAdapter } from "./file-system-workspace-adapter.js";
+export {
+  collectFileSystemWorkspaceTombstonesOffline,
+  FileSystemWorkspaceAdapter,
+} from "./file-system-workspace-adapter.js";
 export type { InMemoryWorkspaceAdapterOptions } from "./in-memory-workspace-adapter.js";
 export { InMemoryWorkspaceAdapter } from "./in-memory-workspace-adapter.js";
 export type {
@@ -17,6 +22,7 @@ export type {
   WorkspaceAdapter,
   WorkspaceLease,
   WorkspaceLeaseConflict,
+  WorkspaceLeaseLossReason,
   WorkspaceLeaseRequest,
   WorkspacePathOverlap,
 } from "./workspace-adapter.js";
