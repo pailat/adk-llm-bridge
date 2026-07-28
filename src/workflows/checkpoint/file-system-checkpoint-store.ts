@@ -1,0 +1,701 @@
+/**
+ * @license
+ * Copyright 2025 PAI
+ * SPDX-License-Identifier: MIT
+ */
+
+import { createHash, randomUUID } from "node:crypto";
+import { constants } from "node:fs";
+import {
+  lstat,
+  mkdir,
+  open,
+  readdir,
+  readFile,
+  rename,
+  rm,
+  unlink,
+} from "node:fs/promises";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { WorkflowError } from "../contracts.js";
+import type { WorkflowCheckpointV1 } from "./schema.js";
+import { isWorkflowCheckpointV1 } from "./schema.js";
+import {
+  type LoadWorkflowCheckpointInput,
+  type SaveWorkflowCheckpointInput,
+  WorkflowCheckpointConflictError,
+  type WorkflowCheckpointRevision,
+  type WorkflowCheckpointStore,
+  type WorkflowCheckpointWrite,
+  workflowCheckpointKey,
+  workflowCheckpointRevision,
+} from "./store.js";
+
+const FILE_FORMAT = "adk-llm-bridge/workflow-checkpoint-file";
+const FILE_FORMAT_VERSION = 1;
+const LOCK_OWNER_FILE = "owner.json";
+const SAFE_LOCK_TOKEN = /^[A-Za-z0-9_-]{1,128}$/u;
+
+export interface FileSystemWorkflowCheckpointStoreOptions {
+  /** Absolute host-controlled directory for checkpoint data and locks. */
+  root: string;
+  /** Maximum time spent waiting for a live lock. Defaults to 10 seconds. */
+  lockTimeoutMs?: number;
+  /** Delay between lock acquisition attempts. Defaults to 25 milliseconds. */
+  lockRetryMs?: number;
+  /** Optional lifetime signal for pending lock acquisition. */
+  signal?: AbortSignal;
+}
+
+interface CheckpointFileV1 {
+  format: typeof FILE_FORMAT;
+  formatVersion: typeof FILE_FORMAT_VERSION;
+  checkpointKey: string;
+  revision: WorkflowCheckpointRevision;
+  checkpoint: WorkflowCheckpointV1;
+}
+
+interface LockMetadata {
+  pid: number;
+  createdAt: number;
+  token: string;
+}
+
+interface HeldCheckpointLock {
+  assertOwned(): Promise<void>;
+  release(): Promise<void>;
+}
+
+/**
+ * Durable single-host checkpoint adapter with cross-process file locking.
+ *
+ * The lock protects compare-and-swap plus rename as one critical section.
+ * Readers need no lock because checkpoint replacement is atomic on one local
+ * filesystem. The configured root must not span filesystems via symlinks.
+ */
+export class FileSystemWorkflowCheckpointStore
+  implements WorkflowCheckpointStore
+{
+  readonly #root: string;
+  readonly #lockTimeoutMs: number;
+  readonly #lockRetryMs: number;
+  readonly #signal: AbortSignal | undefined;
+
+  constructor(options: FileSystemWorkflowCheckpointStoreOptions) {
+    if (!isAbsolute(options.root)) {
+      throw new WorkflowError(
+        "WORKFLOW_DEFINITION_INVALID",
+        "File-system checkpoint root must be absolute",
+        { root: options.root },
+      );
+    }
+    this.#root = resolve(options.root);
+    this.#lockTimeoutMs = positiveInteger(
+      "lockTimeoutMs",
+      options.lockTimeoutMs ?? 10_000,
+    );
+    this.#lockRetryMs = positiveInteger(
+      "lockRetryMs",
+      options.lockRetryMs ?? 25,
+    );
+    this.#signal = options.signal;
+  }
+
+  async load(
+    input: LoadWorkflowCheckpointInput,
+  ): Promise<WorkflowCheckpointV1 | undefined> {
+    const checkpointKey = workflowCheckpointKey(
+      input.workflowId,
+      input.executionId,
+    );
+    const checkpointPath = this.#checkpointPath(checkpointKey);
+    const stored = await readCheckpointFile(checkpointPath, checkpointKey);
+    return stored?.checkpoint;
+  }
+
+  async save(
+    input: SaveWorkflowCheckpointInput,
+  ): Promise<WorkflowCheckpointWrite> {
+    if (!isWorkflowCheckpointV1(input.checkpoint)) {
+      throw checkpointFileError(
+        "checkpoint_schema_invalid",
+        workflowCheckpointKey("invalid", "invalid"),
+        "Cannot persist an invalid workflow checkpoint",
+      );
+    }
+
+    const checkpointKey = workflowCheckpointKey(
+      input.checkpoint.workflowId,
+      input.checkpoint.executionId,
+    );
+    const checkpointPath = this.#checkpointPath(checkpointKey);
+    const revision = await workflowCheckpointRevision(input.checkpoint);
+    if (input.revision !== undefined && input.revision !== revision) {
+      throw checkpointFileError(
+        "checkpoint_revision_invalid",
+        checkpointKey,
+        `Workflow checkpoint revision does not match checkpoint: ${checkpointKey}`,
+        {
+          suppliedRevision: input.revision,
+          computedRevision: revision,
+        },
+      );
+    }
+
+    try {
+      await mkdir(dirname(checkpointPath), { recursive: true, mode: 0o700 });
+    } catch (error) {
+      throw ioError("checkpoint_directory_create_failed", checkpointKey, error);
+    }
+    const lock = await this.#acquireLock(checkpointPath, checkpointKey);
+    try {
+      const current = await readCheckpointFile(checkpointPath, checkpointKey);
+      const actualRevision = current?.revision ?? null;
+      if (
+        input.expectedRevision !== undefined &&
+        input.expectedRevision !== actualRevision
+      ) {
+        throw new WorkflowCheckpointConflictError(
+          checkpointKey,
+          input.expectedRevision,
+          actualRevision,
+        );
+      }
+
+      const stored: CheckpointFileV1 = {
+        format: FILE_FORMAT,
+        formatVersion: FILE_FORMAT_VERSION,
+        checkpointKey,
+        revision,
+        checkpoint: input.checkpoint,
+      };
+      await atomicWriteCheckpoint(
+        checkpointPath,
+        stored,
+        checkpointKey,
+        lock.assertOwned,
+      );
+    } finally {
+      await lock.release();
+    }
+
+    return {
+      checkpointKey,
+      stateDelta: { [checkpointKey]: input.checkpoint },
+    };
+  }
+
+  #checkpointPath(checkpointKey: string): string {
+    const digest = createHash("sha256").update(checkpointKey).digest("hex");
+    return join(this.#root, digest.slice(0, 2), `${digest}.json`);
+  }
+
+  async #acquireLock(
+    checkpointPath: string,
+    checkpointKey: string,
+  ): Promise<HeldCheckpointLock> {
+    const lockPath = `${checkpointPath}.lock`;
+    const startedAt = Date.now();
+    await cleanupAbandonedCandidates(lockPath, checkpointKey);
+    while (true) {
+      throwIfAborted(this.#signal, checkpointKey);
+      const token = randomUUID();
+      const candidatePath = await createLockCandidate(
+        lockPath,
+        token,
+        checkpointKey,
+      );
+      try {
+        await rename(candidatePath, lockPath);
+        return {
+          assertOwned: async () =>
+            await assertLockOwnership(lockPath, token, checkpointKey),
+          release: async () =>
+            await releaseLock(lockPath, token, checkpointKey),
+        };
+      } catch (error) {
+        try {
+          await rm(candidatePath, { recursive: true, force: true });
+        } catch (cleanupError) {
+          throw ioError(
+            "checkpoint_lock_candidate_cleanup_failed",
+            checkpointKey,
+            cleanupError,
+          );
+        }
+        if (!(await isLockContention(error, lockPath))) {
+          throw ioError("checkpoint_lock_acquire_failed", checkpointKey, error);
+        }
+      }
+
+      if (await recoverAbandonedLock(lockPath, checkpointKey)) {
+        continue;
+      }
+      if (Date.now() - startedAt >= this.#lockTimeoutMs) {
+        throw checkpointFileError(
+          "checkpoint_lock_timeout",
+          checkpointKey,
+          `Timed out waiting for workflow checkpoint lock: ${checkpointKey}`,
+          { timeoutMs: this.#lockTimeoutMs },
+        );
+      }
+      await abortableDelay(this.#lockRetryMs, this.#signal, checkpointKey);
+    }
+  }
+}
+
+async function readCheckpointFile(
+  checkpointPath: string,
+  checkpointKey: string,
+): Promise<CheckpointFileV1 | undefined> {
+  try {
+    const info = await lstat(checkpointPath);
+    if (info.isSymbolicLink() || !info.isFile()) {
+      throw checkpointFileError(
+        "checkpoint_file_unsafe",
+        checkpointKey,
+        `Workflow checkpoint path is not a regular file: ${checkpointKey}`,
+      );
+    }
+  } catch (error) {
+    if (hasErrorCode(error, "ENOENT")) {
+      return undefined;
+    }
+    if (error instanceof WorkflowError) {
+      throw error;
+    }
+    throw ioError("checkpoint_stat_failed", checkpointKey, error);
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(await readFile(checkpointPath, "utf8"));
+  } catch (error) {
+    if (hasErrorCode(error, "ENOENT")) {
+      return undefined;
+    }
+    if (error instanceof SyntaxError) {
+      throw checkpointFileError(
+        "checkpoint_file_corrupt",
+        checkpointKey,
+        `Workflow checkpoint file is not valid JSON: ${checkpointKey}`,
+      );
+    }
+    throw ioError("checkpoint_read_failed", checkpointKey, error);
+  }
+
+  if (!isCheckpointFileV1(parsed, checkpointKey)) {
+    throw checkpointFileError(
+      "checkpoint_file_corrupt",
+      checkpointKey,
+      `Workflow checkpoint file has an invalid envelope: ${checkpointKey}`,
+    );
+  }
+  const computedRevision = await workflowCheckpointRevision(parsed.checkpoint);
+  if (parsed.revision !== computedRevision) {
+    throw checkpointFileError(
+      "checkpoint_revision_invalid",
+      checkpointKey,
+      `Workflow checkpoint file revision is invalid: ${checkpointKey}`,
+      {
+        storedRevision: parsed.revision,
+        computedRevision,
+      },
+    );
+  }
+  return parsed;
+}
+
+function isCheckpointFileV1(
+  value: unknown,
+  checkpointKey: string,
+): value is CheckpointFileV1 {
+  if (!isRecord(value)) {
+    return false;
+  }
+  return (
+    value.format === FILE_FORMAT &&
+    value.formatVersion === FILE_FORMAT_VERSION &&
+    value.checkpointKey === checkpointKey &&
+    typeof value.revision === "string" &&
+    isWorkflowCheckpointV1(value.checkpoint) &&
+    workflowCheckpointKey(
+      value.checkpoint.workflowId,
+      value.checkpoint.executionId,
+    ) === checkpointKey
+  );
+}
+
+async function atomicWriteCheckpoint(
+  checkpointPath: string,
+  stored: CheckpointFileV1,
+  checkpointKey: string,
+  assertOwnership: () => Promise<void>,
+): Promise<void> {
+  const directory = dirname(checkpointPath);
+  const temporaryPath = join(
+    directory,
+    `.${basename(checkpointPath)}.${process.pid}.${randomUUID()}.tmp`,
+  );
+  let temporaryExists = false;
+  try {
+    const handle = await open(
+      temporaryPath,
+      constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY,
+      0o600,
+    );
+    temporaryExists = true;
+    try {
+      await handle.writeFile(`${JSON.stringify(stored)}\n`, "utf8");
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    await assertOwnership();
+    await rename(temporaryPath, checkpointPath);
+    temporaryExists = false;
+    await syncDirectory(directory);
+  } catch (error) {
+    if (error instanceof WorkflowError) {
+      throw error;
+    }
+    throw ioError("checkpoint_write_failed", checkpointKey, error);
+  } finally {
+    if (temporaryExists) {
+      await unlink(temporaryPath).catch(() => {});
+    }
+  }
+}
+
+async function syncDirectory(directory: string): Promise<void> {
+  const handle = await open(directory, constants.O_RDONLY);
+  try {
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+
+async function createLockCandidate(
+  lockPath: string,
+  token: string,
+  checkpointKey: string,
+): Promise<string> {
+  const candidatePath = join(
+    dirname(lockPath),
+    `.${basename(lockPath)}.candidate.${process.pid}.${token}`,
+  );
+  try {
+    await mkdir(candidatePath, { mode: 0o700 });
+    const ownerHandle = await open(
+      join(candidatePath, LOCK_OWNER_FILE),
+      constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY,
+      0o600,
+    );
+    try {
+      const metadata: LockMetadata = {
+        pid: process.pid,
+        createdAt: Date.now(),
+        token,
+      };
+      await ownerHandle.writeFile(`${JSON.stringify(metadata)}\n`, "utf8");
+      await ownerHandle.sync();
+    } finally {
+      await ownerHandle.close();
+    }
+    await syncDirectory(candidatePath);
+    return candidatePath;
+  } catch (error) {
+    await rm(candidatePath, { recursive: true, force: true }).catch(() => {});
+    throw ioError("checkpoint_lock_candidate_failed", checkpointKey, error);
+  }
+}
+
+async function cleanupAbandonedCandidates(
+  lockPath: string,
+  checkpointKey: string,
+): Promise<void> {
+  const directory = dirname(lockPath);
+  const prefix = `.${basename(lockPath)}.candidate.`;
+  let entries: string[];
+  try {
+    entries = await readdir(directory);
+  } catch (error) {
+    if (hasErrorCode(error, "ENOENT")) {
+      return;
+    }
+    throw ioError("checkpoint_lock_cleanup_failed", checkpointKey, error);
+  }
+
+  for (const entry of entries) {
+    if (!entry.startsWith(prefix)) {
+      continue;
+    }
+    const pidText = entry.slice(prefix.length).split(".", 1)[0];
+    const pid = Number(pidText);
+    if (!Number.isSafeInteger(pid) || pid <= 0 || isProcessAlive(pid)) {
+      continue;
+    }
+    await rm(join(directory, entry), { recursive: true, force: true }).catch(
+      () => {},
+    );
+  }
+}
+
+async function isLockContention(
+  error: unknown,
+  lockPath: string,
+): Promise<boolean> {
+  if (hasErrorCode(error, "EEXIST") || hasErrorCode(error, "ENOTEMPTY")) {
+    return true;
+  }
+  if (!hasErrorCode(error, "EPERM")) {
+    return false;
+  }
+  try {
+    await lstat(lockPath);
+    return true;
+  } catch (statError) {
+    return !hasErrorCode(statError, "ENOENT");
+  }
+}
+
+async function readLockOwner(
+  lockPath: string,
+  checkpointKey: string,
+): Promise<LockMetadata | undefined> {
+  let info: Awaited<ReturnType<typeof lstat>>;
+  try {
+    info = await lstat(lockPath);
+  } catch (error) {
+    if (hasErrorCode(error, "ENOENT")) {
+      return undefined;
+    }
+    throw ioError("checkpoint_lock_read_failed", checkpointKey, error);
+  }
+  if (info.isSymbolicLink() || !info.isDirectory()) {
+    throw checkpointFileError(
+      "checkpoint_lock_corrupt",
+      checkpointKey,
+      `Workflow checkpoint lock is not a safe directory: ${checkpointKey}`,
+    );
+  }
+
+  let rawOwner: string;
+  try {
+    rawOwner = await readFile(join(lockPath, LOCK_OWNER_FILE), "utf8");
+  } catch (error) {
+    if (hasErrorCode(error, "ENOENT")) {
+      try {
+        const currentInfo = await lstat(lockPath);
+        if (currentInfo.dev !== info.dev || currentInfo.ino !== info.ino) {
+          return await readLockOwner(lockPath, checkpointKey);
+        }
+      } catch (statError) {
+        if (hasErrorCode(statError, "ENOENT")) {
+          return undefined;
+        }
+        throw ioError("checkpoint_lock_read_failed", checkpointKey, statError);
+      }
+      throw checkpointFileError(
+        "checkpoint_lock_corrupt",
+        checkpointKey,
+        `Workflow checkpoint lock has no valid owner: ${checkpointKey}`,
+      );
+    }
+    throw ioError("checkpoint_lock_read_failed", checkpointKey, error);
+  }
+  const metadata = parseLockMetadata(rawOwner);
+  if (!metadata) {
+    throw checkpointFileError(
+      "checkpoint_lock_corrupt",
+      checkpointKey,
+      `Workflow checkpoint lock has invalid owner metadata: ${checkpointKey}`,
+    );
+  }
+  return metadata;
+}
+
+async function assertLockOwnership(
+  lockPath: string,
+  token: string,
+  checkpointKey: string,
+): Promise<void> {
+  const metadata = await readLockOwner(lockPath, checkpointKey);
+  if (metadata?.token !== token || metadata.pid !== process.pid) {
+    throw checkpointFileError(
+      "checkpoint_lock_ownership_lost",
+      checkpointKey,
+      `Workflow checkpoint lock ownership was lost: ${checkpointKey}`,
+      { expectedToken: token, actualToken: metadata?.token ?? null },
+    );
+  }
+}
+
+async function releaseLock(
+  lockPath: string,
+  token: string,
+  checkpointKey: string,
+): Promise<void> {
+  await assertLockOwnership(lockPath, token, checkpointKey);
+  const retiredPath = `${lockPath}.retired.${token}`;
+  try {
+    await rename(lockPath, retiredPath);
+    await syncDirectory(dirname(lockPath));
+  } catch (error) {
+    throw ioError("checkpoint_lock_release_failed", checkpointKey, error);
+  }
+}
+
+async function recoverAbandonedLock(
+  lockPath: string,
+  checkpointKey: string,
+): Promise<boolean> {
+  const metadata = await readLockOwner(lockPath, checkpointKey);
+  if (!metadata) {
+    return true;
+  }
+  if (isProcessAlive(metadata.pid)) {
+    return false;
+  }
+  const retiredPath = `${lockPath}.retired.${metadata.token}`;
+  try {
+    await rename(lockPath, retiredPath);
+    await syncDirectory(dirname(lockPath));
+    return true;
+  } catch (error) {
+    if (hasErrorCode(error, "ENOENT")) {
+      return true;
+    }
+    if (hasErrorCode(error, "EEXIST") || hasErrorCode(error, "ENOTEMPTY")) {
+      return false;
+    }
+    throw ioError("checkpoint_lock_recovery_failed", checkpointKey, error);
+  }
+}
+
+function parseLockMetadata(value: string): LockMetadata | undefined {
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (
+      !isRecord(parsed) ||
+      !Number.isSafeInteger(parsed.pid) ||
+      (parsed.pid as number) <= 0 ||
+      !Number.isSafeInteger(parsed.createdAt) ||
+      (parsed.createdAt as number) <= 0 ||
+      typeof parsed.token !== "string" ||
+      !SAFE_LOCK_TOKEN.test(parsed.token)
+    ) {
+      return undefined;
+    }
+    return {
+      pid: parsed.pid as number,
+      createdAt: parsed.createdAt as number,
+      token: parsed.token,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return !hasErrorCode(error, "ESRCH");
+  }
+}
+
+function positiveInteger(name: string, value: number): number {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new WorkflowError(
+      "WORKFLOW_DEFINITION_INVALID",
+      `${name} must be a positive safe integer`,
+      { name, value },
+    );
+  }
+  return value;
+}
+
+function throwIfAborted(
+  signal: AbortSignal | undefined,
+  checkpointKey: string,
+): void {
+  if (signal?.aborted) {
+    throw new WorkflowError(
+      "WORKFLOW_ABORTED",
+      `Workflow checkpoint lock acquisition was aborted: ${checkpointKey}`,
+      { checkpointKey },
+    );
+  }
+}
+
+async function abortableDelay(
+  delayMs: number,
+  signal: AbortSignal | undefined,
+  checkpointKey: string,
+): Promise<void> {
+  throwIfAborted(signal, checkpointKey);
+  if (!signal) {
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+    return;
+  }
+  await new Promise<void>((resolveDelay, reject) => {
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", abort);
+      resolveDelay();
+    }, delayMs);
+    const abort = () => {
+      clearTimeout(timer);
+      reject(
+        new WorkflowError(
+          "WORKFLOW_ABORTED",
+          `Workflow checkpoint lock acquisition was aborted: ${checkpointKey}`,
+          { checkpointKey },
+        ),
+      );
+    };
+    signal.addEventListener("abort", abort, { once: true });
+  });
+}
+
+function checkpointFileError(
+  reason: string,
+  checkpointKey: string,
+  message: string,
+  details: Record<string, unknown> = {},
+): WorkflowError {
+  return new WorkflowError("WORKFLOW_EXECUTION_ERROR", message, {
+    reason,
+    checkpointKey,
+    ...details,
+  });
+}
+
+function ioError(
+  reason: string,
+  checkpointKey: string,
+  error: unknown,
+): WorkflowError {
+  return checkpointFileError(
+    reason,
+    checkpointKey,
+    `Workflow checkpoint file operation failed: ${checkpointKey}`,
+    { causeCode: errorCode(error) },
+  );
+}
+
+function errorCode(error: unknown): string {
+  return isRecord(error) && typeof error.code === "string"
+    ? error.code
+    : "UNKNOWN";
+}
+
+function hasErrorCode(error: unknown, code: string): boolean {
+  return errorCode(error) === code;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
