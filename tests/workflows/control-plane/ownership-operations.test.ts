@@ -264,6 +264,7 @@ function orchestrationControl() {
     plans,
     state,
     authorizer,
+    bootstrapAuthorizer: authorizer,
     now: () => 1,
   });
   const ownership = new WorkflowOwnershipController({

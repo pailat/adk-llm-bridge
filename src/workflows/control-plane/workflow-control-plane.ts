@@ -13,20 +13,20 @@ import type {
 import type { WorkflowExecutionController } from "../execution/controller.js";
 import { WorkflowActorContext } from "../orchestration/authorization.js";
 import type {
+  WorkflowOwnershipChangeSetValidationRequest,
+  WorkflowOwnershipChangeSetValidator,
+} from "../orchestration/change-set-validator.js";
+import type { WorkflowPlan } from "../orchestration/contracts.js";
+import type {
   WorkflowOwnershipClaimRequest,
+  WorkflowOwnershipController,
   WorkflowOwnershipDecisionRequest,
   WorkflowOwnershipProposalRequest,
   WorkflowOwnershipReleaseRequest,
   WorkflowOwnershipScope,
   WorkflowOwnershipTransferRequest,
 } from "../orchestration/ownership-controller.js";
-import type { WorkflowOwnershipController } from "../orchestration/ownership-controller.js";
-import type { WorkflowPlan } from "../orchestration/contracts.js";
 import type { WorkflowPlanController } from "../orchestration/plan-controller.js";
-import type {
-  WorkflowOwnershipChangeSetValidationRequest,
-  WorkflowOwnershipChangeSetValidator,
-} from "../orchestration/change-set-validator.js";
 import type {
   IntegrationGate,
   IntegrationGateRequest,
@@ -38,11 +38,10 @@ import type {
 } from "../resources/workflow-artifact-store.js";
 import type {
   WorkflowTaskHandle,
+  WorkflowTaskJsonValue,
   WorkflowTaskListRequest,
-  WorkflowTaskMessageAppendRequest,
   WorkflowTaskMessageReadRequest,
   WorkflowTaskResumeRequest,
-  WorkflowTaskSpawnRequest,
 } from "../tasks/contracts.js";
 import type { WorkflowTaskController } from "../tasks/controller.js";
 import type {
@@ -59,6 +58,18 @@ export interface WorkflowControlPlaneEnvelope {
   version: typeof WORKFLOW_CONTROL_PROTOCOL_VERSION;
 }
 
+export interface WorkflowControlTaskSpawnPayload extends WorkflowTaskHandle {
+  agentId: string;
+  input?: WorkflowTaskJsonValue;
+  operationId: string;
+}
+
+export interface WorkflowControlTaskMailboxSendPayload
+  extends WorkflowTaskHandle {
+  payload: WorkflowTaskJsonValue;
+  operationId: string;
+}
+
 export type WorkflowControlPlaneRequest = WorkflowControlPlaneEnvelope &
   (
     | { operation: "execution.start"; payload: WorkflowExecutionRequest }
@@ -70,7 +81,7 @@ export type WorkflowControlPlaneRequest = WorkflowControlPlaneEnvelope &
         operation: "execution.events";
         payload: WorkflowExecutionEventReadRequest;
       }
-    | { operation: "task.spawn"; payload: WorkflowTaskSpawnRequest }
+    | { operation: "task.spawn"; payload: WorkflowControlTaskSpawnPayload }
     | { operation: "task.resume"; payload: WorkflowTaskResumeRequest }
     | { operation: "task.dispatch"; payload: WorkflowTaskHandle }
     | { operation: "task.recover"; payload: WorkflowTaskHandle }
@@ -85,7 +96,7 @@ export type WorkflowControlPlaneRequest = WorkflowControlPlaneEnvelope &
       }
     | {
         operation: "task.mailbox.send";
-        payload: WorkflowTaskMessageAppendRequest;
+        payload: WorkflowControlTaskMailboxSendPayload;
       }
     | {
         operation: "task.mailbox.read";
@@ -225,8 +236,19 @@ export class WorkflowControlPlane {
         return await this.#executions.list(normalized.payload);
       case "execution.events":
         return await this.#executions.events(normalized.payload);
-      case "task.spawn":
-        return await this.#tasks.spawn(normalized.payload);
+      case "task.spawn": {
+        const payload = taskSpawnPayload(normalized.payload);
+        const actor = requiredTaskSpawnActor(options.actor, payload);
+        return await this.#tasks.spawn(
+          {
+            executionId: payload.executionId,
+            taskId: payload.taskId,
+            agentId: payload.agentId,
+            ...(payload.input === undefined ? {} : { input: payload.input }),
+          },
+          { capability: actor, operationId: payload.operationId },
+        );
+      }
       case "task.resume":
         return await this.#tasks.resume(normalized.payload);
       case "task.dispatch":
@@ -256,8 +278,19 @@ export class WorkflowControlPlane {
           awaitAnyPayload(normalized.payload),
           options.signal,
         );
-      case "task.mailbox.send":
-        return await this.#tasks.send(normalized.payload);
+      case "task.mailbox.send": {
+        const payload = taskMailboxSendPayload(normalized.payload);
+        const actor = requiredMailboxSender(options.actor, payload.executionId);
+        return await this.#tasks.send(
+          {
+            executionId: payload.executionId,
+            taskId: payload.taskId,
+            senderTaskId: actor.identity.taskId,
+            payload: payload.payload,
+          },
+          { actor, operationId: payload.operationId },
+        );
+      }
       case "task.mailbox.read":
         return await this.#tasks.readMailbox(normalized.payload);
       case "task.mailbox.wait":
@@ -432,6 +465,36 @@ function taskHandlePayload(payload: unknown): WorkflowTaskHandle {
   return payload as unknown as WorkflowTaskHandle;
 }
 
+function taskSpawnPayload(payload: unknown): WorkflowControlTaskSpawnPayload {
+  exactPayload(
+    payload,
+    ["executionId", "taskId", "agentId", "input", "operationId"],
+    "task spawn",
+  );
+  requiredString(payload.executionId, "task spawn executionId");
+  requiredString(payload.taskId, "task spawn taskId");
+  requiredString(payload.agentId, "task spawn agentId");
+  requiredString(payload.operationId, "task spawn operationId");
+  return payload as unknown as WorkflowControlTaskSpawnPayload;
+}
+
+function taskMailboxSendPayload(
+  payload: unknown,
+): WorkflowControlTaskMailboxSendPayload {
+  exactPayload(
+    payload,
+    ["executionId", "taskId", "payload", "operationId"],
+    "task mailbox send",
+  );
+  requiredString(payload.executionId, "task mailbox send executionId");
+  requiredString(payload.taskId, "task mailbox send taskId");
+  requiredString(payload.operationId, "task mailbox send operationId");
+  if (!Object.hasOwn(payload, "payload")) {
+    invalid("Workflow control task mailbox send payload is invalid");
+  }
+  return payload as unknown as WorkflowControlTaskMailboxSendPayload;
+}
+
 function artifactPutPayload(payload: unknown): WorkflowArtifactInput {
   exactPayload(
     payload,
@@ -462,8 +525,11 @@ function integrationPayload(payload: unknown): IntegrationGateRequest {
 }
 
 function taskSweepPayload(payload: unknown): WorkflowTaskSweepRequest {
-  exactPayload(payload, ["executionId", "limit"], "task sweep");
+  exactPayload(payload, ["executionId", "limit", "cursor"], "task sweep");
   requiredString(payload.executionId, "task sweep executionId");
+  if (payload.cursor !== undefined && typeof payload.cursor !== "string") {
+    invalid("Workflow control task sweep cursor is invalid");
+  }
   if (
     payload.limit !== undefined &&
     (!Number.isSafeInteger(payload.limit) || (payload.limit as number) <= 0)
@@ -771,6 +837,34 @@ function positiveInteger(
 function requiredActor(actor: unknown): WorkflowActorContext {
   if (!(actor instanceof WorkflowActorContext))
     invalid("Workflow control operation requires a host-authenticated actor");
+  return actor;
+}
+
+function requiredTaskSpawnActor(
+  actorValue: unknown,
+  payload: WorkflowControlTaskSpawnPayload,
+): WorkflowActorContext {
+  const actor = requiredActor(actorValue);
+  const identity = actor.identity;
+  if (
+    identity.executionId !== payload.executionId ||
+    identity.taskId !== payload.taskId ||
+    identity.agentId !== payload.agentId
+  ) {
+    invalid("Workflow control task spawn actor does not match the target");
+  }
+  return actor;
+}
+
+function requiredMailboxSender(
+  actorValue: unknown,
+  executionId: string,
+): WorkflowActorContext {
+  const actor = requiredActor(actorValue);
+  const identity = actor.identity;
+  if (identity.executionId !== executionId || identity.taskId === undefined) {
+    invalid("Workflow control mailbox actor does not match the execution");
+  }
   return actor;
 }
 
