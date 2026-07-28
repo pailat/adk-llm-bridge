@@ -6,9 +6,17 @@
 
 import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { lstat, mkdir, readFile, readlink, realpath } from "node:fs/promises";
-import { isAbsolute, relative, resolve, sep } from "node:path";
-import { optionalJsonObject } from "../resources/json.js";
+import {
+  lstat,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readlink,
+  realpath,
+  rm,
+} from "node:fs/promises";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { canonicalJson, optionalJsonObject } from "../resources/json.js";
 import type {
   ProvisionedWorkspace,
   WorkspaceDescriptor,
@@ -19,6 +27,7 @@ import type {
 import {
   assertChangeSetMatchesReceipt,
   createWorkflowChangeSet,
+  normalizeAuthoritativeIntegrationRequest,
   type WorkflowChangeEntry,
   type WorkflowChangeEntryKind,
   type WorkflowChangeInspectionRequest,
@@ -27,11 +36,21 @@ import {
   type WorkflowChangeSet,
   type WorkflowCommitDriver,
   type WorkflowCommitDriverInput,
+  type WorkflowCommitPreparation,
+  type WorkflowCommitPreparationInput,
   type WorkflowCommitResult,
   type WorkflowIntegrationDriver,
   type WorkflowIntegrationRequest,
   type WorkflowIntegrationResult,
 } from "../workspace/change-driver.js";
+import {
+  InMemoryWorkflowHostMutationJournal,
+  WORKFLOW_WORKSPACE_ATTACHMENT,
+  type WorkflowHostMutationJournal,
+  type WorkflowHostMutationRecord,
+  type WorkflowWorkspaceAttachment,
+  type WorkflowWorkspaceRecoveryPort,
+} from "../workspace/mutation-journal.js";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_BUFFER_BYTES = 32 * 1024 * 1024;
@@ -48,6 +67,8 @@ export interface NodeGitWorktreeChangeDriverOptions {
   commandTimeoutMs?: number;
   createWorkspaceId?: () => string;
   now?: () => number;
+  /** Share this durable journal with the live receipt authority. */
+  mutationJournal?: WorkflowHostMutationJournal;
 }
 
 export interface NodeGitRepositoryHost {
@@ -75,7 +96,9 @@ export type NodeGitWorktreeErrorCode =
   | "GIT_SYMLINK_ESCAPE"
   | "GIT_CHANGE_SET_MISMATCH"
   | "GIT_TARGET_STALE"
-  | "GIT_COMMIT_NOT_FAST_FORWARD";
+  | "GIT_COMMIT_NOT_FAST_FORWARD"
+  | "GIT_TARGET_CHECKED_OUT"
+  | "GIT_MUTATION_AMBIGUOUS";
 
 export class NodeGitWorktreeError extends Error {
   readonly code: NodeGitWorktreeErrorCode;
@@ -90,6 +113,7 @@ export class NodeGitWorktreeError extends Error {
 interface GitCommandOptions {
   signal?: AbortSignal;
   allowExitCodes?: readonly number[];
+  env?: NodeJS.ProcessEnv;
 }
 
 interface GitCommandResult {
@@ -105,6 +129,12 @@ interface ParsedGitChange {
   toPath?: string;
 }
 
+interface PreparedTree {
+  workspaceId: string;
+  treeId: string;
+  tempRoot: string;
+}
+
 /**
  * Trusted Node host adapter for disposable Git worktrees.
  *
@@ -116,7 +146,8 @@ export class NodeGitWorktreeChangeDriver
     WorkspaceProvisioner<NodeGitWorktreeHost>,
     WorkflowChangeInspector<NodeGitWorktreeHost>,
     WorkflowCommitDriver<NodeGitWorktreeHost>,
-    WorkflowIntegrationDriver<NodeGitRepositoryHost>
+    WorkflowIntegrationDriver<NodeGitRepositoryHost>,
+    WorkflowWorkspaceRecoveryPort<NodeGitWorktreeHost>
 {
   readonly #repoRoot: string;
   readonly #worktreesRoot: string;
@@ -124,8 +155,10 @@ export class NodeGitWorktreeChangeDriver
   readonly #timeoutMs: number;
   readonly #createWorkspaceId: () => string;
   readonly #now: () => number;
+  readonly #journal: WorkflowHostMutationJournal;
   readonly #active = new Map<string, NodeGitWorktreeHost>();
   readonly #issued = new WeakSet<NodeGitWorktreeHost>();
+  readonly #preparations = new Map<string, PreparedTree>();
   readonly #repository: NodeGitRepositoryHost;
 
   private constructor(input: {
@@ -135,6 +168,7 @@ export class NodeGitWorktreeChangeDriver
     timeoutMs: number;
     createWorkspaceId: () => string;
     now: () => number;
+    mutationJournal: WorkflowHostMutationJournal;
   }) {
     this.#repoRoot = input.repoRoot;
     this.#worktreesRoot = input.worktreesRoot;
@@ -142,6 +176,7 @@ export class NodeGitWorktreeChangeDriver
     this.#timeoutMs = input.timeoutMs;
     this.#createWorkspaceId = input.createWorkspaceId;
     this.#now = input.now;
+    this.#journal = input.mutationJournal;
     this.#repository = Object.freeze({
       kind: "git-repository",
       repoRoot: this.#repoRoot,
@@ -210,6 +245,8 @@ export class NodeGitWorktreeChangeDriver
       timeoutMs,
       createWorkspaceId: options.createWorkspaceId ?? randomUUID,
       now: options.now ?? Date.now,
+      mutationJournal:
+        options.mutationJournal ?? new InMemoryWorkflowHostMutationJournal(),
     });
   }
 
@@ -238,14 +275,14 @@ export class NodeGitWorktreeChangeDriver
         `Workspace identity is already active: ${workspaceId}`,
       );
     }
-    const workspaceSuffix = createHash("sha256")
-      .update(workspaceId)
-      .digest("hex")
-      .slice(0, 12);
-    const directory = `${safeComponent(taskId)}-${safeComponent(
+    const parameters = optionalJsonObject(request.parameters, "parameters");
+    const worktreePath = this.#workspacePath({
       workspaceId,
-    )}-${workspaceSuffix}`;
-    const worktreePath = resolve(this.#worktreesRoot, directory);
+      executionId,
+      taskId,
+      revision: this.#baseRevision,
+      parameters,
+    });
     assertContained(this.#worktreesRoot, worktreePath);
     await this.#git(
       this.#repoRoot,
@@ -254,26 +291,20 @@ export class NodeGitWorktreeChangeDriver
     );
     const canonicalWorktree = await realpath(worktreePath);
     assertContained(this.#worktreesRoot, canonicalWorktree);
-    const host: NodeGitWorktreeHost = Object.freeze({
-      kind: "git-worktree",
+    const host = this.#issueHost({
       workspaceId,
       executionId,
       taskId,
-      repoRoot: this.#repoRoot,
       worktreePath: canonicalWorktree,
-      worktreesRoot: this.#worktreesRoot,
       baseRevision: this.#baseRevision,
-      [HOST_BRAND]: true as const,
     });
-    this.#issued.add(host);
-    this.#active.set(workspaceId, host);
     const descriptor: WorkspaceDescriptor = Object.freeze({
       workspaceId,
       providerId: "node-git-worktree",
       executionId,
       taskId,
       revision: this.#baseRevision,
-      parameters: optionalJsonObject(request.parameters, "parameters"),
+      parameters,
     });
     let released = false;
     return Object.freeze({
@@ -286,6 +317,54 @@ export class NodeGitWorktreeChangeDriver
         return removed;
       },
     });
+  }
+
+  async attach(
+    descriptor: WorkspaceDescriptor,
+    options: WorkflowChangeOperationOptions = {},
+  ): Promise<WorkflowWorkspaceAttachment<NodeGitWorktreeHost> | undefined> {
+    throwIfAborted(options.signal);
+    const normalized = this.#normalizeDescriptor(descriptor);
+    const active = this.#active.get(normalized.workspaceId);
+    if (active) return this.#attachment(normalized, active);
+    const expectedPath = this.#workspacePath(normalized);
+    const canonical = await realpath(expectedPath).catch(() => undefined);
+    if (!canonical) return undefined;
+    if (canonical !== expectedPath) {
+      throw new NodeGitWorktreeError(
+        "GIT_WORKTREE_PATH_ESCAPE",
+        "Durable workspace path was replaced or redirected",
+      );
+    }
+    assertContained(this.#worktreesRoot, canonical);
+    const host = this.#issueHost({
+      workspaceId: normalized.workspaceId,
+      executionId: normalized.executionId,
+      taskId: normalized.taskId,
+      worktreePath: canonical,
+      baseRevision: normalized.revision,
+    });
+    try {
+      await this.#assertHead(host, options);
+    } catch (error) {
+      this.#active.delete(host.workspaceId);
+      throw error;
+    }
+    return this.#attachment(normalized, host);
+  }
+
+  async recover(
+    descriptor: WorkspaceDescriptor,
+    options: WorkflowChangeOperationOptions = {},
+  ): Promise<WorkflowWorkspaceAttachment<NodeGitWorktreeHost>> {
+    const attachment = await this.attach(descriptor, options);
+    if (!attachment) {
+      throw new NodeGitWorktreeError(
+        "GIT_WORKTREE_STALE",
+        `Durable workspace is missing: ${descriptor.workspaceId}`,
+      );
+    }
+    return attachment;
   }
 
   async cleanup(
@@ -383,23 +462,87 @@ export class NodeGitWorktreeChangeDriver
         "Validated change snapshot does not identify this worktree",
       );
     }
-    await this.#assertHead(workspace, options);
+    const preparation = this.#preparations.get(input.preparation.preparationId);
+    if (
+      !preparation ||
+      preparation.workspaceId !== workspace.workspaceId ||
+      preparation.treeId !== input.preparation.treeId
+    ) {
+      throw new NodeGitWorktreeError(
+        "GIT_CHANGE_SET_MISMATCH",
+        "Commit preparation is absent, stale, or belongs to another workspace",
+      );
+    }
     throwIfAborted(options.signal);
-    await this.#git(workspace.worktreePath, ["add", "--all", "--"], options);
-    await this.#git(
-      workspace.worktreePath,
-      ["commit", "--no-gpg-sign", "--no-verify", "-m", input.message],
-      options,
-    );
-    const commitId = await this.#resolveCommit(
-      workspace.worktreePath,
-      "HEAD",
-      options,
-    );
+    const begun = await this.#journal.begin({
+      operationId: input.operationId,
+      intentDigest: input.intentDigest,
+      kind: "commit",
+      executionId: input.receipt.executionId,
+      taskId: input.receipt.taskId,
+      startedAt: nonNegativeTimestamp(this.#now()),
+    });
+    const completed = completedCommitResult(begun.record, input);
+    if (completed) {
+      const resolved = await this.#resolveCommit(
+        workspace.worktreePath,
+        completed.commitId,
+        {},
+      );
+      const treeId = await this.#resolveTree(
+        workspace.worktreePath,
+        resolved,
+        {},
+      );
+      const parent = await this.#resolveCommit(
+        workspace.worktreePath,
+        `${resolved}^`,
+        {},
+      );
+      if (treeId !== completed.treeId || parent !== workspace.baseRevision) {
+        throw new NodeGitWorktreeError(
+          "GIT_MUTATION_AMBIGUOUS",
+          "Durable commit result no longer resolves to its exact tree and parent",
+        );
+      }
+      return completed;
+    }
+
+    // From this point onward AbortSignal is deliberately not passed to Git.
+    // commit-tree only writes immutable objects and is safe to reconcile/retry.
+    let commitId: string;
+    try {
+      const timestamp = stableGitTimestamp(begun.record.startedAt);
+      const result = await this.#git(
+        workspace.worktreePath,
+        [
+          "commit-tree",
+          preparation.treeId,
+          "-p",
+          workspace.baseRevision,
+          "-m",
+          input.message,
+        ],
+        {
+          env: {
+            GIT_AUTHOR_DATE: timestamp,
+            GIT_COMMITTER_DATE: timestamp,
+          },
+        },
+      );
+      commitId = requiredGitObject(textOutput(result.stdout), "commitId");
+    } catch (error) {
+      await this.#journal.markAmbiguous(
+        input.operationId,
+        input.intentDigest,
+        "commit-tree may have written an immutable commit object",
+      );
+      throw error;
+    }
     const parent = await this.#resolveCommit(
       workspace.worktreePath,
       `${commitId}^`,
-      options,
+      {},
     );
     if (parent !== workspace.baseRevision) {
       throw new NodeGitWorktreeError(
@@ -407,14 +550,109 @@ export class NodeGitWorktreeChangeDriver
         "Worktree commit is not based directly on its configured base revision",
       );
     }
-    return Object.freeze({
+    const treeId = await this.#resolveTree(
+      workspace.worktreePath,
       commitId,
+      {},
+    );
+    if (treeId !== preparation.treeId) {
+      throw new NodeGitWorktreeError(
+        "GIT_CHANGE_SET_MISMATCH",
+        "Created commit does not contain the prepared immutable tree",
+      );
+    }
+    const result = Object.freeze({
+      commitId,
+      treeId,
       receiptId: input.receipt.receiptId,
       changeSetDigest: input.changeSet.changeSetDigest,
       workspaceRevision: input.changeSet.workspaceRevision,
       baseRevision: input.changeSet.baseRevision,
       committedAt: nonNegativeTimestamp(this.#now()),
     });
+    await this.#journal.complete(input.operationId, input.intentDigest, result);
+    return result;
+  }
+
+  async prepareCommit(
+    workspace: NodeGitWorktreeHost,
+    input: WorkflowCommitPreparationInput,
+    options: WorkflowChangeOperationOptions = {},
+  ): Promise<WorkflowCommitPreparation> {
+    await this.#assertUsableWorkspace(
+      workspace,
+      {
+        executionId: input.changeSet.executionId,
+        taskId: input.changeSet.taskId,
+        planRevision: input.changeSet.planRevision,
+        workspaceRevision: input.changeSet.workspaceRevision,
+        baseRevision: input.changeSet.baseRevision,
+      },
+      options,
+    );
+    assertChangeSetMatchesReceipt(input.changeSet, input.receipt);
+    const tempRoot = await mkdtemp(join(this.#worktreesRoot, ".prepare-"));
+    const indexPath = join(tempRoot, "index");
+    try {
+      const environment = { GIT_INDEX_FILE: indexPath };
+      await this.#git(
+        workspace.worktreePath,
+        ["read-tree", workspace.baseRevision],
+        { ...options, env: environment },
+      );
+      await this.#git(workspace.worktreePath, ["add", "--all", "--"], {
+        ...options,
+        env: environment,
+      });
+      const treeId = requiredGitObject(
+        textOutput(
+          (
+            await this.#git(workspace.worktreePath, ["write-tree"], {
+              ...options,
+              env: environment,
+            })
+          ).stdout,
+        ),
+        "treeId",
+      );
+      const preparedChangeSet = await this.#inspectTree(
+        workspace,
+        input.changeSet,
+        treeId,
+        options,
+      );
+      assertChangeSetMatchesReceipt(preparedChangeSet, input.receipt);
+      const preparationId = randomUUID();
+      this.#preparations.set(preparationId, {
+        workspaceId: workspace.workspaceId,
+        treeId,
+        tempRoot,
+      });
+      return Object.freeze({ preparationId, treeId });
+    } catch (error) {
+      await rm(tempRoot, { recursive: true, force: true });
+      throw error;
+    }
+  }
+
+  async discardPreparation(
+    workspace: NodeGitWorktreeHost,
+    preparation: WorkflowCommitPreparation,
+  ): Promise<void> {
+    this.#assertOwnedWorkspace(workspace);
+    const stored = this.#preparations.get(preparation.preparationId);
+    if (!stored) return;
+    if (
+      stored.workspaceId !== workspace.workspaceId ||
+      stored.treeId !== preparation.treeId
+    ) {
+      throw new NodeGitWorktreeError(
+        "GIT_CHANGE_SET_MISMATCH",
+        "Cannot discard a preparation owned by another workspace",
+      );
+    }
+    this.#preparations.delete(preparation.preparationId);
+    await rm(stored.tempRoot, { recursive: true, force: true });
   }
 
   async integrate(
@@ -423,24 +661,65 @@ export class NodeGitWorktreeChangeDriver
     options: WorkflowChangeOperationOptions = {},
   ): Promise<WorkflowIntegrationResult> {
     this.#assertOwnedRepository(repository);
+    const normalized = normalizeAuthoritativeIntegrationRequest(request);
     const targetId = await this.#validatedTargetRef(
-      request.expectedTarget.targetId,
+      normalized.expectedTarget.targetId,
       options,
     );
     const expectedRevision = requiredGitObject(
-      request.expectedTarget.revision,
+      normalized.expectedTarget.revision,
       "expected target revision",
     );
     const commitId = await this.#resolveCommit(
       repository.repoRoot,
-      requiredGitObject(request.commitId, "commitId"),
+      requiredGitObject(normalized.commitId, "commitId"),
       options,
     );
+    const treeId = await this.#resolveTree(
+      repository.repoRoot,
+      commitId,
+      options,
+    );
+    if (treeId !== normalized.commit.treeId) {
+      throw new NodeGitWorktreeError(
+        "GIT_CHANGE_SET_MISMATCH",
+        "Integration commit tree is not linked to the accepted receipt",
+      );
+    }
+    throwIfAborted(options.signal);
+    const begun = await this.#journal.begin({
+      operationId: normalized.operationId,
+      intentDigest: await integrationIntentDigest(normalized),
+      kind: "integration",
+      executionId: normalized.executionId,
+      taskId: normalized.taskId,
+      startedAt: nonNegativeTimestamp(this.#now()),
+    });
+    const completed = completedIntegrationResult(begun.record, normalized);
     const currentRevision = await this.#resolveCommit(
       repository.repoRoot,
       targetId,
-      options,
+      {},
     );
+    if (completed) {
+      if (currentRevision !== completed.integratedRevision) {
+        throw new NodeGitWorktreeError(
+          "GIT_MUTATION_AMBIGUOUS",
+          "Durable integration result no longer matches the target reference",
+        );
+      }
+      return completed;
+    }
+    await this.#assertTargetNotCheckedOut(targetId, {});
+    if (currentRevision === commitId) {
+      return await this.#completeIntegrationJournal(
+        begun.record,
+        normalized,
+        expectedRevision,
+        commitId,
+        targetId,
+      );
+    }
     if (currentRevision !== expectedRevision) {
       throw new NodeGitWorktreeError(
         "GIT_TARGET_STALE",
@@ -450,7 +729,7 @@ export class NodeGitWorktreeChangeDriver
     const parent = await this.#resolveCommit(
       repository.repoRoot,
       `${commitId}^`,
-      options,
+      {},
     );
     if (parent !== expectedRevision) {
       throw new NodeGitWorktreeError(
@@ -462,27 +741,40 @@ export class NodeGitWorktreeChangeDriver
       await this.#git(
         repository.repoRoot,
         ["update-ref", targetId, commitId, expectedRevision],
-        options,
+        {},
       );
     } catch (error) {
-      throwIfAborted(options.signal);
       const latest = await this.#resolveCommit(
         repository.repoRoot,
         targetId,
-        options,
+        {},
       );
+      if (latest === commitId) {
+        return await this.#completeIntegrationJournal(
+          begun.record,
+          normalized,
+          expectedRevision,
+          commitId,
+          targetId,
+        );
+      }
       if (latest !== expectedRevision) {
         throw new NodeGitWorktreeError(
           "GIT_TARGET_STALE",
           `Target ${targetId} concurrently moved to ${latest}`,
         );
       }
+      await this.#journal.markAmbiguous(
+        normalized.operationId,
+        begun.record.intentDigest,
+        "Git update-ref failed and the target still has its expected revision",
+      );
       throw error;
     }
     const integratedRevision = await this.#resolveCommit(
       repository.repoRoot,
       targetId,
-      options,
+      {},
     );
     if (integratedRevision !== commitId) {
       throw new NodeGitWorktreeError(
@@ -490,13 +782,253 @@ export class NodeGitWorktreeChangeDriver
         "Git did not update the target to the exact requested commit",
       );
     }
-    return Object.freeze({
-      integrationId: randomUUID(),
-      commitId,
+    return await this.#completeIntegrationJournal(
+      begun.record,
+      normalized,
+      currentRevision,
+      integratedRevision,
       targetId,
-      previousRevision: currentRevision,
+    );
+  }
+
+  async #inspectTree(
+    workspace: NodeGitWorktreeHost,
+    identity: WorkflowChangeSet,
+    treeId: string,
+    options: WorkflowChangeOperationOptions,
+  ): Promise<WorkflowChangeSet> {
+    const changes = parseNameStatus(
+      (
+        await this.#git(
+          workspace.worktreePath,
+          [
+            "diff-tree",
+            "--no-commit-id",
+            "--name-status",
+            "-r",
+            "-z",
+            "--find-renames",
+            workspace.baseRevision,
+            treeId,
+            "--",
+          ],
+          options,
+        )
+      ).stdout,
+    );
+    const entries: WorkflowChangeEntry[] = [];
+    for (const change of changes) {
+      throwIfAborted(options.signal);
+      const path =
+        change.status === "renamed"
+          ? (change.toPath as string)
+          : (change.path as string);
+      const materialized =
+        change.status === "deleted"
+          ? await this.#treeEntry(
+              workspace.worktreePath,
+              workspace.baseRevision,
+              path,
+              options,
+            )
+          : await this.#treeEntry(
+              workspace.worktreePath,
+              treeId,
+              path,
+              options,
+            );
+      entries.push(
+        change.status === "renamed"
+          ? {
+              kind: "renamed",
+              fromPath: change.fromPath as string,
+              toPath: path,
+              ...materialized,
+            }
+          : { kind: change.status, path, ...materialized },
+      );
+    }
+    return await createWorkflowChangeSet({
+      executionId: identity.executionId,
+      taskId: identity.taskId,
+      planRevision: identity.planRevision,
+      workspaceRevision: identity.workspaceRevision,
+      baseRevision: identity.baseRevision,
+      entries,
+    });
+  }
+
+  async #treeEntry(
+    cwd: string,
+    treeish: string,
+    portablePath: string,
+    options: WorkflowChangeOperationOptions,
+  ): Promise<{ entryKind: WorkflowChangeEntryKind; contentDigest: string }> {
+    const listing = textOutput(
+      (await this.#git(cwd, ["ls-tree", treeish, "--", portablePath], options))
+        .stdout,
+    );
+    const match = /^(\d{6})\s+(\w+)\s+([a-f0-9]+)\t/u.exec(listing);
+    if (!match) {
+      throw new NodeGitWorktreeError(
+        "GIT_CONFIGURATION_INVALID",
+        `Prepared tree entry is absent: ${portablePath}`,
+      );
+    }
+    const [, mode, type, objectId] = match;
+    if (mode === "160000" || type === "commit") {
+      return {
+        entryKind: "submodule",
+        contentDigest: digest(Buffer.from(objectId)),
+      };
+    }
+    const content = (
+      await this.#git(cwd, ["cat-file", "blob", objectId], options)
+    ).stdout;
+    if (mode === "120000") {
+      const target = content.toString("utf8");
+      const targetPath = resolve(dirname(resolve(cwd, portablePath)), target);
+      if (isAbsolute(target) || !isContained(cwd, targetPath)) {
+        throw new NodeGitWorktreeError(
+          "GIT_SYMLINK_ESCAPE",
+          `Prepared symlink escapes the worktree: ${portablePath}`,
+        );
+      }
+      return { entryKind: "symlink", contentDigest: digest(content) };
+    }
+    return { entryKind: "file", contentDigest: digest(content) };
+  }
+
+  async #completeIntegrationJournal(
+    record: WorkflowHostMutationRecord,
+    request: ReturnType<typeof normalizeAuthoritativeIntegrationRequest>,
+    previousRevision: string,
+    integratedRevision: string,
+    targetId: string,
+  ): Promise<WorkflowIntegrationResult> {
+    const result = Object.freeze({
+      integrationId: deterministicIntegrationId(
+        request.operationId,
+        record.intentDigest,
+      ),
+      commitId: request.commitId,
+      targetId,
+      previousRevision,
       integratedRevision,
       integratedAt: nonNegativeTimestamp(this.#now()),
+    });
+    await this.#journal.complete(
+      request.operationId,
+      record.intentDigest,
+      result,
+    );
+    return result;
+  }
+
+  async #assertTargetNotCheckedOut(
+    targetId: string,
+    options: WorkflowChangeOperationOptions,
+  ): Promise<void> {
+    const output = textOutput(
+      (
+        await this.#git(
+          this.#repoRoot,
+          ["worktree", "list", "--porcelain"],
+          options,
+        )
+      ).stdout,
+    );
+    for (const line of output.split("\n")) {
+      if (line === `branch ${targetId}`) {
+        throw new NodeGitWorktreeError(
+          "GIT_TARGET_CHECKED_OUT",
+          `Integration target is checked out in a Git worktree: ${targetId}`,
+        );
+      }
+    }
+  }
+
+  #workspacePath(descriptor: Omit<WorkspaceDescriptor, "providerId">): string {
+    const workspaceSuffix = createHash("sha256")
+      .update(
+        canonicalJson({
+          workspaceId: descriptor.workspaceId,
+          executionId: descriptor.executionId,
+          taskId: descriptor.taskId,
+          revision: descriptor.revision,
+          parameters: descriptor.parameters,
+        }),
+      )
+      .digest("hex")
+      .slice(0, 12);
+    const directory = `${safeComponent(descriptor.taskId)}-${safeComponent(
+      descriptor.workspaceId,
+    )}-${workspaceSuffix}`;
+    const worktreePath = resolve(this.#worktreesRoot, directory);
+    assertContained(this.#worktreesRoot, worktreePath);
+    return worktreePath;
+  }
+
+  #issueHost(input: {
+    workspaceId: string;
+    executionId: string;
+    taskId: string;
+    worktreePath: string;
+    baseRevision: string;
+  }): NodeGitWorktreeHost {
+    const host: NodeGitWorktreeHost = Object.freeze({
+      kind: "git-worktree",
+      ...input,
+      repoRoot: this.#repoRoot,
+      worktreesRoot: this.#worktreesRoot,
+      [HOST_BRAND]: true as const,
+    });
+    this.#issued.add(host);
+    this.#active.set(host.workspaceId, host);
+    return host;
+  }
+
+  #normalizeDescriptor(descriptor: WorkspaceDescriptor): WorkspaceDescriptor {
+    if (!descriptor || descriptor.providerId !== "node-git-worktree") {
+      throw new NodeGitWorktreeError(
+        "GIT_CONFIGURATION_INVALID",
+        "Workspace descriptor belongs to another provider",
+      );
+    }
+    const revision = requiredGitObject(descriptor.revision, "revision");
+    if (revision !== this.#baseRevision) {
+      throw new NodeGitWorktreeError(
+        "GIT_WORKTREE_STALE",
+        "Workspace descriptor uses a different immutable base revision",
+      );
+    }
+    return Object.freeze({
+      workspaceId: requiredIdentity(descriptor.workspaceId, "workspaceId"),
+      providerId: "node-git-worktree",
+      executionId: requiredIdentity(descriptor.executionId, "executionId"),
+      taskId: requiredIdentity(descriptor.taskId, "taskId"),
+      revision,
+      parameters: optionalJsonObject(descriptor.parameters, "parameters"),
+    });
+  }
+
+  #attachment(
+    descriptor: WorkspaceDescriptor,
+    host: NodeGitWorktreeHost,
+  ): WorkflowWorkspaceAttachment<NodeGitWorktreeHost> {
+    let attached = true;
+    return Object.freeze({
+      [WORKFLOW_WORKSPACE_ATTACHMENT]: true as const,
+      descriptor,
+      host,
+      detach: async () => {
+        if (!attached) return false;
+        attached = false;
+        if (this.#active.get(host.workspaceId) === host) {
+          this.#active.delete(host.workspaceId);
+        }
+        return true;
+      },
     });
   }
 
@@ -756,15 +1288,133 @@ export class NodeGitWorktreeChangeDriver
     return resolved;
   }
 
+  async #resolveTree(
+    cwd: string,
+    revision: string,
+    options: WorkflowChangeOperationOptions,
+  ): Promise<string> {
+    const result = await this.#git(
+      cwd,
+      ["rev-parse", "--verify", "--end-of-options", `${revision}^{tree}`],
+      options,
+    );
+    return requiredGitObject(textOutput(result.stdout), "treeId");
+  }
+
   async #git(
     cwd: string,
     args: readonly string[],
-    options: WorkflowChangeOperationOptions = {},
+    options: WorkflowChangeOperationOptions & { env?: NodeJS.ProcessEnv } = {},
   ): Promise<GitCommandResult> {
     return await runGit(cwd, args, this.#timeoutMs, {
       signal: options.signal,
+      env: options.env,
     });
   }
+}
+
+function completedCommitResult(
+  record: WorkflowHostMutationRecord,
+  input: WorkflowCommitDriverInput,
+): WorkflowCommitResult | undefined {
+  if (record.status !== "completed") return undefined;
+  const result = jsonRecord(record.result, "completed commit result");
+  const normalized = Object.freeze({
+    commitId: requiredGitObject(result.commitId, "commitId"),
+    treeId: requiredGitObject(result.treeId, "treeId"),
+    receiptId: requiredIdentity(result.receiptId, "receiptId"),
+    changeSetDigest: requiredDigest(result.changeSetDigest, "changeSetDigest"),
+    workspaceRevision: requiredRevision(
+      result.workspaceRevision,
+      "workspaceRevision",
+    ),
+    baseRevision: requiredRevision(result.baseRevision, "baseRevision"),
+    committedAt: nonNegativeTimestamp(result.committedAt),
+  });
+  if (
+    normalized.treeId !== input.preparation.treeId ||
+    normalized.receiptId !== input.receipt.receiptId ||
+    normalized.changeSetDigest !== input.receipt.changeSetDigest ||
+    normalized.workspaceRevision !== input.receipt.workspaceRevision ||
+    normalized.baseRevision !== input.receipt.baseRevision
+  ) {
+    throw new NodeGitWorktreeError(
+      "GIT_CHANGE_SET_MISMATCH",
+      "Durable commit result is not linked to this publication",
+    );
+  }
+  return normalized;
+}
+
+function completedIntegrationResult(
+  record: WorkflowHostMutationRecord,
+  request: ReturnType<typeof normalizeAuthoritativeIntegrationRequest>,
+): WorkflowIntegrationResult | undefined {
+  if (record.status !== "completed") return undefined;
+  const result = jsonRecord(record.result, "completed integration result");
+  const normalized = Object.freeze({
+    integrationId: requiredIdentity(result.integrationId, "integrationId"),
+    commitId: requiredGitObject(result.commitId, "commitId"),
+    targetId: requiredIdentity(result.targetId, "targetId"),
+    previousRevision: requiredGitObject(
+      result.previousRevision,
+      "previousRevision",
+    ),
+    integratedRevision: requiredGitObject(
+      result.integratedRevision,
+      "integratedRevision",
+    ),
+    integratedAt: nonNegativeTimestamp(result.integratedAt),
+  });
+  if (
+    normalized.commitId !== request.commitId ||
+    normalized.targetId !== request.expectedTarget.targetId ||
+    normalized.previousRevision !== request.expectedTarget.revision ||
+    normalized.integratedRevision !== request.commitId
+  ) {
+    throw new NodeGitWorktreeError(
+      "GIT_CHANGE_SET_MISMATCH",
+      "Durable integration result is not linked to this publication",
+    );
+  }
+  return normalized;
+}
+
+async function integrationIntentDigest(
+  request: ReturnType<typeof normalizeAuthoritativeIntegrationRequest>,
+): Promise<string> {
+  const value = JSON.stringify({
+    operationId: request.operationId,
+    receiptId: request.receipt.receiptId,
+    commitId: request.commit.commitId,
+    treeId: request.commit.treeId,
+    expectedTarget: request.expectedTarget,
+  });
+  return `sha256:${createHash("sha256").update(value).digest("hex")}`;
+}
+
+function deterministicIntegrationId(
+  operationId: string,
+  intentDigest: string,
+): string {
+  return `integration-${createHash("sha256")
+    .update(`${operationId}\0${intentDigest}`)
+    .digest("hex")
+    .slice(0, 24)}`;
+}
+
+function stableGitTimestamp(timestamp: number): string {
+  return `@${Math.floor(timestamp / 1000)} +0000`;
+}
+
+function jsonRecord(value: unknown, field: string): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new NodeGitWorktreeError(
+      "GIT_MUTATION_AMBIGUOUS",
+      `${field} is absent or malformed`,
+    );
+  }
+  return value as Record<string, unknown>;
 }
 
 async function canonicalDirectory(
@@ -915,6 +1565,13 @@ function requiredGitObject(value: unknown, field: string): string {
   return value;
 }
 
+function requiredDigest(value: unknown, field: string): string {
+  if (typeof value !== "string" || !/^sha256:[a-f0-9]{64}$/u.test(value)) {
+    throw new TypeError(`${field} must be a lowercase SHA-256 digest`);
+  }
+  return value;
+}
+
 function positiveInteger(value: unknown, field: string): number {
   if (!Number.isSafeInteger(value) || (value as number) <= 0) {
     throw new TypeError(`${field} must be a positive safe integer`);
@@ -955,6 +1612,7 @@ async function runGit(
         maxBuffer: MAX_BUFFER_BYTES,
         timeout: timeoutMs,
         signal: options.signal,
+        env: options.env ? { ...process.env, ...options.env } : undefined,
         windowsHide: true,
       },
       (error, stdout, stderr) => {
