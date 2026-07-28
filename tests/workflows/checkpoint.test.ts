@@ -20,6 +20,11 @@ import {
   hashWorkflowSource,
   stableSerializeWorkflowValue,
 } from "../../src/workflows/checkpoint/hash.js";
+import {
+  isWorkflowCheckpointV1,
+  toDurableWorkflowCheckpoint,
+  type WorkflowCheckpointV1,
+} from "../../src/workflows/checkpoint/schema.js";
 import type {
   WorkflowStep,
   WorkflowStepFailure,
@@ -188,7 +193,170 @@ describe("workflow checkpoints", () => {
       completedAt: 30,
     });
   });
+
+  test("keeps runtime events live but omits them from durable step results", async () => {
+    const inputHash = await hashWorkflowInput(step.input);
+    let checkpoint = await createWorkflowCheckpoint({
+      definition,
+      executionId: "inv-events",
+      input: "workflow input",
+    });
+    checkpoint = withWorkflowStepRunning(checkpoint, step, inputHash, 1, 10);
+    const result: WorkflowStepResult = {
+      ...completedResult(),
+      events: [{ id: "runtime-only" }] as WorkflowStepResult["events"],
+      replayed: true,
+    };
+
+    const completed = withWorkflowStepCompleted(checkpoint, result, 20);
+
+    expect(result.events).toHaveLength(1);
+    expect(completed.steps.plan.result).not.toHaveProperty("events");
+    expect(completed.steps.plan.result).not.toHaveProperty("replayed");
+  });
+
+  test("accepts legacy v1 events and compacts them without mutation", async () => {
+    const legacy = await completedCheckpoint();
+    const legacyResult = legacy.steps.plan?.result;
+    if (!legacyResult) throw new Error("missing completed result");
+    legacyResult.events = [
+      { id: "legacy-runtime-event" },
+    ] as WorkflowStepResult["events"];
+    legacyResult.replayed = false;
+
+    expect(isWorkflowCheckpointV1(legacy)).toBe(true);
+    const durable = toDurableWorkflowCheckpoint(legacy);
+    expect(durable).not.toBe(legacy);
+    expect(durable.steps.plan?.result).not.toHaveProperty("events");
+    expect(durable.steps.plan?.result).not.toHaveProperty("replayed");
+    expect(legacy.steps.plan?.result?.events).toHaveLength(1);
+  });
+
+  test("rejects malformed nested durable values and inconsistent states", async () => {
+    const valid = await completedCheckpoint();
+    const cyclic: Record<string, unknown> = {};
+    cyclic.self = cyclic;
+    const inherited = Object.create({ hidden: true }) as Record<
+      string,
+      unknown
+    >;
+    inherited.visible = true;
+    const sparse: unknown[] = [];
+    sparse.length = 1;
+    const withUndefined = [undefined];
+    const accessorResult = { ...requiredResult(valid) };
+    Object.defineProperty(accessorResult, "events", {
+      enumerable: true,
+      get: () => [],
+    });
+
+    const invalid: WorkflowCheckpointV1[] = [
+      {
+        ...valid,
+        steps: {
+          ...valid.steps,
+          plan: {
+            ...requiredPlan(valid),
+            result: {
+              ...requiredResult(valid),
+              stateDelta: { value: Number.POSITIVE_INFINITY },
+            },
+          },
+        },
+      },
+      {
+        ...valid,
+        steps: {
+          ...valid.steps,
+          plan: {
+            ...requiredPlan(valid),
+            result: {
+              ...requiredResult(valid),
+              stateDelta: { sparse },
+            },
+          },
+        },
+      },
+      {
+        ...valid,
+        output: { role: "model", parts: withUndefined },
+      },
+      {
+        ...valid,
+        steps: {
+          ...valid.steps,
+          plan: {
+            ...requiredPlan(valid),
+            result: accessorResult,
+          },
+        },
+      },
+      { ...valid, output: { role: "model", parts: [cyclic] } },
+      {
+        ...valid,
+        steps: {
+          ...valid.steps,
+          plan: {
+            ...requiredPlan(valid),
+            result: inherited as WorkflowStepResult,
+          },
+        },
+      },
+      {
+        ...valid,
+        steps: {
+          ...valid.steps,
+          plan: {
+            ...requiredPlan(valid),
+            attempts: 2,
+          },
+        },
+      },
+      {
+        ...valid,
+        steps: {
+          ...valid.steps,
+          plan: {
+            ...requiredPlan(valid),
+            status: "failed",
+            result: undefined,
+            error: undefined,
+          },
+        },
+      },
+      { ...valid, status: "running", completedAt: valid.completedAt },
+    ];
+
+    for (const checkpoint of invalid) {
+      expect(isWorkflowCheckpointV1(checkpoint)).toBe(false);
+    }
+  });
 });
+
+async function completedCheckpoint(): Promise<WorkflowCheckpointV1> {
+  const inputHash = await hashWorkflowInput(step.input);
+  let checkpoint = await createWorkflowCheckpoint({
+    definition,
+    executionId: "inv-completed",
+    input: "workflow input",
+    now: 10,
+  });
+  checkpoint = withWorkflowStepRunning(checkpoint, step, inputHash, 1, 10);
+  checkpoint = withWorkflowStepCompleted(checkpoint, completedResult(), 20);
+  return withWorkflowCompleted(checkpoint, "done", 30);
+}
+
+function requiredPlan(checkpoint: WorkflowCheckpointV1) {
+  const saved = checkpoint.steps.plan;
+  if (!saved) throw new Error("missing plan step");
+  return saved;
+}
+
+function requiredResult(checkpoint: WorkflowCheckpointV1) {
+  const result = requiredPlan(checkpoint).result;
+  if (!result) throw new Error("missing plan result");
+  return result;
+}
 
 function completedResult(): WorkflowStepResult {
   return {

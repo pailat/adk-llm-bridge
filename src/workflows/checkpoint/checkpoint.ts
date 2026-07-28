@@ -185,7 +185,7 @@ export function withWorkflowStepCompleted(
   now = Date.now(),
 ): WorkflowCheckpointV1 {
   const previous = requireStep(checkpoint, result.id);
-  const { replayed: _replayed, ...durableResult } = result;
+  const { events: _events, replayed: _replayed, ...durableResult } = result;
   return updateCheckpoint(checkpoint, now, {
     [result.id]: {
       ...previous,
@@ -226,7 +226,7 @@ export function withWorkflowCompleted(
   return {
     ...checkpoint,
     status: "completed",
-    ...(output === undefined ? {} : { output }),
+    output,
     error: undefined,
     updatedAt: now,
     completedAt: now,
@@ -242,6 +242,7 @@ export function withWorkflowFailed(
   return {
     ...checkpoint,
     status,
+    output: undefined,
     error,
     updatedAt: now,
     completedAt: now,
@@ -256,6 +257,8 @@ function updateCheckpoint(
   return {
     ...checkpoint,
     status: "running",
+    output: undefined,
+    error: undefined,
     steps: { ...checkpoint.steps, ...steps },
     updatedAt: now,
     completedAt: undefined,

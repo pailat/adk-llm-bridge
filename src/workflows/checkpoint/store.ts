@@ -8,9 +8,13 @@ import type { InvocationContext } from "@google/adk";
 import { WorkflowError } from "../contracts.js";
 import { hashWorkflowValue } from "./hash.js";
 import type { WorkflowCheckpointV1 } from "./schema.js";
-import { isWorkflowCheckpointV1 } from "./schema.js";
+import {
+  isWorkflowCheckpointV1,
+  toDurableWorkflowCheckpoint,
+} from "./schema.js";
 
 export const WORKFLOW_CHECKPOINT_STATE_PREFIX = "__adk_llm_bridge_workflow_v1";
+export const DEFAULT_WORKFLOW_CHECKPOINT_MAX_BYTES = 4 * 1024 * 1024;
 
 const adkSessionCheckpointObservations = new WeakMap<
   InvocationContext["session"],
@@ -90,10 +94,57 @@ export interface WorkflowCheckpointStore {
   save(input: SaveWorkflowCheckpointInput): Promise<WorkflowCheckpointWrite>;
 }
 
+export interface ADKSessionCheckpointStoreOptions {
+  /** Maximum UTF-8 JSON size of one durable checkpoint. Defaults to 4 MiB. */
+  maxCheckpointBytes?: number;
+}
+
 export async function workflowCheckpointRevision(
   checkpoint: WorkflowCheckpointV1,
 ): Promise<WorkflowCheckpointRevision> {
   return await hashWorkflowValue(checkpoint);
+}
+
+export function workflowCheckpointByteLength(
+  checkpoint: WorkflowCheckpointV1,
+): number {
+  return new TextEncoder().encode(JSON.stringify(checkpoint)).byteLength;
+}
+
+export function assertWorkflowCheckpointSize(
+  checkpoint: WorkflowCheckpointV1,
+  checkpointKey: string,
+  maxBytes: number,
+  direction: "load" | "save",
+): void {
+  const actualBytes = workflowCheckpointByteLength(checkpoint);
+  if (actualBytes > maxBytes) {
+    throw workflowCheckpointSizeLimitError(
+      checkpointKey,
+      maxBytes,
+      actualBytes,
+      direction,
+    );
+  }
+}
+
+export function workflowCheckpointSizeLimitError(
+  checkpointKey: string,
+  maxBytes: number,
+  actualBytes: number,
+  direction: "load" | "save",
+): WorkflowError {
+  return new WorkflowError(
+    "WORKFLOW_EXECUTION_ERROR",
+    `Workflow checkpoint exceeds size limit: ${checkpointKey}`,
+    {
+      reason: "checkpoint_size_limit_exceeded",
+      checkpointKey,
+      maxBytes,
+      actualBytes,
+      direction,
+    },
+  );
 }
 
 export function workflowCheckpointKey(
@@ -119,6 +170,15 @@ export function workflowCheckpointKey(
  * cross-process compare-and-swap guarantee.
  */
 export class ADKSessionCheckpointStore implements WorkflowCheckpointStore {
+  readonly #maxCheckpointBytes: number;
+
+  constructor(options: ADKSessionCheckpointStoreOptions = {}) {
+    this.#maxCheckpointBytes = positiveSafeInteger(
+      "maxCheckpointBytes",
+      options.maxCheckpointBytes ?? DEFAULT_WORKFLOW_CHECKPOINT_MAX_BYTES,
+    );
+  }
+
   async load(
     input: LoadWorkflowCheckpointInput,
   ): Promise<WorkflowCheckpointV1 | undefined> {
@@ -136,10 +196,32 @@ export class ADKSessionCheckpointStore implements WorkflowCheckpointStore {
         "Cannot persist an invalid workflow checkpoint",
       );
     }
+    const durableCheckpoint = toDurableWorkflowCheckpoint(input.checkpoint);
     const checkpointKey = workflowCheckpointKey(
-      input.checkpoint.workflowId,
-      input.checkpoint.executionId,
+      durableCheckpoint.workflowId,
+      durableCheckpoint.executionId,
     );
+    assertWorkflowCheckpointSize(
+      durableCheckpoint,
+      checkpointKey,
+      this.#maxCheckpointBytes,
+      "save",
+    );
+    const revision = await workflowCheckpointRevision(durableCheckpoint);
+    if (input.revision !== undefined && input.revision !== revision) {
+      throw new WorkflowError(
+        "WORKFLOW_EXECUTION_ERROR",
+        `Workflow checkpoint revision does not match checkpoint: ${checkpointKey}`,
+        {
+          checkpointKey,
+          suppliedRevision: input.revision,
+          computedRevision: revision,
+        },
+      );
+    }
+
+    // Validation, compaction, sizing, and revision checks precede observation
+    // so a rejected write cannot publish a process-local shadow value.
     const observation = await this.#observe(input.context, checkpointKey);
     if (
       input.expectedRevision !== undefined &&
@@ -152,24 +234,12 @@ export class ADKSessionCheckpointStore implements WorkflowCheckpointStore {
       );
     }
 
-    const revision = await workflowCheckpointRevision(input.checkpoint);
-    if (input.revision !== undefined && input.revision !== revision) {
-      throw new WorkflowError(
-        "WORKFLOW_EXECUTION_ERROR",
-        `Workflow checkpoint revision does not match checkpoint: ${checkpointKey}`,
-        {
-          checkpointKey,
-          suppliedRevision: input.revision,
-          computedRevision: revision,
-        },
-      );
-    }
     observation.currentRevision = revision;
-    observation.currentCheckpoint = input.checkpoint;
+    observation.currentCheckpoint = durableCheckpoint;
 
     return {
       checkpointKey,
-      stateDelta: { [checkpointKey]: input.checkpoint },
+      stateDelta: { [checkpointKey]: durableCheckpoint },
     };
   }
 
@@ -177,7 +247,11 @@ export class ADKSessionCheckpointStore implements WorkflowCheckpointStore {
     context: InvocationContext,
     checkpointKey: string,
   ): Promise<CheckpointObservation> {
-    const stateCheckpoint = checkpointFromState(context, checkpointKey);
+    const stateCheckpoint = checkpointFromState(
+      context,
+      checkpointKey,
+      this.#maxCheckpointBytes,
+    );
     const stateRevision = stateCheckpoint
       ? await workflowCheckpointRevision(stateCheckpoint)
       : null;
@@ -222,6 +296,7 @@ interface CheckpointObservation {
 function checkpointFromState(
   context: InvocationContext,
   checkpointKey: string,
+  maxCheckpointBytes: number,
 ): WorkflowCheckpointV1 | undefined {
   const value = context.session.state[checkpointKey];
   if (value === undefined || value === null) {
@@ -232,6 +307,24 @@ function checkpointFromState(
       "WORKFLOW_EXECUTION_ERROR",
       `Invalid workflow checkpoint in ADK session state: ${checkpointKey}`,
       { checkpointKey },
+    );
+  }
+  const durableCheckpoint = toDurableWorkflowCheckpoint(value);
+  assertWorkflowCheckpointSize(
+    durableCheckpoint,
+    checkpointKey,
+    maxCheckpointBytes,
+    "load",
+  );
+  return durableCheckpoint;
+}
+
+function positiveSafeInteger(name: string, value: number): number {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new WorkflowError(
+      "WORKFLOW_DEFINITION_INVALID",
+      `${name} must be a positive safe integer`,
+      { name, value },
     );
   }
   return value;

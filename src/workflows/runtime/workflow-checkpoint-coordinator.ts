@@ -19,7 +19,11 @@ import {
   withWorkflowStepRunning,
 } from "../checkpoint/checkpoint.js";
 import { hashWorkflowInput } from "../checkpoint/hash.js";
-import type { WorkflowCheckpointV1 } from "../checkpoint/schema.js";
+import {
+  isWorkflowCheckpointV1,
+  toDurableWorkflowCheckpoint,
+  type WorkflowCheckpointV1,
+} from "../checkpoint/schema.js";
 import type {
   WorkflowCheckpointRevision,
   WorkflowCheckpointStore,
@@ -83,9 +87,15 @@ export class WorkflowCheckpointCoordinator {
       });
 
       if (saved) {
+        if (!isWorkflowCheckpointV1(saved)) {
+          throw new WorkflowError(
+            "WORKFLOW_EXECUTION_ERROR",
+            "Checkpoint store returned an invalid workflow checkpoint",
+          );
+        }
         validateWorkflowCheckpoint(saved, checkpointExpectation(candidate));
         const revision = await workflowCheckpointRevision(saved);
-        this.#checkpoint = saved;
+        this.#checkpoint = toDurableWorkflowCheckpoint(saved);
         this.#revision = revision;
         return;
       }
@@ -175,17 +185,18 @@ export class WorkflowCheckpointCoordinator {
     expectedRevision: WorkflowCheckpointRevision | null | undefined = this
       .#revision,
   ): Promise<void> {
-    const revision = await workflowCheckpointRevision(candidate);
+    const durableCandidate = toDurableWorkflowCheckpoint(candidate);
+    const revision = await workflowCheckpointRevision(durableCandidate);
     const write = await this.#config.store.save({
       context: this.#config.context,
-      checkpoint: candidate,
+      checkpoint: durableCandidate,
       expectedRevision,
       revision,
     });
 
     // A successful store write is the commit boundary. The notification hook
     // may fail, but it cannot roll back the durable checkpoint or its revision.
-    this.#checkpoint = candidate;
+    this.#checkpoint = durableCandidate;
     this.#revision = revision;
     await this.#config.onWrite(write, stepId);
   }
