@@ -127,6 +127,8 @@ export interface WorkflowRuntimeConfig {
   checkpointStore?: WorkflowCheckpointStore;
   resolveExecutionId?: WorkflowExecutionIdResolver;
   workspace?: WorkflowWorkspaceConfig;
+  /** Host-owned cancellation signal scoped to this runtime invocation. */
+  abortSignal?: AbortSignal;
 }
 
 /** Executes one trusted workflow definition inside an ADK invocation. */
@@ -142,6 +144,7 @@ export class WorkflowRuntime {
   readonly #checkpointStore: WorkflowCheckpointStore;
   readonly #resolveExecutionId: WorkflowExecutionIdResolver;
   readonly #workspace?: WorkflowWorkspaceConfig;
+  readonly #abortSignal?: AbortSignal;
   readonly #limits: Required<WorkflowExecutionLimits>;
   readonly #globalSemaphore: AsyncSemaphore;
   readonly #agentSemaphores = new WeakMap<BaseAgent, AsyncSemaphore>();
@@ -167,6 +170,7 @@ export class WorkflowRuntime {
     this.#resolveExecutionId =
       config.resolveExecutionId ?? ((context) => context.invocationId);
     this.#workspace = config.workspace;
+    this.#abortSignal = config.abortSignal;
     this.#limits = validateLimits(config.definition.limits);
     this.#globalSemaphore = new AsyncSemaphore(this.#limits.maxConcurrency);
   }
@@ -174,7 +178,7 @@ export class WorkflowRuntime {
   async execute(): Promise<WorkflowExecutionSummary> {
     const startedAt = Date.now();
     const abortScope = createExecutionAbortScope(
-      this.#parentContext.abortSignal,
+      [this.#parentContext.abortSignal, this.#abortSignal],
       this.#limits.timeoutMs,
     );
     this.#executionSignal = abortScope.signal;
@@ -1038,17 +1042,25 @@ async function retryDelay(
 }
 
 function createExecutionAbortScope(
-  parentSignal: AbortSignal | undefined,
+  sourceSignals: readonly (AbortSignal | undefined)[],
   timeoutMs: number,
 ): { signal: AbortSignal; dispose: () => void } {
   const controller = new AbortController();
-  const abortFromParent = () =>
-    controller.abort(
-      parentSignal?.reason ??
-        new WorkflowError("WORKFLOW_ABORTED", "Workflow execution aborted"),
-    );
-  if (parentSignal?.aborted) abortFromParent();
-  else parentSignal?.addEventListener("abort", abortFromParent, { once: true });
+  const listeners = new Map<AbortSignal, () => void>();
+  for (const signal of sourceSignals) {
+    if (!signal) continue;
+    const abort = () =>
+      controller.abort(
+        signal.reason ??
+          new WorkflowError("WORKFLOW_ABORTED", "Workflow execution aborted"),
+      );
+    if (signal.aborted) {
+      abort();
+      break;
+    }
+    listeners.set(signal, abort);
+    signal.addEventListener("abort", abort, { once: true });
+  }
 
   const timeout = setTimeout(() => {
     controller.abort(
@@ -1064,7 +1076,9 @@ function createExecutionAbortScope(
     signal: controller.signal,
     dispose: () => {
       clearTimeout(timeout);
-      parentSignal?.removeEventListener("abort", abortFromParent);
+      for (const [signal, listener] of listeners) {
+        signal.removeEventListener("abort", listener);
+      }
     },
   };
 }

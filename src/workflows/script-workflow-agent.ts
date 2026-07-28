@@ -112,6 +112,8 @@ export class ScriptWorkflowAgent extends BaseAgent {
     const declaredAgents = new Map(this.#declaredAgents);
     let dynamicAgents: DynamicAgentScope | undefined;
     let executionPromise: Promise<unknown> | undefined;
+    let executionSettled = false;
+    const invocationAbort = new AbortController();
     try {
       dynamicAgents = await this.createDynamicAgentScope(
         context,
@@ -142,17 +144,32 @@ export class ScriptWorkflowAgent extends BaseAgent {
         resolveExecutionId: this.#resolveExecutionId,
         hooks: this.#runtimeHooks,
         workspace: this.#workspace,
+        abortSignal: invocationAbort.signal,
       });
 
       executionPromise = runtime.execute();
       void executionPromise.then(
-        () => queue.close(),
-        (error) => queue.fail(error),
+        () => {
+          executionSettled = true;
+          queue.close();
+        },
+        (error) => {
+          executionSettled = true;
+          queue.fail(error);
+        },
       );
       yield* queue;
     } finally {
+      if (executionPromise && !executionSettled) {
+        invocationAbort.abort(
+          new WorkflowError(
+            "WORKFLOW_ABORTED",
+            "Workflow invocation iterator closed before execution completed",
+          ),
+        );
+      }
       await executionPromise?.catch(() => undefined);
-      dynamicAgents?.releaseAll();
+      await dynamicAgents?.releaseAll();
     }
   }
 
@@ -236,7 +253,9 @@ class DynamicAgentScope {
     this.#staticNames = new Set(declaredAgents.keys());
   }
 
-  spawn(request: WorkflowAgentFactoryRequest): WorkflowAgentDescriptor {
+  async spawn(
+    request: WorkflowAgentFactoryRequest,
+  ): Promise<WorkflowAgentDescriptor> {
     if (this.#staticNames.has(request.name)) {
       throw new WorkflowError(
         "WORKFLOW_EXECUTION_ERROR",
@@ -252,14 +271,14 @@ class DynamicAgentScope {
 
     let handle: WorkflowAgentHandle;
     try {
-      handle = this.#factory.create(request);
+      handle = await this.#factory.create(request);
     } catch (error) {
       throw sanitizedFactoryError("spawn", error);
     }
     const validated = validateHandle(handle, request);
     if (!validated) {
       try {
-        this.#factory.release(handle);
+        await this.#factory.release(handle);
       } catch {
         // The invalid handle is never published; cleanup remains best effort.
       }
@@ -286,7 +305,7 @@ class DynamicAgentScope {
     );
   }
 
-  release(name: string): boolean {
+  async release(name: string): Promise<boolean> {
     if (this.#staticNames.has(name)) {
       throw new WorkflowError(
         "WORKFLOW_EXECUTION_ERROR",
@@ -304,7 +323,7 @@ class DynamicAgentScope {
 
     let released: boolean;
     try {
-      released = this.#factory.release(scoped.handle);
+      released = await this.#factory.release(scoped.handle);
     } catch (error) {
       throw sanitizedFactoryError("release", error);
     }
@@ -320,10 +339,10 @@ class DynamicAgentScope {
     return true;
   }
 
-  releaseAll(): void {
+  async releaseAll(): Promise<void> {
     for (const [name, scoped] of [...this.#handles].reverse()) {
       try {
-        this.#factory.release(scoped.handle);
+        await this.#factory.release(scoped.handle);
       } catch {
         // Continue releasing every handle even if a custom factory misbehaves.
       } finally {
