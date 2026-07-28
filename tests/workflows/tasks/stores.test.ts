@@ -87,6 +87,162 @@ describe("InMemoryWorkflowTaskStore", () => {
     ).rejects.toMatchObject({ code: "WORKFLOW_TASK_INVALID_REQUEST" });
   });
 
+  test("normalizes and freezes an orchestration authority binding", async () => {
+    const store = new InMemoryWorkflowTaskStore();
+    const orchestration = {
+      planRevision: 7,
+      ownership: [
+        { grantId: "grant-z", fencingToken: 9 },
+        { grantId: "grant-a", fencingToken: 3 },
+      ],
+    };
+    const created = await store.create(record("task-1", { orchestration }));
+
+    expect(created.orchestration).toEqual({
+      planRevision: 7,
+      ownership: [
+        { grantId: "grant-a", fencingToken: 3 },
+        { grantId: "grant-z", fencingToken: 9 },
+      ],
+    });
+    expect(Object.isFrozen(created.orchestration)).toBe(true);
+    expect(Object.isFrozen(created.orchestration?.ownership)).toBe(true);
+    expect(Object.isFrozen(created.orchestration?.ownership[0])).toBe(true);
+
+    orchestration.planRevision = 8;
+    const sourceGrant = orchestration.ownership[0];
+    if (!sourceGrant) throw new Error("Expected source ownership grant");
+    sourceGrant.fencingToken = 10;
+    expect(created.orchestration).toEqual({
+      planRevision: 7,
+      ownership: [
+        { grantId: "grant-a", fencingToken: 3 },
+        { grantId: "grant-z", fencingToken: 9 },
+      ],
+    });
+  });
+
+  test("rejects malformed and duplicate orchestration grants", async () => {
+    const store = new InMemoryWorkflowTaskStore();
+    const invalidBindings = [
+      { planRevision: 0, ownership: [] },
+      {
+        planRevision: 1,
+        ownership: [{ grantId: "grant-a", fencingToken: 0 }],
+      },
+      {
+        planRevision: 1,
+        ownership: [
+          { grantId: "grant-a", fencingToken: 1 },
+          { grantId: "grant-a", fencingToken: 2 },
+        ],
+      },
+      { planRevision: 1, ownership: [], actor: "host-handle" },
+    ];
+
+    for (const [index, orchestration] of invalidBindings.entries()) {
+      await expect(
+        store.create(
+          record(`invalid-${index}`, {
+            orchestration: orchestration as WorkflowTaskRecord["orchestration"],
+          }),
+        ),
+      ).rejects.toMatchObject({ code: "WORKFLOW_TASK_INVALID_REQUEST" });
+    }
+  });
+
+  test("prevents orchestration authority changes across CAS", async () => {
+    const store = new InMemoryWorkflowTaskStore();
+    const created = await store.create(
+      record("task-1", {
+        orchestration: {
+          planRevision: 2,
+          ownership: [{ grantId: "grant-a", fencingToken: 4 }],
+        },
+      }),
+    );
+    const binding = created.orchestration;
+    if (!binding) throw new Error("Expected orchestration binding");
+
+    await expect(
+      store.compareAndSet(
+        {
+          ...created,
+          status: "running",
+          revision: 2,
+          updatedAt: 2,
+          startedAt: 2,
+          orchestration: {
+            ...binding,
+            planRevision: 3,
+          },
+        },
+        1,
+      ),
+    ).rejects.toMatchObject({ code: "WORKFLOW_TASK_INVALID_REQUEST" });
+
+    await expect(
+      store.compareAndSet(
+        {
+          ...created,
+          status: "running",
+          revision: 2,
+          updatedAt: 2,
+          startedAt: 2,
+          orchestration: {
+            planRevision: 2,
+            ownership: [{ grantId: "grant-a", fencingToken: 5 }],
+          },
+        },
+        1,
+      ),
+    ).rejects.toMatchObject({ code: "WORKFLOW_TASK_INVALID_REQUEST" });
+  });
+
+  test("preserves orchestration authority through claim and recovery", async () => {
+    let now = 10;
+    const store = new InMemoryWorkflowTaskStore({ now: () => now });
+    const created = await store.create(
+      record("task-1", {
+        orchestration: {
+          planRevision: 5,
+          ownership: [
+            { grantId: "grant-b", fencingToken: 8 },
+            { grantId: "grant-a", fencingToken: 6 },
+          ],
+        },
+      }),
+    );
+    const expected = created.orchestration;
+
+    const claimed = await store.claim({
+      executionId: created.executionId,
+      taskId: created.taskId,
+      workerId: "worker-1",
+      leaseId: "lease-1",
+      leaseDurationMs: 10,
+    });
+    expect(claimed.orchestration).toEqual(expected);
+
+    now = 20;
+    const queued = await store.requeueExpired({
+      executionId: claimed.executionId,
+      taskId: claimed.taskId,
+      expectedRevision: claimed.revision,
+    });
+    expect(queued.orchestration).toEqual(expected);
+
+    now = 21;
+    const reclaimed = await store.claim({
+      executionId: queued.executionId,
+      taskId: queued.taskId,
+      workerId: "worker-2",
+      leaseId: "lease-2",
+      leaseDurationMs: 10,
+    });
+    expect(reclaimed.orchestration).toEqual(expected);
+  });
+
   test("lists by execution with bounded, execution-scoped cursors", async () => {
     const store = new InMemoryWorkflowTaskStore();
     await store.create(record("ignored", { executionId: "execution-2" }));

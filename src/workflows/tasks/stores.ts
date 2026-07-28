@@ -18,6 +18,7 @@ import {
   type WorkflowTaskMessageAppendRequest,
   type WorkflowTaskMessageReadRequest,
   type WorkflowTaskMessageReadResult,
+  type WorkflowTaskOrchestrationBinding,
   type WorkflowTaskRecord,
   type WorkflowTaskRenewClaimRequest,
   type WorkflowTaskRequeueExpiredRequest,
@@ -140,7 +141,7 @@ export class InMemoryWorkflowTaskStore
     if (record.revision !== 1) invalid("Initial task revision must be 1");
     const key = taskKey(record.executionId, record.taskId);
     if (this.#records.has(key)) duplicate(record.executionId, record.taskId);
-    const snapshot = immutableTaskJson(record);
+    const snapshot = normalizedTaskRecordSnapshot(record);
     this.#records.set(key, snapshot);
     this.#order.push(key);
     this.#wakeRevisionWaiters(key, snapshot);
@@ -160,37 +161,38 @@ export class InMemoryWorkflowTaskStore
     expectedRevision: number,
   ): Promise<WorkflowTaskRecord> {
     validateTaskRecord(record);
+    const replacement = normalizedTaskRecordSnapshot(record);
     if (!Number.isSafeInteger(expectedRevision) || expectedRevision <= 0) {
       invalid("Expected task revision must be a positive integer");
     }
-    const key = taskKey(record.executionId, record.taskId);
+    const key = taskKey(replacement.executionId, replacement.taskId);
     const current = this.#records.get(key);
-    if (!current) notFound(record.executionId, record.taskId);
+    if (!current) notFound(replacement.executionId, replacement.taskId);
     if (current.revision !== expectedRevision) {
       conflict(
-        record.executionId,
-        record.taskId,
+        replacement.executionId,
+        replacement.taskId,
         expectedRevision,
         current.revision,
       );
     }
-    if (record.revision !== expectedRevision + 1) {
+    if (replacement.revision !== expectedRevision + 1) {
       invalid("Replacement task revision must increment by one");
     }
-    assertImmutableIdentity(current, record);
-    if (current.claim !== undefined || record.claim !== undefined) {
+    assertImmutableIdentity(current, replacement);
+    if (current.claim !== undefined || replacement.claim !== undefined) {
       throw new WorkflowTaskControlError(
         "WORKFLOW_TASK_CLAIM_CONFLICT",
-        `Claimed workflow tasks require a fenced transition: ${record.taskId}`,
+        `Claimed workflow tasks require a fenced transition: ${replacement.taskId}`,
         {
-          executionId: record.executionId,
-          taskId: record.taskId,
+          executionId: replacement.executionId,
+          taskId: replacement.taskId,
           actualRevision: current.revision,
         },
       );
     }
-    assertTransition(current, record);
-    const snapshot = immutableTaskJson(record);
+    assertTransition(current, replacement);
+    const snapshot = replacement;
     this.#records.set(key, snapshot);
     this.#wakeRevisionWaiters(key, snapshot);
     return snapshot;
@@ -273,30 +275,31 @@ export class InMemoryWorkflowTaskStore
     validateClaimGuard(request.claim);
     validateExpectedRevision(request.expectedRevision);
     validateTaskRecord(request.record);
-    const key = taskKey(request.record.executionId, request.record.taskId);
+    const replacement = normalizedTaskRecordSnapshot(request.record);
+    const key = taskKey(replacement.executionId, replacement.taskId);
     if (
-      request.claim.executionId !== request.record.executionId ||
-      request.claim.taskId !== request.record.taskId
+      request.claim.executionId !== replacement.executionId ||
+      request.claim.taskId !== replacement.taskId
     ) {
       invalid("Workflow task claim guard belongs to another task");
     }
     const current = this.#records.get(key);
-    if (!current) notFound(request.record.executionId, request.record.taskId);
+    if (!current) notFound(replacement.executionId, replacement.taskId);
     assertExpectedRevision(current, request.expectedRevision);
     assertCurrentClaim(current, request.claim, this.#timestamp());
-    if (request.record.revision !== request.expectedRevision + 1) {
+    if (replacement.revision !== request.expectedRevision + 1) {
       invalid("Replacement task revision must increment by one");
     }
-    assertImmutableIdentity(current, request.record);
-    assertTransition(current, request.record);
-    if (isTerminalTaskStatus(request.record.status)) {
-      if (request.record.claim !== undefined) {
+    assertImmutableIdentity(current, replacement);
+    assertTransition(current, replacement);
+    if (isTerminalTaskStatus(replacement.status)) {
+      if (replacement.claim !== undefined) {
         invalid("Terminal workflow tasks cannot retain a durable claim");
       }
     } else {
-      assertClaimUnchanged(current.claim, request.record.claim);
+      assertClaimUnchanged(current.claim, replacement.claim);
     }
-    const snapshot = immutableTaskJson(request.record);
+    const snapshot = replacement;
     this.#records.set(key, snapshot);
     this.#wakeRevisionWaiters(key, snapshot);
     return snapshot;
@@ -673,6 +676,25 @@ export function validateIdentifier(value: string, field: string): void {
   }
 }
 
+function normalizedTaskRecordSnapshot(
+  record: WorkflowTaskRecord,
+): WorkflowTaskRecord {
+  const { orchestration, ...durable } = record;
+  if (orchestration === undefined) return immutableTaskJson(durable);
+  const ownership = orchestration.ownership
+    .map(({ grantId, fencingToken }) => ({ grantId, fencingToken }))
+    .sort((left, right) =>
+      left.grantId < right.grantId ? -1 : left.grantId > right.grantId ? 1 : 0,
+    );
+  return immutableTaskJson({
+    ...durable,
+    orchestration: {
+      planRevision: orchestration.planRevision,
+      ownership,
+    },
+  } satisfies WorkflowTaskRecord);
+}
+
 function validateTaskRecord(record: WorkflowTaskRecord): void {
   validateTaskHandle(record);
   if (record.parentTaskId !== undefined) {
@@ -709,6 +731,9 @@ function validateTaskRecord(record: WorkflowTaskRecord): void {
   if (record.input !== undefined) immutableTaskJson(record.input);
   if (record.output !== undefined) immutableTaskJson(record.output);
   if (record.error) validateTaskError(record.error);
+  if (record.orchestration !== undefined) {
+    validateOrchestrationBinding(record.orchestration);
+  }
   if (record.claim !== undefined) {
     validateTaskClaim(record.claim, record);
     if (record.status !== "running" && record.status !== "cancelling") {
@@ -759,6 +784,49 @@ function validateTaskRecord(record: WorkflowTaskRecord): void {
       "Cancelling and cancelled workflow tasks require cancelRequestedAt",
     );
   }
+}
+
+function validateOrchestrationBinding(
+  orchestration: WorkflowTaskOrchestrationBinding,
+): void {
+  if (
+    !orchestration ||
+    typeof orchestration !== "object" ||
+    Array.isArray(orchestration) ||
+    Object.keys(orchestration).length !== 2 ||
+    Object.keys(orchestration).some(
+      (key) => key !== "planRevision" && key !== "ownership",
+    ) ||
+    !positiveSafeInteger(orchestration.planRevision) ||
+    !Array.isArray(orchestration.ownership)
+  ) {
+    invalid("Workflow task orchestration binding is invalid");
+  }
+  const grantIds = new Set<string>();
+  for (const grant of orchestration.ownership) {
+    if (
+      !grant ||
+      typeof grant !== "object" ||
+      Array.isArray(grant) ||
+      Object.keys(grant).length !== 2 ||
+      Object.keys(grant).some(
+        (key) => key !== "grantId" && key !== "fencingToken",
+      )
+    ) {
+      invalid("Workflow task orchestration ownership grant is invalid");
+    }
+    validateIdentifier(grant.grantId, "orchestration.ownership.grantId");
+    if (!positiveSafeInteger(grant.fencingToken)) {
+      invalid(
+        "Workflow task orchestration ownership fencingToken must be a positive integer",
+      );
+    }
+    if (grantIds.has(grant.grantId)) {
+      invalid("Workflow task orchestration ownership grants must be unique");
+    }
+    grantIds.add(grant.grantId);
+  }
+  immutableTaskJson(orchestration);
 }
 
 function validateTaskClaim(
@@ -901,7 +969,9 @@ function assertImmutableIdentity(
     replacement.parentTaskId !== current.parentTaskId ||
     replacement.agentId !== current.agentId ||
     replacement.createdAt !== current.createdAt ||
-    JSON.stringify(replacement.input) !== JSON.stringify(current.input)
+    JSON.stringify(replacement.input) !== JSON.stringify(current.input) ||
+    JSON.stringify(replacement.orchestration) !==
+      JSON.stringify(current.orchestration)
   ) {
     invalid("Workflow task identity fields are immutable");
   }
