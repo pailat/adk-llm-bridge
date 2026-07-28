@@ -181,6 +181,90 @@ describe("AgentInvocationGateway", () => {
     expect(result.output).toBe("tool output");
   });
 
+  test("uses terminal visible text without preceding progress", async () => {
+    const worker = new CaptureAgent("worker", [
+      createEvent({
+        invocationId: "inv-1",
+        author: "worker",
+        content: { role: "model", parts: [{ text: '{"status":"working"}' }] },
+      }),
+      createEvent({
+        invocationId: "inv-1",
+        author: "worker",
+        content: { role: "model", parts: [{ text: '{"status":"done"}' }] },
+        turnComplete: true,
+      }),
+    ]);
+    const root = new CaptureAgent("root");
+    const gateway = new AgentInvocationGateway({ resolveAgent: () => worker });
+
+    const result = await gateway.run({
+      agentName: "worker",
+      input: { role: "user", parts: [{ text: "task" }] },
+      parentContext: parentContext(root),
+    });
+
+    expect(result.output).toBe('{"status":"done"}');
+    expect(result.summary.textEvents).toBe(2);
+  });
+
+  test("uses the latest visible terminal event", async () => {
+    const worker = new CaptureAgent("worker", [
+      createEvent({
+        invocationId: "inv-1",
+        author: "worker",
+        content: { role: "model", parts: [{ text: "first terminal" }] },
+        turnComplete: true,
+      }),
+      createEvent({
+        invocationId: "inv-1",
+        author: "worker",
+        content: { role: "model", parts: [{ text: "late progress" }] },
+      }),
+      createEvent({
+        invocationId: "inv-1",
+        author: "worker",
+        content: { role: "model", parts: [{ text: "latest terminal" }] },
+        turnComplete: true,
+      }),
+    ]);
+    const root = new CaptureAgent("root");
+    const gateway = new AgentInvocationGateway({ resolveAgent: () => worker });
+
+    const result = await gateway.run({
+      agentName: "worker",
+      input: { role: "user", parts: [{ text: "task" }] },
+      parentContext: parentContext(root),
+    });
+
+    expect(result.output).toBe("latest terminal");
+  });
+
+  test("aggregates visible text when no terminal event is emitted", async () => {
+    const worker = new CaptureAgent("worker", [
+      createEvent({
+        invocationId: "inv-1",
+        author: "worker",
+        content: { role: "model", parts: [{ text: "first" }] },
+      }),
+      createEvent({
+        invocationId: "inv-1",
+        author: "worker",
+        content: { role: "model", parts: [{ text: "second" }] },
+      }),
+    ]);
+    const root = new CaptureAgent("root");
+    const gateway = new AgentInvocationGateway({ resolveAgent: () => worker });
+
+    const result = await gateway.run({
+      agentName: "worker",
+      input: { role: "user", parts: [{ text: "task" }] },
+      parentContext: parentContext(root),
+    });
+
+    expect(result.output).toBe("first\nsecond");
+  });
+
   test("returns a controlled result when resolution fails", async () => {
     const root = new CaptureAgent("root");
     const gateway = new AgentInvocationGateway({

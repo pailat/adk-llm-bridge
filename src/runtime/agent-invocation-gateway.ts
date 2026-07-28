@@ -114,6 +114,7 @@ export class AgentInvocationGateway {
     const text: string[] = [];
     const fallbackOutput: string[] = [];
     const stateDelta: Record<string, unknown> = {};
+    let terminalText: string | undefined;
     let textEvents = 0;
     let toolCalls = 0;
     let errors = 0;
@@ -135,6 +136,9 @@ export class AgentInvocationGateway {
         if (visible) {
           textEvents++;
           text.push(visible);
+          if (event.turnComplete === true) {
+            terminalText = visible;
+          }
         } else {
           const fallback = extractFallbackOutput(event);
           if (fallback) {
@@ -156,7 +160,9 @@ export class AgentInvocationGateway {
 
     return {
       agentName: agent.name,
-      output: text.length > 0 ? text.join("\n") : fallbackOutput.join("\n"),
+      output:
+        terminalText ??
+        (text.length > 0 ? text.join("\n") : fallbackOutput.join("\n")),
       events,
       summary: {
         events: events.length,
