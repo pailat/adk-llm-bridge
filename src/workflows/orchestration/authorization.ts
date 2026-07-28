@@ -13,7 +13,16 @@ export type WorkflowAuthorizationOperation =
   | "plan.put"
   | "plan.get"
   | "plan.list"
-  | "plan.activate";
+  | "plan.activate"
+  | "ownership.claim"
+  | "ownership.propose"
+  | "ownership.approve"
+  | "ownership.transfer"
+  | "ownership.release"
+  | "ownership.list"
+  | "ownership.validate"
+  | "changes.validate"
+  | "integration.publish";
 
 export interface WorkflowAuthenticatedActorIdentity {
   /** Identity established by the host authentication boundary. */
