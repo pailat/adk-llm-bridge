@@ -16,6 +16,7 @@ import type {
   AgentInvocationGateway,
   AgentInvocationResult,
 } from "../../runtime/agent-invocation-gateway.js";
+import { hashWorkflowValue } from "../checkpoint/hash.js";
 import type {
   WorkflowCheckpointStore,
   WorkflowCheckpointWrite,
@@ -23,6 +24,9 @@ import type {
 import { ADKSessionCheckpointStore } from "../checkpoint/store.js";
 import {
   DEFAULT_WORKFLOW_EXECUTION_LIMITS,
+  WORKFLOW_ATTEMPT_CONTEXT_STATE_KEY,
+  type WorkflowAttemptContext,
+  type WorkflowAttemptReplay,
   type WorkflowContext,
   WorkflowError,
   type WorkflowExecutionLimits,
@@ -80,6 +84,29 @@ export interface WorkflowRuntimeHooks {
   ): void | Promise<void>;
   stepFailed?(
     context: WorkflowStepHookContext,
+    failure: WorkflowStepFailure,
+  ): void | Promise<void>;
+  /**
+   * Looks up a previously confirmed durable result before agent invocation.
+   * The runtime validates the returned idempotency key and step identity.
+   */
+  beforeAttempt?(
+    context: WorkflowAttemptContext,
+  ):
+    | WorkflowAttemptReplay
+    | undefined
+    | Promise<WorkflowAttemptReplay | undefined>;
+  /**
+   * Durable outbox boundary. This resolves before the successful step
+   * checkpoint is committed, allowing a resume to replay by idempotency key.
+   */
+  afterAttempt?(
+    context: WorkflowAttemptContext,
+    result: WorkflowStepResult,
+  ): void | Promise<void>;
+  /** Observes an unsuccessful agent invocation before its failure checkpoint. */
+  attemptFailed?(
+    context: WorkflowAttemptContext,
     failure: WorkflowStepFailure,
   ): void | Promise<void>;
 }
@@ -339,14 +366,41 @@ export class WorkflowRuntime {
     }
 
     const lease = await this.acquireWorkspaceLease(step, signal);
+    const leaseLossSignal = workspaceLeaseLossSignal(lease);
+    const attemptScope = combineAbortSignals(
+      leaseLossSignal ? [signal, leaseLossSignal] : [signal],
+    );
+    const idempotencyKey = await workflowAttemptIdempotencyKey({
+      workflowId: this.#definition.id,
+      workflowVersion: this.#definition.version,
+      executionId: this.executionId(),
+      stepId: step.id,
+      agentName: step.agentName,
+      inputHash: prepared.inputHash,
+    });
+    let operationError: unknown;
     try {
       const maxAttempts = validateRetry(step, this.#limits.maxAttemptsPerStep);
       const startedAt = Date.now();
       let lastError: WorkflowError | undefined;
       for (let attemptIndex = 0; attemptIndex < maxAttempts; attemptIndex++) {
         const attempt = prepared.resolution.attempt + attemptIndex;
+        const attemptContext = createWorkflowAttemptContext({
+          definition: this.#definition,
+          executionId: this.executionId(),
+          step,
+          attempt,
+          inputHash: prepared.inputHash,
+          idempotencyKey,
+          lease,
+        });
+        throwIfAttemptAborted(
+          attemptScope.signal,
+          leaseLossSignal,
+          attemptContext,
+        );
         if (attemptIndex > 0) {
-          await retryDelay(step, attemptIndex, signal);
+          await retryDelay(step, attemptIndex, attemptScope.signal);
           await this.checkpointCoordinator().startAttempt(
             step,
             prepared.inputHash,
@@ -360,10 +414,43 @@ export class WorkflowRuntime {
           attempt,
         } satisfies WorkflowStepStartedEvent);
 
-        const result = await this.runAgentAttempt(step, declaredAgent, signal);
-        throwIfAborted(signal);
+        const replay = await this.#hooks?.beforeAttempt?.(attemptContext);
+        throwIfAttemptAborted(
+          attemptScope.signal,
+          leaseLossSignal,
+          attemptContext,
+        );
+        if (replay) {
+          const replayed = validateAttemptReplay(attemptContext, replay);
+          await this.checkpointCoordinator().completeStep(replayed);
+          this.#replayedStepCount++;
+          await this.emitWorkflowEvent({
+            ...this.envelope(),
+            type: "step_replayed",
+            result: replayed,
+          } satisfies WorkflowStepReplayedEvent);
+          return replayed;
+        }
+
+        const result = await this.runAgentAttempt(
+          step,
+          declaredAgent,
+          attemptScope.signal,
+          attemptContext,
+        );
+        throwIfAttemptAborted(
+          attemptScope.signal,
+          leaseLossSignal,
+          attemptContext,
+        );
         if (!result.error) {
           const completed = stepResult(step, result, attempt, startedAt);
+          await this.#hooks?.afterAttempt?.(attemptContext, completed);
+          throwIfAttemptAborted(
+            attemptScope.signal,
+            leaseLossSignal,
+            attemptContext,
+          );
           await this.checkpointCoordinator().completeStep(completed);
           await this.#hooks?.afterStep?.(hookContext, completed);
           await this.emitWorkflowEvent({
@@ -380,6 +467,7 @@ export class WorkflowRuntime {
           { agentName: step.agentName, stepId: step.id, attempt },
         );
         const failure = failureFromError(step, lastError, attempt, startedAt);
+        await this.#hooks?.attemptFailed?.(attemptContext, failure);
         await this.checkpointCoordinator().failStep(failure);
       }
 
@@ -396,8 +484,12 @@ export class WorkflowRuntime {
         failure,
       } satisfies WorkflowStepFailedEvent);
       throw lastError;
+    } catch (caught) {
+      operationError = caught;
+      throw caught;
     } finally {
-      await lease?.release();
+      attemptScope.dispose();
+      await releaseWorkspaceLease(lease, operationError);
     }
   }
 
@@ -433,6 +525,7 @@ export class WorkflowRuntime {
     step: WorkflowStep,
     agent: BaseAgent,
     signal: AbortSignal,
+    attemptContext: WorkflowAttemptContext,
   ): Promise<AgentInvocationResult> {
     let agentSemaphore = this.#agentSemaphores.get(agent);
     if (!agentSemaphore) {
@@ -447,6 +540,9 @@ export class WorkflowRuntime {
           parentContext: this.#parentContext,
           branch: childBranch(this.#parentContext.branch, step.agentName),
           abortSignal: signal,
+          sessionState: {
+            [WORKFLOW_ATTEMPT_CONTEXT_STATE_KEY]: attemptContext,
+          },
           eventSink: (event) => this.#eventSink(event),
         }),
       ),
@@ -566,6 +662,201 @@ export class WorkflowRuntime {
       completedAt: Date.now(),
     };
   }
+}
+
+interface WorkflowAttemptIdentity {
+  workflowId: string;
+  workflowVersion: string;
+  executionId: string;
+  stepId: string;
+  agentName: string;
+  inputHash: string;
+}
+
+async function workflowAttemptIdempotencyKey(
+  identity: WorkflowAttemptIdentity,
+): Promise<string> {
+  const digest = await hashWorkflowValue({
+    protocol: "adk-llm-bridge/workflow-attempt-v1",
+    ...identity,
+  });
+  return `workflow-attempt-v1:${digest}`;
+}
+
+function createWorkflowAttemptContext({
+  definition,
+  executionId,
+  step,
+  attempt,
+  inputHash,
+  idempotencyKey,
+  lease,
+}: {
+  definition: TrustedWorkflowDefinition;
+  executionId: string;
+  step: WorkflowStep;
+  attempt: number;
+  inputHash: string;
+  idempotencyKey: string;
+  lease: WorkspaceLease | undefined;
+}): WorkflowAttemptContext {
+  validateWorkspaceCapability(lease);
+  const workspace = lease
+    ? Object.freeze({
+        workspaceId: lease.workspaceId,
+        leaseId: lease.leaseId,
+        ...(lease.fencingToken === undefined
+          ? {}
+          : { fencingToken: lease.fencingToken }),
+        ...(lease.expiresAt === undefined
+          ? {}
+          : { expiresAt: lease.expiresAt }),
+      })
+    : undefined;
+  return Object.freeze({
+    workflowId: definition.id,
+    workflowVersion: definition.version,
+    executionId,
+    stepId: step.id,
+    agentName: step.agentName,
+    attempt,
+    inputHash,
+    idempotencyKey,
+    ...(workspace ? { workspace } : {}),
+  });
+}
+
+function validateWorkspaceCapability(lease: WorkspaceLease | undefined): void {
+  if (!lease) return;
+  if (
+    lease.fencingToken !== undefined &&
+    (!Number.isSafeInteger(lease.fencingToken) || lease.fencingToken < 0)
+  ) {
+    throw new WorkflowError(
+      "WORKFLOW_EXECUTION_ERROR",
+      "Workspace lease fencingToken must be a non-negative safe integer",
+      { leaseId: lease.leaseId, fencingToken: lease.fencingToken },
+    );
+  }
+  if (lease.expiresAt !== undefined && !Number.isFinite(lease.expiresAt)) {
+    throw new WorkflowError(
+      "WORKFLOW_EXECUTION_ERROR",
+      "Workspace lease expiresAt must be finite",
+      { leaseId: lease.leaseId, expiresAt: lease.expiresAt },
+    );
+  }
+}
+
+function validateAttemptReplay(
+  context: WorkflowAttemptContext,
+  replay: WorkflowAttemptReplay,
+): WorkflowStepResult {
+  const result = isRecord(replay) ? replay.result : undefined;
+  if (
+    !isRecord(replay) ||
+    replay.idempotencyKey !== context.idempotencyKey ||
+    !isRecord(result) ||
+    result.status !== "completed" ||
+    result.id !== context.stepId ||
+    result.agentName !== context.agentName ||
+    typeof result.output !== "string" ||
+    !Number.isSafeInteger(result.attempts) ||
+    result.attempts < 1 ||
+    !Number.isFinite(result.startedAt) ||
+    !Number.isFinite(result.completedAt) ||
+    result.events !== undefined ||
+    (result.content !== undefined && !isWorkflowContent(result.content)) ||
+    (result.stateDelta !== undefined && !isRecord(result.stateDelta)) ||
+    !isJsonSafe(replay)
+  ) {
+    throw new WorkflowError(
+      "WORKFLOW_ATTEMPT_MISMATCH",
+      `Durable workflow attempt result does not match step ${context.stepId}`,
+      {
+        stepId: context.stepId,
+        agentName: context.agentName,
+        expectedIdempotencyKey: context.idempotencyKey,
+        actualIdempotencyKey: isRecord(replay)
+          ? String(replay.idempotencyKey ?? "")
+          : "",
+      },
+    );
+  }
+  return {
+    ...(result as unknown as WorkflowStepResult),
+    attempts: context.attempt,
+    replayed: true,
+  };
+}
+
+function workspaceLeaseLossSignal(
+  lease: WorkspaceLease | undefined,
+): AbortSignal | undefined {
+  return (lease as (WorkspaceLease & { lossSignal?: AbortSignal }) | undefined)
+    ?.lossSignal;
+}
+
+async function releaseWorkspaceLease(
+  lease: WorkspaceLease | undefined,
+  operationError: unknown,
+): Promise<void> {
+  if (!lease) return;
+  try {
+    await lease.release();
+  } catch (releaseError) {
+    if (operationError === undefined) throw releaseError;
+  }
+}
+
+function throwIfAttemptAborted(
+  signal: AbortSignal,
+  leaseLossSignal: AbortSignal | undefined,
+  context: WorkflowAttemptContext,
+): void {
+  if (leaseLossSignal?.aborted) {
+    const reason = leaseLossSignal.reason;
+    const reasonMessage =
+      isRecord(reason) && typeof reason.message === "string"
+        ? reason.message
+        : "Workflow workspace lease was lost";
+    throw new WorkflowError("WORKFLOW_WORKSPACE_LEASE_LOST", reasonMessage, {
+      stepId: context.stepId,
+      agentName: context.agentName,
+      idempotencyKey: context.idempotencyKey,
+      ...(context.workspace ?? {}),
+      leaseLossReason: isJsonSafe(reason) ? reason : { message: reasonMessage },
+    });
+  }
+  throwIfAborted(signal);
+}
+
+function isWorkflowContent(value: unknown): value is Content {
+  return isRecord(value) && Array.isArray(value.parts) && isJsonSafe(value);
+}
+
+function isJsonSafe(value: unknown, seen = new Set<object>()): boolean {
+  if (
+    value === null ||
+    typeof value === "string" ||
+    typeof value === "boolean"
+  ) {
+    return true;
+  }
+  if (typeof value === "number") return Number.isFinite(value);
+  if (typeof value !== "object" || seen.has(value)) return false;
+
+  seen.add(value);
+  const safe = Array.isArray(value)
+    ? value.every((item) => isJsonSafe(item, seen))
+    : (Object.getPrototypeOf(value) === Object.prototype ||
+        Object.getPrototypeOf(value) === null) &&
+      Object.values(value).every((item) => isJsonSafe(item, seen));
+  seen.delete(value);
+  return safe;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function validateLimits(
