@@ -56,10 +56,12 @@ export interface WorkflowAgentHandle {
 }
 
 export interface WorkflowAgentFactory {
-  create(request: WorkflowAgentFactoryRequest): WorkflowAgentHandle;
+  create(
+    request: WorkflowAgentFactoryRequest,
+  ): WorkflowAgentHandle | Promise<WorkflowAgentHandle>;
   get(name: string): WorkflowAgentHandle | undefined;
   list(): readonly WorkflowAgentDescriptor[];
-  release(handle: WorkflowAgentHandle): boolean;
+  release(handle: WorkflowAgentHandle): boolean | Promise<boolean>;
 }
 
 export type WorkflowAgentFactoryErrorCode =

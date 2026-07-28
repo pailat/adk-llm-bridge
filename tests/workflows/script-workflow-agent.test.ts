@@ -176,6 +176,63 @@ class TrackingAgentFactory implements WorkflowAgentFactory {
   }
 }
 
+class AsyncTrackingAgentFactory implements WorkflowAgentFactory {
+  readonly created: string[] = [];
+  readonly releaseAttempts: string[] = [];
+  readonly released: string[] = [];
+  readonly #handles = new Map<string, WorkflowAgentHandle>();
+  readonly #rejectReleaseName?: string;
+  readonly #invalidHandle: boolean;
+
+  constructor(
+    options: {
+      rejectReleaseName?: string;
+      invalidHandle?: boolean;
+    } = {},
+  ) {
+    this.#rejectReleaseName = options.rejectReleaseName;
+    this.#invalidHandle = options.invalidHandle ?? false;
+  }
+
+  async create(
+    request: WorkflowAgentFactoryRequest,
+  ): Promise<WorkflowAgentHandle> {
+    await Promise.resolve();
+    const handle = {
+      descriptor: {
+        providerId: request.providerId,
+        name: request.name,
+      },
+      agent: new ReplyAgent(
+        this.#invalidHandle ? `${request.name}_invalid` : request.name,
+        [`async:${request.name}`],
+      ),
+    } satisfies WorkflowAgentHandle;
+    this.created.push(request.name);
+    this.#handles.set(request.name, handle);
+    return handle;
+  }
+
+  get(name: string): WorkflowAgentHandle | undefined {
+    return this.#handles.get(name);
+  }
+
+  list(): readonly WorkflowAgentDescriptor[] {
+    return [...this.#handles.values()].map((handle) => handle.descriptor);
+  }
+
+  async release(handle: WorkflowAgentHandle): Promise<boolean> {
+    await Promise.resolve();
+    const name = handle.descriptor.name;
+    this.releaseAttempts.push(name);
+    if (name === this.#rejectReleaseName) throw new Error("release failed");
+    if (this.#handles.get(name) !== handle) return false;
+    this.#handles.delete(name);
+    this.released.push(name);
+    return true;
+  }
+}
+
 class DynamicWaitingAgent extends BaseAgent {
   readonly started: Promise<void>;
   #markStarted!: () => void;
@@ -193,39 +250,6 @@ class DynamicWaitingAgent extends BaseAgent {
       context.abortSignal?.addEventListener("abort", () => resolve(), {
         once: true,
       });
-    });
-  }
-
-  protected async *runLiveImpl() {}
-}
-
-class ControlledDynamicAgent extends BaseAgent {
-  readonly started: Promise<void>;
-  #markStarted!: () => void;
-  #proceed!: () => void;
-  readonly #proceedPromise: Promise<void>;
-
-  constructor(name: string) {
-    super({ name });
-    this.started = new Promise((resolve) => {
-      this.#markStarted = resolve;
-    });
-    this.#proceedPromise = new Promise((resolve) => {
-      this.#proceed = resolve;
-    });
-  }
-
-  finish(): void {
-    this.#proceed();
-  }
-
-  protected async *runAsyncImpl(context: InvocationContext) {
-    this.#markStarted();
-    await this.#proceedPromise;
-    yield createEvent({
-      invocationId: context.invocationId,
-      author: this.name,
-      content: { role: "model", parts: [{ text: "finished" }] },
     });
   }
 
@@ -729,9 +753,9 @@ describe("ScriptWorkflowAgent", () => {
     expect(abortedFactory.released).toEqual(["waiting_worker"]);
   });
 
-  test("waits for runtime completion before cleanup on early iterator return", async () => {
-    const controlled = new ControlledDynamicAgent("controlled_worker");
-    const factory = new TrackingAgentFactory(() => controlled);
+  test("cancels runtime and cleans up on early iterator return", async () => {
+    const waiting = new DynamicWaitingAgent("controlled_worker");
+    const factory = new TrackingAgentFactory(() => waiting);
     const workflow = dynamicWorkflow(
       new GeneratorScriptRuntime(function* () {
         yield operation("spawnAgent", {
@@ -752,19 +776,97 @@ describe("ScriptWorkflowAgent", () => {
       invocation(workflow, "wait", undefined, "early-return"),
     );
     await iterator.next();
-    await controlled.started;
+    await waiting.started;
 
-    let returned = false;
-    const closing = iterator.return().then(() => {
-      returned = true;
-    });
-    await Promise.resolve();
-    expect(returned).toBe(false);
-    expect(factory.released).toEqual([]);
-
-    controlled.finish();
-    await closing;
+    await iterator.return();
     expect(factory.released).toEqual(["controlled_worker"]);
+  });
+
+  test("awaits async create and release operations", async () => {
+    const factory = new AsyncTrackingAgentFactory();
+    const workflow = dynamicWorkflow(
+      new GeneratorScriptRuntime(function* () {
+        yield operation("spawnAgent", {
+          request: { providerId: "codex", name: "async_worker" },
+        });
+        const result = (yield operation("run", {
+          step: { id: "async", agentName: "async_worker", input: "task" },
+        })) as { output: string };
+        expect(yield operation("releaseAgent", { name: "async_worker" })).toBe(
+          true,
+        );
+        return result.output;
+      }),
+      async () => factory,
+    );
+
+    const events = await collect(workflow);
+
+    expect(events.at(-2)?.content?.parts?.[0]?.text).toBe("async:async_worker");
+    expect(factory.created).toEqual(["async_worker"]);
+    expect(factory.released).toEqual(["async_worker"]);
+  });
+
+  test("releaseAll awaits every async release after one rejects", async () => {
+    const factory = new AsyncTrackingAgentFactory({
+      rejectReleaseName: "second_worker",
+    });
+    const workflow = dynamicWorkflow(
+      new GeneratorScriptRuntime(function* () {
+        yield operation("spawnAgent", {
+          request: { providerId: "codex", name: "first_worker" },
+        });
+        yield operation("spawnAgent", {
+          request: { providerId: "codex", name: "second_worker" },
+        });
+        return "done";
+      }),
+      () => factory,
+    );
+
+    await collect(workflow);
+
+    expect(factory.releaseAttempts).toEqual(["second_worker", "first_worker"]);
+    expect(factory.released).toEqual(["first_worker"]);
+  });
+
+  test("awaits invalid async handle rollback before surfacing failure", async () => {
+    const factory = new AsyncTrackingAgentFactory({ invalidHandle: true });
+    const workflow = dynamicWorkflow(
+      new GeneratorScriptRuntime(function* () {
+        yield operation("spawnAgent", {
+          request: { providerId: "codex", name: "invalid_worker" },
+        });
+      }),
+      () => factory,
+    );
+
+    await expect(collect(workflow)).rejects.toThrow("invalid handle");
+    expect(factory.releaseAttempts).toEqual(["invalid_worker"]);
+    expect(factory.released).toEqual(["invalid_worker"]);
+  });
+
+  test("does not abort the invocation signal after normal completion", async () => {
+    const runtime = new GeneratorScriptRuntime(function* () {
+      yield operation("emit", {
+        event: { type: "custom", name: "normal_completion" },
+      });
+      return "done";
+    });
+    const workflow = new ScriptWorkflowAgent({
+      name: "normal_completion",
+      definition: defineScriptWorkflow({
+        id: "normal-completion",
+        version: "1",
+        source: "return 'done';",
+      }),
+      runtime,
+    });
+
+    await collect(workflow);
+
+    expect(runtime.sessions).toHaveLength(1);
+    expect(runtime.sessions[0]?.signal?.aborted).toBe(false);
   });
 
   test("rejects unknown, duplicate, static shadow, and static release operations", async () => {
