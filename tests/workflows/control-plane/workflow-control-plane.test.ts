@@ -15,11 +15,14 @@ import {
   InMemoryWorkflowExecutionEventStore,
   InMemoryWorkflowExecutionStore,
 } from "../../../src/workflows/execution/stores.js";
+import { WorkflowActorContext } from "../../../src/workflows/orchestration/authorization.js";
 import { IntegrationGate } from "../../../src/workflows/resources/integration-gate.js";
 import { InMemoryWorkflowArtifactStore } from "../../../src/workflows/resources/workflow-artifact-store.js";
+import type { WorkflowTaskAuthorityPort } from "../../../src/workflows/tasks/authority.js";
 import type { WorkflowTaskDriverResult } from "../../../src/workflows/tasks/contracts.js";
 import { WorkflowTaskController } from "../../../src/workflows/tasks/controller.js";
 import {
+  InMemoryWorkflowTaskCommandStore,
   InMemoryWorkflowTaskMessageStore,
   InMemoryWorkflowTaskStore,
 } from "../../../src/workflows/tasks/stores.js";
@@ -98,29 +101,37 @@ describe("WorkflowControlPlane", () => {
       events: [{ sequence: 1, event: { name: "accepted" } }],
     });
 
-    const handle = (await control.dispatch({
-      ...envelope,
-      operation: "task.spawn",
-      payload: {
-        executionId: "execution-1",
-        taskId: "review",
-        agentId: "codex",
-        orchestration: {
-          planRevision: 1,
-          ownership: [{ grantId: "grant-review", fencingToken: 1 }],
+    const reviewActor = actor("codex", "review");
+    const handle = (await control.dispatch(
+      {
+        ...envelope,
+        operation: "task.spawn",
+        payload: {
+          executionId: "execution-1",
+          taskId: "review",
+          agentId: "codex",
+          input: { patch: "artifact-1" },
+          operationId: "spawn-review",
         },
-        input: { patch: "artifact-1" },
       },
-    })) as { executionId: string; taskId: string };
+      { actor: reviewActor },
+    )) as { executionId: string; taskId: string };
     const waiting = control.dispatch(
       { ...envelope, operation: "task.mailbox.wait", payload: handle },
       { signal: AbortSignal.timeout(1_000) },
     );
-    await control.dispatch({
-      ...envelope,
-      operation: "task.mailbox.send",
-      payload: { ...handle, payload: { instruction: "review" } },
-    });
+    await control.dispatch(
+      {
+        ...envelope,
+        operation: "task.mailbox.send",
+        payload: {
+          ...handle,
+          payload: { instruction: "review" },
+          operationId: "send-review",
+        },
+      },
+      { actor: reviewActor },
+    );
     await expect(waiting).resolves.toMatchObject({
       messages: [{ sequence: 1, payload: { instruction: "review" } }],
     });
@@ -222,8 +233,269 @@ describe("WorkflowControlPlane", () => {
         payload: { executionId: "execution-1", actor: { actorId: "forged" } },
       } as never),
     ).rejects.toMatchObject({ code: "WORKFLOW_CONTROL_INVALID_REQUEST" });
+
+    for (const extra of [
+      { parentTaskId: "forged-parent" },
+      {
+        orchestration: {
+          planRevision: 1,
+          ownership: [{ grantId: "forged", fencingToken: 1 }],
+        },
+      },
+    ]) {
+      await expect(
+        control.dispatch(
+          {
+            ...envelope,
+            operation: "task.spawn",
+            payload: {
+              executionId: "execution-1",
+              taskId: "task-1",
+              agentId: "codex",
+              operationId: "spawn-1",
+              ...extra,
+            },
+          } as never,
+          { actor: actor("codex", "task-1") },
+        ),
+      ).rejects.toMatchObject({ code: "WORKFLOW_CONTROL_INVALID_REQUEST" });
+    }
+
+    await expect(
+      control.dispatch(
+        {
+          ...envelope,
+          operation: "task.spawn",
+          payload: {
+            executionId: "execution-1",
+            taskId: "task-1",
+            agentId: "codex",
+            operationId: "",
+          },
+        },
+        { actor: actor("codex", "task-1") },
+      ),
+    ).rejects.toMatchObject({ code: "WORKFLOW_CONTROL_INVALID_REQUEST" });
+  });
+
+  test("authenticates task mutations, derives senders, and preserves idempotency", async () => {
+    const taskGate = deferred<WorkflowTaskDriverResult>();
+    const store = new InMemoryWorkflowTaskStore();
+    const messageStore = new InMemoryWorkflowTaskMessageStore();
+    const authority: WorkflowTaskAuthorityPort = {
+      async resolveRoot({ capability, request }) {
+        expect(capability).toBeInstanceOf(WorkflowActorContext);
+        expect((capability as WorkflowActorContext).identity.taskId).toBe(
+          request.taskId,
+        );
+        return {
+          planRevision: 1,
+          ownership: [{ grantId: `grant-${request.taskId}`, fencingToken: 1 }],
+        };
+      },
+      async deriveChild() {
+        throw new Error("not used");
+      },
+      async validateAttempt() {},
+      async validateAuthenticatedSender({ actor: senderActor, sender }) {
+        expect(senderActor).toBeInstanceOf(WorkflowActorContext);
+        expect((senderActor as WorkflowActorContext).identity.taskId).toBe(
+          sender.taskId,
+        );
+      },
+    };
+    const tasks = new WorkflowTaskController({
+      store,
+      messageStore,
+      commandStore: new InMemoryWorkflowTaskCommandStore({
+        taskStore: store,
+        messageStore,
+      }),
+      authorityPort: authority,
+      driver: { execute: async () => await taskGate.promise },
+      durable: {
+        workerId: "control-worker",
+        leaseDurationMs: 60_000,
+        heartbeatIntervalMs: 10_000,
+        scheduleHeartbeat: () => ({ cancel() {} }),
+      },
+    });
+    const artifacts = new InMemoryWorkflowArtifactStore();
+    const control = new WorkflowControlPlane({
+      executions: new WorkflowExecutionController({
+        store: new InMemoryWorkflowExecutionStore(),
+        eventStore: new InMemoryWorkflowExecutionEventStore(),
+        driver: { execute: async () => ({}) },
+      }),
+      tasks,
+      artifacts,
+      integration: new IntegrationGate(artifacts, {
+        validate: async () => ({ verdict: "accepted", result: null }),
+      }),
+    });
+    const senderActor = actor("sender-agent", "sender");
+    const targetActor = actor("target-agent", "target");
+
+    const spawnSender = {
+      ...envelope,
+      operation: "task.spawn",
+      payload: {
+        executionId: "execution-1",
+        taskId: "sender",
+        agentId: "sender-agent",
+        operationId: "spawn-sender",
+      },
+    } as const;
+    await expect(control.dispatch(spawnSender)).rejects.toMatchObject({
+      code: "WORKFLOW_CONTROL_INVALID_REQUEST",
+    });
+    await expect(
+      control.dispatch(spawnSender, {
+        actor: {
+          actorId: "principal-sender-agent",
+          agentId: "sender-agent",
+          executionId: "execution-1",
+          taskId: "sender",
+        } as never,
+      }),
+    ).rejects.toMatchObject({ code: "WORKFLOW_CONTROL_INVALID_REQUEST" });
+    await expect(
+      control.dispatch(spawnSender, { actor: targetActor }),
+    ).rejects.toMatchObject({ code: "WORKFLOW_CONTROL_INVALID_REQUEST" });
+    await expect(tasks.status(spawnSender.payload)).rejects.toMatchObject({
+      code: "WORKFLOW_TASK_NOT_FOUND",
+    });
+
+    const sender = await control.dispatch(spawnSender, { actor: senderActor });
+    await expect(
+      control.dispatch(spawnSender, { actor: senderActor }),
+    ).resolves.toEqual(sender);
+    await control.dispatch(
+      {
+        ...envelope,
+        operation: "task.spawn",
+        payload: {
+          executionId: "execution-1",
+          taskId: "target",
+          agentId: "target-agent",
+          operationId: "spawn-target",
+        },
+      },
+      { actor: targetActor },
+    );
+    await eventually(async () => {
+      expect(
+        (await tasks.status({ executionId: "execution-1", taskId: "sender" }))
+          .status,
+      ).toBe("running");
+    });
+
+    const send = {
+      ...envelope,
+      operation: "task.mailbox.send",
+      payload: {
+        executionId: "execution-1",
+        taskId: "target",
+        payload: { instruction: "review" },
+        operationId: "send-1",
+      },
+    } as const;
+    await expect(control.dispatch(send)).rejects.toMatchObject({
+      code: "WORKFLOW_CONTROL_INVALID_REQUEST",
+    });
+    await expect(
+      control.dispatch(send, {
+        actor: {
+          actorId: "principal-sender-agent",
+          agentId: "sender-agent",
+          executionId: "execution-1",
+          taskId: "sender",
+        } as never,
+      }),
+    ).rejects.toMatchObject({ code: "WORKFLOW_CONTROL_INVALID_REQUEST" });
+    await expect(
+      control.dispatch(send, {
+        actor: new WorkflowActorContext({
+          actorId: "principal-sender-agent",
+          agentId: "sender-agent",
+          executionId: "execution-other",
+          taskId: "sender",
+        }),
+      }),
+    ).rejects.toMatchObject({ code: "WORKFLOW_CONTROL_INVALID_REQUEST" });
+    await expect(
+      control.dispatch(
+        { ...send, payload: { ...send.payload, operationId: "" } },
+        { actor: senderActor },
+      ),
+    ).rejects.toMatchObject({ code: "WORKFLOW_CONTROL_INVALID_REQUEST" });
+    await expect(
+      tasks.readMailbox({ executionId: "execution-1", taskId: "target" }),
+    ).resolves.toMatchObject({ messages: [] });
+
+    const first = await control.dispatch(send, { actor: senderActor });
+    await expect(
+      control.dispatch(send, { actor: senderActor }),
+    ).resolves.toEqual(first);
+    await expect(
+      control.dispatch(
+        {
+          ...send,
+          payload: { ...send.payload, senderTaskId: "target" },
+        } as never,
+        { actor: senderActor },
+      ),
+    ).rejects.toMatchObject({ code: "WORKFLOW_CONTROL_INVALID_REQUEST" });
+
+    taskGate.resolve({});
+    await tasks.waitForIdle();
+  });
+
+  test("passes an opaque task sweep cursor through unchanged", async () => {
+    const cursor = "v1:opaque/not-for-the-control-plane";
+    let received: unknown;
+    const artifacts = new InMemoryWorkflowArtifactStore();
+    const control = new WorkflowControlPlane({
+      executions: new WorkflowExecutionController({
+        store: new InMemoryWorkflowExecutionStore(),
+        eventStore: new InMemoryWorkflowExecutionEventStore(),
+        driver: { execute: async () => ({}) },
+      }),
+      tasks: new WorkflowTaskController({
+        store: new InMemoryWorkflowTaskStore(),
+        messageStore: new InMemoryWorkflowTaskMessageStore(),
+        driver: { execute: async () => ({}) },
+      }),
+      artifacts,
+      integration: new IntegrationGate(artifacts, {
+        validate: async () => ({ verdict: "accepted", result: null }),
+      }),
+      dispatcher: {
+        async sweep(request: unknown) {
+          received = request;
+          return { nextCursor: cursor };
+        },
+      } as never,
+    });
+
+    await control.dispatch({
+      ...envelope,
+      operation: "task.sweep",
+      payload: { executionId: "execution-1", cursor, limit: 7 },
+    });
+    expect(received).toEqual({ executionId: "execution-1", cursor, limit: 7 });
   });
 });
+
+function actor(agentId: string, taskId: string): WorkflowActorContext {
+  return new WorkflowActorContext({
+    actorId: `principal-${agentId}`,
+    agentId,
+    executionId: "execution-1",
+    taskId,
+    planRevision: 1,
+  });
+}
 
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
@@ -233,4 +505,20 @@ function deferred<T>() {
     reject = rejectPromise;
   });
   return { promise, resolve, reject };
+}
+
+async function eventually(
+  assertion: () => void | Promise<void>,
+): Promise<void> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 100; attempt++) {
+    try {
+      await assertion();
+      return;
+    } catch (error) {
+      lastError = error;
+      await Bun.sleep(1);
+    }
+  }
+  throw lastError;
 }
