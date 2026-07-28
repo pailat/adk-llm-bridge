@@ -8,6 +8,13 @@ import { describe, expect, test } from "bun:test";
 import { BaseAgent } from "@google/adk";
 import packageJson from "../../package.json";
 import * as root from "../../src/index.js";
+import type {
+  WorkflowAgentDescriptor,
+  WorkflowAgentFactory,
+  WorkflowAgentHandle,
+  WorkflowWorkspaceConfig,
+  WorkspaceAdapter,
+} from "../../src/workflows/index.js";
 import * as workflows from "../../src/workflows/index.js";
 
 describe("workflows public exports", () => {
@@ -27,6 +34,40 @@ describe("workflows public exports", () => {
     expect(workflows.ADKSessionCheckpointStore).toBeFunction();
     expect(workflows.QuickJSSyncGeneratorRuntime).toBeFunction();
     expect(workflows.runWorkflowScript).toBeFunction();
+    expect(workflows.ExternalAgentWorkflowFactory).toBeFunction();
+    expect(workflows.WorkflowAgentFactoryError).toBeFunction();
+    expect(workflows.DEFAULT_WORKFLOW_AGENT_FACTORY_LIMITS).toBeObject();
+    expect(workflows.InMemoryWorkspaceAdapter).toBeFunction();
+    expect(workflows.normalizeWorkspacePath).toBeFunction();
+    expect(workflows.normalizeWorkspaceLeaseRequest).toBeFunction();
+    expect(workflows.workspacePathsOverlap).toBeFunction();
+    expect(workflows.findWorkspacePathOverlaps).toBeFunction();
+  });
+
+  test("./workflows keeps host contracts and agent handles type-only", () => {
+    const adapter: WorkspaceAdapter = new workflows.InMemoryWorkspaceAdapter({
+      createLeaseId: () => "lease-1",
+      now: () => 1,
+    });
+    const workspace = {
+      workspaceId: "repository",
+      adapter,
+    } satisfies WorkflowWorkspaceConfig;
+    const descriptor = {
+      providerId: "codex",
+      name: "reviewer",
+    } satisfies WorkflowAgentDescriptor;
+    const listDescriptors = (factory: WorkflowAgentFactory) => factory.list();
+    const getHostAgent = (handle: WorkflowAgentHandle) => handle.agent;
+
+    expect(workspace.adapter).toBe(adapter);
+    expect(descriptor).toEqual({ providerId: "codex", name: "reviewer" });
+    expect(listDescriptors).toBeFunction();
+    expect(getHostAgent).toBeFunction();
+    expect("WorkspaceAdapter" in workflows).toBe(false);
+    expect("WorkflowWorkspaceConfig" in workflows).toBe(false);
+    expect("WorkflowAgentFactory" in workflows).toBe(false);
+    expect("WorkflowAgentHandle" in workflows).toBe(false);
   });
 
   test("package exports publishes the workflows subpath", () => {
