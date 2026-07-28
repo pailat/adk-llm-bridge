@@ -327,6 +327,9 @@ export class QuickJSSyncGeneratorRuntime implements WorkflowScriptRuntime {
               ...(options === undefined ? {} : { options }),
             }),
             emit: (event) => __operation("emit", { event }),
+            spawnAgent: (request) => __operation("spawnAgent", { request }),
+            listAgents: () => __operation("listAgents", {}),
+            releaseAgent: (name) => __operation("releaseAgent", { name }),
           });
           const __factory = function* (__workflowContext) {
             const ctx = __workflowContext;
