@@ -1053,6 +1053,7 @@ function normalizeSpawnRequest(
         key !== "taskId" &&
         key !== "parentTaskId" &&
         key !== "agentId" &&
+        key !== "orchestration" &&
         key !== "input",
     )
   ) {

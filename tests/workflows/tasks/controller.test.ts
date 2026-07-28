@@ -65,11 +65,21 @@ describe("WorkflowTaskController", () => {
       },
     });
 
-    const root = await controller.start(spawn("root"));
+    const root = await controller.start({
+      ...spawn("root"),
+      orchestration: {
+        planRevision: 7,
+        ownership: [{ grantId: "grant-root", fencingToken: 11 }],
+      },
+    });
     const rootResult = await controller.join(root);
     expect(rootResult.output).toEqual({
       executionId: "execution-1",
       taskId: "child",
+    });
+    expect(rootResult.orchestration).toEqual({
+      planRevision: 7,
+      ownership: [{ grantId: "grant-root", fencingToken: 11 }],
     });
     expect(childHandle).toBeDefined();
     await eventually(async () => expect(childRequest).toBeDefined());
@@ -82,6 +92,10 @@ describe("WorkflowTaskController", () => {
     expect(
       (await controller.status(childHandle as WorkflowTaskHandle)).parentTaskId,
     ).toBe("root");
+    // Child authority is deny-by-default. WorkflowTaskDriverChildRequest does
+    // not currently expose an orchestration binding, so parent grants cannot
+    // be inherited implicitly.
+    expect(childRequest?.task.orchestration).toBeUndefined();
     childGate.resolve({ output: "ack" });
     await expect(
       controller.join(childHandle as WorkflowTaskHandle),
@@ -401,6 +415,16 @@ describe("WorkflowTaskController", () => {
       revision: 3,
       output: "legacy",
     });
+  });
+
+  test("accepts only known spawn fields after adding orchestration", async () => {
+    const { controller } = harness({ execute: async () => ({}) });
+    await expect(
+      controller.spawn({
+        ...spawn("unknown"),
+        unexpected: true,
+      } as Parameters<WorkflowTaskController["spawn"]>[0]),
+    ).rejects.toMatchObject({ code: "WORKFLOW_TASK_INVALID_REQUEST" });
   });
 });
 
