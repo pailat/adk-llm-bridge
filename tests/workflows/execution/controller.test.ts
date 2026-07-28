@@ -199,6 +199,7 @@ describe("WorkflowExecutionController", () => {
       ...record("execution-1"),
       status: "running",
       startedAt: 2,
+      updatedAt: 2,
     });
     const controller = new WorkflowExecutionController({
       store,

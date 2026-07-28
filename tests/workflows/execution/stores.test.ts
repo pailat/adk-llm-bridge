@@ -18,25 +18,24 @@ describe("InMemoryWorkflowExecutionStore", () => {
   test("applies exactly one concurrent CAS transition", async () => {
     const store = new InMemoryWorkflowExecutionStore();
     const initial = await store.create(record("execution-1"));
-    const completed = {
+    const running = {
       ...initial,
-      status: "completed",
+      status: "running",
       revision: 2,
       updatedAt: 2,
-      completedAt: 2,
+      startedAt: 2,
     } satisfies WorkflowExecutionRecord;
-    const failed = {
+    const cancelling = {
       ...initial,
-      status: "failed",
+      status: "cancelling",
       revision: 2,
       updatedAt: 2,
-      completedAt: 2,
-      error: { code: "FAILED", message: "failed" },
+      cancelRequestedAt: 2,
     } satisfies WorkflowExecutionRecord;
 
     const results = await Promise.allSettled([
-      store.compareAndSet(completed, 1),
-      store.compareAndSet(failed, 1),
+      store.compareAndSet(running, 1),
+      store.compareAndSet(cancelling, 1),
     ]);
 
     expect(
@@ -51,6 +50,166 @@ describe("InMemoryWorkflowExecutionStore", () => {
       reason: { code: "WORKFLOW_EXECUTION_CONFLICT" },
     });
     expect((await store.get("execution-1"))?.revision).toBe(2);
+  });
+
+  test("enforces record shapes, transition matrix, and attempt semantics", async () => {
+    const store = new InMemoryWorkflowExecutionStore();
+    await expect(
+      store.create(record("invalid-running", { status: "running" })),
+    ).rejects.toMatchObject({ code: "WORKFLOW_EXECUTION_INVALID_REQUEST" });
+    const queued = await store.create(record("execution-1"));
+
+    await expect(
+      store.compareAndSet(
+        {
+          ...queued,
+          status: "completed",
+          revision: 2,
+          updatedAt: 2,
+          startedAt: 2,
+          completedAt: 2,
+        },
+        1,
+      ),
+    ).rejects.toMatchObject({
+      code: "WORKFLOW_EXECUTION_INVALID_TRANSITION",
+    });
+    await expect(
+      store.compareAndSet(
+        {
+          ...queued,
+          status: "running",
+          revision: 2,
+          attempt: 2,
+          updatedAt: 2,
+          startedAt: 2,
+        },
+        1,
+      ),
+    ).rejects.toMatchObject({ code: "WORKFLOW_EXECUTION_INVALID_REQUEST" });
+
+    const terminalStore = new InMemoryWorkflowExecutionStore();
+    const completed = await terminalStore.create(
+      record("terminal", {
+        status: "completed",
+        updatedAt: 2,
+        startedAt: 1,
+        completedAt: 2,
+      }),
+    );
+    await expect(
+      terminalStore.compareAndSet(
+        {
+          ...completed,
+          status: "running",
+          revision: 2,
+          updatedAt: 3,
+          startedAt: 1,
+          completedAt: undefined,
+        },
+        1,
+      ),
+    ).rejects.toMatchObject({
+      code: "WORKFLOW_EXECUTION_INVALID_TRANSITION",
+    });
+  });
+
+  test("rejects inconsistent terminal and cancellation fields", async () => {
+    const invalidRecords: WorkflowExecutionRecord[] = [
+      record("completed-with-error", {
+        status: "completed",
+        updatedAt: 2,
+        startedAt: 1,
+        completedAt: 2,
+        error: { code: "FAILED", message: "unexpected" },
+      }),
+      record("failed-without-error", {
+        status: "failed",
+        updatedAt: 2,
+        startedAt: 1,
+        completedAt: 2,
+      }),
+      record("cancelled-without-request", {
+        status: "cancelled",
+        updatedAt: 2,
+        completedAt: 2,
+        error: { code: "CANCELLED", message: "cancelled" },
+      }),
+    ];
+
+    for (const invalidRecord of invalidRecords) {
+      await expect(
+        new InMemoryWorkflowExecutionStore().create(invalidRecord),
+      ).rejects.toMatchObject({
+        code: "WORKFLOW_EXECUTION_INVALID_REQUEST",
+      });
+    }
+  });
+
+  test("keeps workflow request identity and payload immutable across CAS", async () => {
+    const store = new InMemoryWorkflowExecutionStore();
+    const queued = await store.create(
+      record("execution-1", {
+        input: { task: "original" },
+        metadata: { owner: "agent-a" },
+      }),
+    );
+
+    await expect(
+      store.compareAndSet(
+        {
+          ...queued,
+          input: { task: "mutated" },
+          status: "running",
+          revision: 2,
+          updatedAt: 2,
+          startedAt: 2,
+        },
+        1,
+      ),
+    ).rejects.toMatchObject({ code: "WORKFLOW_EXECUTION_INVALID_REQUEST" });
+    await expect(
+      store.compareAndSet(
+        {
+          ...queued,
+          metadata: { owner: "agent-b" },
+          status: "running",
+          revision: 2,
+          updatedAt: 2,
+          startedAt: 2,
+        },
+        1,
+      ),
+    ).rejects.toMatchObject({ code: "WORKFLOW_EXECUTION_INVALID_REQUEST" });
+  });
+
+  test("does not rewrite lifecycle timestamps across transitions", async () => {
+    const store = new InMemoryWorkflowExecutionStore();
+    const queued = await store.create(record("execution-1"));
+    const running = await store.compareAndSet(
+      {
+        ...queued,
+        status: "running",
+        revision: 2,
+        updatedAt: 2,
+        startedAt: 2,
+      },
+      1,
+    );
+
+    await expect(
+      store.compareAndSet(
+        {
+          ...running,
+          status: "completed",
+          revision: 3,
+          updatedAt: 4,
+          startedAt: 3,
+          completedAt: 4,
+        },
+        2,
+      ),
+    ).rejects.toMatchObject({ code: "WORKFLOW_EXECUTION_INVALID_REQUEST" });
   });
 
   test("stores immutable JSON snapshots and rejects duplicates", async () => {
@@ -100,6 +259,19 @@ describe("InMemoryWorkflowExecutionStore", () => {
 });
 
 describe("InMemoryWorkflowExecutionEventStore", () => {
+  test("validates bounded capacity configuration", () => {
+    expect(
+      () =>
+        new InMemoryWorkflowExecutionEventStore({
+          maxEventsPerExecution: 0,
+        }),
+    ).toThrowError(
+      expect.objectContaining({
+        code: "WORKFLOW_EXECUTION_INVALID_REQUEST",
+      }),
+    );
+  });
+
   test("assigns monotonic sequences and reads strictly after a cursor", async () => {
     const store = new InMemoryWorkflowExecutionEventStore();
     const appended = await Promise.all(
@@ -158,6 +330,37 @@ describe("InMemoryWorkflowExecutionEventStore", () => {
         cursor: { executionId: "execution-2", afterSequence: 0 },
       }),
     ).rejects.toMatchObject({ code: "WORKFLOW_EXECUTION_INVALID_REQUEST" });
+  });
+
+  test("rejects capacity overflow without deleting events or invalidating cursors", async () => {
+    const store = new InMemoryWorkflowExecutionEventStore({
+      maxEventsPerExecution: 2,
+      maxTotalEvents: 3,
+    });
+    await store.append("execution-1", event("execution-1", 1));
+    const first = await store.read({ executionId: "execution-1", limit: 1 });
+    await store.append("execution-1", event("execution-1", 2));
+
+    await expect(
+      store.append("execution-1", event("execution-1", 3)),
+    ).rejects.toMatchObject({
+      code: "WORKFLOW_EXECUTION_CAPACITY_EXCEEDED",
+    });
+    const remaining = await store.read({
+      executionId: "execution-1",
+      cursor: first.cursor,
+    });
+    expect(remaining.events.map((item) => item.sequence)).toEqual([2]);
+
+    await store.append("execution-2", event("execution-2", 3));
+    await expect(
+      store.append("execution-3", event("execution-3", 4)),
+    ).rejects.toMatchObject({
+      code: "WORKFLOW_EXECUTION_CAPACITY_EXCEEDED",
+    });
+    expect(
+      (await store.read({ executionId: "execution-1" })).events,
+    ).toHaveLength(2);
   });
 });
 
