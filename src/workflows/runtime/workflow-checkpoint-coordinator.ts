@@ -70,27 +70,28 @@ export class WorkflowCheckpointCoordinator {
   }
 
   async initialize(): Promise<void> {
-    const candidate = await createWorkflowCheckpoint({
-      definition: this.#config.definition,
-      executionId: this.#config.executionId,
-      input: this.#config.input,
-    });
-    const saved = await this.#config.store.load({
-      context: this.#config.context,
-      workflowId: this.#config.definition.id,
-      executionId: this.#config.executionId,
-    });
+    await this.#exclusive(async () => {
+      const candidate = await createWorkflowCheckpoint({
+        definition: this.#config.definition,
+        executionId: this.#config.executionId,
+        input: this.#config.input,
+      });
+      const saved = await this.#config.store.load({
+        context: this.#config.context,
+        workflowId: this.#config.definition.id,
+        executionId: this.#config.executionId,
+      });
 
-    if (saved) {
-      validateWorkflowCheckpoint(saved, checkpointExpectation(candidate));
-      this.#checkpoint = saved;
-      this.#revision = await workflowCheckpointRevision(saved);
-      return;
-    }
+      if (saved) {
+        validateWorkflowCheckpoint(saved, checkpointExpectation(candidate));
+        const revision = await workflowCheckpointRevision(saved);
+        this.#checkpoint = saved;
+        this.#revision = revision;
+        return;
+      }
 
-    this.#checkpoint = candidate;
-    this.#revision = null;
-    await this.#persist();
+      await this.#persist(candidate, undefined, null);
+    });
   }
 
   async prepareStep(step: WorkflowStep): Promise<PreparedWorkflowStep> {
@@ -99,13 +100,13 @@ export class WorkflowCheckpointCoordinator {
       const checkpoint = this.checkpoint();
       const resolution = resolveWorkflowStep(checkpoint, step, inputHash);
       if (resolution.action === "execute") {
-        this.#checkpoint = withWorkflowStepRunning(
+        const candidate = withWorkflowStepRunning(
           checkpoint,
           step,
           inputHash,
           resolution.attempt,
         );
-        await this.#persist(step.id);
+        await this.#persist(candidate, step.id);
       }
       return { inputHash, resolution };
     });
@@ -117,34 +118,34 @@ export class WorkflowCheckpointCoordinator {
     attempt: number,
   ): Promise<void> {
     await this.#exclusive(async () => {
-      this.#checkpoint = withWorkflowStepRunning(
+      const candidate = withWorkflowStepRunning(
         this.checkpoint(),
         step,
         inputHash,
         attempt,
       );
-      await this.#persist(step.id);
+      await this.#persist(candidate, step.id);
     });
   }
 
   async completeStep(result: WorkflowStepResult): Promise<void> {
     await this.#exclusive(async () => {
-      this.#checkpoint = withWorkflowStepCompleted(this.checkpoint(), result);
-      await this.#persist(result.id);
+      const candidate = withWorkflowStepCompleted(this.checkpoint(), result);
+      await this.#persist(candidate, result.id);
     });
   }
 
   async failStep(failure: WorkflowStepFailure): Promise<void> {
     await this.#exclusive(async () => {
-      this.#checkpoint = withWorkflowStepFailed(this.checkpoint(), failure);
-      await this.#persist(failure.id);
+      const candidate = withWorkflowStepFailed(this.checkpoint(), failure);
+      await this.#persist(candidate, failure.id);
     });
   }
 
   async completeWorkflow(output: string | Content | undefined): Promise<void> {
     await this.#exclusive(async () => {
-      this.#checkpoint = withWorkflowCompleted(this.checkpoint(), output);
-      await this.#persist();
+      const candidate = withWorkflowCompleted(this.checkpoint(), output);
+      await this.#persist(candidate);
     });
   }
 
@@ -153,8 +154,8 @@ export class WorkflowCheckpointCoordinator {
     status: "failed" | "cancelled",
   ): Promise<void> {
     await this.#exclusive(async () => {
-      this.#checkpoint = withWorkflowFailed(this.checkpoint(), error, status);
-      await this.#persist();
+      const candidate = withWorkflowFailed(this.checkpoint(), error, status);
+      await this.#persist(candidate);
     });
   }
 
@@ -168,15 +169,23 @@ export class WorkflowCheckpointCoordinator {
     return this.#checkpoint;
   }
 
-  async #persist(stepId?: string): Promise<void> {
-    const checkpoint = this.checkpoint();
-    const revision = await workflowCheckpointRevision(checkpoint);
+  async #persist(
+    candidate: WorkflowCheckpointV1,
+    stepId?: string,
+    expectedRevision: WorkflowCheckpointRevision | null | undefined = this
+      .#revision,
+  ): Promise<void> {
+    const revision = await workflowCheckpointRevision(candidate);
     const write = await this.#config.store.save({
       context: this.#config.context,
-      checkpoint,
-      expectedRevision: this.#revision,
+      checkpoint: candidate,
+      expectedRevision,
       revision,
     });
+
+    // A successful store write is the commit boundary. The notification hook
+    // may fail, but it cannot roll back the durable checkpoint or its revision.
+    this.#checkpoint = candidate;
     this.#revision = revision;
     await this.#config.onWrite(write, stepId);
   }
