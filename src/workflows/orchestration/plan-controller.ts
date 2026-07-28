@@ -23,6 +23,7 @@ import {
 import {
   immutableWorkflowOrchestrationJson,
   validateWorkflowPlan,
+  workflowMutationReservations,
 } from "./json.js";
 import type {
   WorkflowOrchestrationStateStore,
@@ -32,8 +33,14 @@ import type {
 export interface WorkflowPlanControllerConfig {
   plans: WorkflowPlanStore;
   state: WorkflowOrchestrationStateStore;
-  /** Host policy. Omitting it intentionally denies every operation. */
-  authorizer?: WorkflowAuthorizer;
+  /** Mandatory host authentication/authorization boundary for every call. */
+  authorizer: WorkflowAuthorizer;
+  /**
+   * Additional host authority for the first plan revision and activation.
+   * Omitting it denies bootstrap, preventing a candidate plan from granting
+   * authority to the principal submitting that same plan.
+   */
+  bootstrapAuthorizer?: WorkflowAuthorizer;
   now?: () => number;
   maxCasRetries?: number;
 }
@@ -48,12 +55,15 @@ export class WorkflowPlanController {
   readonly #plans: WorkflowPlanStore;
   readonly #state: WorkflowOrchestrationStateStore;
   readonly #authorizer: WorkflowAuthorizer;
+  readonly #bootstrapAuthorizer: WorkflowAuthorizer;
   readonly #now: () => number;
   readonly #maxCasRetries: number;
 
   constructor(config: WorkflowPlanControllerConfig) {
-    if (!config?.plans || !config.state) {
-      invalid("Workflow plan controller requires plan and state stores");
+    if (!config?.plans || !config.state || !config.authorizer) {
+      invalid(
+        "Workflow plan controller requires plan and state stores plus a host authorizer",
+      );
     }
     if (
       config.maxCasRetries !== undefined &&
@@ -65,7 +75,9 @@ export class WorkflowPlanController {
     }
     this.#plans = config.plans;
     this.#state = config.state;
-    this.#authorizer = config.authorizer ?? DENY_ALL_WORKFLOW_AUTHORIZER;
+    this.#authorizer = config.authorizer;
+    this.#bootstrapAuthorizer =
+      config.bootstrapAuthorizer ?? DENY_ALL_WORKFLOW_AUTHORIZER;
     this.#now = config.now ?? Date.now;
     this.#maxCasRetries = config.maxCasRetries ?? 16;
   }
@@ -79,16 +91,21 @@ export class WorkflowPlanController {
       invalid("Only ready workflow plans can be persisted");
     }
     const plan = immutableWorkflowOrchestrationJson(planValue);
-    await this.#authorizePlan(
-      actor,
-      "plan.put",
-      "plan:activate",
-      plan,
-      PLAN_MANAGEMENT_ROLES,
-    );
     const revisions = await this.#plans.list(plan.executionId);
     const latest = revisions.at(-1);
-    if (latest && latest.planRevision > plan.planRevision) {
+    if (!latest) {
+      if (plan.planRevision !== 1) {
+        throw new WorkflowOrchestrationControlError(
+          "WORKFLOW_PLAN_REVISION_CONFLICT",
+          "The first workflow plan revision must be 1",
+          { executionId: plan.executionId, planRevision: plan.planRevision },
+        );
+      }
+      await this.#authorizeBootstrap(actor, "plan.put", plan);
+      return await this.#plans.put(plan);
+    }
+
+    if (plan.planRevision <= latest.planRevision) {
       throw new WorkflowOrchestrationControlError(
         "WORKFLOW_PLAN_STALE",
         `Workflow plan revision is stale: ${plan.executionId}@${plan.planRevision}`,
@@ -99,6 +116,53 @@ export class WorkflowPlanController {
         },
       );
     }
+    if (plan.planRevision !== latest.planRevision + 1) {
+      throw new WorkflowOrchestrationControlError(
+        "WORKFLOW_PLAN_REVISION_CONFLICT",
+        "Workflow plan revisions must be contiguous",
+        {
+          executionId: plan.executionId,
+          planRevision: plan.planRevision,
+          latestPlanRevision: latest.planRevision,
+        },
+      );
+    }
+    if (plan.baseRevision !== latest.baseRevision) {
+      throw new WorkflowOrchestrationControlError(
+        "WORKFLOW_PLAN_REVISION_CONFLICT",
+        "Workflow plan revisions must describe the same base revision",
+        {
+          executionId: plan.executionId,
+          planRevision: plan.planRevision,
+          baseRevision: plan.baseRevision,
+          expectedBaseRevision: latest.baseRevision,
+        },
+      );
+    }
+    const current = await this.#state.get(plan.executionId);
+    if (
+      !current?.activePlanRevision ||
+      current.activePlanRevision !== latest.planRevision
+    ) {
+      throw new WorkflowOrchestrationControlError(
+        "WORKFLOW_PLAN_REVISION_CONFLICT",
+        "The latest workflow plan must be active before it can authorize a revision",
+        {
+          executionId: plan.executionId,
+          latestPlanRevision: latest.planRevision,
+          ...(current?.activePlanRevision === undefined
+            ? {}
+            : { activePlanRevision: current.activePlanRevision }),
+        },
+      );
+    }
+    await this.#authorizeAgainstPlan(
+      actor,
+      "plan.put",
+      "plan:activate",
+      latest,
+      PLAN_MANAGEMENT_ROLES,
+    );
     return await this.#plans.put(plan);
   }
 
@@ -146,20 +210,20 @@ export class WorkflowPlanController {
     planRevision: number,
     actor: WorkflowActorContext,
   ): Promise<WorkflowOrchestrationState> {
-    await this.#authorizeHost(
-      actor,
-      "plan.activate",
-      "plan:activate",
-      executionId,
-      planRevision,
-    );
     const plan = await this.#requiredPlan(executionId, planRevision);
     if (plan.status !== "ready") invalid("Only ready plans can be activated");
-    this.#assertPlanPolicy(actor, plan, "plan:activate", PLAN_MANAGEMENT_ROLES);
 
     for (let retry = 0; retry < this.#maxCasRetries; retry++) {
       const current = await this.#state.get(executionId);
       if (!current) {
+        if (planRevision !== 1) {
+          throw new WorkflowOrchestrationControlError(
+            "WORKFLOW_PLAN_REVISION_CONFLICT",
+            "The first active workflow plan revision must be 1",
+            { executionId, planRevision },
+          );
+        }
+        await this.#authorizeBootstrap(actor, "plan.activate", plan);
         try {
           return await this.#state.create(
             immutableWorkflowOrchestrationJson({
@@ -171,6 +235,7 @@ export class WorkflowPlanController {
               nextFencingToken: 1,
               grants: [],
               proposals: [],
+              reservations: [],
               updatedAt: this.#timestamp(),
             } satisfies WorkflowOrchestrationState),
           );
@@ -182,11 +247,22 @@ export class WorkflowPlanController {
         }
       }
 
+      if (current.activePlanRevision === undefined) {
+        invalid("Existing orchestration state requires an active plan");
+      }
+      const activePlan = await this.#requiredPlan(
+        executionId,
+        current.activePlanRevision,
+      );
+      await this.#authorizeAgainstPlan(
+        actor,
+        "plan.activate",
+        "plan:activate",
+        activePlan,
+        PLAN_MANAGEMENT_ROLES,
+      );
       if (current.activePlanRevision === planRevision) return current;
-      if (
-        current.activePlanRevision !== undefined &&
-        current.activePlanRevision > planRevision
-      ) {
+      if (current.activePlanRevision > planRevision) {
         throw new WorkflowOrchestrationControlError(
           "WORKFLOW_PLAN_STALE",
           `Cannot activate an older workflow plan: ${executionId}@${planRevision}`,
@@ -194,6 +270,45 @@ export class WorkflowPlanController {
             executionId,
             planRevision,
             activePlanRevision: current.activePlanRevision,
+          },
+        );
+      }
+      if (planRevision !== current.activePlanRevision + 1) {
+        throw new WorkflowOrchestrationControlError(
+          "WORKFLOW_PLAN_REVISION_CONFLICT",
+          "Workflow plan activation must advance exactly one revision",
+          {
+            executionId,
+            planRevision,
+            activePlanRevision: current.activePlanRevision,
+          },
+        );
+      }
+      const latest = (await this.#plans.list(executionId)).at(-1);
+      if (latest?.planRevision !== planRevision) {
+        throw new WorkflowOrchestrationControlError(
+          "WORKFLOW_PLAN_STALE",
+          "Only the latest workflow plan revision can be activated",
+          {
+            executionId,
+            planRevision,
+            latestPlanRevision: latest?.planRevision ?? 0,
+          },
+        );
+      }
+      const activeReservations = workflowMutationReservations(current).filter(
+        (reservation) => reservation.status === "reserved",
+      );
+      if (activeReservations.length > 0) {
+        throw new WorkflowOrchestrationControlError(
+          "WORKFLOW_MUTATION_RESERVATION_ACTIVE",
+          "Active mutation reservations block workflow plan activation",
+          {
+            executionId,
+            planRevision,
+            reservationIds: activeReservations.map(
+              (reservation) => reservation.reservationId,
+            ),
           },
         );
       }
@@ -205,6 +320,7 @@ export class WorkflowPlanController {
             activePlanRevision: planRevision,
             grants: [],
             proposals: [],
+            reservations: [],
             updatedAt: this.#timestamp(current.updatedAt),
           } satisfies WorkflowOrchestrationState),
           current.revision,
@@ -219,6 +335,25 @@ export class WorkflowPlanController {
       `Workflow plan activation remained contended: ${executionId}`,
       { executionId, planRevision },
     );
+  }
+
+  async #authorizeBootstrap(
+    actor: WorkflowActorContext,
+    operation: "plan.put" | "plan.activate",
+    plan: WorkflowPlan,
+  ): Promise<void> {
+    await authorizeWorkflowActor(this.#authorizer, actor, {
+      operation,
+      permission: "plan:activate",
+      executionId: plan.executionId,
+      planRevision: plan.planRevision,
+    });
+    await authorizeWorkflowActor(this.#bootstrapAuthorizer, actor, {
+      operation,
+      permission: "plan:activate",
+      executionId: plan.executionId,
+      planRevision: plan.planRevision,
+    });
   }
 
   async #authorizeHost(
@@ -236,21 +371,21 @@ export class WorkflowPlanController {
     });
   }
 
-  async #authorizePlan(
+  async #authorizeAgainstPlan(
     actor: WorkflowActorContext,
     operation: WorkflowAuthorizationOperation,
     permission: WorkflowActorPermission,
-    plan: WorkflowPlan,
+    authorityPlan: WorkflowPlan,
     roles?: ReadonlySet<WorkflowActorRole>,
   ): Promise<void> {
     await this.#authorizeHost(
       actor,
       operation,
       permission,
-      plan.executionId,
-      plan.planRevision,
+      authorityPlan.executionId,
+      authorityPlan.planRevision,
     );
-    this.#assertPlanPolicy(actor, plan, permission, roles);
+    this.#assertPlanPolicy(actor, authorityPlan, permission, roles);
   }
 
   #assertPlanPolicy(

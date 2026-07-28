@@ -52,6 +52,7 @@ describe("WorkflowPlanController", () => {
     const denied = new WorkflowPlanController({
       plans: new InMemoryWorkflowPlanStore(),
       state: new InMemoryWorkflowOrchestrationStateStore(),
+      authorizer: { authorize: () => true },
     });
     await expect(
       denied.put(value, actor("coordinator", 1, "integration")),
@@ -87,10 +88,9 @@ describe("WorkflowPlanController", () => {
     const state = new InMemoryWorkflowOrchestrationStateStore();
     const controller = harness({ plans, state, now: () => now++ }).controller;
     const firstActor = actor("coordinator", 1, "integration");
-    const secondActor = actor("coordinator", 2, "integration");
     await controller.put(plan(), firstActor);
-    await controller.put(plan({ planRevision: 2, createdAt: 2 }), secondActor);
     const active = await controller.activate("execution-1", 1, firstActor);
+    await controller.put(plan({ planRevision: 2, createdAt: 2 }), firstActor);
     await state.compareAndSet(
       {
         ...active,
@@ -113,7 +113,7 @@ describe("WorkflowPlanController", () => {
       1,
     );
 
-    const advanced = await controller.activate("execution-1", 2, secondActor);
+    const advanced = await controller.activate("execution-1", 2, firstActor);
     expect(advanced).toMatchObject({
       revision: 3,
       activePlanRevision: 2,
@@ -123,7 +123,7 @@ describe("WorkflowPlanController", () => {
     });
     await expect(
       controller.activate("execution-1", 1, firstActor),
-    ).rejects.toMatchObject({ code: "WORKFLOW_PLAN_STALE" });
+    ).rejects.toMatchObject({ details: { reason: "unauthorized" } });
   });
 
   test("reports missing plans without creating orchestration state", async () => {
@@ -154,6 +154,147 @@ describe("WorkflowPlanController", () => {
       controller.activate("execution-1", 1, builder),
     ).rejects.toMatchObject({ details: { reason: "unauthorized" } });
   });
+
+  test("requires explicit bootstrap authority for the first plan", async () => {
+    const plans = new InMemoryWorkflowPlanStore();
+    const state = new InMemoryWorkflowOrchestrationStateStore();
+    const hostAllows = { authorize: () => true };
+    const denied = new WorkflowPlanController({
+      plans,
+      state,
+      authorizer: hostAllows,
+    });
+
+    await expect(
+      denied.put(plan(), actor("coordinator", 1, "integration")),
+    ).rejects.toMatchObject({ details: { reason: "unauthorized" } });
+
+    const allowed = new WorkflowPlanController({
+      plans,
+      state,
+      authorizer: hostAllows,
+      bootstrapAuthorizer: hostAllows,
+      now: () => 1,
+    });
+    await expect(
+      allowed.put(plan(), actor("coordinator", 1, "integration")),
+    ).resolves.toMatchObject({ planRevision: 1 });
+  });
+
+  test("never lets a candidate plan authorize its own revision", async () => {
+    const { controller } = harness();
+    const coordinator = actor("coordinator", 1, "integration");
+    await controller.put(plan(), coordinator);
+    await controller.activate("execution-1", 1, coordinator);
+    const elevatedCandidate = plan({
+      planRevision: 2,
+      createdAt: 2,
+      agents: [
+        ...plan().agents,
+        {
+          agentId: "intruder",
+          policy: {
+            role: "architect",
+            permissions: ["plan:read", "plan:activate"],
+            canDelegate: false,
+          },
+        },
+      ],
+      lanes: [
+        ...plan().lanes,
+        {
+          taskId: "intruder-task",
+          agentId: "intruder",
+          role: "architect",
+          ownedPaths: [],
+          mayCreateUnder: [],
+          dependsOn: [],
+          acceptance: ["Candidate cannot authorize itself"],
+        },
+      ],
+      waves: [
+        { waveId: "wave-0", taskIds: ["intruder-task"] },
+        ...plan().waves,
+      ],
+    });
+
+    await expect(
+      controller.put(elevatedCandidate, actor("intruder", 1, "intruder-task")),
+    ).rejects.toMatchObject({ details: { reason: "unauthorized" } });
+  });
+
+  test("uses the active plan to authorize and activate the next revision", async () => {
+    const { controller } = harness();
+    const coordinator = actor("coordinator", 1, "integration");
+    await controller.put(plan(), coordinator);
+    await controller.activate("execution-1", 1, coordinator);
+    const candidate = plan({
+      planRevision: 2,
+      createdAt: 2,
+      agents: plan().agents.map((agent) =>
+        agent.agentId === "coordinator"
+          ? {
+              ...agent,
+              policy: { ...agent.policy, permissions: ["plan:read"] },
+            }
+          : agent,
+      ),
+    });
+
+    await controller.put(candidate, coordinator);
+    await expect(
+      controller.activate("execution-1", 2, coordinator),
+    ).resolves.toMatchObject({ activePlanRevision: 2, reservations: [] });
+  });
+
+  test("blocks plan activation while a host mutation reservation is active", async () => {
+    const { controller, state } = harness();
+    const coordinator = actor("coordinator", 1, "integration");
+    await controller.put(plan(), coordinator);
+    const active = await controller.activate("execution-1", 1, coordinator);
+    await controller.put(plan({ planRevision: 2, createdAt: 2 }), coordinator);
+    await state.compareAndSet(
+      {
+        ...active,
+        revision: 2,
+        nextFencingToken: 2,
+        grants: [
+          {
+            grantId: "grant-1",
+            taskId: "implementation",
+            agentId: "builder",
+            planRevision: 1,
+            fencingToken: 1,
+            claims: [{ path: "src/workflows/tasks", scope: "subtree" }],
+            grantedAt: 1,
+          },
+        ],
+        reservations: [
+          {
+            reservationId: "reservation-1",
+            receiptId: "receipt-1",
+            phase: "commit",
+            taskId: "implementation",
+            agentId: "builder",
+            planRevision: 1,
+            orchestrationRevision: 2,
+            grants: [{ grantId: "grant-1", fencingToken: 1 }],
+            changeSetDigest: `sha256:${"a".repeat(64)}`,
+            treeId: "tree-1",
+            status: "reserved",
+            createdAt: 1,
+            expiresAt: 100,
+          },
+        ],
+        updatedAt: 2,
+      },
+      1,
+    );
+
+    await expect(
+      controller.activate("execution-1", 2, coordinator),
+    ).rejects.toMatchObject({ code: "WORKFLOW_MUTATION_RESERVATION_ACTIVE" });
+  });
 });
 
 function harness(
@@ -172,6 +313,15 @@ function harness(
     authorizer: {
       authorize(request) {
         return request.actorId === `principal-${request.agentId}`;
+      },
+    },
+    bootstrapAuthorizer: {
+      authorize(request) {
+        return (
+          request.actorId === `principal-${request.agentId}` &&
+          request.agentId === "coordinator" &&
+          request.taskId === "integration"
+        );
       },
     },
     now: overrides.now ?? (() => 1),

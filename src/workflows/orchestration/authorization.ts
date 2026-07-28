@@ -14,6 +14,8 @@ export type WorkflowAuthorizationOperation =
   | "plan.get"
   | "plan.list"
   | "plan.activate"
+  | "task.spawn"
+  | "task.mailbox.send"
   | "ownership.claim"
   | "ownership.propose"
   | "ownership.approve"
