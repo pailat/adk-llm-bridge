@@ -91,6 +91,96 @@ describe("WorkflowTaskController", () => {
     });
   });
 
+  test("lets a driver join, await, and cancel scoped child handles", async () => {
+    const childrenReady = deferred<void>();
+    const gates = new Map<
+      string,
+      ReturnType<typeof deferred<WorkflowTaskDriverResult>>
+    >();
+    let created = 0;
+    const { controller } = harness({
+      async execute(request) {
+        if (request.task.taskId === "root") {
+          const first = await request.spawn({
+            taskId: "first",
+            agentId: "codex",
+          });
+          const second = await request.spawn({
+            taskId: "second",
+            agentId: "codex",
+          });
+          childrenReady.resolve(undefined);
+          const selected = await request.awaitAny([second, first]);
+          const remaining =
+            selected.handle.taskId === first.taskId ? second : first;
+          const joined = await request.join(remaining);
+          const cancelled = await request.spawn({
+            taskId: "cancelled",
+            agentId: "codex",
+          });
+          await request.cancel(cancelled);
+          const cancelledRecord = await request.join(cancelled);
+          return {
+            output: {
+              selected: selected.handle.taskId,
+              joined: joined.taskId,
+              cancelled: cancelledRecord.status,
+            },
+          };
+        }
+        const gate = deferred<WorkflowTaskDriverResult>();
+        gates.set(request.task.taskId, gate);
+        created++;
+        if (created === 2) childrenReady.resolve(undefined);
+        await new Promise<void>((resolve, reject) => {
+          request.signal.addEventListener(
+            "abort",
+            () => reject(request.signal.reason),
+            { once: true },
+          );
+          gate.promise.then(() => resolve(), reject);
+        });
+        return await gate.promise;
+      },
+    });
+
+    const root = await controller.spawn(spawn("root"));
+    await childrenReady.promise;
+    await eventually(() => expect(gates.size).toBe(2));
+    gates.get("first")?.resolve({ output: "first" });
+    gates.get("second")?.resolve({ output: "second" });
+
+    await expect(controller.join(root)).resolves.toMatchObject({
+      status: "completed",
+      output: {
+        selected: "second",
+        joined: "first",
+        cancelled: "cancelled",
+      },
+    });
+  });
+
+  test("aborts a local join without cancelling the joined task", async () => {
+    const gate = deferred<WorkflowTaskDriverResult>();
+    const { controller } = harness({ execute: async () => await gate.promise });
+    const handle = await controller.spawn(spawn("task-1"));
+    await eventually(async () =>
+      expect((await controller.status(handle)).status).toBe("running"),
+    );
+    const abort = new AbortController();
+    const joined = controller.join(handle, abort.signal);
+    abort.abort();
+
+    await expect(joined).rejects.toMatchObject({
+      code: "WORKFLOW_TASK_WAIT_ABORTED",
+    });
+    expect((await controller.status(handle)).status).toBe("running");
+    gate.resolve({});
+    await expect(controller.join(handle)).resolves.toMatchObject({
+      status: "completed",
+    });
+  });
+
   test("cancels through AbortSignal and keeps cancel idempotent", async () => {
     let signal: AbortSignal | undefined;
     const { controller } = harness({

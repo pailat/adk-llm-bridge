@@ -120,6 +120,11 @@ export interface WorkflowTaskDriverRequest {
   waitForMailbox(
     request?: Pick<WorkflowTaskMessageReadRequest, "cursor" | "limit">,
   ): Promise<WorkflowTaskMessageReadResult>;
+  join(handle: WorkflowTaskHandle): Promise<WorkflowTaskRecord>;
+  awaitAny(
+    handles: readonly WorkflowTaskHandle[],
+  ): Promise<WorkflowTaskAwaitAnyResult>;
+  cancel(handle: WorkflowTaskHandle): Promise<WorkflowTaskRecord>;
 }
 
 export interface WorkflowTaskDriverResult {
