@@ -118,6 +118,12 @@ export interface WorkflowTaskRequeueExpiredRequest extends WorkflowTaskHandle {
   expectedRevision: number;
 }
 
+/** Store-authoritative recovery of an expired cancelling attempt. */
+export interface WorkflowTaskCancelExpiredClaimRequest
+  extends WorkflowTaskHandle {
+  expectedRevision: number;
+}
+
 export interface WorkflowTaskMessageAppendRequest extends WorkflowTaskHandle {
   senderTaskId?: string;
   payload: WorkflowTaskJsonValue;

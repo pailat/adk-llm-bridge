@@ -345,6 +345,118 @@ describe("InMemoryWorkflowTaskStore", () => {
     ).rejects.toMatchObject({ code: "WORKFLOW_TASK_CLAIM_CONFLICT" });
   });
 
+  test("recovers an expired cancelling claim without reviving its worker", async () => {
+    let now = 10;
+    const store = new InMemoryWorkflowTaskStore({ now: () => now });
+    await store.create(record("task-1"));
+    const claimed = await store.claim({
+      executionId: "execution-1",
+      taskId: "task-1",
+      workerId: "worker-1",
+      leaseId: "lease-1",
+      leaseDurationMs: 10,
+    });
+    const oldClaim = claimOf(claimed);
+
+    now = 11;
+    const cancelling = await store.compareAndSetClaimed({
+      expectedRevision: claimed.revision,
+      claim: {
+        executionId: claimed.executionId,
+        taskId: claimed.taskId,
+        workerId: oldClaim.workerId,
+        leaseId: oldClaim.leaseId,
+        fencingToken: oldClaim.fencingToken,
+      },
+      record: {
+        ...claimed,
+        status: "cancelling",
+        revision: claimed.revision + 1,
+        updatedAt: now,
+        cancelRequestedAt: now,
+      },
+    });
+
+    now = 19;
+    await expect(
+      store.cancelExpiredClaim({
+        executionId: cancelling.executionId,
+        taskId: cancelling.taskId,
+        expectedRevision: cancelling.revision,
+      }),
+    ).rejects.toMatchObject({ code: "WORKFLOW_TASK_CLAIM_CONFLICT" });
+
+    now = 20;
+    const cancelled = await store.cancelExpiredClaim({
+      executionId: cancelling.executionId,
+      taskId: cancelling.taskId,
+      expectedRevision: cancelling.revision,
+    });
+    expect(cancelled).toMatchObject({
+      status: "cancelled",
+      revision: 4,
+      cancelRequestedAt: 11,
+      completedAt: 20,
+      error: {
+        code: "WORKFLOW_TASK_CANCELLED",
+        message: "Workflow task was cancelled",
+      },
+    });
+    expect(cancelled.claim).toBeUndefined();
+
+    await expect(
+      store.cancelExpiredClaim({
+        executionId: cancelled.executionId,
+        taskId: cancelled.taskId,
+        expectedRevision: cancelling.revision,
+      }),
+    ).rejects.toMatchObject({ code: "WORKFLOW_TASK_CONFLICT" });
+
+    await expect(
+      store.cancelExpiredClaim({
+        executionId: cancelled.executionId,
+        taskId: cancelled.taskId,
+        expectedRevision: cancelled.revision,
+      }),
+    ).rejects.toMatchObject({ code: "WORKFLOW_TASK_CLAIM_CONFLICT" });
+
+    now = 21;
+    await expect(
+      store.compareAndSetClaimed({
+        expectedRevision: cancelled.revision,
+        claim: {
+          executionId: claimed.executionId,
+          taskId: claimed.taskId,
+          workerId: oldClaim.workerId,
+          leaseId: oldClaim.leaseId,
+          fencingToken: oldClaim.fencingToken,
+        },
+        record: {
+          ...cancelled,
+          revision: cancelled.revision + 1,
+          updatedAt: now,
+        },
+      }),
+    ).rejects.toMatchObject({ code: "WORKFLOW_TASK_CLAIM_CONFLICT" });
+
+    await store.create(record("task-running"));
+    const running = await store.claim({
+      executionId: "execution-1",
+      taskId: "task-running",
+      workerId: "worker-2",
+      leaseId: "lease-2",
+      leaseDurationMs: 1,
+    });
+    now = 22;
+    await expect(
+      store.cancelExpiredClaim({
+        executionId: running.executionId,
+        taskId: running.taskId,
+        expectedRevision: running.revision,
+      }),
+    ).rejects.toMatchObject({ code: "WORKFLOW_TASK_CLAIM_CONFLICT" });
+  });
+
   test("waits for a later revision and supports cancellation", async () => {
     let now = 10;
     const store = new InMemoryWorkflowTaskStore({ now: () => now });
