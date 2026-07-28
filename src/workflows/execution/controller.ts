@@ -292,13 +292,14 @@ export class WorkflowExecutionController {
       }
       if (current.status !== "queued") return undefined;
       try {
+        const now = this.#timestamp();
         return await this.#store.compareAndSet(
           immutableJson({
             ...current,
             status: "running",
             revision: current.revision + 1,
-            updatedAt: this.#timestamp(),
-            startedAt: this.#timestamp(),
+            updatedAt: now,
+            startedAt: now,
           } satisfies WorkflowExecutionRecord),
           current.revision,
         );

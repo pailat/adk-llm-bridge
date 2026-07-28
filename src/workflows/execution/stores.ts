@@ -21,6 +21,8 @@ export const DEFAULT_WORKFLOW_EXECUTION_LIST_LIMIT = 50;
 export const MAX_WORKFLOW_EXECUTION_LIST_LIMIT = 500;
 export const DEFAULT_WORKFLOW_EVENT_READ_LIMIT = 100;
 export const MAX_WORKFLOW_EVENT_READ_LIMIT = 1_000;
+export const DEFAULT_WORKFLOW_EVENTS_PER_EXECUTION = 10_000;
+export const DEFAULT_WORKFLOW_EVENTS_TOTAL = 100_000;
 
 const EXECUTION_STATUSES = new Set<WorkflowExecutionStatus>([
   "queued",
@@ -30,6 +32,40 @@ const EXECUTION_STATUSES = new Set<WorkflowExecutionStatus>([
   "failed",
   "cancelled",
 ]);
+
+const EXECUTION_RECORD_FIELDS = new Set([
+  "executionId",
+  "workflowId",
+  "workflowVersion",
+  "input",
+  "metadata",
+  "status",
+  "revision",
+  "attempt",
+  "createdAt",
+  "updatedAt",
+  "startedAt",
+  "completedAt",
+  "cancelRequestedAt",
+  "output",
+  "error",
+]);
+
+const EXECUTION_TRANSITIONS: Readonly<
+  Record<WorkflowExecutionStatus, ReadonlySet<WorkflowExecutionStatus>>
+> = {
+  queued: new Set(["running", "cancelling", "cancelled"]),
+  running: new Set(["cancelling", "completed", "failed", "cancelled"]),
+  cancelling: new Set(["cancelled"]),
+  completed: new Set(),
+  failed: new Set(["queued"]),
+  cancelled: new Set(["queued"]),
+};
+
+export interface InMemoryWorkflowExecutionEventStoreConfig {
+  maxEventsPerExecution?: number;
+  maxTotalEvents?: number;
+}
 
 export interface WorkflowExecutionStore {
   create(record: WorkflowExecutionRecord): Promise<WorkflowExecutionRecord>;
@@ -62,6 +98,7 @@ export class InMemoryWorkflowExecutionStore implements WorkflowExecutionStore {
   ): Promise<WorkflowExecutionRecord> {
     validateRecord(record);
     if (record.revision !== 1) invalid("Initial execution revision must be 1");
+    if (record.attempt !== 1) invalid("Initial execution attempt must be 1");
     if (this.#records.has(record.executionId)) {
       throw new WorkflowExecutionControlError(
         "WORKFLOW_EXECUTION_DUPLICATE",
@@ -105,12 +142,31 @@ export class InMemoryWorkflowExecutionStore implements WorkflowExecutionStore {
       invalid("Replacement execution revision must increment by one");
     }
     if (
+      record.executionId !== current.executionId ||
       record.workflowId !== current.workflowId ||
       record.workflowVersion !== current.workflowVersion ||
-      record.createdAt !== current.createdAt
+      record.createdAt !== current.createdAt ||
+      !jsonEqual(record.input, current.input) ||
+      !jsonEqual(record.metadata, current.metadata)
     ) {
-      invalid("Execution identity fields are immutable");
+      invalid("Execution request identity and payload are immutable");
     }
+    if (!EXECUTION_TRANSITIONS[current.status].has(record.status)) {
+      invalidTransition(
+        record.executionId,
+        `Workflow execution cannot transition from ${current.status} to ${record.status}`,
+      );
+    }
+    const resumed =
+      (current.status === "failed" || current.status === "cancelled") &&
+      record.status === "queued";
+    if (record.attempt !== current.attempt + (resumed ? 1 : 0)) {
+      invalid("Execution attempt may only increment by one on resume");
+    }
+    if (record.updatedAt < current.updatedAt) {
+      invalid("Execution updatedAt cannot move backwards");
+    }
+    if (!resumed) validateLifecycleTransition(current, record);
     const snapshot = immutableJson(record);
     this.#records.set(record.executionId, snapshot);
     return snapshot;
@@ -164,6 +220,32 @@ export class InMemoryWorkflowExecutionEventStore
   implements WorkflowExecutionEventStore
 {
   readonly #events = new Map<string, WorkflowExecutionEventRecord[]>();
+  readonly #maxEventsPerExecution: number;
+  readonly #maxTotalEvents: number;
+  #totalEvents = 0;
+
+  constructor(config: InMemoryWorkflowExecutionEventStoreConfig = {}) {
+    if (
+      !config ||
+      typeof config !== "object" ||
+      Array.isArray(config) ||
+      Object.keys(config).some(
+        (key) => key !== "maxEventsPerExecution" && key !== "maxTotalEvents",
+      )
+    ) {
+      invalid("Workflow execution event store config is invalid");
+    }
+    this.#maxEventsPerExecution = capacityLimit(
+      config.maxEventsPerExecution,
+      DEFAULT_WORKFLOW_EVENTS_PER_EXECUTION,
+      "maxEventsPerExecution",
+    );
+    this.#maxTotalEvents = capacityLimit(
+      config.maxTotalEvents,
+      DEFAULT_WORKFLOW_EVENTS_TOTAL,
+      "maxTotalEvents",
+    );
+  }
 
   async append(
     executionId: string,
@@ -174,6 +256,16 @@ export class InMemoryWorkflowExecutionEventStore
       invalid("Workflow event executionId does not match its stream");
     }
     const stream = this.#events.get(executionId) ?? [];
+    if (
+      stream.length >= this.#maxEventsPerExecution ||
+      this.#totalEvents >= this.#maxTotalEvents
+    ) {
+      throw new WorkflowExecutionControlError(
+        "WORKFLOW_EXECUTION_CAPACITY_EXCEEDED",
+        `Workflow execution event capacity was exceeded: ${executionId}`,
+        { executionId },
+      );
+    }
     const record = immutableJson({
       executionId,
       sequence: stream.length + 1,
@@ -181,6 +273,7 @@ export class InMemoryWorkflowExecutionEventStore
     } satisfies WorkflowExecutionEventRecord);
     if (!this.#events.has(executionId)) this.#events.set(executionId, stream);
     stream.push(record);
+    this.#totalEvents++;
     return record;
   }
 
@@ -250,6 +343,18 @@ function boundedLimit(
   return limit;
 }
 
+function capacityLimit(
+  requested: number | undefined,
+  fallback: number,
+  field: string,
+): number {
+  const limit = requested ?? fallback;
+  if (!Number.isSafeInteger(limit) || limit <= 0) {
+    invalid(`${field} must be a positive integer`);
+  }
+  return limit;
+}
+
 function encodeListCursor(offset: number): string {
   return `workflow-executions:v1:${offset}`;
 }
@@ -274,7 +379,12 @@ export function validateExecutionId(executionId: string): void {
 }
 
 function validateRecord(record: WorkflowExecutionRecord): void {
-  if (!record || typeof record !== "object" || Array.isArray(record)) {
+  if (
+    !record ||
+    typeof record !== "object" ||
+    Array.isArray(record) ||
+    Object.keys(record).some((key) => !EXECUTION_RECORD_FIELDS.has(key))
+  ) {
     invalid("Workflow execution record must be an object");
   }
   validateExecutionId(record.executionId);
@@ -295,9 +405,198 @@ function validateRecord(record: WorkflowExecutionRecord): void {
     !Number.isFinite(record.createdAt) ||
     record.createdAt < 0 ||
     !Number.isFinite(record.updatedAt) ||
-    record.updatedAt < 0
+    record.updatedAt < record.createdAt
   ) {
     invalid("Workflow execution record is invalid");
+  }
+  if (record.input !== undefined) immutableJson(record.input);
+  if (
+    record.metadata !== undefined &&
+    (!record.metadata ||
+      typeof record.metadata !== "object" ||
+      Array.isArray(record.metadata))
+  ) {
+    invalid("Workflow execution metadata must be a JSON object");
+  }
+  if (record.metadata !== undefined) immutableJson(record.metadata);
+  validateOptionalTimestamp(record.startedAt, record, "startedAt");
+  validateOptionalTimestamp(record.completedAt, record, "completedAt");
+  validateOptionalTimestamp(
+    record.cancelRequestedAt,
+    record,
+    "cancelRequestedAt",
+  );
+  if (record.output !== undefined) immutableJson(record.output);
+  if (record.error !== undefined) validateError(record.error);
+  if (
+    record.startedAt !== undefined &&
+    record.cancelRequestedAt !== undefined &&
+    record.startedAt > record.cancelRequestedAt
+  ) {
+    invalid("Workflow cancellation cannot precede execution start");
+  }
+  if (
+    record.cancelRequestedAt !== undefined &&
+    record.completedAt !== undefined &&
+    record.cancelRequestedAt > record.completedAt
+  ) {
+    invalid("Workflow cancellation cannot follow execution completion");
+  }
+
+  switch (record.status) {
+    case "queued":
+      absent(
+        record,
+        "startedAt",
+        "completedAt",
+        "cancelRequestedAt",
+        "output",
+        "error",
+      );
+      break;
+    case "running":
+      requiredTimestamp(record.startedAt, "startedAt", record.status);
+      absent(record, "completedAt", "cancelRequestedAt", "output", "error");
+      break;
+    case "cancelling":
+      requiredTimestamp(
+        record.cancelRequestedAt,
+        "cancelRequestedAt",
+        record.status,
+      );
+      absent(record, "completedAt", "output", "error");
+      break;
+    case "completed":
+      requiredTimestamp(record.startedAt, "startedAt", record.status);
+      requiredTimestamp(record.completedAt, "completedAt", record.status);
+      absent(record, "cancelRequestedAt", "error");
+      break;
+    case "failed":
+      requiredTimestamp(record.startedAt, "startedAt", record.status);
+      requiredTimestamp(record.completedAt, "completedAt", record.status);
+      if (record.error === undefined)
+        invalid("Failed execution requires error");
+      absent(record, "cancelRequestedAt", "output");
+      break;
+    case "cancelled":
+      requiredTimestamp(
+        record.cancelRequestedAt,
+        "cancelRequestedAt",
+        record.status,
+      );
+      requiredTimestamp(record.completedAt, "completedAt", record.status);
+      if (record.error === undefined)
+        invalid("Cancelled execution requires error");
+      absent(record, "output");
+      break;
+  }
+}
+
+function validateOptionalTimestamp(
+  value: number | undefined,
+  record: WorkflowExecutionRecord,
+  field: string,
+): void {
+  if (
+    value !== undefined &&
+    (!Number.isFinite(value) ||
+      value < record.createdAt ||
+      value > record.updatedAt)
+  ) {
+    invalid(`Workflow execution ${field} is invalid`);
+  }
+}
+
+function requiredTimestamp(
+  value: number | undefined,
+  field: string,
+  status: WorkflowExecutionStatus,
+): void {
+  if (value === undefined) {
+    invalid(`Workflow execution ${status} requires ${field}`);
+  }
+}
+
+function absent(
+  record: WorkflowExecutionRecord,
+  ...fields: (keyof WorkflowExecutionRecord)[]
+): void {
+  if (fields.some((field) => record[field] !== undefined)) {
+    invalid(`Workflow execution ${record.status} has incompatible fields`);
+  }
+}
+
+function validateError(error: WorkflowExecutionRecord["error"]): void {
+  if (
+    !error ||
+    typeof error !== "object" ||
+    Array.isArray(error) ||
+    Object.keys(error).some(
+      (key) => key !== "code" && key !== "message" && key !== "details",
+    ) ||
+    typeof error.code !== "string" ||
+    !/^[A-Z][A-Z0-9_]{0,127}$/u.test(error.code) ||
+    typeof error.message !== "string" ||
+    !error.message ||
+    error.message.length > 4_096 ||
+    (error.details !== undefined &&
+      (!error.details ||
+        typeof error.details !== "object" ||
+        Array.isArray(error.details)))
+  ) {
+    invalid("Workflow execution error is invalid");
+  }
+  if (error.details !== undefined) immutableJson(error.details);
+}
+
+function jsonEqual(left: unknown, right: unknown): boolean {
+  if (left === right) return true;
+  if (typeof left !== typeof right || left === null || right === null) {
+    return false;
+  }
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return (
+      Array.isArray(left) &&
+      Array.isArray(right) &&
+      left.length === right.length &&
+      left.every((value, index) => jsonEqual(value, right[index]))
+    );
+  }
+  if (typeof left !== "object" || typeof right !== "object") return false;
+  const leftRecord = left as Record<string, unknown>;
+  const rightRecord = right as Record<string, unknown>;
+  const leftKeys = Object.keys(leftRecord);
+  const rightKeys = Object.keys(rightRecord);
+  return (
+    leftKeys.length === rightKeys.length &&
+    leftKeys.every(
+      (key) =>
+        Object.hasOwn(rightRecord, key) &&
+        jsonEqual(leftRecord[key], rightRecord[key]),
+    )
+  );
+}
+
+function validateLifecycleTransition(
+  current: WorkflowExecutionRecord,
+  replacement: WorkflowExecutionRecord,
+): void {
+  if (
+    (current.startedAt !== undefined &&
+      replacement.startedAt !== current.startedAt) ||
+    (current.startedAt === undefined &&
+      replacement.startedAt !== undefined &&
+      replacement.status !== "running") ||
+    (current.cancelRequestedAt !== undefined &&
+      replacement.cancelRequestedAt !== current.cancelRequestedAt) ||
+    (current.cancelRequestedAt === undefined &&
+      replacement.cancelRequestedAt !== undefined &&
+      replacement.status !== "cancelling" &&
+      replacement.status !== "cancelled") ||
+    (current.completedAt !== undefined &&
+      replacement.completedAt !== current.completedAt)
+  ) {
+    invalid("Execution lifecycle timestamps cannot be rewritten");
   }
 }
 
@@ -313,5 +612,13 @@ function invalid(message: string): never {
   throw new WorkflowExecutionControlError(
     "WORKFLOW_EXECUTION_INVALID_REQUEST",
     message,
+  );
+}
+
+function invalidTransition(executionId: string, message: string): never {
+  throw new WorkflowExecutionControlError(
+    "WORKFLOW_EXECUTION_INVALID_TRANSITION",
+    message,
+    { executionId },
   );
 }
