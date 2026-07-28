@@ -239,7 +239,13 @@ export function plan(overrides: Partial<WorkflowPlan> = {}): WorkflowPlan {
         agentId: "builder",
         policy: {
           role: "worker",
-          permissions: ["plan:read", "ownership:claim", "ownership:propose"],
+          permissions: [
+            "plan:read",
+            "task:read",
+            "task:cancel",
+            "ownership:claim",
+            "ownership:propose",
+          ],
           canDelegate: false,
         },
       },
@@ -250,6 +256,7 @@ export function plan(overrides: Partial<WorkflowPlan> = {}): WorkflowPlan {
           permissions: [
             "plan:read",
             "plan:activate",
+            "task:manage",
             "ownership:approve",
             "changes:validate",
             "integration:publish",

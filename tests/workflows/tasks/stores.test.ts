@@ -825,6 +825,7 @@ describe("InMemoryWorkflowTaskCommandStore", () => {
     const childCommand = {
       operationId: "child-create",
       parentClaim,
+      expectedParentAuthority: orchestrationOf(root),
       request: { taskId: "child", agentId: "reviewer" },
       authority: binding(1, "grant-child", 2),
     } as const;
@@ -841,6 +842,7 @@ describe("InMemoryWorkflowTaskCommandStore", () => {
     const sendCommand = {
       operationId: "message-send",
       parentClaim,
+      expectedParentAuthority: orchestrationOf(root),
       request: { taskId: "child", payload: { kind: "review" } },
     } as const;
     const message = await commands.appendFromClaim(sendCommand);
@@ -854,6 +856,7 @@ describe("InMemoryWorkflowTaskCommandStore", () => {
     const cancelCommand = {
       operationId: "child-cancel",
       parentClaim,
+      expectedParentAuthority: orchestrationOf(root),
       target: { executionId: "execution-1", taskId: "child" },
     } as const;
     const cancelled = await commands.requestCancellationClaimed(cancelCommand);
@@ -926,12 +929,14 @@ describe("InMemoryWorkflowTaskCommandStore", () => {
       commands.createChildClaimed({
         operationId: "raced-operation",
         parentClaim,
+        expectedParentAuthority: orchestrationOf(root),
         request: { taskId: "child-a", agentId: "codex" },
         authority: binding(1, "grant-a", 1),
       }),
       commands.createChildClaimed({
         operationId: "raced-operation",
         parentClaim,
+        expectedParentAuthority: orchestrationOf(root),
         request: { taskId: "child-b", agentId: "codex" },
         authority: binding(1, "grant-b", 1),
       }),
@@ -942,6 +947,79 @@ describe("InMemoryWorkflowTaskCommandStore", () => {
     expect(raced.filter(({ status }) => status === "rejected")).toMatchObject([
       { reason: { code: "WORKFLOW_TASK_CONFLICT" } },
     ]);
+  });
+
+  test("enforces maxChildren once for the parent lifetime under races and retries", async () => {
+    const taskStore = new InMemoryWorkflowTaskStore({ now: () => 10 });
+    const commands = new InMemoryWorkflowTaskCommandStore({
+      taskStore,
+      messageStore: new InMemoryWorkflowTaskMessageStore(),
+    });
+    const authority = binding(1, "root-grant", 1, 1);
+    const root = await commands.createRoot({
+      operationId: "root",
+      request: {
+        executionId: "execution-1",
+        taskId: "root",
+        agentId: "architect",
+      },
+      authority,
+    });
+    const claimed = await taskStore.claim({
+      executionId: root.executionId,
+      taskId: root.taskId,
+      workerId: "worker-1",
+      leaseId: "lease-1",
+      leaseDurationMs: 10,
+    });
+    const parentClaim = guardOf(claimed);
+    const commandsByChild = ["child-a", "child-b"].map((taskId) => ({
+      operationId: `create-${taskId}`,
+      parentClaim,
+      expectedParentAuthority: authority,
+      request: { taskId, agentId: "worker" },
+      authority: binding(1, `grant-${taskId}`, 2),
+    }));
+
+    const raced = await Promise.allSettled(
+      commandsByChild.map((command) => commands.createChildClaimed(command)),
+    );
+    const winners = raced.filter(
+      (result): result is PromiseFulfilledResult<WorkflowTaskRecord> =>
+        result.status === "fulfilled",
+    );
+    expect(winners).toHaveLength(1);
+    expect(
+      raced.filter((result) => result.status === "rejected"),
+    ).toMatchObject([{ reason: { code: "WORKFLOW_TASK_DELEGATION_LIMIT" } }]);
+
+    const winner = winners[0];
+    if (!winner) throw new Error("Expected winning result");
+    const winningCommand = commandsByChild.find(
+      (command) => command.request.taskId === winner.value.taskId,
+    );
+    if (!winningCommand) throw new Error("Expected winning command");
+    await expect(commands.createChildClaimed(winningCommand)).resolves.toBe(
+      winner.value,
+    );
+    await commands.requestCancellationClaimed({
+      operationId: "cancel-winner",
+      parentClaim,
+      expectedParentAuthority: authority,
+      target: {
+        executionId: winner.value.executionId,
+        taskId: winner.value.taskId,
+      },
+    });
+    await expect(
+      commands.createChildClaimed({
+        operationId: "create-after-cancel",
+        parentClaim,
+        expectedParentAuthority: authority,
+        request: { taskId: "child-c", agentId: "worker" },
+        authority: binding(1, "grant-child-c", 3),
+      }),
+    ).rejects.toMatchObject({ code: "WORKFLOW_TASK_DELEGATION_LIMIT" });
   });
 });
 
@@ -1137,9 +1215,20 @@ function guardOf(record: WorkflowTaskRecord) {
   };
 }
 
-function binding(planRevision: number, grantId: string, fencingToken: number) {
+function binding(
+  planRevision: number,
+  grantId: string,
+  fencingToken: number,
+  maxChildren?: number,
+) {
   return {
     planRevision,
     ownership: [{ grantId, fencingToken }],
+    ...(maxChildren === undefined ? {} : { maxChildren }),
   } as const;
+}
+
+function orchestrationOf(record: WorkflowTaskRecord) {
+  if (!record.orchestration) throw new Error("Expected orchestration binding");
+  return record.orchestration;
 }

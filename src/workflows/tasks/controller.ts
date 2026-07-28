@@ -19,6 +19,7 @@ import {
   type WorkflowTaskMessageAppendRequest,
   type WorkflowTaskMessageReadRequest,
   type WorkflowTaskMessageReadResult,
+  type WorkflowTaskOrchestrationBinding,
   type WorkflowTaskRecord,
   type WorkflowTaskResumeRequest,
   type WorkflowTaskSpawnRequest,
@@ -451,6 +452,7 @@ export class WorkflowTaskController {
       return await this.#commandStore.appendFromClaim({
         operationId: requiredOperationId(options.operationId),
         parentClaim: claimGuard(claimedSender),
+        expectedParentAuthority: requiredOrchestration(claimedSender),
         request: {
           taskId: request.taskId,
           payload: request.payload,
@@ -614,9 +616,11 @@ export class WorkflowTaskController {
   }
 
   #launch(record: WorkflowTaskRecord, resumed: boolean): ActiveTask {
+    const key = taskKey(record);
+    const existing = this.#active.get(key);
+    if (existing && !existing.durable?.lost) return existing;
     const abort = new AbortController();
     const token = {};
-    const key = taskKey(record);
     let settleClaim!: () => void;
     const claimSettled = new Promise<void>((resolve) => {
       settleClaim = resolve;
@@ -668,7 +672,7 @@ export class WorkflowTaskController {
       return;
     }
     try {
-      await this.#validateAttempt(handle, active);
+      await this.#requireLiveAttempt(handle, active);
       current = active.durable?.record ?? current;
       const result = await this.#driver.execute({
         task: current,
@@ -691,6 +695,7 @@ export class WorkflowTaskController {
                 request.operationId,
               ),
               parentClaim: claimGuard(parent),
+              expectedParentAuthority: requiredOrchestration(parent),
               request,
               authority,
             });
@@ -710,6 +715,7 @@ export class WorkflowTaskController {
             return await this.#commandStore.appendFromClaim({
               operationId: requiredOperationId(request.operationId),
               parentClaim: claimGuard(parent),
+              expectedParentAuthority: requiredOrchestration(parent),
               request,
             });
           }
@@ -721,11 +727,11 @@ export class WorkflowTaskController {
           });
         },
         readMailbox: async (request = {}) => {
-          await this.#assertDriverOwned(handle, active);
+          await this.#assertDriverActive(handle, active);
           return await this.readMailbox({ ...request, ...handle });
         },
         waitForMailbox: async (request = {}) => {
-          await this.#assertDriverOwned(handle, active);
+          await this.#assertDriverActive(handle, active);
           return await this.waitForMessages({ ...request, ...handle }, signal);
         },
         join: async (child) => {
@@ -747,6 +753,7 @@ export class WorkflowTaskController {
               await this.#commandStore.requestCancellationClaimed({
                 operationId: driverOperationId(parent, "cancel", child.taskId),
                 parentClaim: claimGuard(parent),
+                expectedParentAuthority: requiredOrchestration(parent),
                 target: child,
               });
             this.#abortLocallyOwned(cancelled);
@@ -760,6 +767,7 @@ export class WorkflowTaskController {
           ? undefined
           : immutableTaskJson(result.output);
       if (active.durable?.lost) throw active.durable.lossReason;
+      await this.#requireLiveAttempt(handle, active);
       if (signal.aborted) {
         await this.#finishCancelled(await this.#required(handle), active);
       } else {
@@ -777,6 +785,7 @@ export class WorkflowTaskController {
       if (signal.aborted) {
         await this.#finishCancelled(await this.#required(handle), active);
       } else {
+        await this.#requireLiveAttempt(handle, active);
         await this.#finish(
           handle,
           "failed",
@@ -1148,6 +1157,7 @@ export class WorkflowTaskController {
     active: ActiveTask,
   ): Promise<void> {
     await this.#assertDriverOwned(handle, active);
+    await this.#requireLiveAttempt(handle, active);
     if (active.abort.signal.aborted) {
       invalidTransition(handle, "Workflow task is cancelling");
     }
@@ -1174,6 +1184,18 @@ export class WorkflowTaskController {
       claim: attempt.guard,
     });
     attempt.record = current;
+  }
+
+  async #requireLiveAttempt(
+    handle: WorkflowTaskHandle,
+    active: ActiveTask,
+  ): Promise<void> {
+    try {
+      await this.#validateAttempt(handle, active);
+    } catch (error) {
+      this.#loseClaim(active, error);
+      throw error;
+    }
   }
 
   async #requiredClaimedParent(
@@ -1316,6 +1338,15 @@ function claimGuard(
     leaseId: record.claim.leaseId,
     fencingToken: record.claim.fencingToken,
   });
+}
+
+function requiredOrchestration(
+  record: WorkflowTaskRecord,
+): WorkflowTaskOrchestrationBinding {
+  if (record.orchestration === undefined) {
+    invalid("Orchestrated workflow task requires an authority binding");
+  }
+  return record.orchestration;
 }
 
 function validateResumeRequest(request: WorkflowTaskResumeRequest): void {

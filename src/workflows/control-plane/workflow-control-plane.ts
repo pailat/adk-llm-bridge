@@ -37,6 +37,11 @@ import type {
   WorkflowArtifactStore,
 } from "../resources/workflow-artifact-store.js";
 import type {
+  WorkflowTaskControlAccess,
+  WorkflowTaskControlAccessPort,
+  WorkflowTaskControlOperation,
+} from "../tasks/authority.js";
+import type {
   WorkflowTaskHandle,
   WorkflowTaskJsonValue,
   WorkflowTaskListRequest,
@@ -152,6 +157,10 @@ export interface WorkflowControlPlaneConfig {
   ownership?: WorkflowOwnershipController;
   changeValidation?: WorkflowOwnershipChangeSetValidator;
   dispatcher?: WorkflowTaskDispatcher;
+  /** Required for task operations unless trustedHostMode is explicitly enabled. */
+  taskAccess?: WorkflowTaskControlAccessPort<WorkflowActorContext>;
+  /** Explicit compatibility escape hatch for a fully trusted host transport. */
+  trustedHostMode?: boolean;
 }
 
 export interface WorkflowControlPlaneDispatchOptions {
@@ -191,6 +200,10 @@ export class WorkflowControlPlane {
   readonly #ownership: WorkflowOwnershipController | undefined;
   readonly #changeValidation: WorkflowOwnershipChangeSetValidator | undefined;
   readonly #dispatcher: WorkflowTaskDispatcher | undefined;
+  readonly #taskAccess:
+    | WorkflowTaskControlAccessPort<WorkflowActorContext>
+    | undefined;
+  readonly #trustedHostMode: boolean;
 
   constructor(config: WorkflowControlPlaneConfig) {
     if (
@@ -212,6 +225,14 @@ export class WorkflowControlPlane {
     this.#ownership = config.ownership;
     this.#changeValidation = config.changeValidation;
     this.#dispatcher = config.dispatcher;
+    if (
+      config.trustedHostMode !== undefined &&
+      typeof config.trustedHostMode !== "boolean"
+    ) {
+      invalid("Workflow control trustedHostMode must be boolean");
+    }
+    this.#taskAccess = config.taskAccess;
+    this.#trustedHostMode = config.trustedHostMode ?? false;
   }
 
   async dispatch(
@@ -238,7 +259,22 @@ export class WorkflowControlPlane {
         return await this.#executions.events(normalized.payload);
       case "task.spawn": {
         const payload = taskSpawnPayload(normalized.payload);
+        if (this.#trustedHostMode && options.actor === undefined) {
+          return await this.#tasks.spawn({
+            executionId: payload.executionId,
+            taskId: payload.taskId,
+            agentId: payload.agentId,
+            ...(payload.input === undefined ? {} : { input: payload.input }),
+          });
+        }
         const actor = requiredTaskSpawnActor(options.actor, payload);
+        await this.#authorizeTask(
+          actor,
+          "task.spawn",
+          "self-spawn",
+          payload.executionId,
+          [payload.taskId],
+        );
         return await this.#tasks.spawn(
           {
             executionId: payload.executionId,
@@ -249,38 +285,125 @@ export class WorkflowControlPlane {
           { capability: actor, operationId: payload.operationId },
         );
       }
-      case "task.resume":
-        return await this.#tasks.resume(normalized.payload);
-      case "task.dispatch":
-        return await this.#tasks.dispatch(
-          taskHandlePayload(normalized.payload),
+      case "task.resume": {
+        const payload = taskResumePayload(normalized.payload);
+        await this.#authorizeTaskFromOptions(
+          options,
+          "task.resume",
+          "self-or-manager",
+          payload.executionId,
+          [payload.taskId],
         );
-      case "task.recover":
-        return await this.#tasks.recoverExpired(
-          taskHandlePayload(normalized.payload),
+        return await this.#tasks.resume(payload);
+      }
+      case "task.dispatch": {
+        const payload = taskHandlePayload(normalized.payload);
+        await this.#authorizeTaskFromOptions(
+          options,
+          "task.dispatch",
+          "manager",
+          payload.executionId,
+          [payload.taskId],
         );
+        return await this.#tasks.dispatch(payload);
+      }
+      case "task.recover": {
+        const payload = taskHandlePayload(normalized.payload);
+        await this.#authorizeTaskFromOptions(
+          options,
+          "task.recover",
+          "manager",
+          payload.executionId,
+          [payload.taskId],
+        );
+        return await this.#tasks.recoverExpired(payload);
+      }
       case "task.sweep": {
         const payload = taskSweepPayload(normalized.payload);
+        await this.#authorizeTaskFromOptions(
+          options,
+          "task.sweep",
+          "manager",
+          payload.executionId,
+          [],
+        );
         return await requiredCapability(this.#dispatcher, "task.sweep").sweep(
           payload,
         );
       }
-      case "task.status":
-        return await this.#tasks.status(taskHandlePayload(normalized.payload));
-      case "task.cancel":
-        return await this.#tasks.cancel(normalized.payload);
-      case "task.list":
-        return await this.#tasks.list(normalized.payload);
-      case "task.join":
-        return await this.#tasks.join(normalized.payload, options.signal);
-      case "task.awaitAny":
-        return await this.#tasks.awaitAny(
-          awaitAnyPayload(normalized.payload),
-          options.signal,
+      case "task.status": {
+        const payload = taskHandlePayload(normalized.payload);
+        await this.#authorizeTaskFromOptions(
+          options,
+          "task.status",
+          "self-read",
+          payload.executionId,
+          [payload.taskId],
         );
+        return await this.#tasks.status(payload);
+      }
+      case "task.cancel": {
+        const payload = taskHandlePayload(normalized.payload);
+        await this.#authorizeTaskFromOptions(
+          options,
+          "task.cancel",
+          "self-or-manager",
+          payload.executionId,
+          [payload.taskId],
+        );
+        return await this.#tasks.cancel(payload);
+      }
+      case "task.list": {
+        const payload = taskListPayload(normalized.payload);
+        await this.#authorizeTaskFromOptions(
+          options,
+          "task.list",
+          "manager",
+          payload.executionId,
+          [],
+        );
+        return await this.#tasks.list(payload);
+      }
+      case "task.join": {
+        const payload = taskHandlePayload(normalized.payload);
+        await this.#authorizeTaskFromOptions(
+          options,
+          "task.join",
+          "self-read",
+          payload.executionId,
+          [payload.taskId],
+        );
+        return await this.#tasks.join(payload, options.signal);
+      }
+      case "task.awaitAny": {
+        const handles = awaitAnyPayload(normalized.payload);
+        const scope = taskHandleScope(handles, "task awaitAny");
+        await this.#authorizeTaskFromOptions(
+          options,
+          "task.awaitAny",
+          "self-read",
+          scope.executionId,
+          scope.taskIds,
+        );
+        return await this.#tasks.awaitAny(handles, options.signal);
+      }
       case "task.mailbox.send": {
         const payload = taskMailboxSendPayload(normalized.payload);
+        if (this.#trustedHostMode && options.actor === undefined) {
+          return await this.#tasks.send({
+            executionId: payload.executionId,
+            taskId: payload.taskId,
+            payload: payload.payload,
+          });
+        }
         const actor = requiredMailboxSender(options.actor, payload.executionId);
+        await this.#authorizeTask(
+          actor,
+          "task.mailbox.send",
+          "self-send",
+          payload.executionId,
+          [actor.identity.taskId as string],
+        );
         return await this.#tasks.send(
           {
             executionId: payload.executionId,
@@ -291,13 +414,28 @@ export class WorkflowControlPlane {
           { actor, operationId: payload.operationId },
         );
       }
-      case "task.mailbox.read":
-        return await this.#tasks.readMailbox(normalized.payload);
-      case "task.mailbox.wait":
-        return await this.#tasks.waitForMessages(
-          normalized.payload,
-          options.signal,
+      case "task.mailbox.read": {
+        const payload = taskMailboxReadPayload(normalized.payload);
+        await this.#authorizeTaskFromOptions(
+          options,
+          "task.mailbox.read",
+          "self-read",
+          payload.executionId,
+          [payload.taskId],
         );
+        return await this.#tasks.readMailbox(payload);
+      }
+      case "task.mailbox.wait": {
+        const payload = taskMailboxReadPayload(normalized.payload);
+        await this.#authorizeTaskFromOptions(
+          options,
+          "task.mailbox.wait",
+          "self-read",
+          payload.executionId,
+          [payload.taskId],
+        );
+        return await this.#tasks.waitForMessages(payload, options.signal);
+      }
       case "artifact.put":
         return await this.#artifacts.put(
           artifactPutPayload(normalized.payload),
@@ -413,6 +551,40 @@ export class WorkflowControlPlane {
         return unknownOperation(normalized);
     }
   }
+
+  async #authorizeTaskFromOptions(
+    options: WorkflowControlPlaneDispatchOptions,
+    operation: WorkflowTaskControlOperation,
+    access: WorkflowTaskControlAccess,
+    executionId: string,
+    taskIds: readonly string[],
+  ): Promise<void> {
+    if (this.#trustedHostMode) return;
+    await this.#authorizeTask(
+      requiredActor(options.actor),
+      operation,
+      access,
+      executionId,
+      taskIds,
+    );
+  }
+
+  async #authorizeTask(
+    actor: WorkflowActorContext,
+    operation: WorkflowTaskControlOperation,
+    access: WorkflowTaskControlAccess,
+    executionId: string,
+    taskIds: readonly string[],
+  ): Promise<void> {
+    if (this.#trustedHostMode) return;
+    await requiredCapability(this.#taskAccess, operation).authorizeControl({
+      actor,
+      operation,
+      access,
+      executionId,
+      taskIds,
+    });
+  }
 }
 
 function controlRequest(request: unknown): WorkflowControlPlaneRequest {
@@ -462,7 +634,106 @@ function awaitAnyPayload(payload: unknown): readonly WorkflowTaskHandle[] {
 
 function taskHandlePayload(payload: unknown): WorkflowTaskHandle {
   exactPayload(payload, ["executionId", "taskId"], "task handle");
+  requiredString(payload.executionId, "task handle executionId");
+  requiredString(payload.taskId, "task handle taskId");
   return payload as unknown as WorkflowTaskHandle;
+}
+
+function taskHandleScope(
+  handles: readonly WorkflowTaskHandle[],
+  label: string,
+): { executionId: string; taskIds: readonly string[] } {
+  if (handles.length === 0)
+    invalid(`Workflow control ${label} handles are required`);
+  const validated = handles.map(taskHandlePayload);
+  const first = validated[0];
+  if (!first) invalid(`Workflow control ${label} handles are required`);
+  const executionId = first.executionId;
+  if (validated.some((handle) => handle.executionId !== executionId)) {
+    invalid(`Workflow control ${label} handles must share an execution`);
+  }
+  return { executionId, taskIds: validated.map((handle) => handle.taskId) };
+}
+
+function taskResumePayload(payload: unknown): WorkflowTaskResumeRequest {
+  exactPayload(payload, ["executionId", "taskId", "strategy"], "task resume");
+  requiredString(payload.executionId, "task resume executionId");
+  requiredString(payload.taskId, "task resume taskId");
+  if (payload.strategy !== "checkpoint") {
+    invalid("Workflow control task resume strategy is invalid");
+  }
+  return payload as unknown as WorkflowTaskResumeRequest;
+}
+
+function taskListPayload(payload: unknown): WorkflowTaskListRequest {
+  exactPayload(
+    payload,
+    ["executionId", "parentTaskId", "agentId", "status", "cursor", "limit"],
+    "task list",
+  );
+  requiredString(payload.executionId, "task list executionId");
+  optionalString(payload.parentTaskId, "task list parentTaskId");
+  optionalString(payload.agentId, "task list agentId");
+  optionalString(payload.cursor, "task list cursor");
+  if (
+    payload.status !== undefined &&
+    ![
+      "queued",
+      "running",
+      "cancelling",
+      "completed",
+      "failed",
+      "cancelled",
+    ].includes(payload.status as string)
+  ) {
+    invalid("Workflow control task list status is invalid");
+  }
+  if (
+    payload.limit !== undefined &&
+    (!Number.isSafeInteger(payload.limit) || (payload.limit as number) <= 0)
+  ) {
+    invalid("Workflow control task list limit is invalid");
+  }
+  return payload as unknown as WorkflowTaskListRequest;
+}
+
+function taskMailboxReadPayload(
+  payload: unknown,
+): WorkflowTaskMessageReadRequest {
+  exactPayload(
+    payload,
+    ["executionId", "taskId", "cursor", "limit"],
+    "task mailbox read",
+  );
+  requiredString(payload.executionId, "task mailbox read executionId");
+  requiredString(payload.taskId, "task mailbox read taskId");
+  if (payload.cursor !== undefined) {
+    exactPayload(
+      payload.cursor,
+      ["executionId", "taskId", "afterSequence"],
+      "task mailbox cursor",
+    );
+    requiredString(
+      payload.cursor.executionId,
+      "task mailbox cursor executionId",
+    );
+    requiredString(payload.cursor.taskId, "task mailbox cursor taskId");
+    if (
+      payload.cursor.executionId !== payload.executionId ||
+      payload.cursor.taskId !== payload.taskId ||
+      !Number.isSafeInteger(payload.cursor.afterSequence) ||
+      (payload.cursor.afterSequence as number) < 0
+    ) {
+      invalid("Workflow control task mailbox cursor is invalid");
+    }
+  }
+  if (
+    payload.limit !== undefined &&
+    (!Number.isSafeInteger(payload.limit) || (payload.limit as number) <= 0)
+  ) {
+    invalid("Workflow control task mailbox read limit is invalid");
+  }
+  return payload as unknown as WorkflowTaskMessageReadRequest;
 }
 
 function taskSpawnPayload(payload: unknown): WorkflowControlTaskSpawnPayload {

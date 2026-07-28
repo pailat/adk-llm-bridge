@@ -36,12 +36,14 @@ describe("WorkflowOrchestrationTaskAuthorityPort", () => {
         orchestration: {
           planRevision: 99,
           ownership: [{ grantId: "forged", fencingToken: 99 }],
+          maxChildren: 99,
         },
       },
     });
 
     expect(binding).toEqual({
       planRevision: 1,
+      maxChildren: 2,
       ownership: [
         { grantId: "grant-a", fencingToken: 2 },
         { grantId: "grant-z", fencingToken: 1 },
@@ -110,7 +112,18 @@ describe("WorkflowOrchestrationTaskAuthorityPort", () => {
       },
     });
     await expect(
-      derive(noDelegation.authority, parentRecord()),
+      derive(
+        noDelegation.authority,
+        parentRecord({
+          orchestration: {
+            planRevision: 1,
+            ownership: [
+              { grantId: "grant-a", fencingToken: 2 },
+              { grantId: "grant-z", fencingToken: 1 },
+            ],
+          },
+        }),
+      ),
     ).rejects.toMatchObject({ details: { reason: "unauthorized" } });
 
     const wrongRole = await harness({
@@ -201,6 +214,47 @@ describe("WorkflowOrchestrationTaskAuthorityPort", () => {
           taskId: "child",
         } as never,
         sender,
+      }),
+    ).rejects.toMatchObject({ details: { reason: "unauthorized" } });
+  });
+
+  test("authorizes exact self task operations and manager-only operations", async () => {
+    const { authority } = await harness();
+
+    await expect(
+      authority.authorizeControl({
+        actor: actor("worker", "child"),
+        operation: "task.status",
+        access: "self-read",
+        executionId: "execution-1",
+        taskIds: ["child"],
+      }),
+    ).resolves.toBeUndefined();
+    await expect(
+      authority.authorizeControl({
+        actor: actor("worker", "child"),
+        operation: "task.status",
+        access: "self-read",
+        executionId: "execution-1",
+        taskIds: ["root"],
+      }),
+    ).rejects.toMatchObject({ details: { reason: "unauthorized" } });
+    await expect(
+      authority.authorizeControl({
+        actor: actor("architect", "root"),
+        operation: "task.dispatch",
+        access: "manager",
+        executionId: "execution-1",
+        taskIds: ["child"],
+      }),
+    ).resolves.toBeUndefined();
+    await expect(
+      authority.authorizeControl({
+        actor: actor("worker", "child"),
+        operation: "task.list",
+        access: "manager",
+        executionId: "execution-1",
+        taskIds: [],
       }),
     ).rejects.toMatchObject({ details: { reason: "unauthorized" } });
   });
@@ -307,6 +361,7 @@ function parentRecord(
     },
     orchestration: {
       planRevision: 1,
+      maxChildren: 2,
       ownership: [
         { grantId: "grant-a", fencingToken: 2 },
         { grantId: "grant-z", fencingToken: 1 },
@@ -409,7 +464,14 @@ function plan(): WorkflowPlan {
         agentId: "architect",
         policy: {
           role: "architect",
-          permissions: ["plan:read", "task:spawn", "task:mailbox:send"],
+          permissions: [
+            "plan:read",
+            "task:spawn",
+            "task:mailbox:send",
+            "task:read",
+            "task:cancel",
+            "task:manage",
+          ],
           canDelegate: true,
           allowedDelegateRoles: ["worker"],
           maxChildren: 2,
@@ -419,7 +481,12 @@ function plan(): WorkflowPlan {
         agentId: "worker",
         policy: {
           role: "worker",
-          permissions: ["plan:read", "task:mailbox:send"],
+          permissions: [
+            "plan:read",
+            "task:mailbox:send",
+            "task:read",
+            "task:cancel",
+          ],
           canDelegate: false,
         },
       },
