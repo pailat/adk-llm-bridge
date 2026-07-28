@@ -10,6 +10,9 @@ import {
   WorkflowError,
   type WorkflowParallelOptions,
   type WorkflowStep,
+  type WorkflowStepFailure,
+  type WorkflowStepOutcome,
+  type WorkflowStepResult,
 } from "../contracts.js";
 import type { WorkflowUserEvent } from "../events.js";
 import {
@@ -149,6 +152,98 @@ function validateOutput(value: unknown): string | Content | undefined {
   );
 }
 
+type WorkflowScriptStepResult = Omit<WorkflowStepResult, "events">;
+type WorkflowScriptStepOutcome = WorkflowScriptStepResult | WorkflowStepFailure;
+
+function hasStepOutcomeFields(value: Record<string, unknown>): boolean {
+  return (
+    typeof value.id === "string" &&
+    typeof value.agentName === "string" &&
+    Number.isSafeInteger(value.attempts) &&
+    typeof value.startedAt === "number" &&
+    Number.isFinite(value.startedAt) &&
+    typeof value.completedAt === "number" &&
+    Number.isFinite(value.completedAt)
+  );
+}
+
+function isStepResult(value: unknown): value is WorkflowStepResult {
+  return (
+    isObject(value) &&
+    value.status === "completed" &&
+    typeof value.output === "string" &&
+    hasStepOutcomeFields(value)
+  );
+}
+
+function isStepFailure(value: unknown): value is WorkflowStepFailure {
+  return (
+    isObject(value) &&
+    value.status === "failed" &&
+    isObject(value.error) &&
+    typeof value.error.code === "string" &&
+    typeof value.error.message === "string" &&
+    hasStepOutcomeFields(value)
+  );
+}
+
+function isStepOutcome(value: unknown): value is WorkflowStepOutcome {
+  return isStepResult(value) || isStepFailure(value);
+}
+
+/**
+ * Exposes only the stable workflow outcome contract to the sandbox. The host
+ * keeps the original result, including its complete ADK event history.
+ */
+function projectStepResult(
+  result: WorkflowStepResult,
+): WorkflowScriptStepResult {
+  return {
+    status: "completed",
+    id: result.id,
+    agentName: result.agentName,
+    output: result.output,
+    ...(result.content === undefined ? {} : { content: result.content }),
+    ...(result.stateDelta === undefined
+      ? {}
+      : { stateDelta: result.stateDelta }),
+    attempts: result.attempts,
+    startedAt: result.startedAt,
+    completedAt: result.completedAt,
+    ...(result.replayed === undefined ? {} : { replayed: result.replayed }),
+  };
+}
+
+function projectStepFailure(failure: WorkflowStepFailure): WorkflowStepFailure {
+  return {
+    status: "failed",
+    id: failure.id,
+    agentName: failure.agentName,
+    error: failure.error,
+    attempts: failure.attempts,
+    startedAt: failure.startedAt,
+    completedAt: failure.completedAt,
+  };
+}
+
+function projectStepOutcome(
+  outcome: WorkflowStepOutcome,
+): WorkflowScriptStepOutcome {
+  return outcome.status === "completed"
+    ? projectStepResult(outcome)
+    : projectStepFailure(outcome);
+}
+
+function projectHostResponse(value: unknown): unknown {
+  if (isStepResult(value)) {
+    return projectStepResult(value);
+  }
+  if (Array.isArray(value) && value.every(isStepOutcome)) {
+    return value.map(projectStepOutcome);
+  }
+  return value;
+}
+
 function throwIfAborted(signal: AbortSignal | undefined): void {
   if (signal?.aborted) {
     throw new WorkflowError("WORKFLOW_ABORTED", "Workflow script was aborted");
@@ -218,7 +313,7 @@ export async function runWorkflowScript(
   try {
     while (true) {
       throwIfAborted(options.signal);
-      const operation = decodeTurn(session.next(response));
+      const operation = decodeTurn(session.next(projectHostResponse(response)));
       if (operation.op === "final") {
         return {
           output: validateOutput(
