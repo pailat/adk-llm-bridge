@@ -17,6 +17,7 @@ import {
   type WorkflowChangeReceiptAuthority,
   type WorkflowCommitDriver,
   WorkflowValidatedCommitter,
+  WorkflowValidatedIntegrator,
 } from "../../../src/workflows/workspace/change-driver.js";
 
 const FILE_DIGEST = `sha256:${"a".repeat(64)}`;
@@ -290,6 +291,81 @@ describe("workspace change ports", () => {
     expect(events).toEqual(["acquire-commit", "complete-commit", "release"]);
   });
 
+  test("records a returned commit even when cancellation wins the return race", async () => {
+    const changeSet = await exampleChangeSet();
+    const receipt = receiptFor(changeSet);
+    const cancellation = new AbortController();
+    const events: string[] = [];
+    const baseAuthority = authority(events);
+    const liveAuthority: WorkflowChangeReceiptAuthority = {
+      ...baseAuthority,
+      completeCommit: async (_lease, result, options) => {
+        expect(options?.signal).toBeUndefined();
+        expect(result).toMatchObject({
+          commitId: "commit-after-abort",
+          treeId: "tree-after-abort",
+          receiptId: receipt.receiptId,
+        });
+        events.push("complete-commit");
+      },
+      release: async (_lease, options) => {
+        expect(options?.signal).toBeUndefined();
+        events.push("release");
+      },
+    };
+    const committer = new WorkflowValidatedCommitter(
+      { inspect: async () => changeSet },
+      {
+        prepareCommit: async () => ({
+          preparationId: "preparation-after-abort",
+          treeId: "tree-after-abort",
+        }),
+        commit: async (_workspace, input) => {
+          events.push("host-commit");
+          cancellation.abort(new Error("caller stopped waiting"));
+          return {
+            commitId: "commit-after-abort",
+            treeId: input.preparation.treeId,
+            receiptId: input.receipt.receiptId,
+            changeSetDigest: input.changeSet.changeSetDigest,
+            workspaceRevision: input.changeSet.workspaceRevision,
+            baseRevision: input.changeSet.baseRevision,
+            committedAt: 2001,
+          };
+        },
+        discardPreparation: async (_workspace, _preparation, options) => {
+          expect(options?.signal).toBeUndefined();
+          events.push("discard-preparation");
+        },
+      },
+      liveAuthority,
+    );
+
+    await expect(
+      committer.commit(
+        {},
+        {
+          receipt,
+          message: "commit despite late cancellation",
+          operationId: "operation-after-abort",
+        },
+        { signal: cancellation.signal },
+      ),
+    ).resolves.toMatchObject({
+      commitId: "commit-after-abort",
+      treeId: "tree-after-abort",
+      receiptId: receipt.receiptId,
+    });
+    expect(cancellation.signal.aborted).toBe(true);
+    expect(events).toEqual([
+      "acquire-commit",
+      "host-commit",
+      "complete-commit",
+      "release",
+      "discard-preparation",
+    ]);
+  });
+
   test("denies legacy shape-only receipts without live authority", async () => {
     const changeSet = await exampleChangeSet();
     let inspected = 0;
@@ -393,5 +469,93 @@ describe("workspace change ports", () => {
         commitId: "commit-forged",
       }),
     ).toThrow("not linked");
+  });
+
+  test("records a returned integration even when cancellation wins the return race", async () => {
+    const changeSet = await exampleChangeSet();
+    const receipt = receiptFor(changeSet);
+    const commit = {
+      commitId: "commit-integration-abort",
+      treeId: "tree-integration-abort",
+      receiptId: receipt.receiptId,
+      changeSetDigest: receipt.changeSetDigest,
+      workspaceRevision: receipt.workspaceRevision,
+      baseRevision: receipt.baseRevision,
+      committedAt: 2000,
+    };
+    const request = {
+      executionId: receipt.executionId,
+      taskId: receipt.taskId,
+      commitId: commit.commitId,
+      receiptId: receipt.receiptId,
+      changeSetDigest: receipt.changeSetDigest,
+      expectedTarget: receipt.expectedTarget,
+      operationId: "integrate-after-abort",
+      receipt,
+      commit,
+    };
+    const cancellation = new AbortController();
+    const events: string[] = [];
+    const liveAuthority: WorkflowChangeReceiptAuthority = {
+      ...authority(),
+      acquireIntegration: async (input) => {
+        events.push("acquire-integration");
+        return {
+          [WORKFLOW_CHANGE_AUTHORITY_LEASE]: true,
+          leaseId: "lease-integration-abort",
+          reservationId: "reservation-integration-abort",
+          operationId: input.operationId,
+          intentDigest: input.intentDigest,
+        };
+      },
+      completeIntegration: async (_lease, result, options) => {
+        expect(options?.signal).toBeUndefined();
+        expect(result).toMatchObject({
+          integrationId: "integration-after-abort",
+          commitId: commit.commitId,
+          previousRevision: receipt.expectedTarget.revision,
+        });
+        events.push("complete-integration");
+      },
+      release: async (_lease, options) => {
+        expect(options?.signal).toBeUndefined();
+        events.push("release");
+      },
+    };
+    const integrator = new WorkflowValidatedIntegrator(
+      {
+        integrate: async (_repository, normalized) => {
+          events.push("host-integrate");
+          cancellation.abort(new Error("caller stopped waiting"));
+          return {
+            integrationId: "integration-after-abort",
+            commitId: normalized.commitId,
+            targetId: normalized.expectedTarget.targetId,
+            previousRevision: normalized.expectedTarget.revision,
+            integratedRevision: "head-after-integration",
+            integratedAt: 3000,
+          };
+        },
+      },
+      liveAuthority,
+    );
+
+    await expect(
+      integrator.integrate({}, request, { signal: cancellation.signal }),
+    ).resolves.toEqual({
+      integrationId: "integration-after-abort",
+      commitId: commit.commitId,
+      targetId: receipt.expectedTarget.targetId,
+      previousRevision: receipt.expectedTarget.revision,
+      integratedRevision: "head-after-integration",
+      integratedAt: 3000,
+    });
+    expect(cancellation.signal.aborted).toBe(true);
+    expect(events).toEqual([
+      "acquire-integration",
+      "host-integrate",
+      "complete-integration",
+      "release",
+    ]);
   });
 });
