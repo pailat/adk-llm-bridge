@@ -347,6 +347,11 @@ export interface WorkflowChangeReceiptAuthority {
     result: WorkflowAuthoritativeCommitResult,
     options?: WorkflowChangeOperationOptions,
   ): Promise<void>;
+  /** Explicitly releases a completed commit handoff that will not integrate. */
+  abandonCommit?(
+    lease: WorkflowChangeAuthorityLease,
+    options?: WorkflowChangeOperationOptions,
+  ): Promise<void>;
   acquireIntegration(
     request: WorkflowIntegrationAuthorityRequest,
     options?: WorkflowChangeOperationOptions,
