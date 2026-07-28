@@ -21,9 +21,11 @@ import {
 import { hashWorkflowInput } from "../checkpoint/hash.js";
 import type { WorkflowCheckpointV1 } from "../checkpoint/schema.js";
 import type {
+  WorkflowCheckpointRevision,
   WorkflowCheckpointStore,
   WorkflowCheckpointWrite,
 } from "../checkpoint/store.js";
+import { workflowCheckpointRevision } from "../checkpoint/store.js";
 import type {
   WorkflowSerializedError,
   WorkflowStep,
@@ -60,6 +62,7 @@ export interface PreparedWorkflowStep {
 export class WorkflowCheckpointCoordinator {
   readonly #config: WorkflowCheckpointCoordinatorConfig;
   #checkpoint?: WorkflowCheckpointV1;
+  #revision: WorkflowCheckpointRevision | null | undefined;
   #tail: Promise<void> = Promise.resolve();
 
   constructor(config: WorkflowCheckpointCoordinatorConfig) {
@@ -81,10 +84,12 @@ export class WorkflowCheckpointCoordinator {
     if (saved) {
       validateWorkflowCheckpoint(saved, checkpointExpectation(candidate));
       this.#checkpoint = saved;
+      this.#revision = await workflowCheckpointRevision(saved);
       return;
     }
 
     this.#checkpoint = candidate;
+    this.#revision = null;
     await this.#persist();
   }
 
@@ -164,10 +169,15 @@ export class WorkflowCheckpointCoordinator {
   }
 
   async #persist(stepId?: string): Promise<void> {
+    const checkpoint = this.checkpoint();
+    const revision = await workflowCheckpointRevision(checkpoint);
     const write = await this.#config.store.save({
       context: this.#config.context,
-      checkpoint: this.checkpoint(),
+      checkpoint,
+      expectedRevision: this.#revision,
+      revision,
     });
+    this.#revision = revision;
     await this.#config.onWrite(write, stepId);
   }
 
