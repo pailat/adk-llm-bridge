@@ -382,6 +382,26 @@ describe("WorkflowTaskController", () => {
     });
     expect(waitError).toMatchObject({ code: "WORKFLOW_TASK_WAIT_ABORTED" });
   });
+
+  test("keeps legacy CAS execution when durable mode is omitted", async () => {
+    const gate = deferred<WorkflowTaskDriverResult>();
+    const { controller } = harness({ execute: async () => await gate.promise });
+    const handle = await controller.spawn(spawn("legacy"));
+    await eventually(async () => {
+      expect(await controller.status(handle)).toMatchObject({
+        status: "running",
+        revision: 2,
+      });
+    });
+    expect((await controller.status(handle)).claim).toBeUndefined();
+
+    gate.resolve({ output: "legacy" });
+    await expect(controller.join(handle)).resolves.toMatchObject({
+      status: "completed",
+      revision: 3,
+      output: "legacy",
+    });
+  });
 });
 
 function harness(driver: WorkflowTaskDriver) {
