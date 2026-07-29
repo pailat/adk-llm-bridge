@@ -143,15 +143,26 @@ export class ExternalAgent extends BaseAgent {
             rootAgentName: rootAgent.name,
           },
         })) {
+          // A driver-level completion event is authoritative. Some provider SDKs emit their
+          // terminal result after the subprocess exits but keep the transport iterator open while
+          // it waits for EOF. Waiting for that EOF strands ADK's Runner even though the turn is
+          // already complete. Breaking here calls return() on the driver iterator, which lets the
+          // provider release its transport in finally.
+          if (event.type === "completed") {
+            break;
+          }
           const adkEvent = this.toAdkEvent(event, context);
           if (adkEvent) {
             traceAdkEvent({ event: adkEvent, context, providerId: this.provider.id });
             queue.push(adkEvent);
           }
         }
-        queue.close();
       } catch (error) {
         queue.fail(error);
+      } finally {
+        // Closing in finally covers normal EOF, an explicit terminal event, cancellation, and an
+        // iterator return. No consumer is left waiting on AsyncEventQueue.next().
+        queue.close();
       }
     })();
 

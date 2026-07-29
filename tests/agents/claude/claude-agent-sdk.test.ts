@@ -624,6 +624,55 @@ describe("ClaudeAgentSdkDriver", () => {
     expect(returned).toBe(true);
   });
 
+  test("returns the Query after a result without waiting for another SDK message", async () => {
+    let returned = false;
+    let read = false;
+    const never = new Promise<IteratorResult<never>>(() => {});
+    const driver = new ClaudeAgentSdkDriver({
+      sdk: {
+        query: () => ({
+          [Symbol.asyncIterator]() {
+            return this;
+          },
+          next: async () => {
+            if (!read) {
+              read = true;
+              return {
+                value: { type: "result", subtype: "success", result: "done" },
+                done: false,
+              } as never;
+            }
+            return never;
+          },
+          return: async () => {
+            returned = true;
+            return { value: undefined, done: true } as never;
+          },
+        }) as never,
+      },
+    });
+
+    const events = await Promise.race([
+      (async () => {
+        const collected = [];
+        for await (const event of driver.run({
+          provider: CLAUDE_PROVIDER,
+          context: { userContent: { parts: [{ text: "finish" }] } } as never,
+          permissions: { mode: "ask" },
+        })) {
+          collected.push(event);
+        }
+        return collected;
+      })(),
+      Bun.sleep(250).then(() => {
+        throw new Error("Claude driver waited for SDK EOF after result");
+      }),
+    ]);
+
+    expect(events.map((event) => event.type)).toEqual(["started", "output", "completed"]);
+    expect(returned).toBe(true);
+  });
+
   // --- ERR-2: typed error classification ---
   test("classifies assistant/result error subtypes as (non-)recoverable", () => {
     const driver = new ClaudeAgentSdkDriver();

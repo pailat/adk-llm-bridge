@@ -201,7 +201,7 @@ export class ClaudeAgentSdkDriver {
     try {
       query = sdk.query({ prompt, options });
       const iterator = query[Symbol.asyncIterator]();
-      while (true) {
+      stream: while (true) {
         const next = await iterator.next();
         if (next.done) {
           break;
@@ -234,6 +234,11 @@ export class ClaudeAgentSdkDriver {
             emittedOutput = true;
           }
           yield event;
+          if (event.type === "completed") {
+            // A result message is the terminal protocol event. Do not wait for another iterator
+            // read: older SDK/CLI combinations can leave it pending after the child has exited.
+            break stream;
+          }
         }
       }
     } catch (error) {

@@ -59,6 +59,21 @@ class DelegatingDriver implements ExternalAgentDriver {
   }
 }
 
+class TerminalThenPendingDriver implements ExternalAgentDriver {
+  readonly providerId = CODEX_PROVIDER.id;
+  returned = false;
+
+  async *run(): AsyncIterable<ExternalAgentEvent> {
+    try {
+      yield { type: "output", content: "done" };
+      yield { type: "completed", exitCode: 0 };
+      await new Promise<never>(() => {});
+    } finally {
+      this.returned = true;
+    }
+  }
+}
+
 type CapturedSpan = {
   name: string;
   attributes: Record<string, unknown>;
@@ -188,6 +203,26 @@ describe("ExternalAgent ADK event formatting", () => {
 
     expect(events).toHaveLength(1);
     expect(events[0].content?.parts?.[0]?.text).toBe("Visible");
+  });
+
+  test("closes the ADK stream at completed without waiting for provider EOF", async () => {
+    const driver = new TerminalThenPendingDriver();
+    const agent = new ExternalAgent({
+      name: "codex_agent",
+      provider: CODEX_PROVIDER,
+      driver,
+    });
+
+    const events = await Promise.race([
+      collect(agent),
+      Bun.sleep(250).then(() => {
+        throw new Error("external agent waited for provider EOF after completed");
+      }),
+    ]);
+
+    expect(events).toHaveLength(1);
+    expect(events[0]?.content?.parts?.[0]?.text).toBe("done");
+    expect(driver.returned).toBe(true);
   });
 
   test("traces synthetic ADK llm_request with native ADK model attributes", async () => {

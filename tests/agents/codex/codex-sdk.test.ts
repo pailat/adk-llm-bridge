@@ -261,6 +261,58 @@ describe("CodexSdkDriver", () => {
     ]);
   });
 
+  test("returns the SDK event iterator after turn.completed without waiting for EOF", async () => {
+    let returned = false;
+    let read = false;
+    const never = new Promise<IteratorResult<Record<string, unknown>>>(() => {});
+    const sdkStream: AsyncIterable<Record<string, unknown>> = {
+      [Symbol.asyncIterator]() {
+        return {
+          next: async () => {
+            if (!read) {
+              read = true;
+              return { value: { type: "turn.completed" }, done: false };
+            }
+            return never;
+          },
+          return: async () => {
+            returned = true;
+            return { value: undefined, done: true };
+          },
+        };
+      },
+    };
+    const driver = new CodexSdkDriver({
+      sdk: {
+        startThread: () => ({
+          runStreamed: async () => ({ events: sdkStream }),
+        }),
+        resumeThread: () => {
+          throw new Error("not used");
+        },
+      },
+    });
+
+    const events = await Promise.race([
+      (async () => {
+        const collected = [];
+        for await (const event of driver.run({
+          provider: CODEX_PROVIDER,
+          context: { userContent: { parts: [{ text: "finish" }] } } as never,
+        })) {
+          collected.push(event);
+        }
+        return collected;
+      })(),
+      Bun.sleep(250).then(() => {
+        throw new Error("Codex driver waited for SDK EOF after turn.completed");
+      }),
+    ]);
+
+    expect(events.map((event) => event.type)).toEqual(["started", "completed"]);
+    expect(returned).toBe(true);
+  });
+
   test("buildPrompt includes prior session history alongside userContent", async () => {
     let capturedInput = "";
     const driver = new CodexSdkDriver({
