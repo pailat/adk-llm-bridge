@@ -145,6 +145,61 @@ describe("ClaudeAgentSdkDriver", () => {
     expect(resolution.checked).toContain(executable);
   });
 
+  test("provides a Claude-supported shell fallback when SHELL is absent", () => {
+    if (process.platform === "win32") return;
+
+    const driver = new ClaudeAgentSdkDriver({ env: { PATH: "/usr/bin" } });
+    const options = driver.buildOptions({
+      provider: CLAUDE_PROVIDER,
+      context: {} as never,
+    });
+
+    expect(options.env?.SHELL).toMatch(/\/(?:ba|z)sh$/);
+  });
+
+  test("fails before the first model turn when a required MCP server is unavailable", async () => {
+    let returned = false;
+    const driver = new ClaudeAgentSdkDriver({
+      requiredMcpServers: ["workflow"],
+      sdk: {
+        query: () =>
+          (async function* () {
+            try {
+              yield {
+                type: "system",
+                subtype: "init",
+                mcp_servers: [{ name: "workflow", status: "failed" }],
+              } as never;
+              yield { type: "result", subtype: "success", result: "unsafe" } as never;
+            } finally {
+              returned = true;
+            }
+          })() as never,
+      },
+    });
+
+    const events = [];
+    for await (const event of driver.run({
+      provider: CLAUDE_PROVIDER,
+      context: {} as never,
+    })) {
+      events.push(event);
+    }
+
+    expect(events).toEqual([
+      { type: "started", providerId: "claude", timestamp: expect.any(Number) },
+      {
+        type: "error",
+        message: "Required Claude MCP server unavailable (workflow:failed)",
+        code: "CLAUDE_AGENT_SDK_ERROR",
+        recoverable: true,
+        timestamp: expect.any(Number),
+      },
+      { type: "completed", exitCode: 1, timestamp: expect.any(Number) },
+    ]);
+    expect(returned).toBe(true);
+  });
+
   test("emits actionable Claude executable lookup errors", async () => {
     const driver = new ClaudeAgentSdkDriver({
       env: { CLAUDE_CODE_EXECUTABLE: "/missing/claude" },

@@ -107,6 +107,13 @@ export interface ClaudeAgentSdkDriverConfig {
   model?: string;
   debugEvents?: boolean;
   /**
+   * MCP servers that must be connected before Claude starts the first model
+   * turn. The SDK reports their connection state in `system/init`; treating a
+   * missing or degraded required server as a provider error prevents the model
+   * from silently continuing without its authority or completion tools.
+   */
+  requiredMcpServers?: string[];
+  /**
    * AUTH-2: opt-in plain-string system prompt. When set, it REPLACES the
    * `claude_code` preset (and `request.instruction` is appended to it) so a
    * non-coding agent is not forced into the full coding-agent persona/token
@@ -138,6 +145,7 @@ export class ClaudeAgentSdkDriver {
   readonly #maxTurns?: number;
   readonly #model?: string;
   readonly #debugEvents: boolean;
+  readonly #requiredMcpServers: readonly string[];
   readonly #resumeSessionId?: string;
   readonly #forkSession?: boolean;
   readonly #systemPrompt?: string;
@@ -165,6 +173,7 @@ export class ClaudeAgentSdkDriver {
     this.#maxTurns = config.maxTurns;
     this.#model = config.model;
     this.#debugEvents = config.debugEvents ?? false;
+    this.#requiredMcpServers = [...new Set(config.requiredMcpServers ?? [])];
     this.#resumeSessionId = config.resumeSessionId;
     this.#forkSession = config.forkSession;
     this.#systemPrompt = config.systemPrompt;
@@ -207,6 +216,7 @@ export class ClaudeAgentSdkDriver {
           break;
         }
         const message = next.value;
+        this.assertRequiredMcpServersConnected(message);
         // RESUME-1: capture the SDK session id (system/init or result) so the
         // next turn of this ADK session can resume it.
         if (adkSessionId) {
@@ -404,6 +414,11 @@ export class ClaudeAgentSdkDriver {
     copyIfPresent(this.#env, env, "HOME");
     copyIfPresent(this.#env, env, "USER");
     copyIfPresent(this.#env, env, "SHELL");
+    if (!env.SHELL && process.platform !== "win32") {
+      env.SHELL = ["/bin/bash", "/usr/bin/bash", "/bin/zsh", "/usr/bin/zsh"].find(
+        existsSync,
+      );
+    }
     copyIfPresent(this.#env, env, "CLAUDE_CONFIG_DIR");
     copyIfPresent(this.#env, env, "XDG_CONFIG_HOME");
     env.CLAUDE_AGENT_SDK_CLIENT_APP = "adk-llm-bridge";
@@ -418,6 +433,33 @@ export class ClaudeAgentSdkDriver {
     }
 
     return env;
+  }
+
+  private assertRequiredMcpServersConnected(message: ClaudeAgentSdkMessage): void {
+    if (this.#requiredMcpServers.length === 0) return;
+
+    const record = asRecord(message);
+    if (record.type !== "system" || record.subtype !== "init") return;
+
+    const statuses = new Map<string, string>();
+    if (Array.isArray(record.mcp_servers)) {
+      for (const item of record.mcp_servers) {
+        const server = asRecord(item);
+        const name = stringValue(server.name);
+        const status = stringValue(server.status);
+        if (name && status) statuses.set(name, status);
+      }
+    }
+
+    const unavailable = this.#requiredMcpServers.flatMap((name) => {
+      const status = statuses.get(name);
+      return status === "connected" ? [] : [`${name}:${status ?? "missing"}`];
+    });
+    if (unavailable.length > 0) {
+      throw new Error(
+        `Required Claude MCP server unavailable (${unavailable.join(", ")})`,
+      );
+    }
   }
 
   /**
