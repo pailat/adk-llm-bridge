@@ -47,4 +47,5 @@ export { OpenAICompatibleLlm } from "./openai-compatible-llm.js";
 export type {
   ProviderDefinition,
   ProviderEnvKeys,
+  ReasoningCapability,
 } from "./provider-definition.js";

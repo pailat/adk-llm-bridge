@@ -20,7 +20,7 @@ import { PlaceholderExternalAgentDriver } from "./external-agent-driver.js";
 import type { ExternalAgentEvent } from "./events.js";
 import type { ExternalAgentPermissionPolicy } from "./permissions/schema.js";
 import type { ExternalAgentProviderDefinition } from "./provider/schema.js";
-import { ToolGateway } from "./tools/tool-gateway.js";
+import { consumeDelegationFinalAnswer, ToolGateway } from "./tools/tool-gateway.js";
 
 const tracerName = "gcp.vertex.agent";
 const tracerVersion = "adk-llm-bridge";
@@ -143,15 +143,26 @@ export class ExternalAgent extends BaseAgent {
             rootAgentName: rootAgent.name,
           },
         })) {
+          // A driver-level completion event is authoritative. Some provider SDKs emit their
+          // terminal result after the subprocess exits but keep the transport iterator open while
+          // it waits for EOF. Waiting for that EOF strands ADK's Runner even though the turn is
+          // already complete. Breaking here calls return() on the driver iterator, which lets the
+          // provider release its transport in finally.
+          if (event.type === "completed") {
+            break;
+          }
           const adkEvent = this.toAdkEvent(event, context);
           if (adkEvent) {
             traceAdkEvent({ event: adkEvent, context, providerId: this.provider.id });
             queue.push(adkEvent);
           }
         }
-        queue.close();
       } catch (error) {
         queue.fail(error);
+      } finally {
+        // Closing in finally covers normal EOF, an explicit terminal event, cancellation, and an
+        // iterator return. No consumer is left waiting on AsyncEventQueue.next().
+        queue.close();
       }
     })();
 
@@ -169,7 +180,16 @@ export class ExternalAgent extends BaseAgent {
     context: InvocationContext,
   ): Event | undefined {
     switch (event.type) {
-      case "output":
+      case "output": {
+        // Native ADK transfer makes the sub-agent's turn the final answer and
+        // the coordinator stays silent afterwards. When a delegation just
+        // produced a terminal sub-agent answer, drop the root model's
+        // redundant re-narration turn. Only a terminal (non-partial) text turn
+        // consumes the flag; partial streaming chunks pass through untouched so
+        // we never strip legitimate root narration from a non-delegation turn.
+        if (!event.partial && consumeDelegationFinalAnswer(context)) {
+          return undefined;
+        }
         return createEvent({
           invocationId: context.invocationId,
           author: this.name,
@@ -180,6 +200,7 @@ export class ExternalAgent extends BaseAgent {
           customMetadata: metadataForExternalEvent(this.name, event),
           timestamp: event.timestamp,
         });
+      }
       case "error":
         return createEvent({
           invocationId: context.invocationId,

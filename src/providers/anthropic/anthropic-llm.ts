@@ -20,6 +20,7 @@ import { DEFAULT_MAX_RETRIES, DEFAULT_TIMEOUT } from "../../constants.js";
 import { BaseProviderLlm } from "../../core/base-provider-llm.js";
 import type { AnthropicProviderConfig } from "../../types.js";
 import { clampPositive } from "../../utils/validate.js";
+
 /** Environment variable names for Anthropic configuration. */
 const ANTHROPIC_ENV = { API_KEY: "ANTHROPIC_API_KEY" } as const;
 
@@ -172,18 +173,27 @@ export class AnthropicLlm extends BaseProviderLlm {
    *
    * @param llmRequest - The ADK LLM request
    * @param stream - Whether to stream the response (default: false)
+   * @param abortSignal - Optional signal used to cancel the provider request
    * @returns An async generator yielding LLM responses
    */
   async *generateContentAsync(
     llmRequest: LlmRequest,
     stream = false,
+    abortSignal?: AbortSignal,
   ): AsyncGenerator<LlmResponse, void> {
     try {
       const { messages, system, tools, params, toolChoice } =
         convertAnthropicRequest(llmRequest);
 
       if (stream) {
-        yield* this.streamResponse(messages, system, tools, params, toolChoice);
+        yield* this.streamResponse(
+          messages,
+          system,
+          tools,
+          params,
+          toolChoice,
+          abortSignal,
+        );
       } else {
         yield await this.singleResponse(
           messages,
@@ -191,9 +201,11 @@ export class AnthropicLlm extends BaseProviderLlm {
           tools,
           params,
           toolChoice,
+          abortSignal,
         );
       }
     } catch (error) {
+      if (abortSignal?.aborted) return;
       yield this.createErrorResponse(error, "ANTHROPIC");
     }
   }
@@ -285,9 +297,11 @@ export class AnthropicLlm extends BaseProviderLlm {
     tools: AnthropicSDK.Tool[] | undefined,
     params?: AnthropicGenerationParams,
     toolChoice?: AnthropicSDK.ToolChoice,
+    abortSignal?: AbortSignal,
   ): Promise<LlmResponse> {
     const response = await this.client.messages.create(
       this.buildRequestParams(messages, system, tools, params, toolChoice),
+      abortSignal ? { signal: abortSignal } : undefined,
     );
     return convertAnthropicResponse(response);
   }
@@ -303,9 +317,11 @@ export class AnthropicLlm extends BaseProviderLlm {
     tools: AnthropicSDK.Tool[] | undefined,
     params?: AnthropicGenerationParams,
     toolChoice?: AnthropicSDK.ToolChoice,
+    abortSignal?: AbortSignal,
   ): AsyncGenerator<LlmResponse, void> {
     const stream = this.client.messages.stream(
       this.buildRequestParams(messages, system, tools, params, toolChoice),
+      abortSignal ? { signal: abortSignal } : undefined,
     );
 
     const acc = createAnthropicStreamAccumulator();

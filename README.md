@@ -3,17 +3,36 @@
 [![npm version](https://img.shields.io/npm/v/adk-llm-bridge.svg)](https://www.npmjs.com/package/adk-llm-bridge)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Use **any LLM** with [Google ADK TypeScript](https://github.com/google/adk-js) in just a few lines of code.
+Use **any LLM** — and now **any coding agent** — with [Google ADK TypeScript](https://github.com/google/adk-js) in just a few lines of code.
+
+> **🆕 New in 0.6.1 — First-class Dynamic Workflows.** Compose ADK agents with trusted TypeScript handlers or bounded QuickJS generator scripts, including checkpoints, replay, retries, cancellation, and parallel steps. [Jump to the workflows guide →](#dynamic-workflows)
+
+## Contents
+
+- [Why?](#why)
+- [Supported Providers](#supported-providers)
+- [Compatibility and Feature Degradation](#compatibility-and-feature-degradation)
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [**External Coding Agents** 🆕](#external-coding-agents)
+- [**Dynamic Workflows** 🆕](#dynamic-workflows)
+- [Configuration](#configuration)
+- [Model Format](#model-format)
+- [Features](#features)
+- [API Reference](#api-reference)
+- [Examples](#examples)
 
 ## Why?
 
-Google ADK TypeScript comes with built-in Gemini support. This bridge extends it to work with **any model** from providers like Anthropic, OpenAI, Meta, and more—while keeping all ADK features like multi-agent orchestration, tool calling, and streaming.
+Google ADK TypeScript comes with built-in Gemini support. This bridge extends it to work with **any model** from providers like Anthropic, OpenAI, Meta, and more — and to embed **provider-owned coding agents** (Claude Code, Codex, Gemini CLI) directly in your agent graph — all while keeping ADK features like multi-agent orchestration, tool calling, and streaming.
 
 ### Key Benefits
 
 - **Simple** — 3 lines to integrate any model
 - **Battle-tested** — Built on the official OpenAI and Anthropic SDKs
 - **Compatible** — Works with any OpenAI-compatible API (AI Gateway, OpenRouter, etc.)
+- **Agent-ready** 🆕 — Wrap external coding agents as ADK `BaseAgent` sub-agents
+- **Workflow-ready** 🆕 — Orchestrate versioned, durable agent workflows as ADK agents
 
 ## Supported Providers
 
@@ -25,6 +44,33 @@ Google ADK TypeScript comes with built-in Gemini support. This bridge extends it
 | **[Anthropic](https://anthropic.com/)** | Claude models | Direct API access |
 | **[xAI](https://x.ai/)** | Grok models | Direct API access |
 | **Custom (OpenAI-compatible)** | Any model | Ollama, vLLM, Azure OpenAI, LM Studio, etc. |
+
+## Compatibility and Feature Degradation
+
+Provider availability is not the same as feature parity. See the
+**[OpenAI-compatible feature degradation and capability matrix](./docs/openai-compatible-feature-matrix.md)**
+for the canonical comparison across OpenAI, OpenRouter, xAI, AI Gateway,
+Ollama, vLLM, LM Studio, and native Anthropic.
+
+The matrix separates deterministic bridge behavior from runtime/model
+capability. It records dropped Gemini-only fields and media, reasoning-model
+restrictions, structured-output and tool-choice variation, `candidateCount`,
+`providerOptions`, and the unsupported bidirectional `connect()` API. It is
+updated with the project's
+[conformance fixtures and exact runtime profiles](./docs/runtime-conformance.md);
+a fixture pass does not claim support for every model a runtime can serve.
+
+## Coding Agents 🆕
+
+Beyond chat models, you can embed full **coding agents** as ADK `BaseAgent` sub-agents via the `adk-llm-bridge/agents` subpath:
+
+| Agent | Runtime | Import |
+|-------|---------|--------|
+| **Claude Code** | `@anthropic-ai/claude-agent-sdk` | `ClaudeAgent` |
+| **OpenAI Codex** | `@openai/codex-sdk` (or `codex` CLI) | `CodexAgent` |
+| **Gemini CLI** | `gemini` CLI | `GeminiCliAgent` |
+
+See [External Coding Agents](#external-coding-agents) for the full guide.
 
 ## Installation
 
@@ -53,7 +99,12 @@ const agent = new LlmAgent({
 });
 ```
 
-That's it. All ADK features work: tools, streaming, multi-agent, etc.
+That's it for core text generation. Tools, streaming, multi-agent orchestration,
+and other ADK features remain available where the selected provider/runtime and
+model support their mapped wire behavior. Check the
+[capability matrix](./docs/openai-compatible-feature-matrix.md) before relying
+on structured output, forced tool choice, reasoning, logprobs, or multimodal
+input.
 
 ### Other Providers
 
@@ -66,7 +117,7 @@ model: OpenRouter('anthropic/claude-sonnet-4')
 // OpenAI - Direct API
 model: OpenAI('gpt-4.1')
 
-// Anthropic - Direct API  
+// Anthropic - Direct API
 model: Anthropic('claude-sonnet-4-6')
 
 // xAI - Direct API
@@ -95,15 +146,25 @@ const agent = new LlmAgent({
 });
 ```
 
-## External Agent Runtimes (Opt-in)
+## External Coding Agents
 
-`adk-llm-bridge` keeps its root import focused on LLM providers. Existing code that imports from `adk-llm-bridge` is unchanged. External agent runtime helpers are available from the explicit `/agents` subpath:
+> 🆕 **New in 0.6.0.** Embed provider-owned coding agents — Claude Code, OpenAI Codex, and Gemini CLI — as native ADK sub-agents.
+
+Most bridges stop at chat models. `adk-llm-bridge` also lets an ADK agent graph delegate to **full coding agents** that own their own tools, sandbox, and auth — so a coordinator LLM can hand a task to Claude Code, Codex, or Gemini CLI and get the result back as a normal ADK agent response.
+
+| Agent | Default driver | CLI fallback |
+|-------|----------------|--------------|
+| `ClaudeAgent` | `@anthropic-ai/claude-agent-sdk` | `ClaudeCliDriver` |
+| `CodexAgent` | `@openai/codex-sdk` | `CodexCliDriver` |
+| `GeminiCliAgent` | `gemini` CLI | — |
+
+The agents API lives behind an explicit subpath, so the root import stays focused on LLM providers and existing code is unchanged:
 
 ```typescript
 import { CodexAgent, ClaudeAgent, GeminiCliAgent } from "adk-llm-bridge/agents";
 ```
 
-Use this API when you want an ADK agent graph to include provider-owned coding CLIs/runtimes as `BaseAgent`-compatible sub-agents. The agent layer exposes shared configuration, credential, permission, provider registry, and runtime drivers while keeping provider auth/configuration owned by each external runtime. `CodexAgent` uses the official `@openai/codex-sdk` driver by default; pass `new CodexCliDriver()` explicitly when you need the lower-level CLI fallback.
+The agent layer provides shared configuration, credential, permission, provider-registry, and runtime drivers, while each external runtime keeps ownership of its own auth and sandbox. `CodexAgent` uses the official `@openai/codex-sdk` driver by default; pass `new CodexCliDriver()` explicitly when you need the lower-level CLI fallback.
 
 ```typescript
 import { LlmAgent } from "@google/adk";
@@ -137,7 +198,184 @@ export const rootAgent = new LlmAgent({
 - **Optional runtime dependencies** — importing `adk-llm-bridge/agents` does not install or execute provider CLIs. Wire a driver/runtime explicitly in applications that need one.
 - **Permission presets** — use `read-only`, `ask`, `workspace-write`, or `full-access` policies, plus optional `allowNetwork` and `allowedPaths`, so provider drivers can map ADK intent to provider-specific sandbox flags.
 
-See [examples/external-agents](./examples/external-agents) for a shape-only example.
+### Runnable examples
+
+Each example typechecks and builds without credentials, and prints a clear "set `<KEY>` to run" hint when run without one:
+
+- **[basic-agent-claude](./examples/basic-agent-claude)** — Claude Code as an ADK agent (Claude Agent SDK)
+- **[basic-agent-codex](./examples/basic-agent-codex)** — OpenAI Codex as an ADK agent (Codex SDK)
+- **[basic-agent-gemini](./examples/basic-agent-gemini)** — Gemini CLI as an ADK agent
+- **[external-agents](./examples/external-agents)** — coordinator + external sub-agents (HelpDesk / architecture review)
+
+## Dynamic Workflows
+
+> 🆕 **New in 0.6.1.** A workflow is itself an ADK `BaseAgent`, so it can be used
+> anywhere a normal agent can. Its steps may invoke any direct subagent,
+> including `CodexAgent`, `ClaudeAgent`, `GeminiCliAgent`, or an ADK `LlmAgent`.
+
+The stable API lives at `adk-llm-bridge/workflows`; the root import remains
+focused on model providers.
+
+### Trusted TypeScript workflows
+
+Use `WorkflowAgent` when the workflow is application-owned code:
+
+```typescript
+import { defineWorkflow, WorkflowAgent } from "adk-llm-bridge/workflows";
+
+const workflow = new WorkflowAgent({
+  name: "ImplementationWorkflow",
+  subAgents: [planner, implementer, reviewer],
+  definition: defineWorkflow({
+    id: "implementation",
+    version: "1",
+    handler: async (ctx) => {
+      const plan = await ctx.run({
+        id: "plan",
+        agentName: "Planner",
+        input: ctx.input,
+      });
+      const implementation = await ctx.run({
+        id: "implement",
+        agentName: "Implementer",
+        input: plan.output,
+      });
+      const review = await ctx.run({
+        id: "review",
+        agentName: "Reviewer",
+        input: implementation.output,
+      });
+      return review.output;
+    },
+  }),
+});
+```
+
+`ctx.parallel(steps, options)` adds bounded concurrency with ordered results and
+`fail-fast` or `all-settled` behavior. Step IDs are durable identities: keep them
+stable across retries and resumes.
+
+### Dynamic script workflows
+
+Use `ScriptWorkflowAgent` when the sequence is supplied dynamically. Scripts
+run inside a fresh bounded QuickJS VM and communicate with the host only by
+yielding JSON operations:
+
+```typescript
+import {
+  defineScriptWorkflow,
+  ScriptWorkflowAgent,
+} from "adk-llm-bridge/workflows";
+
+const workflow = new ScriptWorkflowAgent({
+  name: "DynamicWorkflow",
+  subAgents: [planner, implementer],
+  definition: defineScriptWorkflow({
+    id: "dynamic-implementation",
+    version: "1",
+    source: `
+      const plan = yield ctx.run({
+        id: "plan",
+        agentName: "Planner",
+        input: ctx.input
+      });
+      const result = yield ctx.run({
+        id: "implement",
+        agentName: "Implementer",
+        input: plan.output
+      });
+      return result.output;
+    `,
+  }),
+});
+```
+
+Script bodies are synchronous generators: use `yield ctx.run(...)`,
+`yield ctx.parallel(...)`, and `yield ctx.emit(...)`. Imports, host globals, and
+async callbacks are unavailable inside the VM. Install the optional sandbox
+peers when using script workflows:
+
+```bash
+bun add quickjs-emscripten-core @jitl/quickjs-wasmfile-release-sync
+```
+
+The host can also opt into per-invocation dynamic agents. The script receives
+only secret-free descriptors; agent handles and provider credentials remain on
+the host:
+
+```typescript
+import { ExternalAgentWorkflowFactory } from "adk-llm-bridge/workflows";
+
+const workflow = new ScriptWorkflowAgent({
+  name: "DynamicWorkflow",
+  definition,
+  createAgentFactory: () =>
+    new ExternalAgentWorkflowFactory({
+      registry: externalAgentRegistry,
+      allowedProviderIds: ["codex"],
+      policy: { workingDirectoryRoots: ["/srv/worktrees"] },
+    }),
+});
+```
+
+Guest scripts can then `yield ctx.spawnAgent(request)`,
+`yield ctx.listAgents()`, invoke the returned name with `ctx.run`, and
+`yield ctx.releaseAgent(name)`. Factories and names are isolated per ADK
+invocation; all remaining dynamic handles are released when execution ends.
+The returned descriptor includes a deterministic `revision`; pass it as the
+step's `agentRevision` to prevent checkpoint or outbox replay after the dynamic
+agent configuration changes.
+
+For a JSON or MCP-facing orchestration service, compose
+`WorkflowControlPlane` with execution, task/mailbox, artifact, and integration
+services. Its single versioned `dispatch({ protocol, version, operation,
+payload }, { signal, actor })` entry point
+lets an agent start executions, create additional tasks at runtime, wait for
+them, exchange long-polled messages, and validate immutable artifacts without
+exposing host handles. The actor is a host-authenticated capability, never JSON.
+See the **[workflow control-plane guide](./docs/workflow-control-plane.md)** and
+**[multi-agent orchestration architecture](./docs/workflow-orchestration.md)**.
+
+Both workflow agents persist checkpoints through ADK session `stateDelta` by
+default. Completed steps replay without reinvoking their agents; changed input,
+version, step identity, or script source is rejected explicitly. A custom
+`WorkflowCheckpointStore` and stable `resolveExecutionId` may be injected for
+external durability.
+
+For multiple Node processes on one host, use the dependency-free filesystem
+adapters instead of the process-local defaults:
+
+```typescript
+import {
+  FileSystemWorkflowCheckpointStore,
+  FileSystemWorkspaceAdapter,
+  WorkflowAgent,
+} from "adk-llm-bridge/workflows";
+
+const workflow = new WorkflowAgent({
+  name: "DurableImplementationWorkflow",
+  subAgents: [planner, implementer, reviewer],
+  definition,
+  checkpointStore: new FileSystemWorkflowCheckpointStore({
+    root: "/var/lib/my-app/workflow-checkpoints",
+  }),
+  workspace: {
+    workspaceId: "repository-main",
+    adapter: new FileSystemWorkspaceAdapter({
+      stateDirectory: "/var/lib/my-app/workspace-leases",
+    }),
+  },
+});
+```
+
+These adapters coordinate cooperating processes on one local filesystem. They
+are not distributed database adapters, and workspace fencing tokens must be
+enforced by the host that performs external writes. See the
+**[workflow durability guide](./docs/workflow-durability.md)** for recovery,
+filesystem, and tombstone requirements.
+
+See **[codex-workflow](./examples/codex-workflow)** for a runnable dynamic
+planner → implementer → reviewer flow using only Codex agents.
 
 ## Configuration
 
@@ -159,9 +397,32 @@ OPENROUTER_APP_NAME=Your App Name          # optional, for ranking
 **Direct Providers:**
 ```bash
 OPENAI_API_KEY=your-openai-key
+OPENAI_BASE_URL=https://api.openai.com/v1  # optional
 ANTHROPIC_API_KEY=your-anthropic-key
 XAI_API_KEY=your-xai-key
 ```
+
+**Custom OpenAI-compatible endpoints:**
+```bash
+CUSTOM_LLM_BASE_URL=http://localhost:11434/v1
+CUSTOM_LLM_API_KEY=optional-key
+```
+
+For Custom and OpenAI endpoint settings, precedence is:
+
+1. explicit constructor or named-registration configuration;
+2. global provider configuration, where exposed;
+3. environment variables;
+4. the provider default.
+
+A defined higher-priority value is authoritative: an invalid explicit URL
+fails instead of falling through to an environment value. Custom has no default
+URL, so `baseURL` or `CUSTOM_LLM_BASE_URL` is required; its API key may be
+omitted for unauthenticated local servers. OpenAI reads `OPENAI_BASE_URL` after
+explicit/global configuration and otherwise uses
+`https://api.openai.com/v1`. See
+[Custom provider configuration](./docs/custom-provider-configuration.md) for
+the complete precedence and security behavior.
 
 ### Programmatic Configuration
 
@@ -189,6 +450,37 @@ model: Anthropic('claude-sonnet-4-6', {
   maxTokens: 8192,
 })
 ```
+
+### Safe Named Custom Providers
+
+Use `registerCustomProvider` only when an ADK agent must resolve a Custom model
+from a string. Each registration owns a finite allowlist of exact remote model
+IDs; open-ended prefix ownership is intentionally unsupported because ADK's
+public registry cannot prove arbitrary regular-expression routes do not
+overlap.
+
+```typescript
+import { LlmAgent } from "@google/adk";
+import { registerCustomProvider } from "adk-llm-bridge";
+
+registerCustomProvider("ollama", {
+  baseURL: "http://localhost:11434/v1",
+  models: ["llama3", "qwen2.5:1.5b"],
+});
+
+const agent = new LlmAgent({
+  name: "local-assistant",
+  model: "ollama/llama3",
+  instruction: "You are helpful.",
+});
+```
+
+Registration validates every exact route before changing `LLMRegistry`, rejects
+reserved or already claimed routes, and captures a deep-copied, fully resolved
+endpoint configuration. Register named custom providers **before** broad
+AI Gateway or OpenRouter registrations; ADK uses first-match ordering, and a
+broad provider registered first makes overlap safety impossible to prove. See
+[Custom provider configuration](./docs/custom-provider-configuration.md).
 
 ## Model Format
 
@@ -227,7 +519,21 @@ Browse all models:
 - **Tool calling** - Function calling with automatic conversion
 - **Multi-turn** - Full conversation history support
 - **Multi-agent** - Sub-agents and agent transfer
+- **External coding agents** 🆕 - Claude Code, Codex, and Gemini CLI as ADK sub-agents
 - **Usage metadata** - Token counts for monitoring
+
+Feature support is not uniform across runtimes and models. The
+[capability matrix](./docs/openai-compatible-feature-matrix.md) is the source of
+truth for supported, degraded, provider-dependent, and unsupported behavior.
+Notably, OpenAI-compatible requests accept `candidateCount` only when it is
+omitted or exactly `1`; use separate requests when multiple independent
+candidates are required.
+
+For local servers, consult the
+[runtime conformance matrix](./docs/runtime-conformance.md). Deterministic
+fixtures run in normal CI, Ollama and vLLM have scheduled exact-version/model
+profiles, and LM Studio uses the same runner manually. Conformance results are
+fed back into the capability matrix.
 
 ## Tool Calling Example
 
@@ -344,12 +650,29 @@ See the [examples](./examples) directory:
 - **[basic-agent-lmstudio](./examples/basic-agent-lmstudio)** - Multi-agent HelpDesk with LM Studio
 - **[native-features](./examples/native-features)** - Showcase of native model capabilities (sampling, reasoning, structured output, multimodal, tool_choice, streaming) across all 5 providers
 - **[express-server](./examples/express-server)** - Production HTTP API with sessions, streaming, tools
-- **[external-agents](./examples/external-agents)** - Opt-in `/agents` API shape for external runtime sub-agents
+
+### External coding agents 🆕
+
+- **[basic-agent-claude](./examples/basic-agent-claude)** - Claude Code as an ADK agent (Claude Agent SDK)
+- **[basic-agent-codex](./examples/basic-agent-codex)** - OpenAI Codex as an ADK agent (Codex SDK)
+- **[basic-agent-gemini](./examples/basic-agent-gemini)** - Gemini CLI as an ADK agent
+- **[external-agents](./examples/external-agents)** - Coordinator + external runtime sub-agents
+
+### Dynamic workflows 🆕
+
+- **[codex-workflow](./examples/codex-workflow)** - Dynamic planner → implementer → reviewer workflow using only Codex agents
 
 ## Requirements
 
-- Node.js >= 18.0.0
-- `@google/adk` >= 0.5.0 (peer range `>=0.5.0 <2`; tested against 1.2.0)
+- Node.js >= 20.0.0
+- `@google/adk` (peer range `>=0.6.1 <2`; tested against 1.2.0)
+- **Optional, for external coding agents** (installed only if you use `adk-llm-bridge/agents`):
+  - `@anthropic-ai/claude-agent-sdk` (peer `>=0.2.138 <0.4`) — for `ClaudeAgent`
+  - `@openai/codex-sdk` (peer `>=0.130.0 <0.142`) — for `CodexAgent`
+  - `gemini` CLI on `PATH` — for `GeminiCliAgent`
+- **Optional, for dynamic script workflows** (installed only if you use `ScriptWorkflowAgent`):
+  - `quickjs-emscripten-core` (peer `>=0.32 <0.33`)
+  - `@jitl/quickjs-wasmfile-release-sync` (peer `>=0.32 <0.33`)
 
 ## Contributing
 

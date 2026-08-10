@@ -1,0 +1,21 @@
+{
+  "name": "codex-workflow",
+  "private": true,
+  "type": "module",
+  "main": "agent.ts",
+  "scripts": {
+    "smoke": "bun agent.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@google/adk": "^1.2.0",
+    "@jitl/quickjs-wasmfile-release-sync": "^0.32.0",
+    "@openai/codex-sdk": "^0.141.0",
+    "adk-llm-bridge": "file:../..",
+    "quickjs-emscripten-core": "^0.32.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.9.3"
+  }
+}

@@ -82,13 +82,12 @@ export function convertResponse(response: OpenAI.ChatCompletion): LlmResponse {
 
   const parts: Part[] = [];
 
-  // Surface provider reasoning text as a thought part before the answer text.
-  // OpenAI/OpenRouter use `reasoning`; xAI/DeepSeek use `reasoning_content`.
-  // These fields are not in the OpenAI SDK types, so read them defensively.
-  const reasoning = extractReasoning(choice.message);
-  if (reasoning) {
-    parts.push({ text: reasoning, thought: true });
-  }
+  // Surface provider reasoning as a thought part before the answer text.
+  // OpenAI/OpenRouter use `reasoning`; xAI/DeepSeek use `reasoning_content`;
+  // OpenRouter also returns a structured `reasoning_details` array. These fields
+  // are not in the OpenAI SDK types, so read them defensively.
+  const thoughtPart = buildThoughtPart(choice.message);
+  if (thoughtPart) parts.push(thoughtPart);
 
   if (choice.message.content) {
     parts.push({ text: choice.message.content });
@@ -142,6 +141,78 @@ function extractReasoning(source: unknown): string | undefined {
         ? obj.reasoning
         : undefined;
   return value ? value : undefined;
+}
+
+/**
+ * Reads a structured `reasoning_details` array from a chat message/delta.
+ *
+ * OpenRouter returns reasoning both as a flat string (`reasoning`) AND as a
+ * structured array (`reasoning_details`, e.g.
+ * `[{ type: "reasoning.text", text, signature, index }]`). The structured array
+ * carries the provider signature needed to replay signed reasoning across turns
+ * for signature-strict upstreams (Anthropic/Gemini thinking via OpenRouter).
+ *
+ * Not in the OpenAI SDK types — read defensively.
+ *
+ * @returns The reasoning_details array when present and non-empty, else undefined
+ *
+ * @internal
+ */
+function extractReasoningDetails(
+  source: unknown,
+): Record<string, unknown>[] | undefined {
+  if (!source || typeof source !== "object") return undefined;
+  const details = (source as Record<string, unknown>).reasoning_details;
+  if (!Array.isArray(details) || details.length === 0) return undefined;
+  return details as Record<string, unknown>[];
+}
+
+/**
+ * Concatenates the human-readable text out of a `reasoning_details` array.
+ *
+ * Handles the divergent vendor shapes opaquely: `reasoning.text` (anthropic /
+ * gemini / glm / deepseek via OpenRouter) and `reasoning.summary` (openai / grok
+ * via OpenRouter). Encrypted-only payloads contribute no display text.
+ *
+ * @internal
+ */
+function reasoningDetailsText(details: Record<string, unknown>[]): string {
+  return details
+    .map((d) =>
+      typeof d.text === "string"
+        ? d.text
+        : typeof d.summary === "string"
+          ? d.summary
+          : "",
+    )
+    .filter(Boolean)
+    .join("");
+}
+
+/**
+ * Builds the ADK thought {@link Part} for a non-streaming message.
+ *
+ * Prefers the structured `reasoning_details` array (carries the signature, which
+ * is preserved verbatim on `thoughtSignature` for multi-turn round-trip);
+ * otherwise falls back to the flat reasoning string. Returns undefined when the
+ * message carries no reasoning.
+ *
+ * @internal
+ */
+function buildThoughtPart(source: unknown): Part | undefined {
+  const details = extractReasoningDetails(source);
+  if (details) {
+    return {
+      text: reasoningDetailsText(details),
+      thought: true,
+      thoughtSignature: JSON.stringify(details),
+    };
+  }
+  const reasoning = extractReasoning(source);
+  if (reasoning) {
+    return { text: reasoning, thought: true };
+  }
+  return undefined;
 }
 
 /**
@@ -231,6 +302,34 @@ export function convertStreamChunk(
     partialParts.push({ text: reasoningDelta, thought: true });
   }
 
+  // Accumulate structured reasoning_details fragments by their `index` so the
+  // signed reasoning can be reassembled (in order) on finish. Fragments for the
+  // same index carry incremental `text` plus a (usually final) `signature`.
+  const detailFragments = extractReasoningDetails(delta);
+  if (detailFragments) {
+    for (const frag of detailFragments) {
+      const idx =
+        typeof frag.index === "number"
+          ? frag.index
+          : acc.reasoningDetails.size;
+      const existing = acc.reasoningDetails.get(idx);
+      if (!existing) {
+        acc.reasoningDetails.set(idx, { ...frag });
+      } else {
+        // Merge: append streamed text, overwrite scalar fields (signature, etc.)
+        // with the latest non-undefined value.
+        for (const [key, value] of Object.entries(frag)) {
+          if (key === "text" && typeof value === "string") {
+            existing.text =
+              (typeof existing.text === "string" ? existing.text : "") + value;
+          } else if (value !== undefined) {
+            existing[key] = value;
+          }
+        }
+      }
+    }
+  }
+
   if (delta?.content) {
     acc.text += delta.content;
     partialParts.push({ text: delta.content });
@@ -252,7 +351,20 @@ export function convertStreamChunk(
 
   if (choice.finish_reason) {
     const parts: Part[] = [];
-    if (acc.reasoning) parts.push({ text: acc.reasoning, thought: true });
+    // Prefer structured reasoning_details (carries the signature for round-trip)
+    // over the flat reasoning string when both were streamed.
+    if (acc.reasoningDetails.size) {
+      const details = Array.from(acc.reasoningDetails.entries())
+        .sort((a, b) => a[0] - b[0])
+        .map(([, value]) => value);
+      parts.push({
+        text: reasoningDetailsText(details),
+        thought: true,
+        thoughtSignature: JSON.stringify(details),
+      });
+    } else if (acc.reasoning) {
+      parts.push({ text: acc.reasoning, thought: true });
+    }
     if (acc.text) parts.push({ text: acc.text });
     for (const tc of Array.from(acc.toolCalls.values())) {
       if (tc.name) {
@@ -271,6 +383,7 @@ export function convertStreamChunk(
 
     acc.text = "";
     acc.reasoning = "";
+    acc.reasoningDetails.clear();
     acc.toolCalls.clear();
     acc.usage = undefined;
 
@@ -322,5 +435,10 @@ export function convertStreamChunk(
  * ```
  */
 export function createStreamAccumulator(): StreamAccumulator {
-  return { text: "", reasoning: "", toolCalls: new Map() };
+  return {
+    text: "",
+    reasoning: "",
+    reasoningDetails: new Map(),
+    toolCalls: new Map(),
+  };
 }

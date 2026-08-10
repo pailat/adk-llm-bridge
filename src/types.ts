@@ -660,6 +660,16 @@ export interface StreamAccumulator {
    */
   reasoning: string;
 
+  /**
+   * Accumulated structured reasoning_details fragments (OpenRouter), indexed by
+   * their `index` field so multi-block streamed reasoning reassembles in order.
+   *
+   * Each value is the verbatim provider object (e.g. `{ type: "reasoning.text",
+   * text, signature, index }`). Assembled on finish into the thought part's
+   * `thoughtSignature` so signed reasoning can round-trip across turns.
+   */
+  reasoningDetails: Map<number, Record<string, unknown>>;
+
   /** Map of tool call index to accumulated tool call data */
   toolCalls: Map<number, ToolCallAccumulator>;
 

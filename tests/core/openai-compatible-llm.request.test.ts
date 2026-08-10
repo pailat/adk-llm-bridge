@@ -15,10 +15,9 @@ import type { LlmRequest, LlmResponse } from "@google/adk";
 import type OpenAI from "openai";
 import { OpenAICompatibleLlm } from "../../src/core/openai-compatible-llm.js";
 import { OPENAI_DEFINITION } from "../../src/providers/openai/definition.js";
+import { OPENROUTER_DEFINITION } from "../../src/providers/openrouter/definition.js";
 
-type CreateParams = Parameters<
-  OpenAI["chat"]["completions"]["create"]
->[0] & {
+type CreateParams = Parameters<OpenAI["chat"]["completions"]["create"]>[0] & {
   model: string;
   messages: unknown[];
   tools?: unknown[];
@@ -30,6 +29,11 @@ type CreateParams = Parameters<
   reasoning_effort?: string;
 };
 
+type CreateOptions = { signal?: AbortSignal | null };
+type CreateResult =
+  | unknown
+  | ((params: CreateParams, options?: CreateOptions) => unknown);
+
 function makeLlm(model: string): OpenAICompatibleLlm {
   return new OpenAICompatibleLlm(OPENAI_DEFINITION, {
     model,
@@ -40,15 +44,22 @@ function makeLlm(model: string): OpenAICompatibleLlm {
 /** Replaces the SDK call with a spy that records params and returns `result`. */
 function spyCreate(
   llm: OpenAICompatibleLlm,
-  result: unknown,
-): { calls: CreateParams[] } {
+  result: CreateResult,
+): { calls: CreateParams[]; options: (CreateOptions | undefined)[] } {
   const calls: CreateParams[] = [];
+  const options: (CreateOptions | undefined)[] = [];
   // biome-ignore lint/suspicious/noExplicitAny: test access to private client
-  (llm as any).client.chat.completions.create = async (params: CreateParams) => {
+  (llm as any).client.chat.completions.create = async (
+    params: CreateParams,
+    requestOptions?: CreateOptions,
+  ) => {
     calls.push(params);
-    return result;
+    options.push(requestOptions);
+    return typeof result === "function"
+      ? result(params, requestOptions)
+      : result;
   };
-  return { calls };
+  return { calls, options };
 }
 
 function userRequest(overrides: Partial<LlmRequest> = {}): LlmRequest {
@@ -81,6 +92,22 @@ async function drain(
   const out: LlmResponse[] = [];
   for await (const r of gen) out.push(r);
   return out;
+}
+
+function abortableNever(signal?: AbortSignal | null): Promise<never> {
+  return new Promise((_, reject) => {
+    if (!signal) return;
+
+    const abort = () => {
+      signal.removeEventListener("abort", abort);
+      const error = new Error("Request was aborted");
+      error.name = "AbortError";
+      reject(error);
+    };
+
+    if (signal.aborted) abort();
+    else signal.addEventListener("abort", abort, { once: true });
+  });
 }
 
 describe("OpenAICompatibleLlm request body", () => {
@@ -209,6 +236,30 @@ describe("OpenAICompatibleLlm request body", () => {
     expect(calls[0]).not.toHaveProperty("reasoning_effort");
     expect(calls[0].max_tokens).toBe(128);
   });
+
+  it("sends a native reasoning object for an openrouter non-reasoning vendor id", async () => {
+    const llm = new OpenAICompatibleLlm(OPENROUTER_DEFINITION, {
+      model: "openai/gpt-4o-mini",
+      apiKey: "test-key",
+    });
+    const { calls } = spyCreate(llm, SIMPLE_COMPLETION);
+
+    await drain(
+      llm.generateContentAsync(
+        userRequest({
+          config: { thinkingConfig: { thinkingBudget: 4096 } },
+        }),
+        false,
+      ),
+    );
+
+    // openrouter style: always send the native reasoning object (no name gate),
+    // and never the strict reasoning_effort scalar.
+    expect((calls[0] as unknown as { reasoning?: unknown }).reasoning).toEqual({
+      max_tokens: 4096,
+    });
+    expect(calls[0]).not.toHaveProperty("reasoning_effort");
+  });
 });
 
 describe("OpenAICompatibleLlm streaming usage merge", () => {
@@ -279,5 +330,81 @@ describe("OpenAICompatibleLlm streaming usage merge", () => {
     const final = responses[responses.length - 1];
     expect(final.turnComplete).toBe(true);
     expect(final.content?.parts?.[0]).toEqual({ text: "Hello" });
+  });
+});
+
+describe("OpenAICompatibleLlm cancellation", () => {
+  it("passes a pre-aborted signal without yielding a provider error", async () => {
+    const llm = makeLlm("gpt-4.1");
+    const controller = new AbortController();
+    controller.abort();
+    const { options } = spyCreate(llm, (_params, requestOptions) =>
+      abortableNever(requestOptions?.signal),
+    );
+
+    const responses = await drain(
+      llm.generateContentAsync(userRequest(), false, controller.signal),
+    );
+
+    expect(options[0]?.signal).toBe(controller.signal);
+    expect(responses).toEqual([]);
+  });
+
+  it("cancels an active non-streaming request without yielding a provider error", async () => {
+    const llm = makeLlm("gpt-4.1");
+    const controller = new AbortController();
+    let markStarted: () => void = () => {};
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const { options } = spyCreate(llm, (_params, requestOptions) => {
+      markStarted();
+      return abortableNever(requestOptions?.signal);
+    });
+
+    const pending = drain(
+      llm.generateContentAsync(userRequest(), false, controller.signal),
+    );
+    await started;
+    controller.abort();
+
+    expect(options[0]?.signal).toBe(controller.signal);
+    expect(await pending).toEqual([]);
+  });
+
+  it("cancels an active stream without turning the abort into a provider error", async () => {
+    const llm = makeLlm("gpt-4.1");
+    const controller = new AbortController();
+    const { options } = spyCreate(llm, (_params, requestOptions) =>
+      (async function* () {
+        yield {
+          id: "x",
+          object: "chat.completion.chunk",
+          created: 0,
+          model: "test",
+          choices: [
+            {
+              index: 0,
+              delta: { content: "Hello" },
+              finish_reason: null,
+            },
+          ],
+        } as OpenAI.ChatCompletionChunk;
+        await abortableNever(requestOptions?.signal);
+      })(),
+    );
+
+    const responses = llm.generateContentAsync(
+      userRequest(),
+      true,
+      controller.signal,
+    );
+    const first = await responses.next();
+    controller.abort();
+    const final = await responses.next();
+
+    expect(options[0]?.signal).toBe(controller.signal);
+    expect(first.value).toMatchObject({ partial: true });
+    expect(final).toEqual({ value: undefined, done: true });
   });
 });

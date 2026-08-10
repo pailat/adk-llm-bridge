@@ -1,0 +1,97 @@
+/**
+ * @license
+ * Copyright 2025 PAI
+ * SPDX-License-Identifier: MIT
+ */
+
+import { BaseAgent, type Event, type InvocationContext } from "@google/adk";
+import { AgentInvocationGateway } from "../runtime/agent-invocation-gateway.js";
+import type { WorkflowCheckpointStore } from "./checkpoint/store.js";
+import type { TrustedWorkflowDefinition } from "./definition.js";
+import { AsyncEventQueue } from "./runtime/async-event-queue.js";
+import {
+  type WorkflowExecutionIdResolver,
+  WorkflowRuntime,
+  type WorkflowRuntimeHooks,
+} from "./runtime/workflow-runtime.js";
+import type { WorkflowWorkspaceConfig } from "./workspace/workspace-adapter.js";
+
+export interface WorkflowAgentConfig {
+  name: string;
+  description?: string;
+  definition: TrustedWorkflowDefinition;
+  subAgents?: BaseAgent[];
+  /** Optional gateway injection for instrumentation and deterministic tests. */
+  gateway?: AgentInvocationGateway;
+  /** Checkpoint persistence adapter. Defaults to ADK session state deltas. */
+  checkpointStore?: WorkflowCheckpointStore;
+  /** Stable durable identity. Defaults to the ADK invocation id. */
+  resolveExecutionId?: WorkflowExecutionIdResolver;
+  /** Internal durability extension point; not required by trusted workflows. */
+  runtimeHooks?: WorkflowRuntimeHooks;
+  /** Optional host-side coordination for steps that declare write paths. */
+  workspace?: WorkflowWorkspaceConfig;
+}
+
+/** A trusted, versioned workflow that participates in ADK as a BaseAgent. */
+export class WorkflowAgent extends BaseAgent {
+  readonly definition: TrustedWorkflowDefinition;
+  readonly #gateway: AgentInvocationGateway;
+  readonly #checkpointStore?: WorkflowCheckpointStore;
+  readonly #resolveExecutionId?: WorkflowExecutionIdResolver;
+  readonly #runtimeHooks?: WorkflowRuntimeHooks;
+  readonly #workspace?: WorkflowWorkspaceConfig;
+  readonly #declaredAgents: ReadonlyMap<string, BaseAgent>;
+
+  constructor(config: WorkflowAgentConfig) {
+    const subAgents = config.subAgents ?? [];
+    super({
+      name: config.name,
+      description: config.description ?? config.definition.description,
+      subAgents,
+    });
+    this.definition = config.definition;
+    this.#checkpointStore = config.checkpointStore;
+    this.#resolveExecutionId = config.resolveExecutionId;
+    this.#runtimeHooks = config.runtimeHooks;
+    this.#workspace = config.workspace;
+    this.#declaredAgents = new Map(
+      subAgents.map((agent) => [agent.name, agent]),
+    );
+    this.#gateway =
+      config.gateway ??
+      new AgentInvocationGateway({
+        resolveAgent: (name) => this.#declaredAgents.get(name),
+      });
+  }
+
+  protected async *runAsyncImpl(
+    context: InvocationContext,
+  ): AsyncGenerator<Event, void, void> {
+    const queue = new AsyncEventQueue<Event>();
+    const runtime = new WorkflowRuntime({
+      definition: this.definition,
+      parentContext: context,
+      agentName: this.name,
+      declaredAgents: this.#declaredAgents,
+      gateway: this.#gateway,
+      eventSink: (event) => queue.push(event),
+      hooks: this.#runtimeHooks,
+      checkpointStore: this.#checkpointStore,
+      resolveExecutionId: this.#resolveExecutionId,
+      workspace: this.#workspace,
+    });
+
+    void runtime.execute().then(
+      () => queue.close(),
+      (error) => queue.fail(error),
+    );
+    yield* queue;
+  }
+
+  protected async *runLiveImpl(
+    context: InvocationContext,
+  ): AsyncGenerator<Event, void, void> {
+    yield* this.runAsyncImpl(context);
+  }
+}

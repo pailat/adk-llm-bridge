@@ -133,7 +133,9 @@ export {
   Custom,
   CustomLlm,
   type CustomLlmProviderConfig,
+  type CustomProviderRegistrationConfig,
   createCustomLlm,
+  registerCustomProvider,
 } from "./providers/custom/index.js";
 
 // =============================================================================

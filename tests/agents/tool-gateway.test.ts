@@ -160,7 +160,7 @@ describe("ToolGateway", () => {
     });
   });
 
-  test("emits native function call, subagent events, and function response events by default", async () => {
+  test("emits native transfer_to_agent delegation events by default", async () => {
     const worker = new TextAgent("worker");
     const root = new TextAgent("root");
     const emitted = [];
@@ -168,6 +168,59 @@ describe("ToolGateway", () => {
       rootAgent: root,
       subAgents: [worker],
       parentContext: parentContext(root),
+      eventSink: (event) => emitted.push(event),
+    });
+
+    await gateway.runSubAgent({ agentName: "worker", task: "do it" });
+
+    // Native ordering: #0 transfer_to_agent functionCall, #1 transfer
+    // functionResponse with actions.transferToAgent (the transfer signal fires
+    // BEFORE the sub-agent runs), #2 sub-agent text turn. The empty trailing
+    // TextAgent event has no renderable content so it is suppressed.
+    expect(emitted).toHaveLength(3);
+
+    // #0 native transfer_to_agent call: single agentName arg, no customMetadata,
+    // finishReason=STOP and turnComplete=true (completed synthetic model turn).
+    expect(emitted[0].content?.role).toBe("model");
+    expect(emitted[0].content?.parts?.[0]?.functionCall).toMatchObject({
+      name: "transfer_to_agent",
+      args: { agentName: "worker" },
+    });
+    expect(emitted[0].content?.parts?.[0]?.functionCall?.args).not.toHaveProperty("task");
+    expect(emitted[0].customMetadata).toBeUndefined();
+    expect(emitted[0].finishReason).toBe("STOP");
+    expect(emitted[0].turnComplete).toBe(true);
+
+    // #1 native transfer_to_agent response carries the agent-switch signal and
+    // fires BEFORE the sub-agent runs, with NO stateDelta (matching native).
+    const response = emitted[1];
+    expect(response.content?.role).toBe("user");
+    expect(response.content?.parts?.[0]?.functionResponse).toMatchObject({
+      name: "transfer_to_agent",
+      response: { result: "Transfer queued" },
+    });
+    expect(response.actions?.transferToAgent).toBe("worker");
+    expect(response.actions?.stateDelta).toEqual({});
+    expect(response.customMetadata).toBeUndefined();
+
+    // #2 sub-agent's own turn on the root branch, no external-agent metadata.
+    expect(emitted[2]).toMatchObject({
+      author: "worker",
+      content: { role: "model", parts: [{ text: "OK: do it" }] },
+    });
+    expect(emitted[2].customMetadata).toBeUndefined();
+    expect(emitted[2].branch).toBeUndefined();
+  });
+
+  test("emits legacy run_adk_subagent shape when nativeDelegationShape is false", async () => {
+    const worker = new TextAgent("worker");
+    const root = new TextAgent("root");
+    const emitted = [];
+    const gateway = new ToolGateway({
+      rootAgent: root,
+      subAgents: [worker],
+      parentContext: parentContext(root),
+      nativeDelegationShape: false,
       eventSink: (event) => emitted.push(event),
     });
 
@@ -208,6 +261,35 @@ describe("ToolGateway", () => {
     });
   });
 
+  test("strips customMetadata from surfaced sub-agent events in native mode", async () => {
+    const worker = new FunctionResponseAgent([
+      createEvent({
+        invocationId: "inv-1",
+        author: "worker",
+        content: { role: "model", parts: [{ text: "answer" }] },
+        actions: createEventActions({ stateDelta: { codexThread: "t-1" } }),
+        customMetadata: { title: "worker: final response", externalAgent: true },
+      }),
+    ]);
+    const root = new TextAgent("root");
+    const emitted = [];
+    const gateway = new ToolGateway({
+      rootAgent: root,
+      subAgents: [worker],
+      parentContext: parentContext(root),
+      eventSink: (event) => emitted.push(event),
+    });
+
+    await gateway.runSubAgent({ agentName: "worker", task: "do it" });
+
+    // #0 call, #1 transfer response, #2 sub-agent turn (metadata stripped).
+    expect(emitted).toHaveLength(3);
+    expect(emitted[2].customMetadata).toBeUndefined();
+    // Content and actions are preserved by the clone.
+    expect(emitted[2].content?.parts?.[0]?.text).toBe("answer");
+    expect(emitted[2].actions.stateDelta).toEqual({ codexThread: "t-1" });
+  });
+
   test("can hide subagent events for quiet summaries", async () => {
     const worker = new TextAgent("worker");
     const root = new TextAgent("root");
@@ -224,20 +306,10 @@ describe("ToolGateway", () => {
 
     expect(emitted).toHaveLength(2);
     expect(emitted[1].content?.parts?.[0]?.functionResponse).toMatchObject({
-      name: "run_adk_subagent",
-      response: {
-        agentName: "worker",
-        output: "OK: do it",
-        events: 2,
-        summary: {
-          events: 2,
-          textEvents: 1,
-          toolCalls: 0,
-          errors: 0,
-          durationMs: expect.any(Number),
-        },
-      },
+      name: "transfer_to_agent",
+      response: { result: "Transfer queued" },
     });
+    expect(emitted[1].actions?.transferToAgent).toBe("worker");
   });
 
   test("passes delegated task to real LlmAgent through child session contents", async () => {
@@ -437,27 +509,74 @@ describe("ToolGateway", () => {
 
     expect(result.stateDelta).toEqual({ architectureSummary: "done" });
     expect(emitted).toHaveLength(3);
-    expect(emitted[1]).toMatchObject({
+    // #1 transfer response fires before the sub-agent and is byte-clean: it
+    // carries the transfer signal but NO stateDelta (matching native).
+    expect(emitted[1].actions.transferToAgent).toBe("worker");
+    expect(emitted[1].actions.stateDelta).toEqual({});
+    expect(emitted[1].content?.parts?.[0]?.functionResponse?.response).toEqual({
+      result: "Transfer queued",
+    });
+    // #2 sub-agent turn surfaced verbatim on the root branch (no enrichment),
+    // carrying its OWN stateDelta exactly as a native sub-agent commits state.
+    expect(emitted[2]).toMatchObject({
       author: "worker",
-      customMetadata: {
-        subAgentEvent: true,
-        subAgentName: "worker",
-        parentToolName: "run_adk_subagent",
-      },
+      content: { role: "model", parts: [{ text: "stateful" }] },
     });
+    expect(emitted[2].customMetadata).toBeUndefined();
     expect(emitted[2].actions.stateDelta).toEqual({ architectureSummary: "done" });
-    expect(emitted[2].content?.parts?.[0]?.functionResponse?.response).toEqual({
-      agentName: "worker",
-      output: "stateful",
-      events: 1,
-      summary: {
-        events: 1,
-        textEvents: 1,
-        toolCalls: 0,
-        errors: 0,
-        durationMs: expect.any(Number),
-      },
+  });
+
+  test("surfaces a content-less stateDelta event in native mode so resume survives", async () => {
+    class PreambleStateAgent extends BaseAgent {
+      constructor() {
+        super({ name: "worker" });
+      }
+
+      protected async *runAsyncImpl(context: InvocationContext) {
+        // Content-less state_delta event (e.g. the codex_thread marker emitted
+        // the moment the thread starts). In native mode this must SURFACE as
+        // its own event so the runner commits its stateDelta to session.state
+        // and codex resume keeps working — the transfer response no longer
+        // carries the delta.
+        yield createEvent({
+          invocationId: context.invocationId,
+          author: this.name,
+          actions: createEventActions({ stateDelta: { codexThread: "thread-123" } }),
+        });
+        yield createEvent({
+          invocationId: context.invocationId,
+          author: this.name,
+          content: { role: "model", parts: [{ text: "real answer" }] },
+        });
+      }
+
+      protected async *runLiveImpl() {}
+    }
+
+    const root = new TextAgent("root");
+    const emitted = [];
+    const gateway = new ToolGateway({
+      rootAgent: root,
+      subAgents: [new PreambleStateAgent()],
+      parentContext: parentContext(root),
+      eventSink: (event) => emitted.push(event),
     });
+
+    const result = await gateway.runSubAgent({ agentName: "worker", task: "do it" });
+
+    // #0 transfer call, #1 transfer response (clean), #2 surfaced state_delta
+    // event, #3 real-answer sub-agent turn.
+    expect(emitted).toHaveLength(4);
+    // The transfer response carries NO stateDelta (matches native).
+    expect(emitted[1].actions.stateDelta).toEqual({});
+    // The content-less state_delta event surfaces as its own event carrying the
+    // delta, so the runner commits codex_thread to session.state.
+    expect(emitted[2].content).toBeUndefined();
+    expect(emitted[2].actions.stateDelta).toEqual({ codexThread: "thread-123" });
+    expect(emitted[2].customMetadata).toBeUndefined();
+    // #3 the real answer.
+    expect(emitted[3].content?.parts?.[0]?.text).toBe("real answer");
+    expect(result.stateDelta).toEqual({ codexThread: "thread-123" });
   });
 
   test("applies inherited permission override to ExternalAgent subagents", async () => {

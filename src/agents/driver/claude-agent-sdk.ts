@@ -107,6 +107,13 @@ export interface ClaudeAgentSdkDriverConfig {
   model?: string;
   debugEvents?: boolean;
   /**
+   * MCP servers that must be connected before Claude starts the first model
+   * turn. The SDK reports their connection state in `system/init`; treating a
+   * missing or degraded required server as a provider error prevents the model
+   * from silently continuing without its authority or completion tools.
+   */
+  requiredMcpServers?: string[];
+  /**
    * AUTH-2: opt-in plain-string system prompt. When set, it REPLACES the
    * `claude_code` preset (and `request.instruction` is appended to it) so a
    * non-coding agent is not forced into the full coding-agent persona/token
@@ -138,9 +145,17 @@ export class ClaudeAgentSdkDriver {
   readonly #maxTurns?: number;
   readonly #model?: string;
   readonly #debugEvents: boolean;
+  readonly #requiredMcpServers: readonly string[];
   readonly #resumeSessionId?: string;
   readonly #forkSession?: boolean;
   readonly #systemPrompt?: string;
+  // RESUME-1: maps an ADK session id -> the SDK session id captured from the
+  // first turn's system/init (or result) message. Subsequent turns of the same
+  // ADK session pass it as `options.resume` and send only the newest user turn,
+  // so the SDK reloads prior user/assistant/tool history from its own on-disk
+  // transcript instead of replaying it through the user-only input stream
+  // (which would crash with "Expected message role 'user', got 'assistant'").
+  readonly #sdkSessionByAdkSession = new Map<string, string>();
 
   constructor(config: ClaudeAgentSdkDriverConfig = {}) {
     this.#sdk = config.sdk;
@@ -158,6 +173,7 @@ export class ClaudeAgentSdkDriver {
     this.#maxTurns = config.maxTurns;
     this.#model = config.model;
     this.#debugEvents = config.debugEvents ?? false;
+    this.#requiredMcpServers = [...new Set(config.requiredMcpServers ?? [])];
     this.#resumeSessionId = config.resumeSessionId;
     this.#forkSession = config.forkSession;
     this.#systemPrompt = config.systemPrompt;
@@ -165,8 +181,14 @@ export class ClaudeAgentSdkDriver {
 
   async *run(request: ExternalAgentRunRequest): AsyncIterable<ExternalAgentEvent> {
     const sdk = await this.loadSdk();
-    const prompt = this.buildPromptInput(request);
-    const options = await this.buildOptionsForRun(request, sdk);
+    // RESUME-1: a static #resumeSessionId (config) wins; otherwise resume the SDK
+    // session previously captured for this ADK session, if any.
+    const adkSessionId = adkSessionIdOf(request);
+    const resolvedResume =
+      this.#resumeSessionId ??
+      (adkSessionId ? this.#sdkSessionByAdkSession.get(adkSessionId) : undefined);
+    const prompt = this.buildPromptInput(request, resolvedResume);
+    const options = await this.buildOptionsForRun(request, sdk, resolvedResume);
 
     yield {
       type: "started",
@@ -188,12 +210,21 @@ export class ClaudeAgentSdkDriver {
     try {
       query = sdk.query({ prompt, options });
       const iterator = query[Symbol.asyncIterator]();
-      while (true) {
+      stream: while (true) {
         const next = await iterator.next();
         if (next.done) {
           break;
         }
         const message = next.value;
+        this.assertRequiredMcpServersConnected(message);
+        // RESUME-1: capture the SDK session id (system/init or result) so the
+        // next turn of this ADK session can resume it.
+        if (adkSessionId) {
+          const captured = extractSdkSessionId(message);
+          if (captured) {
+            this.#sdkSessionByAdkSession.set(adkSessionId, captured);
+          }
+        }
         // ERR-3: if the turn produced no streamed assistant text, fall back to
         // the aggregated `result.result` on a successful result message so the
         // run does not complete with silent-empty output.
@@ -213,6 +244,11 @@ export class ClaudeAgentSdkDriver {
             emittedOutput = true;
           }
           yield event;
+          if (event.type === "completed") {
+            // A result message is the terminal protocol event. Do not wait for another iterator
+            // read: older SDK/CLI combinations can leave it pending after the child has exited.
+            break stream;
+          }
         }
       }
     } catch (error) {
@@ -240,7 +276,10 @@ export class ClaudeAgentSdkDriver {
     }
   }
 
-  buildOptions(request: ExternalAgentRunRequest): ClaudeAgentSdkOptions {
+  buildOptions(
+    request: ExternalAgentRunRequest,
+    resume: string | undefined = this.#resumeSessionId,
+  ): ClaudeAgentSdkOptions {
     const permission = mapPolicyToClaudeSdkPermission(request.permissions);
     const options: ClaudeAgentSdkOptions = {
       cwd: request.workingDirectory,
@@ -256,7 +295,7 @@ export class ClaudeAgentSdkDriver {
       model: this.#model,
       systemPrompt: this.buildSystemPrompt(request),
       allowDangerouslySkipPermissions: permission.allowDangerouslySkipPermissions,
-      resume: this.#resumeSessionId,
+      resume,
       forkSession: this.#forkSession,
     };
 
@@ -282,18 +321,22 @@ export class ClaudeAgentSdkDriver {
   }
 
   /**
-   * Build the SDK `prompt` input from a run request. Returns:
-   * - a plain string for text-only single-turn invocations (fast path);
-   * - an `AsyncIterable<SDKUserMessage>` carrying lossless multimodal blocks
-   *   for multi-turn or multimodal history;
-   * - an empty string when no content can be collected (defensive fallback).
+   * Build the SDK `prompt` input from a run request. Returns either a plain
+   * string (single-shot mode) or an `AsyncIterable<SDKUserMessage>` carrying a
+   * SINGLE user message (multimodal or resumed turn).
    *
-   * When `resumeSessionId` is configured, only the last collected `Content`
-   * is sent so the resumed session continues from existing transcript on disk
-   * rather than re-feeding history.
+   * MCP-SAFE: this NEVER emits more than one streaming-input message. Emitting
+   * several (the old synthetic-transcript approach) makes the SDK run multiple
+   * turns inside one `query()`, and the in-process MCP server (`adk_bridge`) is
+   * torn down after the first turn's `result`, so a subagent tool call in a
+   * later turn fails with "Stream closed" before the handler runs. Prior history
+   * is restored by the SDK from its own transcript via `options.resume`
+   * (RESUME-1) — for a non-resumed turn it is folded into the single user prompt
+   * as text — never replayed as assistant/tool turns through the input stream.
    */
   buildPromptInput(
     request: ExternalAgentRunRequest,
+    resume: string | undefined = this.#resumeSessionId,
   ): string | AsyncIterable<SDKUserMessage> {
     let contents: ReturnType<typeof collectContents>;
     try {
@@ -306,22 +349,30 @@ export class ClaudeAgentSdkDriver {
       return extractContextText(request.context) ?? "";
     }
 
-    if (this.#resumeSessionId) {
-      const last = contents[contents.length - 1];
-      const messages = contentsToSdkMessages([last]);
-      return asyncIterable(messages);
+    // Send only the newest user turn. Prefer the last non-model content so a
+    // trailing model/tool turn never becomes the (user-rendered) prompt.
+    const lastUser =
+      [...contents].reverse().find((content) => content.role !== "model") ??
+      contents[contents.length - 1];
+
+    if (resume) {
+      // Resuming: the SDK reloads prior turns from its transcript; send only the
+      // newest user turn as a single streaming-input message.
+      return asyncIterable(contentsToSdkMessages([lastUser]));
     }
 
-    if (contents.length === 1) {
-      const onlyTextParts = (contents[0].parts ?? []).every(
-        (part) => typeof part.text === "string" && !part.thought,
-      );
-      if (onlyTextParts) {
-        return buildPrompt(request);
-      }
+    // First turn (no resume). Text-only -> a plain string (single-shot mode),
+    // which keeps the in-process MCP server alive for the whole tool round-trip
+    // and folds any pre-existing history into the prompt as text. Multimodal ->
+    // a single message carrying the newest turn's lossless blocks.
+    const onlyTextParts = (lastUser.parts ?? []).every(
+      (part) => typeof part.text === "string" && !part.thought,
+    );
+    if (onlyTextParts) {
+      return buildPrompt(request);
     }
 
-    const messages = contentsToSdkMessages(contents);
+    const messages = contentsToSdkMessages([lastUser]);
     if (messages.length === 0) {
       return buildPrompt(request);
     }
@@ -363,6 +414,11 @@ export class ClaudeAgentSdkDriver {
     copyIfPresent(this.#env, env, "HOME");
     copyIfPresent(this.#env, env, "USER");
     copyIfPresent(this.#env, env, "SHELL");
+    if (!env.SHELL && process.platform !== "win32") {
+      env.SHELL = ["/bin/bash", "/usr/bin/bash", "/bin/zsh", "/usr/bin/zsh"].find(
+        existsSync,
+      );
+    }
     copyIfPresent(this.#env, env, "CLAUDE_CONFIG_DIR");
     copyIfPresent(this.#env, env, "XDG_CONFIG_HOME");
     env.CLAUDE_AGENT_SDK_CLIENT_APP = "adk-llm-bridge";
@@ -377,6 +433,33 @@ export class ClaudeAgentSdkDriver {
     }
 
     return env;
+  }
+
+  private assertRequiredMcpServersConnected(message: ClaudeAgentSdkMessage): void {
+    if (this.#requiredMcpServers.length === 0) return;
+
+    const record = asRecord(message);
+    if (record.type !== "system" || record.subtype !== "init") return;
+
+    const statuses = new Map<string, string>();
+    if (Array.isArray(record.mcp_servers)) {
+      for (const item of record.mcp_servers) {
+        const server = asRecord(item);
+        const name = stringValue(server.name);
+        const status = stringValue(server.status);
+        if (name && status) statuses.set(name, status);
+      }
+    }
+
+    const unavailable = this.#requiredMcpServers.flatMap((name) => {
+      const status = statuses.get(name);
+      return status === "connected" ? [] : [`${name}:${status ?? "missing"}`];
+    });
+    if (unavailable.length > 0) {
+      throw new Error(
+        `Required Claude MCP server unavailable (${unavailable.join(", ")})`,
+      );
+    }
   }
 
   /**
@@ -549,8 +632,9 @@ export class ClaudeAgentSdkDriver {
   async buildOptionsForRun(
     request: ExternalAgentRunRequest,
     sdk: ClaudeAgentSdkLike,
+    resume: string | undefined = this.#resumeSessionId,
   ): Promise<ClaudeAgentSdkOptions> {
-    const options = this.buildOptions(request);
+    const options = this.buildOptions(request, resume);
     if (!request.toolGateway || !request.subAgents || request.subAgents.length === 0) {
       return options;
     }
@@ -761,6 +845,30 @@ function readCredentialEnv(
 
 function importClaudeAgentSdk(): Promise<ClaudeAgentSdkLike> {
   return import("@anthropic-ai/claude-agent-sdk") as Promise<ClaudeAgentSdkLike>;
+}
+
+/** RESUME-1: the ADK session id used to key captured SDK session ids. */
+function adkSessionIdOf(request: ExternalAgentRunRequest): string | undefined {
+  const session = (request.context as { session?: { id?: unknown } } | undefined)
+    ?.session;
+  return typeof session?.id === "string" && session.id.length > 0
+    ? session.id
+    : undefined;
+}
+
+/** RESUME-1: pull the SDK session id off a `system`/`init` or `result` message. */
+function extractSdkSessionId(message: unknown): string | undefined {
+  const record = asRecord(message);
+  if (!record) {
+    return undefined;
+  }
+  if (
+    (record.type === "system" && record.subtype === "init") ||
+    record.type === "result"
+  ) {
+    return stringValue(record.session_id);
+  }
+  return undefined;
 }
 
 async function createRunSubAgentSchema(): Promise<Record<string, unknown>> {

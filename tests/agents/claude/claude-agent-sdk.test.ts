@@ -2,6 +2,7 @@ import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
+import type { Content } from "@google/genai";
 import {
   ClaudeAgent,
   CLAUDE_AGENT_DEFINITION,
@@ -142,6 +143,61 @@ describe("ClaudeAgentSdkDriver", () => {
 
     expect(resolution.path).toBe(executable);
     expect(resolution.checked).toContain(executable);
+  });
+
+  test("provides a Claude-supported shell fallback when SHELL is absent", () => {
+    if (process.platform === "win32") return;
+
+    const driver = new ClaudeAgentSdkDriver({ env: { PATH: "/usr/bin" } });
+    const options = driver.buildOptions({
+      provider: CLAUDE_PROVIDER,
+      context: {} as never,
+    });
+
+    expect(options.env?.SHELL).toMatch(/\/(?:ba|z)sh$/);
+  });
+
+  test("fails before the first model turn when a required MCP server is unavailable", async () => {
+    let returned = false;
+    const driver = new ClaudeAgentSdkDriver({
+      requiredMcpServers: ["workflow"],
+      sdk: {
+        query: () =>
+          (async function* () {
+            try {
+              yield {
+                type: "system",
+                subtype: "init",
+                mcp_servers: [{ name: "workflow", status: "failed" }],
+              } as never;
+              yield { type: "result", subtype: "success", result: "unsafe" } as never;
+            } finally {
+              returned = true;
+            }
+          })() as never,
+      },
+    });
+
+    const events = [];
+    for await (const event of driver.run({
+      provider: CLAUDE_PROVIDER,
+      context: {} as never,
+    })) {
+      events.push(event);
+    }
+
+    expect(events).toEqual([
+      { type: "started", providerId: "claude", timestamp: expect.any(Number) },
+      {
+        type: "error",
+        message: "Required Claude MCP server unavailable (workflow:failed)",
+        code: "CLAUDE_AGENT_SDK_ERROR",
+        recoverable: true,
+        timestamp: expect.any(Number),
+      },
+      { type: "completed", exitCode: 1, timestamp: expect.any(Number) },
+    ]);
+    expect(returned).toBe(true);
   });
 
   test("emits actionable Claude executable lookup errors", async () => {
@@ -623,6 +679,55 @@ describe("ClaudeAgentSdkDriver", () => {
     expect(returned).toBe(true);
   });
 
+  test("returns the Query after a result without waiting for another SDK message", async () => {
+    let returned = false;
+    let read = false;
+    const never = new Promise<IteratorResult<never>>(() => {});
+    const driver = new ClaudeAgentSdkDriver({
+      sdk: {
+        query: () => ({
+          [Symbol.asyncIterator]() {
+            return this;
+          },
+          next: async () => {
+            if (!read) {
+              read = true;
+              return {
+                value: { type: "result", subtype: "success", result: "done" },
+                done: false,
+              } as never;
+            }
+            return never;
+          },
+          return: async () => {
+            returned = true;
+            return { value: undefined, done: true } as never;
+          },
+        }) as never,
+      },
+    });
+
+    const events = await Promise.race([
+      (async () => {
+        const collected = [];
+        for await (const event of driver.run({
+          provider: CLAUDE_PROVIDER,
+          context: { userContent: { parts: [{ text: "finish" }] } } as never,
+          permissions: { mode: "ask" },
+        })) {
+          collected.push(event);
+        }
+        return collected;
+      })(),
+      Bun.sleep(250).then(() => {
+        throw new Error("Claude driver waited for SDK EOF after result");
+      }),
+    ]);
+
+    expect(events.map((event) => event.type)).toEqual(["started", "output", "completed"]);
+    expect(returned).toBe(true);
+  });
+
   // --- ERR-2: typed error classification ---
   test("classifies assistant/result error subtypes as (non-)recoverable", () => {
     const driver = new ClaudeAgentSdkDriver();
@@ -834,6 +939,152 @@ describe("ClaudeAgentSdkDriver", () => {
       permissions: { mode: "ask" },
     });
     expect(noInstruction.systemPrompt).toBe("You are a helpful Q&A assistant.");
+  });
+
+  // --- SESSION-RESUME: capture SDK session_id and resume on next turn ---
+  test("captures the SDK session_id from system/init and result messages", async () => {
+    const capturedOptions: Array<{ resume?: string; sessionId?: unknown }> = [];
+    const driver = new ClaudeAgentSdkDriver({
+      sdk: {
+        query: ({ options }) => {
+          capturedOptions.push(options as { resume?: string; sessionId?: unknown });
+          return (async function* () {
+            yield { type: "system", subtype: "init", session_id: "sess-1" } as never;
+            yield { type: "result", subtype: "success", result: "ok", session_id: "sess-1" } as never;
+          })() as never;
+        },
+      },
+    });
+
+    const baseContext = {
+      agent: { name: "claude" },
+      branch: "root",
+      session: { id: "adk-session-A", events: [] },
+      userContent: { role: "user", parts: [{ text: "hello" }] },
+    };
+
+    // Turn 1: no resume; the SDK emits a session_id the driver must capture.
+    for await (const _event of driver.run({
+      provider: CLAUDE_PROVIDER,
+      context: baseContext as never,
+      permissions: { mode: "ask" },
+    })) {
+      void _event;
+    }
+    expect(capturedOptions[0]?.resume).toBeUndefined();
+
+    // Turn 2 (same ADK session): the driver must resume the captured id and
+    // must NOT also set sessionId (the SDK throws on resume+sessionId).
+    for await (const _event of driver.run({
+      provider: CLAUDE_PROVIDER,
+      context: {
+        ...baseContext,
+        userContent: { role: "user", parts: [{ text: "again" }] },
+      } as never,
+      permissions: { mode: "ask" },
+    })) {
+      void _event;
+    }
+    expect(capturedOptions[1]?.resume).toBe("sess-1");
+    expect("sessionId" in (capturedOptions[1] ?? {})).toBe(false);
+  });
+
+  test("two turns of one ADK session resume and send exactly one user-role message", async () => {
+    const calls: Array<{
+      prompt: unknown;
+      options: { resume?: string };
+    }> = [];
+    const driver = new ClaudeAgentSdkDriver({
+      sdk: {
+        query: ({ prompt, options }) => {
+          calls.push({ prompt, options: options as { resume?: string } });
+          return (async function* () {
+            yield { type: "system", subtype: "init", session_id: "sdk-sess-42" } as never;
+            yield {
+              type: "assistant",
+              message: { content: [{ type: "text", text: "answer" }] },
+            } as never;
+            yield {
+              type: "result",
+              subtype: "success",
+              result: "answer",
+              session_id: "sdk-sess-42",
+            } as never;
+          })() as never;
+        },
+      },
+    });
+
+    const sessionEvents: Array<{ author: string; content: Content }> = [
+      { author: "user", content: { role: "user", parts: [{ text: "turn-1" }] } },
+    ];
+
+    const turn1Events: string[] = [];
+    for await (const event of driver.run({
+      provider: CLAUDE_PROVIDER,
+      context: {
+        agent: { name: "claude" },
+        branch: "root",
+        session: { id: "adk-session-B", events: sessionEvents },
+        userContent: { role: "user", parts: [{ text: "turn-1" }] },
+      } as never,
+      permissions: { mode: "ask" },
+    })) {
+      turn1Events.push(event.type);
+    }
+    expect(turn1Events).not.toContain("error");
+    expect(calls[0].options.resume).toBeUndefined();
+
+    // Simulate ADK appending the model reply + the new user turn for turn 2.
+    sessionEvents.push({
+      author: "claude",
+      content: { role: "model", parts: [{ text: "answer" }] },
+    });
+    sessionEvents.push({
+      author: "user",
+      content: { role: "user", parts: [{ text: "turn-2" }] },
+    });
+
+    const turn2Events: Array<{ type: string; code?: string }> = [];
+    for await (const event of driver.run({
+      provider: CLAUDE_PROVIDER,
+      context: {
+        agent: { name: "claude" },
+        branch: "root",
+        session: { id: "adk-session-B", events: sessionEvents },
+        userContent: { role: "user", parts: [{ text: "turn-2" }] },
+      } as never,
+      permissions: { mode: "ask" },
+    })) {
+      turn2Events.push(event as { type: string; code?: string });
+    }
+
+    // Turn 2 resumes the captured SDK session id.
+    expect(calls[1].options.resume).toBe("sdk-sess-42");
+
+    // Turn 2 sends exactly one user-role message: the newest turn only.
+    const prompt = calls[1].prompt;
+    expect(typeof prompt).not.toBe("string");
+    const collected: Array<{ message: { role: string; content: Array<{ type: string; text?: string }> } }> = [];
+    for await (const message of prompt as AsyncIterable<{
+      message: { role: string; content: Array<{ type: string; text?: string }> };
+    }>) {
+      collected.push(message);
+    }
+    expect(collected).toHaveLength(1);
+    expect(collected[0].message.role).toBe("user");
+    const text = collected[0].message.content
+      .filter((b) => b.type === "text")
+      .map((b) => b.text)
+      .join("");
+    expect(text).toBe("turn-2");
+
+    // No input message had role 'assistant'; no error/CLAUDE_AGENT_SDK_ERROR.
+    for (const message of collected) {
+      expect(message.message.role).not.toBe("assistant");
+    }
+    expect(turn2Events.some((e) => e.type === "error")).toBe(false);
+    expect(turn2Events.some((e) => e.code === "CLAUDE_AGENT_SDK_ERROR")).toBe(false);
   });
 
   // --- STREAM-1: capability claim matches actual behavior ---

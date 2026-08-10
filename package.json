@@ -1,6 +1,6 @@
 {
   "name": "adk-llm-bridge",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "Use any LLM with Google ADK TypeScript - supports AI Gateway, OpenRouter, and 100+ models",
   "keywords": [
     "adk",
@@ -22,6 +22,9 @@
   "bugs": {
     "url": "https://github.com/pailat/adk-llm-bridge/issues"
   },
+  "workspaces": [
+    "examples/*"
+  ],
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -33,6 +36,14 @@
     "./agents": {
       "types": "./dist/agents/index.d.ts",
       "import": "./dist/agents/index.js"
+    },
+    "./workflows": {
+      "types": "./dist/workflows/index.d.ts",
+      "import": "./dist/workflows/index.js"
+    },
+    "./workflows/node": {
+      "types": "./dist/workflows/node/index.d.ts",
+      "import": "./dist/workflows/node/index.js"
     }
   },
   "files": [
@@ -46,6 +57,8 @@
     "test": "bun test",
     "typecheck": "bunx tsc --noEmit",
     "typecheck:all": "bunx tsc --noEmit -p tsconfig.test.json",
+    "typecheck:conformance": "bunx tsc --noEmit --skipLibCheck --target ESNext --module NodeNext --moduleResolution NodeNext --esModuleInterop --types bun scripts/conformance/run-runtime.ts",
+    "check:conformance": "bunx biome check ./tests/conformance && bunx biome check --stdin-file-path=scripts/conformance/run-runtime.ts < scripts/conformance/run-runtime.ts > /dev/null && bunx biome check --stdin-file-path=.github/workflows/conformance.yml < .github/workflows/conformance.yml > /dev/null && bunx biome check --stdin-file-path=docs/runtime-conformance.md < docs/runtime-conformance.md > /dev/null && bunx biome check --stdin-file-path=package.json < package.json > /dev/null",
     "lint": "biome lint ./src ./tests",
     "lint:fix": "biome lint --write ./src ./tests",
     "format": "biome format ./src ./tests",
@@ -53,20 +66,32 @@
     "check": "biome check ./src ./tests",
     "check:fix": "biome check --write ./src ./tests",
     "lint:publish": "publint --strict && attw --pack --profile esm-only",
-    "ci": "bun run typecheck:all && bun run lint && bun test && bun run build && bun run lint:publish",
+    "ci": "bun run typecheck:all && bun run typecheck:conformance && bun run check:conformance && bun run lint && bun test && bun run build && bun run lint:publish",
     "prepublishOnly": "bun run build && bun run lint:publish",
     "typecheck:compat:nodenext": "bun run build && bunx tsc -p tests/compat/nodenext-consumer/tsconfig.json"
   },
   "peerDependencies": {
     "@anthropic-ai/claude-agent-sdk": ">=0.2.138 <0.4",
     "@google/adk": ">=0.6.1 <2",
-    "@openai/codex-sdk": ">=0.130.0 <0.142"
+    "@openai/codex-sdk": ">=0.130.0 <0.142",
+    "@jitl/quickjs-wasmfile-release-sync": ">=0.32.0 <0.33.0",
+    "quickjs-emscripten-core": ">=0.32.0 <0.33.0",
+    "zod": ">=3.25.0"
   },
   "peerDependenciesMeta": {
     "@anthropic-ai/claude-agent-sdk": {
       "optional": true
     },
     "@openai/codex-sdk": {
+      "optional": true
+    },
+    "@jitl/quickjs-wasmfile-release-sync": {
+      "optional": true
+    },
+    "quickjs-emscripten-core": {
+      "optional": true
+    },
+    "zod": {
       "optional": true
     }
   },
@@ -82,9 +107,13 @@
     "@google/adk": "^1.2.0",
     "@google/genai": "^2.0.1",
     "@openai/codex-sdk": "^0.141.0",
+    "@jitl/quickjs-wasmfile-debug-sync": "^0.32.0",
+    "@jitl/quickjs-wasmfile-release-sync": "^0.32.0",
     "@types/bun": "latest",
     "bunup": "^0.16.32",
     "publint": "^0.3.21",
-    "typescript": "^5.9.3"
+    "quickjs-emscripten-core": "^0.32.0",
+    "typescript": "^5.9.3",
+    "zod": "^4.2.1"
   }
 }

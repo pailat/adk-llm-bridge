@@ -97,9 +97,9 @@ export function createCustomLlm(config: CustomLlmProviderConfig): CustomLlm {
  */
 type CustomOptions = Omit<CustomLlmConfig, "model"> & {
   /**
-   * Base URL for the API endpoint (required).
+   * Base URL for the API endpoint. Falls back to CUSTOM_LLM_BASE_URL.
    */
-  baseURL: string;
+  baseURL?: string;
 };
 
 /**
@@ -147,6 +147,6 @@ type CustomOptions = Omit<CustomLlmConfig, "model"> & {
  *
  * @see {@link createCustomLlm} for the full configuration syntax
  */
-export function Custom(model: string, options: CustomOptions): CustomLlm {
+export function Custom(model: string, options: CustomOptions = {}): CustomLlm {
   return createCustomLlm({ model, ...options });
 }

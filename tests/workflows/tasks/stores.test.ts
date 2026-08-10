@@ -1,0 +1,1234 @@
+/**
+ * @license
+ * Copyright 2025 PAI
+ * SPDX-License-Identifier: MIT
+ */
+
+import { describe, expect, test } from "bun:test";
+import type {
+  WorkflowTaskClaim,
+  WorkflowTaskRecord,
+} from "../../../src/workflows/tasks/contracts.js";
+import {
+  InMemoryWorkflowTaskCommandStore,
+  InMemoryWorkflowTaskMessageStore,
+  InMemoryWorkflowTaskStore,
+} from "../../../src/workflows/tasks/stores.js";
+
+describe("InMemoryWorkflowTaskStore", () => {
+  test("creates immutable snapshots and enforces CAS", async () => {
+    const store = new InMemoryWorkflowTaskStore();
+    const input = { nested: { value: 1 } };
+    const created = await store.create(record("task-1", { input }));
+
+    expect(created).toMatchObject({ status: "queued", revision: 1 });
+    expect(Object.isFrozen(created)).toBe(true);
+    expect(Object.isFrozen(created.input)).toBe(true);
+    input.nested.value = 2;
+    expect(created.input).toEqual({ nested: { value: 1 } });
+
+    const running = await store.compareAndSet(
+      {
+        ...created,
+        status: "running",
+        revision: 2,
+        updatedAt: 2,
+        startedAt: 2,
+      },
+      1,
+    );
+    expect(running.status).toBe("running");
+    await expect(
+      store.compareAndSet(
+        {
+          ...running,
+          status: "failed",
+          revision: 3,
+          updatedAt: 3,
+          completedAt: 3,
+          error: { code: "X", message: "x" },
+        },
+        1,
+      ),
+    ).rejects.toMatchObject({ code: "WORKFLOW_TASK_CONFLICT" });
+  });
+
+  test("rejects invalid transitions, identity changes, and unsafe JSON", async () => {
+    const store = new InMemoryWorkflowTaskStore();
+    const created = await store.create(record("task-1"));
+
+    await expect(
+      store.compareAndSet(
+        {
+          ...created,
+          status: "completed",
+          revision: 2,
+          updatedAt: 2,
+          startedAt: 2,
+          completedAt: 2,
+        },
+        1,
+      ),
+    ).rejects.toMatchObject({ code: "WORKFLOW_TASK_INVALID_REQUEST" });
+    await expect(
+      store.compareAndSet(
+        {
+          ...created,
+          agentId: "other",
+          status: "running",
+          revision: 2,
+          updatedAt: 2,
+          startedAt: 2,
+        },
+        1,
+      ),
+    ).rejects.toMatchObject({ code: "WORKFLOW_TASK_INVALID_REQUEST" });
+    await expect(
+      store.create(record("task-2", { input: { bad: Number.NaN } })),
+    ).rejects.toMatchObject({ code: "WORKFLOW_TASK_INVALID_REQUEST" });
+  });
+
+  test("normalizes and freezes an orchestration authority binding", async () => {
+    const store = new InMemoryWorkflowTaskStore();
+    const orchestration = {
+      planRevision: 7,
+      ownership: [
+        { grantId: "grant-z", fencingToken: 9 },
+        { grantId: "grant-a", fencingToken: 3 },
+      ],
+    };
+    const created = await store.create(record("task-1", { orchestration }));
+
+    expect(created.orchestration).toEqual({
+      planRevision: 7,
+      ownership: [
+        { grantId: "grant-a", fencingToken: 3 },
+        { grantId: "grant-z", fencingToken: 9 },
+      ],
+    });
+    expect(Object.isFrozen(created.orchestration)).toBe(true);
+    expect(Object.isFrozen(created.orchestration?.ownership)).toBe(true);
+    expect(Object.isFrozen(created.orchestration?.ownership[0])).toBe(true);
+
+    orchestration.planRevision = 8;
+    const sourceGrant = orchestration.ownership[0];
+    if (!sourceGrant) throw new Error("Expected source ownership grant");
+    sourceGrant.fencingToken = 10;
+    expect(created.orchestration).toEqual({
+      planRevision: 7,
+      ownership: [
+        { grantId: "grant-a", fencingToken: 3 },
+        { grantId: "grant-z", fencingToken: 9 },
+      ],
+    });
+  });
+
+  test("rejects malformed and duplicate orchestration grants", async () => {
+    const store = new InMemoryWorkflowTaskStore();
+    const invalidBindings = [
+      { planRevision: 0, ownership: [] },
+      {
+        planRevision: 1,
+        ownership: [{ grantId: "grant-a", fencingToken: 0 }],
+      },
+      {
+        planRevision: 1,
+        ownership: [
+          { grantId: "grant-a", fencingToken: 1 },
+          { grantId: "grant-a", fencingToken: 2 },
+        ],
+      },
+      { planRevision: 1, ownership: [], actor: "host-handle" },
+    ];
+
+    for (const [index, orchestration] of invalidBindings.entries()) {
+      await expect(
+        store.create(
+          record(`invalid-${index}`, {
+            orchestration: orchestration as WorkflowTaskRecord["orchestration"],
+          }),
+        ),
+      ).rejects.toMatchObject({ code: "WORKFLOW_TASK_INVALID_REQUEST" });
+    }
+  });
+
+  test("prevents orchestration authority changes across CAS", async () => {
+    const store = new InMemoryWorkflowTaskStore();
+    const created = await store.create(
+      record("task-1", {
+        orchestration: {
+          planRevision: 2,
+          ownership: [{ grantId: "grant-a", fencingToken: 4 }],
+        },
+      }),
+    );
+    const binding = created.orchestration;
+    if (!binding) throw new Error("Expected orchestration binding");
+
+    await expect(
+      store.compareAndSet(
+        {
+          ...created,
+          status: "running",
+          revision: 2,
+          updatedAt: 2,
+          startedAt: 2,
+          orchestration: {
+            ...binding,
+            planRevision: 3,
+          },
+        },
+        1,
+      ),
+    ).rejects.toMatchObject({ code: "WORKFLOW_TASK_INVALID_REQUEST" });
+
+    await expect(
+      store.compareAndSet(
+        {
+          ...created,
+          status: "running",
+          revision: 2,
+          updatedAt: 2,
+          startedAt: 2,
+          orchestration: {
+            planRevision: 2,
+            ownership: [{ grantId: "grant-a", fencingToken: 5 }],
+          },
+        },
+        1,
+      ),
+    ).rejects.toMatchObject({ code: "WORKFLOW_TASK_INVALID_REQUEST" });
+  });
+
+  test("preserves orchestration authority through claim and recovery", async () => {
+    let now = 10;
+    const store = new InMemoryWorkflowTaskStore({ now: () => now });
+    const created = await store.create(
+      record("task-1", {
+        orchestration: {
+          planRevision: 5,
+          ownership: [
+            { grantId: "grant-b", fencingToken: 8 },
+            { grantId: "grant-a", fencingToken: 6 },
+          ],
+        },
+      }),
+    );
+    const expected = created.orchestration;
+
+    const claimed = await store.claim({
+      executionId: created.executionId,
+      taskId: created.taskId,
+      workerId: "worker-1",
+      leaseId: "lease-1",
+      leaseDurationMs: 10,
+    });
+    expect(claimed.orchestration).toEqual(expected);
+
+    now = 20;
+    const queued = await store.requeueExpired({
+      executionId: claimed.executionId,
+      taskId: claimed.taskId,
+      expectedRevision: claimed.revision,
+    });
+    expect(queued.orchestration).toEqual(expected);
+
+    now = 21;
+    const reclaimed = await store.claim({
+      executionId: queued.executionId,
+      taskId: queued.taskId,
+      workerId: "worker-2",
+      leaseId: "lease-2",
+      leaseDurationMs: 10,
+    });
+    expect(reclaimed.orchestration).toEqual(expected);
+  });
+
+  test("lists by execution with bounded, execution-scoped cursors", async () => {
+    const store = new InMemoryWorkflowTaskStore();
+    await store.create(record("ignored", { executionId: "execution-2" }));
+    await store.create(record("task-1"));
+    await store.create(
+      record("task-2", { parentTaskId: "task-1", agentId: "reviewer" }),
+    );
+    await store.create(
+      record("task-3", { parentTaskId: "task-1", agentId: "reviewer" }),
+    );
+
+    const first = await store.list({
+      executionId: "execution-1",
+      agentId: "reviewer",
+      limit: 1,
+    });
+    expect(first.records.map(({ taskId }) => taskId)).toEqual(["task-2"]);
+    expect(first.nextCursor).toBeString();
+    const second = await store.list({
+      executionId: "execution-1",
+      agentId: "reviewer",
+      cursor: first.nextCursor,
+      limit: 1,
+    });
+    expect(second.records.map(({ taskId }) => taskId)).toEqual(["task-3"]);
+    expect(second.nextCursor).toBeUndefined();
+    await expect(
+      store.list({ executionId: "execution-2", cursor: first.nextCursor }),
+    ).rejects.toMatchObject({ code: "WORKFLOW_TASK_INVALID_REQUEST" });
+    await expect(
+      store.list({
+        executionId: "execution-1",
+        agentId: "codex",
+        cursor: first.nextCursor,
+      }),
+    ).rejects.toMatchObject({ code: "WORKFLOW_TASK_INVALID_REQUEST" });
+    await expect(
+      store.list({ executionId: "execution-1", limit: 501 }),
+    ).rejects.toMatchObject({ code: "WORKFLOW_TASK_INVALID_REQUEST" });
+  });
+
+  test("atomically grants only one claim and fences generic CAS", async () => {
+    let now = 10;
+    const store = new InMemoryWorkflowTaskStore({ now: () => now });
+    await store.create(record("task-1"));
+
+    const attempts = await Promise.allSettled([
+      store.claim({
+        executionId: "execution-1",
+        taskId: "task-1",
+        workerId: "worker-1",
+        leaseId: "lease-1",
+        leaseDurationMs: 10,
+      }),
+      store.claim({
+        executionId: "execution-1",
+        taskId: "task-1",
+        workerId: "worker-2",
+        leaseId: "lease-2",
+        leaseDurationMs: 10,
+      }),
+    ]);
+
+    const fulfilled = attempts.filter(
+      (attempt) => attempt.status === "fulfilled",
+    );
+    const rejected = attempts.filter(
+      (attempt) => attempt.status === "rejected",
+    );
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0]).toMatchObject({
+      reason: { code: "WORKFLOW_TASK_CLAIM_CONFLICT" },
+    });
+
+    const claimed = await store.get("execution-1", "task-1");
+    if (!claimed) throw new Error("Expected claimed task");
+    expect(claimed).toMatchObject({
+      status: "running",
+      revision: 2,
+      claim: {
+        fencingToken: 1,
+        claimedAt: 10,
+        heartbeatAt: 10,
+        expiresAt: 20,
+      },
+    });
+    expect(Object.isFrozen(claimed?.claim)).toBe(true);
+
+    now = 11;
+    await expect(
+      store.compareAndSet(
+        {
+          ...claimed,
+          status: "completed",
+          revision: 3,
+          updatedAt: now,
+          completedAt: now,
+          output: "unsafe",
+          claim: undefined,
+        },
+        2,
+      ),
+    ).rejects.toMatchObject({ code: "WORKFLOW_TASK_CLAIM_CONFLICT" });
+  });
+
+  test("renews a live claim and completes through its fencing guard", async () => {
+    let now = 10;
+    const store = new InMemoryWorkflowTaskStore({ now: () => now });
+    await store.create(record("task-1"));
+    const claimed = await store.claim({
+      executionId: "execution-1",
+      taskId: "task-1",
+      workerId: "worker-1",
+      leaseId: "lease-1",
+      leaseDurationMs: 10,
+      expectedRevision: 1,
+    });
+    const initialClaim = claimOf(claimed);
+
+    now = 15;
+    const renewed = await store.renewClaim({
+      executionId: "execution-1",
+      taskId: "task-1",
+      workerId: "worker-1",
+      leaseId: "lease-1",
+      fencingToken: initialClaim.fencingToken,
+      expectedRevision: claimed.revision,
+      leaseDurationMs: 20,
+    });
+    const renewedClaim = claimOf(renewed);
+    expect(renewed).toMatchObject({
+      revision: 3,
+      claim: { heartbeatAt: 15, expiresAt: 35 },
+    });
+
+    now = 16;
+    const { claim: _claim, ...unclaimed } = renewed;
+    const completed = await store.compareAndSetClaimed({
+      expectedRevision: renewed.revision,
+      claim: {
+        executionId: renewed.executionId,
+        taskId: renewed.taskId,
+        workerId: renewedClaim.workerId,
+        leaseId: renewedClaim.leaseId,
+        fencingToken: renewedClaim.fencingToken,
+      },
+      record: {
+        ...unclaimed,
+        status: "completed",
+        revision: renewed.revision + 1,
+        updatedAt: now,
+        completedAt: now,
+        output: { result: "ok" },
+      },
+    });
+    expect(completed).toMatchObject({
+      status: "completed",
+      revision: 4,
+      output: { result: "ok" },
+    });
+    expect(completed.claim).toBeUndefined();
+  });
+
+  test("persists remote cancellation without changing the worker fence", async () => {
+    let now = 10;
+    const store = new InMemoryWorkflowTaskStore({ now: () => now });
+    await store.create(record("task-1"));
+    const claimed = await store.claim({
+      executionId: "execution-1",
+      taskId: "task-1",
+      workerId: "worker-1",
+      leaseId: "lease-1",
+      leaseDurationMs: 10,
+    });
+    const ownerClaim = claimOf(claimed);
+
+    now = 12;
+    const cancelling = await store.requestCancellation({
+      executionId: claimed.executionId,
+      taskId: claimed.taskId,
+      expectedRevision: claimed.revision,
+    });
+    expect(cancelling).toMatchObject({
+      status: "cancelling",
+      revision: 3,
+      updatedAt: 12,
+      cancelRequestedAt: 12,
+    });
+    expect(cancelling.claim).toEqual(ownerClaim);
+
+    await expect(
+      store.requestCancellation({
+        executionId: cancelling.executionId,
+        taskId: cancelling.taskId,
+        expectedRevision: claimed.revision,
+      }),
+    ).rejects.toMatchObject({ code: "WORKFLOW_TASK_CONFLICT" });
+
+    now = 13;
+    const idempotent = await store.requestCancellation({
+      executionId: cancelling.executionId,
+      taskId: cancelling.taskId,
+      expectedRevision: cancelling.revision,
+    });
+    expect(idempotent).toBe(cancelling);
+    expect(idempotent.updatedAt).toBe(12);
+
+    await expect(
+      store.renewClaim({
+        executionId: cancelling.executionId,
+        taskId: cancelling.taskId,
+        workerId: "worker-old",
+        leaseId: "lease-old",
+        fencingToken: ownerClaim.fencingToken,
+        expectedRevision: cancelling.revision,
+        leaseDurationMs: 10,
+      }),
+    ).rejects.toMatchObject({ code: "WORKFLOW_TASK_CLAIM_CONFLICT" });
+
+    const renewed = await store.renewClaim({
+      executionId: cancelling.executionId,
+      taskId: cancelling.taskId,
+      workerId: ownerClaim.workerId,
+      leaseId: ownerClaim.leaseId,
+      fencingToken: ownerClaim.fencingToken,
+      expectedRevision: cancelling.revision,
+      leaseDurationMs: 10,
+    });
+    expect(renewed).toMatchObject({
+      status: "cancelling",
+      revision: 4,
+      cancelRequestedAt: 12,
+      claim: { heartbeatAt: 13, fencingToken: ownerClaim.fencingToken },
+    });
+
+    const renewedClaim = claimOf(renewed);
+    const { claim: _claim, ...withoutClaim } = renewed;
+    now = 14;
+    const cancelled = await store.compareAndSetClaimed({
+      expectedRevision: renewed.revision,
+      claim: {
+        executionId: renewed.executionId,
+        taskId: renewed.taskId,
+        workerId: renewedClaim.workerId,
+        leaseId: renewedClaim.leaseId,
+        fencingToken: renewedClaim.fencingToken,
+      },
+      record: {
+        ...withoutClaim,
+        status: "cancelled",
+        revision: renewed.revision + 1,
+        updatedAt: now,
+        completedAt: now,
+        error: {
+          code: "WORKFLOW_TASK_CANCELLED",
+          message: "Workflow task was cancelled",
+        },
+      },
+    });
+    await expect(
+      store.requestCancellation({
+        executionId: cancelled.executionId,
+        taskId: cancelled.taskId,
+        expectedRevision: cancelled.revision,
+      }),
+    ).rejects.toMatchObject({ code: "WORKFLOW_TASK_CLAIM_CONFLICT" });
+
+    await store.create(record("task-queued"));
+    await expect(
+      store.requestCancellation({
+        executionId: "execution-1",
+        taskId: "task-queued",
+        expectedRevision: 1,
+      }),
+    ).rejects.toMatchObject({ code: "WORKFLOW_TASK_CLAIM_CONFLICT" });
+  });
+
+  test("requeues only expired claims and rejects the old worker after reclaim", async () => {
+    let now = 10;
+    const store = new InMemoryWorkflowTaskStore({ now: () => now });
+    await store.create(record("task-1"));
+    const first = await store.claim({
+      executionId: "execution-1",
+      taskId: "task-1",
+      workerId: "worker-1",
+      leaseId: "lease-1",
+      leaseDurationMs: 10,
+    });
+    const firstClaim = claimOf(first);
+
+    now = 19;
+    await expect(
+      store.requeueExpired({
+        executionId: "execution-1",
+        taskId: "task-1",
+        expectedRevision: first.revision,
+      }),
+    ).rejects.toMatchObject({ code: "WORKFLOW_TASK_CLAIM_CONFLICT" });
+
+    now = 20;
+    await expect(
+      store.renewClaim({
+        executionId: "execution-1",
+        taskId: "task-1",
+        workerId: firstClaim.workerId,
+        leaseId: firstClaim.leaseId,
+        fencingToken: firstClaim.fencingToken,
+        expectedRevision: first.revision,
+        leaseDurationMs: 10,
+      }),
+    ).rejects.toMatchObject({ code: "WORKFLOW_TASK_LEASE_EXPIRED" });
+
+    const queued = await store.requeueExpired({
+      executionId: "execution-1",
+      taskId: "task-1",
+      expectedRevision: first.revision,
+    });
+    expect(queued).toMatchObject({
+      status: "queued",
+      revision: 3,
+      attempt: 2,
+    });
+    expect(queued.claim).toBeUndefined();
+    expect(queued.startedAt).toBeUndefined();
+
+    now = 21;
+    const second = await store.claim({
+      executionId: "execution-1",
+      taskId: "task-1",
+      workerId: "worker-2",
+      leaseId: "lease-2",
+      leaseDurationMs: 10,
+      expectedRevision: queued.revision,
+    });
+    expect(second.claim?.fencingToken).toBe(2);
+
+    now = 22;
+    await expect(
+      store.renewClaim({
+        executionId: "execution-1",
+        taskId: "task-1",
+        workerId: "worker-1",
+        leaseId: "lease-1",
+        fencingToken: firstClaim.fencingToken,
+        expectedRevision: second.revision,
+        leaseDurationMs: 10,
+      }),
+    ).rejects.toMatchObject({ code: "WORKFLOW_TASK_CLAIM_CONFLICT" });
+
+    const { claim: _secondClaim, ...withoutClaim } = second;
+    await expect(
+      store.compareAndSetClaimed({
+        expectedRevision: second.revision,
+        claim: {
+          executionId: first.executionId,
+          taskId: first.taskId,
+          workerId: firstClaim.workerId,
+          leaseId: firstClaim.leaseId,
+          fencingToken: firstClaim.fencingToken,
+        },
+        record: {
+          ...withoutClaim,
+          status: "completed",
+          revision: second.revision + 1,
+          updatedAt: now,
+          completedAt: now,
+        },
+      }),
+    ).rejects.toMatchObject({ code: "WORKFLOW_TASK_CLAIM_CONFLICT" });
+  });
+
+  test("recovers an expired cancelling claim without reviving its worker", async () => {
+    let now = 10;
+    const store = new InMemoryWorkflowTaskStore({ now: () => now });
+    await store.create(record("task-1"));
+    const claimed = await store.claim({
+      executionId: "execution-1",
+      taskId: "task-1",
+      workerId: "worker-1",
+      leaseId: "lease-1",
+      leaseDurationMs: 10,
+    });
+    const oldClaim = claimOf(claimed);
+
+    now = 11;
+    const cancelling = await store.compareAndSetClaimed({
+      expectedRevision: claimed.revision,
+      claim: {
+        executionId: claimed.executionId,
+        taskId: claimed.taskId,
+        workerId: oldClaim.workerId,
+        leaseId: oldClaim.leaseId,
+        fencingToken: oldClaim.fencingToken,
+      },
+      record: {
+        ...claimed,
+        status: "cancelling",
+        revision: claimed.revision + 1,
+        updatedAt: now,
+        cancelRequestedAt: now,
+      },
+    });
+
+    now = 19;
+    await expect(
+      store.cancelExpiredClaim({
+        executionId: cancelling.executionId,
+        taskId: cancelling.taskId,
+        expectedRevision: cancelling.revision,
+      }),
+    ).rejects.toMatchObject({ code: "WORKFLOW_TASK_CLAIM_CONFLICT" });
+
+    now = 20;
+    const cancelled = await store.cancelExpiredClaim({
+      executionId: cancelling.executionId,
+      taskId: cancelling.taskId,
+      expectedRevision: cancelling.revision,
+    });
+    expect(cancelled).toMatchObject({
+      status: "cancelled",
+      revision: 4,
+      cancelRequestedAt: 11,
+      completedAt: 20,
+      error: {
+        code: "WORKFLOW_TASK_CANCELLED",
+        message: "Workflow task was cancelled",
+      },
+    });
+    expect(cancelled.claim).toBeUndefined();
+
+    await expect(
+      store.cancelExpiredClaim({
+        executionId: cancelled.executionId,
+        taskId: cancelled.taskId,
+        expectedRevision: cancelling.revision,
+      }),
+    ).rejects.toMatchObject({ code: "WORKFLOW_TASK_CONFLICT" });
+
+    await expect(
+      store.cancelExpiredClaim({
+        executionId: cancelled.executionId,
+        taskId: cancelled.taskId,
+        expectedRevision: cancelled.revision,
+      }),
+    ).rejects.toMatchObject({ code: "WORKFLOW_TASK_CLAIM_CONFLICT" });
+
+    now = 21;
+    await expect(
+      store.compareAndSetClaimed({
+        expectedRevision: cancelled.revision,
+        claim: {
+          executionId: claimed.executionId,
+          taskId: claimed.taskId,
+          workerId: oldClaim.workerId,
+          leaseId: oldClaim.leaseId,
+          fencingToken: oldClaim.fencingToken,
+        },
+        record: {
+          ...cancelled,
+          revision: cancelled.revision + 1,
+          updatedAt: now,
+        },
+      }),
+    ).rejects.toMatchObject({ code: "WORKFLOW_TASK_CLAIM_CONFLICT" });
+
+    await store.create(record("task-running"));
+    const running = await store.claim({
+      executionId: "execution-1",
+      taskId: "task-running",
+      workerId: "worker-2",
+      leaseId: "lease-2",
+      leaseDurationMs: 1,
+    });
+    now = 22;
+    await expect(
+      store.cancelExpiredClaim({
+        executionId: running.executionId,
+        taskId: running.taskId,
+        expectedRevision: running.revision,
+      }),
+    ).rejects.toMatchObject({ code: "WORKFLOW_TASK_CLAIM_CONFLICT" });
+  });
+
+  test("waits for a later revision and supports cancellation", async () => {
+    let now = 10;
+    const store = new InMemoryWorkflowTaskStore({ now: () => now });
+    await store.create(record("task-1"));
+    const changed = store.waitForRevision("execution-1", "task-1", 1);
+
+    now = 11;
+    await store.claim({
+      executionId: "execution-1",
+      taskId: "task-1",
+      workerId: "worker-1",
+      leaseId: "lease-1",
+      leaseDurationMs: 10,
+    });
+    await expect(changed).resolves.toMatchObject({ revision: 2 });
+
+    const abort = new AbortController();
+    const waiting = store.waitForRevision(
+      "execution-1",
+      "task-1",
+      2,
+      abort.signal,
+    );
+    abort.abort();
+    await expect(waiting).rejects.toMatchObject({
+      code: "WORKFLOW_TASK_WAIT_ABORTED",
+    });
+  });
+});
+
+describe("InMemoryWorkflowTaskCommandStore", () => {
+  test("derives root authority and deduplicates retries by intent", async () => {
+    let now = 10;
+    const taskStore = new InMemoryWorkflowTaskStore({ now: () => now });
+    const messageStore = new InMemoryWorkflowTaskMessageStore();
+    const commands = new InMemoryWorkflowTaskCommandStore({
+      taskStore,
+      messageStore,
+    });
+    const command = {
+      operationId: "operation-root",
+      request: {
+        operationId: "operation-root",
+        executionId: "execution-1",
+        taskId: "root",
+        agentId: "codex",
+        orchestration: binding(99, "untrusted", 99),
+      },
+      authority: binding(2, "grant-root", 4),
+    } as const;
+
+    const [first, retry] = await Promise.all([
+      commands.createRoot(command),
+      commands.createRoot(command),
+    ]);
+    expect(retry).toBe(first);
+    expect(first.orchestration).toEqual(binding(2, "grant-root", 4));
+    expect(first.createdAt).toBe(10);
+
+    now = 11;
+    await expect(
+      commands.createRoot({
+        ...command,
+        request: { ...command.request, agentId: "other" },
+      }),
+    ).rejects.toMatchObject({ code: "WORKFLOW_TASK_CONFLICT" });
+  });
+
+  test("atomically fences child, message, and cancellation commands", async () => {
+    let now = 10;
+    const taskStore = new InMemoryWorkflowTaskStore({ now: () => now });
+    const messageStore = new InMemoryWorkflowTaskMessageStore();
+    const commands = new InMemoryWorkflowTaskCommandStore({
+      taskStore,
+      messageStore,
+    });
+    const root = await commands.createRoot({
+      operationId: "root-create",
+      request: {
+        executionId: "execution-1",
+        taskId: "root",
+        agentId: "codex",
+      },
+      authority: binding(1, "grant-root", 1),
+    });
+    const claimed = await taskStore.claim({
+      executionId: root.executionId,
+      taskId: root.taskId,
+      workerId: "worker-1",
+      leaseId: "lease-1",
+      leaseDurationMs: 10,
+    });
+    const parentClaim = guardOf(claimed);
+
+    const childCommand = {
+      operationId: "child-create",
+      parentClaim,
+      expectedParentAuthority: orchestrationOf(root),
+      request: { taskId: "child", agentId: "reviewer" },
+      authority: binding(1, "grant-child", 2),
+    } as const;
+    const child = await commands.createChildClaimed(childCommand);
+    await expect(commands.createChildClaimed(childCommand)).resolves.toBe(
+      child,
+    );
+    expect(child).toMatchObject({
+      executionId: "execution-1",
+      parentTaskId: "root",
+      orchestration: binding(1, "grant-child", 2),
+    });
+
+    const sendCommand = {
+      operationId: "message-send",
+      parentClaim,
+      expectedParentAuthority: orchestrationOf(root),
+      request: { taskId: "child", payload: { kind: "review" } },
+    } as const;
+    const message = await commands.appendFromClaim(sendCommand);
+    await expect(commands.appendFromClaim(sendCommand)).resolves.toBe(message);
+    const mailbox = await messageStore.read({
+      executionId: "execution-1",
+      taskId: "child",
+    });
+    expect(mailbox.messages).toHaveLength(1);
+
+    const cancelCommand = {
+      operationId: "child-cancel",
+      parentClaim,
+      expectedParentAuthority: orchestrationOf(root),
+      target: { executionId: "execution-1", taskId: "child" },
+    } as const;
+    const cancelled = await commands.requestCancellationClaimed(cancelCommand);
+    await expect(
+      commands.requestCancellationClaimed(cancelCommand),
+    ).resolves.toBe(cancelled);
+    expect(cancelled.status).toBe("cancelled");
+
+    now = 20;
+    const queued = await taskStore.requeueExpired({
+      executionId: claimed.executionId,
+      taskId: claimed.taskId,
+      expectedRevision: claimed.revision,
+    });
+    now = 21;
+    await taskStore.claim({
+      executionId: queued.executionId,
+      taskId: queued.taskId,
+      workerId: "worker-2",
+      leaseId: "lease-2",
+      leaseDurationMs: 10,
+    });
+
+    await expect(
+      commands.createChildClaimed({
+        ...childCommand,
+        operationId: "stale-child",
+        request: { taskId: "stale-child", agentId: "reviewer" },
+      }),
+    ).rejects.toMatchObject({ code: "WORKFLOW_TASK_CLAIM_CONFLICT" });
+    await expect(
+      commands.appendFromClaim({
+        ...sendCommand,
+        operationId: "stale-message",
+      }),
+    ).rejects.toMatchObject({ code: "WORKFLOW_TASK_CLAIM_CONFLICT" });
+    await expect(
+      commands.requestCancellationClaimed({
+        ...cancelCommand,
+        operationId: "stale-cancel",
+      }),
+    ).rejects.toMatchObject({ code: "WORKFLOW_TASK_CLAIM_CONFLICT" });
+  });
+
+  test("allows one racing intent for an operation id", async () => {
+    const taskStore = new InMemoryWorkflowTaskStore({ now: () => 10 });
+    const commands = new InMemoryWorkflowTaskCommandStore({
+      taskStore,
+      messageStore: new InMemoryWorkflowTaskMessageStore(),
+    });
+    const root = await commands.createRoot({
+      operationId: "root",
+      request: {
+        executionId: "execution-1",
+        taskId: "root",
+        agentId: "codex",
+      },
+      authority: binding(1, "root-grant", 1),
+    });
+    const claimed = await taskStore.claim({
+      executionId: root.executionId,
+      taskId: root.taskId,
+      workerId: "worker-1",
+      leaseId: "lease-1",
+      leaseDurationMs: 10,
+    });
+    const parentClaim = guardOf(claimed);
+
+    const raced = await Promise.allSettled([
+      commands.createChildClaimed({
+        operationId: "raced-operation",
+        parentClaim,
+        expectedParentAuthority: orchestrationOf(root),
+        request: { taskId: "child-a", agentId: "codex" },
+        authority: binding(1, "grant-a", 1),
+      }),
+      commands.createChildClaimed({
+        operationId: "raced-operation",
+        parentClaim,
+        expectedParentAuthority: orchestrationOf(root),
+        request: { taskId: "child-b", agentId: "codex" },
+        authority: binding(1, "grant-b", 1),
+      }),
+    ]);
+    expect(raced.filter(({ status }) => status === "fulfilled")).toHaveLength(
+      1,
+    );
+    expect(raced.filter(({ status }) => status === "rejected")).toMatchObject([
+      { reason: { code: "WORKFLOW_TASK_CONFLICT" } },
+    ]);
+  });
+
+  test("enforces maxChildren once for the parent lifetime under races and retries", async () => {
+    const taskStore = new InMemoryWorkflowTaskStore({ now: () => 10 });
+    const commands = new InMemoryWorkflowTaskCommandStore({
+      taskStore,
+      messageStore: new InMemoryWorkflowTaskMessageStore(),
+    });
+    const authority = binding(1, "root-grant", 1, 1);
+    const root = await commands.createRoot({
+      operationId: "root",
+      request: {
+        executionId: "execution-1",
+        taskId: "root",
+        agentId: "architect",
+      },
+      authority,
+    });
+    const claimed = await taskStore.claim({
+      executionId: root.executionId,
+      taskId: root.taskId,
+      workerId: "worker-1",
+      leaseId: "lease-1",
+      leaseDurationMs: 10,
+    });
+    const parentClaim = guardOf(claimed);
+    const commandsByChild = ["child-a", "child-b"].map((taskId) => ({
+      operationId: `create-${taskId}`,
+      parentClaim,
+      expectedParentAuthority: authority,
+      request: { taskId, agentId: "worker" },
+      authority: binding(1, `grant-${taskId}`, 2),
+    }));
+
+    const raced = await Promise.allSettled(
+      commandsByChild.map((command) => commands.createChildClaimed(command)),
+    );
+    const winners = raced.filter(
+      (result): result is PromiseFulfilledResult<WorkflowTaskRecord> =>
+        result.status === "fulfilled",
+    );
+    expect(winners).toHaveLength(1);
+    expect(
+      raced.filter((result) => result.status === "rejected"),
+    ).toMatchObject([{ reason: { code: "WORKFLOW_TASK_DELEGATION_LIMIT" } }]);
+
+    const winner = winners[0];
+    if (!winner) throw new Error("Expected winning result");
+    const winningCommand = commandsByChild.find(
+      (command) => command.request.taskId === winner.value.taskId,
+    );
+    if (!winningCommand) throw new Error("Expected winning command");
+    await expect(commands.createChildClaimed(winningCommand)).resolves.toBe(
+      winner.value,
+    );
+    await commands.requestCancellationClaimed({
+      operationId: "cancel-winner",
+      parentClaim,
+      expectedParentAuthority: authority,
+      target: {
+        executionId: winner.value.executionId,
+        taskId: winner.value.taskId,
+      },
+    });
+    await expect(
+      commands.createChildClaimed({
+        operationId: "create-after-cancel",
+        parentClaim,
+        expectedParentAuthority: authority,
+        request: { taskId: "child-c", agentId: "worker" },
+        authority: binding(1, "grant-child-c", 3),
+      }),
+    ).rejects.toMatchObject({ code: "WORKFLOW_TASK_DELEGATION_LIMIT" });
+  });
+});
+
+describe("InMemoryWorkflowTaskMessageStore", () => {
+  test("assigns monotonic sequences and reads with a scoped cursor", async () => {
+    const store = new InMemoryWorkflowTaskMessageStore();
+    const payload = { request: { value: 1 } };
+    const first = await store.append({
+      executionId: "execution-1",
+      taskId: "task-1",
+      senderTaskId: "parent",
+      payload,
+      sentAt: 1,
+    });
+    payload.request.value = 2;
+    const second = await store.append({
+      executionId: "execution-1",
+      taskId: "task-1",
+      payload: "next",
+      sentAt: 2,
+    });
+    expect(first.sequence).toBe(1);
+    expect(first.payload).toEqual({ request: { value: 1 } });
+    expect(second.sequence).toBe(2);
+
+    const page = await store.read({
+      executionId: "execution-1",
+      taskId: "task-1",
+      limit: 1,
+    });
+    expect(page.messages).toEqual([first]);
+    expect(page.hasMore).toBe(true);
+    const tail = await store.read({
+      executionId: "execution-1",
+      taskId: "task-1",
+      cursor: page.cursor,
+    });
+    expect(tail.messages).toEqual([second]);
+    expect(tail.hasMore).toBe(false);
+    await expect(
+      store.read({
+        executionId: "execution-1",
+        taskId: "other",
+        cursor: page.cursor,
+      }),
+    ).rejects.toMatchObject({ code: "WORKFLOW_TASK_INVALID_REQUEST" });
+  });
+
+  test("fails explicitly when the configured mailbox capacity is reached", async () => {
+    const store = new InMemoryWorkflowTaskMessageStore({ capacity: 1 });
+    const message = {
+      executionId: "execution-1",
+      taskId: "task-1",
+      payload: "message",
+      sentAt: 1,
+    } as const;
+    await store.append(message);
+    await expect(store.append(message)).rejects.toMatchObject({
+      code: "WORKFLOW_TASK_MAILBOX_FULL",
+      details: { capacity: 1 },
+    });
+  });
+
+  test("wakes a pending long-poll when a message is appended", async () => {
+    const store = new InMemoryWorkflowTaskMessageStore();
+    const wait = store.wait({
+      executionId: "execution-1",
+      taskId: "task-1",
+    });
+
+    await store.append({
+      executionId: "execution-1",
+      taskId: "task-1",
+      payload: "wake",
+      sentAt: 1,
+    });
+
+    await expect(wait).resolves.toMatchObject({
+      messages: [{ sequence: 1, payload: "wake" }],
+      hasMore: false,
+    });
+  });
+
+  test("returns immediately when the cursor already has unread messages", async () => {
+    const store = new InMemoryWorkflowTaskMessageStore();
+    await store.append({
+      executionId: "execution-1",
+      taskId: "task-1",
+      payload: "existing",
+      sentAt: 1,
+    });
+
+    const result = await store.wait({
+      executionId: "execution-1",
+      taskId: "task-1",
+    });
+    expect(result.messages).toHaveLength(1);
+    expect(result.messages[0]?.payload).toBe("existing");
+  });
+
+  test("aborts and removes a pending waiter without affecting later waits", async () => {
+    const store = new InMemoryWorkflowTaskMessageStore();
+    const abort = new AbortController();
+    const first = store.wait(
+      { executionId: "execution-1", taskId: "task-1" },
+      abort.signal,
+    );
+    abort.abort();
+    await expect(first).rejects.toMatchObject({
+      code: "WORKFLOW_TASK_WAIT_ABORTED",
+    });
+
+    const second = store.wait({
+      executionId: "execution-1",
+      taskId: "task-1",
+    });
+    await store.append({
+      executionId: "execution-1",
+      taskId: "task-1",
+      payload: "after-abort",
+      sentAt: 2,
+    });
+    await expect(second).resolves.toMatchObject({
+      messages: [{ payload: "after-abort" }],
+    });
+  });
+
+  test("keeps waiters isolated by execution and task mailbox", async () => {
+    const store = new InMemoryWorkflowTaskMessageStore();
+    let secondSettled = false;
+    const first = store.wait({
+      executionId: "execution-1",
+      taskId: "task-1",
+    });
+    const second = store
+      .wait({ executionId: "execution-1", taskId: "task-2" })
+      .finally(() => {
+        secondSettled = true;
+      });
+
+    await store.append({
+      executionId: "execution-1",
+      taskId: "task-1",
+      payload: "first-only",
+      sentAt: 1,
+    });
+    await first;
+    await Promise.resolve();
+    expect(secondSettled).toBe(false);
+
+    await store.append({
+      executionId: "execution-1",
+      taskId: "task-2",
+      payload: "second",
+      sentAt: 2,
+    });
+    await expect(second).resolves.toMatchObject({
+      messages: [{ payload: "second" }],
+    });
+  });
+});
+
+function record(
+  taskId: string,
+  overrides: Partial<WorkflowTaskRecord> = {},
+): WorkflowTaskRecord {
+  return {
+    executionId: "execution-1",
+    taskId,
+    agentId: "codex",
+    status: "queued",
+    revision: 1,
+    attempt: 1,
+    createdAt: 1,
+    updatedAt: 1,
+    ...overrides,
+  };
+}
+
+function claimOf(record: WorkflowTaskRecord): WorkflowTaskClaim {
+  if (!record.claim) throw new Error("Expected task to contain a claim");
+  return record.claim;
+}
+
+function guardOf(record: WorkflowTaskRecord) {
+  const claim = claimOf(record);
+  return {
+    executionId: record.executionId,
+    taskId: record.taskId,
+    workerId: claim.workerId,
+    leaseId: claim.leaseId,
+    fencingToken: claim.fencingToken,
+  };
+}
+
+function binding(
+  planRevision: number,
+  grantId: string,
+  fencingToken: number,
+  maxChildren?: number,
+) {
+  return {
+    planRevision,
+    ownership: [{ grantId, fencingToken }],
+    ...(maxChildren === undefined ? {} : { maxChildren }),
+  } as const;
+}
+
+function orchestrationOf(record: WorkflowTaskRecord) {
+  if (!record.orchestration) throw new Error("Expected orchestration binding");
+  return record.orchestration;
+}

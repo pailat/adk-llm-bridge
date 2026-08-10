@@ -185,7 +185,7 @@ export class CodexSdkDriver {
 
     let completed = false;
     let failed = false;
-    const pendingEvents: ExternalAgentEvent[] = [];
+    let terminalEvent: ExternalAgentEvent | undefined;
     let cleanup: () => Promise<void> = async () => {};
     try {
       const sdk = await this.loadSdk(request);
@@ -244,7 +244,7 @@ export class CodexSdkDriver {
         return delta;
       };
 
-      for await (const event of events) {
+      stream: for await (const event of events) {
         if (stringValue(event.type) === "thread.started") {
           const delta = emitThreadId(threadStartedId(event));
           if (delta) {
@@ -254,8 +254,8 @@ export class CodexSdkDriver {
         }
         for (const normalized of this.normalizeEvent(event)) {
           if (normalized.type === "completed") {
-            pendingEvents.push(normalized);
-            continue;
+            terminalEvent = normalized;
+            break stream;
           }
           yield normalized;
         }
@@ -268,11 +268,9 @@ export class CodexSdkDriver {
         yield postLoopDelta;
       }
 
-      for (const event of pendingEvents) {
-        if (event.type === "completed") {
-          completed = true;
-        }
-        yield event;
+      if (terminalEvent) {
+        completed = true;
+        yield terminalEvent;
       }
     } catch (error) {
       failed = true;

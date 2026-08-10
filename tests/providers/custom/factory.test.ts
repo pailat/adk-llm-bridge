@@ -1,6 +1,9 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
 import { CustomLlm } from "../../../src/providers/custom/custom-llm.js";
-import { Custom, createCustomLlm } from "../../../src/providers/custom/factory.js";
+import {
+  Custom,
+  createCustomLlm,
+} from "../../../src/providers/custom/factory.js";
 
 describe("createCustomLlm", () => {
   it("creates a CustomLlm instance", () => {
@@ -72,6 +75,10 @@ describe("createCustomLlm", () => {
 });
 
 describe("Custom", () => {
+  afterEach(() => {
+    delete process.env.CUSTOM_LLM_BASE_URL;
+  });
+
   it("creates a CustomLlm instance", () => {
     const llm = Custom("llama3", {
       baseURL: "http://localhost:11434/v1",
@@ -106,6 +113,14 @@ describe("Custom", () => {
       baseURL: "http://localhost:11434/v1",
     });
     expect(llm.model).toBe("llama3");
+  });
+
+  it("allows environment-only endpoint configuration", () => {
+    process.env.CUSTOM_LLM_BASE_URL = "http://localhost:11434/v1";
+
+    const llm = Custom("llama3");
+
+    expect(llm).toBeInstanceOf(CustomLlm);
   });
 });
 

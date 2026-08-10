@@ -20,7 +20,20 @@ import {
   type Part,
 } from "@google/genai";
 import type OpenAI from "openai";
+import type { ReasoningCapability } from "../core/provider-definition.js";
 import { normalizeSchema } from "./schema.js";
+
+/**
+ * Provider-aware options forwarded into {@link convertRequest}.
+ *
+ * Carries the declarative {@link ReasoningCapability} so the request converter
+ * can choose between the strict `reasoning_effort` path (OpenAI/xAI) and the
+ * permissive native `reasoning` object path (OpenRouter/AI Gateway).
+ */
+export interface ConvertRequestOptions {
+  /** Reasoning capability from the provider definition (undefined = strict). */
+  reasoning?: ReasoningCapability;
+}
 
 /**
  * Extracts the bare model name from a possibly provider-prefixed id.
@@ -176,8 +189,10 @@ export interface ConvertedRequest {
 export function convertRequest(
   llmRequest: LlmRequest,
   model?: string,
+  opts?: ConvertRequestOptions,
 ): ConvertedRequest {
   const messages: OpenAI.ChatCompletionMessageParam[] = [];
+  const toolCallIdCorrelation: ToolCallIdCorrelation = { pendingCalls: [] };
 
   const systemContent = extractSystemInstruction(llmRequest);
   if (systemContent) {
@@ -185,7 +200,7 @@ export function convertRequest(
   }
 
   for (const content of llmRequest.contents ?? []) {
-    processContent(content, messages);
+    processContent(content, messages, toolCallIdCorrelation, opts?.reasoning);
   }
 
   const tools = convertTools(llmRequest);
@@ -198,7 +213,7 @@ export function convertRequest(
   const params: Record<string, unknown> = {
     ...convertGenerationConfig(llmRequest, resolvedModel),
     ...convertStructuredOutput(llmRequest),
-    ...convertReasoningConfig(llmRequest, resolvedModel),
+    ...convertReasoningConfig(llmRequest, resolvedModel, opts),
     ...convertLogprobsConfig(llmRequest, resolvedModel),
   };
 
@@ -227,6 +242,8 @@ export function convertGenerationConfig(
 ): Record<string, unknown> {
   const config = req.config;
   if (!config) return {};
+
+  assertSupportedCandidateCount(config.candidateCount);
 
   const resolvedModel = model ?? req.model;
   const reasoningModel = usesMaxCompletionTokens(resolvedModel);
@@ -261,10 +278,6 @@ export function convertGenerationConfig(
     params.presence_penalty = config.presencePenalty;
   if (config.frequencyPenalty !== undefined && !reasoningModel)
     params.frequency_penalty = config.frequencyPenalty;
-  // n>1 stays cosmetic: convertResponse reads choices[0] only. Reasoning
-  // models (gpt-5*, o-series) reject n>1 with a 400, so drop it for them.
-  if (config.candidateCount !== undefined && !reasoningModel)
-    params.n = config.candidateCount;
   // topK intentionally dropped — no OpenAI Chat Completions equivalent.
   // Reasoning is handled separately in convertReasoningConfig.
 
@@ -272,39 +285,139 @@ export function convertGenerationConfig(
 }
 
 /**
- * Maps ADK `thinkingConfig` to an OpenAI-compatible `reasoning_effort`.
+ * Rejects unsupported ADK response-candidate counts.
  *
- * GPT-5 / o-series and other reasoning-capable OpenAI-compatible models accept
- * a `reasoning_effort` of "low" | "medium" | "high" on the Chat Completions
- * body. ADK expresses reasoning intent via `config.thinkingConfig`
- * (`thinkingBudget`, `includeThoughts`). We map the budget to coarse buckets:
+ * The bridge produces one ADK `LlmResponse` for each provider response, so it
+ * cannot faithfully represent multiple Chat Completions choices from a single
+ * response. The shared request converter runs before both streaming and
+ * non-streaming provider calls; rejecting here prevents providers from
+ * generating paid choices that the bridge would discard. A `candidateCount`
+ * of `1` remains supported and is omitted because Chat Completions defaults to
+ * one choice.
  *
- * - budget <= 0 (or `includeThoughts === false` with no budget) -> not emitted
+ * @param candidateCount - Requested number of ADK response candidates
+ * @throws {Error} When a provided value is anything other than integer `1`
+ * @internal
+ */
+function assertSupportedCandidateCount(candidateCount: unknown): void {
+  if (candidateCount === undefined) return;
+
+  if (
+    typeof candidateCount !== "number" ||
+    !Number.isInteger(candidateCount) ||
+    candidateCount !== 1
+  ) {
+    throw new Error(
+      "candidateCount must be exactly 1 when provided: adk-llm-bridge returns one ADK LlmResponse per provider response and cannot represent multiple Chat Completions choices. Set candidateCount to 1 or omit it.",
+    );
+  }
+}
+
+/**
+ * Buckets an ADK `thinkingBudget` into a coarse `reasoning_effort` level.
+ *
+ * - no budget set -> "medium" (sensible default)
  * - 0 < budget <= 2048 -> "low"
  * - 2048 < budget <= 8192 -> "medium"
  * - budget > 8192 -> "high"
- * - no budget set (but thinkingConfig present) -> "medium" (sensible default)
  *
- * CRITICAL: `reasoning_effort` is only emitted when `thinkingConfig` is present
- * AND the resolved model is reasoning-capable. gpt-4.1, gpt-4o, plain grok-4,
- * etc. return a 400 on `reasoning_effort`, so when a model is supplied and it is
- * NOT reasoning-capable we drop it entirely. When no model is supplied we keep
- * the legacy thinkingConfig-only behavior (used by callers that gate elsewhere).
+ * Callers handle the budget <= 0 ("disable") case before calling this.
+ *
+ * @internal
+ */
+function budgetToEffort(
+  budget: number | null | undefined,
+): "low" | "medium" | "high" {
+  if (budget === undefined || budget === null) return "medium";
+  if (budget <= 2048) return "low";
+  if (budget <= 8192) return "medium";
+  return "high";
+}
+
+/**
+ * Decides which depth lever a budget should steer for an OpenRouter-routed
+ * model: the coarse `reasoning.effort` bucket vs the token-precise
+ * `reasoning.max_tokens`.
+ *
+ * OpenRouter rejects sending BOTH `reasoning.effort` and `reasoning.max_tokens`
+ * in one request ("Only one of 'reasoning.effort' and 'reasoning.max_tokens'
+ * can be specified"), so a single ADK `thinkingBudget` must be mapped to exactly
+ * one of them — and the choice must match the lever the target model family
+ * actually honors:
+ *
+ * - **effort-family**: OpenAI reasoning models (gpt-5*, o-series) and xAI Grok
+ *   reasoners IGNORE `max_tokens` through OpenRouter but respond cleanly to
+ *   `effort` (verified: gpt-5-mini low->high ~10x reasoning tokens). Anthropic
+ *   thinking is also routed via `effort` here (OpenRouter maps it to a thinking
+ *   budget under the hood and `effort` gives monotonic control). These reuse the
+ *   existing {@link supportsReasoningEffort} model-name gate.
+ * - **everything else** (gemini thinking, glm/deepseek, and unknown/default
+ *   reasoners): honor `max_tokens` cleanly (verified: gemini-2.5-flash
+ *   256->16384 budget scales reasoning tokens monotonically), so a budget maps
+ *   to `max_tokens`.
+ *
+ * @returns `"effort"` for effort-family models, otherwise `"max_tokens"`
+ * @internal
+ */
+function openRouterBudgetLever(
+  model: string | undefined,
+): "effort" | "max_tokens" {
+  return supportsReasoningEffort(model) ? "effort" : "max_tokens";
+}
+
+/**
+ * Maps ADK `thinkingConfig` to a provider-appropriate reasoning param.
+ *
+ * Behavior is selected by the provider's declarative {@link ReasoningCapability}
+ * (`opts.reasoning.style`); when absent the strict `"openai-effort"` path is
+ * used.
+ *
+ * **`"openai-effort"` (strict — OpenAI, xAI, manual/custom):**
+ * Emit `reasoning_effort` of "low" | "medium" | "high" ONLY when the resolved
+ * model is reasoning-capable (the {@link supportsReasoningEffort} model-name
+ * gate). gpt-4.1, gpt-4o, plain grok-4, etc. return a 400 on `reasoning_effort`,
+ * so when a model is supplied and it is NOT reasoning-capable we drop it
+ * entirely. When no model is supplied we keep the legacy emit behavior (used by
+ * callers that gate elsewhere). The budget bucketing is described in
+ * {@link budgetToEffort}.
+ *
+ * **`"openrouter"` (permissive — OpenRouter, AI Gateway):**
+ * NO model-name gate (these providers return HTTP 200 and ignore reasoning on
+ * non-reasoning models). Build the native OpenRouter `reasoning` object:
+ * - `includeThoughts === false` -> `{ exclude: true }` (reason but do not
+ *   surface the thoughts) merged with the enable controls below.
+ * - `thinkingBudget > 0` -> a SINGLE depth lever chosen by
+ *   {@link openRouterBudgetLever}: `{ effort: <bucket> }` for effort-family
+ *   models (OpenAI/xAI/Anthropic reasoners, which ignore `max_tokens` via
+ *   OpenRouter) or `{ max_tokens: budget }` for everything else (gemini and
+ *   default reasoners). Only one may be sent — OpenRouter 400s if both are
+ *   present.
+ * - `thinkingBudget === 0` (explicit) -> `{ enabled: false }` (leave reasoning
+ *   off).
+ * - `thinkingBudget` unset (but `thinkingConfig` present) -> `{ effort:
+ *   "medium" }` (sensible enable default; no `max_tokens`).
  *
  * @param req - The LLM request
  * @param model - The resolved model id (for reasoning-capability gating)
- * @returns A params object with `reasoning_effort`, or `{}` when not applicable
+ * @param opts - Provider-aware options carrying the reasoning capability
+ * @returns A params object with `reasoning_effort` or a native `reasoning`
+ *   object, or `{}` when not applicable
  */
 export function convertReasoningConfig(
   req: LlmRequest,
   model?: string,
+  opts?: ConvertRequestOptions,
 ): Record<string, unknown> {
   const thinking = req.config?.thinkingConfig;
   if (!thinking) return {};
 
-  // When a model is known, only emit reasoning_effort for reasoning-capable
-  // models. If no model is supplied, fall back to the request's model field;
-  // if that is also absent, keep the legacy behavior (emit).
+  if (opts?.reasoning?.style === "openrouter") {
+    return convertOpenRouterReasoning(thinking, model ?? req.model);
+  }
+
+  // Strict "openai-effort" path (default). When a model is known, only emit
+  // reasoning_effort for reasoning-capable models. If no model is supplied, fall
+  // back to the request's model field; if that is also absent, emit (legacy).
   const resolvedModel = model ?? req.model;
   if (resolvedModel && !supportsReasoningEffort(resolvedModel)) return {};
 
@@ -314,18 +427,52 @@ export function convertReasoningConfig(
   // left at its own default behavior rather than forced to reason.
   if (budget !== undefined && budget !== null && budget <= 0) return {};
 
-  let effort: "low" | "medium" | "high";
-  if (budget === undefined || budget === null) {
-    effort = "medium";
-  } else if (budget <= 2048) {
-    effort = "low";
-  } else if (budget <= 8192) {
-    effort = "medium";
+  return { reasoning_effort: budgetToEffort(budget) };
+}
+
+/**
+ * Builds the native OpenRouter `reasoning` object from ADK `thinkingConfig`.
+ *
+ * See {@link convertReasoningConfig} for the mapping rules. Returns `{}` only
+ * when there is nothing meaningful to send.
+ *
+ * @param thinking - The ADK thinkingConfig
+ * @param model - The resolved model id (selects the depth lever for a budget;
+ *   see {@link openRouterBudgetLever})
+ * @internal
+ */
+function convertOpenRouterReasoning(
+  thinking: NonNullable<NonNullable<LlmRequest["config"]>["thinkingConfig"]>,
+  model: string | undefined,
+): Record<string, unknown> {
+  const budget = thinking.thinkingBudget;
+  const reasoning: Record<string, unknown> = {};
+
+  if (budget !== undefined && budget !== null && budget <= 0) {
+    // Explicit disable: turn reasoning off rather than forcing it on.
+    reasoning.enabled = false;
+  } else if (budget !== undefined && budget !== null) {
+    // A budget is given. OpenRouter 400s if BOTH `max_tokens` and `effort` are
+    // present ("Only one of 'reasoning.effort' and 'reasoning.max_tokens' can be
+    // specified"), so route the budget to the SINGLE lever the target model
+    // family actually honors (effort-family ignore max_tokens via OpenRouter).
+    if (openRouterBudgetLever(model) === "effort") {
+      reasoning.effort = budgetToEffort(budget);
+    } else {
+      reasoning.max_tokens = budget;
+    }
   } else {
-    effort = "high";
+    // thinkingConfig present without a budget: enable with a sensible default.
+    reasoning.effort = "medium";
   }
 
-  return { reasoning_effort: effort };
+  // includeThoughts === false means "reason internally but don't surface the
+  // thoughts". Map to exclude:true (still reasons; thoughts not returned).
+  if (thinking.includeThoughts === false) {
+    reasoning.exclude = true;
+  }
+
+  return Object.keys(reasoning).length ? { reasoning } : {};
 }
 
 /**
@@ -510,6 +657,93 @@ function extractText(parts: Part[]): string {
 }
 
 /**
+ * Parses an ADK thought part's `thoughtSignature` back into an OpenRouter
+ * `reasoning_details` array.
+ *
+ * The response converter stores the entire `reasoning_details` array verbatim as
+ * a JSON string on `thoughtSignature` (so the signed reasoning round-trips
+ * byte-for-byte). Here we parse it back. Display-only thought parts (no parseable
+ * array — e.g. glm/deepseek string reasoning) return undefined, in which case the
+ * thought text is simply dropped from the assistant turn.
+ *
+ * @param signature - The thoughtSignature value (may be undefined)
+ * @returns The parsed reasoning_details array, or undefined when not present/valid
+ *
+ * @internal
+ */
+function parseReasoningDetails(
+  signature: string | undefined,
+): unknown[] | undefined {
+  if (!signature) return undefined;
+  try {
+    const parsed = JSON.parse(signature);
+    return Array.isArray(parsed) ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Generates a collision-safe ID accepted by OpenAI-compatible tool calls. */
+function generateToolCallId(): string {
+  return `call_${crypto.randomUUID().replaceAll("-", "")}`;
+}
+
+interface PendingToolCall {
+  id: string;
+  name: string;
+  generated: boolean;
+}
+
+interface ToolCallIdCorrelation {
+  pendingCalls: PendingToolCall[];
+}
+
+/** Resolves a call ID, treating an empty string the same as a missing ID. */
+function resolveToolCallId(id: string | undefined): string {
+  return id || generateToolCallId();
+}
+
+/**
+ * Correlates a tool response with a previously emitted call. Names are used
+ * when available so parallel responses may arrive in a different order. A
+ * missing response ID prefers a generated call with the same name before an
+ * explicit call, while an unmatched name leaves pending calls untouched. An
+ * explicit response ID always wins and is removed from the pending set when
+ * present.
+ */
+function resolveToolResponseId(
+  id: string | undefined,
+  name: string | undefined,
+  correlation: ToolCallIdCorrelation,
+): string {
+  if (id) {
+    const pendingIndex = correlation.pendingCalls.findIndex(
+      (call) => call.id === id,
+    );
+    if (pendingIndex >= 0) correlation.pendingCalls.splice(pendingIndex, 1);
+    return id;
+  }
+
+  let pendingIndex: number;
+  if (name) {
+    pendingIndex = correlation.pendingCalls.findIndex(
+      (call) => call.name === name && call.generated,
+    );
+    if (pendingIndex < 0) {
+      pendingIndex = correlation.pendingCalls.findIndex(
+        (call) => call.name === name,
+      );
+    }
+    if (pendingIndex < 0) return generateToolCallId();
+  } else {
+    pendingIndex = correlation.pendingCalls.findIndex((call) => call.generated);
+    if (pendingIndex < 0) pendingIndex = 0;
+  }
+  const pendingCall = correlation.pendingCalls.splice(pendingIndex, 1)[0];
+  return pendingCall?.id ?? generateToolCallId();
+}
+
+/**
  * Processes a Content object and adds appropriate messages.
  *
  * Handles user messages, model responses, function calls, and function responses.
@@ -522,15 +756,36 @@ function extractText(parts: Part[]): string {
 function processContent(
   content: Content,
   messages: OpenAI.ChatCompletionMessageParam[],
+  correlation: ToolCallIdCorrelation,
+  reasoning?: ReasoningCapability,
 ): void {
   if (!content.parts?.length) return;
 
   const texts: string[] = [];
   const images: OpenAI.ChatCompletionContentPartImage[] = [];
-  const calls: { id: string; name: string; arguments: string }[] = [];
+  const calls: {
+    id: string;
+    name: string;
+    arguments: string;
+    generated: boolean;
+  }[] = [];
   const responses: { id: string; content: string }[] = [];
+  // reasoning_details arrays parsed from thought parts' thoughtSignature, to be
+  // echoed verbatim on the assistant turn (openrouter style only).
+  const reasoningDetails: unknown[] = [];
 
   for (const part of content.parts) {
+    // Thought parts (captured from a prior assistant turn) must NEVER be folded
+    // back into answer content — re-sending reasoning as plain text pollutes the
+    // context and, for signature-strict upstreams, corrupts the round-trip.
+    // Handled before the text branch so a thought part never falls through.
+    if (part.thought) {
+      if (reasoning?.style === "openrouter") {
+        const parsed = parseReasoningDetails(part.thoughtSignature);
+        if (parsed) reasoningDetails.push(...parsed);
+      }
+      continue;
+    }
     if (part.text) texts.push(part.text);
     const image = partToOpenAIImage(part);
     if (image) images.push(image);
@@ -544,9 +799,10 @@ function processContent(
         console.warn("[adk-llm-bridge] functionCall missing name");
       }
       calls.push({
-        id: part.functionCall.id ?? `call_${Date.now()}`,
+        id: resolveToolCallId(part.functionCall.id),
         name: part.functionCall.name ?? "",
         arguments: JSON.stringify(part.functionCall.args ?? {}),
+        generated: !part.functionCall.id,
       });
     }
     if (part.functionResponse) {
@@ -554,7 +810,14 @@ function processContent(
         console.warn("[adk-llm-bridge] functionResponse missing id");
       }
       responses.push({
-        id: part.functionResponse.id ?? "",
+        id:
+          content.role === "user"
+            ? resolveToolResponseId(
+                part.functionResponse.id,
+                part.functionResponse.name,
+                correlation,
+              )
+            : resolveToolCallId(part.functionResponse.id),
         content: JSON.stringify(part.functionResponse.response ?? {}),
       });
     }
@@ -584,17 +847,27 @@ function processContent(
           "OpenAI assistant messages cannot carry images",
       );
     }
-    if (texts.length || calls.length) {
+    if (texts.length || calls.length || reasoningDetails.length) {
       const msg: OpenAI.ChatCompletionAssistantMessageParam = {
         role: "assistant",
         content: texts.length ? texts.join("\n") : null,
       };
       if (calls.length) {
+        correlation.pendingCalls.push(
+          ...calls.map(({ id, name, generated }) => ({ id, name, generated })),
+        );
         msg.tool_calls = calls.map((c) => ({
           id: c.id,
           type: "function" as const,
           function: { name: c.name, arguments: c.arguments },
         }));
+      }
+      // Echo signed reasoning back verbatim so signature-strict upstreams
+      // (Anthropic/Gemini thinking via OpenRouter) accept the continuation.
+      // The OpenAI SDK type has no reasoning_details field; attach defensively.
+      if (reasoningDetails.length) {
+        (msg as unknown as Record<string, unknown>).reasoning_details =
+          reasoningDetails;
       }
       messages.push(msg);
     }

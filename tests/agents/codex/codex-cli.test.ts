@@ -181,6 +181,67 @@ describe("Codex CLI driver", () => {
     });
   });
 
+  test("does not terminate the turn when a Codex MCP item completes", async () => {
+    const spawn: CodexCliSpawn = () => ({
+      stdout: chunks([
+        JSON.stringify({ type: "thread.started", thread_id: "thread-1" }),
+        JSON.stringify({
+          type: "item.started",
+          item: {
+            id: "call-1",
+            type: "mcp_tool_call",
+            tool: "workflow_get",
+            arguments: {},
+          },
+        }),
+        JSON.stringify({
+          type: "item.completed",
+          item: {
+            id: "call-1",
+            type: "mcp_tool_call",
+            tool: "workflow_get",
+            arguments: {},
+            result: { ok: true },
+          },
+        }),
+        JSON.stringify({
+          type: "item.completed",
+          item: { id: "message-1", type: "agent_message", text: "finished" },
+        }),
+        JSON.stringify({ type: "turn.completed", exit_code: 0 }),
+      ]),
+      exited: Promise.resolve(0),
+    });
+
+    const events = await collect(new CodexCliDriver({ spawn }).run(request()));
+
+    expect(events.filter((event) => event.type === "completed")).toEqual([
+      { type: "completed", exitCode: 0, timestamp: undefined },
+      { type: "completed", exitCode: 0, timestamp: expect.any(Number) },
+    ]);
+    expect(events).toContainEqual({
+      type: "tool_call",
+      name: "workflow_get",
+      input: {},
+      callId: "call-1",
+      timestamp: undefined,
+    });
+    expect(events).toContainEqual({
+      type: "tool_result",
+      name: "workflow_get",
+      result: { ok: true },
+      callId: "call-1",
+      error: undefined,
+      timestamp: undefined,
+    });
+    expect(events).toContainEqual({
+      type: "output",
+      content: "finished",
+      stream: "stdout",
+      timestamp: undefined,
+    });
+  });
+
   test("maps bridge permissions to current Codex global and exec flags", () => {
     expect(mapPolicyToCodexArgs()).toEqual([
       "--ask-for-approval",

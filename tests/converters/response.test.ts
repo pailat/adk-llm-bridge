@@ -549,3 +549,118 @@ describe("reasoning passthrough", () => {
     });
   });
 });
+
+describe("reasoning_details (structured, signed) passthrough", () => {
+  const details = [
+    { type: "reasoning.text", text: "step A", signature: "sig-1", index: 0 },
+  ];
+
+  it("builds a thought part with thoughtSignature round-tripping the array", () => {
+    const response = createCompletion({
+      choices: [
+        {
+          index: 0,
+          message: {
+            role: "assistant",
+            content: "The answer.",
+            reasoning: "step A",
+            reasoning_details: details,
+            refusal: null,
+          },
+          finish_reason: "stop",
+          logprobs: null,
+        },
+      ],
+    } as unknown as Partial<ChatCompletion>);
+
+    const parts = convertResponse(response).content?.parts ?? [];
+    expect(parts[0]?.thought).toBe(true);
+    expect(parts[0]?.text).toBe("step A");
+    expect(parts[0]?.thoughtSignature).toBeDefined();
+    expect(JSON.parse(parts[0]?.thoughtSignature as string)).toEqual(details);
+    expect(parts[1]).toEqual({ text: "The answer." });
+  });
+
+  it("uses reasoning.summary text when reasoning.text is absent", () => {
+    const summaryDetails = [
+      { type: "reasoning.summary", summary: "brief", index: 0 },
+    ];
+    const response = createCompletion({
+      choices: [
+        {
+          index: 0,
+          message: {
+            role: "assistant",
+            content: "ok",
+            reasoning_details: summaryDetails,
+            refusal: null,
+          },
+          finish_reason: "stop",
+          logprobs: null,
+        },
+      ],
+    } as unknown as Partial<ChatCompletion>);
+
+    const parts = convertResponse(response).content?.parts ?? [];
+    expect(parts[0]?.text).toBe("brief");
+    expect(JSON.parse(parts[0]?.thoughtSignature as string)).toEqual(
+      summaryDetails,
+    );
+  });
+
+  it("falls back to a flat thought part (no signature) without reasoning_details", () => {
+    const response = createCompletion({
+      choices: [
+        {
+          index: 0,
+          message: {
+            role: "assistant",
+            content: "ok",
+            reasoning: "plain thinking",
+            refusal: null,
+          },
+          finish_reason: "stop",
+          logprobs: null,
+        },
+      ],
+    } as unknown as Partial<ChatCompletion>);
+
+    const parts = convertResponse(response).content?.parts ?? [];
+    expect(parts[0]).toEqual({ text: "plain thinking", thought: true });
+    expect(parts[0]?.thoughtSignature).toBeUndefined();
+  });
+
+  it("accumulates streamed reasoning_details fragments and assembles on finish", () => {
+    const acc = createStreamAccumulator();
+
+    convertStreamChunk(
+      createChunk({
+        reasoning_details: [
+          { type: "reasoning.text", text: "foo ", index: 0 },
+        ],
+      } as unknown as ChatCompletionChunk["choices"][0]["delta"]),
+      acc,
+    );
+    convertStreamChunk(
+      createChunk({
+        reasoning_details: [
+          { type: "reasoning.text", text: "bar", signature: "sig-z", index: 0 },
+        ],
+      } as unknown as ChatCompletionChunk["choices"][0]["delta"]),
+      acc,
+    );
+    convertStreamChunk(createChunk({ content: "answer" }), acc);
+
+    const final = convertStreamChunk(createChunk({}, "stop"), acc);
+    const parts = final.response?.content?.parts ?? [];
+    expect(parts[0]?.thought).toBe(true);
+    expect(parts[0]?.text).toBe("foo bar");
+    const sig = JSON.parse(parts[0]?.thoughtSignature as string);
+    expect(sig).toEqual([
+      { type: "reasoning.text", text: "foo bar", signature: "sig-z", index: 0 },
+    ]);
+    expect(parts[1]).toEqual({ text: "answer" });
+    // accumulator reset after completion
+    expect(acc.reasoningDetails.size).toBe(0);
+  });
+});

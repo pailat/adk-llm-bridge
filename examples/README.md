@@ -14,6 +14,22 @@ Examples of using `adk-llm-bridge` with Google ADK and multiple LLM providers.
 | [basic-agent-lmstudio](./basic-agent-lmstudio) | LM Studio | Multi-agent HelpDesk with local models |
 | [express-server](./express-server) | AI Gateway | Full HTTP API with tools, state & streaming |
 | [native-features](./native-features) | Anthropic / OpenAI | CLI showcasing sampling, reasoning, structured output, multimodal, tool choice & streaming |
+| [codex-workflow](./codex-workflow) | OpenAI Codex | Dynamic planner → implementer → reviewer workflow using only Codex agents |
+
+## Feature Portability
+
+The examples demonstrate bridge mappings; they do not guarantee that every
+runtime/model supports each mapped feature. Check the
+[OpenAI-compatible feature degradation and capability matrix](../docs/openai-compatible-feature-matrix.md)
+before moving a demo between OpenAI, OpenRouter, xAI, AI Gateway, Ollama, vLLM,
+LM Studio, and native Anthropic.
+
+For local endpoints, the
+[runtime conformance matrix](../docs/runtime-conformance.md) distinguishes
+deterministic fixtures from exact Ollama, vLLM, and manual LM Studio profiles.
+The feature matrix is updated with those fixtures. In all OpenAI-compatible
+examples, omit `candidateCount` or set it to exactly `1`; use separate requests
+for multiple alternatives.
 
 ## Known limitations
 
@@ -314,9 +330,17 @@ bun run examples/basic-agent-ai-gateway/agent.ts
 |----------|----------|-------------|
 | `AI_GATEWAY_API_KEY` | AI Gateway | Vercel AI Gateway API key |
 | `OPENAI_API_KEY` | OpenAI / AI Gateway | OpenAI API key |
+| `OPENAI_BASE_URL` | OpenAI / AI Gateway fallback | Optional OpenAI-compatible endpoint |
 | `ANTHROPIC_API_KEY` | Anthropic | Anthropic API key |
 | `XAI_API_KEY` | xAI | xAI API key |
 | `OPENROUTER_API_KEY` | OpenRouter | OpenRouter API key |
 | `OPENROUTER_SITE_URL` | OpenRouter | Your site URL (for ranking) |
 | `OPENROUTER_APP_NAME` | OpenRouter | Your app name (for ranking) |
+| `CUSTOM_LLM_BASE_URL` | Custom | Fallback endpoint; required when `baseURL` is omitted |
+| `CUSTOM_LLM_API_KEY` | Custom | Optional fallback credential |
 | `LMSTUDIO_BASE_URL` | LM Studio | Local server URL (default: http://localhost:1234/v1) |
+
+For Custom and direct OpenAI, explicit configuration wins over global
+configuration, which wins over environment variables and then provider
+defaults. Custom has no default endpoint. See
+[Custom provider configuration](../docs/custom-provider-configuration.md).

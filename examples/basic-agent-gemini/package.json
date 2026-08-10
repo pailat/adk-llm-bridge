@@ -10,7 +10,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@google/adk": "^1.1.0",
+    "@google/adk": "^1.2.0",
     "adk-llm-bridge": "file:../.."
   },
   "devDependencies": {

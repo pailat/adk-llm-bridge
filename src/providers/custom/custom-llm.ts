@@ -14,27 +14,41 @@
  * @module providers/custom/custom-llm
  */
 
-import { DEFAULT_MAX_RETRIES, DEFAULT_TIMEOUT } from "../../constants.js";
+import {
+  resolveConfig,
+  type ResolvedConfig,
+} from "../../core/config-resolver.js";
 import { OpenAICompatibleLlm } from "../../core/openai-compatible-llm.js";
+import type { ProviderDefinition } from "../../core/provider-definition.js";
 import type { CustomLlmConfig } from "../../types.js";
-import { clampPositive, requireValidURL } from "../../utils/validate.js";
 
 /**
- * Configuration type with required baseURL for custom providers.
+ * Configuration for custom providers.
  *
- * Unlike built-in providers (AI Gateway, OpenRouter) which have default URLs,
- * custom providers require an explicit baseURL.
+ * `baseURL` may be supplied explicitly or through `CUSTOM_LLM_BASE_URL`.
+ * `apiKey` is optional for unauthenticated local servers and otherwise falls
+ * back to `CUSTOM_LLM_API_KEY`. Explicit values, including an explicitly empty
+ * API key, take precedence over environment variables.
  */
-export type CustomLlmProviderConfig = CustomLlmConfig & {
-  /**
-   * Base URL for the API endpoint (required).
-   *
-   * @example "http://localhost:11434/v1" // Ollama
-   * @example "http://localhost:8000/v1"  // vLLM
-   * @example "https://my-resource.openai.azure.com/openai/deployments/gpt-4" // Azure
-   */
-  baseURL: string;
+export type CustomLlmProviderConfig = CustomLlmConfig;
+
+const CUSTOM_DEFINITION: ProviderDefinition = {
+  id: "custom",
+  errorPrefix: "CUSTOM",
+  defaultBaseURL: "",
+  envKeys: {
+    apiKey: ["CUSTOM_LLM_API_KEY"],
+    baseURL: ["CUSTOM_LLM_BASE_URL"],
+  },
+  modelPatterns: [/.*/],
 };
+
+/** Resolve endpoint settings using the shared provider precedence model. */
+export function resolveCustomConfig(
+  config: CustomLlmProviderConfig,
+): ResolvedConfig {
+  return resolveConfig(CUSTOM_DEFINITION, config);
+}
 
 /**
  * LLM implementation for any API that supports the chat completions interface.
@@ -47,8 +61,8 @@ export type CustomLlmProviderConfig = CustomLlmConfig & {
  * - **Self-hosted**: Any compatible server
  *
  * Unlike AI Gateway and OpenRouter, this provider:
- * - Requires explicit `baseURL` configuration
- * - Does not use environment variables for defaults
+ * - Has no default endpoint; set `baseURL` or `CUSTOM_LLM_BASE_URL`
+ * - Allows missing credentials for local servers
  * - Supports custom headers and query parameters
  *
  * @example
@@ -103,7 +117,7 @@ export class CustomLlm extends OpenAICompatibleLlm {
   /**
    * Creates a new custom LLM provider instance.
    *
-   * @param config - Configuration options including model, baseURL, and optional settings
+   * @param config - Configuration options including model and optional endpoint settings
    *
    * @example
    * ```typescript
@@ -115,14 +129,12 @@ export class CustomLlm extends OpenAICompatibleLlm {
    * ```
    */
   constructor(config: CustomLlmProviderConfig) {
-    const providerName = config.name ?? "custom";
-
-    requireValidURL(config.baseURL, "baseURL", providerName);
+    const resolved = resolveCustomConfig(config);
 
     // Build final URL with query params if provided
-    let finalBaseURL = config.baseURL;
+    let finalBaseURL = resolved.baseURL;
     if (config.queryParams && Object.keys(config.queryParams).length > 0) {
-      const url = new URL(config.baseURL);
+      const url = new URL(resolved.baseURL);
       for (const [key, value] of Object.entries(config.queryParams)) {
         url.searchParams.append(key, value);
       }
@@ -131,9 +143,9 @@ export class CustomLlm extends OpenAICompatibleLlm {
 
     super(config, {
       baseURL: finalBaseURL,
-      apiKey: config.apiKey ?? "",
-      timeout: clampPositive(config.timeout ?? DEFAULT_TIMEOUT, DEFAULT_TIMEOUT, 1000),
-      maxRetries: clampPositive(config.maxRetries ?? DEFAULT_MAX_RETRIES, DEFAULT_MAX_RETRIES, 0),
+      apiKey: resolved.apiKey,
+      timeout: resolved.timeout,
+      maxRetries: resolved.maxRetries,
       defaultHeaders: config.headers,
     });
 

@@ -107,11 +107,7 @@ export class CodexCliDriver extends SubprocessJsonlDriver {
 
   buildArgs(request: ExternalAgentRunRequest): readonly string[] {
     const prompt = buildPrompt(request);
-    return [
-      ...mapPolicyToCodexArgs(request.permissions),
-      ...this.args,
-      prompt,
-    ];
+    return [...mapPolicyToCodexArgs(request.permissions), ...this.args, prompt];
   }
 
   buildEnv(request: ExternalAgentRunRequest): Record<string, string> {
@@ -211,24 +207,38 @@ function normalizeCodexEvent(value: unknown): ExternalAgentEvent {
 
   const toolName = extractToolName(record);
   if (toolName) {
+    if (type === "item.completed") {
+      return {
+        type: "tool_result",
+        name: toolName,
+        result: item.result ?? item.aggregated_output ?? item,
+        callId: stringValue(item.id),
+        error: extractErrorMessage(item.error),
+        timestamp,
+      };
+    }
     return {
       type: "tool_call",
       name: toolName,
-      input: record.input ?? record.arguments,
+      input: record.input ?? record.arguments ?? item.input ?? item.arguments,
+      callId: stringValue(item.id),
       timestamp,
     };
   }
 
-  if (type.includes("started") || type.includes("created")) {
+  if (type === "thread.started" || type === "response.created") {
     return {
       type: "started",
       providerId: CODEX_PROVIDER.id,
-      runId: stringValue(record.run_id) ?? stringValue(record.id),
+      runId:
+        stringValue(record.thread_id) ??
+        stringValue(record.run_id) ??
+        stringValue(record.id),
       timestamp,
     };
   }
 
-  if (type.includes("completed") || type.includes("done")) {
+  if (type === "turn.completed" || type === "response.completed") {
     return {
       type: "completed",
       exitCode: numberValue(record.exit_code),
@@ -254,10 +264,21 @@ function extractToolName(record: Record<string, unknown>): string | undefined {
   const item = asRecord(record.item);
   const itemType = stringValue(item.type) ?? "";
   if (itemType.includes("tool") || itemType.includes("call")) {
-    return stringValue(item.name) ?? stringValue(item.tool_name);
+    return (
+      stringValue(item.name) ??
+      stringValue(item.tool_name) ??
+      stringValue(item.tool)
+    );
+  }
+  if (itemType === "command_execution") {
+    return "command_execution";
   }
 
   return undefined;
+}
+
+function extractErrorMessage(value: unknown): string | undefined {
+  return stringValue(value) ?? stringValue(asRecord(value).message);
 }
 
 function extractText(value: unknown): string | undefined {

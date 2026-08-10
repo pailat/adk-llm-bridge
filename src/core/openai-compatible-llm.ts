@@ -26,7 +26,10 @@ import {
 import type { BaseProviderConfig } from "../types.js";
 import { BaseProviderLlm } from "./base-provider-llm.js";
 import { resolveConfig } from "./config-resolver.js";
-import type { ProviderDefinition } from "./provider-definition.js";
+import type {
+  ProviderDefinition,
+  ReasoningCapability,
+} from "./provider-definition.js";
 
 /**
  * Configuration for the underlying OpenAI client.
@@ -79,6 +82,13 @@ export class OpenAICompatibleLlm extends BaseProviderLlm {
 
   private readonly _errorPrefix: string;
   private readonly _getRequestOptions?: () => Record<string, unknown>;
+  /**
+   * Declarative reasoning capability from the provider definition.
+   *
+   * Undefined in manual/CustomLlm mode, which falls back to the strict
+   * `"openai-effort"` default in the request converter.
+   */
+  private readonly _reasoning?: ReasoningCapability;
 
   /** Declarative constructor: definition + config */
   constructor(definition: ProviderDefinition, config: BaseProviderConfig);
@@ -96,6 +106,7 @@ export class OpenAICompatibleLlm extends BaseProviderLlm {
 
       super(config);
       this._errorPrefix = definition.errorPrefix;
+      this._reasoning = definition.reasoning;
 
       const resolved = resolveConfig(definition, config);
       this.client = new OpenAI({
@@ -147,19 +158,34 @@ export class OpenAICompatibleLlm extends BaseProviderLlm {
   async *generateContentAsync(
     llmRequest: LlmRequest,
     stream = false,
+    abortSignal?: AbortSignal,
   ): AsyncGenerator<LlmResponse, void> {
     try {
       const { messages, tools, params, toolChoice } = convertRequest(
         llmRequest,
         this.model,
+        { reasoning: this._reasoning },
       );
 
       if (stream) {
-        yield* this.streamResponse(messages, tools, params, toolChoice);
+        yield* this.streamResponse(
+          messages,
+          tools,
+          params,
+          toolChoice,
+          abortSignal,
+        );
       } else {
-        yield await this.singleResponse(messages, tools, params, toolChoice);
+        yield await this.singleResponse(
+          messages,
+          tools,
+          params,
+          toolChoice,
+          abortSignal,
+        );
       }
     } catch (error) {
+      if (abortSignal?.aborted) return;
       yield this.createErrorResponse(error, this.getErrorPrefix());
     }
   }
@@ -169,15 +195,19 @@ export class OpenAICompatibleLlm extends BaseProviderLlm {
     tools?: OpenAI.ChatCompletionTool[],
     params?: Record<string, unknown>,
     toolChoice?: OpenAI.ChatCompletionToolChoiceOption,
+    abortSignal?: AbortSignal,
   ): Promise<LlmResponse> {
-    const response = await this.client.chat.completions.create({
-      model: this.model,
-      messages,
-      ...params,
-      ...(tools?.length ? { tools } : {}),
-      ...(toolChoice && tools?.length ? { tool_choice: toolChoice } : {}),
-      ...this.getProviderRequestOptions(),
-    });
+    const response = await this.client.chat.completions.create(
+      {
+        model: this.model,
+        messages,
+        ...params,
+        ...(tools?.length ? { tools } : {}),
+        ...(toolChoice && tools?.length ? { tool_choice: toolChoice } : {}),
+        ...this.getProviderRequestOptions(),
+      },
+      abortSignal ? { signal: abortSignal } : undefined,
+    );
     return convertResponse(response);
   }
 
@@ -186,17 +216,21 @@ export class OpenAICompatibleLlm extends BaseProviderLlm {
     tools?: OpenAI.ChatCompletionTool[],
     params?: Record<string, unknown>,
     toolChoice?: OpenAI.ChatCompletionToolChoiceOption,
+    abortSignal?: AbortSignal,
   ): AsyncGenerator<LlmResponse, void> {
-    const stream = await this.client.chat.completions.create({
-      model: this.model,
-      messages,
-      stream: true,
-      stream_options: { include_usage: true },
-      ...params,
-      ...(tools?.length ? { tools } : {}),
-      ...(toolChoice && tools?.length ? { tool_choice: toolChoice } : {}),
-      ...this.getProviderRequestOptions(),
-    });
+    const stream = await this.client.chat.completions.create(
+      {
+        model: this.model,
+        messages,
+        stream: true,
+        stream_options: { include_usage: true },
+        ...params,
+        ...(tools?.length ? { tools } : {}),
+        ...(toolChoice && tools?.length ? { tool_choice: toolChoice } : {}),
+        ...this.getProviderRequestOptions(),
+      },
+      abortSignal ? { signal: abortSignal } : undefined,
+    );
 
     const acc = createStreamAccumulator();
 

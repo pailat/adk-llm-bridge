@@ -1,7 +1,22 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import type OpenAI from "openai";
 import { CustomLlm } from "../../../src/providers/custom/custom-llm.js";
 
+function getClient(llm: CustomLlm): OpenAI {
+  return (llm as CustomLlm & { client: OpenAI }).client;
+}
+
 describe("CustomLlm", () => {
+  beforeEach(() => {
+    delete process.env.CUSTOM_LLM_API_KEY;
+    delete process.env.CUSTOM_LLM_BASE_URL;
+  });
+
+  afterEach(() => {
+    delete process.env.CUSTOM_LLM_API_KEY;
+    delete process.env.CUSTOM_LLM_BASE_URL;
+  });
+
   describe("supportedModels", () => {
     it("has static supportedModels property", () => {
       expect(CustomLlm.supportedModels).toBeDefined();
@@ -59,6 +74,67 @@ describe("CustomLlm", () => {
         baseURL: "http://localhost:11434/v1",
       });
       expect(llm.model).toBe("llama3");
+    });
+
+    it("uses Custom environment fallbacks", () => {
+      process.env.CUSTOM_LLM_BASE_URL = "http://localhost:11434/v1";
+      process.env.CUSTOM_LLM_API_KEY = "environment-key";
+
+      const llm = new CustomLlm({ model: "llama3" });
+      const client = getClient(llm);
+
+      expect(client.baseURL).toBe("http://localhost:11434/v1");
+      expect(client.apiKey).toBe("environment-key");
+    });
+
+    it("keeps explicit URL and credentials ahead of environment values", () => {
+      process.env.CUSTOM_LLM_BASE_URL = "https://environment.example.test/v1";
+      process.env.CUSTOM_LLM_API_KEY = "environment-key";
+
+      const llm = new CustomLlm({
+        model: "llama3",
+        baseURL: "http://localhost:8000/v1",
+        apiKey: "explicit-key",
+      });
+      const client = getClient(llm);
+
+      expect(client.baseURL).toBe("http://localhost:8000/v1");
+      expect(client.apiKey).toBe("explicit-key");
+    });
+
+    it("allows an explicitly empty credential for local servers", () => {
+      process.env.CUSTOM_LLM_API_KEY = "environment-key";
+
+      const llm = new CustomLlm({
+        model: "llama3",
+        baseURL: "http://localhost:11434/v1",
+        apiKey: "",
+      });
+
+      expect(getClient(llm).apiKey).toBe("adk-llm-bridge-custom-provider");
+    });
+
+    it("throws an actionable error when no base URL resolves", () => {
+      expect(() => new CustomLlm({ model: "llama3" })).toThrow(
+        "set CUSTOM_LLM_BASE_URL",
+      );
+    });
+
+    it("does not expose a secret from an invalid URL", () => {
+      const secret = "issue85-custom-secret";
+      let message = "";
+
+      try {
+        new CustomLlm({
+          model: "llama3",
+          baseURL: `https://user:${secret}@[`,
+        });
+      } catch (error) {
+        message = error instanceof Error ? error.message : String(error);
+      }
+
+      expect(message).toContain("Invalid baseURL");
+      expect(message).not.toContain(secret);
     });
 
     it("throws on empty model", () => {
