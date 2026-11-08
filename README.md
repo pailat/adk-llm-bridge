@@ -5,7 +5,7 @@
 
 Use **any LLM** — and now **any coding agent** — with [Google ADK TypeScript](https://github.com/google/adk-js) in just a few lines of code.
 
-> **🆕 New in 0.6.1 — First-class Dynamic Workflows.** Compose ADK agents with trusted TypeScript handlers or bounded QuickJS generator scripts, including checkpoints, replay, retries, cancellation, and parallel steps. [Jump to the workflows guide →](#dynamic-workflows)
+> **🆕 New in 0.7.0 — First-class Dynamic Workflows.** Compose ADK agents with trusted TypeScript handlers or bounded QuickJS generator scripts, including checkpoints, replay, retries, cancellation, and parallel steps. [Jump to the workflows guide →](#dynamic-workflows)
 
 ## Contents
 
@@ -19,6 +19,7 @@ Use **any LLM** — and now **any coding agent** — with [Google ADK TypeScript
 - [Configuration](#configuration)
 - [Model Format](#model-format)
 - [Features](#features)
+- [Errors, Telemetry and Usage](#errors-telemetry-and-usage)
 - [API Reference](#api-reference)
 - [Examples](#examples)
 
@@ -94,7 +95,7 @@ import { AIGateway } from 'adk-llm-bridge';
 
 const agent = new LlmAgent({
   name: 'assistant',
-  model: AIGateway('anthropic/claude-sonnet-4'),
+  model: AIGateway('anthropic/claude-sonnet-4.6'),
   instruction: 'You are a helpful assistant.',
 });
 ```
@@ -112,7 +113,7 @@ input.
 import { OpenRouter, OpenAI, Anthropic, XAI, Custom } from 'adk-llm-bridge';
 
 // OpenRouter - 100+ models with routing
-model: OpenRouter('anthropic/claude-sonnet-4')
+model: OpenRouter('anthropic/claude-sonnet-4.6')
 
 // OpenAI - Direct API
 model: OpenAI('gpt-4.1')
@@ -185,7 +186,7 @@ const reviewer = new ClaudeAgent({
 
 export const rootAgent = new LlmAgent({
   name: "Coordinator",
-  model: AIGateway("anthropic/claude-sonnet-4"),
+  model: AIGateway("anthropic/claude-sonnet-4.6"),
   instruction: "Route code review tasks to the reviewer sub-agent.",
   subAgents: [reviewer],
 });
@@ -209,7 +210,7 @@ Each example typechecks and builds without credentials, and prints a clear "set 
 
 ## Dynamic Workflows
 
-> 🆕 **New in 0.6.1.** A workflow is itself an ADK `BaseAgent`, so it can be used
+> 🆕 **New in 0.7.0.** A workflow is itself an ADK `BaseAgent`, so it can be used
 > anywhere a normal agent can. Its steps may invoke any direct subagent,
 > including `CodexAgent`, `ClaudeAgent`, `GeminiCliAgent`, or an ADK `LlmAgent`.
 
@@ -444,13 +445,13 @@ Pass options directly to the factory functions:
 import { AIGateway, OpenRouter, Anthropic } from 'adk-llm-bridge';
 
 // AI Gateway with custom URL
-model: AIGateway('anthropic/claude-sonnet-4', {
+model: AIGateway('anthropic/claude-sonnet-4.6', {
   apiKey: process.env.MY_API_KEY,
   baseURL: 'https://my-gateway.example.com/v1',
 })
 
 // OpenRouter with site info
-model: OpenRouter('anthropic/claude-sonnet-4', {
+model: OpenRouter('anthropic/claude-sonnet-4.6', {
   apiKey: process.env.OPENROUTER_API_KEY,
   siteUrl: 'https://your-site.com',
   appName: 'Your App',
@@ -496,29 +497,35 @@ broad provider registered first makes overlap safety impossible to prove. See
 
 ## Model Format
 
-Use the `provider/model` format:
+Gateways use the `provider/model` format. Model ids are gateway-specific; these
+are from the [Vercel AI Gateway](https://vercel.com/ai-gateway/models) list:
 
 ```
-anthropic/claude-sonnet-4
+anthropic/claude-sonnet-4.6
 openai/gpt-5
 google/gemini-3-flash
 meta/llama-4-maverick
 mistral/mistral-large-3
-xai/grok-4.1
-deepseek/deepseek-chat
+spacexai/grok-4.3
+deepseek/deepseek-v3.2
 ```
 
 ### Popular Models
 
-| Provider | Models |
-|----------|--------|
-| Anthropic | `anthropic/claude-sonnet-4`, `anthropic/claude-opus-4.5` |
+| Provider | AI Gateway ids |
+|----------|----------------|
+| Anthropic | `anthropic/claude-sonnet-4.6`, `anthropic/claude-opus-4.5` |
 | OpenAI | `openai/gpt-5`, `openai/gpt-5-mini`, `openai/o3` |
-| Google | `google/gemini-3-flash`, `google/gemini-3-pro`, `google/gemini-2.5-pro` |
-| Meta | `meta/llama-4-maverick`, `meta/llama-4-scout`, `meta/llama-3.3-70b-instruct` |
-| Mistral | `mistral/mistral-large-3`, `mistral/ministral-3-14b` |
-| xAI | `xai/grok-4.1`, `xai/grok-4`, `xai/grok-3` |
-| DeepSeek | `deepseek/deepseek-chat`, `deepseek/deepseek-reasoner` |
+| Google | `google/gemini-3-flash`, `google/gemini-2.5-pro` |
+| Meta | `meta/llama-4-maverick`, `meta/llama-4-scout` |
+| Mistral | `mistral/mistral-large-3` |
+| xAI | `spacexai/grok-4.3`, `spacexai/grok-4.7` |
+| DeepSeek | `deepseek/deepseek-v3.2`, `deepseek/deepseek-r1` |
+
+Other gateways name the same models differently. For example, xAI models are
+`spacexai/grok-*` on AI Gateway, `x-ai/grok-*` on OpenRouter, and plain
+`grok-*` with the direct `XAI()` provider. Check the gateway's list before
+copying an id.
 
 Browse all models:
 - [Vercel AI Gateway Models](https://vercel.com/ai-gateway/models)
@@ -546,6 +553,70 @@ For local servers, consult the
 fixtures run in normal CI, Ollama and vLLM have scheduled exact-version/model
 profiles, and LM Studio uses the same runner manually. Conformance results are
 fed back into the capability matrix.
+
+## Errors, Telemetry and Usage
+
+### Provider errors
+
+By default (`errorMode: "throw"`), a failed provider call throws a
+`ProviderLlmError`. ADK then runs `onModelErrorCallback`, and `RoutedLlm` can
+fail over. Note that in this mode `afterModelCallback` does not see provider
+errors. Set `errorMode: "response"` (per model or with `setProviderConfig`) to
+get the pre-0.7 behavior, an `LlmResponse` with `errorCode`/`errorMessage`.
+
+- `error.code`, `error.status` and `error.provider` identify the failure.
+- `error.detail` has the human-readable text. `error.message` is a JSON string
+  (`{"error":{"code":...,"message":...}}`) because ADK parses it to fill the
+  event's `errorCode`.
+- `error.cause` is the original SDK error.
+
+To recover from an error, return an ADK `Event` built with `createEvent`, not a
+bare `LlmResponse`. ADK 2.4 reads `actions` from the returned value and fails on
+a plain object.
+
+```typescript
+import { BasePlugin, createEvent } from '@google/adk';
+import { ProviderLlmError } from 'adk-llm-bridge';
+
+class FallbackPlugin extends BasePlugin {
+  async onModelErrorCallback({ error }: { error: Error }) {
+    if (!(error instanceof ProviderLlmError)) return undefined;
+    return createEvent({
+      content: { role: 'model', parts: [{ text: `Model unavailable: ${error.detail}` }] },
+    });
+  }
+}
+```
+
+### Telemetry
+
+The bridge adds GenAI attributes to ADK's model span and emits its own spans
+for external agents and workflows. It needs `@opentelemetry/api` (a peer
+dependency) and records nothing until you register an OpenTelemetry provider.
+
+Message content in spans is controlled by two variables:
+
+- `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` controls the bridge's own
+  spans. With `NO_CONTENT`, they carry no prompts, tool arguments or results,
+  not even in span names.
+- `ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS=false` controls ADK's own spans, for
+  example the model-call span (`call_llm` in ADK 2.4). On ADK 2.4, the
+  `OTEL_...` variable does **not** remove prompts from ADK's spans. When the
+  `OTEL_...` variable is not set, the bridge's spans follow this variable too.
+
+To keep all content out of traces on ADK 2.4, set both.
+
+### Usage metadata
+
+`usageMetadata` reports `promptTokenCount` (including cached and
+cache-creation tokens), `candidatesTokenCount`, `thoughtsTokenCount`,
+`cachedContentTokenCount` and `totalTokenCount`.
+
+On OpenAI-compatible providers, `candidatesTokenCount` follows OpenAI's
+`completion_tokens` and **includes** reasoning tokens; `thoughtsTokenCount`
+reports the reasoning part separately. Gemini models used directly through ADK
+exclude thoughts from `candidatesTokenCount`. Do not add the two counts
+together on OpenAI-compatible providers, or reasoning tokens are counted twice.
 
 ## Tool Calling Example
 
@@ -676,15 +747,26 @@ See the [examples](./examples) directory:
 
 ## Requirements
 
-- Node.js >= 22.0.0
-- `@google/adk` (peer range `>=2.4.0 <3`; tested against 2.4.0)
-- **Optional, for external coding agents** (installed only if you use `adk-llm-bridge/agents`):
-  - `@anthropic-ai/claude-agent-sdk` (peer `>=0.3.319 <0.4`) — for `ClaudeAgent`
-  - `@openai/codex-sdk` (peer `>=0.167.0 <0.168`) — for `CodexAgent`
-  - `gemini` CLI on `PATH` — for `GeminiCliAgent`
-- **Optional, for dynamic script workflows** (installed only if you use `ScriptWorkflowAgent`):
-  - `quickjs-emscripten-core` (peer `>=0.32 <0.33`)
-  - `@jitl/quickjs-wasmfile-release-sync` (peer `>=0.32 <0.33`)
+- Node.js >= 22.0.0. The package is **ESM only**: use `import` (or
+  `await import()` from CommonJS). `require("adk-llm-bridge")` fails with
+  `ERR_PACKAGE_PATH_NOT_EXPORTED`. This is deliberate: `@google/adk` ships
+  separate CommonJS and ESM builds, and loading the bridge through `require`
+  would mix the two and break ADK's class identity checks.
+- Required peers:
+  - `@google/adk` (`>=2.4.0 <3`; tested against 2.4.0)
+  - `@google/genai` (`>=2.29.1 <3`). Version 3.x is not supported yet. Most
+    package managers install a matching version with ADK; if you add it
+    yourself, pin it to the supported range, for example `@google/genai@^2.29.1`.
+  - `@opentelemetry/api` (`>=1.9.1 <2`)
+- Optional peers:
+  - `zod` (`^4`) — only if you use zod schemas (ADK 2.4 requires zod 4)
+  - for external coding agents (`adk-llm-bridge/agents`):
+    - `@anthropic-ai/claude-agent-sdk` (`>=0.3.319 <0.4`) — for `ClaudeAgent`
+    - `@openai/codex-sdk` (`>=0.167.0 <0.168`) — for `CodexAgent`
+    - `gemini` CLI on `PATH` — for `GeminiCliAgent`
+  - for dynamic script workflows (`ScriptWorkflowAgent`):
+    - `quickjs-emscripten-core` (`>=0.32 <0.33`)
+    - `@jitl/quickjs-wasmfile-release-sync` (`>=0.32 <0.33`)
 
 ## Contributing
 
