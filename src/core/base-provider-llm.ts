@@ -14,7 +14,7 @@
  */
 
 import type { BaseLlmConnection, LlmRequest, LlmResponse } from "@google/adk";
-import { BaseLlm } from "@google/adk";
+import { BaseLlm, InputValidationError } from "@google/adk";
 import { getProviderConfig } from "../config.js";
 import type { BaseProviderConfig, ErrorMode } from "../types.js";
 import { ProviderLlmError } from "./provider-llm-error.js";
@@ -67,7 +67,7 @@ export abstract class BaseProviderLlm extends BaseLlm {
    */
   constructor(config: BaseProviderConfig) {
     if (!config.model?.trim()) {
-      throw new Error(
+      throw new InputValidationError(
         "[adk-llm-bridge] model is required and cannot be empty.",
       );
     }

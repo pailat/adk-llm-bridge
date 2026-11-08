@@ -1,55 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { InputValidationError } from "@google/adk";
-import {
-  clampPositive,
-  redactUrl,
-  requireNonEmpty,
-  requireValidURL,
-} from "../../src/utils/validate.js";
-
-describe("requireNonEmpty", () => {
-  it("returns value when non-empty", () => {
-    expect(requireNonEmpty("hello", "field", "test")).toBe("hello");
-  });
-
-  it("throws on empty string", () => {
-    expect(() => requireNonEmpty("", "apiKey", "provider")).toThrow(
-      "[provider] apiKey is required but was empty",
-    );
-  });
-
-  it("throws on whitespace-only string", () => {
-    expect(() => requireNonEmpty("   ", "apiKey", "provider")).toThrow(
-      "[provider] apiKey is required but was empty",
-    );
-  });
-});
-
-describe("requireValidURL", () => {
-  it("returns value for valid HTTP URL", () => {
-    expect(
-      requireValidURL("http://localhost:11434/v1", "baseURL", "test"),
-    ).toBe("http://localhost:11434/v1");
-  });
-
-  it("returns value for valid HTTPS URL", () => {
-    expect(
-      requireValidURL("https://api.example.com/v1", "baseURL", "test"),
-    ).toBe("https://api.example.com/v1");
-  });
-
-  it("throws on invalid URL", () => {
-    expect(() => requireValidURL("not-a-url", "baseURL", "custom")).toThrow(
-      '[custom] Invalid baseURL: "not-a-url"',
-    );
-  });
-
-  it("throws on empty string", () => {
-    expect(() => requireValidURL("", "baseURL", "custom")).toThrow(
-      "[custom] Invalid baseURL",
-    );
-  });
-});
+import { clampPositive, redactUrl } from "../../src/utils/validate.js";
 
 describe("clampPositive", () => {
   it("returns value when above min", () => {
@@ -74,42 +24,6 @@ describe("clampPositive", () => {
 
   it("allows zero when min is 0", () => {
     expect(clampPositive(0, 10, 0)).toBe(0);
-  });
-});
-
-describe("InputValidationError and credential redaction", () => {
-  it("throws ADK's InputValidationError (still an Error) with the same messages", () => {
-    for (const fn of [
-      () => requireNonEmpty("", "apiKey", "p"),
-      () => requireValidURL("not-a-url", "baseURL", "p"),
-    ]) {
-      try {
-        fn();
-        throw new Error("expected a throw");
-      } catch (error) {
-        expect(error).toBeInstanceOf(InputValidationError);
-        expect(error).toBeInstanceOf(Error);
-      }
-    }
-    expect(() => requireNonEmpty("", "apiKey", "p")).toThrow(
-      "[p] apiKey is required but was empty.",
-    );
-  });
-
-  it("masks userinfo and sensitive query params in the quoted URL", () => {
-    // Not parseable by `new URL` (space), so it reaches the error message.
-    const bad = "https://user:s3cret@ho st.example/v1?api_key=abc123&x=1";
-    let message = "";
-    try {
-      requireValidURL(bad, "baseURL", "custom");
-    } catch (error) {
-      message = (error as Error).message;
-    }
-    expect(message).toContain("***:***@ho st.example");
-    expect(message).toContain("api_key=***");
-    expect(message).toContain("x=1");
-    expect(message).not.toContain("s3cret");
-    expect(message).not.toContain("abc123");
   });
 });
 
@@ -145,22 +59,5 @@ describe("redactUrl", () => {
       "https://host/v1#sig=***&x=1",
     );
     expect(redactUrl("https://u:p@ss@host/v1")).toBe("https://***:***@host/v1");
-  });
-
-  it("does not leak those credentials through requireValidURL", () => {
-    for (const bad of [
-      "https://u:pa/ss@ho st",
-      "not a url user:hunter2@host",
-    ]) {
-      let message = "";
-      try {
-        requireValidURL(bad, "baseURL", "custom");
-      } catch (error) {
-        message = (error as Error).message;
-      }
-      expect(message).not.toContain("pa/ss");
-      expect(message).not.toContain("hunter2");
-      expect(message).toContain("***");
-    }
   });
 });

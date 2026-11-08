@@ -15,6 +15,7 @@
 
 import AnthropicSDK from "@anthropic-ai/sdk";
 import type { LlmRequest, LlmResponse } from "@google/adk";
+import { InputValidationError } from "@google/adk";
 import { getProviderConfig } from "../../config.js";
 import { DEFAULT_MAX_RETRIES, DEFAULT_TIMEOUT } from "../../constants.js";
 import { BaseProviderLlm } from "../../core/base-provider-llm.js";
@@ -141,7 +142,7 @@ export class AnthropicLlm extends BaseProviderLlm {
       "";
 
     if (!apiKey) {
-      throw new Error(
+      throw new InputValidationError(
         `[anthropic] API key is required. Provide it via config, ` +
           `setProviderConfig("anthropic", { apiKey }), or set the ANTHROPIC_API_KEY env var.`,
       );

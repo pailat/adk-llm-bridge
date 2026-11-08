@@ -14,7 +14,7 @@
  * @module providers/custom/registry
  */
 
-import { LLMRegistry } from "@google/adk";
+import { InputValidationError, LLMRegistry } from "@google/adk";
 import {
   CustomLlm,
   type CustomLlmProviderConfig,
@@ -69,7 +69,7 @@ function displayPrefix(prefix: unknown): string {
 
 function validatePrefix(prefix: string): void {
   if (typeof prefix !== "string" || !PREFIX_PATTERN.test(prefix)) {
-    throw new Error(
+    throw new InputValidationError(
       `[adk-llm-bridge] Invalid custom provider prefix ${displayPrefix(prefix)}. ` +
         "Use lowercase path segments beginning with a letter and containing only letters, numbers, dots, underscores, or hyphens.",
     );
@@ -77,7 +77,7 @@ function validatePrefix(prefix: string): void {
 
   const rootPrefix = prefix.split("/", 1)[0];
   if (RESERVED_PREFIXES.has(rootPrefix)) {
-    throw new Error(
+    throw new InputValidationError(
       `[adk-llm-bridge] Custom provider prefix ${JSON.stringify(prefix)} is reserved.`,
     );
   }
@@ -91,7 +91,7 @@ function copyConfig<T>(config: T): T {
   try {
     return structuredClone(config);
   } catch (error) {
-    throw new Error(
+    throw new InputValidationError(
       "[adk-llm-bridge] Custom provider registration configuration must contain only cloneable values.",
       { cause: error },
     );
@@ -148,7 +148,10 @@ function resolvesInAdk(model: string): boolean {
  *
  * @param prefix - Unique routing prefix, for example `ollama` or `local/vllm`
  * @param config - Endpoint configuration captured for all models under prefix
- * @throws If validation fails, a route is claimed, or route safety cannot be proven
+ * @throws {InputValidationError} If the prefix, models, or endpoint configuration
+ *   are invalid, or a route is already claimed (ADK's `InputValidationError`,
+ *   an `Error` subclass)
+ * @throws {Error} If route safety cannot be proven because ADK resolution failed
  *
  * @example
  * ```typescript
@@ -168,13 +171,13 @@ export function registerCustomProvider(
   validatePrefix(prefix);
 
   if (registeredPrefixes.has(prefix)) {
-    throw new Error(
+    throw new InputValidationError(
       `[adk-llm-bridge] Custom provider prefix ${JSON.stringify(prefix)} is already registered.`,
     );
   }
 
   if (!Array.isArray(config.models) || config.models.length === 0) {
-    throw new Error(
+    throw new InputValidationError(
       `[adk-llm-bridge] Custom provider ${JSON.stringify(prefix)} must declare at least one model.`,
     );
   }
@@ -184,14 +187,14 @@ export function registerCustomProvider(
   const remoteModels = [...models];
   for (const model of remoteModels) {
     if (typeof model !== "string" || model.trim().length === 0) {
-      throw new Error(
+      throw new InputValidationError(
         `[adk-llm-bridge] Custom provider ${JSON.stringify(prefix)} contains an invalid model ID. Model IDs must contain non-whitespace characters.`,
       );
     }
   }
 
   if (new Set(remoteModels).size !== remoteModels.length) {
-    throw new Error(
+    throw new InputValidationError(
       `[adk-llm-bridge] Custom provider ${JSON.stringify(prefix)} contains duplicate model IDs.`,
     );
   }
@@ -216,7 +219,7 @@ export function registerCustomProvider(
   );
   const conflictingRoute = [...routes.keys()].find(resolvesInAdk);
   if (conflictingRoute) {
-    throw new Error(
+    throw new InputValidationError(
       `[adk-llm-bridge] Custom provider route ${JSON.stringify(conflictingRoute)} is already claimed by an existing ADK LLM registration. Register custom providers before broad AI Gateway or OpenRouter registrations.`,
     );
   }
@@ -229,7 +232,7 @@ export function registerCustomProvider(
     constructor({ model }: { model: string }) {
       const remoteModel = routes.get(model);
       if (remoteModel === undefined) {
-        throw new Error(
+        throw new InputValidationError(
           `[adk-llm-bridge] Model ${JSON.stringify(model)} is not declared by custom provider ${JSON.stringify(prefix)}.`,
         );
       }

@@ -13,6 +13,7 @@
  * @module core/config-resolver
  */
 
+import { InputValidationError } from "@google/adk";
 import { getProviderConfig } from "../config.js";
 import { DEFAULT_MAX_RETRIES, DEFAULT_TIMEOUT } from "../constants.js";
 import type { BaseProviderConfig } from "../types.js";
@@ -82,7 +83,7 @@ function resolveBaseURL(
 
   const envHint = definition.envKeys.baseURL?.join(" or ");
   if (typeof value !== "string" || !value.trim()) {
-    throw new Error(
+    throw new InputValidationError(
       `[${definition.id}] baseURL is required. Provide it via explicit configuration` +
         ` or global provider configuration${envHint ? `, or set ${envHint}` : ""}.`,
     );
@@ -91,7 +92,7 @@ function resolveBaseURL(
   try {
     new URL(value);
   } catch {
-    throw new Error(
+    throw new InputValidationError(
       `[${definition.id}] Invalid baseURL from ${source}. Provide a valid absolute URL ` +
         "(for example, http://localhost:11434/v1). The configured value was omitted for security.",
     );
@@ -113,6 +114,8 @@ function resolveBaseURL(
  * @param definition - The provider definition with defaults and env var names
  * @param instanceConfig - Instance-level configuration
  * @returns Fully resolved configuration
+ * @throws {InputValidationError} If a required API key is missing or the base
+ *   URL is missing or invalid (ADK's `InputValidationError`, an `Error` subclass)
  */
 export function resolveConfig(
   definition: ProviderDefinition,
@@ -131,7 +134,7 @@ export function resolveConfig(
 
   if (definition.requireApiKey && !apiKey) {
     const envHint = definition.envKeys.apiKey.join(" or ");
-    throw new Error(
+    throw new InputValidationError(
       `[${definition.id}] API key is required. Provide it via config, ` +
         `setProviderConfig("${definition.id}", { apiKey }), or set the ${envHint} env var.`,
     );

@@ -5,20 +5,16 @@
  */
 
 /**
- * Runtime validation helpers for configuration boundaries.
+ * Small, zero-dependency helpers for configuration boundaries.
  *
- * These are lightweight, zero-dependency checks applied at system boundaries
- * (config resolution, constructor initialization) to fail fast with clear
- * error messages instead of propagating invalid state.
- *
- * Failures are thrown as ADK's `InputValidationError` (a plain `Error`
- * subclass, so `catch`/`instanceof Error` and `message` keep working). Messages
- * never include credentials: URLs are passed through {@link redactUrl}.
+ * Configuration failures are thrown as ADK's `InputValidationError` (a plain
+ * `Error` subclass) by the callers in `core/config-resolver.ts`,
+ * `core/base-provider-llm.ts` and the providers; those messages never include
+ * credentials. {@link redactUrl} masks secrets in URL-like text for messages
+ * and logs.
  *
  * @module utils/validate
  */
-
-import { InputValidationError } from "@google/adk";
 
 /** Query or fragment parameter names whose values are treated as secrets. */
 const SENSITIVE_PARAM =
@@ -65,57 +61,6 @@ function redactUserinfo(value: string): string {
  */
 export function redactUrl(value: string): string {
   return redactUserinfo(value).replace(SENSITIVE_PARAM, "$1***");
-}
-
-/**
- * Asserts that a string value is non-empty.
- *
- * @param value - The string to check
- * @param field - The field name (for error messages)
- * @param context - The provider/module context (for error messages)
- * @returns The validated non-empty string
- * @throws {InputValidationError} If the value is empty or only whitespace
- *
- * @internal
- */
-export function requireNonEmpty(
-  value: string,
-  field: string,
-  context: string,
-): string {
-  if (!value?.trim()) {
-    throw new InputValidationError(
-      `[${context}] ${field} is required but was empty.`,
-    );
-  }
-  return value;
-}
-
-/**
- * Asserts that a string is a valid URL.
- *
- * @param value - The URL string to validate
- * @param field - The field name (for error messages)
- * @param context - The provider/module context (for error messages)
- * @returns The validated URL string
- * @throws {InputValidationError} If the value is not a valid URL; the quoted
- * value has credentials masked
- *
- * @internal
- */
-export function requireValidURL(
-  value: string,
-  field: string,
-  context: string,
-): string {
-  try {
-    new URL(value);
-    return value;
-  } catch {
-    throw new InputValidationError(
-      `[${context}] Invalid ${field}: "${redactUrl(value)}". Must be a valid URL (e.g., http://localhost:11434/v1).`,
-    );
-  }
 }
 
 /**
