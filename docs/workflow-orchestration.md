@@ -56,6 +56,42 @@ lanes; dynamic child execution follows its declared delegation edge. A host
 that requires strict "dependency must be terminal" semantics must add that
 policy to its dispatcher.
 
+## Parallel steps and agent instances
+
+`ctx.parallel(...)` runs steps concurrently up to `maxConcurrency`, but one
+agent instance runs one step at a time: the runtime holds a per-agent lock
+(`AsyncSemaphore(1)`) because ADK agents are not re-entrant. Parallel steps
+whose `agentName` resolves to the same sub-agent therefore run one after the
+other, with no warning. For fan-out, declare one sub-agent per concurrent
+branch, each with its own name:
+
+```typescript
+const reviewers = ["api", "ui", "db"].map(
+  (area) => new LlmAgent({ name: `Reviewer-${area}`, model, instruction }),
+);
+
+const workflow = new WorkflowAgent({
+  name: "review",
+  subAgents: reviewers,
+  definition: defineWorkflow({
+    id: "review",
+    version: "1",
+    handler: async (ctx) => {
+      const outcomes = await ctx.parallel(
+        reviewers.map((agent) => ({
+          id: `review-${agent.name}`,
+          agentName: agent.name,
+          input: ctx.input,
+        })),
+      );
+      return outcomes
+        .map((outcome) => (outcome.status === "completed" ? outcome.output : ""))
+        .join("\n");
+    },
+  }),
+});
+```
+
 ## Recovery guarantees
 
 - Task claims, operation IDs, plan/grant fences, and terminal writes prevent a

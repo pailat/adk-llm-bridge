@@ -4,12 +4,15 @@
  * SPDX-License-Identifier: MIT
  */
 
-import { createHash } from "node:crypto";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import type { ExternalAgentDefinitionRegistry } from "../../agents/agent-registry.js";
 import type { ExternalAgentDefinitionConfig } from "../../agents/agent-schema.js";
 import type { ExternalAgentPermissionPolicy } from "../../agents/permissions/schema.js";
-import { stableSerializeWorkflowValue } from "../checkpoint/hash.js";
+import { rememberLegacyDigest } from "../internal/canonical-hash.js";
+import {
+  canonicalDigestSync,
+  legacyDigestSync,
+} from "../internal/canonical-hash-node.js";
 import {
   DEFAULT_WORKFLOW_AGENT_FACTORY_LIMITS,
   type WorkflowAgentDescriptor,
@@ -150,11 +153,15 @@ export class ExternalAgentWorkflowFactory implements WorkflowAgentFactory {
 }
 
 function agentRevision(request: WorkflowAgentFactoryRequest): string {
-  const serialized = stableSerializeWorkflowValue({
+  const fingerprint = {
     providerId: request.providerId,
     config: request.config ?? {},
-  });
-  return `sha256:${createHash("sha256").update(serialized).digest("hex")}`;
+  };
+  const revision = canonicalDigestSync(fingerprint);
+  // Steps checkpointed before 0.7.0 hold the localeCompare-ordered revision
+  // (it differs when permissions set both allowNetwork and allowedPaths).
+  rememberLegacyDigest(revision, legacyDigestSync(fingerprint, "locale"));
+  return revision;
 }
 
 function normalizeRequest(

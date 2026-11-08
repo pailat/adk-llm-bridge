@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: MIT
  */
 
+import { canonicalJson as canonicalJsonText } from "../internal/canonical-hash.js";
+
 export type WorkflowResourceJsonPrimitive = boolean | number | string | null;
 export type WorkflowResourceJsonValue =
   | WorkflowResourceJsonPrimitive
@@ -43,8 +45,12 @@ export function snapshotJson(
   return cloneJson(value, field, 0, seen, budget);
 }
 
+/**
+ * Canonical JSON text of `value`: object keys sorted by UTF-16 code unit at
+ * every level (see `src/workflows/internal/canonical-hash.ts`).
+ */
 export function canonicalJson(value: WorkflowResourceJsonValue): string {
-  return JSON.stringify(value);
+  return canonicalJsonText(value);
 }
 
 function cloneJson(

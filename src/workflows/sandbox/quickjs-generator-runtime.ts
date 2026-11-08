@@ -21,6 +21,7 @@ import {
 import {
   loadReleaseQuickJS,
   type QuickJSModuleLoader,
+  quickJSModule,
 } from "./quickjs-loader.js";
 import type {
   WorkflowScriptGeneratorSession,
@@ -313,7 +314,7 @@ export class QuickJSSyncGeneratorRuntime implements WorkflowScriptRuntime {
       );
     });
 
-    const runtime = module.newRuntime();
+    const runtime = quickJSModule(module).newRuntime();
     runtime.setMemoryLimit(limits.memoryBytes);
     runtime.setMaxStackSize(limits.stackBytes);
     const setupDeadline = Date.now() + limits.cpuTimeMs;

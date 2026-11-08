@@ -25,7 +25,10 @@ export {
   QUICKJS_SYNC_CAPABILITIES,
   QuickJSSyncGeneratorRuntime,
 } from "./sandbox/quickjs-generator-runtime.js";
-export type { QuickJSModuleLoader } from "./sandbox/quickjs-loader.js";
+export type {
+  QuickJSModuleLike,
+  QuickJSModuleLoader,
+} from "./sandbox/quickjs-loader.js";
 export * from "./sandbox/types.js";
 export type {
   WorkflowScriptExecutionOptions,

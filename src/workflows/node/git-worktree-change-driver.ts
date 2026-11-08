@@ -18,8 +18,14 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import {
+  canonicalDigest,
+  canonicalJson,
+  legacyJson,
+} from "../internal/canonical-hash.js";
+import { sha256HexSync } from "../internal/canonical-hash-node.js";
 import { isProcessAlive } from "../internal/error-support.js";
-import { canonicalJson, optionalJsonObject } from "../resources/json.js";
+import { optionalJsonObject } from "../resources/json.js";
 import type {
   ProvisionedWorkspace,
   WorkspaceDescriptor,
@@ -467,13 +473,15 @@ export class NodeGitWorktreeChangeDriver
     throwIfAborted(options.signal);
     const normalized = this.#normalizeDescriptor(descriptor);
     const active = this.#active.get(normalized.workspaceId);
-    const expectedPath = this.#workspacePath(normalized);
+    const canonicalPath = this.#workspacePath(normalized);
+    const legacyPath = this.#workspacePath(normalized, "legacy");
     if (active) {
+      const expectedPath = active.worktreePath;
       if (
         active.executionId !== normalized.executionId ||
         active.taskId !== normalized.taskId ||
         active.baseRevision !== normalized.revision ||
-        active.worktreePath !== expectedPath
+        (expectedPath !== canonicalPath && expectedPath !== legacyPath)
       ) {
         throw new NodeGitWorktreeError(
           "GIT_WORKTREE_STALE",
@@ -490,7 +498,13 @@ export class NodeGitWorktreeChangeDriver
       await this.#assertHead(active, options);
       return this.#attachment(normalized, active);
     }
-    const canonical = await realpath(expectedPath).catch(() => undefined);
+    // Worktrees created before 0.7.0 live under the legacy directory name.
+    let expectedPath = canonicalPath;
+    let canonical = await realpath(expectedPath).catch(() => undefined);
+    if (!canonical && legacyPath !== canonicalPath) {
+      expectedPath = legacyPath;
+      canonical = await realpath(expectedPath).catch(() => undefined);
+    }
     if (!canonical) return undefined;
     if (canonical !== expectedPath) {
       throw new NodeGitWorktreeError(
@@ -1181,19 +1195,27 @@ export class NodeGitWorktreeChangeDriver
     );
   }
 
-  #workspacePath(descriptor: Omit<WorkspaceDescriptor, "providerId">): string {
-    const workspaceSuffix = createHash("sha256")
-      .update(
-        canonicalJson({
-          workspaceId: descriptor.workspaceId,
-          executionId: descriptor.executionId,
-          taskId: descriptor.taskId,
-          revision: descriptor.revision,
-          parameters: descriptor.parameters,
-        }),
-      )
-      .digest("hex")
-      .slice(0, 12);
+  /**
+   * Durable worktree directory for a descriptor. `legacy` gives the pre-0.7.0
+   * name (insertion-order JSON), used only to attach worktrees created before
+   * 0.7.0; new worktrees always use the canonical name.
+   */
+  #workspacePath(
+    descriptor: Omit<WorkspaceDescriptor, "providerId">,
+    form: "canonical" | "legacy" = "canonical",
+  ): string {
+    const identity = {
+      workspaceId: descriptor.workspaceId,
+      executionId: descriptor.executionId,
+      taskId: descriptor.taskId,
+      revision: descriptor.revision,
+      parameters: descriptor.parameters,
+    };
+    const workspaceSuffix = sha256HexSync(
+      form === "canonical"
+        ? canonicalJson(identity)
+        : legacyJson(identity, "insertion"),
+    ).slice(0, 12);
     const directory = `${safeComponent(descriptor.taskId)}-${safeComponent(
       descriptor.workspaceId,
     )}-${workspaceSuffix}`;
@@ -1624,14 +1646,14 @@ function completedIntegrationResult(
 async function integrationIntentDigest(
   request: ReturnType<typeof normalizeAuthoritativeIntegrationRequest>,
 ): Promise<string> {
-  const value = JSON.stringify({
+  // Must equal the intent digest computed by WorkflowValidatedIntegrator.
+  return await canonicalDigest({
     operationId: request.operationId,
     receiptId: request.receipt.receiptId,
     commitId: request.commit.commitId,
     treeId: request.commit.treeId,
     expectedTarget: request.expectedTarget,
   });
-  return `sha256:${createHash("sha256").update(value).digest("hex")}`;
 }
 
 function deterministicIntegrationId(

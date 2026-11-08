@@ -85,6 +85,11 @@ Things to know:
   raised it. The TypeScript Runner creates a new invocation id for every turn,
   so any other workflow that must resume across turns needs a stable
   `resolveExecutionId` (for example from the session id and node name).
+- ADK's `Workflow` accepts at most one terminal output per run. Edges that fan
+  out from `START` to two nodes with no outgoing edges fail once both produce
+  output (`multiple terminal nodes produced output (2). A workflow must have at
+  most one terminal output.`). Chain the nodes, as in the example above, or
+  end the branches in a `JoinNode`.
 - Running the same workflow agent several times in one invocation (several
   `ctx.runNode` calls) shares the invocation id. Use `useSubBranch: true` with
   distinct `runId`s and include `ctx.branch` in `resolveExecutionId` so each run

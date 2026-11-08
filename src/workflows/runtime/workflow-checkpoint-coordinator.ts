@@ -40,6 +40,11 @@ import type {
 } from "../contracts.js";
 import { WorkflowError } from "../contracts.js";
 import type { WorkflowDefinition } from "../definition.js";
+import {
+  isRememberedLegacyDigest,
+  legacyDigest,
+  resolveStoredDigest,
+} from "../internal/canonical-hash.js";
 
 export interface WorkflowCheckpointCoordinatorConfig {
   definition: WorkflowDefinition;
@@ -97,7 +102,16 @@ export class WorkflowCheckpointCoordinator {
             "Checkpoint store returned an invalid workflow checkpoint",
           );
         }
-        validateWorkflowCheckpoint(saved, checkpointExpectation(candidate));
+        // A checkpoint written before 0.7.0 keeps its legacy input hash.
+        const inputHash = await resolveStoredDigest(
+          saved.inputHash,
+          candidate.inputHash,
+          () => legacyDigest(this.#config.input, "locale"),
+        );
+        validateWorkflowCheckpoint(saved, {
+          ...checkpointExpectation(candidate),
+          inputHash,
+        });
         const revision = await workflowCheckpointRevision(saved);
         this.#checkpoint = toDurableWorkflowCheckpoint(saved);
         this.#revision = revision;
@@ -126,10 +140,34 @@ export class WorkflowCheckpointCoordinator {
     return answered ? saved.input : undefined;
   }
 
+  /**
+   * Returns `step` with the agent revision already stored for it when that
+   * revision is the pre-0.7.0 form of `step.agentRevision`, so a resumed step
+   * keeps its checkpoint identity and idempotency key.
+   */
+  withStoredAgentRevision(step: WorkflowStep): WorkflowStep {
+    const saved = this.checkpoint().steps[step.id]?.agentRevision;
+    if (
+      saved === undefined ||
+      step.agentRevision === undefined ||
+      saved === step.agentRevision ||
+      !isRememberedLegacyDigest(saved, step.agentRevision)
+    ) {
+      return step;
+    }
+    return { ...step, agentRevision: saved };
+  }
+
   async prepareStep(step: WorkflowStep): Promise<PreparedWorkflowStep> {
-    const inputHash = await hashWorkflowInput(step.input);
+    const currentHash = await hashWorkflowInput(step.input);
     return this.#exclusive(async () => {
       const checkpoint = this.checkpoint();
+      // A step checkpointed before 0.7.0 keeps its legacy input hash.
+      const inputHash = await resolveStoredDigest(
+        checkpoint.steps[step.id]?.inputHash,
+        currentHash,
+        () => legacyDigest(step.input, "locale"),
+      );
       const resolution = resolveWorkflowStep(checkpoint, step, inputHash, {
         retryFailed: this.#config.retryFailedSteps,
       });

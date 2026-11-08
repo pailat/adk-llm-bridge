@@ -5,22 +5,15 @@
  */
 
 import { WorkflowError } from "../contracts.js";
+import { canonicalJson, sha256Digest } from "../internal/canonical-hash.js";
 
-/** Stable JSON representation used to detect incompatible workflow resumes. */
+/**
+ * Stable JSON representation used to detect incompatible workflow resumes.
+ * Canonical form: keys sorted by UTF-16 code unit (see `canonical-hash.ts`).
+ */
 export function stableSerializeWorkflowValue(value: unknown): string {
   try {
-    return (
-      JSON.stringify(value, (_key, current) => {
-        if (current && typeof current === "object" && !Array.isArray(current)) {
-          return Object.fromEntries(
-            Object.entries(current).sort(([left], [right]) =>
-              left.localeCompare(right),
-            ),
-          );
-        }
-        return current;
-      }) ?? "undefined"
-    );
+    return canonicalJson(value);
   } catch (error) {
     throw new WorkflowError(
       "WORKFLOW_EXECUTION_ERROR",
@@ -31,9 +24,7 @@ export function stableSerializeWorkflowValue(value: unknown): string {
 }
 
 export async function hashWorkflowValue(value: unknown): Promise<string> {
-  const bytes = new TextEncoder().encode(stableSerializeWorkflowValue(value));
-  const digest = await crypto.subtle.digest("SHA-256", bytes);
-  return `sha256:${toHex(new Uint8Array(digest))}`;
+  return await sha256Digest(stableSerializeWorkflowValue(value));
 }
 
 export function hashWorkflowSource(source: string): Promise<string> {
@@ -42,8 +33,4 @@ export function hashWorkflowSource(source: string): Promise<string> {
 
 export function hashWorkflowInput(input: unknown): Promise<string> {
   return hashWorkflowValue(input);
-}
-
-function toHex(bytes: Uint8Array): string {
-  return [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }

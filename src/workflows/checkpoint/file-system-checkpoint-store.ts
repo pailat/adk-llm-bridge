@@ -39,6 +39,7 @@ import {
   type WorkflowCheckpointWrite,
   workflowCheckpointKey,
   workflowCheckpointRevision,
+  workflowCheckpointRevisionMatches,
   workflowCheckpointSizeLimitError,
 } from "./store.js";
 
@@ -517,15 +518,21 @@ async function readCheckpointFile(
     maxCheckpointBytes,
     "load",
   );
-  const storedRevision = await workflowCheckpointRevision(parsed.checkpoint);
-  if (parsed.revision !== storedRevision) {
+  // Files written before 0.7.0 carry the legacy revision; the returned
+  // revision below is always canonical.
+  if (
+    !(await workflowCheckpointRevisionMatches(
+      parsed.checkpoint,
+      parsed.revision,
+    ))
+  ) {
     throw checkpointFileError(
       "checkpoint_revision_invalid",
       checkpointKey,
       `Workflow checkpoint file revision is invalid: ${checkpointKey}`,
       {
         storedRevision: parsed.revision,
-        computedRevision: storedRevision,
+        computedRevision: await workflowCheckpointRevision(parsed.checkpoint),
       },
     );
   }

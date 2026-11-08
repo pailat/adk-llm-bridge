@@ -65,6 +65,21 @@ describe("QuickJSSyncGeneratorRuntime limits", () => {
     session.dispose();
   });
 
+  test("rejects a loader result that is not a QuickJS module", async () => {
+    for (const value of [null, {}, { newRuntime: "no" }]) {
+      const runtime = new QuickJSSyncGeneratorRuntime({
+        // A JavaScript caller can bypass the structural loader type.
+        loader: async () => value as never,
+      });
+      await expect(
+        runtime.createSession({ source: "return 1;" }),
+      ).rejects.toMatchObject({
+        code: "WORKFLOW_SANDBOX_UNAVAILABLE",
+        message: "QuickJS module loader must resolve to a QuickJSWASMModule",
+      });
+    }
+  });
+
   test("reports an unavailable optional dependency", async () => {
     const runtime = new QuickJSSyncGeneratorRuntime({
       loader: async () => {

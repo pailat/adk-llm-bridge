@@ -105,8 +105,41 @@ Representative calls are:
 {"protocol":"adk-llm-bridge/workflow-control","version":1,"operation":"task.mailbox.send","payload":{"executionId":"issue-82","taskId":"review-api","payload":{"need":"contract artifact"},"operationId":"send-contract-1"}}
 ```
 
+```json
+{"protocol":"adk-llm-bridge/workflow-control","version":1,"operation":"task.awaitAny","payload":{"handles":[{"executionId":"issue-82","taskId":"review-api"},{"executionId":"issue-82","taskId":"review-ui"}]}}
+```
+
 The sender is derived from the authenticated actor. `orchestration`,
 `parentTaskId`, and `senderTaskId` are rejected at this JSON boundary.
+
+`task.awaitAny` takes `{ "handles": [...] }`: a non-empty list of task handles
+from one execution (at most 1,000). `task.join` takes a single handle.
+
+### `operationId` and replays
+
+`task.spawn` and `task.mailbox.send` require an `operationId`. It is an
+idempotency key only when the task controller runs in orchestration mode
+(constructed with an authority port and a command store): a replay with the
+same `operationId` returns the original handle or message. Without
+orchestration mode, which includes `trustedHostMode`, the id is checked but
+not stored. Spawning the same `taskId` again then fails with
+`WORKFLOW_TASK_DUPLICATE`, and a repeated `task.mailbox.send` appends a second
+message. Hosts that retry without orchestration mode should treat
+`WORKFLOW_TASK_DUPLICATE` as "already spawned" and read the task with
+`task.status`.
+
+### Payload validation
+
+The control plane checks every payload before it calls a controller: exact
+keys, field types, required fields, enums, and integer bounds (`limit` and
+revisions are positive safe integers, sequences are non-negative). Free-form
+JSON fields (`input`, `metadata`, `content`, `context`, and the mailbox
+`payload`) must be plain JSON: finite numbers, plain objects, no cycles, at
+most 32 levels deep, 20,000 nodes, and 1 MiB per string. A failure throws
+`WorkflowControlPlaneError` with code `WORKFLOW_CONTROL_INVALID_REQUEST`, and
+no controller runs. Identifier formats, store-specific limits (such as the
+maximum `limit`), and cross-field plan rules stay in the controllers and keep
+their own error codes.
 
 The complete operation families are:
 

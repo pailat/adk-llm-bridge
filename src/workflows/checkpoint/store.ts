@@ -6,6 +6,7 @@
 
 import type { InvocationContext } from "@google/adk";
 import { WorkflowError } from "../contracts.js";
+import { legacyDigest } from "../internal/canonical-hash.js";
 import { hashWorkflowValue } from "./hash.js";
 import type { WorkflowCheckpointV1 } from "./schema.js";
 import {
@@ -103,6 +104,19 @@ export async function workflowCheckpointRevision(
   checkpoint: WorkflowCheckpointV1,
 ): Promise<WorkflowCheckpointRevision> {
   return await hashWorkflowValue(checkpoint);
+}
+
+/**
+ * True when `stored` is the revision of `checkpoint`, either canonical or the
+ * pre-0.7.0 `localeCompare` form. Legacy acceptance lives only here and in
+ * `src/workflows/internal/canonical-hash.ts`.
+ */
+export async function workflowCheckpointRevisionMatches(
+  checkpoint: WorkflowCheckpointV1,
+  stored: string,
+): Promise<boolean> {
+  if (stored === (await workflowCheckpointRevision(checkpoint))) return true;
+  return stored === (await legacyDigest(checkpoint, "locale"));
 }
 
 export function workflowCheckpointByteLength(

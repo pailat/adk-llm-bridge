@@ -507,6 +507,45 @@ describe("WorkflowControlPlane", () => {
     });
     expect(received).toEqual({ executionId: "execution-1", cursor, limit: 7 });
   });
+
+  test("does not replay operationId outside orchestration mode (documented)", async () => {
+    const artifacts = new InMemoryWorkflowArtifactStore();
+    const control = new WorkflowControlPlane({
+      executions: new WorkflowExecutionController({
+        store: new InMemoryWorkflowExecutionStore(),
+        eventStore: new InMemoryWorkflowExecutionEventStore(),
+        driver: { execute: async () => ({}) },
+      }),
+      tasks: new WorkflowTaskController({
+        store: new InMemoryWorkflowTaskStore(),
+        messageStore: new InMemoryWorkflowTaskMessageStore(),
+        driver: { execute: async () => ({ output: null }) },
+      }),
+      artifacts,
+      integration: new IntegrationGate(artifacts, {
+        validate: async () => ({ verdict: "accepted", result: null }),
+      }),
+      trustedHostMode: true,
+    });
+    const spawn = {
+      ...envelope,
+      operation: "task.spawn",
+      payload: {
+        executionId: "execution-1",
+        taskId: "review",
+        agentId: "codex",
+        operationId: "spawn-review-1",
+      },
+    } as const;
+
+    await expect(control.dispatch(spawn)).resolves.toEqual({
+      executionId: "execution-1",
+      taskId: "review",
+    });
+    await expect(control.dispatch(spawn)).rejects.toMatchObject({
+      code: "WORKFLOW_TASK_DUPLICATE",
+    });
+  });
 });
 
 function actor(agentId: string, taskId: string): WorkflowActorContext {

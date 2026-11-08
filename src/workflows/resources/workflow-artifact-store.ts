@@ -4,9 +4,8 @@
  * SPDX-License-Identifier: MIT
  */
 
-import { createHash } from "node:crypto";
+import { canonicalDigest, legacyDigest } from "../internal/canonical-hash.js";
 import {
-  canonicalJson,
   optionalJsonObject,
   requiredResourceIdentity,
   snapshotJson,
@@ -103,10 +102,12 @@ export class InMemoryWorkflowArtifactStore implements WorkflowArtifactStore {
     options: { signal?: AbortSignal } = {},
   ): Promise<WorkflowArtifactPutResult> {
     throwIfResourceAborted(options.signal);
-    const artifact = normalizeArtifact(input);
+    const artifact = await normalizeArtifact(input);
     const existing = this.#artifacts.get(artifact.artifactId);
     if (existing) {
-      if (existing.revision !== artifact.revision) {
+      if (
+        !(await workflowArtifactRevisionMatches(artifact, existing.revision))
+      ) {
         throw new WorkflowArtifactConflictError(
           artifact.artifactId,
           existing.revision,
@@ -161,7 +162,9 @@ export class InMemoryWorkflowArtifactStore implements WorkflowArtifactStore {
   }
 }
 
-function normalizeArtifact(input: WorkflowArtifactInput): WorkflowArtifact {
+async function normalizeArtifact(
+  input: WorkflowArtifactInput,
+): Promise<WorkflowArtifact> {
   const normalized = {
     artifactId: requiredResourceIdentity(input.artifactId, "artifactId"),
     executionId: requiredResourceIdentity(input.executionId, "executionId"),
@@ -170,13 +173,36 @@ function normalizeArtifact(input: WorkflowArtifactInput): WorkflowArtifact {
     content: snapshotJson(input.content, "content"),
     metadata: optionalJsonObject(input.metadata, "metadata"),
   };
-  const contentDigest = digest(normalized.content);
-  const revision = digest({ ...normalized, contentDigest });
+  const contentDigest = await canonicalDigest(normalized.content);
+  const revision = await canonicalDigest({ ...normalized, contentDigest });
   return Object.freeze({ ...normalized, contentDigest, revision });
 }
 
-function digest(value: WorkflowResourceJsonValue): string {
-  return `sha256:${createHash("sha256").update(canonicalJson(value)).digest("hex")}`;
+/**
+ * True when `revision` is the revision of `artifact`'s fields: the canonical
+ * digest, or the pre-0.7.0 insertion-order digest of artifacts stored before
+ * 0.7.0. Durable stores can use it to accept artifacts they already hold.
+ */
+export async function workflowArtifactRevisionMatches(
+  artifact: WorkflowArtifact,
+  revision: string,
+): Promise<boolean> {
+  const { contentDigest: _content, revision: _revision, ...fields } = artifact;
+  const contentDigest = await canonicalDigest(fields.content);
+  if (revision === (await canonicalDigest({ ...fields, contentDigest }))) {
+    return true;
+  }
+  // Legacy form: JSON.stringify in this exact property order.
+  const legacy = {
+    artifactId: fields.artifactId,
+    executionId: fields.executionId,
+    taskId: fields.taskId,
+    type: fields.type,
+    content: fields.content,
+    metadata: fields.metadata,
+    contentDigest: await legacyDigest(fields.content, "insertion"),
+  };
+  return revision === (await legacyDigest(legacy, "insertion"));
 }
 
 function optionalIdentity(

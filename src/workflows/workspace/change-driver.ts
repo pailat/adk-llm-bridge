@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: MIT
  */
 
+import { canonicalDigest, legacyDigest } from "../internal/canonical-hash.js";
+
 export type WorkflowChangeEntryKind =
   | "file"
   | "directory"
@@ -257,7 +259,7 @@ export class WorkflowValidatedIntegrator<HostRepository = unknown> {
   ): Promise<WorkflowIntegrationResult> {
     throwIfAborted(options.signal);
     const normalized = normalizeAuthoritativeIntegrationRequest(request);
-    const intentDigest = await digestCanonicalJson({
+    const intentDigest = await canonicalDigest({
       operationId: normalized.operationId,
       receiptId: normalized.receipt.receiptId,
       commitId: normalized.commit.commitId,
@@ -432,7 +434,7 @@ export class WorkflowValidatedCommitter<HostWorkspace = unknown> {
       ),
     );
     try {
-      const intentDigest = await digestCanonicalJson({
+      const intentDigest = await canonicalDigest({
         operationId,
         receiptId: receipt.receiptId,
         changeSetDigest: verified.changeSetDigest,
@@ -489,7 +491,7 @@ export async function createWorkflowChangeSet(
   input: WorkflowChangeSetInput,
 ): Promise<WorkflowChangeSet> {
   const normalized = normalizeChangeSetInput(input);
-  const changeSetDigest = await digestCanonicalJson(normalized);
+  const changeSetDigest = await canonicalDigest(normalized);
   return Object.freeze({ ...normalized, changeSetDigest });
 }
 
@@ -510,8 +512,10 @@ export async function verifyWorkflowChangeSet(
     input.changeSetDigest,
     "changeSetDigest",
   );
-  const actualDigest = await digestCanonicalJson(normalized);
-  if (declaredDigest !== actualDigest) {
+  if (
+    declaredDigest !== (await canonicalDigest(normalized)) &&
+    declaredDigest !== (await legacyChangeSetDigest(normalized))
+  ) {
     throw new WorkflowChangeMismatchError(
       "CHANGE_SET_DIGEST_MISMATCH",
       "Change set digest does not match its canonical contents",
@@ -679,8 +683,9 @@ function normalizeChangeSetInput(
       seen.add(path);
     }
   }
+  // Code-unit order, like the canonical digest; see legacyChangeSetDigest.
   entries.sort((left, right) =>
-    changeEntryKey(left).localeCompare(changeEntryKey(right)),
+    compareCodeUnits(changeEntryKey(left), changeEntryKey(right)),
   );
   return Object.freeze({
     executionId: requiredIdentity(input.executionId, "executionId"),
@@ -910,12 +915,22 @@ function normalizeExpectedTarget(
   });
 }
 
-async function digestCanonicalJson(value: unknown): Promise<string> {
-  const encoded = new TextEncoder().encode(JSON.stringify(value));
-  const digest = await crypto.subtle.digest("SHA-256", encoded);
-  return `sha256:${Array.from(new Uint8Array(digest), (byte) =>
-    byte.toString(16).padStart(2, "0"),
-  ).join("")}`;
+/**
+ * Pre-0.7.0 change set digest: `JSON.stringify` in property order, with the
+ * entries sorted by `localeCompare`. Accepted by verifyWorkflowChangeSet so
+ * receipts and change sets stored before 0.7.0 keep verifying; never written.
+ */
+function legacyChangeSetDigest(
+  normalized: WorkflowChangeSetInput,
+): Promise<string> {
+  const entries = [...normalized.entries].sort((left, right) =>
+    changeEntryKey(left).localeCompare(changeEntryKey(right)),
+  );
+  return legacyDigest({ ...normalized, entries }, "insertion");
+}
+
+function compareCodeUnits(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 function assertAuthorityLease(

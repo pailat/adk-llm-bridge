@@ -362,11 +362,13 @@ export class WorkflowRuntime {
   }
 
   private async runStep(
-    step: WorkflowStep,
+    requestedStep: WorkflowStep,
     signal: AbortSignal,
   ): Promise<WorkflowStepResult> {
     throwIfAborted(signal);
-    validateStep(step);
+    validateStep(requestedStep);
+    const step =
+      this.checkpointCoordinator().withStoredAgentRevision(requestedStep);
     if (this.#seenStepIds.has(step.id)) {
       throw new WorkflowError(
         "WORKFLOW_STEP_MISMATCH",
