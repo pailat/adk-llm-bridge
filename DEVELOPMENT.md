@@ -44,7 +44,7 @@ adk-llm-bridge/
 ### Prerequisites
 
 - [Bun](https://bun.sh/) >= 1.4.4
-- Node.js >= 22.0.0
+- Node.js >= 22.0.0 (CI tests 22, 24 and 26; `mise.toml` pins 26.13.0 for local dev)
 
 ### Initial Setup
 
