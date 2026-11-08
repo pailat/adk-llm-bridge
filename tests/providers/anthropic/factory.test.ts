@@ -1,6 +1,9 @@
 import { beforeEach, describe, expect, it } from "bun:test";
 import { resetAllConfigs } from "../../../src/config.js";
-import { Anthropic, AnthropicLlm } from "../../../src/providers/anthropic/index.js";
+import {
+  Anthropic,
+  AnthropicLlm,
+} from "../../../src/providers/anthropic/index.js";
 
 describe("Anthropic factory", () => {
   beforeEach(() => {

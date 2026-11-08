@@ -30,11 +30,16 @@ export function deriveSubAgentPermissionPolicy(
   const parentPolicy = parent ?? { mode: "ask" as const };
   const childPolicy = child ?? parentPolicy;
   const mode = moreRestrictiveMode(parentPolicy.mode, childPolicy.mode);
-  const allowedPaths = deriveAllowedPaths(parentPolicy.allowedPaths, childPolicy.allowedPaths);
+  const allowedPaths = deriveAllowedPaths(
+    parentPolicy.allowedPaths,
+    childPolicy.allowedPaths,
+  );
 
   return {
     mode,
-    allowNetwork: Boolean(parentPolicy.allowNetwork && childPolicy.allowNetwork),
+    allowNetwork: Boolean(
+      parentPolicy.allowNetwork && childPolicy.allowNetwork,
+    ),
     ...(allowedPaths ? { allowedPaths } : {}),
   };
 }

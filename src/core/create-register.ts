@@ -19,7 +19,9 @@ import { resetProviderConfig, setProviderConfig } from "../config.js";
 import type { ProviderDefinition } from "./provider-definition.js";
 
 /** Type that LLMRegistry.register() expects. */
-type RegisterableLlm = (new (params: { model: string }) => BaseLlm) & {
+type RegisterableLlm = (new (params: {
+  model: string;
+}) => BaseLlm) & {
   readonly supportedModels: (string | RegExp)[];
 };
 

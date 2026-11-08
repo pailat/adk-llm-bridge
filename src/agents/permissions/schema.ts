@@ -4,7 +4,11 @@
  * SPDX-License-Identifier: MIT
  */
 
-export type ExternalAgentPermissionMode = "read-only" | "ask" | "workspace-write" | "full-access";
+export type ExternalAgentPermissionMode =
+  | "read-only"
+  | "ask"
+  | "workspace-write"
+  | "full-access";
 
 export interface ExternalAgentPermissionPolicy {
   mode: ExternalAgentPermissionMode;

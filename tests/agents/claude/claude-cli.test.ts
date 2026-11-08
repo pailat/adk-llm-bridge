@@ -29,7 +29,9 @@ describe("ClaudeCliDriver", () => {
     const driver = new ClaudeCliDriver();
     const args = driver.buildArgs({
       provider: CLAUDE_PROVIDER,
-      context: { userContent: { parts: [{ text: "Review this diff" }] } } as never,
+      context: {
+        userContent: { parts: [{ text: "Review this diff" }] },
+      } as never,
       instruction: "You are a reviewer.",
       permissions: { mode: "ask" },
     });

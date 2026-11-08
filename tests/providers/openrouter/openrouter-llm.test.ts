@@ -3,8 +3,8 @@ import { resetAllConfigs } from "../../../src/config.js";
 import { OPENROUTER_DEFINITION } from "../../../src/providers/openrouter/definition.js";
 import { OpenRouterLlm } from "../../../src/providers/openrouter/index.js";
 import {
-  describeModelPatterns,
   describeConnectError,
+  describeModelPatterns,
 } from "../../helpers/provider-test-helpers.js";
 
 describe("OpenRouterLlm", () => {

@@ -98,7 +98,9 @@ interface FactoryTestConfig {
   /** Factory function */
   factory: (model: string, options?: Record<string, unknown>) => unknown;
   /** Expected class constructor */
-  expectedClass: new (...args: unknown[]) => unknown;
+  expectedClass: new (
+    ...args: unknown[]
+  ) => unknown;
   /** Default model string for tests */
   defaultModel: string;
   /** Env vars to clean before each test */
@@ -187,7 +189,10 @@ export function describeModelPatterns(cfg: ModelPatternsTestConfig) {
 // ---------------------------------------------------------------------------
 
 export function describeConnectError(
-  LlmClass: new (config: { model: string; apiKey?: string }) => {
+  LlmClass: new (config: {
+    model: string;
+    apiKey?: string;
+  }) => {
     connect: (req: unknown) => Promise<unknown>;
   },
   testModel: string,

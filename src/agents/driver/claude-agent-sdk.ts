@@ -13,13 +13,13 @@ import {
   resolveAbortSignal,
 } from "../external-agent-driver.js";
 import { mapPermissionPolicyToFlags } from "../permissions/mapper.js";
-import { classifyRecoverable } from "../runtime/error-classification.js";
 import type { ExternalAgentPermissionPolicy } from "../permissions/schema.js";
 import { CLAUDE_PROVIDER } from "../provider/schema.js";
 import {
   collectContents,
   flattenContentsToPrompt,
 } from "../runtime/content-collector.js";
+import { classifyRecoverable } from "../runtime/error-classification.js";
 import {
   contentsToSdkMessages,
   type SDKUserMessage,
@@ -45,7 +45,9 @@ type ClaudeAgentSdkOptions = {
   settingSources?: ClaudeAgentSdkSettingSource[];
   maxTurns?: number;
   model?: string;
-  systemPrompt?: string | { type: "preset"; preset: "claude_code"; append?: string };
+  systemPrompt?:
+    | string
+    | { type: "preset"; preset: "claude_code"; append?: string };
   allowDangerouslySkipPermissions?: true;
   mcpServers?: Record<string, unknown>;
   allowedTools?: string[];
@@ -86,7 +88,10 @@ type ClaudeAgentSdkLike = {
     name: string,
     description: string,
     inputSchema: Record<string, unknown>,
-    handler: (args: Record<string, unknown>, extra: unknown) => Promise<ClaudeAgentSdkToolResult>,
+    handler: (
+      args: Record<string, unknown>,
+      extra: unknown,
+    ) => Promise<ClaudeAgentSdkToolResult>,
     extras?: Record<string, unknown>,
   ): ClaudeAgentSdkToolDefinition;
 };
@@ -179,14 +184,18 @@ export class ClaudeAgentSdkDriver {
     this.#systemPrompt = config.systemPrompt;
   }
 
-  async *run(request: ExternalAgentRunRequest): AsyncIterable<ExternalAgentEvent> {
+  async *run(
+    request: ExternalAgentRunRequest,
+  ): AsyncIterable<ExternalAgentEvent> {
     const sdk = await this.loadSdk();
     // RESUME-1: a static #resumeSessionId (config) wins; otherwise resume the SDK
     // session previously captured for this ADK session, if any.
     const adkSessionId = adkSessionIdOf(request);
     const resolvedResume =
       this.#resumeSessionId ??
-      (adkSessionId ? this.#sdkSessionByAdkSession.get(adkSessionId) : undefined);
+      (adkSessionId
+        ? this.#sdkSessionByAdkSession.get(adkSessionId)
+        : undefined);
     const prompt = this.buildPromptInput(request, resolvedResume);
     const options = await this.buildOptionsForRun(request, sdk, resolvedResume);
 
@@ -272,7 +281,11 @@ export class ClaudeAgentSdkDriver {
     }
 
     if (!completed) {
-      yield { type: "completed", exitCode: failed ? 1 : 0, timestamp: Date.now() };
+      yield {
+        type: "completed",
+        exitCode: failed ? 1 : 0,
+        timestamp: Date.now(),
+      };
     }
   }
 
@@ -294,7 +307,8 @@ export class ClaudeAgentSdkDriver {
       maxTurns: this.#maxTurns,
       model: this.#model,
       systemPrompt: this.buildSystemPrompt(request),
-      allowDangerouslySkipPermissions: permission.allowDangerouslySkipPermissions,
+      allowDangerouslySkipPermissions:
+        permission.allowDangerouslySkipPermissions,
       resume,
       forkSession: this.#forkSession,
     };
@@ -379,7 +393,9 @@ export class ClaudeAgentSdkDriver {
     return asyncIterable(messages);
   }
 
-  resolveClaudeExecutable(request: ExternalAgentRunRequest): ClaudeExecutableResolution {
+  resolveClaudeExecutable(
+    request: ExternalAgentRunRequest,
+  ): ClaudeExecutableResolution {
     const checked: string[] = [];
     const explicit = firstNonEmpty(
       this.#pathToClaudeCodeExecutable,
@@ -407,7 +423,9 @@ export class ClaudeAgentSdkDriver {
     return { checked };
   }
 
-  buildEnv(request: ExternalAgentRunRequest): Record<string, string | undefined> {
+  buildEnv(
+    request: ExternalAgentRunRequest,
+  ): Record<string, string | undefined> {
     const env: Record<string, string | undefined> = {};
 
     copyIfPresent(this.#env, env, "PATH");
@@ -415,9 +433,12 @@ export class ClaudeAgentSdkDriver {
     copyIfPresent(this.#env, env, "USER");
     copyIfPresent(this.#env, env, "SHELL");
     if (!env.SHELL && process.platform !== "win32") {
-      env.SHELL = ["/bin/bash", "/usr/bin/bash", "/bin/zsh", "/usr/bin/zsh"].find(
-        existsSync,
-      );
+      env.SHELL = [
+        "/bin/bash",
+        "/usr/bin/bash",
+        "/bin/zsh",
+        "/usr/bin/zsh",
+      ].find(existsSync);
     }
     copyIfPresent(this.#env, env, "CLAUDE_CONFIG_DIR");
     copyIfPresent(this.#env, env, "XDG_CONFIG_HOME");
@@ -435,7 +456,9 @@ export class ClaudeAgentSdkDriver {
     return env;
   }
 
-  private assertRequiredMcpServersConnected(message: ClaudeAgentSdkMessage): void {
+  private assertRequiredMcpServersConnected(
+    message: ClaudeAgentSdkMessage,
+  ): void {
     if (this.#requiredMcpServers.length === 0) return;
 
     const record = asRecord(message);
@@ -541,16 +564,22 @@ export class ClaudeAgentSdkDriver {
       }
 
       const text = extractText(asRecord(record.message).content);
-      return text ? [{ type: "output", content: text, timestamp: Date.now() }] : [];
+      return text
+        ? [{ type: "output", content: text, timestamp: Date.now() }]
+        : [];
     }
 
     if (type === "result") {
       if (record.subtype === "success") {
-        return [{ type: "completed" as const, exitCode: 0, timestamp: Date.now() }];
+        return [
+          { type: "completed" as const, exitCode: 0, timestamp: Date.now() },
+        ];
       }
 
       const errors = Array.isArray(record.errors)
-        ? record.errors.filter((item): item is string => typeof item === "string")
+        ? record.errors.filter(
+            (item): item is string => typeof item === "string",
+          )
         : [];
       const subtype = stringValue(record.subtype);
       const message =
@@ -623,7 +652,13 @@ export class ClaudeAgentSdkDriver {
     }
 
     if (this.#debugEvents) {
-      return [{ type: "output", content: JSON.stringify(message), timestamp: Date.now() }];
+      return [
+        {
+          type: "output",
+          content: JSON.stringify(message),
+          timestamp: Date.now(),
+        },
+      ];
     }
 
     return [];
@@ -635,7 +670,11 @@ export class ClaudeAgentSdkDriver {
     resume: string | undefined = this.#resumeSessionId,
   ): Promise<ClaudeAgentSdkOptions> {
     const options = this.buildOptions(request, resume);
-    if (!request.toolGateway || !request.subAgents || request.subAgents.length === 0) {
+    if (
+      !request.toolGateway ||
+      !request.subAgents ||
+      request.subAgents.length === 0
+    ) {
       return options;
     }
 
@@ -664,7 +703,8 @@ export class ClaudeAgentSdkDriver {
     }
 
     const schema = await createRunSubAgentSchema();
-    const available = request.subAgents?.map((agent) => agent.name).join(", ") ?? "";
+    const available =
+      request.subAgents?.map((agent) => agent.name).join(", ") ?? "";
     const runSubAgentTool = sdk.tool(
       "run_adk_subagent",
       `Run one of the ADK subagents by name. Available subagents: ${available}`,
@@ -672,14 +712,20 @@ export class ClaudeAgentSdkDriver {
       async (args) => {
         const agentName = stringValue(args.agentName) ?? "";
         const task = stringValue(args.task) ?? "";
-        const result = await request.toolGateway?.runSubAgent({ agentName, task });
+        const result = await request.toolGateway?.runSubAgent({
+          agentName,
+          task,
+        });
         if (!result) {
           return toolTextResult("ADK ToolGateway is not available.", true);
         }
         if (result.error) {
           return toolTextResult(result.error, true);
         }
-        return toolTextResult(result.output || `Subagent ${result.agentName} completed with ${result.events} events.`);
+        return toolTextResult(
+          result.output ||
+            `Subagent ${result.agentName} completed with ${result.events} events.`,
+        );
       },
       { alwaysLoad: true },
     );
@@ -692,16 +738,23 @@ export class ClaudeAgentSdkDriver {
     });
   }
 
-  private describeError(error: unknown, request: ExternalAgentRunRequest): string {
+  private describeError(
+    error: unknown,
+    request: ExternalAgentRunRequest,
+  ): string {
     const message = error instanceof Error ? error.message : String(error);
-    if (!message.includes("Native CLI binary") && !message.includes("pathToClaudeCodeExecutable")) {
+    if (
+      !message.includes("Native CLI binary") &&
+      !message.includes("pathToClaudeCodeExecutable")
+    ) {
       return message;
     }
 
     const resolution = this.resolveClaudeExecutable(request);
-    const checked = resolution.checked.length > 0
-      ? resolution.checked.map((item) => `  - ${item}`).join("\n")
-      : "  - <no candidates>";
+    const checked =
+      resolution.checked.length > 0
+        ? resolution.checked.map((item) => `  - ${item}`).join("\n")
+        : "  - <no candidates>";
     return [
       "Claude Agent SDK could not locate a Claude Code executable.",
       "Set CLAUDE_CODE_EXECUTABLE=/absolute/path/to/claude or CLAUDE_CODE_PATH=/absolute/path/to/claude, add the executable directory to PATH, pass executableSearchPaths, or reinstall @anthropic-ai/claude-agent-sdk with optional dependencies.",
@@ -748,7 +801,10 @@ export function mapPolicyToClaudeSdkPermission(
     return { permissionMode: "acceptEdits" };
   }
   if (flags.fullAccess) {
-    return { permissionMode: "bypassPermissions", allowDangerouslySkipPermissions: true };
+    return {
+      permissionMode: "bypassPermissions",
+      allowDangerouslySkipPermissions: true,
+    };
   }
   return { permissionMode: "default" };
 }
@@ -786,7 +842,15 @@ function claudeExecutableCandidates({
   for (const base of candidateBaseDirectories(workingDirectory)) {
     candidates.add(join(base, "node_modules", ".bin", executable));
     for (const platformPackage of platformClaudePackages()) {
-      candidates.add(join(base, "node_modules", "@anthropic-ai", platformPackage, executable));
+      candidates.add(
+        join(
+          base,
+          "node_modules",
+          "@anthropic-ai",
+          platformPackage,
+          executable,
+        ),
+      );
     }
   }
 
@@ -832,25 +896,34 @@ function platformClaudePackages(): string[] {
   }
 }
 
-function firstNonEmpty(...values: Array<string | undefined>): string | undefined {
-  return values.find((value): value is string => typeof value === "string" && value.length > 0);
+function firstNonEmpty(
+  ...values: Array<string | undefined>
+): string | undefined {
+  return values.find(
+    (value): value is string => typeof value === "string" && value.length > 0,
+  );
 }
 
 function readCredentialEnv(
   request: ExternalAgentRunRequest,
   key: string,
 ): string | undefined {
-  return request.credential?.kind === "env" ? request.credential.env?.[key] : undefined;
+  return request.credential?.kind === "env"
+    ? request.credential.env?.[key]
+    : undefined;
 }
 
 function importClaudeAgentSdk(): Promise<ClaudeAgentSdkLike> {
-  return import("@anthropic-ai/claude-agent-sdk") as Promise<ClaudeAgentSdkLike>;
+  return import(
+    "@anthropic-ai/claude-agent-sdk"
+  ) as Promise<ClaudeAgentSdkLike>;
 }
 
 /** RESUME-1: the ADK session id used to key captured SDK session ids. */
 function adkSessionIdOf(request: ExternalAgentRunRequest): string | undefined {
-  const session = (request.context as { session?: { id?: unknown } } | undefined)
-    ?.session;
+  const session = (
+    request.context as { session?: { id?: unknown } } | undefined
+  )?.session;
   return typeof session?.id === "string" && session.id.length > 0
     ? session.id
     : undefined;
@@ -886,7 +959,10 @@ async function createRunSubAgentSchema(): Promise<Record<string, unknown>> {
   }
 }
 
-function toolTextResult(text: string, isError?: boolean): ClaudeAgentSdkToolResult {
+function toolTextResult(
+  text: string,
+  isError?: boolean,
+): ClaudeAgentSdkToolResult {
   return {
     content: [{ type: "text", text }],
     ...(isError ? { isError: true } : {}),
@@ -965,7 +1041,9 @@ function copyIfPresent(
   }
 }
 
-function removeUndefined(value: Record<string, unknown>): Record<string, unknown> {
+function removeUndefined(
+  value: Record<string, unknown>,
+): Record<string, unknown> {
   return Object.fromEntries(
     Object.entries(value).filter(([, entry]) => entry !== undefined),
   );

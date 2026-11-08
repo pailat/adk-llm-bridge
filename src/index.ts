@@ -112,7 +112,12 @@ export {
 // xAI Provider
 // =============================================================================
 
-export { isXAIRegistered, registerXAI, XAI, XAILlm } from "./providers/xai/index.js";
+export {
+  isXAIRegistered,
+  registerXAI,
+  XAI,
+  XAILlm,
+} from "./providers/xai/index.js";
 
 // =============================================================================
 // Anthropic Provider

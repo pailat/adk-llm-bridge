@@ -3,8 +3,8 @@ import { resetAllConfigs } from "../../../src/config.js";
 import { XAI_DEFINITION } from "../../../src/providers/xai/definition.js";
 import { XAILlm } from "../../../src/providers/xai/index.js";
 import {
-  describeModelPatterns,
   describeConnectError,
+  describeModelPatterns,
 } from "../../helpers/provider-test-helpers.js";
 
 describe("XAILlm", () => {

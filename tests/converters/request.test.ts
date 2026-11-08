@@ -1306,7 +1306,11 @@ describe("convertRequest", () => {
             thinkingConfig: { includeThoughts: false, thinkingBudget: 3000 },
           },
         });
-        const result = convertReasoningConfig(request, "deepseek/deepseek-r1", OR);
+        const result = convertReasoningConfig(
+          request,
+          "deepseek/deepseek-r1",
+          OR,
+        );
         expect(result).toEqual({
           reasoning: { max_tokens: 3000, exclude: true },
         });
@@ -1364,17 +1368,23 @@ describe("convertRequest", () => {
 
       it("buckets the budget to effort low/medium/high for gpt-5-mini", () => {
         const low = convertReasoningConfig(
-          createLlmRequest({ config: { thinkingConfig: { thinkingBudget: 1000 } } }),
+          createLlmRequest({
+            config: { thinkingConfig: { thinkingBudget: 1000 } },
+          }),
           "openai/gpt-5-mini",
           OR,
         );
         const medium = convertReasoningConfig(
-          createLlmRequest({ config: { thinkingConfig: { thinkingBudget: 5000 } } }),
+          createLlmRequest({
+            config: { thinkingConfig: { thinkingBudget: 5000 } },
+          }),
           "openai/gpt-5-mini",
           OR,
         );
         const high = convertReasoningConfig(
-          createLlmRequest({ config: { thinkingConfig: { thinkingBudget: 20000 } } }),
+          createLlmRequest({
+            config: { thinkingConfig: { thinkingBudget: 20000 } },
+          }),
           "openai/gpt-5-mini",
           OR,
         );
@@ -1462,7 +1472,11 @@ describe("convertRequest", () => {
             },
           ],
         });
-        const result = convertRequest(request, "anthropic/claude-sonnet-4.5", OR);
+        const result = convertRequest(
+          request,
+          "anthropic/claude-sonnet-4.5",
+          OR,
+        );
         const msg = result.messages[0] as Record<string, unknown>;
         expect(msg.role).toBe("assistant");
         expect(msg.content).toBe("The answer is 782.");

@@ -3,7 +3,10 @@
  * Copyright 2025 PAI
  * SPDX-License-Identifier: MIT
  */
-import { createProviderClass, createProviderFactory } from "../../core/create-provider.js";
+import {
+  createProviderClass,
+  createProviderFactory,
+} from "../../core/create-provider.js";
 import { createRegisterFunction } from "../../core/create-register.js";
 import { OPENROUTER_DEFINITION } from "./definition.js";
 

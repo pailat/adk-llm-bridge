@@ -14,7 +14,10 @@ import {
 describe("permission mapping", () => {
   test("maps read-only policy to provider flags", () => {
     expect(
-      mapPermissionPolicyToFlags({ mode: "read-only", allowedPaths: ["/tmp/project"] }),
+      mapPermissionPolicyToFlags({
+        mode: "read-only",
+        allowedPaths: ["/tmp/project"],
+      }),
     ).toEqual({
       readOnly: true,
       requireApproval: false,
@@ -24,7 +27,9 @@ describe("permission mapping", () => {
   });
 
   test("maps ask policy to approval flags", () => {
-    expect(mapPermissionPolicyToFlags({ mode: "ask", allowNetwork: false })).toEqual({
+    expect(
+      mapPermissionPolicyToFlags({ mode: "ask", allowNetwork: false }),
+    ).toEqual({
       requireApproval: true,
       network: false,
       paths: undefined,

@@ -15,9 +15,7 @@ import {
 
 describe("contentsToSdkMessages", () => {
   test("single text-only user content emits one message with shouldQuery", () => {
-    const contents: Content[] = [
-      { role: "user", parts: [{ text: "hello" }] },
-    ];
+    const contents: Content[] = [{ role: "user", parts: [{ text: "hello" }] }];
     const messages = contentsToSdkMessages(contents);
     expect(messages).toHaveLength(1);
     const message = messages[0];
@@ -130,7 +128,10 @@ describe("contentsToSdkMessages", () => {
         role: "user",
         parts: [
           {
-            fileData: { fileUri: "gs://bucket/file.bin", mimeType: "application/octet-stream" },
+            fileData: {
+              fileUri: "gs://bucket/file.bin",
+              mimeType: "application/octet-stream",
+            },
           },
         ],
       },
@@ -138,7 +139,9 @@ describe("contentsToSdkMessages", () => {
     const [message] = contentsToSdkMessages(contents);
     const block = message.message.content[0] as ClaudeTextBlockParam;
     expect(block.type).toBe("text");
-    expect(block.text).toBe("[file: gs://bucket/file.bin (application/octet-stream)]");
+    expect(block.text).toBe(
+      "[file: gs://bucket/file.bin (application/octet-stream)]",
+    );
   });
 
   test("functionCall on model content renders user-role text (no tool_use block)", () => {
@@ -191,10 +194,7 @@ describe("contentsToSdkMessages", () => {
     const contents: Content[] = [
       {
         role: "model",
-        parts: [
-          { text: "kept" },
-          { thought: true, text: "hidden" },
-        ],
+        parts: [{ text: "kept" }, { thought: true, text: "hidden" }],
       },
     ];
     const [message] = contentsToSdkMessages(contents);

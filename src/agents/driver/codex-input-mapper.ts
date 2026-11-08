@@ -62,7 +62,10 @@ export function userContentToCodexInput(
     }
     if (part.inlineData) {
       const mime = part.inlineData.mimeType ?? "application/octet-stream";
-      if (mime.startsWith("image/") && typeof part.inlineData.data === "string") {
+      if (
+        mime.startsWith("image/") &&
+        typeof part.inlineData.data === "string"
+      ) {
         const ext = extensionForMime(mime);
         const path = join(tmpDir, `codex-${idPrefix}-${index}.${ext}`);
         try {
@@ -72,7 +75,10 @@ export function userContentToCodexInput(
           tmpFiles.push(path);
           result.push({ type: "local_image", path });
         } catch {
-          result.push({ type: "text", text: `[image: ${mime} (write failed)]` });
+          result.push({
+            type: "text",
+            text: `[image: ${mime} (write failed)]`,
+          });
         }
         return;
       }

@@ -110,7 +110,8 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
     yield {
       type: "error",
       message:
-        stderrLines.join("\n").trim() || `Claude CLI exited with code ${exitCode}`,
+        stderrLines.join("\n").trim() ||
+        `Claude CLI exited with code ${exitCode}`,
       code: "CLAUDE_CLI_EXIT",
       recoverable: true,
       timestamp: Date.now(),
@@ -230,7 +231,9 @@ function normalizeClaudeEvent(
 
   if (type === "assistant" || type === "user") {
     const text = extractText(event.message ?? event.content ?? event.text);
-    return text ? { type: "output", content: text, timestamp: Date.now() } : undefined;
+    return text
+      ? { type: "output", content: text, timestamp: Date.now() }
+      : undefined;
   }
 
   if (type === "result" || type === "completed" || type === "complete") {
@@ -260,9 +263,18 @@ function normalizeClaudeEvent(
     const message =
       typeof event.error === "string"
         ? event.error
-        : (event.error?.message ?? stringValue(event.message) ?? "Claude CLI error");
-    const code = typeof event.error === "object" ? event.error.code : event.code;
-    return { type: "error", message, code, recoverable: true, timestamp: Date.now() };
+        : (event.error?.message ??
+          stringValue(event.message) ??
+          "Claude CLI error");
+    const code =
+      typeof event.error === "object" ? event.error.code : event.code;
+    return {
+      type: "error",
+      message,
+      code,
+      recoverable: true,
+      timestamp: Date.now(),
+    };
   }
 
   const fallbackText = extractText(event);
@@ -272,7 +284,10 @@ function normalizeClaudeEvent(
 }
 
 function buildPrompt(request: ExternalAgentRunRequest): string {
-  const parts = [request.instruction, extractContextText(request.context)].filter(
+  const parts = [
+    request.instruction,
+    extractContextText(request.context),
+  ].filter(
     (part): part is string => typeof part === "string" && part.length > 0,
   );
   return parts.join("\n\n");

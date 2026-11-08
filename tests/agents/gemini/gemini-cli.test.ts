@@ -5,16 +5,16 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import type { ExternalAgentRunRequest } from "../../../src/agents/index.js";
 import {
-  GeminiCliAgent,
-  GeminiCliDriver,
+  buildGeminiArgs,
   GEMINI_CLI_ENV_ALLOWLIST,
   GEMINI_CLI_PROVIDER,
-  buildGeminiArgs,
-  mapGeminiPermissionArgs,
+  GeminiCliAgent,
+  GeminiCliDriver,
   type GeminiCliSpawn,
+  mapGeminiPermissionArgs,
 } from "../../../src/agents/index.js";
-import type { ExternalAgentRunRequest } from "../../../src/agents/index.js";
 
 function request(
   overrides: Partial<ExternalAgentRunRequest> = {},

@@ -309,9 +309,7 @@ export function convertStreamChunk(
   if (detailFragments) {
     for (const frag of detailFragments) {
       const idx =
-        typeof frag.index === "number"
-          ? frag.index
-          : acc.reasoningDetails.size;
+        typeof frag.index === "number" ? frag.index : acc.reasoningDetails.size;
       const existing = acc.reasoningDetails.get(idx);
       if (!existing) {
         acc.reasoningDetails.set(idx, { ...frag });

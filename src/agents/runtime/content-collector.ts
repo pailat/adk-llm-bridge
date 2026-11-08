@@ -18,7 +18,9 @@ import type { Content, Part } from "@google/genai";
  */
 export function collectContents(context: InvocationContext): Content[] {
   const ctxRecord = (context ?? {}) as unknown as Record<string, unknown>;
-  const session = ctxRecord.session as { events?: ReadonlyArray<AdkEventLike> } | undefined;
+  const session = ctxRecord.session as
+    | { events?: ReadonlyArray<AdkEventLike> }
+    | undefined;
   // If no session is present we treat this as a synthetic context and bail out;
   // the driver fallback path will reconstruct the prompt via extractContextText.
   if (!session || !Array.isArray(session.events)) {
@@ -27,7 +29,9 @@ export function collectContents(context: InvocationContext): Content[] {
   const events: ReadonlyArray<AdkEventLike> = session.events;
   const agentName = (ctxRecord.agent as { name?: string } | undefined)?.name;
   const currentBranch =
-    typeof ctxRecord.branch === "string" ? (ctxRecord.branch as string) : undefined;
+    typeof ctxRecord.branch === "string"
+      ? (ctxRecord.branch as string)
+      : undefined;
   const userContent = ctxRecord.userContent as Content | undefined;
 
   const filtered: AdkEventLike[] = [];
@@ -39,7 +43,11 @@ export function collectContents(context: InvocationContext): Content[] {
       continue;
     }
     const content = event.content;
-    if (!content || !Array.isArray(content.parts) || content.parts.length === 0) {
+    if (
+      !content ||
+      !Array.isArray(content.parts) ||
+      content.parts.length === 0
+    ) {
       continue;
     }
     if (!hasVisibleContent(content.parts)) {
@@ -84,7 +92,9 @@ export function collectContents(context: InvocationContext): Content[] {
  * Render `Content[]` into a deterministic prompt string suitable for external
  * runtimes that consume a single text turn.
  */
-export function flattenContentsToPrompt(contents: ReadonlyArray<Content>): string {
+export function flattenContentsToPrompt(
+  contents: ReadonlyArray<Content>,
+): string {
   const blocks: string[] = [];
   for (const content of contents) {
     const header = content.role === "model" ? "assistant:" : "user:";
@@ -117,14 +127,22 @@ function hasVisibleContent(parts: ReadonlyArray<Part>): boolean {
     if (typeof part.text === "string" && part.text.length > 0) {
       return true;
     }
-    if (part.inlineData || part.fileData || part.functionCall || part.functionResponse) {
+    if (
+      part.inlineData ||
+      part.fileData ||
+      part.functionCall ||
+      part.functionResponse
+    ) {
       return true;
     }
   }
   return false;
 }
 
-function isForeignEvent(agentName: string | undefined, event: AdkEventLike): boolean {
+function isForeignEvent(
+  agentName: string | undefined,
+  event: AdkEventLike,
+): boolean {
   if (!agentName) {
     return false;
   }
@@ -139,7 +157,11 @@ function rewriteForeignEvent(event: AdkEventLike): AdkEventLike {
   const newParts: Part[] = [];
 
   for (const part of parts) {
-    if (typeof part.text === "string" && part.text.length > 0 && !part.thought) {
+    if (
+      typeof part.text === "string" &&
+      part.text.length > 0 &&
+      !part.thought
+    ) {
       textParts.push(part.text);
     }
   }
@@ -169,7 +191,9 @@ function rewriteForeignEvent(event: AdkEventLike): AdkEventLike {
  * the call. Mirrors the common-case behaviour of ADK's
  * `rearrangeEventsForAsyncFunctionResponsesInHistory`.
  */
-function rearrangeAsyncFunctionResponses(events: AdkEventLike[]): AdkEventLike[] {
+function rearrangeAsyncFunctionResponses(
+  events: AdkEventLike[],
+): AdkEventLike[] {
   const responseIndexById = new Map<string, number>();
   for (let i = 0; i < events.length; i++) {
     for (const part of events[i].content?.parts ?? []) {
@@ -202,7 +226,11 @@ function rearrangeAsyncFunctionResponses(events: AdkEventLike[]): AdkEventLike[]
     }
     for (const callId of callIds) {
       const responseIdx = responseIndexById.get(callId);
-      if (responseIdx !== undefined && responseIdx !== i && !consumed.has(responseIdx)) {
+      if (
+        responseIdx !== undefined &&
+        responseIdx !== i &&
+        !consumed.has(responseIdx)
+      ) {
         result.push(events[responseIdx]);
         consumed.add(responseIdx);
       }

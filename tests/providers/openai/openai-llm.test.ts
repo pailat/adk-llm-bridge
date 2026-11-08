@@ -4,8 +4,8 @@ import { resetAllConfigs } from "../../../src/config.js";
 import { OPENAI_DEFINITION } from "../../../src/providers/openai/definition.js";
 import { OpenAILlm } from "../../../src/providers/openai/index.js";
 import {
-  describeModelPatterns,
   describeConnectError,
+  describeModelPatterns,
 } from "../../helpers/provider-test-helpers.js";
 
 describe("OpenAILlm", () => {

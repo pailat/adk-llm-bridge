@@ -5,7 +5,10 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { EnvCredentialProvider, readAllowedEnv } from "../../src/agents/index.js";
+import {
+  EnvCredentialProvider,
+  readAllowedEnv,
+} from "../../src/agents/index.js";
 
 describe("environment credential allowlist", () => {
   test("reads only allowlisted non-empty variables", () => {
@@ -15,9 +18,11 @@ describe("environment credential allowlist", () => {
       EMPTY: "",
     };
 
-    expect(readAllowedEnv(env, ["OPENAI_API_KEY", "EMPTY", "MISSING"])).toEqual({
-      OPENAI_API_KEY: "allowed",
-    });
+    expect(readAllowedEnv(env, ["OPENAI_API_KEY", "EMPTY", "MISSING"])).toEqual(
+      {
+        OPENAI_API_KEY: "allowed",
+      },
+    );
   });
 
   test("credential provider does not read unallowlisted values", async () => {
@@ -42,7 +47,10 @@ describe("environment credential allowlist", () => {
     const provider = new EnvCredentialProvider({ SECRET_TOKEN: "blocked" });
 
     await expect(
-      provider.getCredential({ providerId: "codex", envAllowlist: ["OPENAI_API_KEY"] }),
+      provider.getCredential({
+        providerId: "codex",
+        envAllowlist: ["OPENAI_API_KEY"],
+      }),
     ).resolves.toBeUndefined();
   });
 });

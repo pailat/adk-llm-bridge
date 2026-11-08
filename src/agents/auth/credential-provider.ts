@@ -7,7 +7,9 @@
 import type { CredentialRequest, ExternalAgentCredential } from "./schema.js";
 
 export interface ExternalAgentCredentialProvider {
-  getCredential(request: CredentialRequest): Promise<ExternalAgentCredential | undefined>;
+  getCredential(
+    request: CredentialRequest,
+  ): Promise<ExternalAgentCredential | undefined>;
 }
 
 export class NoopCredentialProvider implements ExternalAgentCredentialProvider {

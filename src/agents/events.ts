@@ -71,7 +71,9 @@ export interface ExternalAgentCompletedEvent {
   timestamp?: number;
 }
 
-export function isExternalAgentEvent(value: unknown): value is ExternalAgentEvent {
+export function isExternalAgentEvent(
+  value: unknown,
+): value is ExternalAgentEvent {
   if (!value || typeof value !== "object") {
     return false;
   }

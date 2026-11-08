@@ -62,7 +62,9 @@ describe("collectContents / flattenContentsToPrompt", () => {
       { role: "user", parts: [{ text: "hi" }] },
       { role: "model", parts: [{ text: "hello" }] },
     ]);
-    expect(flattenContentsToPrompt(contents)).toBe("user:\nhi\n\nassistant:\nhello");
+    expect(flattenContentsToPrompt(contents)).toBe(
+      "user:\nhi\n\nassistant:\nhello",
+    );
   });
 
   test("foreign-agent text event is rewritten under user role", () => {
@@ -95,7 +97,7 @@ describe("collectContents / flattenContentsToPrompt", () => {
     });
     const rendered = flattenContentsToPrompt(collectContents(ctx));
     expect(rendered).toContain(
-      "[billing-bot called tool refund with parameters {\"amount\":50}]",
+      '[billing-bot called tool refund with parameters {"amount":50}]',
     );
   });
 
@@ -129,7 +131,9 @@ describe("collectContents / flattenContentsToPrompt", () => {
           author: "user",
           content: {
             role: "user",
-            parts: [{ inlineData: { mimeType: "image/png", data: "base64..." } }],
+            parts: [
+              { inlineData: { mimeType: "image/png", data: "base64..." } },
+            ],
           },
         },
       ],
@@ -217,7 +221,9 @@ describe("collectContents / flattenContentsToPrompt", () => {
           author: "user",
           content: {
             role: "user",
-            parts: [{ functionResponse: { id: "x", name: "t", response: { a: 1 } } }],
+            parts: [
+              { functionResponse: { id: "x", name: "t", response: { a: 1 } } },
+            ],
           },
         },
       ],

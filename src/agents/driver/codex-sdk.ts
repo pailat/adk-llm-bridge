@@ -41,8 +41,16 @@ const CODEX_AMBIENT_PASSTHROUGH = [
 ] as const;
 
 type CodexSdkApprovalMode = "never" | "on-request" | "on-failure" | "untrusted";
-type CodexSdkSandboxMode = "read-only" | "workspace-write" | "danger-full-access";
-type CodexSdkModelReasoningEffort = "minimal" | "low" | "medium" | "high" | "xhigh";
+type CodexSdkSandboxMode =
+  | "read-only"
+  | "workspace-write"
+  | "danger-full-access";
+type CodexSdkModelReasoningEffort =
+  | "minimal"
+  | "low"
+  | "medium"
+  | "high"
+  | "xhigh";
 type CodexSdkWebSearchMode = "disabled" | "cached" | "live";
 type CodexSdkConfigValue =
   | string
@@ -95,7 +103,9 @@ type CodexSdkClientLike = {
   resumeThread(id: string, options?: CodexSdkThreadOptions): CodexSdkThreadLike;
 };
 
-type CodexSdkConstructor = new (options?: CodexSdkOptions) => CodexSdkClientLike;
+type CodexSdkConstructor = new (
+  options?: CodexSdkOptions,
+) => CodexSdkClientLike;
 
 type CodexSdkModuleLike = {
   Codex: CodexSdkConstructor;
@@ -176,7 +186,9 @@ export class CodexSdkDriver {
     };
   }
 
-  async *run(request: ExternalAgentRunRequest): AsyncIterable<ExternalAgentEvent> {
+  async *run(
+    request: ExternalAgentRunRequest,
+  ): AsyncIterable<ExternalAgentEvent> {
     yield {
       type: "started",
       providerId: this.providerId,
@@ -295,7 +307,11 @@ export class CodexSdkDriver {
     }
 
     if (!completed) {
-      yield { type: "completed", exitCode: failed ? 1 : 0, timestamp: Date.now() };
+      yield {
+        type: "completed",
+        exitCode: failed ? 1 : 0,
+        timestamp: Date.now(),
+      };
     }
   }
 
@@ -322,7 +338,9 @@ export class CodexSdkDriver {
       skipGitRepoCheck: this.#skipGitRepoCheck,
       modelReasoningEffort: this.#modelReasoningEffort,
       webSearchMode: networkAccessEnabled ? this.#webSearchMode : undefined,
-      webSearchEnabled: networkAccessEnabled ? this.#webSearchEnabled : undefined,
+      webSearchEnabled: networkAccessEnabled
+        ? this.#webSearchEnabled
+        : undefined,
     }) as CodexSdkThreadOptions;
   }
 
@@ -439,7 +457,9 @@ export class CodexSdkDriver {
     return normalizeCompletedItem(asRecord(event.item), timestamp);
   }
 
-  private async loadSdk(request: ExternalAgentRunRequest): Promise<CodexSdkClientLike> {
+  private async loadSdk(
+    request: ExternalAgentRunRequest,
+  ): Promise<CodexSdkClientLike> {
     if (this.#sdk) {
       return this.#sdk;
     }
@@ -459,16 +479,20 @@ export class CodexSdkDriver {
     }
   }
 
-  private describeError(error: unknown, request: ExternalAgentRunRequest): string {
+  private describeError(
+    error: unknown,
+    request: ExternalAgentRunRequest,
+  ): string {
     const message = error instanceof Error ? error.message : String(error);
     if (!message.includes("Unable to locate Codex CLI binaries")) {
       return message;
     }
 
     const resolution = this.resolveCodexBinary(request);
-    const checked = resolution.checked.length > 0
-      ? resolution.checked.map((item) => `  - ${item}`).join("\n")
-      : "  - <no candidates>";
+    const checked =
+      resolution.checked.length > 0
+        ? resolution.checked.map((item) => `  - ${item}`).join("\n")
+        : "  - <no candidates>";
     return [
       "Codex SDK could not locate a Codex binary.",
       "Set CODEX_EXECUTABLE=/absolute/path/to/codex or CODEX_CLI_PATH=/absolute/path/to/codex, or reinstall @openai/codex with optional dependencies.",
@@ -485,7 +509,9 @@ export function mapPolicyToCodexSdkThreadOptions(
   const policy = permissions ?? { mode: "read-only" as const };
   const base = {
     networkAccessEnabled: policy.allowNetwork,
-    additionalDirectories: policy.allowedPaths ? [...policy.allowedPaths] : undefined,
+    additionalDirectories: policy.allowedPaths
+      ? [...policy.allowedPaths]
+      : undefined,
   };
 
   switch (policy.mode) {
@@ -596,7 +622,9 @@ function normalizeCompletedItem(
 
   if (itemType === "agent_message") {
     const text = stringValue(item.text);
-    return text ? [{ type: "output", content: text, stream: "stdout", timestamp }] : [];
+    return text
+      ? [{ type: "output", content: text, stream: "stdout", timestamp }]
+      : [];
   }
 
   if (itemType === "error") {
@@ -707,7 +735,7 @@ function normalizeCompletedItem(
  * `ThreadStartedEvent { type: "thread.started", thread_id }`.
  */
 function threadStartedId(event: CodexSdkThreadEvent): string | undefined {
-  return stringValue(event.thread_id) ?? stringValue((asRecord(event.thread)).id);
+  return stringValue(event.thread_id) ?? stringValue(asRecord(event.thread).id);
 }
 
 function safeCollectContents(request: ExternalAgentRunRequest): Content[] {
@@ -771,8 +799,9 @@ function readSavedThreadId(
   stateKey: string | undefined,
 ): string | undefined {
   if (!stateKey) return undefined;
-  const session = (request.context as { session?: { state?: unknown } } | undefined)
-    ?.session;
+  const session = (
+    request.context as { session?: { state?: unknown } } | undefined
+  )?.session;
   const state = session?.state;
   if (!state || typeof state !== "object") {
     return undefined;
@@ -903,15 +932,21 @@ function platformCodexPackages(): Array<[string, string]> {
   }
 }
 
-function firstNonEmpty(...values: Array<string | undefined>): string | undefined {
-  return values.find((value): value is string => typeof value === "string" && value.length > 0);
+function firstNonEmpty(
+  ...values: Array<string | undefined>
+): string | undefined {
+  return values.find(
+    (value): value is string => typeof value === "string" && value.length > 0,
+  );
 }
 
 function readCredentialEnv(
   request: ExternalAgentRunRequest,
   key: string,
 ): string | undefined {
-  return request.credential?.kind === "env" ? request.credential.env?.[key] : undefined;
+  return request.credential?.kind === "env"
+    ? request.credential.env?.[key]
+    : undefined;
 }
 
 function copyIfPresent(
@@ -925,7 +960,9 @@ function copyIfPresent(
   }
 }
 
-function removeUndefined(value: Record<string, unknown>): Record<string, unknown> {
+function removeUndefined(
+  value: Record<string, unknown>,
+): Record<string, unknown> {
   return Object.fromEntries(
     Object.entries(value).filter(([, entry]) => entry !== undefined),
   );

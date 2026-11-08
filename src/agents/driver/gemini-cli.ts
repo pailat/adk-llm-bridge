@@ -4,12 +4,12 @@
  * SPDX-License-Identifier: MIT
  */
 
-import { SubprocessJsonlDriver } from "./subprocess-jsonl.js";
-import type { ExternalAgentRunRequest } from "../external-agent-driver.js";
 import type { ExternalAgentEvent } from "../events.js";
+import type { ExternalAgentRunRequest } from "../external-agent-driver.js";
 import { mapPermissionPolicyToFlags } from "../permissions/mapper.js";
 import type { ExternalAgentPermissionPolicy } from "../permissions/schema.js";
 import { GEMINI_CLI_PROVIDER } from "../provider/gemini-cli.js";
+import { SubprocessJsonlDriver } from "./subprocess-jsonl.js";
 
 declare const Bun: {
   spawn(

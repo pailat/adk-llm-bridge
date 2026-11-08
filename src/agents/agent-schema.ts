@@ -25,7 +25,10 @@ export interface ExternalAgentDefinition {
   createCredentialProvider?: () => ExternalAgentCredentialProvider;
 }
 
-export type ExternalAgentDefinitionConfig = Omit<ExternalAgentConfig, "provider">;
+export type ExternalAgentDefinitionConfig = Omit<
+  ExternalAgentConfig,
+  "provider"
+>;
 
 export function createExternalAgentConfig(
   definition: ExternalAgentDefinition,

@@ -1,7 +1,7 @@
+import { describe, expect, test } from "bun:test";
 import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, test } from "bun:test";
 import { CodexAgent } from "../../../src/agents/codex-agent.js";
 import { CodexCliDriver } from "../../../src/agents/driver/codex-cli.js";
 import {
@@ -86,10 +86,15 @@ describe("CodexSdkDriver", () => {
 
   test("detects Codex binary from explicit environment overrides", () => {
     const dir = mkdtempSync(join(tmpdir(), "codex-sdk-driver-"));
-    const executable = join(dir, process.platform === "win32" ? "codex.exe" : "codex");
+    const executable = join(
+      dir,
+      process.platform === "win32" ? "codex.exe" : "codex",
+    );
     writeFileSync(executable, "#!/bin/sh\nexit 0\n");
     chmodSync(executable, 0o755);
-    const driver = new CodexSdkDriver({ env: { CODEX_EXECUTABLE: executable } });
+    const driver = new CodexSdkDriver({
+      env: { CODEX_EXECUTABLE: executable },
+    });
 
     const resolution = driver.resolveCodexBinary({
       provider: CODEX_PROVIDER,
@@ -109,7 +114,9 @@ describe("CodexSdkDriver", () => {
       env: { CODEX_EXECUTABLE: "/missing/codex" },
       Codex: class {
         startThread() {
-          throw new Error("Unable to locate Codex CLI binaries. Ensure @openai/codex is installed with optional dependencies.");
+          throw new Error(
+            "Unable to locate Codex CLI binaries. Ensure @openai/codex is installed with optional dependencies.",
+          );
         }
         resumeThread() {
           throw new Error("not used");
@@ -129,7 +136,9 @@ describe("CodexSdkDriver", () => {
       { type: "started", providerId: "codex", timestamp: expect.any(Number) },
       {
         type: "error",
-        message: expect.stringContaining("Set CODEX_EXECUTABLE=/absolute/path/to/codex"),
+        message: expect.stringContaining(
+          "Set CODEX_EXECUTABLE=/absolute/path/to/codex",
+        ),
         // A missing-binary condition is non-recoverable: retrying without
         // installing the binary is futile (CODEX-5).
         code: "MISSING_BINARY",
@@ -149,7 +158,9 @@ describe("CodexSdkDriver", () => {
       sandboxMode: "workspace-write",
       approvalPolicy: "on-request",
     });
-    expect(mapPolicyToCodexSdkThreadOptions({ mode: "workspace-write" })).toEqual({
+    expect(
+      mapPolicyToCodexSdkThreadOptions({ mode: "workspace-write" }),
+    ).toEqual({
       sandboxMode: "workspace-write",
       approvalPolicy: "never",
     });
@@ -229,7 +240,12 @@ describe("CodexSdkDriver", () => {
     expect(runInput).toBe("Be concise.\n\nReview this");
     expect(events).toEqual([
       { type: "started", providerId: "codex", timestamp: expect.any(Number) },
-      { type: "output", content: "Done", stream: "stdout", timestamp: expect.any(Number) },
+      {
+        type: "output",
+        content: "Done",
+        stream: "stdout",
+        timestamp: expect.any(Number),
+      },
       {
         type: "tool_call",
         name: "command_execution",
@@ -264,7 +280,9 @@ describe("CodexSdkDriver", () => {
   test("returns the SDK event iterator after turn.completed without waiting for EOF", async () => {
     let returned = false;
     let read = false;
-    const never = new Promise<IteratorResult<Record<string, unknown>>>(() => {});
+    const never = new Promise<IteratorResult<Record<string, unknown>>>(
+      () => {},
+    );
     const sdkStream: AsyncIterable<Record<string, unknown>> = {
       [Symbol.asyncIterator]() {
         return {
@@ -507,16 +525,19 @@ describe("CodexSdkDriver", () => {
     );
     const adkEvent = new (class extends ExternalAgent {
       expose(ev: unknown, ctx: unknown) {
-        return (this as unknown as {
-          toAdkEvent: (e: unknown, c: unknown) => unknown;
-        }).toAdkEvent(ev, ctx);
+        return (
+          this as unknown as {
+            toAdkEvent: (e: unknown, c: unknown) => unknown;
+          }
+        ).toAdkEvent(ev, ctx);
       }
     })({ name: "codex", provider: CODEX_PROVIDER }).expose(stateDeltaEvent, {
       invocationId: "inv-1",
       branch: "root",
     });
-    expect((adkEvent as { actions?: { stateDelta?: unknown } }).actions?.stateDelta)
-      .toEqual({ "codex_thread:codex": "thread-test-123" });
+    expect(
+      (adkEvent as { actions?: { stateDelta?: unknown } }).actions?.stateDelta,
+    ).toEqual({ "codex_thread:codex": "thread-test-123" });
   });
 
   test("second invocation resumes the saved thread and sends only the current turn", async () => {
@@ -588,15 +609,16 @@ describe("CodexSdkDriver", () => {
     let capturedInput: unknown;
     const driver = new CodexSdkDriver({
       sdk: {
-        startThread: () => ({
-          id: "thread-cold-1",
-          runStreamed: async (input) => {
-            capturedInput = input;
-            return {
-              events: sdkEvents([{ type: "turn.completed" }]),
-            };
-          },
-        }) as never,
+        startThread: () =>
+          ({
+            id: "thread-cold-1",
+            runStreamed: async (input) => {
+              capturedInput = input;
+              return {
+                events: sdkEvents([{ type: "turn.completed" }]),
+              };
+            },
+          }) as never,
         resumeThread: () => {
           throw new Error("not used");
         },
@@ -659,7 +681,10 @@ describe("CodexSdkDriver", () => {
     ]);
 
     expect(
-      driver.normalizeEvent({ type: "turn.failed", error: { message: "failed" } }),
+      driver.normalizeEvent({
+        type: "turn.failed",
+        error: { message: "failed" },
+      }),
     ).toEqual([
       {
         type: "error",

@@ -45,9 +45,7 @@ describe("safeJsonParse", () => {
   });
 
   it("does NOT modify numbers inside JSON strings", () => {
-    const result = safeJsonParse(
-      '{"note": "ID is 1021987000032211189"}',
-    );
+    const result = safeJsonParse('{"note": "ID is 1021987000032211189"}');
     expect(result.note).toBe("ID is 1021987000032211189");
   });
 
@@ -60,17 +58,13 @@ describe("safeJsonParse", () => {
   });
 
   it("converts large integer as first element of array", () => {
-    const result = safeJsonParse(
-      '{"ids": [1021987000032211189, 42]}',
-    );
+    const result = safeJsonParse('{"ids": [1021987000032211189, 42]}');
     expect((result.ids as unknown[])[0]).toBe("1021987000032211189");
     expect((result.ids as unknown[])[1]).toBe(42);
   });
 
   it("converts large integer as last element of array", () => {
-    const result = safeJsonParse(
-      '{"ids": [42, 1021987000032211189]}',
-    );
+    const result = safeJsonParse('{"ids": [42, 1021987000032211189]}');
     expect((result.ids as unknown[])[0]).toBe(42);
     expect((result.ids as unknown[])[1]).toBe("1021987000032211189");
   });
@@ -96,9 +90,7 @@ describe("safeJsonParse", () => {
   });
 
   it("handles nested objects with large integers", () => {
-    const result = safeJsonParse(
-      '{"data": {"ticketId": 1021987000032211189}}',
-    );
+    const result = safeJsonParse('{"data": {"ticketId": 1021987000032211189}}');
     expect((result.data as Record<string, unknown>).ticketId).toBe(
       "1021987000032211189",
     );

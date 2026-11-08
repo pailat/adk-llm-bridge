@@ -109,35 +109,36 @@ describe("workflow host authorization", () => {
     ).rejects.toMatchObject({ details: { reason: "unauthorized" } });
   });
 
-  test.each(
-    OWNERSHIP_OPERATIONS,
-  )("passes %s through the authenticated host boundary", async (operation, permission) => {
-    const actor = context();
-    const requests: WorkflowAuthorizationOperation[] = [];
+  test.each(OWNERSHIP_OPERATIONS)(
+    "passes %s through the authenticated host boundary",
+    async (operation, permission) => {
+      const actor = context();
+      const requests: WorkflowAuthorizationOperation[] = [];
 
-    await authorizeWorkflowActor(
-      {
-        authorize(request) {
-          requests.push(request.operation);
-          return (
-            request.actor === actor &&
-            request.actorId === "principal-1" &&
-            request.agentId === "coordinator"
-          );
+      await authorizeWorkflowActor(
+        {
+          authorize(request) {
+            requests.push(request.operation);
+            return (
+              request.actor === actor &&
+              request.actorId === "principal-1" &&
+              request.agentId === "coordinator"
+            );
+          },
         },
-      },
-      actor,
-      {
-        operation,
-        permission,
-        executionId: "execution-1",
-        taskId: "integration",
-        planRevision: 1,
-      },
-    );
+        actor,
+        {
+          operation,
+          permission,
+          executionId: "execution-1",
+          taskId: "integration",
+          planRevision: 1,
+        },
+      );
 
-    expect(requests).toEqual([operation]);
-  });
+      expect(requests).toEqual([operation]);
+    },
+  );
 
   test("passes authenticated identities to the host policy but cannot serialize the capability", async () => {
     const actor = context();

@@ -37,9 +37,9 @@ describe("requireValidURL", () => {
   });
 
   it("throws on invalid URL", () => {
-    expect(() =>
-      requireValidURL("not-a-url", "baseURL", "custom"),
-    ).toThrow('[custom] Invalid baseURL: "not-a-url"');
+    expect(() => requireValidURL("not-a-url", "baseURL", "custom")).toThrow(
+      '[custom] Invalid baseURL: "not-a-url"',
+    );
   });
 
   it("throws on empty string", () => {

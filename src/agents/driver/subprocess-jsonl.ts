@@ -4,11 +4,11 @@
  * SPDX-License-Identifier: MIT
  */
 
+import { type ExternalAgentEvent, isExternalAgentEvent } from "../events.js";
 import type {
   ExternalAgentDriver,
   ExternalAgentRunRequest,
 } from "../external-agent-driver.js";
-import { isExternalAgentEvent, type ExternalAgentEvent } from "../events.js";
 
 export interface SubprocessJsonlDriverConfig {
   providerId: string;
@@ -33,7 +33,9 @@ export class SubprocessJsonlDriver implements ExternalAgentDriver {
     this.args = config.args ?? [];
   }
 
-  async *run(_request: ExternalAgentRunRequest): AsyncIterable<ExternalAgentEvent> {
+  async *run(
+    _request: ExternalAgentRunRequest,
+  ): AsyncIterable<ExternalAgentEvent> {
     yield {
       type: "error",
       message:

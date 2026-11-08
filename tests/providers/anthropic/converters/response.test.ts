@@ -629,7 +629,11 @@ describe("structured output (json_output synthetic tool)", () => {
 
   it("streaming: json_output tool surfaces as TEXT at message_stop", () => {
     const acc = createAnthropicStreamAccumulator();
-    acc.toolUses.set(0, { id: "c1", name: "json_output", input: '{"answer":42}' });
+    acc.toolUses.set(0, {
+      id: "c1",
+      name: "json_output",
+      input: '{"answer":42}',
+    });
 
     const result = convertAnthropicStreamEvent({ type: "message_stop" }, acc);
 

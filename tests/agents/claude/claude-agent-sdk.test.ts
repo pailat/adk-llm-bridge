@@ -1,20 +1,22 @@
+import { describe, expect, test } from "bun:test";
 import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, test } from "bun:test";
 import type { Content } from "@google/genai";
 import {
-  ClaudeAgent,
   CLAUDE_AGENT_DEFINITION,
+  ClaudeAgent,
 } from "../../../src/agents/claude-agent.js";
 import {
   ClaudeAgentSdkDriver,
   mapPolicyToClaudeSdkPermission,
 } from "../../../src/agents/driver/claude-agent-sdk.js";
 import { ClaudeCliDriver } from "../../../src/agents/driver/claude-cli.js";
-import { CLAUDE_PROVIDER } from "../../../src/agents/provider/schema.js";
-import { CODEX_PROVIDER } from "../../../src/agents/provider/schema.js";
 import { ExternalAgent } from "../../../src/agents/external-agent.js";
+import {
+  CLAUDE_PROVIDER,
+  CODEX_PROVIDER,
+} from "../../../src/agents/provider/schema.js";
 
 async function materializePrompt(prompt: unknown): Promise<string> {
   if (typeof prompt === "string") {
@@ -108,10 +110,15 @@ describe("ClaudeAgentSdkDriver", () => {
 
   test("detects Claude Code executable from explicit environment overrides", () => {
     const dir = mkdtempSync(join(tmpdir(), "claude-sdk-driver-"));
-    const executable = join(dir, process.platform === "win32" ? "claude.exe" : "claude");
+    const executable = join(
+      dir,
+      process.platform === "win32" ? "claude.exe" : "claude",
+    );
     writeFileSync(executable, "#!/bin/sh\nexit 0\n");
     chmodSync(executable, 0o755);
-    const driver = new ClaudeAgentSdkDriver({ env: { CLAUDE_CODE_EXECUTABLE: executable } });
+    const driver = new ClaudeAgentSdkDriver({
+      env: { CLAUDE_CODE_EXECUTABLE: executable },
+    });
 
     const resolution = driver.resolveClaudeExecutable({
       provider: CLAUDE_PROVIDER,
@@ -128,7 +135,10 @@ describe("ClaudeAgentSdkDriver", () => {
 
   test("detects Claude Code executable from configurable search paths", () => {
     const dir = mkdtempSync(join(tmpdir(), "claude-sdk-search-path-"));
-    const executable = join(dir, process.platform === "win32" ? "claude.exe" : "claude");
+    const executable = join(
+      dir,
+      process.platform === "win32" ? "claude.exe" : "claude",
+    );
     writeFileSync(executable, "#!/bin/sh\nexit 0\n");
     chmodSync(executable, 0o755);
     const driver = new ClaudeAgentSdkDriver({
@@ -170,7 +180,11 @@ describe("ClaudeAgentSdkDriver", () => {
                 subtype: "init",
                 mcp_servers: [{ name: "workflow", status: "failed" }],
               } as never;
-              yield { type: "result", subtype: "success", result: "unsafe" } as never;
+              yield {
+                type: "result",
+                subtype: "success",
+                result: "unsafe",
+              } as never;
             } finally {
               returned = true;
             }
@@ -205,7 +219,9 @@ describe("ClaudeAgentSdkDriver", () => {
       env: { CLAUDE_CODE_EXECUTABLE: "/missing/claude" },
       sdk: {
         query: () => {
-          throw new Error("Native CLI binary for darwin-arm64 not found. Reinstall @anthropic-ai/claude-agent-sdk without --omit=optional, or set options.pathToClaudeCodeExecutable.");
+          throw new Error(
+            "Native CLI binary for darwin-arm64 not found. Reinstall @anthropic-ai/claude-agent-sdk without --omit=optional, or set options.pathToClaudeCodeExecutable.",
+          );
         },
       },
     });
@@ -222,7 +238,9 @@ describe("ClaudeAgentSdkDriver", () => {
       { type: "started", providerId: "claude", timestamp: expect.any(Number) },
       {
         type: "error",
-        message: expect.stringContaining("Set CLAUDE_CODE_EXECUTABLE=/absolute/path/to/claude"),
+        message: expect.stringContaining(
+          "Set CLAUDE_CODE_EXECUTABLE=/absolute/path/to/claude",
+        ),
         code: "CLAUDE_AGENT_SDK_ERROR",
         recoverable: true,
         timestamp: expect.any(Number),
@@ -241,9 +259,11 @@ describe("ClaudeAgentSdkDriver", () => {
     expect(mapPolicyToClaudeSdkPermission({ mode: "ask" })).toEqual({
       permissionMode: "default",
     });
-    expect(mapPolicyToClaudeSdkPermission({ mode: "workspace-write" })).toEqual({
-      permissionMode: "acceptEdits",
-    });
+    expect(mapPolicyToClaudeSdkPermission({ mode: "workspace-write" })).toEqual(
+      {
+        permissionMode: "acceptEdits",
+      },
+    );
     expect(mapPolicyToClaudeSdkPermission({ mode: "full-access" })).toEqual({
       permissionMode: "bypassPermissions",
       allowDangerouslySkipPermissions: true,
@@ -258,7 +278,9 @@ describe("ClaudeAgentSdkDriver", () => {
         type: "assistant",
         message: { content: [{ type: "text", text: "Hello" }] },
       } as never),
-    ).toEqual([{ type: "output", content: "Hello", timestamp: expect.any(Number) }]);
+    ).toEqual([
+      { type: "output", content: "Hello", timestamp: expect.any(Number) },
+    ]);
 
     expect(
       driver.normalizeMessage({
@@ -266,25 +288,36 @@ describe("ClaudeAgentSdkDriver", () => {
         subtype: "success",
         result: "Done",
       } as never),
-    ).toEqual([{ type: "completed", exitCode: 0, timestamp: expect.any(Number) }]);
+    ).toEqual([
+      { type: "completed", exitCode: 0, timestamp: expect.any(Number) },
+    ]);
   });
 
   test("suppresses system and rate-limit diagnostics by default", () => {
     const driver = new ClaudeAgentSdkDriver();
 
-    expect(driver.normalizeMessage({ type: "system", subtype: "init" } as never)).toEqual([]);
-    expect(driver.normalizeMessage({ type: "rate_limit_event" } as never)).toEqual([]);
+    expect(
+      driver.normalizeMessage({ type: "system", subtype: "init" } as never),
+    ).toEqual([]);
+    expect(
+      driver.normalizeMessage({ type: "rate_limit_event" } as never),
+    ).toEqual([]);
   });
 
   test("builds SDK MCP options for ADK subagent delegation", async () => {
-    let handler: ((args: Record<string, unknown>, extra: unknown) => Promise<unknown>) | undefined;
+    let handler:
+      | ((args: Record<string, unknown>, extra: unknown) => Promise<unknown>)
+      | undefined;
     const sdk = {
       query: async function* () {},
       tool: (
         name: string,
         _description: string,
         inputSchema: Record<string, unknown>,
-        toolHandler: (args: Record<string, unknown>, extra: unknown) => Promise<unknown>,
+        toolHandler: (
+          args: Record<string, unknown>,
+          extra: unknown,
+        ) => Promise<unknown>,
       ) => {
         expect(name).toBe("run_adk_subagent");
         expect(inputSchema.agentName).toBeDefined();
@@ -295,7 +328,10 @@ describe("ClaudeAgentSdkDriver", () => {
       createSdkMcpServer: (options: Record<string, unknown>) => options,
     };
     const driver = new ClaudeAgentSdkDriver({ sdk });
-    const subAgent = new ExternalAgent({ name: "CodexImplementer", provider: CODEX_PROVIDER });
+    const subAgent = new ExternalAgent({
+      name: "CodexImplementer",
+      provider: CODEX_PROVIDER,
+    });
     const result = { agentName: "CodexImplementer", output: "done", events: 1 };
     const options = await driver.buildOptionsForRun(
       {
@@ -304,7 +340,10 @@ describe("ClaudeAgentSdkDriver", () => {
         subAgents: [subAgent],
         toolGateway: {
           runSubAgent: async (input: unknown) => {
-            expect(input).toEqual({ agentName: "CodexImplementer", task: "patch" });
+            expect(input).toEqual({
+              agentName: "CodexImplementer",
+              task: "patch",
+            });
             return result;
           },
         } as never,
@@ -317,7 +356,9 @@ describe("ClaudeAgentSdkDriver", () => {
       tools: [{ name: "run_adk_subagent" }],
     });
     expect(options.allowedTools).toContain("mcp__adk_bridge__run_adk_subagent");
-    await expect(handler?.({ agentName: "CodexImplementer", task: "patch" }, {})).resolves.toEqual({
+    await expect(
+      handler?.({ agentName: "CodexImplementer", task: "patch" }, {}),
+    ).resolves.toEqual({
       content: [{ type: "text", text: "done" }],
     });
   });
@@ -444,10 +485,14 @@ describe("ClaudeAgentSdkDriver", () => {
     expect(typeof capturedPrompt).not.toBe("string");
     expect(capturedPrompt).toBeDefined();
     const iterable = capturedPrompt as AsyncIterable<{
-      message: { content: Array<{ type: string; source?: { media_type?: string } }> };
+      message: {
+        content: Array<{ type: string; source?: { media_type?: string } }>;
+      };
     }>;
     const collected: Array<{
-      message: { content: Array<{ type: string; source?: { media_type?: string } }> };
+      message: {
+        content: Array<{ type: string; source?: { media_type?: string } }>;
+      };
     }> = [];
     for await (const message of iterable) {
       collected.push(message);
@@ -531,7 +576,11 @@ describe("ClaudeAgentSdkDriver", () => {
               type: "assistant",
               message: { content: [{ type: "text", text: "Looks good." }] },
             } as never;
-            yield { type: "result", subtype: "success", result: "Complete" } as never;
+            yield {
+              type: "result",
+              subtype: "success",
+              result: "Complete",
+            } as never;
           })() as never;
         },
       },
@@ -615,7 +664,11 @@ describe("ClaudeAgentSdkDriver", () => {
               type: "assistant",
               message: { content: [{ type: "text", text: "two" }] },
             } as never;
-            yield { type: "result", subtype: "success", result: "done" } as never;
+            yield {
+              type: "result",
+              subtype: "success",
+              result: "done",
+            } as never;
           })();
           return Object.assign(gen, {
             interrupt: async () => {
@@ -651,7 +704,11 @@ describe("ClaudeAgentSdkDriver", () => {
       sdk: {
         query: () => {
           const gen = (async function* () {
-            yield { type: "result", subtype: "success", result: "done" } as never;
+            yield {
+              type: "result",
+              subtype: "success",
+              result: "done",
+            } as never;
           })();
           return Object.assign(gen, {
             interrupt: async () => {
@@ -685,25 +742,26 @@ describe("ClaudeAgentSdkDriver", () => {
     const never = new Promise<IteratorResult<never>>(() => {});
     const driver = new ClaudeAgentSdkDriver({
       sdk: {
-        query: () => ({
-          [Symbol.asyncIterator]() {
-            return this;
-          },
-          next: async () => {
-            if (!read) {
-              read = true;
-              return {
-                value: { type: "result", subtype: "success", result: "done" },
-                done: false,
-              } as never;
-            }
-            return never;
-          },
-          return: async () => {
-            returned = true;
-            return { value: undefined, done: true } as never;
-          },
-        }) as never,
+        query: () =>
+          ({
+            [Symbol.asyncIterator]() {
+              return this;
+            },
+            next: async () => {
+              if (!read) {
+                read = true;
+                return {
+                  value: { type: "result", subtype: "success", result: "done" },
+                  done: false,
+                } as never;
+              }
+              return never;
+            },
+            return: async () => {
+              returned = true;
+              return { value: undefined, done: true } as never;
+            },
+          }) as never,
       },
     });
 
@@ -724,7 +782,11 @@ describe("ClaudeAgentSdkDriver", () => {
       }),
     ]);
 
-    expect(events.map((event) => event.type)).toEqual(["started", "output", "completed"]);
+    expect(events.map((event) => event.type)).toEqual([
+      "started",
+      "output",
+      "completed",
+    ]);
     expect(returned).toBe(true);
   });
 
@@ -758,7 +820,11 @@ describe("ClaudeAgentSdkDriver", () => {
         code: "CLAUDE_SERVER_ERROR",
       },
       {
-        message: { type: "result", subtype: "error_max_turns", errors: ["max turns"] },
+        message: {
+          type: "result",
+          subtype: "error_max_turns",
+          errors: ["max turns"],
+        },
         recoverable: false,
         code: "error_max_turns",
       },
@@ -947,10 +1013,21 @@ describe("ClaudeAgentSdkDriver", () => {
     const driver = new ClaudeAgentSdkDriver({
       sdk: {
         query: ({ options }) => {
-          capturedOptions.push(options as { resume?: string; sessionId?: unknown });
+          capturedOptions.push(
+            options as { resume?: string; sessionId?: unknown },
+          );
           return (async function* () {
-            yield { type: "system", subtype: "init", session_id: "sess-1" } as never;
-            yield { type: "result", subtype: "success", result: "ok", session_id: "sess-1" } as never;
+            yield {
+              type: "system",
+              subtype: "init",
+              session_id: "sess-1",
+            } as never;
+            yield {
+              type: "result",
+              subtype: "success",
+              result: "ok",
+              session_id: "sess-1",
+            } as never;
           })() as never;
         },
       },
@@ -999,7 +1076,11 @@ describe("ClaudeAgentSdkDriver", () => {
         query: ({ prompt, options }) => {
           calls.push({ prompt, options: options as { resume?: string } });
           return (async function* () {
-            yield { type: "system", subtype: "init", session_id: "sdk-sess-42" } as never;
+            yield {
+              type: "system",
+              subtype: "init",
+              session_id: "sdk-sess-42",
+            } as never;
             yield {
               type: "assistant",
               message: { content: [{ type: "text", text: "answer" }] },
@@ -1016,7 +1097,10 @@ describe("ClaudeAgentSdkDriver", () => {
     });
 
     const sessionEvents: Array<{ author: string; content: Content }> = [
-      { author: "user", content: { role: "user", parts: [{ text: "turn-1" }] } },
+      {
+        author: "user",
+        content: { role: "user", parts: [{ text: "turn-1" }] },
+      },
     ];
 
     const turn1Events: string[] = [];
@@ -1065,9 +1149,17 @@ describe("ClaudeAgentSdkDriver", () => {
     // Turn 2 sends exactly one user-role message: the newest turn only.
     const prompt = calls[1].prompt;
     expect(typeof prompt).not.toBe("string");
-    const collected: Array<{ message: { role: string; content: Array<{ type: string; text?: string }> } }> = [];
+    const collected: Array<{
+      message: {
+        role: string;
+        content: Array<{ type: string; text?: string }>;
+      };
+    }> = [];
     for await (const message of prompt as AsyncIterable<{
-      message: { role: string; content: Array<{ type: string; text?: string }> };
+      message: {
+        role: string;
+        content: Array<{ type: string; text?: string }>;
+      };
     }>) {
       collected.push(message);
     }
@@ -1084,7 +1176,9 @@ describe("ClaudeAgentSdkDriver", () => {
       expect(message.message.role).not.toBe("assistant");
     }
     expect(turn2Events.some((e) => e.type === "error")).toBe(false);
-    expect(turn2Events.some((e) => e.code === "CLAUDE_AGENT_SDK_ERROR")).toBe(false);
+    expect(turn2Events.some((e) => e.code === "CLAUDE_AGENT_SDK_ERROR")).toBe(
+      false,
+    );
   });
 
   // --- STREAM-1: capability claim matches actual behavior ---

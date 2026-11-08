@@ -6,9 +6,9 @@
 
 import { describe, expect, test } from "bun:test";
 import { BaseAgent } from "@google/adk";
-import * as root from "../../src/index.js";
-import * as agents from "../../src/agents/index.js";
 import packageJson from "../../package.json";
+import * as agents from "../../src/agents/index.js";
+import * as root from "../../src/index.js";
 
 describe("agents public exports", () => {
   test("root export behavior remains LLM-focused", () => {
@@ -36,8 +36,12 @@ describe("agents public exports", () => {
     expect(agents.ClaudeAgent).toBeFunction();
     expect(agents.GeminiCliAgent).toBeFunction();
     expect(agents.CODEX_AGENT_DEFINITION.provider).toBe(agents.CODEX_PROVIDER);
-    expect(agents.CLAUDE_AGENT_DEFINITION.provider).toBe(agents.CLAUDE_PROVIDER);
-    expect(agents.GEMINI_CLI_AGENT_DEFINITION.provider).toBe(agents.GEMINI_CLI_PROVIDER);
+    expect(agents.CLAUDE_AGENT_DEFINITION.provider).toBe(
+      agents.CLAUDE_PROVIDER,
+    );
+    expect(agents.GEMINI_CLI_AGENT_DEFINITION.provider).toBe(
+      agents.GEMINI_CLI_PROVIDER,
+    );
     expect(agents.ExternalAgentProviderRegistry).toBeFunction();
     expect(agents.EnvCredentialProvider).toBeFunction();
     expect(agents.NoopCredentialProvider).toBeFunction();
@@ -62,7 +66,10 @@ describe("agents public exports", () => {
     expect(claude.provider).toEqual(agents.CLAUDE_PROVIDER);
     expect(gemini.provider).toEqual(agents.GEMINI_CLI_PROVIDER);
 
-    const root = new agents.ClaudeAgent({ name: "root", subAgents: [codex, gemini] });
+    const root = new agents.ClaudeAgent({
+      name: "root",
+      subAgents: [codex, gemini],
+    });
     expect(root.subAgents).toEqual([codex, gemini]);
   });
 

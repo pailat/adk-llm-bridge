@@ -17,7 +17,9 @@ import { OpenAICompatibleLlm } from "./openai-compatible-llm.js";
 import type { ProviderDefinition } from "./provider-definition.js";
 
 /** Type compatible with LLMRegistry.register(). */
-type RegisterableLlm = (new (params: { model: string }) => BaseLlm) & {
+type RegisterableLlm = (new (params: {
+  model: string;
+}) => BaseLlm) & {
   readonly supportedModels: (string | RegExp)[];
 };
 

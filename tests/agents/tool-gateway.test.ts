@@ -1,17 +1,17 @@
+import { describe, expect, test } from "bun:test";
 import {
   BaseAgent,
   BaseLlm,
+  type BaseLlmConnection,
   createEvent,
   createEventActions,
   FunctionTool,
-  LlmAgent,
-  PluginManager,
-  type BaseLlmConnection,
   type InvocationContext,
+  LlmAgent,
   type LlmRequest,
   type LlmResponse,
+  PluginManager,
 } from "@google/adk";
-import { describe, expect, test } from "bun:test";
 import {
   ExternalAgent,
   type ExternalAgentDriver,
@@ -42,7 +42,10 @@ class TextAgent extends BaseAgent {
       author: this.name,
       content: { role: "model", parts: [{ text: `OK: ${task}` }] },
     });
-    yield createEvent({ invocationId: context.invocationId, author: this.name });
+    yield createEvent({
+      invocationId: context.invocationId,
+      author: this.name,
+    });
   }
 
   protected async *runLiveImpl() {}
@@ -70,7 +73,9 @@ class FakeLlm extends BaseLlm {
     super({ model: "fake-model" });
   }
 
-  async *generateContentAsync(llmRequest: LlmRequest): AsyncGenerator<LlmResponse, void> {
+  async *generateContentAsync(
+    llmRequest: LlmRequest,
+  ): AsyncGenerator<LlmResponse, void> {
     this.requests.push(llmRequest);
     yield { content: { role: "model", parts: [{ text: "child saw task" }] } };
   }
@@ -87,13 +92,19 @@ class ToolCallingFakeLlm extends BaseLlm {
     super({ model: "fake-tool-model" });
   }
 
-  async *generateContentAsync(llmRequest: LlmRequest): AsyncGenerator<LlmResponse, void> {
+  async *generateContentAsync(
+    llmRequest: LlmRequest,
+  ): AsyncGenerator<LlmResponse, void> {
     this.requests.push(llmRequest);
     const hasToolResponse = llmRequest.contents.some((content) =>
-      content.parts?.some((part) => part.functionResponse?.name === "lookup_status")
+      content.parts?.some(
+        (part) => part.functionResponse?.name === "lookup_status",
+      ),
     );
     if (hasToolResponse) {
-      yield { content: { role: "model", parts: [{ text: "final after tool" }] } };
+      yield {
+        content: { role: "model", parts: [{ text: "final after tool" }] },
+      };
       return;
     }
     yield {
@@ -144,7 +155,10 @@ describe("ToolGateway", () => {
       parentContext: parentContext(root),
     });
 
-    const result = await gateway.runSubAgent({ agentName: "worker", task: "do it" });
+    const result = await gateway.runSubAgent({
+      agentName: "worker",
+      task: "do it",
+    });
 
     expect(result).toEqual({
       agentName: "worker",
@@ -186,7 +200,9 @@ describe("ToolGateway", () => {
       name: "transfer_to_agent",
       args: { agentName: "worker" },
     });
-    expect(emitted[0].content?.parts?.[0]?.functionCall?.args).not.toHaveProperty("task");
+    expect(
+      emitted[0].content?.parts?.[0]?.functionCall?.args,
+    ).not.toHaveProperty("task");
     expect(emitted[0].customMetadata).toBeUndefined();
     expect(emitted[0].finishReason).toBe("STOP");
     expect(emitted[0].turnComplete).toBe(true);
@@ -268,7 +284,10 @@ describe("ToolGateway", () => {
         author: "worker",
         content: { role: "model", parts: [{ text: "answer" }] },
         actions: createEventActions({ stateDelta: { codexThread: "t-1" } }),
-        customMetadata: { title: "worker: final response", externalAgent: true },
+        customMetadata: {
+          title: "worker: final response",
+          externalAgent: true,
+        },
       }),
     ]);
     const root = new TextAgent("root");
@@ -330,7 +349,10 @@ describe("ToolGateway", () => {
       parentContext: context,
     });
 
-    const result = await gateway.runSubAgent({ agentName: "worker", task: "delegated task" });
+    const result = await gateway.runSubAgent({
+      agentName: "worker",
+      task: "delegated task",
+    });
 
     expect(result.output).toBe("child saw task");
     expect(fakeLlm.requests).toHaveLength(1);
@@ -339,7 +361,9 @@ describe("ToolGateway", () => {
       parts: [{ text: "delegated task" }],
     });
     expect(context.session.events).toHaveLength(1);
-    expect(context.session.events[0].content?.parts?.[0]?.text).toBe("previous task");
+    expect(context.session.events[0].content?.parts?.[0]?.text).toBe(
+      "previous task",
+    );
   });
 
   test("persists child LlmAgent events in the child session for multi-step tool calls", async () => {
@@ -355,7 +379,11 @@ describe("ToolGateway", () => {
       } as never,
       execute: () => ({ status: "degraded" }),
     });
-    const worker = new LlmAgent({ name: "worker", model: fakeLlm, tools: [lookupStatus] });
+    const worker = new LlmAgent({
+      name: "worker",
+      model: fakeLlm,
+      tools: [lookupStatus],
+    });
     const root = new TextAgent("root");
     const context = parentContext(root);
     const gateway = new ToolGateway({
@@ -364,14 +392,21 @@ describe("ToolGateway", () => {
       parentContext: context,
     });
 
-    const result = await gateway.runSubAgent({ agentName: "worker", task: "check auth" });
+    const result = await gateway.runSubAgent({
+      agentName: "worker",
+      task: "check auth",
+    });
 
     expect(result.output).toBe("final after tool");
     expect(result.summary.toolCalls).toBe(1);
     expect(fakeLlm.requests).toHaveLength(2);
-    expect(fakeLlm.requests[1].contents.some((content) =>
-      content.parts?.some((part) => part.functionResponse?.name === "lookup_status")
-    )).toBe(true);
+    expect(
+      fakeLlm.requests[1].contents.some((content) =>
+        content.parts?.some(
+          (part) => part.functionResponse?.name === "lookup_status",
+        ),
+      ),
+    ).toBe(true);
     expect(context.session.events).toHaveLength(0);
   });
 
@@ -406,7 +441,10 @@ describe("ToolGateway", () => {
       parentContext: parentContext(root),
     });
 
-    const result = await gateway.runSubAgent({ agentName: "worker", task: "do it" });
+    const result = await gateway.runSubAgent({
+      agentName: "worker",
+      task: "do it",
+    });
 
     expect(result.output).toBe("final text");
   });
@@ -437,7 +475,10 @@ describe("ToolGateway", () => {
       parentContext: parentContext(root),
     });
 
-    const result = await gateway.runSubAgent({ agentName: "worker", task: "do it" });
+    const result = await gateway.runSubAgent({
+      agentName: "worker",
+      task: "do it",
+    });
 
     expect(result.output).toBe("tool output");
     expect(result.summary.textEvents).toBe(0);
@@ -471,7 +512,10 @@ describe("ToolGateway", () => {
       parentContext: parentContext(root),
     });
 
-    const result = await gateway.runSubAgent({ agentName: "worker", task: "do it" });
+    const result = await gateway.runSubAgent({
+      agentName: "worker",
+      task: "do it",
+    });
 
     expect(result.output).toBe("Lamento completo");
     expect(result.summary.textEvents).toBe(1);
@@ -489,7 +533,9 @@ describe("ToolGateway", () => {
           invocationId: context.invocationId,
           author: this.name,
           content: { role: "model", parts: [{ text: "stateful" }] },
-          actions: createEventActions({ stateDelta: { architectureSummary: "done" } }),
+          actions: createEventActions({
+            stateDelta: { architectureSummary: "done" },
+          }),
         });
       }
 
@@ -505,7 +551,10 @@ describe("ToolGateway", () => {
       eventSink: (event) => emitted.push(event),
     });
 
-    const result = await gateway.runSubAgent({ agentName: "worker", task: "do it" });
+    const result = await gateway.runSubAgent({
+      agentName: "worker",
+      task: "do it",
+    });
 
     expect(result.stateDelta).toEqual({ architectureSummary: "done" });
     expect(emitted).toHaveLength(3);
@@ -523,7 +572,9 @@ describe("ToolGateway", () => {
       content: { role: "model", parts: [{ text: "stateful" }] },
     });
     expect(emitted[2].customMetadata).toBeUndefined();
-    expect(emitted[2].actions.stateDelta).toEqual({ architectureSummary: "done" });
+    expect(emitted[2].actions.stateDelta).toEqual({
+      architectureSummary: "done",
+    });
   });
 
   test("surfaces a content-less stateDelta event in native mode so resume survives", async () => {
@@ -541,7 +592,9 @@ describe("ToolGateway", () => {
         yield createEvent({
           invocationId: context.invocationId,
           author: this.name,
-          actions: createEventActions({ stateDelta: { codexThread: "thread-123" } }),
+          actions: createEventActions({
+            stateDelta: { codexThread: "thread-123" },
+          }),
         });
         yield createEvent({
           invocationId: context.invocationId,
@@ -562,7 +615,10 @@ describe("ToolGateway", () => {
       eventSink: (event) => emitted.push(event),
     });
 
-    const result = await gateway.runSubAgent({ agentName: "worker", task: "do it" });
+    const result = await gateway.runSubAgent({
+      agentName: "worker",
+      task: "do it",
+    });
 
     // #0 transfer call, #1 transfer response (clean), #2 surfaced state_delta
     // event, #3 real-answer sub-agent turn.
@@ -572,7 +628,9 @@ describe("ToolGateway", () => {
     // The content-less state_delta event surfaces as its own event carrying the
     // delta, so the runner commits codex_thread to session.state.
     expect(emitted[2].content).toBeUndefined();
-    expect(emitted[2].actions.stateDelta).toEqual({ codexThread: "thread-123" });
+    expect(emitted[2].actions.stateDelta).toEqual({
+      codexThread: "thread-123",
+    });
     expect(emitted[2].customMetadata).toBeUndefined();
     // #3 the real answer.
     expect(emitted[3].content?.parts?.[0]?.text).toBe("real answer");
@@ -611,7 +669,10 @@ describe("ToolGateway", () => {
       parentContext: parentContext(root),
     });
 
-    const result = await gateway.runSubAgent({ agentName: "missing", task: "do it" });
+    const result = await gateway.runSubAgent({
+      agentName: "missing",
+      task: "do it",
+    });
 
     expect(result.error).toBe("Unknown ADK subagent: missing");
     expect(result.output).toBe("");

@@ -4,8 +4,8 @@
  * SPDX-License-Identifier: MIT
  */
 
-import type { CredentialRequest, ExternalAgentCredential } from "./schema.js";
 import type { ExternalAgentCredentialProvider } from "./credential-provider.js";
+import type { CredentialRequest, ExternalAgentCredential } from "./schema.js";
 
 export type EnvSource = Record<string, string | undefined>;
 

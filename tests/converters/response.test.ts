@@ -635,9 +635,7 @@ describe("reasoning_details (structured, signed) passthrough", () => {
 
     convertStreamChunk(
       createChunk({
-        reasoning_details: [
-          { type: "reasoning.text", text: "foo ", index: 0 },
-        ],
+        reasoning_details: [{ type: "reasoning.text", text: "foo ", index: 0 }],
       } as unknown as ChatCompletionChunk["choices"][0]["delta"]),
       acc,
     );

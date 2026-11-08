@@ -15,8 +15,8 @@
  */
 
 import {
-  resolveConfig,
   type ResolvedConfig,
+  resolveConfig,
 } from "../../core/config-resolver.js";
 import { OpenAICompatibleLlm } from "../../core/openai-compatible-llm.js";
 import type { ProviderDefinition } from "../../core/provider-definition.js";

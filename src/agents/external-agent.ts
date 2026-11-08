@@ -15,12 +15,15 @@ import type { Content } from "@google/genai";
 import { trace } from "@opentelemetry/api";
 import type { ExternalAgentCredentialProvider } from "./auth/credential-provider.js";
 import { NoopCredentialProvider } from "./auth/credential-provider.js";
+import type { ExternalAgentEvent } from "./events.js";
 import type { ExternalAgentDriver } from "./external-agent-driver.js";
 import { PlaceholderExternalAgentDriver } from "./external-agent-driver.js";
-import type { ExternalAgentEvent } from "./events.js";
 import type { ExternalAgentPermissionPolicy } from "./permissions/schema.js";
 import type { ExternalAgentProviderDefinition } from "./provider/schema.js";
-import { consumeDelegationFinalAnswer, ToolGateway } from "./tools/tool-gateway.js";
+import {
+  consumeDelegationFinalAnswer,
+  ToolGateway,
+} from "./tools/tool-gateway.js";
 
 const tracerName = "gcp.vertex.agent";
 const tracerVersion = "adk-llm-bridge";
@@ -33,7 +36,9 @@ function readPermissionOverride(
   return isPermissionPolicy(override) ? override : undefined;
 }
 
-function isPermissionPolicy(value: unknown): value is ExternalAgentPermissionPolicy {
+function isPermissionPolicy(
+  value: unknown,
+): value is ExternalAgentPermissionPolicy {
   return Boolean(
     value &&
       typeof value === "object" &&
@@ -90,12 +95,17 @@ export class ExternalAgent extends BaseAgent {
     this.permissions = config.permissions;
   }
 
-  protected createInvocationContext(parentContext: InvocationContext): InvocationContext {
+  protected createInvocationContext(
+    parentContext: InvocationContext,
+  ): InvocationContext {
     const context = super.createInvocationContext(parentContext);
     const inherited = readPermissionOverride(parentContext);
     if (inherited) {
-      (context as { externalAgentPermissionOverride?: ExternalAgentPermissionPolicy })
-        .externalAgentPermissionOverride = inherited;
+      (
+        context as {
+          externalAgentPermissionOverride?: ExternalAgentPermissionPolicy;
+        }
+      ).externalAgentPermissionOverride = inherited;
     }
     return context;
   }
@@ -112,18 +122,19 @@ export class ExternalAgent extends BaseAgent {
     const queue = new AsyncEventQueue<Event>();
     const rootAgent = this.rootAgent ?? context.agent ?? this;
     const subAgents = this.subAgents;
-    const toolGateway = subAgents.length > 0
-      ? new ToolGateway({
-          rootAgent,
-          subAgents,
-          parentContext: context,
-          parentPermissions: permissions,
-          eventSink: (event) => {
-            traceAdkEvent({ event, context, providerId: this.provider.id });
-            queue.push(event);
-          },
-        })
-      : undefined;
+    const toolGateway =
+      subAgents.length > 0
+        ? new ToolGateway({
+            rootAgent,
+            subAgents,
+            parentContext: context,
+            parentPermissions: permissions,
+            eventSink: (event) => {
+              traceAdkEvent({ event, context, providerId: this.provider.id });
+              queue.push(event);
+            },
+          })
+        : undefined;
 
     void (async () => {
       try {
@@ -153,7 +164,11 @@ export class ExternalAgent extends BaseAgent {
           }
           const adkEvent = this.toAdkEvent(event, context);
           if (adkEvent) {
-            traceAdkEvent({ event: adkEvent, context, providerId: this.provider.id });
+            traceAdkEvent({
+              event: adkEvent,
+              context,
+              providerId: this.provider.id,
+            });
             queue.push(adkEvent);
           }
         }
@@ -264,9 +279,10 @@ export class ExternalAgent extends BaseAgent {
   private toolResultToContent(
     event: Extract<ExternalAgentEvent, { type: "tool_result" }>,
   ): Content {
-    const response = typeof event.result === "object" && event.result !== null
-      ? (event.result as Record<string, unknown>)
-      : { result: event.result };
+    const response =
+      typeof event.result === "object" && event.result !== null
+        ? (event.result as Record<string, unknown>)
+        : { result: event.result };
     return {
       role: "user",
       parts: [
@@ -274,7 +290,9 @@ export class ExternalAgent extends BaseAgent {
           functionResponse: {
             id: event.callId,
             name: event.name,
-            response: event.error ? { ...response, error: event.error } : response,
+            response: event.error
+              ? { ...response, error: event.error }
+              : response,
           },
         },
       ],
@@ -282,18 +300,25 @@ export class ExternalAgent extends BaseAgent {
   }
 }
 
-function metadataForExternalEvent(agentName: string, event: ExternalAgentEvent): Record<string, unknown> {
+function metadataForExternalEvent(
+  agentName: string,
+  event: ExternalAgentEvent,
+): Record<string, unknown> {
   const metadata = "metadata" in event && event.metadata ? event.metadata : {};
   return {
     ...metadata,
-    title: typeof metadata.title === "string"
-      ? metadata.title
-      : readableExternalEventTitle(agentName, event),
+    title:
+      typeof metadata.title === "string"
+        ? metadata.title
+        : readableExternalEventTitle(agentName, event),
     externalAgent: true,
   };
 }
 
-function readableExternalEventTitle(agentName: string, event: ExternalAgentEvent): string {
+function readableExternalEventTitle(
+  agentName: string,
+  event: ExternalAgentEvent,
+): string {
   switch (event.type) {
     case "output": {
       const itemType = stringValue(event.metadata?.itemType);
@@ -301,7 +326,9 @@ function readableExternalEventTitle(agentName: string, event: ExternalAgentEvent
       if (itemType) {
         return `${agentName}: ${itemType}${status ? ` ${status}` : ""}`;
       }
-      return event.partial ? `${agentName}: progress` : `${agentName}: final response`;
+      return event.partial
+        ? `${agentName}: progress`
+        : `${agentName}: final response`;
     }
     case "error":
       return `${agentName}: error ${event.code ?? "EXTERNAL_AGENT_ERROR"}`;
@@ -397,8 +424,10 @@ function traceAdkEvent({
     const metadataSubAgentName = stringValue(metadata.subAgentName);
     span.setAttributes({
       "gen_ai.system": "gcp.vertex.agent",
-      "gen_ai.agent.name": event.author ?? context.agent?.name ?? "external_agent",
-      "gen_ai.operation.name": spanName === "call_llm" ? "call_llm" : "execute_tool",
+      "gen_ai.agent.name":
+        event.author ?? context.agent?.name ?? "external_agent",
+      "gen_ai.operation.name":
+        spanName === "call_llm" ? "call_llm" : "execute_tool",
       "gen_ai.request.model": providerId,
       "gcp.vertex.agent.invocation_id": context.invocationId,
       "gcp.vertex.agent.session_id": readSessionId(context),
@@ -414,15 +443,25 @@ function traceAdkEvent({
       "gcp.vertex.agent.llm_response": safeJsonSerialize(event),
     });
 
-    const functionCall = event.content?.parts?.find((part) => part.functionCall)?.functionCall;
-    const functionResponse = event.content?.parts?.find((part) => part.functionResponse)?.functionResponse;
+    const functionCall = event.content?.parts?.find(
+      (part) => part.functionCall,
+    )?.functionCall;
+    const functionResponse = event.content?.parts?.find(
+      (part) => part.functionResponse,
+    )?.functionResponse;
     if (functionCall) {
       span.setAttributes({
         "gen_ai.operation.name": "execute_tool",
         "gen_ai.tool.name": functionCall.name ?? "run_adk_subagent",
         "gen_ai.tool.call.id": functionCall.id ?? event.id,
-        "gcp.vertex.agent.tool_call_args": safeJsonSerialize(functionCall.args ?? {}),
-        "gcp.vertex.agent.subagent.name": stringValue((functionCall.args as { agentName?: unknown } | undefined)?.agentName) || metadataSubAgentName,
+        "gcp.vertex.agent.tool_call_args": safeJsonSerialize(
+          functionCall.args ?? {},
+        ),
+        "gcp.vertex.agent.subagent.name":
+          stringValue(
+            (functionCall.args as { agentName?: unknown } | undefined)
+              ?.agentName,
+          ) || metadataSubAgentName,
       });
     }
     if (functionResponse) {
@@ -430,8 +469,14 @@ function traceAdkEvent({
         "gen_ai.operation.name": "execute_tool",
         "gen_ai.tool.name": functionResponse.name ?? "run_adk_subagent",
         "gen_ai.tool.call.id": functionResponse.id ?? event.id,
-        "gcp.vertex.agent.tool_response": safeJsonSerialize(functionResponse.response ?? {}),
-        "gcp.vertex.agent.subagent.name": stringValue((functionResponse.response as { agentName?: unknown } | undefined)?.agentName) || metadataSubAgentName,
+        "gcp.vertex.agent.tool_response": safeJsonSerialize(
+          functionResponse.response ?? {},
+        ),
+        "gcp.vertex.agent.subagent.name":
+          stringValue(
+            (functionResponse.response as { agentName?: unknown } | undefined)
+              ?.agentName,
+          ) || metadataSubAgentName,
       });
     }
   } finally {
@@ -458,17 +503,26 @@ function contentForTrace(content: Content): Content {
 }
 
 function spanNameForEvent(event: Event): string {
-  const functionCall = event.content?.parts?.find((part) => part.functionCall)?.functionCall;
+  const functionCall = event.content?.parts?.find(
+    (part) => part.functionCall,
+  )?.functionCall;
   if (functionCall) {
-    const subAgentName = stringValue((functionCall.args as { agentName?: unknown } | undefined)?.agentName);
+    const subAgentName = stringValue(
+      (functionCall.args as { agentName?: unknown } | undefined)?.agentName,
+    );
     return functionCall.name === "run_adk_subagent" && subAgentName
       ? `execute_tool run_adk_subagent → ${subAgentName}`
       : `execute_tool ${functionCall.name ?? "<unknown>"}${toolDetail(functionCall.args)}`;
   }
 
-  const functionResponse = event.content?.parts?.find((part) => part.functionResponse)?.functionResponse;
+  const functionResponse = event.content?.parts?.find(
+    (part) => part.functionResponse,
+  )?.functionResponse;
   if (functionResponse) {
-    const subAgentName = stringValue((functionResponse.response as { agentName?: unknown } | undefined)?.agentName);
+    const subAgentName = stringValue(
+      (functionResponse.response as { agentName?: unknown } | undefined)
+        ?.agentName,
+    );
     return functionResponse.name === "run_adk_subagent" && subAgentName
       ? `execute_tool run_adk_subagent ← ${subAgentName}`
       : `execute_tool ${functionResponse.name ?? "<unknown>"}${toolDetail(functionResponse.response)}`;
@@ -492,7 +546,11 @@ function spanNameForToolProgress(event: Event): string | undefined {
 }
 
 function isToolProgressItemType(value: string): boolean {
-  return value === "command_execution" || value === "web_search" || value === "mcp_tool_call";
+  return (
+    value === "command_execution" ||
+    value === "web_search" ||
+    value === "mcp_tool_call"
+  );
 }
 
 function toolDetail(value: unknown): string {
@@ -515,19 +573,25 @@ function readableEventTitle(event: Event): string {
     return metadataTitle;
   }
 
-  const functionCall = event.content?.parts?.find((part) => part.functionCall)?.functionCall;
+  const functionCall = event.content?.parts?.find(
+    (part) => part.functionCall,
+  )?.functionCall;
   if (functionCall?.name) {
     return `functionCall:${functionCall.name}`;
   }
 
-  const functionResponse = event.content?.parts?.find((part) => part.functionResponse)?.functionResponse;
+  const functionResponse = event.content?.parts?.find(
+    (part) => part.functionResponse,
+  )?.functionResponse;
   if (functionResponse?.name) {
     return `functionResponse:${functionResponse.name}`;
   }
 
   const text = event.content?.parts
     ?.map((part) => part.text)
-    .find((part): part is string => typeof part === "string" && part.length > 0);
+    .find(
+      (part): part is string => typeof part === "string" && part.length > 0,
+    );
   if (text) {
     return truncate(text, 80);
   }
@@ -539,11 +603,15 @@ function readableEventTitle(event: Event): string {
     return `${subAgentName}: ${itemType}${status ? ` ${status}` : ""}`;
   }
 
-  return event.errorMessage ? `error:${event.errorCode ?? "EXTERNAL_AGENT_ERROR"}` : event.author ?? "external_agent";
+  return event.errorMessage
+    ? `error:${event.errorCode ?? "EXTERNAL_AGENT_ERROR"}`
+    : (event.author ?? "external_agent");
 }
 
 function readCustomMetadata(event: Event): Record<string, unknown> {
-  return (event as { customMetadata?: Record<string, unknown> }).customMetadata ?? {};
+  return (
+    (event as { customMetadata?: Record<string, unknown> }).customMetadata ?? {}
+  );
 }
 
 function readSessionId(context: InvocationContext): string {
@@ -552,7 +620,9 @@ function readSessionId(context: InvocationContext): string {
 }
 
 function truncate(value: string, maxLength: number): string {
-  return value.length > maxLength ? `${value.slice(0, maxLength - 3)}...` : value;
+  return value.length > maxLength
+    ? `${value.slice(0, maxLength - 3)}...`
+    : value;
 }
 
 function stringValue(value: unknown): string {

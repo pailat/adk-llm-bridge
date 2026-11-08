@@ -3,8 +3,8 @@ import { resetConfig } from "../../../src/config.js";
 import { AI_GATEWAY_DEFINITION } from "../../../src/providers/ai-gateway/definition.js";
 import { AIGatewayLlm } from "../../../src/providers/ai-gateway/index.js";
 import {
-  describeModelPatterns,
   describeConnectError,
+  describeModelPatterns,
 } from "../../helpers/provider-test-helpers.js";
 
 describe("AIGatewayLlm", () => {

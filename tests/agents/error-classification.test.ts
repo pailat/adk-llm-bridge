@@ -5,8 +5,8 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { classifyRecoverable } from "../../src/agents/runtime/error-classification.js";
 import * as agents from "../../src/agents/index.js";
+import { classifyRecoverable } from "../../src/agents/runtime/error-classification.js";
 
 describe("classifyRecoverable", () => {
   test("is exported from the agents public surface", () => {
@@ -82,14 +82,18 @@ describe("classifyRecoverable", () => {
   });
 
   test("rate-limit message is not mis-bucketed as quota/billing", () => {
-    expect(classifyRecoverable({ message: "rate limit quota reached" })).toEqual({
+    expect(
+      classifyRecoverable({ message: "rate limit quota reached" }),
+    ).toEqual({
       recoverable: true,
       code: "RATE_LIMIT",
     });
   });
 
   test("unknown input falls back to recoverable + UNKNOWN_ERROR by default", () => {
-    expect(classifyRecoverable({ message: "something weird happened" })).toEqual({
+    expect(
+      classifyRecoverable({ message: "something weird happened" }),
+    ).toEqual({
       recoverable: true,
       code: "UNKNOWN_ERROR",
     });

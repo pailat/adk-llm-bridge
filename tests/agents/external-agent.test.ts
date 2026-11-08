@@ -4,8 +4,8 @@ import {
   createEvent,
   createEventActions,
   InMemorySessionService,
-  Runner,
   type InvocationContext,
+  Runner,
 } from "@google/adk";
 import { trace } from "@opentelemetry/api";
 import {
@@ -27,7 +27,9 @@ class StateAgent extends BaseAgent {
       author: this.name,
       branch: context.branch,
       content: { role: "model", parts: [{ text: "child output" }] },
-      actions: createEventActions({ stateDelta: { architectureSummary: "done" } }),
+      actions: createEventActions({
+        stateDelta: { architectureSummary: "done" },
+      }),
     });
   }
 
@@ -40,7 +42,9 @@ class StaticDriver implements ExternalAgentDriver {
 
   constructor(private readonly events: ExternalAgentEvent[]) {}
 
-  async *run(request: ExternalAgentRunRequest): AsyncIterable<ExternalAgentEvent> {
+  async *run(
+    request: ExternalAgentRunRequest,
+  ): AsyncIterable<ExternalAgentEvent> {
     this.request = request;
     yield* this.events;
   }
@@ -49,7 +53,9 @@ class StaticDriver implements ExternalAgentDriver {
 class DelegatingDriver implements ExternalAgentDriver {
   readonly providerId = CODEX_PROVIDER.id;
 
-  async *run(request: ExternalAgentRunRequest): AsyncIterable<ExternalAgentEvent> {
+  async *run(
+    request: ExternalAgentRunRequest,
+  ): AsyncIterable<ExternalAgentEvent> {
     yield { type: "output", content: "starting", partial: true };
     const result = await request.toolGateway?.runSubAgent({
       agentName: "state_agent",
@@ -106,7 +112,10 @@ function installTraceCapture(): CapturedSpan[] {
   return spans;
 }
 
-async function collect(agent: ExternalAgent, context: Partial<InvocationContext> = {}) {
+async function collect(
+  agent: ExternalAgent,
+  context: Partial<InvocationContext> = {},
+) {
   const events = [];
   for await (const event of agent.runAsync({
     invocationId: "inv-1",
@@ -216,7 +225,9 @@ describe("ExternalAgent ADK event formatting", () => {
     const events = await Promise.race([
       collect(agent),
       Bun.sleep(250).then(() => {
-        throw new Error("external agent waited for provider EOF after completed");
+        throw new Error(
+          "external agent waited for provider EOF after completed",
+        );
       }),
     ]);
 
@@ -244,7 +255,9 @@ describe("ExternalAgent ADK event formatting", () => {
       "gcp.vertex.agent.provider_id": CODEX_PROVIDER.id,
       "gcp.vertex.agent.event_title": "codex_agent: final response",
     });
-    expect(JSON.parse(spans[0].attributes["gcp.vertex.agent.llm_request"] as string)).toEqual({
+    expect(
+      JSON.parse(spans[0].attributes["gcp.vertex.agent.llm_request"] as string),
+    ).toEqual({
       model: CODEX_PROVIDER.id,
       contents: [{ role: "user", parts: [{ text: "Review this diff" }] }],
     });
@@ -349,7 +362,10 @@ describe("ExternalAgent ADK event formatting", () => {
     for await (const event of runner.runAsync({
       userId: "user",
       sessionId: session.id,
-      newMessage: { role: "user", parts: [{ text: "understand architecture" }] },
+      newMessage: {
+        role: "user",
+        parts: [{ text: "understand architecture" }],
+      },
     })) {
       streamed.push(event);
     }
@@ -366,7 +382,9 @@ describe("ExternalAgent ADK event formatting", () => {
     // Delegation is shaped as a native transfer_to_agent call.
     expect(
       updated?.events.some((event) =>
-        event.content?.parts?.some((part) => part.functionCall?.name === "transfer_to_agent"),
+        event.content?.parts?.some(
+          (part) => part.functionCall?.name === "transfer_to_agent",
+        ),
       ),
     ).toBe(true);
 
@@ -383,7 +401,9 @@ describe("ExternalAgent ADK event formatting", () => {
 
     // The transfer response carries the agent-switch signal.
     const transferResponse = updated?.events.find((event) =>
-      event.content?.parts?.some((part) => part.functionResponse?.name === "transfer_to_agent"),
+      event.content?.parts?.some(
+        (part) => part.functionResponse?.name === "transfer_to_agent",
+      ),
     );
     expect(transferResponse).toBeDefined();
     expect(transferResponse?.actions?.transferToAgent).toBe("state_agent");
@@ -402,13 +422,19 @@ describe("ExternalAgent ADK event formatting", () => {
     // Native ordering: call -> transfer response (with the agent-switch signal,
     // fired BEFORE the sub-agent runs) -> sub-agent turn.
     const functionCallIndex = updated?.events.findIndex((event) =>
-      event.content?.parts?.some((part) => part.functionCall?.name === "transfer_to_agent"),
+      event.content?.parts?.some(
+        (part) => part.functionCall?.name === "transfer_to_agent",
+      ),
     );
     const functionResponseIndex = updated?.events.findIndex((event) =>
-      event.content?.parts?.some((part) => part.functionResponse?.name === "transfer_to_agent"),
+      event.content?.parts?.some(
+        (part) => part.functionResponse?.name === "transfer_to_agent",
+      ),
     );
     const childEventIndex = updated?.events.findIndex(
-      (event) => event.author === "state_agent" && event.content?.parts?.[0]?.text === "child output",
+      (event) =>
+        event.author === "state_agent" &&
+        event.content?.parts?.[0]?.text === "child output",
     );
     expect(functionCallIndex).toBeGreaterThanOrEqual(0);
     expect(functionResponseIndex).toBeGreaterThan(functionCallIndex ?? -1);
@@ -421,7 +447,9 @@ describe("ExternalAgent ADK event formatting", () => {
       (event) =>
         event.author === "root_external" &&
         !event.partial &&
-        event.content?.parts?.some((part) => typeof part.text === "string" && part.text.length > 0),
+        event.content?.parts?.some(
+          (part) => typeof part.text === "string" && part.text.length > 0,
+        ),
     );
     expect(rootFinalText).toHaveLength(0);
 
@@ -434,7 +462,9 @@ describe("ExternalAgent ADK event formatting", () => {
     class TwoPhaseDriver implements ExternalAgentDriver {
       readonly providerId = CODEX_PROVIDER.id;
 
-      async *run(request: ExternalAgentRunRequest): AsyncIterable<ExternalAgentEvent> {
+      async *run(
+        request: ExternalAgentRunRequest,
+      ): AsyncIterable<ExternalAgentEvent> {
         await request.toolGateway?.runSubAgent({
           agentName: "state_agent",
           task: "summarize",
