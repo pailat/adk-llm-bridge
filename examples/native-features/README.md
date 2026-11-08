@@ -3,7 +3,7 @@
 A programmatic [Bun](https://bun.sh) + TypeScript CLI that demonstrates **every
 native-model capability** [`adk-llm-bridge`](https://www.npmjs.com/package/adk-llm-bridge)
 passes through to [Google ADK](https://google.github.io/adk-docs/)
-([adk-js](https://github.com/google/adk-js), `@google/adk@^1.2.0`).
+([adk-js](https://github.com/google/adk-js), `@google/adk@^2.4.0`).
 
 Each feature is an isolated "demo" you can run on its own, so you can inspect the
 exact events, parts, and usage metadata the chat UI normally hides
@@ -256,9 +256,9 @@ npm install ../../adk-llm-bridge-*.tgz
 # 3. Prove there is a SINGLE, deduped @google/adk
 npm ls @google/adk
 #   native-features-example@
-#   ├── @google/adk@1.2.0
+#   ├── @google/adk@2.4.0
 #   └─┬ adk-llm-bridge@0.5.3
-#     └── @google/adk@1.2.0 deduped     <-- one copy, deduped
+#     └── @google/adk@2.4.0 deduped     <-- one copy, deduped
 
 # 4. Run the demos against the local build
 cp .env.example .env           # add your ANTHROPIC_API_KEY

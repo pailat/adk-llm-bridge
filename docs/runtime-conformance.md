@@ -102,9 +102,10 @@ prove reconstruction from multiple argument deltas. Reports count `pass`,
 recorded and printed as `[SKIP]`; it never increments the passed count.
 
 The cancellation check aborts after the first partial response and requires the
-bridge iterator to end without yielding any post-abort response. A server that
-ignores `AbortSignal` and completes normally therefore fails instead of being
-mistaken for successful cancellation.
+bridge iterator to end without yielding any post-abort response. Cancellation
+is guaranteed on the client: the OpenAI SDK and the bridge both stop the stream
+once the signal aborts, so this check verifies the bridge contract, not that the
+server honors the abort.
 
 The structured-output check uses a closed object schema with three required,
 enum-constrained values and rejects missing, changed, or additional properties.
@@ -178,7 +179,7 @@ The integrated registry tests exercise `LLMRegistry.resolve` and
 `LLMRegistry.newLlm` with the repository's installed `@google/adk` development
 version. This conformance infrastructure cannot prove that `resolve` has the
 same public behavior across the entire declared peer range
-`@google/adk >=0.6.1 <2`: the deterministic protocol fixtures do not install
+`@google/adk >=2.4.0 <3`: the deterministic protocol fixtures do not install
 alternate peer versions, and doing so here would require dependency/lockfile
 changes outside issue #86 ownership.
 

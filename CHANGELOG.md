@@ -6,6 +6,15 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.6.1] - 2026-07-27
 
+### Breaking
+
+- **Node.js `>=22.0.0` is now required** (`openai` 7 requires it).
+- **`@google/adk` peer is now `>=2.4.0 <3`.** ADK 0.x and 1.x are no longer
+  supported; upgrade to 2.4.0 or later (below 3) first.
+- Optional peers are tightened: `@anthropic-ai/claude-agent-sdk` `>=0.3.319 <0.4`
+  and `@openai/codex-sdk` `>=0.167.0 <0.168`. Update them if you use
+  `adk-llm-bridge/agents`.
+
 ### Added
 
 - **First-class workflows** (`adk-llm-bridge/workflows`) as native ADK
@@ -31,6 +40,14 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Dependency upgrade.** Built and tested against `@google/adk` 2.4.0,
+  `openai` 7, `@anthropic-ai/sdk` 1.6, TypeScript 7 and Biome 2.6; CI uses
+  Node 22 and Bun 1.4.4.
+- `AgentInvocationGateway` now shares the `maxLlmCalls` counter and the ADK 2
+  context fields (`isolationScope`, `nodeToolDepth`, ...) between a parent and
+  its child agents. Previously each child had its own counter.
+- OpenAI-compatible providers stop emitting responses as soon as the
+  `AbortSignal` is aborted, even if the server keeps sending data.
 - Package version remains `0.6.1`; the existing root and `/agents` exports
   remain unchanged while `/workflows` is additive.
 

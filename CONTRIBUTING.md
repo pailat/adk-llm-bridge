@@ -6,8 +6,8 @@ Thank you for your interest in contributing! This document provides guidelines f
 
 ### Prerequisites
 
-- [Bun](https://bun.sh/) >= 1.0.0
-- Node.js >= 18.0.0
+- [Bun](https://bun.sh/) >= 1.4.4
+- Node.js >= 22.0.0
 
 ### Getting Started
 

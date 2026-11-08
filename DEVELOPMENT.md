@@ -43,8 +43,8 @@ adk-llm-bridge/
 
 ### Prerequisites
 
-- [Bun](https://bun.sh/) >= 1.0.0
-- Node.js >= 18.0.0
+- [Bun](https://bun.sh/) >= 1.4.4
+- Node.js >= 22.0.0
 
 ### Initial Setup
 
@@ -75,10 +75,10 @@ Examples use `"adk-llm-bridge": "file:../..` for local development. This creates
 
 ```
 example/node_modules/
-├── @google/adk@0.2.2          # Copy 1
+├── @google/adk@2.4.0          # Copy 1
 └── adk-llm-bridge/
     └── node_modules/
-        └── @google/adk@0.2.2  # Copy 2 (symlink to root)
+        └── @google/adk@2.4.0  # Copy 2 (symlink to root)
 ```
 
 This causes TypeScript errors because ADK uses a private symbol (`BASE_MODEL_SYMBOL`) for type checking:

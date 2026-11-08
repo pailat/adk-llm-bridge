@@ -664,11 +664,11 @@ See the [examples](./examples) directory:
 
 ## Requirements
 
-- Node.js >= 20.0.0
-- `@google/adk` (peer range `>=0.6.1 <2`; tested against 1.2.0)
+- Node.js >= 22.0.0
+- `@google/adk` (peer range `>=2.4.0 <3`; tested against 2.4.0)
 - **Optional, for external coding agents** (installed only if you use `adk-llm-bridge/agents`):
-  - `@anthropic-ai/claude-agent-sdk` (peer `>=0.2.138 <0.4`) — for `ClaudeAgent`
-  - `@openai/codex-sdk` (peer `>=0.130.0 <0.142`) — for `CodexAgent`
+  - `@anthropic-ai/claude-agent-sdk` (peer `>=0.3.319 <0.4`) — for `ClaudeAgent`
+  - `@openai/codex-sdk` (peer `>=0.167.0 <0.168`) — for `CodexAgent`
   - `gemini` CLI on `PATH` — for `GeminiCliAgent`
 - **Optional, for dynamic script workflows** (installed only if you use `ScriptWorkflowAgent`):
   - `quickjs-emscripten-core` (peer `>=0.32 <0.33`)
