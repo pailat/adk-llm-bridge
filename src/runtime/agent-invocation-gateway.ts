@@ -9,11 +9,16 @@ import {
   type BaseAgent,
   BaseSessionService,
   createEvent,
+  createEventActions,
   type Event,
   getFunctionCalls,
+  getPendingUserInputRequests,
   InvocationContext,
+  isFinalResponse,
   isLlmCallsLimitExceededError,
   type Session,
+  type UserInputKind,
+  type UserInputRequest,
 } from "@google/adk";
 import type { Content } from "@google/genai";
 import { inheritSessionPermissions } from "../agents/permissions/inheritance.js";
@@ -32,21 +37,66 @@ export interface AgentInvocationExecutionSummary {
  * - `llm-calls-limit`: the shared `RunConfig.maxLlmCalls` budget was exhausted.
  * - `preparation`: `prepareContext` rejected.
  * - `agent-error`: resolution failed or the agent emitted/threw an error.
+ * - `invalid-resume`: `resume` did not match a pending interrupt.
  */
 export type AgentInvocationErrorKind =
   | "aborted"
   | "llm-calls-limit"
   | "preparation"
-  | "agent-error";
+  | "agent-error"
+  | "invalid-resume";
+
+export type AgentInvocationInterruptKind = UserInputKind | "long-running";
+
+/**
+ * The child stopped waiting for a human or an external system (ADK
+ * `adk_request_input`, `adk_request_confirmation`, `adk_request_credential`
+ * function calls, or a final event carrying `longRunningToolIds`).
+ *
+ * To continue, call `run()` again with the same `agentName`, `resume: { events:
+ * interrupt.events }` and `input` set to a `user` content whose
+ * `functionResponse` parts answer `functionCallIds` (same `id` and `name` as the
+ * pending call, see `requests[].interruptId` / `functionCallName`).
+ */
+export interface AgentInvocationInterrupt {
+  /** Kind of the first pending request; `long-running` for bare LRO calls. */
+  kind: AgentInvocationInterruptKind;
+  /** Ids of the function calls that must be answered to resume. */
+  functionCallIds: readonly string[];
+  /** ADK's flattened view of the pending requests (empty for bare LRO calls). */
+  requests: readonly UserInputRequest[];
+  /**
+   * Every non-partial event of this delegation (including events carried by
+   * `resume` and the input event), in order: the history needed to resume.
+   */
+  events: readonly Event[];
+}
+
+export interface AgentInvocationResume {
+  /** `interrupt.events` of the interrupted result. */
+  events: readonly Event[];
+}
 
 export interface AgentInvocationResult {
   agentName: string;
+  /**
+   * Non-thought text of the last non-partial `isFinalResponse` event that has
+   * text (the Runner/`AgentTool` semantics). When no final event has text it
+   * falls back to function-response output, then to {@link transcript}.
+   */
   output: string;
+  /**
+   * Every visible non-partial text event joined by newlines (previous `output`
+   * behavior), including narration emitted before tool calls.
+   */
+  transcript: string;
   events: readonly Event[];
   summary: AgentInvocationExecutionSummary;
   stateDelta?: Record<string, unknown>;
   error?: string;
   errorKind?: AgentInvocationErrorKind;
+  /** Present when the child stopped waiting for input; see the type docs. */
+  interrupt?: AgentInvocationInterrupt;
 }
 
 export interface AgentInvocationRequest {
@@ -57,10 +107,20 @@ export interface AgentInvocationRequest {
   abortSignal?: AbortSignal;
   /** JSON-safe state projected into the isolated child session only. */
   sessionState?: Readonly<Record<string, unknown>>;
-  /** Merge is the compatibility default; replace prevents parent-state inheritance. */
+  /**
+   * `merge` (default) starts from a deep copy of the parent state (so the child
+   * never shares mutable objects with it) plus `sessionState`; `replace` uses
+   * only `sessionState` and freezes the child state.
+   */
   sessionStateMode?: "merge" | "replace";
-  /** Inherit is the compatibility default; replace hides parent event history. */
+  /**
+   * `replace` (default) starts the child with only the delegated input, like
+   * ADK's `AgentTool`; `inherit` also exposes the parent history, like a native
+   * `transfer_to_agent` (which shares the session).
+   */
   sessionHistoryMode?: "inherit" | "replace";
+  /** Continues a previously interrupted delegation. */
+  resume?: AgentInvocationResume;
   eventSink?: AgentInvocationEventSink;
   /**
    * Host authorization fence invoked around agent resolution. Rejections escape
@@ -139,22 +199,42 @@ export class AgentInvocationGateway {
       );
     }
 
+    const resumeEvents = request.resume?.events ?? [];
+    if (request.resume) {
+      const pending = findInterrupt(resumeEvents);
+      const answered = new Set(
+        (request.input.parts ?? [])
+          .map((part) => part.functionResponse?.id)
+          .filter((id): id is string => typeof id === "string"),
+      );
+      if (!pending?.functionCallIds.some((id) => answered.has(id))) {
+        return failedResult(
+          request.agentName,
+          startedAt,
+          "Resume input does not answer a pending interrupt",
+          "invalid-resume",
+        );
+      }
+    }
+
     const signal = combineAbortSignals([
       request.parentContext.abortSignal,
       request.abortSignal,
     ]);
-    const child = createChildSession(
-      request.parentContext.session,
-      createEvent({
-        invocationId: request.parentContext.invocationId,
-        author: "user",
-        branch: request.branch,
-        content: request.input,
-      }),
-      request.sessionState,
-      request.sessionStateMode ?? "merge",
-      request.sessionHistoryMode ?? "inherit",
-    );
+    const inputEvent = createEvent({
+      invocationId: request.parentContext.invocationId,
+      author: "user",
+      branch: request.branch,
+      content: request.input,
+    });
+    const child = createChildSession({
+      parentSession: request.parentContext.session,
+      inputEvent,
+      priorEvents: resumeEvents,
+      sessionState: request.sessionState,
+      sessionStateMode: request.sessionStateMode ?? "merge",
+      sessionHistoryMode: request.sessionHistoryMode ?? "replace",
+    });
     // Every delegation hop keeps the caller's permission ceiling, whatever the
     // state/history modes: the policy is keyed by session object, not by state.
     inheritSessionPermissions(request.parentContext.session, child.session);
@@ -171,7 +251,7 @@ export class AgentInvocationGateway {
     const text: string[] = [];
     const fallbackOutput: string[] = [];
     const stateDelta: Record<string, unknown> = {};
-    let terminalText: string | undefined;
+    let finalText: string | undefined;
     let textEvents = 0;
     let toolCalls = 0;
     let errors = 0;
@@ -231,8 +311,8 @@ export class AgentInvocationGateway {
           if (visible) {
             textEvents++;
             text.push(visible);
-            if (persisted.turnComplete === true) {
-              terminalText = visible;
+            if (isFinal(persisted)) {
+              finalText = visible;
             }
           } else {
             const fallback = extractFallbackOutput(persisted);
@@ -267,11 +347,14 @@ export class AgentInvocationGateway {
       }
     }
 
+    const transcript =
+      text.length > 0 ? text.join("\n") : fallbackOutput.join("\n");
+    const interrupt = findInterrupt([...resumeEvents, inputEvent, ...events]);
+
     return {
       agentName: agent.name,
-      output:
-        terminalText ??
-        (text.length > 0 ? text.join("\n") : fallbackOutput.join("\n")),
+      output: finalText ?? transcript,
+      transcript,
       events,
       summary: {
         events: events.length,
@@ -283,6 +366,7 @@ export class AgentInvocationGateway {
       ...(Object.keys(stateDelta).length > 0 ? { stateDelta } : {}),
       ...(error ? { error } : {}),
       ...(error && errorKind ? { errorKind } : {}),
+      ...(interrupt ? { interrupt } : {}),
     };
   }
 }
@@ -345,25 +429,47 @@ interface ChildSession {
   append(event: Event): Promise<Event>;
 }
 
-function createChildSession(
-  parentSession: Session,
-  syntheticUserEvent: Event,
-  sessionState: Readonly<Record<string, unknown>> | undefined,
-  sessionStateMode: "merge" | "replace",
-  sessionHistoryMode: "inherit" | "replace",
-): ChildSession {
+function createChildSession({
+  parentSession,
+  inputEvent,
+  priorEvents,
+  sessionState,
+  sessionStateMode,
+  sessionHistoryMode,
+}: {
+  parentSession: Session;
+  inputEvent: Event;
+  priorEvents: readonly Event[];
+  sessionState: Readonly<Record<string, unknown>> | undefined;
+  sessionStateMode: "merge" | "replace";
+  sessionHistoryMode: "inherit" | "replace";
+}): ChildSession {
   const frozen = sessionStateMode === "replace";
+  const baseState = frozen
+    ? { ...sessionState }
+    : { ...cloneState(parentSession.state), ...sessionState };
+  // Deltas recorded by the events of an interrupted run are part of the
+  // delegation's state (they were applied to the previous child session).
+  for (const event of priorEvents) {
+    if (event.partial) continue;
+    for (const [key, value] of Object.entries(
+      event.actions?.stateDelta ?? {},
+    )) {
+      if (!key.startsWith("temp:")) {
+        baseState[key] = value;
+      }
+    }
+  }
   const session: Session = {
     id: parentSession.id,
     appName: parentSession.appName,
     userId: parentSession.userId,
-    state: frozen
-      ? Object.freeze({ ...sessionState })
-      : { ...parentSession.state, ...sessionState },
-    events:
-      sessionHistoryMode === "replace"
-        ? [syntheticUserEvent]
-        : [...parentSession.events, syntheticUserEvent],
+    state: frozen ? Object.freeze(baseState) : baseState,
+    events: [
+      ...(sessionHistoryMode === "inherit" ? parentSession.events : []),
+      ...priorEvents,
+      inputEvent,
+    ],
     lastUpdateTime: parentSession.lastUpdateTime,
   };
 
@@ -387,6 +493,60 @@ function createChildSession(
       session.lastUpdateTime = scratch.lastUpdateTime;
       return stored;
     },
+  };
+}
+
+/**
+ * Deep copy of the parent state so the child never shares mutable objects with
+ * it. Values that cannot be structured-cloned (functions, class instances with
+ * private slots) are not valid session state either and are left out.
+ */
+function cloneState(
+  state: Readonly<Record<string, unknown>>,
+): Record<string, unknown> {
+  const copy: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(state)) {
+    try {
+      copy[key] = structuredClone(value);
+    } catch {
+      // Not cloneable: omit rather than share a mutable reference.
+    }
+  }
+  return copy;
+}
+
+/** `isFinalResponse` tolerant of externally built events without `actions`. */
+function isFinal(event: Event): boolean {
+  return isFinalResponse(
+    event.actions ? event : { ...event, actions: createEventActions() },
+  );
+}
+
+/**
+ * Whether the events end waiting for a human or external system. Uses ADK's
+ * own `getPendingUserInputRequests` (unanswered `adk_request_*` calls) plus a
+ * trailing event that carries `longRunningToolIds`.
+ */
+function findInterrupt(
+  allEvents: readonly Event[],
+): AgentInvocationInterrupt | undefined {
+  const events = allEvents.filter((event) => !event.partial);
+  const requests = getPendingUserInputRequests(events);
+  const trailing = events.at(-1)?.longRunningToolIds ?? [];
+  const functionCallIds = [
+    ...new Set([
+      ...requests.map((request) => request.interruptId),
+      ...trailing,
+    ]),
+  ];
+  if (functionCallIds.length === 0) {
+    return undefined;
+  }
+  return {
+    kind: requests[0]?.kind ?? "long-running",
+    functionCallIds,
+    requests,
+    events,
   };
 }
 
@@ -453,10 +613,12 @@ function failedResult(
   agentName: string,
   startedAt: number,
   error: string,
+  errorKind: AgentInvocationErrorKind = "agent-error",
 ): AgentInvocationResult {
   return {
     agentName,
     output: "",
+    transcript: "",
     events: [],
     summary: {
       events: 0,
@@ -466,7 +628,7 @@ function failedResult(
       durationMs: Date.now() - startedAt,
     },
     error,
-    errorKind: "agent-error",
+    errorKind,
   };
 }
 

@@ -7,6 +7,9 @@ import {
   InvocationContext,
   LlmCallsLimitExceededError,
   PluginManager,
+  REQUEST_CONFIRMATION_FUNCTION_CALL_NAME,
+  REQUEST_CREDENTIAL_FUNCTION_CALL_NAME,
+  REQUEST_INPUT_FUNCTION_CALL_NAME,
 } from "@google/adk";
 import {
   getInheritedPermissions,
@@ -406,7 +409,10 @@ describe("AgentInvocationGateway", () => {
       parentContext: parentContext(root),
     });
 
-    expect(result.output).toBe("first\nsecond");
+    // RT-9: the output is the last final response (ADK Runner/AgentTool
+    // semantics); the previous concatenation lives in `transcript`.
+    expect(result.output).toBe("second");
+    expect(result.transcript).toBe("first\nsecond");
   });
 
   test("returns a controlled result when resolution fails", async () => {
@@ -560,7 +566,8 @@ describe("AgentInvocationGateway", () => {
       expect(context.session.state).toEqual({ shared: true });
       const childEvents = worker.context?.session.events ?? [];
       expect(childEvents.some((event) => event.partial)).toBe(false);
-      expect(childEvents).toHaveLength(3);
+      // Default history is `replace` (AgentTool-like): input + final only.
+      expect(childEvents).toHaveLength(2);
       // The partial still reaches sinks and the result stream.
       expect(result.events).toHaveLength(2);
     });
@@ -827,6 +834,378 @@ describe("AgentInvocationGateway", () => {
       });
 
       expect(getInheritedPermissions(worker.context?.session)).toBeUndefined();
+    });
+  });
+
+  describe("final output and transcript (RT-9)", () => {
+    test("output is the last final text, transcript keeps the narration", async () => {
+      const worker = new CaptureAgent("worker", [
+        createEvent({
+          invocationId: "inv-1",
+          author: "worker",
+          content: {
+            role: "model",
+            parts: [
+              { text: "let me check" },
+              { functionCall: { id: "c", name: "t", args: {} } },
+            ],
+          },
+        }),
+        createEvent({
+          invocationId: "inv-1",
+          author: "worker",
+          content: {
+            role: "user",
+            parts: [{ functionResponse: { id: "c", name: "t", response: {} } }],
+          },
+        }),
+        createEvent({
+          invocationId: "inv-1",
+          author: "worker",
+          content: {
+            role: "model",
+            parts: [{ text: "hidden", thought: true }, { text: "the answer" }],
+          },
+        }),
+      ]);
+      const gateway = new AgentInvocationGateway({
+        resolveAgent: () => worker,
+      });
+
+      const result = await gateway.run({
+        agentName: "worker",
+        input: { role: "user", parts: [{ text: "go" }] },
+        parentContext: parentContext(new CaptureAgent("root")),
+      });
+
+      expect(result.transcript).toBe("let me check\nthe answer");
+      expect(result.output).toBe("the answer");
+    });
+
+    test("skipSummarization and long-running events are final too", async () => {
+      const worker = new CaptureAgent("worker", [
+        createEvent({
+          invocationId: "inv-1",
+          author: "worker",
+          content: {
+            role: "model",
+            parts: [
+              { text: "json" },
+              { functionCall: { id: "c", name: "t", args: {} } },
+            ],
+          },
+          actions: createEventActions({ skipSummarization: true }),
+        }),
+      ]);
+      const gateway = new AgentInvocationGateway({
+        resolveAgent: () => worker,
+      });
+
+      const result = await gateway.run({
+        agentName: "worker",
+        input: { role: "user", parts: [{ text: "go" }] },
+        parentContext: parentContext(new CaptureAgent("root")),
+      });
+
+      expect(result.output).toBe("json");
+    });
+  });
+
+  describe("session isolation defaults (RT-8)", () => {
+    test("defaults to a deep copy of the parent state and no parent history", async () => {
+      const worker = new CaptureAgent();
+      const context = parentContext(new CaptureAgent("root"));
+      context.session.state = { nested: { n: 1 }, fn: () => 1 };
+      const gateway = new AgentInvocationGateway({
+        resolveAgent: () => worker,
+      });
+
+      await gateway.run({
+        agentName: "worker",
+        input: { role: "user", parts: [{ text: "go" }] },
+        parentContext: context,
+      });
+
+      const childState = worker.context?.session.state as {
+        nested: { n: number };
+        fn?: unknown;
+      };
+      expect(childState.nested).toEqual({ n: 1 });
+      expect(childState.nested).not.toBe(context.session.state.nested);
+      childState.nested.n = 99;
+      expect((context.session.state.nested as { n: number }).n).toBe(1);
+      // Non-cloneable values are left out instead of shared.
+      expect("fn" in childState).toBe(false);
+      expect(worker.context?.session.events).toHaveLength(1);
+    });
+
+    test("inherit exposes the parent history (native transfer semantics)", async () => {
+      const worker = new CaptureAgent();
+      const context = parentContext(new CaptureAgent("root"));
+      const gateway = new AgentInvocationGateway({
+        resolveAgent: () => worker,
+      });
+
+      await gateway.run({
+        agentName: "worker",
+        input: { role: "user", parts: [{ text: "go" }] },
+        parentContext: context,
+        sessionHistoryMode: "inherit",
+      });
+
+      expect(worker.context?.session.events).toHaveLength(2);
+      expect(worker.context?.session.events[0]).toBe(context.session.events[0]);
+    });
+  });
+
+  describe("interrupt and resume", () => {
+    const confirmationRequest = () =>
+      createEvent({
+        invocationId: "inv-1",
+        author: "worker",
+        content: {
+          role: "user",
+          parts: [
+            {
+              functionCall: {
+                id: "req-1",
+                name: REQUEST_CONFIRMATION_FUNCTION_CALL_NAME,
+                args: {
+                  originalFunctionCall: { id: "orig", name: "delete" },
+                  toolConfirmation: { hint: "Delete it?" },
+                },
+              },
+            },
+          ],
+        },
+        actions: createEventActions({ stateDelta: { stage: "asked" } }),
+        longRunningToolIds: ["req-1"],
+      });
+
+    const answer = (id: string, name: string) => ({
+      role: "user" as const,
+      parts: [
+        { functionResponse: { id, name, response: { confirmed: true } } },
+      ],
+    });
+
+    test("reports a pending confirmation with the events needed to resume", async () => {
+      const request = confirmationRequest();
+      const worker = new CaptureAgent("worker", [request]);
+      const gateway = new AgentInvocationGateway({
+        resolveAgent: () => worker,
+      });
+
+      const result = await gateway.run({
+        agentName: "worker",
+        input: { role: "user", parts: [{ text: "go" }] },
+        parentContext: parentContext(new CaptureAgent("root")),
+      });
+
+      expect(result.interrupt?.kind).toBe("confirmation");
+      expect(result.interrupt?.functionCallIds).toEqual(["req-1"]);
+      expect(result.interrupt?.requests[0]).toMatchObject({
+        interruptId: "req-1",
+        toolName: "delete",
+        message: "Delete it?",
+      });
+      // input event + the request event
+      expect(result.interrupt?.events).toHaveLength(2);
+      expect(result.interrupt?.events.at(-1)).toBe(request);
+    });
+
+    test("reports input and credential requests and bare long-running calls", async () => {
+      const mk = (name: string, args: Record<string, unknown>, lro = true) =>
+        createEvent({
+          invocationId: "inv-1",
+          author: "worker",
+          content: {
+            role: "user",
+            parts: [{ functionCall: { id: `${name}-1`, name, args } }],
+          },
+          ...(lro ? { longRunningToolIds: [`${name}-1`] } : {}),
+        });
+      const run = async (event: Event) => {
+        const worker = new CaptureAgent("worker", [event]);
+        return new AgentInvocationGateway({
+          resolveAgent: () => worker,
+        }).run({
+          agentName: "worker",
+          input: { role: "user", parts: [{ text: "go" }] },
+          parentContext: parentContext(new CaptureAgent("root")),
+        });
+      };
+
+      const input = await run(
+        mk(REQUEST_INPUT_FUNCTION_CALL_NAME, { message: "Name?" }),
+      );
+      const credential = await run(
+        mk(REQUEST_CREDENTIAL_FUNCTION_CALL_NAME, { auth_config: {} }),
+      );
+      const lro = await run(
+        createEvent({
+          invocationId: "inv-1",
+          author: "worker",
+          content: {
+            role: "model",
+            parts: [{ functionCall: { id: "slow-1", name: "slow", args: {} } }],
+          },
+          longRunningToolIds: ["slow-1"],
+        }),
+      );
+      const none = await run(
+        createEvent({
+          invocationId: "inv-1",
+          author: "worker",
+          content: { role: "model", parts: [{ text: "done" }] },
+        }),
+      );
+
+      expect(input.interrupt).toMatchObject({
+        kind: "input",
+        functionCallIds: [`${REQUEST_INPUT_FUNCTION_CALL_NAME}-1`],
+      });
+      expect(credential.interrupt?.kind).toBe("credential");
+      expect(lro.interrupt).toMatchObject({
+        kind: "long-running",
+        functionCallIds: ["slow-1"],
+        requests: [],
+      });
+      expect(none.interrupt).toBeUndefined();
+    });
+
+    test("resumes with the pending call in history and the answer as input", async () => {
+      const first = new CaptureAgent("worker", [confirmationRequest()]);
+      const context = parentContext(new CaptureAgent("root"));
+      const interrupted = await new AgentInvocationGateway({
+        resolveAgent: () => first,
+      }).run({
+        agentName: "worker",
+        input: { role: "user", parts: [{ text: "go" }] },
+        parentContext: context,
+      });
+
+      const second = new CaptureAgent("worker", [
+        createEvent({
+          invocationId: "inv-1",
+          author: "worker",
+          content: { role: "model", parts: [{ text: "deleted" }] },
+        }),
+      ]);
+      const answerContent = answer(
+        "req-1",
+        REQUEST_CONFIRMATION_FUNCTION_CALL_NAME,
+      );
+      const resumed = await new AgentInvocationGateway({
+        resolveAgent: () => second,
+      }).run({
+        agentName: "worker",
+        input: answerContent,
+        parentContext: context,
+        resume: { events: interrupted.interrupt?.events ?? [] },
+      });
+
+      expect(resumed.error).toBeUndefined();
+      expect(resumed.output).toBe("deleted");
+      expect(resumed.interrupt).toBeUndefined();
+      const history = second.context?.session.events ?? [];
+      expect(history).toHaveLength(4);
+      expect(history[0]?.content?.parts?.[0]?.text).toBe("go");
+      expect(history[1]?.content?.parts?.[0]?.functionCall?.id).toBe("req-1");
+      expect(history[2]?.content).toEqual(answerContent);
+      expect(history[3]?.content?.parts?.[0]?.text).toBe("deleted");
+      // State written before the interrupt survives the resume.
+      expect(second.context?.session.state).toMatchObject({
+        shared: true,
+        stage: "asked",
+      });
+    });
+
+    test("an unanswered resume stays interrupted and rejects unrelated input", async () => {
+      const first = new CaptureAgent("worker", [confirmationRequest()]);
+      const context = parentContext(new CaptureAgent("root"));
+      const interrupted = await new AgentInvocationGateway({
+        resolveAgent: () => first,
+      }).run({
+        agentName: "worker",
+        input: { role: "user", parts: [{ text: "go" }] },
+        parentContext: context,
+      });
+      const never = new CaptureAgent("worker");
+      const gateway = new AgentInvocationGateway({ resolveAgent: () => never });
+
+      const unrelated = await gateway.run({
+        agentName: "worker",
+        input: { role: "user", parts: [{ text: "just text" }] },
+        parentContext: context,
+        resume: { events: interrupted.interrupt?.events ?? [] },
+      });
+      const wrongId = await gateway.run({
+        agentName: "worker",
+        input: answer("other", REQUEST_CONFIRMATION_FUNCTION_CALL_NAME),
+        parentContext: context,
+        resume: { events: interrupted.interrupt?.events ?? [] },
+      });
+      const nothingPending = await gateway.run({
+        agentName: "worker",
+        input: answer("req-1", REQUEST_CONFIRMATION_FUNCTION_CALL_NAME),
+        parentContext: context,
+        resume: { events: [] },
+      });
+
+      for (const result of [unrelated, wrongId, nothingPending]) {
+        expect(result.errorKind).toBe("invalid-resume");
+        expect(result.error).toBe(
+          "Resume input does not answer a pending interrupt",
+        );
+      }
+      expect(never.context).toBeUndefined();
+    });
+
+    test("a resume that is answered but pauses again reports the new interrupt", async () => {
+      const first = new CaptureAgent("worker", [confirmationRequest()]);
+      const context = parentContext(new CaptureAgent("root"));
+      const interrupted = await new AgentInvocationGateway({
+        resolveAgent: () => first,
+      }).run({
+        agentName: "worker",
+        input: { role: "user", parts: [{ text: "go" }] },
+        parentContext: context,
+      });
+      const next = createEvent({
+        invocationId: "inv-1",
+        author: "worker",
+        content: {
+          role: "user",
+          parts: [
+            {
+              functionCall: {
+                id: "req-2",
+                name: REQUEST_INPUT_FUNCTION_CALL_NAME,
+                args: { message: "Reason?" },
+              },
+            },
+          ],
+        },
+        longRunningToolIds: ["req-2"],
+      });
+      const second = new CaptureAgent("worker", [next]);
+
+      const resumed = await new AgentInvocationGateway({
+        resolveAgent: () => second,
+      }).run({
+        agentName: "worker",
+        input: answer("req-1", REQUEST_CONFIRMATION_FUNCTION_CALL_NAME),
+        parentContext: context,
+        resume: { events: interrupted.interrupt?.events ?? [] },
+      });
+
+      expect(resumed.interrupt?.functionCallIds).toEqual(["req-2"]);
+      // request 1 is answered now, so it is no longer reported
+      expect(resumed.interrupt?.requests.map((r) => r.interruptId)).toEqual([
+        "req-2",
+      ]);
+      expect(resumed.interrupt?.events).toHaveLength(4);
     });
   });
 });
