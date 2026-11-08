@@ -132,6 +132,16 @@ function resolvesInAdk(model: string): boolean {
  * broad provider is registered later, ADK's first-match ordering leaves these
  * earlier exact routes with the custom provider.
  *
+ * ADK `LLMRegistry` behavior this relies on (pinned by
+ * `tests/providers/custom/llm-registry-contract.test.ts`):
+ * - a pattern must match the **whole** model name (`^(?:pattern)$`);
+ * - the first registered matching pattern wins, and ADK's own (`gemini-.*`,
+ *   `apigee/.*`, `chrome/.*`) are registered before any of ours;
+ * - there is no `unregister`, so a registration lasts for the process;
+ * - resolutions are cached (LRU of 32) and the cache is **not** invalidated by
+ *   later registrations. Register custom providers at startup, before any
+ *   agent resolves a model name; a model that already resolved keeps its class.
+ *
  * @param prefix - Unique routing prefix, for example `ollama` or `local/vllm`
  * @param config - Endpoint configuration captured for all models under prefix
  * @throws If validation fails, a route is claimed, or route safety cannot be proven

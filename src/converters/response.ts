@@ -219,7 +219,9 @@ function buildThoughtPart(source: unknown): Part | undefined {
  * Maps an OpenAI usage object to ADK `usageMetadata`.
  *
  * `completion_tokens_details.reasoning_tokens` (present on reasoning models) is
- * surfaced as `thoughtsTokenCount` when available.
+ * surfaced as `thoughtsTokenCount` when available, and
+ * `prompt_tokens_details.cached_tokens` as `cachedContentTokenCount`
+ * (`promptTokenCount` keeps OpenAI's meaning: it already includes cached tokens).
  *
  * @internal
  */
@@ -234,6 +236,10 @@ function buildUsageMetadata(
   const reasoningTokens = usage.completion_tokens_details?.reasoning_tokens;
   if (reasoningTokens !== undefined && reasoningTokens !== null) {
     metadata.thoughtsTokenCount = reasoningTokens;
+  }
+  const cachedTokens = usage.prompt_tokens_details?.cached_tokens;
+  if (cachedTokens !== undefined && cachedTokens !== null) {
+    metadata.cachedContentTokenCount = cachedTokens;
   }
   return metadata;
 }

@@ -592,6 +592,22 @@ export interface AnthropicRegisterOptions {
   maxTokens?: number;
 
   /**
+   * Request timeout in milliseconds for all models created through the
+   * registry.
+   *
+   * @defaultValue 60000
+   */
+  timeout?: number;
+
+  /**
+   * Maximum number of retry attempts for all models created through the
+   * registry.
+   *
+   * @defaultValue 2
+   */
+  maxRetries?: number;
+
+  /**
    * Opt-in Anthropic prompt caching for all models created through the
    * registry.
    *

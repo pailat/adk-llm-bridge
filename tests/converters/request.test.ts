@@ -1495,6 +1495,70 @@ describe("convertRequest", () => {
         expect(msg.reasoning_details).toEqual(details);
       });
 
+      it("still echoes reasoning_details when a planner cleared the thought flag", () => {
+        // ADK's NlPlanningRequestProcessor removes `thought` but keeps
+        // `thoughtSignature` on every history part.
+        const request = createLlmRequest({
+          contents: [
+            {
+              role: "model",
+              parts: [
+                {
+                  text: "thinking...",
+                  thoughtSignature: JSON.stringify(details),
+                },
+                { text: "The answer is 782." },
+              ],
+            },
+          ],
+        });
+        const msg = convertRequest(request, "anthropic/claude-sonnet-4.5", OR)
+          .messages[0] as Record<string, unknown>;
+        expect(msg.content).toBe("The answer is 782.");
+        expect(msg.reasoning_details).toEqual(details);
+      });
+
+      it("does not treat foreign signatures (Gemini base64, other JSON) as reasoning", () => {
+        for (const signature of [
+          "CiQBjz1rX3abc/+=",
+          JSON.stringify([{ foo: "bar" }]),
+          JSON.stringify({ type: "reasoning.text" }),
+          JSON.stringify([]),
+        ]) {
+          const request = createLlmRequest({
+            contents: [
+              {
+                role: "model",
+                parts: [
+                  { text: "visible answer", thoughtSignature: signature },
+                ],
+              },
+            ],
+          });
+          const msg = convertRequest(request, "google/gemini-3", OR)
+            .messages[0] as Record<string, unknown>;
+          expect(msg.content).toBe("visible answer");
+          expect(msg).not.toHaveProperty("reasoning_details");
+        }
+      });
+
+      it("keeps a signature-only part as visible text under the strict style", () => {
+        const request = createLlmRequest({
+          contents: [
+            {
+              role: "model",
+              parts: [
+                { text: "answer", thoughtSignature: JSON.stringify(details) },
+              ],
+            },
+          ],
+        });
+        const msg = convertRequest(request, "gpt-5", {
+          reasoning: { style: "openai-effort" },
+        }).messages[0] as Record<string, unknown>;
+        expect(msg.content).toBe("answer");
+      });
+
       it("drops display-only thought text and adds no reasoning_details key", () => {
         const request = createLlmRequest({
           contents: [
@@ -1841,6 +1905,86 @@ describe("convertRequest", () => {
         expect(body).not.toHaveProperty(forbidden);
         expect(result.params ?? {}).not.toHaveProperty(forbidden);
       }
+    });
+  });
+});
+
+describe("convertRequest tool declarations", () => {
+  const schema = {
+    type: "object",
+    properties: { a: { type: "string" } },
+    required: ["a"],
+  };
+
+  it("forwards parametersJsonSchema as-is", () => {
+    const result = convertRequest(
+      createLlmRequest({
+        config: {
+          tools: [
+            {
+              functionDeclarations: [
+                { name: "f", description: "d", parametersJsonSchema: schema },
+              ],
+            },
+          ],
+        },
+      }),
+    );
+    expect(result.tools?.[0]).toEqual({
+      type: "function",
+      function: { name: "f", description: "d", parameters: schema },
+    });
+  });
+
+  it("prefers parametersJsonSchema over parameters", () => {
+    const result = convertRequest(
+      createLlmRequest({
+        config: {
+          tools: [
+            {
+              functionDeclarations: [
+                {
+                  name: "f",
+                  parameters: { type: "OBJECT", properties: {} },
+                  parametersJsonSchema: schema,
+                },
+              ],
+            },
+          ],
+        },
+      }),
+    );
+    expect(result.tools?.[0]?.function.parameters).toEqual(schema);
+  });
+
+  it("still normalizes Gemini-style parameters and defaults to an empty object", () => {
+    const result = convertRequest(
+      createLlmRequest({
+        config: {
+          tools: [
+            {
+              functionDeclarations: [
+                {
+                  name: "g",
+                  parameters: {
+                    type: "OBJECT",
+                    properties: { x: { type: "STRING" } },
+                  },
+                },
+                { name: "h" },
+              ],
+            },
+          ],
+        },
+      }),
+    );
+    expect(result.tools?.[0]?.function.parameters).toEqual({
+      type: "object",
+      properties: { x: { type: "string" } },
+    });
+    expect(result.tools?.[1]?.function.parameters).toEqual({
+      type: "object",
+      properties: {},
     });
   });
 });

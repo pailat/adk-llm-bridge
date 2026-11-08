@@ -10,8 +10,9 @@
  * pure converter unit tests cannot observe.
  */
 
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import type { LlmRequest, LlmResponse } from "@google/adk";
+import { SpanStatusCode, trace } from "@opentelemetry/api";
 import type OpenAI from "openai";
 import { OpenAICompatibleLlm } from "../../src/core/openai-compatible-llm.js";
 import { OPENAI_DEFINITION } from "../../src/providers/openai/definition.js";
@@ -469,5 +470,87 @@ describe("OpenAICompatibleLlm cancellation", () => {
     );
 
     expect(out).toEqual([]);
+  });
+});
+
+describe("OpenAICompatibleLlm span annotation", () => {
+  function captureSpan() {
+    const attributes: Record<string, unknown> = {};
+    const state = {
+      attributes,
+      exceptions: [] as unknown[],
+      status: undefined as { code: number } | undefined,
+    };
+    const span = {
+      setAttributes(a: Record<string, unknown>) {
+        Object.assign(attributes, a);
+        return this;
+      },
+      setAttribute(k: string, v: unknown) {
+        attributes[k] = v;
+        return this;
+      },
+      recordException(e: unknown) {
+        state.exceptions.push(e);
+      },
+      setStatus(s: { code: number }) {
+        state.status = s;
+        return this;
+      },
+    };
+    const spy = spyOn(trace, "getActiveSpan").mockReturnValue(span as never);
+    return { state, restore: () => spy.mockRestore() };
+  }
+
+  it("labels the call_llm span with provider, model, response id and host", async () => {
+    const { state, restore } = captureSpan();
+    try {
+      const llm = makeLlm("gpt-4o");
+      spyCreate(llm, { ...SIMPLE_COMPLETION, id: "cmpl-9", model: "gpt-4o-x" });
+      await drain(llm.generateContentAsync(userRequest(), false));
+      expect(state.attributes["gen_ai.provider.name"]).toBe("openai");
+      expect(state.attributes["gen_ai.response.model"]).toBe("gpt-4o-x");
+      expect(state.attributes["gen_ai.response.id"]).toBe("cmpl-9");
+      expect(state.attributes["server.address"]).toBe("api.openai.com");
+      expect(state.status).toBeUndefined();
+    } finally {
+      restore();
+    }
+  });
+
+  it("marks the span as ERROR when the provider call fails", async () => {
+    const { state, restore } = captureSpan();
+    try {
+      const llm = makeLlm("gpt-4o");
+      spyCreate(llm, () => {
+        throw Object.assign(new Error("rate limited"), { status: 429 });
+      });
+      const out = await drain(llm.generateContentAsync(userRequest(), false));
+      expect(out[0]?.errorCode).toBe("API_ERROR_429");
+      expect(state.attributes["error.type"]).toBe("429");
+      expect(state.status?.code).toBe(SpanStatusCode.ERROR);
+      expect(state.attributes["gen_ai.provider.name"]).toBe("openai");
+    } finally {
+      restore();
+    }
+  });
+
+  it("does not record an error for caller aborts", async () => {
+    const { state, restore } = captureSpan();
+    try {
+      const llm = makeLlm("gpt-4o");
+      const controller = new AbortController();
+      spyCreate(llm, () => {
+        controller.abort();
+        throw new Error("aborted");
+      });
+      await drain(
+        llm.generateContentAsync(userRequest(), false, controller.signal),
+      );
+      expect(state.exceptions).toEqual([]);
+      expect(state.status).toBeUndefined();
+    } finally {
+      restore();
+    }
   });
 });

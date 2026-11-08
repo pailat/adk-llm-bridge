@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { safeJsonParse } from "../../src/utils/json.js";
+import { safeJsonParse, tryParseJson } from "../../src/utils/json.js";
 
 describe("safeJsonParse", () => {
   it("parses normal JSON unchanged", () => {
@@ -94,5 +94,79 @@ describe("safeJsonParse", () => {
     expect((result.data as Record<string, unknown>).ticketId).toBe(
       "1021987000032211189",
     );
+  });
+});
+
+describe("safeJsonParse (source-based parsing)", () => {
+  it("does not rewrite digits inside a string value", () => {
+    const result = safeJsonParse('{"t":"a: 12345678901234567890, b"}');
+    expect(result).toEqual({ t: "a: 12345678901234567890, b" });
+  });
+
+  it("keeps an unsafe 16-digit integer exact as a string", () => {
+    const result = safeJsonParse('{"id": 9007199254740993}');
+    expect(result.id).toBe("9007199254740993");
+  });
+
+  it("keeps a long decimal as a number", () => {
+    const result = safeJsonParse('{"v": 1.12345678901234567890}');
+    expect(typeof result.v).toBe("number");
+  });
+
+  it("handles unsafe integers in arrays and nested objects", () => {
+    const result = safeJsonParse(
+      '{"a":[12345678901234567890],"b":{"c":-12345678901234567}}',
+    );
+    expect(result).toEqual({
+      a: ["12345678901234567890"],
+      b: { c: "-12345678901234567" },
+    });
+  });
+
+  it("returns {} for arrays, primitives and null", () => {
+    expect(safeJsonParse("[1,2]")).toEqual({});
+    expect(safeJsonParse('"x"')).toEqual({});
+    expect(safeJsonParse("5")).toEqual({});
+    expect(safeJsonParse("null")).toEqual({});
+  });
+
+  it("returns {} for invalid, truncated, empty and non-string input", () => {
+    expect(safeJsonParse("{bad")).toEqual({});
+    expect(safeJsonParse('{"a":1')).toEqual({});
+    expect(safeJsonParse("")).toEqual({});
+    expect(safeJsonParse(undefined as unknown as string)).toEqual({});
+  });
+
+  it("does not pollute Object.prototype through __proto__", () => {
+    const result = safeJsonParse('{"__proto__":{"polluted":true},"a":1}');
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+    expect(result.a).toBe(1);
+    expect(Object.getPrototypeOf(result)).toBe(Object.prototype);
+  });
+});
+
+describe("tryParseJson", () => {
+  it("distinguishes broken payloads from empty ones", () => {
+    expect(tryParseJson("")).toEqual({ ok: true, value: {} });
+    expect(tryParseJson("  ")).toEqual({ ok: true, value: {} });
+    expect(tryParseJson("{}")).toEqual({ ok: true, value: {} });
+    const truncated = tryParseJson('{"a":1');
+    expect(truncated.ok).toBe(false);
+    if (!truncated.ok) expect(truncated.reason).toBe("invalid-json");
+  });
+
+  it("reports non-object JSON", () => {
+    for (const text of ["[1]", "null", "3", '"s"']) {
+      const result = tryParseJson(text);
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.reason).toBe("not-an-object");
+    }
+  });
+
+  it("returns parsed objects with exact large integers", () => {
+    expect(tryParseJson('{"id": 1021987000032211189}')).toEqual({
+      ok: true,
+      value: { id: "1021987000032211189" },
+    });
   });
 });

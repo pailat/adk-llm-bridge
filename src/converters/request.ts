@@ -23,6 +23,7 @@ import type OpenAI from "openai";
 import type { ReasoningCapability } from "../core/provider-definition.js";
 import { uriScheme } from "../utils/uri.js";
 import { normalizeSchema } from "./schema.js";
+import { ToolCallIdCorrelator } from "./tool-call-ids.js";
 
 /**
  * Provider-aware options forwarded into {@link convertRequest}.
@@ -193,7 +194,7 @@ export function convertRequest(
   opts?: ConvertRequestOptions,
 ): ConvertedRequest {
   const messages: OpenAI.ChatCompletionMessageParam[] = [];
-  const toolCallIdCorrelation: ToolCallIdCorrelation = { pendingCalls: [] };
+  const toolCallIdCorrelation = new ToolCallIdCorrelator();
 
   const systemContent = extractSystemInstruction(llmRequest);
   if (systemContent) {
@@ -684,64 +685,26 @@ function parseReasoningDetails(
   }
 }
 
-/** Generates a collision-safe ID accepted by OpenAI-compatible tool calls. */
-function generateToolCallId(): string {
-  return `call_${crypto.randomUUID().replaceAll("-", "")}`;
-}
-
-interface PendingToolCall {
-  id: string;
-  name: string;
-  generated: boolean;
-}
-
-interface ToolCallIdCorrelation {
-  pendingCalls: PendingToolCall[];
-}
-
-/** Resolves a call ID, treating an empty string the same as a missing ID. */
-function resolveToolCallId(id: string | undefined): string {
-  return id || generateToolCallId();
-}
-
 /**
- * Correlates a tool response with a previously emitted call. Names are used
- * when available so parallel responses may arrive in a different order. A
- * missing response ID prefers a generated call with the same name before an
- * explicit call, while an unmatched name leaves pending calls untouched. An
- * explicit response ID always wins and is removed from the pending set when
- * present.
+ * Whether a `thoughtSignature` is a `reasoning_details` array produced by this
+ * bridge: a non-empty JSON array of objects whose `type` starts with
+ * `reasoning.` (`reasoning.text`, `reasoning.summary`, `reasoning.encrypted`).
+ *
+ * @internal
  */
-function resolveToolResponseId(
-  id: string | undefined,
-  name: string | undefined,
-  correlation: ToolCallIdCorrelation,
-): string {
-  if (id) {
-    const pendingIndex = correlation.pendingCalls.findIndex(
-      (call) => call.id === id,
-    );
-    if (pendingIndex >= 0) correlation.pendingCalls.splice(pendingIndex, 1);
-    return id;
-  }
-
-  let pendingIndex: number;
-  if (name) {
-    pendingIndex = correlation.pendingCalls.findIndex(
-      (call) => call.name === name && call.generated,
-    );
-    if (pendingIndex < 0) {
-      pendingIndex = correlation.pendingCalls.findIndex(
-        (call) => call.name === name,
-      );
-    }
-    if (pendingIndex < 0) return generateToolCallId();
-  } else {
-    pendingIndex = correlation.pendingCalls.findIndex((call) => call.generated);
-    if (pendingIndex < 0) pendingIndex = 0;
-  }
-  const pendingCall = correlation.pendingCalls.splice(pendingIndex, 1)[0];
-  return pendingCall?.id ?? generateToolCallId();
+function isReasoningDetailsSignature(signature: string | undefined): boolean {
+  const parsed = parseReasoningDetails(signature);
+  return (
+    parsed !== undefined &&
+    parsed.length > 0 &&
+    parsed.every(
+      (entry) =>
+        entry !== null &&
+        typeof entry === "object" &&
+        typeof (entry as { type?: unknown }).type === "string" &&
+        (entry as { type: string }).type.startsWith("reasoning."),
+    )
+  );
 }
 
 /**
@@ -757,7 +720,7 @@ function resolveToolResponseId(
 function processContent(
   content: Content,
   messages: OpenAI.ChatCompletionMessageParam[],
-  correlation: ToolCallIdCorrelation,
+  correlation: ToolCallIdCorrelator,
   reasoning?: ReasoningCapability,
 ): void {
   if (!content.parts?.length) return;
@@ -780,7 +743,17 @@ function processContent(
     // back into answer content — re-sending reasoning as plain text pollutes the
     // context and, for signature-strict upstreams, corrupts the round-trip.
     // Handled before the text branch so a thought part never falls through.
-    if (part.thought) {
+    //
+    // ADK's planners (`BuiltInPlanner`, `PlanReActPlanner`) clear `thought` on
+    // every history part before the request is built, but keep
+    // `thoughtSignature`. Our own `reasoning_details` JSON in the signature is
+    // an unambiguous marker (a Gemini signature is opaque base64 and never
+    // parses to this shape), so such a part is still a thought part.
+    if (
+      part.thought ||
+      (reasoning?.style === "openrouter" &&
+        isReasoningDetailsSignature(part.thoughtSignature))
+    ) {
       if (reasoning?.style === "openrouter") {
         const parsed = parseReasoningDetails(part.thoughtSignature);
         if (parsed) reasoningDetails.push(...parsed);
@@ -800,7 +773,7 @@ function processContent(
         console.warn("[adk-llm-bridge] functionCall missing name");
       }
       calls.push({
-        id: resolveToolCallId(part.functionCall.id),
+        id: correlation.callId(part.functionCall.id),
         name: part.functionCall.name ?? "",
         arguments: JSON.stringify(part.functionCall.args ?? {}),
         generated: !part.functionCall.id,
@@ -813,12 +786,11 @@ function processContent(
       responses.push({
         id:
           content.role === "user"
-            ? resolveToolResponseId(
+            ? correlation.response(
                 part.functionResponse.id,
                 part.functionResponse.name,
-                correlation,
               )
-            : resolveToolCallId(part.functionResponse.id),
+            : correlation.callId(part.functionResponse.id),
         content: JSON.stringify(part.functionResponse.response ?? {}),
       });
     }
@@ -854,9 +826,9 @@ function processContent(
         content: texts.length ? texts.join("\n") : null,
       };
       if (calls.length) {
-        correlation.pendingCalls.push(
-          ...calls.map(({ id, name, generated }) => ({ id, name, generated })),
-        );
+        for (const { id, name, generated } of calls) {
+          correlation.track({ id, name, generated });
+        }
         msg.tool_calls = calls.map((c) => ({
           id: c.id,
           type: "function" as const,
@@ -966,6 +938,31 @@ function collectGeminiOnlyToolNames(group: Record<string, unknown>): string[] {
 }
 
 /**
+ * Resolves the JSON Schema for a function declaration's parameters.
+ *
+ * `parametersJsonSchema` (already standard JSON Schema, set by custom tools and
+ * third-party toolsets) takes precedence and is forwarded as-is. Otherwise the
+ * Gemini-style `parameters` are normalized to lowercase JSON Schema types.
+ * ADK's own `FunctionTool`/`McpTool` emit `parameters`.
+ *
+ * @internal
+ */
+function toolParameters(fn: {
+  parameters?: unknown;
+  parametersJsonSchema?: unknown;
+}): Record<string, unknown> {
+  const jsonSchema = fn.parametersJsonSchema;
+  if (
+    jsonSchema &&
+    typeof jsonSchema === "object" &&
+    !Array.isArray(jsonSchema)
+  ) {
+    return jsonSchema as Record<string, unknown>;
+  }
+  return normalizeSchema(fn.parameters) ?? { type: "object", properties: {} };
+}
+
+/**
  * Converts ADK tool declarations to OpenAI format.
  *
  * Only `functionDeclarations` are forwarded. Gemini-only built-in tool groups
@@ -1003,10 +1000,7 @@ function convertTools(
           function: {
             name: fn.name,
             description: fn.description ?? "",
-            parameters: normalizeSchema(fn.parameters) ?? {
-              type: "object",
-              properties: {},
-            },
+            parameters: toolParameters(fn),
           },
         });
       }

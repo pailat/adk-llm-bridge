@@ -449,6 +449,54 @@ describe("reasoning passthrough", () => {
     });
   });
 
+  it("maps prompt_tokens_details.cached_tokens to cachedContentTokenCount", () => {
+    const response = createCompletion({
+      usage: {
+        prompt_tokens: 100,
+        completion_tokens: 5,
+        total_tokens: 105,
+        prompt_tokens_details: { cached_tokens: 64 },
+      },
+    } as Partial<ChatCompletion>);
+
+    expect(convertResponse(response).usageMetadata).toEqual({
+      promptTokenCount: 100,
+      candidatesTokenCount: 5,
+      totalTokenCount: 105,
+      cachedContentTokenCount: 64,
+    });
+  });
+
+  it("omits cachedContentTokenCount when the provider reports no cache details", () => {
+    const response = createCompletion({
+      usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+    });
+    expect(
+      convertResponse(response).usageMetadata?.cachedContentTokenCount,
+    ).toBeUndefined();
+  });
+
+  it("maps cached_tokens from the streaming usage chunk", () => {
+    const acc = createStreamAccumulator();
+    convertStreamChunk(
+      {
+        id: "c",
+        object: "chat.completion.chunk",
+        created: 0,
+        model: "m",
+        choices: [],
+        usage: {
+          prompt_tokens: 20,
+          completion_tokens: 2,
+          total_tokens: 22,
+          prompt_tokens_details: { cached_tokens: 16 },
+        },
+      } as ChatCompletionChunk,
+      acc,
+    );
+    expect(acc.usage?.cachedContentTokenCount).toBe(16);
+  });
+
   it("omits thoughtsTokenCount when reasoning_tokens is absent", () => {
     const response = createCompletion({
       usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },

@@ -30,6 +30,7 @@ import type {
   ProviderDefinition,
   ReasoningCapability,
 } from "./provider-definition.js";
+import { annotateLlmSpan, recordLlmError } from "./telemetry.js";
 
 /**
  * Configuration for the underlying OpenAI client.
@@ -81,6 +82,7 @@ export class OpenAICompatibleLlm extends BaseProviderLlm {
   protected readonly client: OpenAI;
 
   private readonly _errorPrefix: string;
+  private readonly _providerId: string;
   private readonly _getRequestOptions?: () => Record<string, unknown>;
   /**
    * Declarative reasoning capability from the provider definition.
@@ -106,6 +108,7 @@ export class OpenAICompatibleLlm extends BaseProviderLlm {
 
       super(config);
       this._errorPrefix = definition.errorPrefix;
+      this._providerId = definition.id;
       this._reasoning = definition.reasoning;
 
       const resolved = resolveConfig(definition, config);
@@ -131,6 +134,7 @@ export class OpenAICompatibleLlm extends BaseProviderLlm {
 
       super(config);
       this._errorPrefix = "CUSTOM";
+      this._providerId = "custom";
       this.client = new OpenAI({
         baseURL: clientConfig.baseURL,
         // The OpenAI SDK requires a non-empty credential at construction
@@ -161,6 +165,12 @@ export class OpenAICompatibleLlm extends BaseProviderLlm {
     abortSignal?: AbortSignal,
   ): AsyncGenerator<LlmResponse, void> {
     try {
+      // Identify the provider/endpoint on the span up front so even a failed
+      // call is attributable; model and response id are added on response.
+      annotateLlmSpan({
+        provider: this._providerId,
+        baseURL: this.client.baseURL,
+      });
       const { messages, tools, params, toolChoice } = convertRequest(
         llmRequest,
         this.model,
@@ -186,8 +196,21 @@ export class OpenAICompatibleLlm extends BaseProviderLlm {
       }
     } catch (error) {
       if (abortSignal?.aborted) return;
+      recordLlmError(error);
       yield this.createErrorResponse(error, this.getErrorPrefix());
     }
+  }
+
+  /** Labels the active `call_llm` span with this provider's identity. */
+  private annotateSpan(
+    result: Pick<OpenAI.ChatCompletion, "id" | "model">,
+  ): void {
+    annotateLlmSpan({
+      provider: this._providerId,
+      model: result.model,
+      responseId: result.id,
+      baseURL: this.client.baseURL,
+    });
   }
 
   private async singleResponse(
@@ -208,6 +231,7 @@ export class OpenAICompatibleLlm extends BaseProviderLlm {
       },
       abortSignal ? { signal: abortSignal } : undefined,
     );
+    this.annotateSpan(response);
     return convertResponse(response);
   }
 
@@ -233,6 +257,7 @@ export class OpenAICompatibleLlm extends BaseProviderLlm {
     );
 
     const acc = createStreamAccumulator();
+    let annotated = false;
 
     // OpenAI with stream_options.include_usage emits the cumulative usage in a
     // SEPARATE, choices-empty chunk that arrives AFTER the finish chunk. If we
@@ -245,6 +270,10 @@ export class OpenAICompatibleLlm extends BaseProviderLlm {
       // Honor cancellation explicitly: never rely on the SDK (or a server that
       // ignores the abort) to stop delivering chunks after the caller aborted.
       if (abortSignal?.aborted) return;
+      if (!annotated) {
+        annotated = true;
+        this.annotateSpan(chunk);
+      }
       const { response, isComplete } = convertStreamChunk(chunk, acc);
       if (isComplete) {
         // Hold the final response; do not break — a usage-only chunk may follow.
