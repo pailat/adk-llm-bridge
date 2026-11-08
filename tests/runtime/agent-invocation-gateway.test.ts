@@ -5,6 +5,7 @@ import {
   createEventActions,
   type Event,
   InvocationContext,
+  LlmCallsLimitExceededError,
   PluginManager,
 } from "@google/adk";
 import { AgentInvocationGateway } from "../../src/runtime/agent-invocation-gateway.js";
@@ -492,5 +493,284 @@ describe("AgentInvocationGateway", () => {
     child.incrementLlmCallCount();
     expect(() => child.incrementLlmCallCount()).toThrow();
     expect(() => context.incrementLlmCallCount()).toThrow();
+  });
+
+  describe("ADK session semantics", () => {
+    class ScriptAgent extends BaseAgent {
+      context?: InvocationContext;
+      constructor(
+        name: string,
+        private readonly script: (
+          context: InvocationContext,
+        ) => AsyncGenerator<Event, void, void>,
+      ) {
+        super({ name });
+      }
+      protected async *runAsyncImpl(context: InvocationContext) {
+        this.context = context;
+        yield* this.script(context);
+      }
+      protected async *runLiveImpl() {}
+    }
+
+    const modelEvent = (
+      parts: Event["content"] extends infer C
+        ? C extends { parts?: infer P }
+          ? P
+          : never
+        : never,
+      extra: Partial<Event> = {},
+    ) =>
+      createEvent({
+        invocationId: "inv-1",
+        author: "worker",
+        content: { role: "model", parts },
+        ...extra,
+      });
+
+    test("applies stateDelta to the child state, trims temp: keys and skips partials", async () => {
+      let seenByNext: unknown;
+      const worker = new ScriptAgent("worker", async function* (context) {
+        yield modelEvent([{ text: "typing" }], { partial: true });
+        yield modelEvent([{ text: "done" }], {
+          actions: createEventActions({
+            stateDelta: { k: 1, "temp:scratch": 2 },
+          }),
+        });
+        seenByNext = { ...context.session.state };
+      });
+      const root = new CaptureAgent("root");
+      const context = parentContext(root);
+      const gateway = new AgentInvocationGateway({
+        resolveAgent: () => worker,
+      });
+
+      const result = await gateway.run({
+        agentName: "worker",
+        input: { role: "user", parts: [{ text: "go" }] },
+        parentContext: context,
+      });
+
+      expect(seenByNext).toEqual({ shared: true, k: 1 });
+      expect(result.stateDelta).toEqual({ k: 1 });
+      expect(context.session.state).toEqual({ shared: true });
+      const childEvents = worker.context?.session.events ?? [];
+      expect(childEvents.some((event) => event.partial)).toBe(false);
+      expect(childEvents).toHaveLength(3);
+      // The partial still reaches sinks and the result stream.
+      expect(result.events).toHaveLength(2);
+    });
+
+    test("replace mode keeps the child state frozen while applying deltas", async () => {
+      const worker = new ScriptAgent("worker", async function* () {
+        yield modelEvent([{ text: "ok" }], {
+          actions: createEventActions({ stateDelta: { fresh: true } }),
+        });
+      });
+      const gateway = new AgentInvocationGateway({
+        resolveAgent: () => worker,
+      });
+
+      await gateway.run({
+        agentName: "worker",
+        input: { role: "user", parts: [{ text: "go" }] },
+        parentContext: parentContext(new CaptureAgent("root")),
+        sessionState: { seed: 1 },
+        sessionStateMode: "replace",
+      });
+
+      expect(worker.context?.session.state).toEqual({ seed: 1, fresh: true });
+      expect(Object.isFrozen(worker.context?.session.state)).toBe(true);
+    });
+
+    test("excludes thought parts from the output", async () => {
+      const worker = new ScriptAgent("worker", async function* () {
+        yield modelEvent([
+          { text: "secret reasoning", thought: true },
+          { text: "answer" },
+        ]);
+      });
+      const gateway = new AgentInvocationGateway({
+        resolveAgent: () => worker,
+      });
+
+      const result = await gateway.run({
+        agentName: "worker",
+        input: { role: "user", parts: [{ text: "go" }] },
+        parentContext: parentContext(new CaptureAgent("root")),
+      });
+
+      expect(result.output).toBe("answer");
+      expect(result.errorKind).toBeUndefined();
+    });
+  });
+
+  describe("cancellation and error classification", () => {
+    class StallAgent extends BaseAgent {
+      returned = false;
+      constructor() {
+        super({ name: "stall" });
+      }
+      protected async *runAsyncImpl() {
+        try {
+          yield createEvent({
+            invocationId: "inv-1",
+            author: "stall",
+            content: { role: "model", parts: [{ text: "started" }] },
+          });
+          await new Promise<never>(() => undefined);
+        } finally {
+          this.returned = true;
+        }
+      }
+      protected async *runLiveImpl() {}
+    }
+
+    test("releases run() when the agent stalls without emitting after abort", async () => {
+      const stall = new StallAgent();
+      const abort = new AbortController();
+      setTimeout(() => abort.abort(new Error("stop now")), 50);
+      const gateway = new AgentInvocationGateway({
+        resolveAgent: () => stall,
+      });
+
+      const outcome = await Promise.race([
+        gateway.run({
+          agentName: "stall",
+          input: { role: "user", parts: [{ text: "go" }] },
+          parentContext: parentContext(new CaptureAgent("root")),
+          abortSignal: abort.signal,
+        }),
+        new Promise<"hung">((resolve) =>
+          setTimeout(() => resolve("hung"), 1500),
+        ),
+      ]);
+
+      expect(outcome).not.toBe("hung");
+      if (outcome === "hung") return;
+      // return() queues behind the parked await, so it cannot run: documented.
+      expect(stall.returned).toBe(false);
+      expect(outcome.error).toBe("stop now");
+      expect(outcome.errorKind).toBe("aborted");
+    });
+
+    test("classifies the shared LLM call budget error", async () => {
+      class LimitAgent extends BaseAgent {
+        constructor() {
+          super({ name: "limit" });
+        }
+        protected async *runAsyncImpl(): AsyncGenerator<Event, void, void> {
+          yield* [];
+          throw new LlmCallsLimitExceededError("budget exhausted");
+        }
+        protected async *runLiveImpl() {}
+      }
+      const gateway = new AgentInvocationGateway({
+        resolveAgent: () => new LimitAgent(),
+      });
+
+      const result = await gateway.run({
+        agentName: "limit",
+        input: { role: "user", parts: [{ text: "go" }] },
+        parentContext: parentContext(new CaptureAgent("root")),
+      });
+
+      expect(result.error).toBe("budget exhausted");
+      expect(result.errorKind).toBe("llm-calls-limit");
+    });
+
+    test("classifies preparation, resolution and event errors", async () => {
+      const worker = new CaptureAgent("worker", [
+        createEvent({
+          invocationId: "inv-1",
+          author: "worker",
+          errorMessage: "model failed",
+        }),
+      ]);
+      const gateway = new AgentInvocationGateway({
+        resolveAgent: (name) => (name === "worker" ? worker : undefined),
+      });
+      const base = {
+        input: { role: "user" as const, parts: [{ text: "go" }] },
+        parentContext: parentContext(new CaptureAgent("root")),
+      };
+
+      const prepared = await gateway.run({
+        ...base,
+        agentName: "worker",
+        prepareContext: () => {
+          throw new Error("binder refused");
+        },
+      });
+      const missing = await gateway.run({ ...base, agentName: "ghost" });
+      const failed = await gateway.run({ ...base, agentName: "worker" });
+
+      expect(prepared.errorKind).toBe("preparation");
+      expect(missing.errorKind).toBe("agent-error");
+      expect(failed.errorKind).toBe("agent-error");
+      expect(failed.error).toBe("model failed");
+    });
+  });
+
+  test("closes the agent generator when an event sink throws", async () => {
+    const log: string[] = [];
+    class FinallyAgent extends BaseAgent {
+      constructor() {
+        super({ name: "fin" });
+      }
+      protected async *runAsyncImpl() {
+        try {
+          yield createEvent({
+            invocationId: "inv-1",
+            author: "fin",
+            content: { role: "model", parts: [{ text: "one" }] },
+          });
+          yield createEvent({
+            invocationId: "inv-1",
+            author: "fin",
+            content: { role: "model", parts: [{ text: "two" }] },
+          });
+        } finally {
+          log.push("agent-finally");
+        }
+      }
+      protected async *runLiveImpl() {}
+    }
+    const gateway = new AgentInvocationGateway({
+      resolveAgent: () => new FinallyAgent(),
+    });
+
+    const result = await gateway.run({
+      agentName: "fin",
+      input: { role: "user", parts: [{ text: "go" }] },
+      parentContext: parentContext(new CaptureAgent("root")),
+      eventSink: () => {
+        throw new Error("sink boom");
+      },
+    });
+
+    expect(result.error).toBe("sink boom");
+    expect(result.errorKind).toBe("agent-error");
+    expect(log).toEqual(["agent-finally"]);
+  });
+
+  test("ignores stateDelta carried by partial events in the aggregate", async () => {
+    const worker = new CaptureAgent("worker", [
+      createEvent({
+        invocationId: "inv-1",
+        author: "worker",
+        partial: true,
+        actions: createEventActions({ stateDelta: { "temp:x": 1, p: 1 } }),
+      }),
+    ]);
+    const gateway = new AgentInvocationGateway({ resolveAgent: () => worker });
+
+    const result = await gateway.run({
+      agentName: "worker",
+      input: { role: "user", parts: [{ text: "go" }] },
+      parentContext: parentContext(new CaptureAgent("root")),
+    });
+
+    expect(result.stateDelta).toBeUndefined();
   });
 });

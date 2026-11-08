@@ -5,10 +5,14 @@
  */
 
 import {
+  type AppendEventRequest,
   type BaseAgent,
+  BaseSessionService,
   createEvent,
   type Event,
+  getFunctionCalls,
   InvocationContext,
+  isLlmCallsLimitExceededError,
   type Session,
 } from "@google/adk";
 import type { Content } from "@google/genai";
@@ -21,6 +25,19 @@ export interface AgentInvocationExecutionSummary {
   durationMs: number;
 }
 
+/**
+ * Machine-readable classification of {@link AgentInvocationResult.error}.
+ * - `aborted`: the parent or request signal fired.
+ * - `llm-calls-limit`: the shared `RunConfig.maxLlmCalls` budget was exhausted.
+ * - `preparation`: `prepareContext` rejected.
+ * - `agent-error`: resolution failed or the agent emitted/threw an error.
+ */
+export type AgentInvocationErrorKind =
+  | "aborted"
+  | "llm-calls-limit"
+  | "preparation"
+  | "agent-error";
+
 export interface AgentInvocationResult {
   agentName: string;
   output: string;
@@ -28,6 +45,7 @@ export interface AgentInvocationResult {
   summary: AgentInvocationExecutionSummary;
   stateDelta?: Record<string, unknown>;
   error?: string;
+  errorKind?: AgentInvocationErrorKind;
 }
 
 export interface AgentInvocationRequest {
@@ -120,19 +138,29 @@ export class AgentInvocationGateway {
       );
     }
 
-    const combinedAbort = combineAbortSignals([
+    const signal = combineAbortSignals([
       request.parentContext.abortSignal,
       request.abortSignal,
     ]);
+    const child = createChildSession(
+      request.parentContext.session,
+      createEvent({
+        invocationId: request.parentContext.invocationId,
+        author: "user",
+        branch: request.branch,
+        content: request.input,
+      }),
+      request.sessionState,
+      request.sessionStateMode ?? "merge",
+      request.sessionHistoryMode ?? "inherit",
+    );
     const childContext = createChildInvocationContext({
       agent,
       parentContext: request.parentContext,
       input: request.input,
       branch: request.branch,
-      abortSignal: combinedAbort.signal,
-      sessionState: request.sessionState,
-      sessionStateMode: request.sessionStateMode ?? "merge",
-      sessionHistoryMode: request.sessionHistoryMode ?? "inherit",
+      abortSignal: signal,
+      session: child.session,
     });
 
     const events: Event[] = [];
@@ -144,66 +172,96 @@ export class AgentInvocationGateway {
     let toolCalls = 0;
     let errors = 0;
     let error: string | undefined;
+    let errorKind: AgentInvocationErrorKind | undefined;
+    const fail = (caught: unknown, fallbackKind: AgentInvocationErrorKind) => {
+      errors++;
+      error = errorMessage(caught);
+      errorKind = signal?.aborted
+        ? "aborted"
+        : isLlmCallsLimitExceededError(caught)
+          ? "llm-calls-limit"
+          : fallbackKind;
+    };
 
-    try {
-      await request.validateInvocation?.("before-prepare");
-    } catch (caught) {
-      combinedAbort.dispose();
-      throw caught;
-    }
+    await request.validateInvocation?.("before-prepare");
 
     let preparationFailed = false;
     try {
-      throwIfAborted(combinedAbort.signal);
+      throwIfAborted(signal);
       await request.prepareContext?.(childContext, agent);
     } catch (caught) {
       preparationFailed = true;
-      errors++;
-      error = errorMessage(caught);
+      fail(caught, "preparation");
     }
 
     if (!preparationFailed) {
-      try {
-        await request.validateInvocation?.("before-execute");
-      } catch (caught) {
-        combinedAbort.dispose();
-        throw caught;
-      }
+      await request.validateInvocation?.("before-execute");
 
+      const iterator = agent.runAsync(childContext)[Symbol.asyncIterator]();
+      const aborted = abortRejection(signal);
+      let exhausted = false;
       try {
-        for await (const event of agent.runAsync(childContext)) {
-          throwIfAborted(combinedAbort.signal);
-          childContext.session.events.push(event);
-          events.push(event);
-          Object.assign(stateDelta, event.actions?.stateDelta ?? {});
-          await this.#eventSink?.(event, childContext);
-          await request.eventSink?.(event, childContext);
+        while (true) {
+          const next = await (aborted
+            ? Promise.race([iterator.next(), aborted.promise])
+            : iterator.next());
+          if (next.done) {
+            exhausted = true;
+            break;
+          }
+          const event = next.value;
+          throwIfAborted(signal);
+          // ADK's BaseSessionService.appendEvent semantics: partial events are
+          // not persisted, `temp:` keys are trimmed and deltas applied in order.
+          const persisted = await child.append(event);
+          events.push(persisted);
+          if (!persisted.partial) {
+            Object.assign(stateDelta, persisted.actions?.stateDelta ?? {});
+          }
+          await this.#eventSink?.(persisted, childContext);
+          await request.eventSink?.(persisted, childContext);
 
-          const visible = event.partial ? undefined : extractVisibleText(event);
+          const visible = persisted.partial
+            ? undefined
+            : extractVisibleText(persisted);
           if (visible) {
             textEvents++;
             text.push(visible);
-            if (event.turnComplete === true) {
+            if (persisted.turnComplete === true) {
               terminalText = visible;
             }
           } else {
-            const fallback = extractFallbackOutput(event);
+            const fallback = extractFallbackOutput(persisted);
             if (fallback) {
               fallbackOutput.push(fallback);
             }
           }
-          toolCalls += countFunctionCalls(event);
-          if (event.errorMessage) {
+          toolCalls += getFunctionCalls(persisted).length;
+          if (persisted.errorMessage) {
             errors++;
-            error = event.errorMessage;
+            error = persisted.errorMessage;
+            errorKind = "agent-error";
           }
         }
       } catch (caught) {
-        errors++;
-        error = errorMessage(caught);
+        fail(caught, "agent-error");
+      } finally {
+        aborted?.dispose();
+        if (!exhausted) {
+          // Any abnormal exit (abort, sink/append failure, thrown event) must
+          // close the agent generator like `for await` did, so its `finally`
+          // blocks (external drivers, workflow runtimes) run. After an abort the
+          // generator may be parked on a pending await and return() would queue
+          // behind it, so only wait when we were not aborted.
+          const closing = Promise.resolve(iterator.return?.()).catch(
+            () => undefined,
+          );
+          if (!signal?.aborted) {
+            await closing;
+          }
+        }
       }
     }
-    combinedAbort.dispose();
 
     return {
       agentName: agent.name,
@@ -220,6 +278,7 @@ export class AgentInvocationGateway {
       },
       ...(Object.keys(stateDelta).length > 0 ? { stateDelta } : {}),
       ...(error ? { error } : {}),
+      ...(error && errorKind ? { errorKind } : {}),
     };
   }
 }
@@ -230,26 +289,15 @@ function createChildInvocationContext({
   input,
   branch,
   abortSignal,
-  sessionState,
-  sessionStateMode,
-  sessionHistoryMode,
+  session,
 }: {
   agent: BaseAgent;
   parentContext: InvocationContext;
   input: Content;
   branch: string | undefined;
   abortSignal: AbortSignal | undefined;
-  sessionState: Readonly<Record<string, unknown>> | undefined;
-  sessionStateMode: "merge" | "replace";
-  sessionHistoryMode: "inherit" | "replace";
+  session: Session;
 }): InvocationContext {
-  const syntheticUserEvent = createEvent({
-    invocationId: parentContext.invocationId,
-    author: "user",
-    branch,
-    content: input,
-  });
-
   // Mismo patrón que BaseAgent.createInvocationContext de ADK 2.x: el spread
   // conserva el contador compartido de llamadas LLM (maxLlmCalls) y los campos
   // nuevos (isolationScope, nodeToolDepth, a2aMetadata, workflowInstructionScope,
@@ -260,88 +308,141 @@ function createChildInvocationContext({
     branch,
     agent,
     userContent: input,
-    session: createChildSessionView(
-      parentContext.session,
-      syntheticUserEvent,
-      sessionState,
-      sessionStateMode,
-      sessionHistoryMode,
-    ),
+    session,
     abortSignal,
   });
 }
 
-function createChildSessionView(
+/**
+ * Minimal session service used only for its inherited `appendEvent`, so the
+ * child session follows exactly the ADK Runner's persistence semantics without
+ * storing anything (InMemorySessionService would warn about unknown sessions).
+ */
+class ChildSessionService extends BaseSessionService {
+  createSession(): Promise<Session> {
+    return Promise.reject(new Error("ChildSessionService is append-only"));
+  }
+  getSession(): Promise<Session | undefined> {
+    return Promise.reject(new Error("ChildSessionService is append-only"));
+  }
+  listSessions(): Promise<never> {
+    return Promise.reject(new Error("ChildSessionService is append-only"));
+  }
+  deleteSession(): Promise<void> {
+    return Promise.reject(new Error("ChildSessionService is append-only"));
+  }
+}
+
+const childSessionService = new ChildSessionService();
+
+interface ChildSession {
+  session: Session;
+  /** Persists an event with ADK semantics and returns the stored event. */
+  append(event: Event): Promise<Event>;
+}
+
+function createChildSession(
   parentSession: Session,
   syntheticUserEvent: Event,
   sessionState: Readonly<Record<string, unknown>> | undefined,
   sessionStateMode: "merge" | "replace",
   sessionHistoryMode: "inherit" | "replace",
-): Session {
-  return {
+): ChildSession {
+  const frozen = sessionStateMode === "replace";
+  const session: Session = {
     id: parentSession.id,
     appName: parentSession.appName,
     userId: parentSession.userId,
-    state:
-      sessionStateMode === "replace"
-        ? Object.freeze({ ...sessionState })
-        : { ...parentSession.state, ...sessionState },
+    state: frozen
+      ? Object.freeze({ ...sessionState })
+      : { ...parentSession.state, ...sessionState },
     events:
       sessionHistoryMode === "replace"
         ? [syntheticUserEvent]
         : [...parentSession.events, syntheticUserEvent],
     lastUpdateTime: parentSession.lastUpdateTime,
   };
-}
-
-function combineAbortSignals(signals: readonly (AbortSignal | undefined)[]): {
-  signal: AbortSignal | undefined;
-  dispose: () => void;
-} {
-  const active = signals.filter((signal): signal is AbortSignal =>
-    Boolean(signal),
-  );
-  if (active.length === 0) {
-    return { signal: undefined, dispose: () => undefined };
-  }
-  if (active.length === 1) {
-    return { signal: active[0], dispose: () => undefined };
-  }
-
-  const controller = new AbortController();
-  const listeners = new Map<AbortSignal, () => void>();
-  for (const signal of active) {
-    const abort = () => controller.abort(signal.reason);
-    if (signal.aborted) {
-      abort();
-      break;
-    }
-    listeners.set(signal, abort);
-    signal.addEventListener("abort", abort, { once: true });
-  }
 
   return {
-    signal: controller.signal,
-    dispose: () => {
-      for (const [signal, listener] of listeners) {
-        signal.removeEventListener("abort", listener);
+    session,
+    async append(event) {
+      if (!frozen) {
+        return childSessionService.appendEvent({ session, event });
       }
+      // `replace` exposes an immutable state: apply the delta on a scratch copy
+      // that shares the events array, then publish a new frozen snapshot.
+      const scratch: AppendEventRequest["session"] = {
+        ...session,
+        state: { ...session.state },
+      };
+      const stored = await childSessionService.appendEvent({
+        session: scratch,
+        event,
+      });
+      session.state = Object.freeze({ ...scratch.state });
+      session.lastUpdateTime = scratch.lastUpdateTime;
+      return stored;
     },
   };
 }
 
-function throwIfAborted(signal: AbortSignal | undefined): void {
-  if (!signal?.aborted) {
-    return;
+/**
+ * Combines the active signals with the platform `AbortSignal.any` (Node >=22),
+ * the same primitive ADK's LlmAgent uses; no listeners to dispose.
+ */
+function combineAbortSignals(
+  signals: readonly (AbortSignal | undefined)[],
+): AbortSignal | undefined {
+  const active = signals.filter((signal): signal is AbortSignal =>
+    Boolean(signal),
+  );
+  if (active.length <= 1) {
+    return active[0];
   }
+  return AbortSignal.any(active);
+}
+
+/**
+ * A promise that rejects as soon as `signal` aborts, so a stalled agent
+ * generator cannot keep `run()` pending (ADK itself only checks between events).
+ */
+function abortRejection(
+  signal: AbortSignal | undefined,
+): { promise: Promise<never>; dispose: () => void } | undefined {
+  if (!signal) {
+    return undefined;
+  }
+  let onAbort: () => void = () => undefined;
+  const promise = new Promise<never>((_, reject) => {
+    onAbort = () => reject(abortError(signal));
+    if (signal.aborted) {
+      onAbort();
+    } else {
+      signal.addEventListener("abort", onAbort, { once: true });
+    }
+  });
+  promise.catch(() => undefined);
+  return {
+    promise,
+    dispose: () => signal.removeEventListener("abort", onAbort),
+  };
+}
+
+function abortError(signal: AbortSignal): Error {
   if (signal.reason instanceof Error) {
-    throw signal.reason;
+    return signal.reason;
   }
-  throw new Error(
+  return new Error(
     typeof signal.reason === "string"
       ? signal.reason
       : "Agent invocation aborted",
   );
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) {
+    throw abortError(signal);
+  }
 }
 
 function failedResult(
@@ -361,15 +462,12 @@ function failedResult(
       durationMs: Date.now() - startedAt,
     },
     error,
+    errorKind: "agent-error",
   };
 }
 
 function errorMessage(caught: unknown): string {
   return caught instanceof Error ? caught.message : String(caught);
-}
-
-function countFunctionCalls(event: Event): number {
-  return event.content?.parts?.filter((part) => part.functionCall).length ?? 0;
 }
 
 function extractVisibleText(event: Event): string | undefined {
@@ -379,6 +477,7 @@ function extractVisibleText(event: Event): string | undefined {
   }
 
   const text = parts
+    .filter((part) => part.thought !== true)
     .map((part) => part.text)
     .filter(
       (part): part is string => typeof part === "string" && part.length > 0,
