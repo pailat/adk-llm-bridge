@@ -14,6 +14,7 @@ function createMessage(overrides: {
     input_tokens: number;
     output_tokens: number;
     cache_read_input_tokens?: number | null;
+    cache_creation_input_tokens?: number | null;
   };
   id?: string;
   stop_reason?: Anthropic.Message["stop_reason"];
@@ -32,7 +33,8 @@ function createMessage(overrides: {
       input_tokens: overrides.usage.input_tokens,
       output_tokens: overrides.usage.output_tokens,
       cache_creation: null,
-      cache_creation_input_tokens: null,
+      cache_creation_input_tokens:
+        overrides.usage.cache_creation_input_tokens ?? null,
       cache_read_input_tokens: overrides.usage.cache_read_input_tokens ?? null,
       server_tool_use: null,
       service_tier: null,
@@ -703,9 +705,9 @@ describe("cache read tokens (LLM-5a)", () => {
     );
 
     expect(result.usageMetadata?.cachedContentTokenCount).toBe(1234);
-    // promptTokenCount semantics are unchanged (see B-LLM-5b).
-    expect(result.usageMetadata?.promptTokenCount).toBe(10);
-    expect(result.usageMetadata?.totalTokenCount).toBe(15);
+    // LLM-5b: promptTokenCount is the full prompt (input + cache read).
+    expect(result.usageMetadata?.promptTokenCount).toBe(1244);
+    expect(result.usageMetadata?.totalTokenCount).toBe(1249);
   });
 
   it("omits cachedContentTokenCount when the API reports none (non-stream)", () => {
@@ -751,8 +753,9 @@ describe("cache read tokens (LLM-5a)", () => {
     );
 
     expect(response?.usageMetadata).toMatchObject({
-      promptTokenCount: 7,
+      promptTokenCount: 106,
       candidatesTokenCount: 3,
+      totalTokenCount: 109,
       cachedContentTokenCount: 99,
     });
     expect(acc.cacheReadTokens).toBeUndefined();
@@ -781,5 +784,201 @@ describe("cache read tokens (LLM-5a)", () => {
     );
 
     expect(response?.usageMetadata?.cachedContentTokenCount).toBe(42);
+  });
+});
+
+describe("prompt token count includes the cache (LLM-5b)", () => {
+  it("adds cache read and creation tokens to promptTokenCount (non-stream)", () => {
+    const result = convertAnthropicResponse(
+      createMessage({
+        content: [{ type: "text", text: "Hi", citations: null }],
+        usage: {
+          input_tokens: 5,
+          output_tokens: 20,
+          cache_read_input_tokens: 100,
+          cache_creation_input_tokens: 30,
+        },
+      }),
+    );
+
+    expect(result.usageMetadata).toMatchObject({
+      promptTokenCount: 135,
+      candidatesTokenCount: 20,
+      totalTokenCount: 155,
+      cachedContentTokenCount: 100,
+    });
+  });
+
+  it("does not change counts when no cache is used", () => {
+    const result = convertAnthropicResponse(
+      createMessage({
+        content: [{ type: "text", text: "Hi", citations: null }],
+        usage: { input_tokens: 5, output_tokens: 20 },
+      }),
+    );
+
+    expect(result.usageMetadata).toEqual({
+      promptTokenCount: 5,
+      candidatesTokenCount: 20,
+      totalTokenCount: 25,
+    });
+  });
+
+  it("adds cache creation tokens in streams and resets the accumulator", () => {
+    const acc = createAnthropicStreamAccumulator();
+    convertAnthropicStreamEvent(
+      {
+        type: "message_start",
+        message: {
+          usage: {
+            input_tokens: 5,
+            cache_read_input_tokens: 100,
+            cache_creation_input_tokens: 30,
+          },
+        },
+      } as unknown as Anthropic.MessageStreamEvent,
+      acc,
+    );
+    convertAnthropicStreamEvent(
+      {
+        type: "message_delta",
+        delta: { stop_reason: "end_turn" },
+        usage: { output_tokens: 20 },
+      } as unknown as Anthropic.MessageStreamEvent,
+      acc,
+    );
+    const { response } = convertAnthropicStreamEvent(
+      { type: "message_stop" } as Anthropic.MessageStreamEvent,
+      acc,
+    );
+
+    expect(response?.usageMetadata).toMatchObject({
+      promptTokenCount: 135,
+      totalTokenCount: 155,
+      cachedContentTokenCount: 100,
+    });
+    expect(acc.cacheCreationTokens).toBeUndefined();
+  });
+});
+
+describe("malformed tool calls (LLM-6)", () => {
+  function streamToolTurn(
+    json: string,
+    stopReason: string,
+    extra?: (acc: ReturnType<typeof createAnthropicStreamAccumulator>) => void,
+  ) {
+    const acc = createAnthropicStreamAccumulator();
+    const send = (event: unknown) =>
+      convertAnthropicStreamEvent(event as Anthropic.MessageStreamEvent, acc);
+    send({ type: "message_start", message: { usage: { input_tokens: 4 } } });
+    send({
+      type: "content_block_start",
+      index: 0,
+      content_block: { type: "tool_use", id: "toolu_1", name: "lookup" },
+    });
+    send({
+      type: "content_block_delta",
+      index: 0,
+      delta: { type: "input_json_delta", partial_json: json },
+    });
+    extra?.(acc);
+    send({
+      type: "message_delta",
+      delta: { stop_reason: stopReason },
+      usage: { output_tokens: 9 },
+    });
+    return send({ type: "message_stop" }).response;
+  }
+
+  it("reports truncated streamed arguments as MALFORMED_FUNCTION_CALL", () => {
+    const response = streamToolTurn('{"city": "Tok', "max_tokens");
+
+    expect(response?.finishReason).toBe(FinishReason.MALFORMED_FUNCTION_CALL);
+    // The shared helper sets errorCode so ADK does not drop the response when
+    // no retry plugin is installed (contract change in the helper, not here).
+    expect(response?.errorCode).toBe("MALFORMED_FUNCTION_CALL");
+    expect(response?.errorMessage).toContain("lookup");
+    expect(response?.content).toBeUndefined();
+    expect(response?.usageMetadata?.candidatesTokenCount).toBe(9);
+  });
+
+  it("keeps text and drops the function call when arguments are invalid", () => {
+    const response = streamToolTurn("not json", "tool_use", (acc) => {
+      acc.text = "Let me check.";
+    });
+
+    expect(response?.finishReason).toBe(FinishReason.MALFORMED_FUNCTION_CALL);
+    expect(response?.errorCode).toBe("MALFORMED_FUNCTION_CALL");
+    expect(response?.content?.parts).toEqual([{ text: "Let me check." }]);
+  });
+
+  it("treats a streamed tool call cut by max_tokens as truncated even if the JSON parses", () => {
+    const response = streamToolTurn('{"city": "Tokyo"}', "max_tokens");
+
+    expect(response?.finishReason).toBe(FinishReason.MALFORMED_FUNCTION_CALL);
+  });
+
+  it("accepts a streamed call without arguments", () => {
+    const response = streamToolTurn("", "tool_use");
+
+    expect(response?.finishReason).not.toBe(
+      FinishReason.MALFORMED_FUNCTION_CALL,
+    );
+    expect(response?.errorCode).toBeUndefined();
+    expect(response?.content?.parts?.[0]?.functionCall).toMatchObject({
+      name: "lookup",
+      args: {},
+    });
+  });
+
+  it("does not flag a complete tool call", () => {
+    const response = streamToolTurn('{"city": "Tokyo"}', "tool_use");
+
+    expect(response?.content?.parts?.[0]?.functionCall?.args).toEqual({
+      city: "Tokyo",
+    });
+  });
+
+  it("reports a non-stream tool_use cut by max_tokens as malformed", () => {
+    const result = convertAnthropicResponse(
+      createMessage({
+        content: [
+          { type: "text", text: "Checking", citations: null },
+          {
+            type: "tool_use",
+            id: "toolu_1",
+            name: "lookup",
+            input: { city: "To" },
+            caller: { type: "direct" },
+          } as unknown as Anthropic.ToolUseBlock,
+        ],
+        stop_reason: "max_tokens",
+        usage: { input_tokens: 4, output_tokens: 9 },
+      }),
+    );
+
+    expect(result.finishReason).toBe(FinishReason.MALFORMED_FUNCTION_CALL);
+    expect(result.errorCode).toBe("MALFORMED_FUNCTION_CALL");
+    expect(result.content?.parts).toEqual([{ text: "Checking" }]);
+  });
+
+  it("keeps a non-stream tool_use when the turn ended normally", () => {
+    const result = convertAnthropicResponse(
+      createMessage({
+        content: [
+          {
+            type: "tool_use",
+            id: "toolu_1",
+            name: "lookup",
+            input: { city: "Tokyo" },
+          } as unknown as Anthropic.ToolUseBlock,
+        ],
+        stop_reason: "tool_use",
+        usage: { input_tokens: 4, output_tokens: 9 },
+      }),
+    );
+
+    expect(result.finishReason).not.toBe(FinishReason.MALFORMED_FUNCTION_CALL);
+    expect(result.content?.parts?.[0]?.functionCall?.name).toBe("lookup");
   });
 });

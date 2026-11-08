@@ -16,7 +16,11 @@
 import type Anthropic from "@anthropic-ai/sdk";
 import type { LlmResponse } from "@google/adk";
 import { FinishReason, type Part } from "@google/genai";
-import { safeJsonParse } from "../../../utils/index.js";
+import {
+  type MalformedToolCall,
+  malformedToolCallResponse,
+  parseToolArguments,
+} from "../../../converters/tool-arguments.js";
 import { JSON_OUTPUT_TOOL_NAME } from "./request.js";
 
 /**
@@ -82,6 +86,9 @@ export interface AnthropicStreamAccumulator {
   /** Tokens served from the prompt cache (`cache_read_input_tokens`) */
   cacheReadTokens?: number;
 
+  /** Tokens written to the prompt cache (`cache_creation_input_tokens`) */
+  cacheCreationTokens?: number;
+
   /** Stop reason captured from the message_delta event */
   stopReason?: string | null;
 }
@@ -98,6 +105,32 @@ export interface AnthropicStreamResult {
 }
 
 /**
+ * Builds ADK usage metadata from Anthropic token counts.
+ *
+ * Anthropic reports `input_tokens` EXCLUDING cached tokens, so the real prompt
+ * size is `input + cache_read + cache_creation`. ADK reads `promptTokenCount`
+ * for compaction thresholds and tracing, so it must be the full prompt size.
+ * `cachedContentTokenCount` keeps the cache-read part separately.
+ */
+function buildUsageMetadata(tokens: {
+  input: number;
+  output: number;
+  cacheRead?: number;
+  cacheCreation?: number;
+}): NonNullable<LlmResponse["usageMetadata"]> {
+  const prompt =
+    tokens.input + (tokens.cacheRead ?? 0) + (tokens.cacheCreation ?? 0);
+  return {
+    promptTokenCount: prompt,
+    candidatesTokenCount: tokens.output,
+    totalTokenCount: prompt + tokens.output,
+    ...(tokens.cacheRead !== undefined
+      ? { cachedContentTokenCount: tokens.cacheRead }
+      : {}),
+  };
+}
+
+/**
  * Converts an Anthropic Message response to ADK LlmResponse format.
  *
  * @param message - The Anthropic Message response
@@ -107,6 +140,16 @@ export function convertAnthropicResponse(
   message: Anthropic.Message,
 ): LlmResponse {
   const parts: Part[] = [];
+  const malformed: MalformedToolCall[] = [];
+
+  // When the output limit cuts the turn short, the last block is the one that
+  // was being generated; a tool_use there has incomplete arguments even though
+  // the API returns it as an object.
+  const lastBlock = message.content[message.content.length - 1];
+  const truncatedToolUse =
+    message.stop_reason === "max_tokens" && lastBlock?.type === "tool_use"
+      ? lastBlock
+      : undefined;
 
   for (const block of message.content) {
     if (block.type === "text") {
@@ -133,6 +176,10 @@ export function convertAnthropicResponse(
     }
 
     if (block.type === "tool_use") {
+      if (block === truncatedToolUse) {
+        malformed.push({ name: block.name, reason: "invalid-json" });
+        continue;
+      }
       const input =
         typeof block.input === "object" && block.input !== null
           ? (block.input as Record<string, unknown>)
@@ -156,23 +203,24 @@ export function convertAnthropicResponse(
     }
   }
 
+  const usageMetadata = message.usage
+    ? buildUsageMetadata({
+        input: message.usage.input_tokens,
+        output: message.usage.output_tokens,
+        cacheRead: message.usage.cache_read_input_tokens ?? undefined,
+        cacheCreation: message.usage.cache_creation_input_tokens ?? undefined,
+      })
+    : undefined;
+
+  if (malformed.length) {
+    return malformedToolCallResponse(parts, malformed, { usageMetadata });
+  }
+
   return {
     content: parts.length ? { role: "model", parts } : undefined,
     turnComplete: true,
     finishReason: mapAnthropicStopReason(message.stop_reason),
-    usageMetadata: message.usage
-      ? {
-          promptTokenCount: message.usage.input_tokens,
-          candidatesTokenCount: message.usage.output_tokens,
-          totalTokenCount:
-            message.usage.input_tokens + message.usage.output_tokens,
-          ...(message.usage.cache_read_input_tokens != null
-            ? {
-                cachedContentTokenCount: message.usage.cache_read_input_tokens,
-              }
-            : {}),
-        }
-      : undefined,
+    usageMetadata,
   };
 }
 
@@ -188,6 +236,7 @@ export function createAnthropicStreamAccumulator(): AnthropicStreamAccumulator {
     inputTokens: undefined,
     outputTokens: undefined,
     cacheReadTokens: undefined,
+    cacheCreationTokens: undefined,
     stopReason: undefined,
   };
 }
@@ -212,6 +261,10 @@ export function convertAnthropicStreamEvent(
       if (event.message?.usage?.cache_read_input_tokens != null) {
         acc.cacheReadTokens = event.message.usage.cache_read_input_tokens;
       }
+      if (event.message?.usage?.cache_creation_input_tokens != null) {
+        acc.cacheCreationTokens =
+          event.message.usage.cache_creation_input_tokens;
+      }
       return { isComplete: false };
     }
 
@@ -222,6 +275,9 @@ export function convertAnthropicStreamEvent(
       }
       if (event.usage?.cache_read_input_tokens != null) {
         acc.cacheReadTokens = event.usage.cache_read_input_tokens;
+      }
+      if (event.usage?.cache_creation_input_tokens != null) {
+        acc.cacheCreationTokens = event.usage.cache_creation_input_tokens;
       }
       // Capture the stop reason (carried on the message_delta).
       if (event.delta?.stop_reason) {
@@ -346,9 +402,26 @@ export function convertAnthropicStreamEvent(
         parts.push({ text: acc.text });
       }
 
-      for (const toolUse of acc.toolUses.values()) {
+      const malformed: MalformedToolCall[] = [];
+      const lastToolIndex = Math.max(-1, ...acc.toolUses.keys());
+      for (const [index, toolUse] of acc.toolUses) {
         if (toolUse.name) {
-          const args = safeJsonParse(toolUse.input);
+          const parsed = parseToolArguments(toolUse.input, toolUse.name);
+          // A turn cut by max_tokens leaves its last block incomplete, even
+          // when the partial JSON happens to parse.
+          const truncated =
+            acc.stopReason === "max_tokens" &&
+            index === lastToolIndex &&
+            index === acc.currentBlockIndex;
+          if (!parsed.ok || truncated) {
+            malformed.push(
+              parsed.ok
+                ? { name: toolUse.name, reason: "invalid-json" }
+                : parsed.failure,
+            );
+            continue;
+          }
+          const args = parsed.args;
           // See convertAnthropicResponse: the synthetic json_output tool must
           // surface as TEXT so ADK's outputKey/text-parse and isFinalResponse
           // work, not as a dispatchable functionCall.
@@ -370,14 +443,12 @@ export function convertAnthropicStreamEvent(
       const hasUsage =
         acc.inputTokens !== undefined || acc.outputTokens !== undefined;
       const usageMetadata = hasUsage
-        ? {
-            promptTokenCount: acc.inputTokens ?? 0,
-            candidatesTokenCount: acc.outputTokens ?? 0,
-            totalTokenCount: (acc.inputTokens ?? 0) + (acc.outputTokens ?? 0),
-            ...(acc.cacheReadTokens !== undefined
-              ? { cachedContentTokenCount: acc.cacheReadTokens }
-              : {}),
-          }
+        ? buildUsageMetadata({
+            input: acc.inputTokens ?? 0,
+            output: acc.outputTokens ?? 0,
+            cacheRead: acc.cacheReadTokens,
+            cacheCreation: acc.cacheCreationTokens,
+          })
         : undefined;
 
       const finishReason = mapAnthropicStopReason(acc.stopReason);
@@ -390,7 +461,17 @@ export function convertAnthropicStreamEvent(
       acc.inputTokens = undefined;
       acc.outputTokens = undefined;
       acc.cacheReadTokens = undefined;
+      acc.cacheCreationTokens = undefined;
       acc.stopReason = undefined;
+
+      if (malformed.length) {
+        return {
+          response: malformedToolCallResponse(parts, malformed, {
+            usageMetadata,
+          }),
+          isComplete: true,
+        };
+      }
 
       return {
         response: {

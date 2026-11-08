@@ -28,6 +28,7 @@ import {
 } from "@google/genai";
 import { normalizeSchema as normalizeSharedSchema } from "../../../converters/schema.js";
 import { ToolCallIdCorrelator } from "../../../converters/tool-call-ids.js";
+import { LogCode, WarningScope, warn } from "../../../utils/log.js";
 import { uriScheme } from "../../../utils/uri.js";
 
 /** Name of the synthetic tool used to emulate structured JSON output. */
@@ -165,13 +166,15 @@ export function convertAnthropicRequest(
   // One correlator per request: a tool_use and the tool_result that answers it
   // must carry the same id, and Anthropic only accepts ^[a-zA-Z0-9_-]+$.
   const toolCallIds = new ToolCallIdCorrelator({ sanitize: true });
+  // De-duplicates warnings within this request (one line per kind).
+  const warnings = new WarningScope();
 
   // Extract system instruction as separate field
   const system = extractSystemInstruction(llmRequest);
 
   // Process contents into messages
   for (const content of llmRequest.contents ?? []) {
-    const msg = processContent(content, toolCallIds);
+    const msg = processContent(content, toolCallIds, warnings);
     if (msg) {
       messages.push(msg);
     }
@@ -185,7 +188,7 @@ export function convertAnthropicRequest(
     });
   }
 
-  let tools = convertTools(llmRequest);
+  let tools = convertTools(llmRequest, warnings);
   let toolChoice = convertAnthropicToolChoice(llmRequest);
 
   // Structured output: inject a forced single output tool. It takes precedence
@@ -403,6 +406,7 @@ function extractText(parts: Part[]): string {
 function processContent(
   content: Content,
   toolCallIds: ToolCallIdCorrelator,
+  warnings: WarningScope,
 ): Anthropic.MessageParam | null {
   if (!content.parts?.length) return null;
 
@@ -425,17 +429,18 @@ function processContent(
       contentBlocks.push({ type: "text", text: part.text });
     }
 
-    const media = partToAnthropicMedia(part);
+    const media = partToAnthropicMedia(part, warnings);
     if (media) contentBlocks.push(media);
 
     if (part.functionCall) {
       if (!part.functionCall.id) {
-        console.warn(
-          "[adk-llm-bridge] functionCall missing id, using generated ID",
+        warn(
+          LogCode.TOOL_CALL_MISSING_ID,
+          "functionCall missing id, using generated ID",
         );
       }
       if (!part.functionCall.name) {
-        console.warn("[adk-llm-bridge] functionCall missing name");
+        warn(LogCode.TOOL_CALL_MISSING_NAME, "functionCall missing name");
       }
       const id = toolCallIds.callId(part.functionCall.id);
       const name = part.functionCall.name ?? "";
@@ -450,8 +455,9 @@ function processContent(
 
     if (part.functionResponse) {
       if (!part.functionResponse.id) {
-        console.warn(
-          "[adk-llm-bridge] functionResponse missing id, using generated ID",
+        warn(
+          LogCode.TOOL_RESPONSE_MISSING_ID,
+          "functionResponse missing id, using generated ID",
         );
       }
       contentBlocks.push({
@@ -541,6 +547,7 @@ const ANTHROPIC_IMAGE_MEDIA_TYPES = new Set([
  */
 function partToAnthropicMedia(
   part: Part,
+  warnings: WarningScope,
 ): Anthropic.ContentBlockParam | undefined {
   const inline = part.inlineData;
   if (inline?.data && inline.mimeType) {
@@ -565,8 +572,9 @@ function partToAnthropicMedia(
         },
       };
     }
-    console.warn(
-      `[adk-llm-bridge] dropping unsupported inlineData mime type: ${inline.mimeType}`,
+    warnings.warnOnce(
+      LogCode.MEDIA_MIME_UNSUPPORTED,
+      `dropping unsupported inlineData mime type: ${inline.mimeType}`,
     );
     return undefined;
   }
@@ -576,8 +584,9 @@ function partToAnthropicMedia(
     const isHttp =
       file.fileUri.startsWith("http://") || file.fileUri.startsWith("https://");
     if (!isHttp) {
-      console.warn(
-        `[adk-llm-bridge] dropping non-http fileData URI (scheme: ${uriScheme(file.fileUri)})`,
+      warnings.warnOnce(
+        LogCode.MEDIA_URI_UNSUPPORTED,
+        `dropping non-http fileData URI (scheme: ${uriScheme(file.fileUri)})`,
       );
       return undefined;
     }
@@ -590,8 +599,9 @@ function partToAnthropicMedia(
     if (!file.mimeType || file.mimeType.startsWith("image/")) {
       return { type: "image", source: { type: "url", url: file.fileUri } };
     }
-    console.warn(
-      `[adk-llm-bridge] dropping unsupported fileData mime type: ${file.mimeType}`,
+    warnings.warnOnce(
+      LogCode.MEDIA_MIME_UNSUPPORTED,
+      `dropping unsupported fileData mime type: ${file.mimeType}`,
     );
   }
 
@@ -657,7 +667,10 @@ function resolveInputSchema(
  * skipped without crashing; if any are present a SINGLE warning is emitted
  * naming the dropped built-in tool(s).
  */
-function convertTools(req: LlmRequest): Anthropic.Tool[] | undefined {
+function convertTools(
+  req: LlmRequest,
+  warnings: WarningScope,
+): Anthropic.Tool[] | undefined {
   const adkTools = req.config?.tools;
   if (!adkTools?.length) return undefined;
 
@@ -671,7 +684,10 @@ function convertTools(req: LlmRequest): Anthropic.Tool[] | undefined {
     ) {
       for (const fn of group.functionDeclarations) {
         if (!fn.name) {
-          console.warn("[adk-llm-bridge] Tool function missing name, skipping");
+          warnings.warnOnce(
+            LogCode.TOOL_DECLARATION_MISSING_NAME,
+            "Tool function missing name, skipping",
+          );
           continue;
         }
         tools.push({
@@ -691,8 +707,9 @@ function convertTools(req: LlmRequest): Anthropic.Tool[] | undefined {
   }
 
   if (droppedBuiltins.size > 0) {
-    console.warn(
-      `[adk-llm-bridge] dropping Gemini-only built-in tool(s) not supported on this provider: ${[
+    warn(
+      LogCode.BUILTIN_TOOLS_DROPPED,
+      `dropping Gemini-only built-in tool(s) not supported on this provider: ${[
         ...droppedBuiltins,
       ].join(", ")}`,
     );

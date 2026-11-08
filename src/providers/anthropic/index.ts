@@ -16,6 +16,7 @@ import type {
   AnthropicProviderConfig,
   AnthropicRegisterOptions,
 } from "../../types.js";
+import { LogCode, warn } from "../../utils/log.js";
 import { AnthropicLlm } from "./anthropic-llm.js";
 
 // Re-exports
@@ -52,7 +53,7 @@ let registered = false;
 
 export function registerAnthropic(options?: AnthropicRegisterOptions): void {
   if (registered) {
-    console.warn("[adk-llm-bridge] anthropic already registered, skipping");
+    warn(LogCode.ALREADY_REGISTERED, "anthropic already registered, skipping");
     return;
   }
   if (options) {

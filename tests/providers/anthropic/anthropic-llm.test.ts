@@ -2,12 +2,14 @@ import { beforeEach, describe, expect, it, spyOn } from "bun:test";
 import type { LlmRequest, LlmResponse } from "@google/adk";
 import { SpanStatusCode, trace } from "@opentelemetry/api";
 import { resetAllConfigs, setProviderConfig } from "../../../src/config.js";
+import { ProviderLlmError } from "../../../src/core/provider-llm-error.js";
 import { _resetAnthropicWarningState } from "../../../src/providers/anthropic/anthropic-llm.js";
 import {
   ANTHROPIC_MODEL_PATTERNS,
   AnthropicLlm,
 } from "../../../src/providers/anthropic/index.js";
 import { useCleanEnv } from "../../helpers/env.js";
+import { captureWarnings } from "../../helpers/fake-logger.js";
 import {
   describeConnectError,
   describeModelPatterns,
@@ -299,15 +301,13 @@ describe("AnthropicLlm", () => {
         _resetAnthropicWarningState();
       });
 
-      const downgradeWarnCount = (
-        spy: ReturnType<typeof spyOn<typeof console, "warn">>,
-      ) =>
+      const downgradeWarnCount = (spy: ReturnType<typeof captureWarnings>) =>
         spy.mock.calls.filter((c) =>
           String(c[0]).includes("downgrading tool_choice"),
         ).length;
 
       it("warns at most once when downgrading a forced tool_choice under thinking", () => {
-        const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
+        const warnSpy = captureWarnings();
         try {
           const llm = newLlm();
           const first = llm.callBuild(
@@ -337,7 +337,7 @@ describe("AnthropicLlm", () => {
       });
 
       it("does NOT warn when tool_choice is {type:'none'} under thinking", () => {
-        const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
+        const warnSpy = captureWarnings();
         try {
           const result = newLlm().callBuild(
             { thinking: { type: "enabled", budget_tokens: 2048 } },
@@ -351,7 +351,7 @@ describe("AnthropicLlm", () => {
       });
 
       it("does NOT warn when thinking is OFF even with a forced tool_choice", () => {
-        const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
+        const warnSpy = captureWarnings();
         try {
           const result = newLlm().callBuild(
             {},
@@ -660,9 +660,11 @@ describe("AnthropicLlm", () => {
             Object.assign(new Error("rate limited"), { status: 429 }),
           );
 
-        const responses = await drain(llm.generateContentAsync(userRequest()));
+        const error = await drain(
+          llm.generateContentAsync(userRequest()),
+        ).catch((e) => e as ProviderLlmError);
 
-        expect(responses[0]?.errorCode).toBe("API_ERROR_429");
+        expect(error).toBeInstanceOf(ProviderLlmError);
         expect(span.attributes["error.type"]).toBe("429");
         expect(span.status?.code).toBe(SpanStatusCode.ERROR);
         expect(span.exceptions).toHaveLength(1);
@@ -690,6 +692,85 @@ describe("AnthropicLlm", () => {
       } finally {
         spy.mockRestore();
       }
+    });
+  });
+
+  describe("errorMode (LLM-1)", () => {
+    function failing(
+      config: { errorMode?: "throw" | "response" } = {},
+    ): AnthropicLlm {
+      const llm = new AnthropicLlm({
+        model: "claude-sonnet-4-5-20250929",
+        apiKey: "sk-ant-test",
+        ...config,
+      });
+      messagesClient(llm).create = () =>
+        Promise.reject(
+          Object.assign(new Error("rate limited"), { status: 429 }),
+        );
+      return llm;
+    }
+
+    it("throws a ProviderLlmError by default, with the JSON message ADK parses", async () => {
+      const error = (await drain(
+        failing().generateContentAsync(userRequest()),
+      ).catch((e) => e)) as ProviderLlmError;
+
+      expect(error).toBeInstanceOf(ProviderLlmError);
+      expect(error.code).toBe("API_ERROR_429");
+      expect(error.provider).toBe("ANTHROPIC");
+      expect(JSON.parse(error.message)).toEqual({
+        error: { code: "API_ERROR_429", message: "rate limited" },
+      });
+    });
+
+    it("uses ANTHROPIC_ERROR for errors without a status", async () => {
+      const llm = makeLlm();
+      messagesClient(llm).create = () => Promise.reject(new Error("boom"));
+
+      const error = (await drain(llm.generateContentAsync(userRequest())).catch(
+        (e) => e,
+      )) as ProviderLlmError;
+
+      expect(error.code).toBe("ANTHROPIC_ERROR");
+    });
+
+    it('yields an error response with errorMode "response"', async () => {
+      const responses = await drain(
+        failing({ errorMode: "response" }).generateContentAsync(userRequest()),
+      );
+
+      expect(responses).toEqual([
+        {
+          errorCode: "API_ERROR_429",
+          errorMessage: "rate limited",
+          turnComplete: true,
+        },
+      ]);
+    });
+
+    it("honours the global config and lets the instance override it", async () => {
+      setProviderConfig("anthropic", { errorMode: "response" });
+
+      expect(
+        await drain(failing().generateContentAsync(userRequest())),
+      ).toHaveLength(1);
+      await expect(
+        drain(
+          failing({ errorMode: "throw" }).generateContentAsync(userRequest()),
+        ),
+      ).rejects.toBeInstanceOf(ProviderLlmError);
+    });
+
+    it("applies to streaming failures", async () => {
+      const llm = makeLlm();
+      messagesClient(llm).stream = () => {
+        throw Object.assign(new Error("overloaded"), { status: 529 });
+      };
+
+      await expect(
+        drain(llm.generateContentAsync(userRequest(), true)),
+      ).rejects.toMatchObject({ code: "API_ERROR_529" });
     });
   });
 

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import type Anthropic from "@anthropic-ai/sdk";
 import type { LlmRequest } from "@google/adk";
 import { FunctionCallingConfigMode, type Schema } from "@google/genai";
@@ -9,6 +9,8 @@ import {
   convertAnthropicStructuredOutput,
   convertAnthropicToolChoice,
 } from "../../../../src/providers/anthropic/converters/request.js";
+import { LogCode } from "../../../../src/utils/log.js";
+import { captureWarnings } from "../../../helpers/fake-logger.js";
 
 function createLlmRequest(overrides: Partial<LlmRequest> = {}): LlmRequest {
   return {
@@ -1090,37 +1092,81 @@ describe("convertAnthropicRequest", () => {
         ],
       });
 
-      const warns: string[] = [];
-      const original = console.warn;
-      console.warn = (...args: unknown[]) => {
-        warns.push(args.map(String).join(" "));
-      };
+      const spy = captureWarnings();
       let result: ReturnType<typeof convertAnthropicRequest>;
       try {
         result = convertAnthropicRequest(request);
       } finally {
-        console.warn = original;
+        spy.mockRestore();
       }
+      const warns = spy.mock.calls.map((c) => String(c[0]));
       expect(warns.some((w) => w.includes("scheme: gs"))).toBe(true);
       expect(warns.join("\n")).not.toContain("bucket/img.png");
+      expect(spy.codes).toContain(LogCode.MEDIA_URI_UNSUPPORTED);
       expect(result.messages[0].content).toEqual([
         { type: "text", text: "hi" },
       ]);
     });
   });
 
-  describe("Gemini-only built-in tools", () => {
-    function withConsoleWarn<T>(fn: () => T): { result: T; warns: string[] } {
-      const warns: string[] = [];
-      const original = console.warn;
-      console.warn = (...args: unknown[]) => {
-        warns.push(args.map(String).join(" "));
+  describe("warnings go through the ADK logger (OBS-4)", () => {
+    it("tags missing-id warnings with stable codes and never touches console", () => {
+      const consoleSpy = spyOn(console, "warn").mockImplementation(() => {});
+      const spy = captureWarnings();
+      try {
+        convertAnthropicRequest(
+          createLlmRequest({
+            contents: [
+              { role: "user", parts: [{ text: "go" }] },
+              {
+                role: "model",
+                parts: [{ functionCall: { name: "a", args: {} } }],
+              },
+              {
+                role: "user",
+                parts: [{ functionResponse: { name: "a", response: {} } }],
+              },
+            ],
+          }),
+        );
+      } finally {
+        spy.mockRestore();
+      }
+      expect(spy.codes).toEqual([
+        LogCode.TOOL_CALL_MISSING_ID,
+        LogCode.TOOL_RESPONSE_MISSING_ID,
+      ]);
+      expect(spy.mock.calls[0]?.[0]).toStartWith("[adk-llm-bridge] ");
+      expect(consoleSpy).not.toHaveBeenCalled();
+      consoleSpy.mockRestore();
+    });
+
+    it("warns once per request for repeated unsupported media", () => {
+      const spy = captureWarnings();
+      const part = {
+        inlineData: { mimeType: "audio/wav", data: "AAAA" },
       };
       try {
-        const result = fn();
-        return { result, warns };
+        convertAnthropicRequest(
+          createLlmRequest({
+            contents: [{ role: "user", parts: [part, part, part] }],
+          }),
+        );
       } finally {
-        console.warn = original;
+        spy.mockRestore();
+      }
+      expect(spy.codes).toEqual([LogCode.MEDIA_MIME_UNSUPPORTED]);
+    });
+  });
+
+  describe("Gemini-only built-in tools", () => {
+    function withWarnings<T>(fn: () => T): { result: T; warns: string[] } {
+      const spy = captureWarnings();
+      try {
+        const result = fn();
+        return { result, warns: spy.mock.calls.map((c) => String(c[0])) };
+      } finally {
+        spy.mockRestore();
       }
     }
 
@@ -1132,7 +1178,7 @@ describe("convertAnthropicRequest", () => {
         },
       });
 
-      const { result, warns } = withConsoleWarn(() =>
+      const { result, warns } = withWarnings(() =>
         convertAnthropicRequest(request),
       );
 
@@ -1163,7 +1209,7 @@ describe("convertAnthropicRequest", () => {
         },
       });
 
-      const { result, warns } = withConsoleWarn(() =>
+      const { result, warns } = withWarnings(() =>
         convertAnthropicRequest(request),
       );
 
