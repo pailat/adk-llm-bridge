@@ -63,28 +63,140 @@ function normalizeToolCallArgs(input: unknown): Record<string, unknown> {
 }
 
 /**
+ * Brand carried by every `ExternalAgent` instance. `Symbol.for` makes it the
+ * same key in every copy of this module (a duplicated install or a bundle
+ * split), where `instanceof` would fail and silently skip the ancestor.
+ */
+const EXTERNAL_AGENT_BRAND = Symbol.for(
+  "adk-llm-bridge.agents.external-agent.v1",
+);
+
+/** Read by every brand reader; anything else counts as unreadable. */
+type PolicyReader = () => ExternalAgentPermissionPolicy | undefined;
+
+const PERMISSION_MODES: ReadonlySet<string> = new Set([
+  "read-only",
+  "ask",
+  "workspace-write",
+  "full-access",
+]);
+
+/** Policy that a branded ancestor with an unreadable policy counts as. */
+const UNREADABLE_POLICY: ExternalAgentPermissionPolicy = Object.freeze({
+  mode: "ask",
+});
+
+/**
+ * Validated, deep-frozen copy of `value`, `null` when it is not a well-formed
+ * policy and `undefined` when there is no policy. Only the known fields are
+ * copied, so extra or accessor-backed fields cannot leak through.
+ */
+function snapshotPolicy(
+  value: unknown,
+): ExternalAgentPermissionPolicy | undefined | null {
+  if (value === undefined) return undefined;
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return null;
+  }
+  const { mode, allowNetwork, allowedPaths } = value as Record<string, unknown>;
+  if (typeof mode !== "string" || !PERMISSION_MODES.has(mode)) return null;
+  if (allowNetwork !== undefined && typeof allowNetwork !== "boolean") {
+    return null;
+  }
+  let paths: readonly string[] | undefined;
+  if (allowedPaths !== undefined) {
+    if (!Array.isArray(allowedPaths)) return null;
+    const copy = [...allowedPaths];
+    if (!copy.every((path) => typeof path === "string")) return null;
+    paths = Object.freeze(copy);
+  }
+  return Object.freeze({
+    mode: mode as ExternalAgentPermissionPolicy["mode"],
+    ...(allowNetwork !== undefined ? { allowNetwork } : {}),
+    ...(paths ? { allowedPaths: paths } : {}),
+  });
+}
+
+/** Defines the brand on `agent`: a frozen reader of its current policy. */
+function brandExternalAgent(agent: ExternalAgent): void {
+  const reader: PolicyReader = () => {
+    const policy = snapshotPolicy(agent.permissions);
+    return policy === null ? UNREADABLE_POLICY : policy;
+  };
+  Object.defineProperty(agent, EXTERNAL_AGENT_BRAND, {
+    value: Object.freeze(reader),
+    enumerable: false,
+    writable: false,
+    configurable: false,
+  });
+}
+
+/**
+ * The brand reader of `node`, or `undefined` when `node` is not branded. The
+ * brand must be an own property: a prototype-inherited key does not count.
+ */
+function brandOf(node: object): { reader: unknown } | undefined {
+  const descriptor = Object.getOwnPropertyDescriptor(
+    node,
+    EXTERNAL_AGENT_BRAND,
+  );
+  return descriptor ? { reader: descriptor.value } : undefined;
+}
+
+/**
+ * Policy of a branded ancestor, read only through its brand reader and
+ * re-validated here. Fails closed: a reader that is missing, not frozen, a
+ * getter, throws, or returns a malformed policy counts as `ask`.
+ */
+function readBrandedPolicy(brand: {
+  reader: unknown;
+}): ExternalAgentPermissionPolicy | undefined {
+  const { reader } = brand;
+  if (typeof reader !== "function" || !Object.isFrozen(reader)) {
+    return UNREADABLE_POLICY;
+  }
+  try {
+    const policy = snapshotPolicy((reader as PolicyReader)());
+    return policy === null ? UNREADABLE_POLICY : policy;
+  } catch {
+    return UNREADABLE_POLICY;
+  }
+}
+
+/**
  * Policy of `agent` capped by every `ExternalAgent` above it in the agent
  * tree, folded root-down with the same rule `ToolGateway` applies on each
  * delegation (`deriveSubAgentPermissionPolicy(parentEffective, childOwn)`,
  * where a parent with no policy counts as `ask`). Other agents in between
  * (LlmAgent, Sequential...) do not delegate through the gateway and are
  * skipped. With no ExternalAgent ancestor this is the agent's own policy.
+ *
+ * Ancestors are detected by the {@link EXTERNAL_AGENT_BRAND} brand, not
+ * `instanceof`, so an ancestor built by another copy of this class still caps
+ * the agent. Their policy is read only through the brand reader and is
+ * re-validated; an unreadable one counts as `ask`. Only the static tree is
+ * covered (see `permissions/inheritance.ts`).
  */
 function ancestryPermissions(
   agent: ExternalAgent,
 ): ExternalAgentPermissionPolicy | undefined {
-  const chain: ExternalAgent[] = [];
+  const chain: { reader: unknown }[] = [];
   for (let node = agent.parentAgent; node; node = node.parentAgent) {
-    if (node instanceof ExternalAgent) chain.unshift(node);
+    const brand = brandOf(node);
+    if (brand) chain.unshift(brand);
   }
-  if (chain.length === 0) {
+  const [root, ...rest] = chain;
+  if (!root) {
     return agent.permissions;
   }
-  let effective = chain[0]?.permissions;
-  for (const next of [...chain.slice(1), agent]) {
-    effective = deriveSubAgentPermissionPolicy(effective, next.permissions);
+  let effective = readBrandedPolicy(root);
+  for (const brand of rest) {
+    effective = deriveSubAgentPermissionPolicy(
+      effective,
+      readBrandedPolicy(brand),
+    );
   }
-  return effective;
+  return deriveSubAgentPermissionPolicy(effective, agent.permissions);
 }
 
 /**
@@ -186,6 +298,7 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
     this.confirmation = config.confirmation;
     this.tools = config.tools ?? [];
     this.readOnlyTools = config.readOnlyTools ?? [];
+    brandExternalAgent(this);
   }
 
   protected async *runAsyncImpl(

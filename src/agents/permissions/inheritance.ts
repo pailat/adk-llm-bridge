@@ -82,6 +82,16 @@ function deriveAllowedPaths(
  * instead, or give agents wrapped in `AgentTool` an explicit policy no broader
  * than their caller's.
  *
+ * Static ancestry: independently of this registry, `ExternalAgent` also caps
+ * its policy by the `ExternalAgent`s above it in the agent tree (they are
+ * detected by a `Symbol.for` brand, so a second copy of the class still
+ * counts; an ancestor whose policy cannot be read counts as `ask`). That fold
+ * covers only policies declared in the static tree (`parentAgent` links set
+ * from `subAgents`). A policy granted at run time (a delegation through
+ * `ToolGateway`, a workflow step, an `AgentTool` hop) reaches the agent only
+ * through this session registry; an agent run on a session that does not
+ * carry it is capped by its static ancestors alone.
+ *
  * Other session-creating hops (e.g. the gateway that runs workflow steps) must
  * call {@link inheritSessionPermissions} when they build a new child session.
  * This module intentionally has no runtime imports so `src/runtime` can use it.

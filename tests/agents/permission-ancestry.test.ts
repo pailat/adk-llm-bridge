@@ -264,3 +264,164 @@ describe("ExternalAgent permissions follow its static ancestry (B1)", () => {
     expect(seen.at(-1)?.permissions).toEqual(DERIVED);
   });
 });
+
+// Wave 4 (security): ancestors are detected by a `Symbol.for` brand, so a
+// second copy of the class (duplicated install, bundle split) still caps the
+// agent, and their policy is read only through a frozen, validated reader.
+describe("ExternalAgent ancestry brand check", () => {
+  const BRAND = Symbol.for("adk-llm-bridge.agents.external-agent.v1");
+
+  /** An ancestor that passes the brand check but is not `instanceof`. */
+  function foreignAncestor(
+    child: ExternalAgent,
+    brandValue: PropertyDescriptor | undefined,
+  ): LlmAgent {
+    const parent = new LlmAgent({
+      name: "foreign_root",
+      model: "unused",
+      subAgents: [child],
+    });
+    if (brandValue) Object.defineProperty(parent, BRAND, brandValue);
+    expect(parent instanceof ExternalAgent).toBe(false);
+    return parent;
+  }
+
+  /** The brand descriptor of a genuine ExternalAgent, as another copy defines it. */
+  function brandFrom(permissions?: ExternalAgentPermissionPolicy) {
+    const donor = new ExternalAgent({
+      name: "donor",
+      provider: CODEX_PROVIDER,
+      driver: delegatingDriver(),
+      ...(permissions ? { permissions } : {}),
+    });
+    return Object.getOwnPropertyDescriptor(donor, BRAND);
+  }
+
+  async function permissionsSeenBy(child: ExternalAgent, seen: Seen[]) {
+    await (await resumableRunner(child)).run({
+      role: "user",
+      parts: [{ text: "go" }],
+    });
+    return seen.at(-1)?.permissions;
+  }
+
+  test("every instance carries a frozen, non-writable, non-configurable brand", () => {
+    const descriptor = brandFrom({ mode: "ask" });
+    expect(descriptor).toBeDefined();
+    expect(descriptor?.enumerable).toBe(false);
+    expect(descriptor?.writable).toBe(false);
+    expect(descriptor?.configurable).toBe(false);
+    expect(typeof descriptor?.value).toBe("function");
+    expect(Object.isFrozen(descriptor?.value)).toBe(true);
+    const policy = descriptor?.value();
+    expect(policy).toEqual({ mode: "ask" });
+    expect(Object.isFrozen(policy)).toBe(true);
+  });
+
+  test("a branded ancestor from another class copy caps the agent", async () => {
+    const seen: Seen[] = [];
+    const child = worker("full-access", seen, () => 1);
+    foreignAncestor(child, brandFrom({ mode: "ask", allowedPaths: ["/repo"] }));
+    expect(await permissionsSeenBy(child, seen)).toEqual(DERIVED);
+  });
+
+  test("a branded read-only ancestor from another copy makes the agent read-only", async () => {
+    const seen: Seen[] = [];
+    const child = worker("full-access", seen, () => 1);
+    foreignAncestor(child, brandFrom({ mode: "read-only" }));
+    expect((await permissionsSeenBy(child, seen))?.mode).toBe("read-only");
+  });
+
+  const unreadable: [string, PropertyDescriptor][] = [
+    ["a non-function brand", { value: { mode: "full-access" } }],
+    ["a non-frozen reader", { value: () => ({ mode: "full-access" }) }],
+    ["an accessor brand", { get: () => () => ({ mode: "full-access" }) }],
+    [
+      "a reader that throws",
+      {
+        value: Object.freeze(() => {
+          throw new Error("boom");
+        }),
+      },
+    ],
+    [
+      "a reader returning an unknown mode",
+      { value: Object.freeze(() => ({ mode: "root" })) },
+    ],
+    [
+      "a reader returning a malformed allowNetwork",
+      {
+        value: Object.freeze(() => ({ mode: "full-access", allowNetwork: 1 })),
+      },
+    ],
+    [
+      "a reader returning non-string paths",
+      {
+        value: Object.freeze(() => ({
+          mode: "full-access",
+          allowedPaths: [42],
+        })),
+      },
+    ],
+    ["a reader returning null", { value: Object.freeze(() => null) }],
+  ];
+  for (const [label, descriptor] of unreadable) {
+    test(`fails closed to ask on ${label}`, async () => {
+      const seen: Seen[] = [];
+      const child = worker("full-access", seen, () => 1);
+      foreignAncestor(child, descriptor);
+      expect(await permissionsSeenBy(child, seen)).toEqual({
+        mode: "ask",
+        allowNetwork: false,
+      });
+    });
+  }
+
+  test("a look-alike ancestor cannot widen a narrower child", async () => {
+    const seen: Seen[] = [];
+    const child = worker("read-only", seen, () => 1);
+    foreignAncestor(child, {
+      value: Object.freeze(() => ({
+        mode: "full-access",
+        allowNetwork: true,
+      })),
+    });
+    expect(await permissionsSeenBy(child, seen)).toEqual({
+      mode: "read-only",
+      allowNetwork: false,
+    });
+  });
+
+  test("an unbranded ancestor is still skipped", async () => {
+    const seen: Seen[] = [];
+    const child = worker("full-access", seen, () => 1);
+    foreignAncestor(child, undefined);
+    expect(await permissionsSeenBy(child, seen)).toEqual({
+      mode: "full-access",
+    });
+  });
+
+  test("a brand inherited through the prototype does not count", async () => {
+    const seen: Seen[] = [];
+    const child = worker("full-access", seen, () => 1);
+    const parent = foreignAncestor(child, undefined);
+    const proto = Object.create(Object.getPrototypeOf(parent));
+    Object.defineProperty(proto, BRAND, brandFrom({ mode: "read-only" }) ?? {});
+    Object.setPrototypeOf(parent, proto);
+    expect(await permissionsSeenBy(child, seen)).toEqual({
+      mode: "full-access",
+    });
+  });
+
+  test("mutating a returned snapshot does not change the ancestor's policy", () => {
+    const reader = brandFrom({ mode: "ask", allowedPaths: ["/repo"] })?.value;
+    const snapshot = reader();
+    expect(() => {
+      snapshot.mode = "full-access";
+    }).toThrow();
+    expect(() => {
+      snapshot.allowedPaths.push("/");
+    }).toThrow();
+    expect(reader()).toEqual({ mode: "ask", allowedPaths: ["/repo"] });
+  });
+});
