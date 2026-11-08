@@ -53,7 +53,7 @@
     "node": ">=22.0.0"
   },
   "scripts": {
-    "build": "bunup",
+    "build": "bunup && bun scripts/fix-dts-private.ts",
     "test": "bun test",
     "typecheck": "bunx tsc --noEmit",
     "typecheck:all": "bunx tsc --noEmit -p tsconfig.test.json",
@@ -65,8 +65,8 @@
     "check": "biome check .",
     "check:fix": "biome check --write .",
     "lint:publish": "publint --strict && attw --pack --profile esm-only",
-    "ci": "bun run typecheck:all && bun run typecheck:conformance && bun run check && bun test && bun run build && bun scripts/check-dist-permissions.ts && bun run lint:publish",
-    "prepublishOnly": "bun run build && bun scripts/check-dist-permissions.ts && bun run lint:publish",
+    "ci": "bun run typecheck:all && bun run typecheck:conformance && bun run check && bun test && bun run build && bun scripts/fix-dts-private.ts --check && bun scripts/check-dist-permissions.ts && bun run lint:publish",
+    "prepublishOnly": "bun run build && bun scripts/fix-dts-private.ts --check && bun scripts/check-dist-permissions.ts && bun run lint:publish",
     "typecheck:compat:nodenext": "bun run build && bunx tsc -p tests/compat/nodenext-consumer/tsconfig.json"
   },
   "peerDependencies": {
