@@ -8,6 +8,7 @@ import { type ExternalAgentEvent, isExternalAgentEvent } from "../events.js";
 import type { ExternalAgentRunRequest } from "../external-agent-driver.js";
 import type { ExternalAgentPermissionPolicy } from "../permissions/schema.js";
 import { CODEX_PROVIDER } from "../provider/codex.js";
+import { asRecord, copyIfPresent, stringValue } from "./shared.js";
 import { SubprocessJsonlDriver } from "./subprocess-jsonl.js";
 
 declare const Bun: {
@@ -336,10 +337,13 @@ function extractContextText(context: unknown): string | undefined {
 }
 
 async function* readLines(source: LineSource): AsyncIterable<string> {
+  const decoder = new TextDecoder();
   let buffer = "";
   for await (const chunk of toAsyncIterable(source)) {
     buffer +=
-      typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk);
+      typeof chunk === "string"
+        ? chunk
+        : decoder.decode(chunk, { stream: true });
     let newlineIndex = buffer.indexOf("\n");
     while (newlineIndex >= 0) {
       yield buffer.slice(0, newlineIndex).replace(/\r$/, "");
@@ -347,6 +351,7 @@ async function* readLines(source: LineSource): AsyncIterable<string> {
       newlineIndex = buffer.indexOf("\n");
     }
   }
+  buffer += decoder.decode();
   if (buffer.length > 0) {
     yield buffer.replace(/\r$/, "");
   }
@@ -396,27 +401,6 @@ function spawnWithBun(
     stderr: child.stderr,
     exited: child.exited,
   };
-}
-
-function copyIfPresent(
-  source: Record<string, string | undefined>,
-  target: Record<string, string>,
-  key: string,
-): void {
-  const value = source[key];
-  if (typeof value === "string" && value.length > 0) {
-    target[key] = value;
-  }
-}
-
-function asRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object"
-    ? (value as Record<string, unknown>)
-    : {};
-}
-
-function stringValue(value: unknown): string | undefined {
-  return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
 function numberValue(value: unknown): number | undefined {

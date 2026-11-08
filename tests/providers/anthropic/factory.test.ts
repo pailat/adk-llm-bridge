@@ -4,11 +4,12 @@ import {
   Anthropic,
   AnthropicLlm,
 } from "../../../src/providers/anthropic/index.js";
+import { useCleanEnv } from "../../helpers/env.js";
 
 describe("Anthropic factory", () => {
+  useCleanEnv(["ANTHROPIC_API_KEY"]);
   beforeEach(() => {
     resetAllConfigs();
-    delete process.env.ANTHROPIC_API_KEY;
   });
 
   it("creates correct instance", () => {
@@ -33,9 +34,7 @@ describe("Anthropic factory", () => {
 });
 
 describe("Anthropic factory (provider-specific)", () => {
-  beforeEach(() => {
-    delete process.env.ANTHROPIC_API_KEY;
-  });
+  beforeEach(() => {});
 
   it("accepts maxTokens option", () => {
     const llm = Anthropic("claude-sonnet-4-5-20250929", {

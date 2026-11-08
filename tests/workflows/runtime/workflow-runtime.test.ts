@@ -25,6 +25,7 @@ class DelayedAgent extends BaseAgent {
   readonly #output: string;
   readonly #activity: Activity;
   aborted = false;
+  readonly started = deferred<void>();
 
   constructor(
     name: string,
@@ -39,6 +40,7 @@ class DelayedAgent extends BaseAgent {
   }
 
   protected async *runAsyncImpl(context: InvocationContext) {
+    this.started.resolve();
     this.#activity.active++;
     this.#activity.maxActive = Math.max(
       this.#activity.maxActive,
@@ -253,7 +255,8 @@ describe("WorkflowRuntime parallel execution", () => {
       parentWorkflow,
       invocation(parentWorkflow, parentAbort.signal),
     );
-    setTimeout(() => parentAbort.abort("cancelled by parent"), 5);
+    await parentSlow.started.promise;
+    parentAbort.abort("cancelled by parent");
     await expect(parentRun).rejects.toMatchObject({
       code: "WORKFLOW_ABORTED",
       message: "cancelled by parent",

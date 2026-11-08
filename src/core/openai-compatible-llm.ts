@@ -133,7 +133,7 @@ export class OpenAICompatibleLlm extends BaseProviderLlm {
       this._errorPrefix = "CUSTOM";
       this.client = new OpenAI({
         baseURL: clientConfig.baseURL,
-        // OpenAI SDK v6.37 requires a non-empty credential at construction
+        // The OpenAI SDK requires a non-empty credential at construction
         // time. Custom OpenAI-compatible providers such as Ollama, vLLM, and
         // LM Studio often do not require API keys, so use a harmless dummy key
         // only for manual/custom mode when the caller intentionally omitted one.

@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import {
   BaseAgent,
   createEvent,
@@ -15,6 +15,12 @@ import {
   type ExternalAgentRunRequest,
 } from "../../src/agents/index.js";
 import { CODEX_PROVIDER } from "../../src/agents/provider/schema.js";
+import { withDeadline } from "./helpers.js";
+
+// installTraceCapture() sets a process-global tracer provider; always undo it.
+afterEach(() => {
+  trace.disable();
+});
 
 class StateAgent extends BaseAgent {
   constructor(name = "state_agent") {
@@ -222,14 +228,11 @@ describe("ExternalAgent ADK event formatting", () => {
       driver,
     });
 
-    const events = await Promise.race([
+    const events = await withDeadline(
       collect(agent),
-      Bun.sleep(250).then(() => {
-        throw new Error(
-          "external agent waited for provider EOF after completed",
-        );
-      }),
-    ]);
+      2000,
+      "external agent waited for provider EOF after completed",
+    );
 
     expect(events).toHaveLength(1);
     expect(events[0]?.content?.parts?.[0]?.text).toBe("done");

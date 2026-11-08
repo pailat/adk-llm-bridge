@@ -36,6 +36,15 @@ export const ANTHROPIC_MODEL_PATTERNS = [/claude-.*/];
  */
 let warnedThinkingToolChoiceDowngrade = false;
 
+/**
+ * Resets the one-time warning flag. Test-only.
+ *
+ * @internal
+ */
+export function _resetAnthropicWarningState(): void {
+  warnedThinkingToolChoiceDowngrade = false;
+}
+
 import type { AnthropicGenerationParams } from "./converters/request.js";
 import {
   applyAnthropicPromptCaching,

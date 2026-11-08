@@ -18,6 +18,11 @@ import {
 } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { WorkflowError } from "../contracts.js";
+import {
+  attachCause,
+  attachCleanupErrors,
+  isProcessAlive,
+} from "../internal/error-support.js";
 import type { WorkflowCheckpointV1 } from "./schema.js";
 import {
   isWorkflowCheckpointV1,
@@ -213,6 +218,7 @@ export class FileSystemWorkflowCheckpointStore
       throw ioError("checkpoint_directory_create_failed", checkpointKey, error);
     }
     const lock = await this.#acquireLock(checkpointPath, checkpointKey);
+    let failed = false;
     try {
       const current = await readCheckpointFile(
         checkpointPath,
@@ -244,9 +250,17 @@ export class FileSystemWorkflowCheckpointStore
         checkpointKey,
         lock.assertOwned,
       );
-    } finally {
-      await lock.release();
+    } catch (error) {
+      failed = true;
+      try {
+        await lock.release();
+      } catch (releaseError) {
+        // Keep the primary failure (e.g. a CAS conflict) visible to callers.
+        attachCleanupErrors(error, [releaseError]);
+      }
+      throw error;
     }
+    if (!failed) await lock.release();
 
     return {
       checkpointKey,
@@ -525,12 +539,14 @@ async function readCheckpointFile(
 }
 
 function checkpointEnvelopeOverheadBytes(checkpointKey: string): number {
-  const placeholder: CheckpointFileV1 = {
+  const placeholder: Omit<CheckpointFileV1, "checkpoint"> & {
+    checkpoint: null;
+  } = {
     format: FILE_FORMAT,
     formatVersion: FILE_FORMAT_VERSION,
     checkpointKey,
     revision: `sha256:${"0".repeat(64)}`,
-    checkpoint: null as unknown as WorkflowCheckpointV1,
+    checkpoint: null,
   };
   const envelopeBytes = new TextEncoder().encode(
     `${JSON.stringify(placeholder)}\n`,
@@ -830,15 +846,6 @@ function parseLockMetadata(value: string): LockMetadata | undefined {
   }
 }
 
-function isProcessAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return !hasErrorCode(error, "ESRCH");
-  }
-}
-
 function positiveInteger(name: string, value: number): number {
   if (!Number.isSafeInteger(value) || value <= 0) {
     throw new WorkflowError(
@@ -910,12 +917,31 @@ function ioError(
   checkpointKey: string,
   error: unknown,
 ): WorkflowError {
-  return checkpointFileError(
+  const wrapped = checkpointFileError(
     reason,
     checkpointKey,
     `Workflow checkpoint file operation failed: ${checkpointKey}`,
-    { causeCode: errorCode(error) },
+    {
+      causeCode: errorCode(error),
+      ...(errorMessage(error) !== undefined
+        ? { causeMessage: errorMessage(error) }
+        : {}),
+      ...(errorSyscall(error) !== undefined
+        ? { syscall: errorSyscall(error) }
+        : {}),
+    },
   );
+  return attachCause(wrapped, error);
+}
+
+function errorMessage(error: unknown): string | undefined {
+  return error instanceof Error ? error.message : undefined;
+}
+
+function errorSyscall(error: unknown): string | undefined {
+  return isRecord(error) && typeof error.syscall === "string"
+    ? error.syscall
+    : undefined;
 }
 
 function errorCode(error: unknown): string {

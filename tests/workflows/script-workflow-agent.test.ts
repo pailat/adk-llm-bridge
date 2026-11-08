@@ -492,8 +492,13 @@ describe("ScriptWorkflowAgent", () => {
   });
 
   test("propagates cancellation through script and child execution", async () => {
+    let markStarted: () => void = () => {};
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
     class WaitingAgent extends BaseAgent {
       protected async *runAsyncImpl(context: InvocationContext) {
+        markStarted();
         await new Promise<void>((resolve) => {
           context.abortSignal?.addEventListener("abort", () => resolve(), {
             once: true,
@@ -523,7 +528,8 @@ describe("ScriptWorkflowAgent", () => {
       workflow,
       invocation(workflow, "wait", controller.signal),
     );
-    setTimeout(() => controller.abort(), 5);
+    await started;
+    controller.abort();
 
     await expect(execution).rejects.toMatchObject({ code: "WORKFLOW_ABORTED" });
   });

@@ -8,14 +8,18 @@
  * adk-llm-bridge - Connect Google ADK to 100+ LLM models.
  *
  * This library bridges Google ADK (Agent Development Kit) to multiple LLM providers
- * through OpenAI-compatible APIs, enabling access to models from Anthropic, OpenAI,
- * Google, Meta, and more while preserving ADK features like multi-agent orchestration,
- * tool calling, and streaming.
+ * through OpenAI-compatible APIs (and a native SDK for Anthropic), enabling access to
+ * models from Anthropic, OpenAI, Google, Meta, and more while preserving ADK features
+ * like multi-agent orchestration, tool calling, and streaming.
  *
  * ## Supported Providers
  *
  * - **AI Gateway** (Vercel): Unified gateway for 100+ models
  * - **OpenRouter**: Multi-provider routing with fallbacks and price optimization
+ * - **OpenAI**: Direct OpenAI API
+ * - **xAI**: Direct xAI (Grok) API
+ * - **Anthropic**: Direct Anthropic API via the native `@anthropic-ai/sdk`
+ *   (not OpenAI-compatible)
  *
  * ## Quick Start
  *
@@ -27,7 +31,7 @@
  *
  * const agent = new LlmAgent({
  *   name: "assistant",
- *   llm: AIGateway("anthropic/claude-sonnet-4")
+ *   model: AIGateway("anthropic/claude-sonnet-4")
  * });
  * ```
  *

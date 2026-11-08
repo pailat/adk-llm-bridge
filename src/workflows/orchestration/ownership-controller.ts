@@ -786,7 +786,7 @@ function assertPlanPermission(
 ): void {
   const identity = actor.identity;
   const agent = plan.agents.find((item) => item.agentId === identity.agentId);
-  if (!agent || !agent.policy.permissions.includes(permission))
+  if (!agent?.policy.permissions.includes(permission))
     unauthorized("Workflow plan policy does not authorize this actor");
   requiredActorLane(plan, actor);
 }

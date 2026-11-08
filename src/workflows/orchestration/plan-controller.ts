@@ -437,7 +437,7 @@ function hasPlanPermission(
   const agent = plan.agents.find(
     (candidate) => candidate.agentId === identity.agentId,
   );
-  if (!agent || !agent.policy.permissions.includes(permission)) return false;
+  if (!agent?.policy.permissions.includes(permission)) return false;
   if (roles && !roles.has(agent.policy.role)) return false;
   if (identity.taskId === undefined) return true;
   return plan.lanes.some(

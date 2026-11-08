@@ -1,21 +1,14 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { describe, expect, it } from "bun:test";
 import type OpenAI from "openai";
 import { CustomLlm } from "../../../src/providers/custom/custom-llm.js";
+import { useCleanEnv } from "../../helpers/env.js";
 
 function getClient(llm: CustomLlm): OpenAI {
   return (llm as CustomLlm & { client: OpenAI }).client;
 }
 
 describe("CustomLlm", () => {
-  beforeEach(() => {
-    delete process.env.CUSTOM_LLM_API_KEY;
-    delete process.env.CUSTOM_LLM_BASE_URL;
-  });
-
-  afterEach(() => {
-    delete process.env.CUSTOM_LLM_API_KEY;
-    delete process.env.CUSTOM_LLM_BASE_URL;
-  });
+  useCleanEnv(["CUSTOM_LLM_API_KEY", "CUSTOM_LLM_BASE_URL"]);
 
   describe("supportedModels", () => {
     it("has static supportedModels property", () => {

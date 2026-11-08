@@ -24,6 +24,7 @@ import type {
 } from "./definition.js";
 import type { WorkflowEvent } from "./events.js";
 import { isWorkflowEvent } from "./events.js";
+import { attachCause } from "./internal/error-support.js";
 import { AsyncEventQueue } from "./runtime/async-event-queue.js";
 import {
   type WorkflowExecutionIdResolver,
@@ -225,10 +226,13 @@ export class ScriptWorkflowAgent extends BaseAgent {
     let factory: WorkflowAgentFactory;
     try {
       factory = await this.#createAgentFactory(context);
-    } catch {
-      throw new WorkflowError(
-        "WORKFLOW_EXECUTION_ERROR",
-        "Workflow dynamic agent factory initialization failed",
+    } catch (error) {
+      throw attachCause(
+        new WorkflowError(
+          "WORKFLOW_EXECUTION_ERROR",
+          "Workflow dynamic agent factory initialization failed",
+        ),
+        error,
       );
     }
     if (!isWorkflowAgentFactory(factory)) {

@@ -58,34 +58,6 @@ export const DEFAULT_MAX_RETRIES = 2;
  */
 export const MODEL_PATTERNS: (string | RegExp)[] = [/.+\/.+/];
 
-/**
- * Environment variable names for AI Gateway configuration.
- *
- * These environment variables are checked in order when resolving configuration.
- *
- * @constant
- *
- * @example
- * ```bash
- * # Set in your environment or .env file
- * export AI_GATEWAY_API_KEY="your-api-key"
- * export AI_GATEWAY_URL="https://custom-gateway.example.com/v1"
- * ```
- */
-export const ENV = {
-  /** Environment variable for AI Gateway URL override */
-  AI_GATEWAY_URL: "AI_GATEWAY_URL",
-
-  /** Environment variable for AI Gateway API key */
-  AI_GATEWAY_API_KEY: "AI_GATEWAY_API_KEY",
-
-  /** Fallback environment variable for base URL (OpenAI compatibility) */
-  OPENAI_BASE_URL: "OPENAI_BASE_URL",
-
-  /** Fallback environment variable for API key (OpenAI compatibility) */
-  OPENAI_API_KEY: "OPENAI_API_KEY",
-} as const;
-
 // =============================================================================
 // OpenRouter Constants
 // =============================================================================
@@ -112,30 +84,6 @@ export const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
  * ```
  */
 export const OPENROUTER_MODEL_PATTERNS: (string | RegExp)[] = [/.+\/.+/];
-
-/**
- * Environment variable names for OpenRouter configuration.
- *
- * @constant
- *
- * @example
- * ```bash
- * # Set in your environment or .env file
- * export OPENROUTER_API_KEY="your-api-key"
- * export OPENROUTER_SITE_URL="https://myapp.com"
- * export OPENROUTER_APP_NAME="My Application"
- * ```
- */
-export const OPENROUTER_ENV = {
-  /** Environment variable for OpenRouter API key */
-  API_KEY: "OPENROUTER_API_KEY",
-
-  /** Environment variable for site URL (used for rankings) */
-  SITE_URL: "OPENROUTER_SITE_URL",
-
-  /** Environment variable for app name (used for rankings) */
-  APP_NAME: "OPENROUTER_APP_NAME",
-} as const;
 
 // =============================================================================
 // Provider Identifiers

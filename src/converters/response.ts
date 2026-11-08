@@ -259,18 +259,27 @@ function buildUsageMetadata(
  *
  * const accumulator = createStreamAccumulator();
  *
+ * let finalResponse;
  * for await (const chunk of stream) {
  *   const { response, isComplete } = convertStreamChunk(chunk, accumulator);
+ *
+ *   if (isComplete) {
+ *     // Hold the final response (complete tool calls) but keep draining: with
+ *     // `stream_options.include_usage`, a usage-only chunk arrives AFTER the
+ *     // finish chunk and lands in `accumulator.usage`.
+ *     finalResponse = response;
+ *     continue;
+ *   }
  *
  *   if (response?.content?.parts?.[0]?.text) {
  *     // Stream text to user immediately
  *     process.stdout.write(response.content.parts[0].text);
  *   }
+ * }
  *
- *   if (isComplete) {
- *     // Final response with complete tool calls
- *     return response;
- *   }
+ * if (finalResponse) {
+ *   if (accumulator.usage) finalResponse.usageMetadata = accumulator.usage;
+ *   return finalResponse;
  * }
  * ```
  */
@@ -416,7 +425,9 @@ export function convertStreamChunk(
  *
  * The accumulator stores:
  * - Accumulated text content
+ * - Accumulated reasoning text and structured reasoning details
  * - Partial tool call data (indexed by position)
+ * - Token usage from the trailing usage chunk
  *
  * Use with {@link convertStreamChunk} to process streaming responses.
  *

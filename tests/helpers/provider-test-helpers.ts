@@ -7,6 +7,7 @@
 
 import { beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { getProviderConfig, resetAllConfigs } from "../../src/config.js";
+import { useCleanEnv } from "./env.js";
 
 // ---------------------------------------------------------------------------
 // Registration test suite
@@ -111,9 +112,9 @@ interface FactoryTestConfig {
 
 export function describeProviderFactory(cfg: FactoryTestConfig) {
   describe(`${cfg.name} factory`, () => {
+    useCleanEnv(cfg.envVars);
     beforeEach(() => {
       resetAllConfigs();
-      for (const v of cfg.envVars) delete process.env[v];
     });
 
     it("creates correct instance", () => {

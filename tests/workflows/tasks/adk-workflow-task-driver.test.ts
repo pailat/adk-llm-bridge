@@ -240,15 +240,11 @@ describe("AdkWorkflowTaskDriver", () => {
     expect(Object.isFrozen(worker.context?.session.state.workflowTask)).toBe(
       true,
     );
-    expect(
-      Object.isFrozen(
-        (
-          worker.context!.session.state.workflowTask as {
-            ownership: readonly unknown[];
-          }
-        ).ownership,
-      ),
-    ).toBe(true);
+    const workflowTask = worker.context?.session.state.workflowTask as
+      | { ownership: readonly unknown[] }
+      | undefined;
+    expect(workflowTask).toBeDefined();
+    expect(Object.isFrozen(workflowTask?.ownership)).toBe(true);
     expect(JSON.parse(JSON.stringify(worker.context?.session.state))).toEqual(
       worker.context?.session.state,
     );

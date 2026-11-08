@@ -766,14 +766,15 @@ describe("convertAnthropicRequest", () => {
 
       expect(result.system).toBeUndefined();
       expect(result.tools).toHaveLength(2);
+      const tools = result.tools ?? [];
       // First tool: no cache_control.
       expect(
-        (result.tools![0] as { cache_control?: unknown }).cache_control,
+        (tools[0] as { cache_control?: unknown }).cache_control,
       ).toBeUndefined();
       // Last tool: cache_control present.
-      expect(
-        (result.tools![1] as { cache_control?: unknown }).cache_control,
-      ).toEqual({ type: "ephemeral" });
+      expect((tools[1] as { cache_control?: unknown }).cache_control).toEqual({
+        type: "ephemeral",
+      });
     });
 
     it("does not mutate the input tools", () => {
@@ -808,8 +809,10 @@ describe("convertAnthropicRequest", () => {
       const result = convertAnthropicRequest(request);
       // System stays a plain string; tools carry no cache_control.
       expect(typeof result.system).toBe("string");
+      expect(result.tools).toBeDefined();
+      const tools = result.tools ?? [];
       expect(
-        (result.tools![0] as { cache_control?: unknown }).cache_control,
+        (tools[0] as { cache_control?: unknown }).cache_control,
       ).toBeUndefined();
     });
   });
@@ -907,7 +910,19 @@ describe("convertAnthropicRequest", () => {
         ],
       });
 
-      const result = convertAnthropicRequest(request);
+      const warns: string[] = [];
+      const original = console.warn;
+      console.warn = (...args: unknown[]) => {
+        warns.push(args.map(String).join(" "));
+      };
+      let result: ReturnType<typeof convertAnthropicRequest>;
+      try {
+        result = convertAnthropicRequest(request);
+      } finally {
+        console.warn = original;
+      }
+      expect(warns.some((w) => w.includes("scheme: gs"))).toBe(true);
+      expect(warns.join("\n")).not.toContain("bucket/img.png");
       expect(result.messages[0].content).toEqual([
         { type: "text", text: "hi" },
       ]);

@@ -372,7 +372,7 @@ export class WorkflowRuntime {
     }
 
     const lease = await this.acquireWorkspaceLease(step, signal);
-    const leaseLossSignal = workspaceLeaseLossSignal(lease);
+    const leaseLossSignal = lease?.lossSignal;
     const attemptScope = combineAbortSignals(
       leaseLossSignal ? [signal, leaseLossSignal] : [signal],
     );
@@ -802,13 +802,6 @@ function validateAttemptReplay(
     attempts: context.attempt,
     replayed: true,
   };
-}
-
-function workspaceLeaseLossSignal(
-  lease: WorkspaceLease | undefined,
-): AbortSignal | undefined {
-  return (lease as (WorkspaceLease & { lossSignal?: AbortSignal }) | undefined)
-    ?.lossSignal;
 }
 
 async function releaseWorkspaceLease(

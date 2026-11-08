@@ -5,8 +5,7 @@
  */
 
 import { existsSync } from "node:fs";
-import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { delimiter, join } from "node:path";
 import type { ExternalAgentEvent } from "../events.js";
 import {
   type ExternalAgentRunRequest,
@@ -16,14 +15,23 @@ import { mapPermissionPolicyToFlags } from "../permissions/mapper.js";
 import type { ExternalAgentPermissionPolicy } from "../permissions/schema.js";
 import { CLAUDE_PROVIDER } from "../provider/schema.js";
 import {
-  collectContents,
   flattenContentsToPrompt,
+  safeCollectContents,
 } from "../runtime/content-collector.js";
 import { classifyRecoverable } from "../runtime/error-classification.js";
 import {
   contentsToSdkMessages,
   type SDKUserMessage,
 } from "./claude-message-mapper.js";
+import {
+  asRecord,
+  candidateBaseDirectories,
+  copyIfPresent,
+  firstNonEmpty,
+  readCredentialEnv,
+  removeUndefined,
+  stringValue,
+} from "./shared.js";
 
 type ClaudeAgentSdkPermissionMode =
   | "default"
@@ -352,12 +360,7 @@ export class ClaudeAgentSdkDriver {
     request: ExternalAgentRunRequest,
     resume: string | undefined = this.#resumeSessionId,
   ): string | AsyncIterable<SDKUserMessage> {
-    let contents: ReturnType<typeof collectContents>;
-    try {
-      contents = collectContents(request.context);
-    } catch {
-      contents = [];
-    }
+    const contents = safeCollectContents(request.context);
 
     if (contents.length === 0) {
       return extractContextText(request.context) ?? "";
@@ -857,26 +860,6 @@ function claudeExecutableCandidates({
   return [...candidates];
 }
 
-function candidateBaseDirectories(workingDirectory?: string): string[] {
-  const roots = new Set<string>();
-  if (workingDirectory) {
-    roots.add(resolve(workingDirectory));
-  }
-  roots.add(process.cwd());
-
-  let current = dirname(fileURLToPath(import.meta.url));
-  for (let index = 0; index < 8; index++) {
-    roots.add(current);
-    const next = dirname(current);
-    if (next === current) {
-      break;
-    }
-    current = next;
-  }
-
-  return [...roots].filter((item) => isAbsolute(item));
-}
-
 function platformClaudePackages(): string[] {
   switch (`${process.platform}:${process.arch}`) {
     case "darwin:arm64":
@@ -894,23 +877,6 @@ function platformClaudePackages(): string[] {
     default:
       return [];
   }
-}
-
-function firstNonEmpty(
-  ...values: Array<string | undefined>
-): string | undefined {
-  return values.find(
-    (value): value is string => typeof value === "string" && value.length > 0,
-  );
-}
-
-function readCredentialEnv(
-  request: ExternalAgentRunRequest,
-  key: string,
-): string | undefined {
-  return request.credential?.kind === "env"
-    ? request.credential.env?.[key]
-    : undefined;
 }
 
 function importClaudeAgentSdk(): Promise<ClaudeAgentSdkLike> {
@@ -980,13 +946,9 @@ function asyncIterable(
 }
 
 function buildPrompt(request: ExternalAgentRunRequest): string {
-  try {
-    const contents = collectContents(request.context);
-    if (contents.length > 0) {
-      return flattenContentsToPrompt(contents);
-    }
-  } catch {
-    // fall through to legacy extractor
+  const contents = safeCollectContents(request.context);
+  if (contents.length > 0) {
+    return flattenContentsToPrompt(contents);
   }
   return extractContextText(request.context) ?? "";
 }
@@ -1030,25 +992,6 @@ function extractText(value: unknown): string | undefined {
   return arrayContent ? extractText(arrayContent) : undefined;
 }
 
-function copyIfPresent(
-  source: Record<string, string | undefined>,
-  target: Record<string, string | undefined>,
-  key: string,
-): void {
-  const value = source[key];
-  if (typeof value === "string" && value.length > 0) {
-    target[key] = value;
-  }
-}
-
-function removeUndefined(
-  value: Record<string, unknown>,
-): Record<string, unknown> {
-  return Object.fromEntries(
-    Object.entries(value).filter(([, entry]) => entry !== undefined),
-  );
-}
-
 function isSuccessResultWithText(message: ClaudeAgentSdkMessage): boolean {
   const record = asRecord(message);
   return (
@@ -1057,14 +1000,4 @@ function isSuccessResultWithText(message: ClaudeAgentSdkMessage): boolean {
     typeof record.result === "string" &&
     record.result.length > 0
   );
-}
-
-function asRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object"
-    ? (value as Record<string, unknown>)
-    : {};
-}
-
-function stringValue(value: unknown): string | undefined {
-  return typeof value === "string" && value.length > 0 ? value : undefined;
 }

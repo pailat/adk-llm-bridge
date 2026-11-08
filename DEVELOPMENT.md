@@ -62,10 +62,11 @@ bun install
 | `bun run test` | Run all tests |
 | `bun run typecheck` | Type check `src/` only |
 | `bun run typecheck:all` | Type check `src/` + `tests/` |
-| `bun run lint` | Run Biome linter |
+| `bun run lint` | Run Biome linter (whole repo) |
+| `bun run check` | Biome lint + format + import order (enforced by CI, 0 warnings) |
 | `bun run lint:fix` | Auto-fix lint issues |
 | `bun run check:fix` | Auto-fix lint + formatting |
-| `bun run ci` | Full CI: typecheck + lint + test + build |
+| `bun run ci` | Full CI: typecheck + Biome check + test + build |
 
 ## Running Examples Locally
 

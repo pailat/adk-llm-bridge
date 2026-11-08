@@ -9,6 +9,7 @@ import type { ExternalAgentRunRequest } from "../external-agent-driver.js";
 import { mapPermissionPolicyToFlags } from "../permissions/mapper.js";
 import type { ExternalAgentPermissionPolicy } from "../permissions/schema.js";
 import { CLAUDE_PROVIDER } from "../provider/schema.js";
+import { asRecord, copyIfPresent, stringValue } from "./shared.js";
 import { SubprocessJsonlDriver } from "./subprocess-jsonl.js";
 
 declare const Bun: {
@@ -447,25 +448,4 @@ function spawnWithBun(
     stderr: child.stderr,
     exited: child.exited,
   };
-}
-
-function copyIfPresent(
-  source: Record<string, string | undefined>,
-  target: Record<string, string>,
-  key: string,
-): void {
-  const value = source[key];
-  if (typeof value === "string" && value.length > 0) {
-    target[key] = value;
-  }
-}
-
-function asRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object"
-    ? (value as Record<string, unknown>)
-    : {};
-}
-
-function stringValue(value: unknown): string | undefined {
-  return typeof value === "string" && value.length > 0 ? value : undefined;
 }

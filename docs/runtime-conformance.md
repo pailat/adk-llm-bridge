@@ -60,7 +60,7 @@ that an endpoint with optional authentication remains usable, not that the HTTP
 
 ```sh
 bun run typecheck:conformance
-bun run check:conformance
+bun run check
 bun test tests/conformance
 ```
 

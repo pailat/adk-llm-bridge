@@ -2,17 +2,20 @@ import { beforeEach, describe, expect, it } from "bun:test";
 import { resetAllConfigs } from "../../../src/config.js";
 import { OPENROUTER_DEFINITION } from "../../../src/providers/openrouter/definition.js";
 import { OpenRouterLlm } from "../../../src/providers/openrouter/index.js";
+import { useCleanEnv } from "../../helpers/env.js";
 import {
   describeConnectError,
   describeModelPatterns,
 } from "../../helpers/provider-test-helpers.js";
 
 describe("OpenRouterLlm", () => {
+  useCleanEnv([
+    "OPENROUTER_API_KEY",
+    "OPENROUTER_SITE_URL",
+    "OPENROUTER_APP_NAME",
+  ]);
   beforeEach(() => {
     resetAllConfigs();
-    delete process.env.OPENROUTER_API_KEY;
-    delete process.env.OPENROUTER_SITE_URL;
-    delete process.env.OPENROUTER_APP_NAME;
   });
 
   describeModelPatterns({

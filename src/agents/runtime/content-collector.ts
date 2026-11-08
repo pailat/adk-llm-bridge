@@ -330,3 +330,16 @@ function safeJsonStringify(value: unknown): string {
     return "{}";
   }
 }
+
+/**
+ * Internal: like `collectContents` but never throws. A malformed or synthetic
+ * invocation context yields an empty list so callers fall back to their legacy
+ * text extractor. Not re-exported from the public barrel.
+ */
+export function safeCollectContents(context: InvocationContext): Content[] {
+  try {
+    return collectContents(context);
+  } catch {
+    return [];
+  }
+}

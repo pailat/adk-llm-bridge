@@ -10,6 +10,7 @@ import {
   AgentInvocationGateway,
   type AgentInvocationResult,
 } from "../../runtime/agent-invocation-gateway.js";
+import { attachCleanupErrors } from "../internal/error-support.js";
 import type { WorkflowTaskAuthorityPort } from "./authority.js";
 import type {
   WorkflowTaskClaimGuard,
@@ -436,19 +437,6 @@ async function release<T>(
     await releaseMethod.call(receiver);
   } catch (error) {
     errors.push(error);
-  }
-}
-
-function attachCleanupErrors(primary: unknown, cleanupErrors: unknown[]): void {
-  if (cleanupErrors.length === 0 || !(primary instanceof Error)) return;
-  try {
-    Object.defineProperty(primary, "cleanupErrors", {
-      configurable: true,
-      enumerable: false,
-      value: Object.freeze([...cleanupErrors]),
-    });
-  } catch {
-    // Preserve the primary error even when it is non-extensible.
   }
 }
 

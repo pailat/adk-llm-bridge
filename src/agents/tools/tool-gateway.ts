@@ -13,6 +13,7 @@ import {
 } from "@google/adk";
 import { FinishReason } from "@google/genai";
 import { AgentInvocationGateway } from "../../runtime/agent-invocation-gateway.js";
+import { stringValue } from "../driver/shared.js";
 import { deriveSubAgentPermissionPolicy } from "../permissions/inheritance.js";
 import type { ExternalAgentPermissionPolicy } from "../permissions/schema.js";
 
@@ -41,30 +42,21 @@ export interface RunSubAgentResult {
 export type ToolGatewayEventSink = (event: Event) => void;
 
 /**
- * Marker set by the ToolGateway on the shared invocation context whenever a
- * delegation produced a terminal answer authored by the sub-agent. The
- * ExternalAgent uses this signal to suppress the root model's redundant
- * re-narration turn, matching native ADK transfer (the coordinator stays silent
- * after the sub-agent answers).
+ * Contexts on which a delegation produced a terminal answer authored by the
+ * sub-agent. The ExternalAgent uses this signal to suppress the root model's
+ * redundant re-narration turn, matching native ADK transfer (the coordinator
+ * stays silent after the sub-agent answers).
  */
-export const DELEGATION_FINAL_ANSWER_FLAG =
-  "__adkDelegationProducedFinalAnswer";
+const delegationFinalAnswerContexts = new WeakSet<InvocationContext>();
 
 export function markDelegationFinalAnswer(context: InvocationContext): void {
-  (context as unknown as Record<string, unknown>)[
-    DELEGATION_FINAL_ANSWER_FLAG
-  ] = true;
+  delegationFinalAnswerContexts.add(context);
 }
 
 export function consumeDelegationFinalAnswer(
   context: InvocationContext,
 ): boolean {
-  const record = context as unknown as Record<string, unknown>;
-  const flagged = record[DELEGATION_FINAL_ANSWER_FLAG] === true;
-  if (flagged) {
-    record[DELEGATION_FINAL_ANSWER_FLAG] = false;
-  }
-  return flagged;
+  return delegationFinalAnswerContexts.delete(context);
 }
 
 export interface ToolGatewayConfig {
@@ -543,8 +535,4 @@ function truncate(value: string, maxLength: number): string {
   return value.length > maxLength
     ? `${value.slice(0, maxLength - 3)}...`
     : value;
-}
-
-function stringValue(value: unknown): string | undefined {
-  return typeof value === "string" && value.length > 0 ? value : undefined;
 }

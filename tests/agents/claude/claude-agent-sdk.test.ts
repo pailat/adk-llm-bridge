@@ -17,6 +17,7 @@ import {
   CLAUDE_PROVIDER,
   CODEX_PROVIDER,
 } from "../../../src/agents/provider/schema.js";
+import { withDeadline } from "../helpers.js";
 
 async function materializePrompt(prompt: unknown): Promise<string> {
   if (typeof prompt === "string") {
@@ -765,7 +766,7 @@ describe("ClaudeAgentSdkDriver", () => {
       },
     });
 
-    const events = await Promise.race([
+    const events = await withDeadline(
       (async () => {
         const collected = [];
         for await (const event of driver.run({
@@ -777,10 +778,9 @@ describe("ClaudeAgentSdkDriver", () => {
         }
         return collected;
       })(),
-      Bun.sleep(250).then(() => {
-        throw new Error("Claude driver waited for SDK EOF after result");
-      }),
-    ]);
+      2000,
+      "Claude driver waited for SDK EOF after result",
+    );
 
     expect(events.map((event) => event.type)).toEqual([
       "started",

@@ -413,13 +413,21 @@ describe("runWorkflowScript", () => {
       },
     });
     const host = createHost([]);
-    host.run = async () => await new Promise<WorkflowStepResult>(() => {});
+    let markStarted: () => void = () => {};
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    host.run = async () => {
+      markStarted();
+      return await new Promise<WorkflowStepResult>(() => {});
+    };
     const execution = runWorkflowScript(runtime, {
       source: `yield ctx.run({ id: "wait", agentName: "agent", input: "wait" });`,
       signal: controller.signal,
       host,
     });
-    setTimeout(() => controller.abort(), 5);
+    await started;
+    controller.abort();
     await expect(execution).rejects.toMatchObject({ code: "WORKFLOW_ABORTED" });
     expect(disposed).toBe(1);
   });

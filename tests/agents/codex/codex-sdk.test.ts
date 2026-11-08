@@ -1,5 +1,5 @@
-import { describe, expect, test } from "bun:test";
-import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
+import { afterEach, describe, expect, test } from "bun:test";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CodexAgent } from "../../../src/agents/codex-agent.js";
@@ -9,6 +9,7 @@ import {
   mapPolicyToCodexSdkThreadOptions,
 } from "../../../src/agents/driver/codex-sdk.js";
 import { CODEX_PROVIDER } from "../../../src/agents/provider/schema.js";
+import { withDeadline } from "../helpers.js";
 
 async function* sdkEvents(events: readonly Record<string, unknown>[]) {
   for (const event of events) {
@@ -311,7 +312,7 @@ describe("CodexSdkDriver", () => {
       },
     });
 
-    const events = await Promise.race([
+    const events = await withDeadline(
       (async () => {
         const collected = [];
         for await (const event of driver.run({
@@ -322,10 +323,9 @@ describe("CodexSdkDriver", () => {
         }
         return collected;
       })(),
-      Bun.sleep(250).then(() => {
-        throw new Error("Codex driver waited for SDK EOF after turn.completed");
-      }),
-    ]);
+      2000,
+      "Codex driver waited for SDK EOF after turn.completed",
+    );
 
     expect(events.map((event) => event.type)).toEqual(["started", "completed"]);
     expect(returned).toBe(true);
@@ -928,14 +928,26 @@ describe("basic-agent-codex credential guard (CODEX-1)", () => {
     "CODEX_HOME",
   ] as const;
 
-  function withClearedEnv<T>(fn: () => T): T {
+  const tempDirs: string[] = [];
+  function makeTempDir(prefix: string): string {
+    const dir = mkdtempSync(join(tmpdir(), prefix));
+    tempDirs.push(dir);
+    return dir;
+  }
+  afterEach(() => {
+    for (const dir of tempDirs.splice(0)) {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  async function withClearedEnv<T>(fn: () => T | Promise<T>): Promise<T> {
     const saved: Record<string, string | undefined> = {};
     for (const key of CRED_KEYS) {
       saved[key] = process.env[key];
       delete process.env[key];
     }
     try {
-      return fn();
+      return await fn();
     } finally {
       for (const key of CRED_KEYS) {
         if (saved[key] === undefined) {
@@ -955,13 +967,11 @@ describe("basic-agent-codex credential guard (CODEX-1)", () => {
     await withClearedEnv(async () => {
       // No credential at all → false (an absent CODEX_HOME points at
       // ~/.codex/auth.json which does not exist in CI).
-      process.env.CODEX_HOME = join(
-        mkdtempSync(join(tmpdir(), "codex-empty-home-")),
-      );
+      process.env.CODEX_HOME = makeTempDir("codex-empty-home-");
       expect(codexCredentialsAvailable()).toBe(false);
 
       // A readable auth.json under $CODEX_HOME → true, even with no PATH binary.
-      const home = mkdtempSync(join(tmpdir(), "codex-home-"));
+      const home = makeTempDir("codex-home-");
       writeFileSync(join(home, "auth.json"), '{"OPENAI_API_KEY":"x"}');
       process.env.CODEX_HOME = home;
       expect(codexCredentialsAvailable()).toBe(true);
@@ -973,7 +983,7 @@ describe("basic-agent-codex credential guard (CODEX-1)", () => {
       "../../../examples/basic-agent-codex/agent.ts"
     );
     await withClearedEnv(() => {
-      process.env.CODEX_HOME = mkdtempSync(join(tmpdir(), "codex-empty-"));
+      process.env.CODEX_HOME = makeTempDir("codex-empty-");
       process.env.CODEX_API_KEY = "key-abc";
       expect(codexCredentialsAvailable()).toBe(true);
     });

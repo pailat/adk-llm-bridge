@@ -26,6 +26,7 @@ import {
   type Part,
 } from "@google/genai";
 import { normalizeSchema as normalizeSharedSchema } from "../../../converters/schema.js";
+import { uriScheme } from "../../../utils/uri.js";
 
 /** Name of the synthetic tool used to emulate structured JSON output. */
 export const JSON_OUTPUT_TOOL_NAME = "json_output";
@@ -256,7 +257,7 @@ export function convertAnthropicGenerationConfig(
 /**
  * Reconciles Anthropic sampling-parameter combinations the API rejects.
  *
- * Anthropic enforces two mutually-exclusive constraints that 332 shape-only
+ * Anthropic enforces two mutually-exclusive constraints that shape-only
  * unit tests don't catch because each field is valid in isolation:
  *
  * 1. **thinking + sampling → 400.** When extended thinking is enabled,
@@ -558,7 +559,7 @@ function partToAnthropicMedia(
       file.fileUri.startsWith("http://") || file.fileUri.startsWith("https://");
     if (!isHttp) {
       console.warn(
-        `[adk-llm-bridge] dropping non-http fileData URI: ${file.fileUri}`,
+        `[adk-llm-bridge] dropping non-http fileData URI (scheme: ${uriScheme(file.fileUri)})`,
       );
       return undefined;
     }

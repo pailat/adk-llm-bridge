@@ -1,10 +1,12 @@
 import { beforeEach, describe, expect, it, spyOn } from "bun:test";
 import type { LlmRequest, LlmResponse } from "@google/adk";
 import { resetAllConfigs } from "../../../src/config.js";
+import { _resetAnthropicWarningState } from "../../../src/providers/anthropic/anthropic-llm.js";
 import {
   ANTHROPIC_MODEL_PATTERNS,
   AnthropicLlm,
 } from "../../../src/providers/anthropic/index.js";
+import { useCleanEnv } from "../../helpers/env.js";
 import {
   describeConnectError,
   describeModelPatterns,
@@ -68,9 +70,9 @@ function abortableNever(signal?: AbortSignal | null): Promise<never> {
 }
 
 describe("AnthropicLlm", () => {
+  useCleanEnv(["ANTHROPIC_API_KEY"]);
   beforeEach(() => {
     resetAllConfigs();
-    delete process.env.ANTHROPIC_API_KEY;
   });
 
   describeModelPatterns({
@@ -289,9 +291,13 @@ describe("AnthropicLlm", () => {
         });
       });
 
-      // Counts warn calls whose first arg mentions the downgrade. Insensitive
-      // to the module-level one-time flag (which may already be tripped by an
-      // earlier test) because it measures a DELTA around the action.
+      // Counts warn calls whose first arg mentions the downgrade. The
+      // module-level one-time flag is reset before each test so absolute
+      // counts are deterministic.
+      beforeEach(() => {
+        _resetAnthropicWarningState();
+      });
+
       const downgradeWarnCount = (
         spy: ReturnType<typeof spyOn<typeof console, "warn">>,
       ) =>
@@ -311,9 +317,10 @@ describe("AnthropicLlm", () => {
             },
           );
           expect(first.tool_choice).toEqual({ type: "auto" });
+          // The first downgrade emits exactly one warning.
+          expect(downgradeWarnCount(warnSpy)).toBe(1);
 
           // A second identical call must NOT add another downgrade warning.
-          const before = downgradeWarnCount(warnSpy);
           const second = llm.callBuild(
             { thinking: { type: "enabled", budget_tokens: 2048 } },
             {
@@ -322,7 +329,7 @@ describe("AnthropicLlm", () => {
             },
           );
           expect(second.tool_choice).toEqual({ type: "auto" });
-          expect(downgradeWarnCount(warnSpy)).toBe(before);
+          expect(downgradeWarnCount(warnSpy)).toBe(1);
         } finally {
           warnSpy.mockRestore();
         }

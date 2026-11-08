@@ -975,7 +975,19 @@ describe("convertRequest", () => {
         ],
       });
 
-      const result = convertRequest(request);
+      const warns: string[] = [];
+      const original = console.warn;
+      console.warn = (...args: unknown[]) => {
+        warns.push(args.map(String).join(" "));
+      };
+      let result: ReturnType<typeof convertRequest>;
+      try {
+        result = convertRequest(request);
+      } finally {
+        console.warn = original;
+      }
+      expect(warns.some((w) => w.includes("scheme: gs"))).toBe(true);
+      expect(warns.join("\n")).not.toContain("bucket/img.png");
       // No image present -> falls back to string content path.
       expect(result.messages[0]).toEqual({ role: "user", content: "hi" });
     });

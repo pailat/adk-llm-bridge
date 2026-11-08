@@ -34,8 +34,7 @@ src/core/
 ├── provider-definition.ts     # ProviderDefinition interface
 ├── config-resolver.ts         # Centralized config resolution (apiKey, baseURL, headers)
 ├── create-provider.ts         # createProviderClass() / createProviderFactory()
-├── create-register.ts         # createRegisterFunction() (singleton pattern)
-└── index.ts                   # Core barrel exports
+└── create-register.ts         # createRegisterFunction() (singleton pattern)
 ```
 
 ### Adding a New OpenAI-Compatible Provider

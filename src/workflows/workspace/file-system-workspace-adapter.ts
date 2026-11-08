@@ -19,6 +19,10 @@ import {
 } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import {
+  attachCleanupErrors,
+  isProcessAlive,
+} from "../internal/error-support.js";
+import {
   findWorkspacePathOverlaps,
   normalizeWorkspaceLeaseRequest,
   type WorkspaceAcquireOptions,
@@ -406,14 +410,22 @@ export class FileSystemWorkspaceAdapter implements WorkspaceAdapter {
       workspaceId,
     );
     const owner = await acquireLock(files.lock, this.#options, signal);
+    let result: LockedMutation<T>;
     try {
       const state = readStateSync(files.state, workspaceId);
-      const result = operation(state);
+      result = operation(state);
       if (result.dirty) writeStateSync(files, state, owner.token);
-      return result.value;
-    } finally {
-      releaseLockSync(files.lock, owner.token);
+    } catch (error) {
+      try {
+        releaseLockSync(files.lock, owner.token);
+      } catch (releaseError) {
+        // Keep the primary failure visible to callers.
+        attachCleanupErrors(error, [releaseError]);
+      }
+      throw error;
     }
+    releaseLockSync(files.lock, owner.token);
+    return result.value;
   }
 }
 
@@ -914,15 +926,6 @@ function requiredLeaseId(value: string): string {
 
 function newLockOwner(): LockOwner {
   return { token: randomUUID(), pid: process.pid, acquiredAt: Date.now() };
-}
-
-function isProcessAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return !hasErrorCode(error, "ESRCH");
-  }
 }
 
 function abortableDelay(delayMs: number, signal?: AbortSignal): Promise<void> {

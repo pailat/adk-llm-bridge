@@ -2,18 +2,21 @@ import { beforeEach, describe, expect, it } from "bun:test";
 import { resetConfig } from "../../../src/config.js";
 import { AI_GATEWAY_DEFINITION } from "../../../src/providers/ai-gateway/definition.js";
 import { AIGatewayLlm } from "../../../src/providers/ai-gateway/index.js";
+import { useCleanEnv } from "../../helpers/env.js";
 import {
   describeConnectError,
   describeModelPatterns,
 } from "../../helpers/provider-test-helpers.js";
 
 describe("AIGatewayLlm", () => {
+  useCleanEnv([
+    "AI_GATEWAY_URL",
+    "AI_GATEWAY_API_KEY",
+    "OPENAI_BASE_URL",
+    "OPENAI_API_KEY",
+  ]);
   beforeEach(() => {
     resetConfig();
-    delete process.env.AI_GATEWAY_URL;
-    delete process.env.AI_GATEWAY_API_KEY;
-    delete process.env.OPENAI_BASE_URL;
-    delete process.env.OPENAI_API_KEY;
   });
 
   describeModelPatterns({

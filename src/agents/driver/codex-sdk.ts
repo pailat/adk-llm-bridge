@@ -5,8 +5,7 @@
  */
 
 import { existsSync } from "node:fs";
-import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { delimiter, join } from "node:path";
 import type { Content } from "@google/genai";
 import type { ExternalAgentEvent } from "../events.js";
 import {
@@ -15,13 +14,22 @@ import {
 } from "../external-agent-driver.js";
 import type { ExternalAgentPermissionPolicy } from "../permissions/schema.js";
 import { CODEX_PROVIDER } from "../provider/codex.js";
-import { collectContents } from "../runtime/content-collector.js";
+import { safeCollectContents } from "../runtime/content-collector.js";
 import { classifyRecoverable } from "../runtime/error-classification.js";
 import {
   type CodexInputPart,
   summarizeHistoryForColdStart,
   userContentToCodexInput,
 } from "./codex-input-mapper.js";
+import {
+  asRecord,
+  candidateBaseDirectories,
+  copyIfPresent,
+  firstNonEmpty,
+  readCredentialEnv,
+  removeUndefined,
+  stringValue,
+} from "./shared.js";
 
 /**
  * Ambient environment variables forwarded from `this.#env` into the Codex SDK's
@@ -205,7 +213,7 @@ export class CodexSdkDriver {
       const agentName = request.agent?.name ?? request.context?.agent?.name;
       const stateKey = agentName ? this.#threadStateKey(agentName) : undefined;
       const savedThreadId = readSavedThreadId(request, stateKey);
-      const contents = safeCollectContents(request);
+      const contents = safeCollectContents(request.context);
       const lastContent = contents[contents.length - 1];
 
       let thread: CodexSdkThreadLike;
@@ -738,14 +746,6 @@ function threadStartedId(event: CodexSdkThreadEvent): string | undefined {
   return stringValue(event.thread_id) ?? stringValue(asRecord(event.thread).id);
 }
 
-function safeCollectContents(request: ExternalAgentRunRequest): Content[] {
-  try {
-    return collectContents(request.context);
-  } catch {
-    return [];
-  }
-}
-
 function mapLastContentOrFallback(
   lastContent: Content | undefined,
   request: ExternalAgentRunRequest,
@@ -893,26 +893,6 @@ function codexBinaryCandidates({
   return [...candidates];
 }
 
-function candidateBaseDirectories(workingDirectory?: string): string[] {
-  const roots = new Set<string>();
-  if (workingDirectory) {
-    roots.add(resolve(workingDirectory));
-  }
-  roots.add(process.cwd());
-
-  let current = dirname(fileURLToPath(import.meta.url));
-  for (let index = 0; index < 8; index++) {
-    roots.add(current);
-    const next = dirname(current);
-    if (next === current) {
-      break;
-    }
-    current = next;
-  }
-
-  return [...roots].filter((item) => isAbsolute(item));
-}
-
 function platformCodexPackages(): Array<[string, string]> {
   switch (`${process.platform}:${process.arch}`) {
     case "darwin:arm64":
@@ -930,50 +910,4 @@ function platformCodexPackages(): Array<[string, string]> {
     default:
       return [];
   }
-}
-
-function firstNonEmpty(
-  ...values: Array<string | undefined>
-): string | undefined {
-  return values.find(
-    (value): value is string => typeof value === "string" && value.length > 0,
-  );
-}
-
-function readCredentialEnv(
-  request: ExternalAgentRunRequest,
-  key: string,
-): string | undefined {
-  return request.credential?.kind === "env"
-    ? request.credential.env?.[key]
-    : undefined;
-}
-
-function copyIfPresent(
-  source: Record<string, string | undefined>,
-  target: Record<string, string>,
-  key: string,
-): void {
-  const value = source[key];
-  if (typeof value === "string" && value.length > 0) {
-    target[key] = value;
-  }
-}
-
-function removeUndefined(
-  value: Record<string, unknown>,
-): Record<string, unknown> {
-  return Object.fromEntries(
-    Object.entries(value).filter(([, entry]) => entry !== undefined),
-  );
-}
-
-function asRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object"
-    ? (value as Record<string, unknown>)
-    : {};
-}
-
-function stringValue(value: unknown): string | undefined {
-  return typeof value === "string" && value.length > 0 ? value : undefined;
 }

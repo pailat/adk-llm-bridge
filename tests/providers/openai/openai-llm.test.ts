@@ -3,18 +3,21 @@ import type OpenAI from "openai";
 import { resetAllConfigs } from "../../../src/config.js";
 import { OPENAI_DEFINITION } from "../../../src/providers/openai/definition.js";
 import { OpenAILlm } from "../../../src/providers/openai/index.js";
+import { useCleanEnv } from "../../helpers/env.js";
 import {
   describeConnectError,
   describeModelPatterns,
 } from "../../helpers/provider-test-helpers.js";
 
 describe("OpenAILlm", () => {
+  useCleanEnv([
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+    "OPENAI_ORGANIZATION",
+    "OPENAI_PROJECT",
+  ]);
   beforeEach(() => {
     resetAllConfigs();
-    delete process.env.OPENAI_API_KEY;
-    delete process.env.OPENAI_BASE_URL;
-    delete process.env.OPENAI_ORGANIZATION;
-    delete process.env.OPENAI_PROJECT;
   });
 
   describeModelPatterns({

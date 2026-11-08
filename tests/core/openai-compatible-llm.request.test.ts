@@ -407,4 +407,67 @@ describe("OpenAICompatibleLlm cancellation", () => {
     expect(first.value).toMatchObject({ partial: true });
     expect(final).toEqual({ value: undefined, done: true });
   });
+  it("emits nothing after abort even if the server keeps streaming chunks and a final response", async () => {
+    const llm = makeLlm("gpt-4.1");
+    const controller = new AbortController();
+    const mkChunk = (
+      content: string,
+      finish: string | null = null,
+    ): OpenAI.ChatCompletionChunk =>
+      ({
+        id: "x",
+        object: "chat.completion.chunk",
+        created: 0,
+        model: "test",
+        choices: [{ index: 0, delta: { content }, finish_reason: finish }],
+      }) as OpenAI.ChatCompletionChunk;
+    // A server/SDK that ignores the abort: it keeps delivering buffered chunks,
+    // including the finish chunk.
+    spyCreate(
+      llm,
+      (async function* () {
+        yield mkChunk("one");
+        yield mkChunk("two");
+        yield mkChunk("three", "stop");
+      })(),
+    );
+
+    const responses = llm.generateContentAsync(
+      userRequest(),
+      true,
+      controller.signal,
+    );
+    const first = await responses.next();
+    expect(first.value).toMatchObject({ partial: true });
+    controller.abort();
+    const rest: LlmResponse[] = [];
+    for await (const r of responses) rest.push(r);
+
+    expect(rest).toEqual([]);
+  });
+
+  it("does not emit the held final response when aborted after the last chunk", async () => {
+    const llm = makeLlm("gpt-4.1");
+    const controller = new AbortController();
+    spyCreate(
+      llm,
+      (async function* () {
+        yield {
+          id: "x",
+          object: "chat.completion.chunk",
+          created: 0,
+          model: "test",
+          choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+        } as OpenAI.ChatCompletionChunk;
+        // Abort once the finish chunk was delivered, before the stream ends.
+        controller.abort();
+      })(),
+    );
+
+    const out = await drain(
+      llm.generateContentAsync(userRequest(), true, controller.signal),
+    );
+
+    expect(out).toEqual([]);
+  });
 });

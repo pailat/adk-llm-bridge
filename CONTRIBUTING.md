@@ -36,7 +36,8 @@ bun run ci
 | `bun run build` | Build the package |
 | `bun run typecheck` | Type check source files |
 | `bun run typecheck:all` | Type check source and test files |
-| `bun run lint` | Run linter |
+| `bun run lint` | Run linter (whole repo) |
+| `bun run check` | Biome lint + format + import order (enforced by CI) |
 | `bun run lint:fix` | Auto-fix lint issues |
 | `bun run check:fix` | Auto-fix lint and formatting |
 | `bun run ci` | Run full CI pipeline (typecheck, lint, test, build) |

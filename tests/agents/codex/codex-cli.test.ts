@@ -181,6 +181,32 @@ describe("Codex CLI driver", () => {
     });
   });
 
+  test("decodes multibyte UTF-8 characters split across stdout chunks", async () => {
+    const bytes = new TextEncoder().encode(
+      `${JSON.stringify({ type: "response.output_text.delta", delta: "h\u00e9llo" })}\n`,
+    );
+    // "é" is 0xC3 0xA9: cut the stream between its two bytes.
+    const split = bytes.indexOf(0xc3) + 1;
+    expect(split).toBeGreaterThan(0);
+    const spawn: CodexCliSpawn = () => ({
+      stdout: (async function* () {
+        yield bytes.slice(0, split);
+        yield bytes.slice(split);
+      })(),
+      exited: Promise.resolve(0),
+    });
+
+    const events = await collect(new CodexCliDriver({ spawn }).run(request()));
+
+    expect(events).toContainEqual({
+      type: "output",
+      content: "h\u00e9llo",
+      stream: "stdout",
+      timestamp: undefined,
+    });
+    expect(JSON.stringify(events)).not.toContain("\ufffd");
+  });
+
   test("does not terminate the turn when a Codex MCP item completes", async () => {
     const spawn: CodexCliSpawn = () => ({
       stdout: chunks([

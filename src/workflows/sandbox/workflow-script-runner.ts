@@ -21,6 +21,7 @@ import {
   type WorkflowStepResult,
 } from "../contracts.js";
 import type { WorkflowUserEvent } from "../events.js";
+import { attachCause } from "../internal/error-support.js";
 import {
   WORKFLOW_SCRIPT_PROTOCOL,
   WORKFLOW_SCRIPT_PROTOCOL_VERSION,
@@ -424,9 +425,12 @@ function wrapHostError(error: unknown): never {
   if (error instanceof WorkflowError) {
     throw error;
   }
-  throw new WorkflowError(
-    "WORKFLOW_EXECUTION_ERROR",
-    `Workflow script host operation failed: ${error instanceof Error ? error.message : String(error)}`,
+  throw attachCause(
+    new WorkflowError(
+      "WORKFLOW_EXECUTION_ERROR",
+      `Workflow script host operation failed: ${error instanceof Error ? error.message : String(error)}`,
+    ),
+    error,
   );
 }
 

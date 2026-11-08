@@ -21,6 +21,7 @@ import {
 } from "@google/genai";
 import type OpenAI from "openai";
 import type { ReasoningCapability } from "../core/provider-definition.js";
+import { uriScheme } from "../utils/uri.js";
 import { normalizeSchema } from "./schema.js";
 
 /**
@@ -919,7 +920,7 @@ function partToOpenAIImage(
     }
     // gs:// and other non-fetchable schemes are dropped cleanly.
     console.warn(
-      `[adk-llm-bridge] dropping non-http fileData URI: ${file.fileUri}`,
+      `[adk-llm-bridge] dropping non-http fileData URI (scheme: ${uriScheme(file.fileUri)})`,
     );
   }
 

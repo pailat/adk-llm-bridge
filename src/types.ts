@@ -630,18 +630,24 @@ export interface ToolCallAccumulator {
 /**
  * Accumulator state for streaming responses.
  *
- * Tracks the accumulated text and tool calls across multiple stream chunks.
+ * Tracks the accumulated text, reasoning (and structured reasoning details),
+ * tool calls and token usage across multiple stream chunks.
  * Created using {@link createStreamAccumulator}.
  *
  * @example
  * ```typescript
  * const accumulator = createStreamAccumulator();
  *
+ * let finalResponse;
  * for await (const chunk of stream) {
  *   const result = convertStreamChunk(chunk, accumulator);
  *   if (result.isComplete) {
- *     return result.response;
+ *     // Keep draining: a usage-only chunk may follow the finish chunk.
+ *     finalResponse = result.response;
  *   }
+ * }
+ * if (finalResponse && accumulator.usage) {
+ *   finalResponse.usageMetadata = accumulator.usage;
  * }
  * ```
  *

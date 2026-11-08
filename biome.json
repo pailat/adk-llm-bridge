@@ -12,6 +12,14 @@
     "indentWidth": 2
   },
   "files": {
-    "includes": ["src/**", "tests/**"]
+    "includes": [
+      "**",
+      "!**/node_modules",
+      "!**/dist",
+      "!**/bun.lock",
+      "!**/.claude",
+      "!**/*.md",
+      "!**/*.yml"
+    ]
   }
 }

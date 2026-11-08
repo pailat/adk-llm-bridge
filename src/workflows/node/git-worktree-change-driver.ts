@@ -18,6 +18,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { isProcessAlive } from "../internal/error-support.js";
 import { canonicalJson, optionalJsonObject } from "../resources/json.js";
 import type {
   ProvisionedWorkspace,
@@ -216,7 +217,7 @@ export class FileSystemWorkflowRepositoryMutationLock
           .then((value) => Date.now() - value.mtimeMs)
           .catch(() => 0);
         if (
-          (owner && !processIsAlive(owner.pid)) ||
+          (owner && !isProcessAlive(owner.pid)) ||
           (!owner && age > this.#acquireTimeoutMs)
         ) {
           await rm(lockPath, { recursive: true, force: true });
@@ -1221,7 +1222,7 @@ export class NodeGitWorktreeChangeDriver
   }
 
   #normalizeDescriptor(descriptor: WorkspaceDescriptor): WorkspaceDescriptor {
-    if (!descriptor || descriptor.providerId !== "node-git-worktree") {
+    if (descriptor?.providerId !== "node-git-worktree") {
       throw new NodeGitWorktreeError(
         "GIT_CONFIGURATION_INVALID",
         "Workspace descriptor belongs to another provider",
@@ -1913,15 +1914,6 @@ async function readLockOwner(
     return { token: value.token, pid: value.pid as number };
   } catch {
     return undefined;
-  }
-}
-
-function processIsAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "EPERM";
   }
 }
 
