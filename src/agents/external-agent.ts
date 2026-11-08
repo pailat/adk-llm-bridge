@@ -5,14 +5,15 @@
  */
 
 import {
+  AsyncQueue,
   BaseAgent,
+  type BaseAgentConfig,
   createEvent,
   createEventActions,
   type Event,
   type InvocationContext,
 } from "@google/adk";
 import type { Content } from "@google/genai";
-import { trace } from "@opentelemetry/api";
 import type { ExternalAgentCredentialProvider } from "./auth/credential-provider.js";
 import { NoopCredentialProvider } from "./auth/credential-provider.js";
 import type { ExternalAgentEvent } from "./events.js";
@@ -20,13 +21,11 @@ import type { ExternalAgentDriver } from "./external-agent-driver.js";
 import { PlaceholderExternalAgentDriver } from "./external-agent-driver.js";
 import type { ExternalAgentPermissionPolicy } from "./permissions/schema.js";
 import type { ExternalAgentProviderDefinition } from "./provider/schema.js";
+import { toolDetail, traceAdkEvent } from "./telemetry.js";
 import {
   consumeDelegationFinalAnswer,
   ToolGateway,
 } from "./tools/tool-gateway.js";
-
-const tracerName = "gcp.vertex.agent";
-const tracerVersion = "adk-llm-bridge";
 
 function readPermissionOverride(
   context: InvocationContext,
@@ -59,19 +58,39 @@ function normalizeToolCallArgs(input: unknown): Record<string, unknown> {
   return { input };
 }
 
-export interface ExternalAgentConfig {
-  name: string;
-  description?: string;
+/**
+ * Configuration of an {@link ExternalAgent}. Extends ADK's `BaseAgentConfig`, so
+ * `beforeAgentCallback` / `afterAgentCallback` and the workflow-node options
+ * (`retryConfig`, `timeout`, `inputSchema`, `outputSchema`, `stateSchema`,
+ * `isolationScope`, ...) are accepted and honored by ADK when the agent runs as
+ * a node. The whole object is forwarded to `super()` so `BaseAgent.clone()` can
+ * rebuild the agent (provider, driver, permissions included).
+ *
+ * Caveat: `clone()` reuses the same `driver` instance. Drivers keep resume state
+ * keyed per ADK session (Claude SDK) or per agent name (Codex), so two clones
+ * running in the same session would resume each other's conversation. When
+ * cloning into parallel branches, pass a fresh `driver` (and a distinct `name`)
+ * in the overrides: `agent.clone({ name: "b", driver: new XDriver() })`.
+ */
+export interface ExternalAgentConfig extends BaseAgentConfig {
   provider: ExternalAgentProviderDefinition;
   driver?: ExternalAgentDriver;
   credentialProvider?: ExternalAgentCredentialProvider;
   instruction?: string;
   workingDirectory?: string;
   permissions?: ExternalAgentPermissionPolicy;
-  subAgents?: BaseAgent[];
 }
 
-export class ExternalAgent extends BaseAgent {
+/**
+ * ADK agent backed by an external runtime driver (Claude, Codex, Gemini CLI...).
+ *
+ * As a `BaseAgent` it is also a `BaseNode`: ADK's inherited `runImpl` delegates
+ * to `runAsync`, so no override is needed to drop it into a `Workflow`.
+ *
+ * `clone()` shares the driver instance with the original (see
+ * {@link ExternalAgentConfig}); override `driver` when cloning for concurrent use.
+ */
+export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
   readonly provider: ExternalAgentProviderDefinition;
   readonly driver: ExternalAgentDriver;
   readonly credentialProvider: ExternalAgentCredentialProvider;
@@ -80,11 +99,7 @@ export class ExternalAgent extends BaseAgent {
   readonly permissions?: ExternalAgentPermissionPolicy;
 
   constructor(config: ExternalAgentConfig) {
-    super({
-      name: config.name,
-      description: config.description,
-      subAgents: config.subAgents,
-    });
+    super(config);
     this.provider = config.provider;
     this.driver =
       config.driver ?? new PlaceholderExternalAgentDriver(config.provider.id);
@@ -119,8 +134,8 @@ export class ExternalAgent extends BaseAgent {
     });
     const permissions = readPermissionOverride(context) ?? this.permissions;
 
-    const queue = new AsyncEventQueue<Event>();
-    const rootAgent = this.rootAgent ?? context.agent ?? this;
+    const queue = new AsyncQueue<Event>();
+    const rootAgent = this.rootAgent;
     const subAgents = this.subAgents;
     const toolGateway =
       subAgents.length > 0
@@ -136,11 +151,21 @@ export class ExternalAgent extends BaseAgent {
           })
         : undefined;
 
+    // Own controller so abandoning the generator (iterator.return(), e.g. a
+    // ParallelAgent sibling failing or the client disconnecting) cancels the
+    // driver. It is linked to the Runner's signal so upstream aborts propagate.
+    const controller = new AbortController();
+    const abortSignal = context.abortSignal
+      ? AbortSignal.any([context.abortSignal, controller.signal])
+      : controller.signal;
+    let driverDone = false;
+
     void (async () => {
       try {
         for await (const event of this.driver.run({
           provider: this.provider,
           context,
+          abortSignal,
           instruction: this.instruction,
           workingDirectory: this.workingDirectory,
           credential,
@@ -175,13 +200,20 @@ export class ExternalAgent extends BaseAgent {
       } catch (error) {
         queue.fail(error);
       } finally {
+        driverDone = true;
         // Closing in finally covers normal EOF, an explicit terminal event, cancellation, and an
-        // iterator return. No consumer is left waiting on AsyncEventQueue.next().
+        // iterator return. No consumer is left waiting on the queue.
         queue.close();
       }
     })();
 
-    yield* queue;
+    try {
+      yield* queue;
+    } finally {
+      if (!driverDone) {
+        controller.abort();
+      }
+    }
   }
 
   protected async *runLiveImpl(
@@ -214,6 +246,15 @@ export class ExternalAgent extends BaseAgent {
           turnComplete: event.turnComplete ?? !event.partial,
           customMetadata: metadataForExternalEvent(this.name, event),
           timestamp: event.timestamp,
+          // Same contract as ADK's LlmAgent-as-node wrapper: the final text of a
+          // non-partial turn is the node output, so a downstream Workflow node
+          // receives it. Ignored outside a Workflow.
+          ...(event.partial
+            ? {}
+            : {
+                output: this.nodeOutput(event.content),
+                nodeInfo: { messageAsOutput: true },
+              }),
         });
       }
       case "error":
@@ -257,6 +298,23 @@ export class ExternalAgent extends BaseAgent {
       case "completed":
         return undefined;
     }
+  }
+
+  /**
+   * Node output for a final text turn, following ADK's `maybeSetOutput`
+   * (workflow/run_llm_agent_as_node): with an `outputSchema` and non-blank text
+   * the text is parsed as JSON; if parsing fails the raw text is kept and ADK's
+   * output validation reports the mismatch.
+   */
+  private nodeOutput(text: string): unknown {
+    if (this.outputSchema && text.trim()) {
+      try {
+        return JSON.parse(text);
+      } catch {
+        return text;
+      }
+    }
+    return text;
   }
 
   private toolCallToContent(
@@ -345,294 +403,6 @@ function readableExternalEventTitle(
   }
 }
 
-class AsyncEventQueue<T> implements AsyncIterable<T> {
-  readonly #items: T[] = [];
-  readonly #waiters: Array<{
-    resolve: (result: IteratorResult<T>) => void;
-    reject: (reason?: unknown) => void;
-  }> = [];
-  #closed = false;
-  #error: unknown;
-
-  push(item: T): void {
-    if (this.#closed) {
-      return;
-    }
-    const waiter = this.#waiters.shift();
-    if (waiter) {
-      waiter.resolve({ value: item, done: false });
-      return;
-    }
-    this.#items.push(item);
-  }
-
-  close(): void {
-    this.#closed = true;
-    while (this.#waiters.length > 0) {
-      this.#waiters.shift()?.resolve({ value: undefined, done: true });
-    }
-  }
-
-  fail(error: unknown): void {
-    this.#error = error;
-    this.#closed = true;
-    while (this.#waiters.length > 0) {
-      this.#waiters.shift()?.reject(error);
-    }
-  }
-
-  [Symbol.asyncIterator](): AsyncIterator<T> {
-    return {
-      next: () => this.next(),
-    };
-  }
-
-  private next(): Promise<IteratorResult<T>> {
-    if (this.#items.length > 0) {
-      return Promise.resolve({ value: this.#items.shift() as T, done: false });
-    }
-    if (this.#error) {
-      return Promise.reject(this.#error);
-    }
-    if (this.#closed) {
-      return Promise.resolve({ value: undefined, done: true });
-    }
-    return new Promise<IteratorResult<T>>((resolve, reject) => {
-      this.#waiters.push({ resolve, reject });
-    });
-  }
-}
-
-function traceAdkEvent({
-  event,
-  context,
-  providerId,
-}: {
-  event: Event;
-  context: InvocationContext;
-  providerId: string;
-}): void {
-  const spanName = spanNameForEvent(event);
-  const tracer = trace.getTracer(tracerName, tracerVersion);
-  const span = tracer.startSpan(spanName);
-  try {
-    const title = readableEventTitle(event);
-    const metadata = readCustomMetadata(event);
-    const llmRequest = buildSyntheticAdkLlmRequest(context, providerId);
-    const parentToolName = stringValue(metadata.parentToolName);
-    const parentToolCallId = stringValue(metadata.parentToolCallId);
-    const metadataSubAgentName = stringValue(metadata.subAgentName);
-    span.setAttributes({
-      "gen_ai.system": "gcp.vertex.agent",
-      "gen_ai.agent.name":
-        event.author ?? context.agent?.name ?? "external_agent",
-      "gen_ai.operation.name":
-        spanName === "call_llm" ? "call_llm" : "execute_tool",
-      "gen_ai.request.model": providerId,
-      "gcp.vertex.agent.invocation_id": context.invocationId,
-      "gcp.vertex.agent.session_id": readSessionId(context),
-      "gcp.vertex.agent.event_id": event.id,
-      "gcp.vertex.agent.provider_id": providerId,
-      "gcp.vertex.agent.external_agent.name": event.author ?? "",
-      "gcp.vertex.agent.event_title": title,
-      "gcp.vertex.agent.branch": event.branch ?? "",
-      "gcp.vertex.agent.subagent.name": metadataSubAgentName,
-      "gcp.vertex.agent.parent_tool.name": parentToolName,
-      "gcp.vertex.agent.parent_tool.call_id": parentToolCallId,
-      "gcp.vertex.agent.llm_request": safeJsonSerialize(llmRequest),
-      "gcp.vertex.agent.llm_response": safeJsonSerialize(event),
-    });
-
-    const functionCall = event.content?.parts?.find(
-      (part) => part.functionCall,
-    )?.functionCall;
-    const functionResponse = event.content?.parts?.find(
-      (part) => part.functionResponse,
-    )?.functionResponse;
-    if (functionCall) {
-      span.setAttributes({
-        "gen_ai.operation.name": "execute_tool",
-        "gen_ai.tool.name": functionCall.name ?? "run_adk_subagent",
-        "gen_ai.tool.call.id": functionCall.id ?? event.id,
-        "gcp.vertex.agent.tool_call_args": safeJsonSerialize(
-          functionCall.args ?? {},
-        ),
-        "gcp.vertex.agent.subagent.name":
-          stringValue(
-            (functionCall.args as { agentName?: unknown } | undefined)
-              ?.agentName,
-          ) || metadataSubAgentName,
-      });
-    }
-    if (functionResponse) {
-      span.setAttributes({
-        "gen_ai.operation.name": "execute_tool",
-        "gen_ai.tool.name": functionResponse.name ?? "run_adk_subagent",
-        "gen_ai.tool.call.id": functionResponse.id ?? event.id,
-        "gcp.vertex.agent.tool_response": safeJsonSerialize(
-          functionResponse.response ?? {},
-        ),
-        "gcp.vertex.agent.subagent.name":
-          stringValue(
-            (functionResponse.response as { agentName?: unknown } | undefined)
-              ?.agentName,
-          ) || metadataSubAgentName,
-      });
-    }
-  } finally {
-    span.end();
-  }
-}
-
-function buildSyntheticAdkLlmRequest(
-  context: InvocationContext,
-  providerId: string,
-): { model: string; contents: Content[] } {
-  const userContent = (context as { userContent?: Content }).userContent;
-  return {
-    model: providerId,
-    contents: userContent ? [contentForTrace(userContent)] : [],
-  };
-}
-
-function contentForTrace(content: Content): Content {
-  return {
-    role: content.role,
-    parts: content.parts?.filter((part) => !part.inlineData) ?? [],
-  };
-}
-
-function spanNameForEvent(event: Event): string {
-  const functionCall = event.content?.parts?.find(
-    (part) => part.functionCall,
-  )?.functionCall;
-  if (functionCall) {
-    const subAgentName = stringValue(
-      (functionCall.args as { agentName?: unknown } | undefined)?.agentName,
-    );
-    return functionCall.name === "run_adk_subagent" && subAgentName
-      ? `execute_tool run_adk_subagent → ${subAgentName}`
-      : `execute_tool ${functionCall.name ?? "<unknown>"}${toolDetail(functionCall.args)}`;
-  }
-
-  const functionResponse = event.content?.parts?.find(
-    (part) => part.functionResponse,
-  )?.functionResponse;
-  if (functionResponse) {
-    const subAgentName = stringValue(
-      (functionResponse.response as { agentName?: unknown } | undefined)
-        ?.agentName,
-    );
-    return functionResponse.name === "run_adk_subagent" && subAgentName
-      ? `execute_tool run_adk_subagent ← ${subAgentName}`
-      : `execute_tool ${functionResponse.name ?? "<unknown>"}${toolDetail(functionResponse.response)}`;
-  }
-
-  const toolProgressSpanName = spanNameForToolProgress(event);
-  if (toolProgressSpanName) {
-    return toolProgressSpanName;
-  }
-
-  return "call_llm";
-}
-
-function spanNameForToolProgress(event: Event): string | undefined {
-  const metadata = readCustomMetadata(event);
-  const itemType = stringValue(metadata.itemType);
-  if (!isToolProgressItemType(itemType)) {
-    return undefined;
-  }
-  return `execute_tool ${itemType}${toolDetail(metadata)}`;
-}
-
-function isToolProgressItemType(value: string): boolean {
-  return (
-    value === "command_execution" ||
-    value === "web_search" ||
-    value === "mcp_tool_call"
-  );
-}
-
-function toolDetail(value: unknown): string {
-  if (!value || typeof value !== "object") {
-    return "";
-  }
-  const record = value as Record<string, unknown>;
-  const command = stringValue(record.command);
-  const status = stringValue(record.status);
-  const query = stringValue(record.query);
-  const toolName = stringValue(record.toolName);
-  const detail = command || query || toolName || status;
-  return detail ? `: ${truncate(detail, 72)}` : "";
-}
-
-function readableEventTitle(event: Event): string {
-  const metadata = readCustomMetadata(event);
-  const metadataTitle = stringValue(metadata.title);
-  if (metadataTitle) {
-    return metadataTitle;
-  }
-
-  const functionCall = event.content?.parts?.find(
-    (part) => part.functionCall,
-  )?.functionCall;
-  if (functionCall?.name) {
-    return `functionCall:${functionCall.name}`;
-  }
-
-  const functionResponse = event.content?.parts?.find(
-    (part) => part.functionResponse,
-  )?.functionResponse;
-  if (functionResponse?.name) {
-    return `functionResponse:${functionResponse.name}`;
-  }
-
-  const text = event.content?.parts
-    ?.map((part) => part.text)
-    .find(
-      (part): part is string => typeof part === "string" && part.length > 0,
-    );
-  if (text) {
-    return truncate(text, 80);
-  }
-
-  const itemType = stringValue(metadata.itemType);
-  const status = stringValue(metadata.status);
-  const subAgentName = stringValue(metadata.subAgentName) || event.author;
-  if (itemType && subAgentName) {
-    return `${subAgentName}: ${itemType}${status ? ` ${status}` : ""}`;
-  }
-
-  return event.errorMessage
-    ? `error:${event.errorCode ?? "EXTERNAL_AGENT_ERROR"}`
-    : (event.author ?? "external_agent");
-}
-
-function readCustomMetadata(event: Event): Record<string, unknown> {
-  return (
-    (event as { customMetadata?: Record<string, unknown> }).customMetadata ?? {}
-  );
-}
-
-function readSessionId(context: InvocationContext): string {
-  const session = (context as { session?: { id?: unknown } }).session;
-  return typeof session?.id === "string" ? session.id : "";
-}
-
-function truncate(value: string, maxLength: number): string {
-  return value.length > maxLength
-    ? `${value.slice(0, maxLength - 3)}...`
-    : value;
-}
-
 function stringValue(value: unknown): string {
   return typeof value === "string" ? value : "";
-}
-
-function safeJsonSerialize(value: unknown): string {
-  try {
-    return JSON.stringify(value);
-  } catch {
-    return "<not serializable>";
-  }
 }

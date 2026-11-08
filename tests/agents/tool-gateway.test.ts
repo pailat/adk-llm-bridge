@@ -6,7 +6,7 @@ import {
   createEvent,
   createEventActions,
   FunctionTool,
-  type InvocationContext,
+  InvocationContext,
   LlmAgent,
   type LlmRequest,
   type LlmResponse,
@@ -193,13 +193,16 @@ describe("ToolGateway", () => {
     // TextAgent event has no renderable content so it is suppressed.
     expect(emitted).toHaveLength(3);
 
-    // #0 native transfer_to_agent call: single agentName arg, no customMetadata,
+    // #0 native transfer_to_agent call: single agent_name arg (ADK >= 2.1 wire format), no customMetadata,
     // finishReason=STOP and turnComplete=true (completed synthetic model turn).
     expect(emitted[0].content?.role).toBe("model");
     expect(emitted[0].content?.parts?.[0]?.functionCall).toMatchObject({
       name: "transfer_to_agent",
-      args: { agentName: "worker" },
+      args: { agent_name: "worker" },
     });
+    expect(
+      emitted[0].content?.parts?.[0]?.functionCall?.args,
+    ).not.toHaveProperty("agentName");
     expect(
       emitted[0].content?.parts?.[0]?.functionCall?.args,
     ).not.toHaveProperty("task");
@@ -678,4 +681,60 @@ describe("ToolGateway", () => {
     expect(result.output).toBe("");
     expect(result.events).toBe(0);
   });
+});
+
+describe("ToolGateway parent context without a session", () => {
+  class ContextCapturingAgent extends BaseAgent {
+    seen?: InvocationContext;
+
+    constructor() {
+      super({ name: "worker" });
+    }
+
+    protected async *runAsyncImpl(context: InvocationContext) {
+      this.seen = context;
+      yield createEvent({
+        invocationId: context.invocationId,
+        author: this.name,
+        content: { role: "model", parts: [{ text: "ok" }] },
+      });
+    }
+
+    protected async *runLiveImpl() {}
+  }
+
+  for (const [label, makeContext] of [
+    [
+      "an InvocationContext instance",
+      () =>
+        new InvocationContext({
+          invocationId: "inv-1",
+          pluginManager: new PluginManager(),
+          session: undefined as never,
+        }),
+    ],
+    [
+      "a duck-typed context",
+      () => ({ invocationId: "inv-1" }) as unknown as InvocationContext,
+    ],
+  ] as const) {
+    test(`gives the child a real InvocationContext with a session (${label})`, async () => {
+      const worker = new ContextCapturingAgent();
+      const gateway = new ToolGateway({
+        rootAgent: worker,
+        subAgents: [worker],
+        parentContext: makeContext(),
+      });
+
+      const result = await gateway.runSubAgent({
+        agentName: "worker",
+        task: "go",
+      });
+
+      expect(result.error).toBeUndefined();
+      expect(worker.seen).toBeInstanceOf(InvocationContext);
+      expect(worker.seen?.session.id).toBe("tool-gateway-child-session");
+      expect(worker.seen?.invocationId).toBe("inv-1");
+    });
+  }
 });

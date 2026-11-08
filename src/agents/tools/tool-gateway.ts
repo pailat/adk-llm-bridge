@@ -8,8 +8,11 @@ import {
   type BaseAgent,
   createEvent,
   createEventActions,
+  createSession,
   type Event,
-  type InvocationContext,
+  InvocationContext,
+  type InvocationContextParams,
+  PluginManager,
 } from "@google/adk";
 import { FinishReason } from "@google/genai";
 import { AgentInvocationGateway } from "../../runtime/agent-invocation-gateway.js";
@@ -290,7 +293,8 @@ export class ToolGateway {
     callId: string,
   ): Event {
     if (this.#nativeDelegationShape) {
-      // Native `transfer_to_agent` call: single { agentName } arg, no metadata.
+      // Native `transfer_to_agent` call: single { agent_name } arg (ADK >= 2.1
+      // wire format, see agent_transfer_llm_request_processor), no metadata.
       // A completed synthetic transfer turn legitimately is STOP/turnComplete,
       // matching native nat_billing#0/nat_support#0 so DevTools renders it as a
       // finished model turn. usageMetadata is intentionally omitted (no real
@@ -308,7 +312,7 @@ export class ToolGateway {
               functionCall: {
                 id: callId,
                 name: "transfer_to_agent",
-                args: { agentName: input.agentName },
+                args: { agent_name: input.agentName },
               },
             },
           ],
@@ -418,21 +422,30 @@ function childBranch(
   return parentBranch ? `${parentBranch}.${agentName}` : agentName;
 }
 
+/**
+ * Guarantees the parent context carries a session. Real contexts are cloned
+ * with ADK's own `clone()` (keeps the shared LLM-call counter); duck-typed
+ * contexts (tests, ad-hoc callers) are promoted to a real `InvocationContext`.
+ */
 function withToolGatewaySession(context: InvocationContext): InvocationContext {
   if (context.session) {
     return context;
   }
-  return {
-    ...context,
-    session: {
-      id: "tool-gateway-child-session",
-      appName: "tool-gateway",
-      userId: "tool-gateway-user",
-      state: {},
-      events: [],
-      lastUpdateTime: Date.now(),
-    },
-  } as unknown as InvocationContext;
+  const session = createSession({
+    id: "tool-gateway-child-session",
+    appName: "tool-gateway",
+    userId: "tool-gateway-user",
+  });
+  if (context instanceof InvocationContext) {
+    return context.clone({ session });
+  }
+  const fields: Partial<InvocationContextParams> = context;
+  return new InvocationContext({
+    invocationId: `e-${crypto.randomUUID()}`,
+    pluginManager: new PluginManager(),
+    ...fields,
+    session,
+  });
 }
 
 function readAgentPermissions(

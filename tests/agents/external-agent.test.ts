@@ -3,11 +3,15 @@ import {
   BaseAgent,
   createEvent,
   createEventActions,
+  createSession,
+  InMemoryRunner,
   InMemorySessionService,
   type InvocationContext,
   Runner,
+  Workflow,
 } from "@google/adk";
 import { trace } from "@opentelemetry/api";
+import { z } from "zod";
 import {
   ExternalAgent,
   type ExternalAgentDriver,
@@ -89,6 +93,7 @@ class TerminalThenPendingDriver implements ExternalAgentDriver {
 type CapturedSpan = {
   name: string;
   attributes: Record<string, unknown>;
+  status?: { code: number; message?: string };
 };
 
 function installTraceCapture(): CapturedSpan[] {
@@ -107,6 +112,10 @@ function installTraceCapture(): CapturedSpan[] {
             },
             setAttribute(key: string, value: unknown) {
               span.attributes[key] = value;
+              return this;
+            },
+            setStatus(status: { code: number; message?: string }) {
+              (span as CapturedSpan).status = status;
               return this;
             },
             end() {},
@@ -494,5 +503,388 @@ describe("ExternalAgent ADK event formatting", () => {
 
     expect(rootTexts).not.toContain("child output (re-narrated)");
     expect(rootTexts).toContain("additional root commentary");
+  });
+});
+
+describe("ExternalAgent ADK 2.x integration", () => {
+  test("clone() rebuilds the agent with provider, driver and permissions", () => {
+    const driver = new StaticDriver([]);
+    const child = new ExternalAgent({
+      name: "child",
+      provider: CODEX_PROVIDER,
+      driver: new StaticDriver([]),
+    });
+    const agent = new ExternalAgent({
+      name: "original",
+      provider: CODEX_PROVIDER,
+      driver,
+      instruction: "be brief",
+      permissions: { mode: "read-only" },
+      subAgents: [child],
+    });
+
+    const copy = agent.clone();
+    expect(copy).toBeInstanceOf(ExternalAgent);
+    expect(copy).not.toBe(agent);
+    expect(copy.driver).toBe(driver);
+    expect(copy.provider).toBe(CODEX_PROVIDER);
+    expect(copy.instruction).toBe("be brief");
+    expect(copy.permissions).toEqual({ mode: "read-only" });
+    expect(copy.parentAgent).toBeUndefined();
+    expect(copy.subAgents).toHaveLength(1);
+    expect(copy.subAgents[0]).not.toBe(child);
+    expect(copy.subAgents[0]?.parentAgent).toBe(copy);
+
+    const renamed = agent.clone({
+      name: "renamed",
+      permissions: { mode: "full-access" },
+    });
+    expect(renamed.name).toBe("renamed");
+    expect(renamed.permissions).toEqual({ mode: "full-access" });
+    expect(agent.permissions).toEqual({ mode: "read-only" });
+  });
+
+  test("honors ADK before/afterAgentCallback from the config", async () => {
+    const skipped = new StaticDriver([{ type: "output", content: "driver" }]);
+    const blocked = new ExternalAgent({
+      name: "blocked",
+      provider: CODEX_PROVIDER,
+      driver: skipped,
+      beforeAgentCallback: () => ({
+        role: "model",
+        parts: [{ text: "short-circuit" }],
+      }),
+    });
+    const session = createSession({ id: "s", appName: "app", userId: "user" });
+    const blockedEvents = await collect(blocked, { session });
+    expect(blockedEvents.map((e) => e.content?.parts?.[0]?.text)).toEqual([
+      "short-circuit",
+    ]);
+    expect(skipped.request).toBeUndefined();
+
+    const after = new ExternalAgent({
+      name: "after",
+      provider: CODEX_PROVIDER,
+      driver: new StaticDriver([{ type: "output", content: "driver" }]),
+      afterAgentCallback: () => ({
+        role: "model",
+        parts: [{ text: "after" }],
+      }),
+    });
+    const afterEvents = await collect(after, { session });
+    expect(afterEvents.map((e) => e.content?.parts?.[0]?.text)).toEqual([
+      "driver",
+      "after",
+    ]);
+  });
+
+  test("final output carries output and nodeInfo; partial output does not", async () => {
+    const agent = new ExternalAgent({
+      name: "codex_agent",
+      provider: CODEX_PROVIDER,
+      driver: new StaticDriver([
+        { type: "output", content: "draft", partial: true },
+        { type: "output", content: "final" },
+      ]),
+    });
+
+    const [partial, final] = await collect(agent);
+
+    expect(partial?.output).toBeUndefined();
+    expect(final?.output).toBe("final");
+    expect(final?.nodeInfo).toMatchObject({ messageAsOutput: true });
+  });
+
+  test("works as a node of an ADK Workflow and feeds the next node", async () => {
+    const agent = new ExternalAgent({
+      name: "worker",
+      provider: CODEX_PROVIDER,
+      driver: new StaticDriver([{ type: "output", content: "HELLO" }]),
+    });
+    const received: unknown[] = [];
+    const sink = Object.defineProperty(
+      (_ctx: unknown, input: unknown) => {
+        received.push(input);
+        return "done";
+      },
+      "name",
+      { value: "sink" },
+    );
+    const workflow = new Workflow({
+      name: "wf",
+      edges: [["START", agent, sink]],
+    } as never);
+    const runner = new InMemoryRunner({
+      agent: workflow as never,
+      appName: "app",
+    });
+    const session = await runner.sessionService.createSession({
+      appName: "app",
+      userId: "user",
+    });
+
+    for await (const _event of runner.runAsync({
+      userId: "user",
+      sessionId: session.id,
+      newMessage: { role: "user", parts: [{ text: "go" }] },
+    })) {
+      // drain
+    }
+
+    expect(received).toEqual(["HELLO"]);
+  });
+
+  test("clone() shares the driver instance unless overridden", () => {
+    const driver = new StaticDriver([]);
+    const agent = new ExternalAgent({
+      name: "a",
+      provider: CODEX_PROVIDER,
+      driver,
+    });
+    expect(agent.clone().driver).toBe(driver);
+    const fresh = new StaticDriver([]);
+    expect(agent.clone({ name: "b", driver: fresh }).driver).toBe(fresh);
+  });
+
+  async function runAsNode(
+    agent: ExternalAgent,
+  ): Promise<{ received: unknown[]; errors: (string | undefined)[] }> {
+    const received: unknown[] = [];
+    const sink = Object.defineProperty(
+      (_ctx: unknown, input: unknown) => {
+        received.push(input);
+        return "done";
+      },
+      "name",
+      { value: "sink" },
+    );
+    const runner = new InMemoryRunner({
+      agent: new Workflow({
+        name: "wf",
+        edges: [["START", agent, sink]],
+      } as never) as never,
+      appName: "app",
+    });
+    const session = await runner.sessionService.createSession({
+      appName: "app",
+      userId: "user",
+    });
+    const errors: (string | undefined)[] = [];
+    try {
+      for await (const event of runner.runAsync({
+        userId: "user",
+        sessionId: session.id,
+        newMessage: { role: "user", parts: [{ text: "go" }] },
+      })) {
+        if (event.errorCode) errors.push(event.errorMessage);
+      }
+    } catch (error) {
+      errors.push(error instanceof Error ? error.message : String(error));
+    }
+    return { received, errors };
+  }
+
+  test("outputSchema: JSON text is parsed into the node output", async () => {
+    const agent = new ExternalAgent({
+      name: "worker",
+      provider: CODEX_PROVIDER,
+      driver: new StaticDriver([{ type: "output", content: '{"x":1}' }]),
+      outputSchema: z.object({ x: z.number() }),
+    });
+
+    const { received, errors } = await runAsNode(agent);
+
+    expect(errors).toEqual([]);
+    expect(received).toEqual([{ x: 1 }]);
+  });
+
+  test("outputSchema: non-JSON text is kept raw and ADK reports the mismatch", async () => {
+    const agent = new ExternalAgent({
+      name: "worker",
+      provider: CODEX_PROVIDER,
+      driver: new StaticDriver([{ type: "output", content: "not json" }]),
+      outputSchema: z.object({ x: z.number() }),
+    });
+
+    const [final] = await collect(agent);
+    expect(final?.output).toBe("not json");
+
+    const { received, errors } = await runAsNode(agent);
+    expect(received).toEqual([]);
+    expect(errors.length).toBeGreaterThan(0);
+  });
+
+  test("without outputSchema the output stays raw text even if it is JSON", async () => {
+    const agent = new ExternalAgent({
+      name: "worker",
+      provider: CODEX_PROVIDER,
+      driver: new StaticDriver([{ type: "output", content: '{"x":1}' }]),
+    });
+    const [final] = await collect(agent);
+    expect(final?.output).toBe('{"x":1}');
+  });
+
+  test("passes the Runner abort signal to the driver and aborts it when the consumer abandons the stream", async () => {
+    let seen: AbortSignal | undefined;
+    let finished = false;
+    const driver: ExternalAgentDriver = {
+      providerId: CODEX_PROVIDER.id,
+      async *run(request) {
+        seen = request.abortSignal;
+        try {
+          yield { type: "output", content: "one", partial: true };
+          await new Promise<never>((_, reject) => {
+            request.abortSignal?.addEventListener("abort", () =>
+              reject(new Error("aborted")),
+            );
+          });
+        } finally {
+          finished = true;
+        }
+      },
+    };
+    const agent = new ExternalAgent({
+      name: "codex_agent",
+      provider: CODEX_PROVIDER,
+      driver,
+    });
+    const upstream = new AbortController();
+
+    const iterator = agent.runAsync({
+      invocationId: "inv-1",
+      abortSignal: upstream.signal,
+    } as InvocationContext);
+    const first = await iterator.next();
+    expect(first.value?.content?.parts?.[0]?.text).toBe("one");
+    expect(seen?.aborted).toBe(false);
+
+    await iterator.return(undefined);
+
+    expect(seen?.aborted).toBe(true);
+    await withDeadline(
+      (async () => {
+        while (!finished) await new Promise((r) => setTimeout(r, 5));
+      })(),
+      2000,
+      "driver was not cancelled after the consumer abandoned the stream",
+    );
+    expect(upstream.signal.aborted).toBe(false);
+  });
+
+  test("an upstream abort reaches the driver signal", async () => {
+    let seen: AbortSignal | undefined;
+    const upstream = new AbortController();
+    const driver: ExternalAgentDriver = {
+      providerId: CODEX_PROVIDER.id,
+      async *run(request) {
+        seen = request.abortSignal;
+        upstream.abort();
+        yield { type: "output", content: "x" };
+      },
+    };
+    const agent = new ExternalAgent({
+      name: "codex_agent",
+      provider: CODEX_PROVIDER,
+      driver,
+    });
+
+    await collect(agent, { abortSignal: upstream.signal });
+
+    expect(seen?.aborted).toBe(true);
+  });
+
+  test("does not abort the driver signal on a normal completion", async () => {
+    const driver = new StaticDriver([{ type: "output", content: "ok" }]);
+    const agent = new ExternalAgent({
+      name: "codex_agent",
+      provider: CODEX_PROVIDER,
+      driver,
+    });
+
+    await collect(agent);
+
+    expect(driver.request?.abortSignal?.aborted).toBe(false);
+  });
+});
+
+describe("ExternalAgent telemetry", () => {
+  const ENV = "ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS";
+  const original = process.env[ENV];
+  afterEach(() => {
+    if (original === undefined) delete process.env[ENV];
+    else process.env[ENV] = original;
+  });
+
+  async function runWithSpans(value: string | undefined) {
+    if (value === undefined) delete process.env[ENV];
+    else process.env[ENV] = value;
+    const spans = installTraceCapture();
+    const agent = new ExternalAgent({
+      name: "codex_agent",
+      provider: CODEX_PROVIDER,
+      driver: new StaticDriver([{ type: "output", content: "secret" }]),
+    });
+    await collect(agent, {
+      userContent: { role: "user", parts: [{ text: "private prompt" }] },
+    });
+    return spans;
+  }
+
+  test("captures message content by default", async () => {
+    const spans = await runWithSpans(undefined);
+    expect(spans[0]?.attributes["gcp.vertex.agent.llm_request"]).toContain(
+      "private prompt",
+    );
+    expect(spans[0]?.attributes["gcp.vertex.agent.llm_response"]).toContain(
+      "secret",
+    );
+  });
+
+  for (const value of ["false", "0"]) {
+    test(`redacts message content when ${ENV}=${value}`, async () => {
+      const spans = await runWithSpans(value);
+      expect(spans[0]?.attributes["gcp.vertex.agent.llm_request"]).toBe("{}");
+      expect(spans[0]?.attributes["gcp.vertex.agent.llm_response"]).toBe("{}");
+    });
+  }
+
+  test("marks error events with error.type and ERROR status without the message", async () => {
+    const spans = installTraceCapture();
+    const agent = new ExternalAgent({
+      name: "codex_agent",
+      provider: CODEX_PROVIDER,
+      driver: new StaticDriver([
+        {
+          type: "error",
+          code: "CODEX_ERROR",
+          message: "sensitive detail",
+          recoverable: false,
+        },
+      ]),
+    });
+
+    await collect(agent);
+
+    expect(spans[0]?.attributes["error.type"]).toBe("CODEX_ERROR");
+    expect(spans[0]?.status).toEqual({ code: 2, message: "CODEX_ERROR" });
+  });
+
+  test("records the transfer target from the native agent_name argument", async () => {
+    const spans = installTraceCapture();
+    const agent = new ExternalAgent({
+      name: "root_external",
+      provider: CODEX_PROVIDER,
+      driver: new DelegatingDriver(),
+      subAgents: [new StateAgent()],
+    });
+
+    await collect(agent);
+
+    const transfer = spans.find(
+      (span) => span.attributes["gen_ai.tool.name"] === "transfer_to_agent",
+    );
+    expect(transfer?.attributes["gcp.vertex.agent.subagent.name"]).toBe(
+      "state_agent",
+    );
   });
 });
