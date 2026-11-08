@@ -18,8 +18,9 @@
  *
  * Requires `ANTHROPIC_API_KEY` in `.env` (Bun loads it from the cwd).
  */
-import { FunctionTool, LlmAgent } from "@google/adk";
+
 import type { Context } from "@google/adk";
+import { FunctionTool, LlmAgent } from "@google/adk";
 import { Anthropic } from "adk-llm-bridge";
 import { z } from "zod";
 

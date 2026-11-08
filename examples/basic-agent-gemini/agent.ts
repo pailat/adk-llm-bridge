@@ -73,9 +73,7 @@ function hasGeminiCli(): boolean {
 
 export async function main(): Promise<void> {
   if (!hasGeminiCredential() && !hasGeminiCli()) {
-    console.log(
-      "set GEMINI_API_KEY (or local gemini CLI) to run this example",
-    );
+    console.log("set GEMINI_API_KEY (or local gemini CLI) to run this example");
     process.exit(0);
   }
 

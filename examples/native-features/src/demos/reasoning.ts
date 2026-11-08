@@ -44,7 +44,10 @@ export const reasoningDemo: Demo = {
       },
     });
 
-    out.label("thinkingConfig", { includeThoughts: true, thinkingBudget: 2048 });
+    out.label("thinkingConfig", {
+      includeThoughts: true,
+      thinkingBudget: 2048,
+    });
     out.section("reasoning (thought parts)");
 
     const result = await harness.run(
@@ -59,7 +62,10 @@ export const reasoningDemo: Demo = {
     if (result.thoughtText.trim()) {
       out.thought(result.thoughtText.trim());
     } else {
-      out.label("note", "no thought parts returned (model/provider may not emit them)");
+      out.label(
+        "note",
+        "no thought parts returned (model/provider may not emit them)",
+      );
     }
 
     out.section("final answer");

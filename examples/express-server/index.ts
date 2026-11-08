@@ -19,19 +19,20 @@
  *
  * Run: bun run start
  */
-import express from "express";
+
+import type { Context } from "@google/adk";
 import {
   FunctionTool,
-  LlmAgent,
-  LLMRegistry,
-  Runner,
-  InMemorySessionService,
   InMemoryArtifactService,
   InMemoryMemoryService,
+  InMemorySessionService,
+  LLMRegistry,
+  LlmAgent,
+  Runner,
   StreamingMode,
 } from "@google/adk";
-import type { Context } from "@google/adk";
 import { AIGatewayLlm } from "adk-llm-bridge";
+import express from "express";
 import { z } from "zod";
 
 LLMRegistry.register(AIGatewayLlm);

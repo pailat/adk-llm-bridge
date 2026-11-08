@@ -8,10 +8,10 @@ import {
   mapPermissionModeToPolicy,
 } from "adk-llm-bridge/agents";
 import {
-  type WorkflowEvent,
-  type WorkflowOutputEvent,
   defineScriptWorkflow,
   ScriptWorkflowAgent,
+  type WorkflowEvent,
+  type WorkflowOutputEvent,
 } from "adk-llm-bridge/workflows";
 
 const adkRuntime = await import(
@@ -27,7 +27,7 @@ const adkRuntime = await import(
       "index.js",
     ].join("/"),
     import.meta.url,
-  ).href,
+  ).href
 );
 
 const HANDOFF_ID = "codex-workflow-smoke-v1";
@@ -36,7 +36,9 @@ let workflowOutput = "";
 function requireTarget(): string {
   const target = process.env.WORKFLOW_TARGET;
   if (!target || !isAbsolute(target)) {
-    throw new Error("WORKFLOW_TARGET must be an absolute disposable worktree path");
+    throw new Error(
+      "WORKFLOW_TARGET must be an absolute disposable worktree path",
+    );
   }
   const resolved = realpathSync(target);
   if (!statSync(resolved).isDirectory()) {
@@ -159,7 +161,8 @@ function createWorkflow(target: string): ScriptWorkflowAgent {
     definition: defineScriptWorkflow({
       id: "codex-improvement-smoke",
       version: "1",
-      description: "Planner to implementer to reviewer, using only Codex agents.",
+      description:
+        "Planner to implementer to reviewer, using only Codex agents.",
       source,
       limits: {
         maxSteps: 3,
@@ -219,7 +222,9 @@ export async function main(): Promise<void> {
   ) {
     throw new Error("Codex agents did not acknowledge the workflow handoffs");
   }
-  console.log("[workflow] verified planner -> implementer -> reviewer handoffs");
+  console.log(
+    "[workflow] verified planner -> implementer -> reviewer handoffs",
+  );
   console.log(workflowOutput);
 }
 

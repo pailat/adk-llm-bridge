@@ -88,5 +88,10 @@ export function loadConfig(overrides?: {
     );
   }
 
-  return { provider, model, apiKey, modelExplicit: explicitModel !== undefined };
+  return {
+    provider,
+    model,
+    apiKey,
+    modelExplicit: explicitModel !== undefined,
+  };
 }
