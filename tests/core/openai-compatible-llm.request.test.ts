@@ -35,10 +35,14 @@ type CreateResult =
   | unknown
   | ((params: CreateParams, options?: CreateOptions) => unknown);
 
-function makeLlm(model: string): OpenAICompatibleLlm {
+function makeLlm(
+  model: string,
+  extra: { errorMode?: "throw" | "response" } = {},
+): OpenAICompatibleLlm {
   return new OpenAICompatibleLlm(OPENAI_DEFINITION, {
     model,
     apiKey: "test-key",
+    ...extra,
   });
 }
 
@@ -521,7 +525,7 @@ describe("OpenAICompatibleLlm span annotation", () => {
   it("marks the span as ERROR when the provider call fails", async () => {
     const { state, restore } = captureSpan();
     try {
-      const llm = makeLlm("gpt-4o");
+      const llm = makeLlm("gpt-4o", { errorMode: "response" });
       spyCreate(llm, () => {
         throw Object.assign(new Error("rate limited"), { status: 429 });
       });
@@ -530,6 +534,23 @@ describe("OpenAICompatibleLlm span annotation", () => {
       expect(state.attributes["error.type"]).toBe("429");
       expect(state.status?.code).toBe(SpanStatusCode.ERROR);
       expect(state.attributes["gen_ai.provider.name"]).toBe("openai");
+    } finally {
+      restore();
+    }
+  });
+
+  it("marks the span as ERROR before throwing in throw mode", async () => {
+    const { state, restore } = captureSpan();
+    try {
+      const llm = makeLlm("gpt-4o", { errorMode: "throw" });
+      spyCreate(llm, () => {
+        throw Object.assign(new Error("rate limited"), { status: 429 });
+      });
+      await expect(
+        drain(llm.generateContentAsync(userRequest(), false)),
+      ).rejects.toThrow();
+      expect(state.attributes["error.type"]).toBe("429");
+      expect(state.status?.code).toBe(SpanStatusCode.ERROR);
     } finally {
       restore();
     }

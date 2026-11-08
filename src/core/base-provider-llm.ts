@@ -15,7 +15,9 @@
 
 import type { BaseLlmConnection, LlmRequest, LlmResponse } from "@google/adk";
 import { BaseLlm } from "@google/adk";
-import type { BaseProviderConfig } from "../types.js";
+import { getProviderConfig } from "../config.js";
+import type { BaseProviderConfig, ErrorMode } from "../types.js";
+import { ProviderLlmError } from "./provider-llm-error.js";
 
 /**
  * Abstract base class for all LLM providers in adk-llm-bridge.
@@ -106,6 +108,63 @@ export abstract class BaseProviderLlm extends BaseLlm {
     throw new Error(
       `${this.constructor.name} does not support bidirectional streaming`,
     );
+  }
+
+  /**
+   * Resolves the effective {@link ErrorMode}: instance config, then the global
+   * provider config (`setProviderConfig`), then `"throw"`.
+   *
+   * @param providerId - Provider id used to look up the global config
+   * @protected
+   */
+  protected resolveErrorMode(providerId: string): ErrorMode {
+    const global = getProviderConfig(providerId as "ai-gateway") as
+      | { errorMode?: ErrorMode }
+      | undefined;
+    return this.config.errorMode ?? global?.errorMode ?? "throw";
+  }
+
+  /**
+   * Reports a failed provider call according to `errorMode`.
+   *
+   * Call it from the `catch` of `generateContentAsync`, after handling aborts:
+   * `yield this.handleProviderError(error, { prefix, providerId })`.
+   *
+   * - `"response"`: returns the error `LlmResponse` (see
+   *   {@link createErrorResponse}) for the caller to yield.
+   * - `"throw"` (default): throws a {@link ProviderLlmError} whose `code` is the
+   *   same code `"response"` would have used, so ADK events keep their
+   *   `errorCode`, plugins' `onModelErrorCallback` runs, and `RoutedLlm` can
+   *   fail over.
+   *
+   * @param error - The caught value
+   * @param options.prefix - Provider error prefix (e.g. `"OPENAI"`)
+   * @param options.providerId - Provider id for the global config lookup
+   * @returns The error response (only in `"response"` mode)
+   * @throws {ProviderLlmError} in `"throw"` mode
+   * @protected
+   */
+  protected handleProviderError(
+    error: unknown,
+    options: { prefix: string; providerId: string },
+  ): LlmResponse {
+    const response = this.createErrorResponse(error, options.prefix);
+    if (this.resolveErrorMode(options.providerId) === "response") {
+      return response;
+    }
+    const status =
+      error !== null &&
+      typeof error === "object" &&
+      typeof (error as { status?: unknown }).status === "number"
+        ? (error as { status: number }).status
+        : undefined;
+    throw new ProviderLlmError({
+      code: response.errorCode as string,
+      detail: response.errorMessage as string,
+      provider: options.prefix,
+      status,
+      cause: error,
+    });
   }
 
   /**

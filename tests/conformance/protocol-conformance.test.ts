@@ -70,6 +70,9 @@ function llm(
     baseURL: fixtureServer.baseURL(profile.id),
     maxRetries: 0,
     timeout: 2_000,
+    // These assertions inspect the error LlmResponse contract (code, message,
+    // terminal turnComplete); "throw" mode is covered in tests/core.
+    errorMode: "response",
     providerOptions,
   });
 }

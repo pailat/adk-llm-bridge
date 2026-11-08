@@ -1,4 +1,4 @@
-import { describe, expect, it, spyOn } from "bun:test";
+import { describe, expect, it } from "bun:test";
 import type { LlmRequest } from "@google/adk";
 import { FunctionCallingConfigMode } from "@google/genai";
 import {
@@ -9,6 +9,7 @@ import {
   convertStructuredOutput,
   convertToolChoice,
 } from "../../src/converters/request.js";
+import { captureWarnings } from "../helpers/fake-logger.js";
 
 function createLlmRequest(overrides: Partial<LlmRequest> = {}): LlmRequest {
   return {
@@ -120,7 +121,7 @@ describe("convertRequest", () => {
     });
 
     it("generates an OpenAI-compatible ID and warns when an ID is missing", () => {
-      const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
+      const warnSpy = captureWarnings();
       try {
         const request = createLlmRequest({
           contents: [
@@ -153,7 +154,7 @@ describe("convertRequest", () => {
     });
 
     it("generates distinct IDs for multiple missing-ID calls in one message", () => {
-      const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
+      const warnSpy = captureWarnings();
       try {
         const request = createLlmRequest({
           contents: [
@@ -181,7 +182,7 @@ describe("convertRequest", () => {
     });
 
     it("drops image parts on a model/assistant turn and warns", () => {
-      const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
+      const warnSpy = captureWarnings();
       try {
         const request = createLlmRequest({
           contents: [
@@ -212,7 +213,7 @@ describe("convertRequest", () => {
     });
 
     it("keeps image parts on a user turn (regression guard)", () => {
-      const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
+      const warnSpy = captureWarnings();
       try {
         const request = createLlmRequest({
           contents: [
@@ -277,7 +278,7 @@ describe("convertRequest", () => {
     });
 
     it("round-trips multiple missing and empty IDs across the request", () => {
-      const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
+      const warnSpy = captureWarnings();
       try {
         const request = createLlmRequest({
           contents: [
@@ -391,7 +392,7 @@ describe("convertRequest", () => {
     });
 
     it("prefers a generated same-name call for an out-of-order missing-ID response", () => {
-      const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
+      const warnSpy = captureWarnings();
       try {
         const request = createLlmRequest({
           contents: [
@@ -459,7 +460,7 @@ describe("convertRequest", () => {
     });
 
     it("does not consume an unrelated pending call for an unmatched response name", () => {
-      const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
+      const warnSpy = captureWarnings();
       try {
         const request = createLlmRequest({
           contents: [
@@ -515,7 +516,7 @@ describe("convertRequest", () => {
     });
 
     it("replaces an unmatched empty response ID after warning", () => {
-      const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
+      const warnSpy = captureWarnings();
       try {
         const request = createLlmRequest({
           contents: [
@@ -975,17 +976,14 @@ describe("convertRequest", () => {
         ],
       });
 
-      const warns: string[] = [];
-      const original = console.warn;
-      console.warn = (...args: unknown[]) => {
-        warns.push(args.map(String).join(" "));
-      };
+      const warnSpy = captureWarnings();
       let result: ReturnType<typeof convertRequest>;
       try {
         result = convertRequest(request);
       } finally {
-        console.warn = original;
+        warnSpy.mockRestore();
       }
+      const warns = warnSpy.mock.calls.map((c) => String(c[0]));
       expect(warns.some((w) => w.includes("scheme: gs"))).toBe(true);
       expect(warns.join("\n")).not.toContain("bucket/img.png");
       // No image present -> falls back to string content path.
@@ -1755,16 +1753,15 @@ describe("convertRequest", () => {
 
   describe("Gemini-only built-in tools", () => {
     function withConsoleWarn<T>(fn: () => T): { result: T; warns: string[] } {
-      const warns: string[] = [];
-      const original = console.warn;
-      console.warn = (...args: unknown[]) => {
-        warns.push(args.map(String).join(" "));
-      };
+      const warnSpy = captureWarnings();
       try {
         const result = fn();
-        return { result, warns };
+        return {
+          result,
+          warns: warnSpy.mock.calls.map((c) => String(c[0])),
+        };
       } finally {
-        console.warn = original;
+        warnSpy.mockRestore();
       }
     }
 
@@ -1986,5 +1983,51 @@ describe("convertRequest tool declarations", () => {
       type: "object",
       properties: {},
     });
+  });
+});
+
+describe("convertRequest warnings (ADK logger)", () => {
+  it("routes warnings through ADK's logger with stable codes", () => {
+    const spy = captureWarnings();
+    try {
+      convertRequest(
+        createLlmRequest({
+          contents: [
+            {
+              role: "model",
+              parts: [{ functionCall: { name: "f", args: {} } }],
+            },
+          ],
+        }),
+      );
+    } finally {
+      spy.mockRestore();
+    }
+    expect(spy.codes).toEqual(["TOOL_CALL_MISSING_ID"]);
+  });
+
+  it("logs a repeated media warning once per request, not once per part", () => {
+    const spy = captureWarnings();
+    const turn = {
+      role: "model",
+      parts: [
+        { inlineData: { mimeType: "image/png", data: "AA==" } },
+        { text: "x" },
+      ],
+    };
+    try {
+      convertRequest(
+        createLlmRequest({ contents: [turn, turn, turn] as never }),
+      );
+      expect(spy.codes).toEqual(["IMAGE_DROPPED_ON_MODEL_TURN"]);
+      // A new request starts a new scope.
+      convertRequest(createLlmRequest({ contents: [turn] as never }));
+      expect(spy.codes).toEqual([
+        "IMAGE_DROPPED_ON_MODEL_TURN",
+        "IMAGE_DROPPED_ON_MODEL_TURN",
+      ]);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });

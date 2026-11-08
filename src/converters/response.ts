@@ -17,7 +17,11 @@ import type { LlmResponse } from "@google/adk";
 import { FinishReason, type Part } from "@google/genai";
 import type OpenAI from "openai";
 import type { StreamAccumulator, StreamChunkResult } from "../types.js";
-import { safeJsonParse } from "../utils/index.js";
+import {
+  type MalformedToolCall,
+  malformedToolCallResponse,
+  parseToolArguments,
+} from "./tool-arguments.js";
 
 /**
  * Maps an OpenAI `finish_reason` to the ADK/genai {@link FinishReason} enum.
@@ -93,14 +97,35 @@ export function convertResponse(response: OpenAI.ChatCompletion): LlmResponse {
     parts.push({ text: choice.message.content });
   }
 
+  const malformed: MalformedToolCall[] = [];
   for (const tc of choice.message.tool_calls ?? []) {
     if (tc.type !== "function") continue;
+    const parsed = parseToolArguments(tc.function.arguments, tc.function.name);
+    if (!parsed.ok) {
+      malformed.push(parsed.failure);
+      continue;
+    }
     parts.push({
       functionCall: {
         id: tc.id,
         name: tc.function.name,
-        args: safeJsonParse(tc.function.arguments),
+        args: parsed.args,
       },
+    });
+  }
+
+  const usageMetadata = response.usage
+    ? buildUsageMetadata(response.usage)
+    : undefined;
+  // Namespaced key so downstream code can read per-token logprobs.
+  const customMetadata = choice.logprobs?.content?.length
+    ? { logprobs: choice.logprobs }
+    : undefined;
+
+  if (malformed.length) {
+    return malformedToolCallResponse(parts, malformed, {
+      usageMetadata,
+      customMetadata,
     });
   }
 
@@ -108,14 +133,8 @@ export function convertResponse(response: OpenAI.ChatCompletion): LlmResponse {
     content: parts.length ? { role: "model", parts } : undefined,
     turnComplete: true,
     finishReason: mapOpenAIFinishReason(choice.finish_reason),
-    usageMetadata: response.usage
-      ? buildUsageMetadata(response.usage)
-      : undefined,
-    // Surface per-token logprobs (when the caller requested them) under a
-    // namespaced key so downstream code can read them off the response.
-    customMetadata: choice.logprobs?.content?.length
-      ? { logprobs: choice.logprobs }
-      : undefined,
+    usageMetadata,
+    customMetadata,
   };
 }
 
@@ -379,14 +398,16 @@ export function convertStreamChunk(
       parts.push({ text: acc.reasoning, thought: true });
     }
     if (acc.text) parts.push({ text: acc.text });
+    const malformed: MalformedToolCall[] = [];
     for (const tc of Array.from(acc.toolCalls.values())) {
       if (tc.name) {
+        const parsed = parseToolArguments(tc.arguments, tc.name);
+        if (!parsed.ok) {
+          malformed.push(parsed.failure);
+          continue;
+        }
         parts.push({
-          functionCall: {
-            id: tc.id,
-            name: tc.name,
-            args: safeJsonParse(tc.arguments),
-          },
+          functionCall: { id: tc.id, name: tc.name, args: parsed.args },
         });
       }
     }
@@ -399,6 +420,15 @@ export function convertStreamChunk(
     acc.reasoningDetails.clear();
     acc.toolCalls.clear();
     acc.usage = undefined;
+
+    if (malformed.length) {
+      return {
+        response: malformedToolCallResponse(parts, malformed, {
+          usageMetadata,
+        }),
+        isComplete: true,
+      };
+    }
 
     return {
       response: {

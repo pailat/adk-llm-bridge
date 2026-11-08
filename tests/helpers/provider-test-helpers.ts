@@ -8,6 +8,7 @@
 import { beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { getProviderConfig, resetAllConfigs } from "../../src/config.js";
 import { useCleanEnv } from "./env.js";
+import { captureWarnings } from "./fake-logger.js";
 
 // ---------------------------------------------------------------------------
 // Registration test suite
@@ -39,12 +40,17 @@ export function describeProviderRegistration(cfg: RegistrationTestConfig) {
     });
 
     it("only registers once (singleton)", () => {
-      const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
+      // The warning goes through ADK's logger. Providers not migrated yet
+      // still use console.warn, so count both channels.
+      const logSpy = captureWarnings();
+      const consoleSpy = spyOn(console, "warn").mockImplementation(() => {});
       cfg.register();
       cfg.register();
       cfg.register();
-      expect(warnSpy).toHaveBeenCalledTimes(2);
-      warnSpy.mockRestore();
+      const warned = logSpy.mock.calls.length + consoleSpy.mock.calls.length;
+      logSpy.mockRestore();
+      consoleSpy.mockRestore();
+      expect(warned).toBe(2);
     });
 
     for (const [key, value] of cfg.configProps) {

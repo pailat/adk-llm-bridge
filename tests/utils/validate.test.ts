@@ -1,6 +1,8 @@
 import { describe, expect, it } from "bun:test";
+import { InputValidationError } from "@google/adk";
 import {
   clampPositive,
+  redactUrl,
   requireNonEmpty,
   requireValidURL,
 } from "../../src/utils/validate.js";
@@ -72,5 +74,93 @@ describe("clampPositive", () => {
 
   it("allows zero when min is 0", () => {
     expect(clampPositive(0, 10, 0)).toBe(0);
+  });
+});
+
+describe("InputValidationError and credential redaction", () => {
+  it("throws ADK's InputValidationError (still an Error) with the same messages", () => {
+    for (const fn of [
+      () => requireNonEmpty("", "apiKey", "p"),
+      () => requireValidURL("not-a-url", "baseURL", "p"),
+    ]) {
+      try {
+        fn();
+        throw new Error("expected a throw");
+      } catch (error) {
+        expect(error).toBeInstanceOf(InputValidationError);
+        expect(error).toBeInstanceOf(Error);
+      }
+    }
+    expect(() => requireNonEmpty("", "apiKey", "p")).toThrow(
+      "[p] apiKey is required but was empty.",
+    );
+  });
+
+  it("masks userinfo and sensitive query params in the quoted URL", () => {
+    // Not parseable by `new URL` (space), so it reaches the error message.
+    const bad = "https://user:s3cret@ho st.example/v1?api_key=abc123&x=1";
+    let message = "";
+    try {
+      requireValidURL(bad, "baseURL", "custom");
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toContain("***:***@ho st.example");
+    expect(message).toContain("api_key=***");
+    expect(message).toContain("x=1");
+    expect(message).not.toContain("s3cret");
+    expect(message).not.toContain("abc123");
+  });
+});
+
+describe("redactUrl", () => {
+  it("masks user:pass, bare user and each sensitive query param", () => {
+    expect(redactUrl("http://u:p@h/x")).toBe("http://***:***@h/x");
+    expect(redactUrl("http://tokenvalue@h/x")).toBe("http://***@h/x");
+    expect(
+      redactUrl(
+        "http://h/x?key=1&API_KEY=2&token=3&access_token=4&secret=5&password=6&signature=7&q=ok#frag",
+      ),
+    ).toBe(
+      "http://h/x?key=***&API_KEY=***&token=***&access_token=***&secret=***&password=***&signature=***&q=ok#frag",
+    );
+  });
+
+  it("leaves clean URLs and non-URL text untouched", () => {
+    expect(redactUrl("http://localhost:11434/v1")).toBe(
+      "http://localhost:11434/v1",
+    );
+    expect(redactUrl("not-a-url")).toBe("not-a-url");
+    expect(redactUrl("http://h/?monkey=banana")).toBe(
+      "http://h/?monkey=banana",
+    );
+  });
+
+  it("masks credentials in malformed URLs (slash in the password, no scheme, fragment)", () => {
+    expect(redactUrl("https://u:pa/ss@host")).toBe("https://***:***@host");
+    expect(redactUrl("not a url user:secret@host")).toBe(
+      "not a url ***:***@host",
+    );
+    expect(redactUrl("https://host/v1#sig=zz&x=1")).toBe(
+      "https://host/v1#sig=***&x=1",
+    );
+    expect(redactUrl("https://u:p@ss@host/v1")).toBe("https://***:***@host/v1");
+  });
+
+  it("does not leak those credentials through requireValidURL", () => {
+    for (const bad of [
+      "https://u:pa/ss@ho st",
+      "not a url user:hunter2@host",
+    ]) {
+      let message = "";
+      try {
+        requireValidURL(bad, "baseURL", "custom");
+      } catch (error) {
+        message = (error as Error).message;
+      }
+      expect(message).not.toContain("pa/ss");
+      expect(message).not.toContain("hunter2");
+      expect(message).toContain("***");
+    }
   });
 });

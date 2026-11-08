@@ -710,3 +710,82 @@ describe("reasoning_details (structured, signed) passthrough", () => {
     expect(acc.reasoningDetails.size).toBe(0);
   });
 });
+
+describe("malformed tool-call arguments", () => {
+  const toolCompletion = (args: string, finish = "length") =>
+    createCompletion({
+      choices: [
+        {
+          index: 0,
+          message: {
+            role: "assistant",
+            content: "let me check",
+            tool_calls: [
+              {
+                id: "call_1",
+                type: "function",
+                function: { name: "get_weather", arguments: args },
+              },
+            ],
+          },
+          finish_reason: finish,
+          logprobs: null,
+        },
+      ],
+    } as Partial<ChatCompletion>);
+
+  it("reports truncated arguments as MALFORMED_FUNCTION_CALL instead of calling with {}", () => {
+    const response = convertResponse(toolCompletion('{"city":"Par'));
+    expect(response.finishReason).toBe("MALFORMED_FUNCTION_CALL");
+    expect(response.errorCode).toBe("MALFORMED_FUNCTION_CALL");
+    expect(response.errorMessage).toContain("get_weather (invalid-json)");
+    expect(response.content?.parts?.some((p) => p.functionCall)).toBe(false);
+    expect(response.content?.parts?.[0]?.text).toBe("let me check");
+  });
+
+  it("still emits calls whose arguments are empty or valid", () => {
+    for (const args of ["", "{}", '{"city":"Paris"}']) {
+      const response = convertResponse(toolCompletion(args, "tool_calls"));
+      expect(response.finishReason).toBe("STOP");
+      expect(response.content?.parts?.some((p) => p.functionCall)).toBe(true);
+    }
+  });
+
+  it("drops every function call of the turn when any one is malformed", () => {
+    const completion = toolCompletion('{"a":1}');
+    // biome-ignore lint/suspicious/noExplicitAny: test fixture mutation
+    (completion.choices[0] as any).message.tool_calls.push({
+      id: "call_2",
+      type: "function",
+      function: { name: "other", arguments: "{oops" },
+    });
+    const response = convertResponse(completion);
+    expect(response.finishReason).toBe("MALFORMED_FUNCTION_CALL");
+    expect(response.content?.parts?.some((p) => p.functionCall)).toBe(false);
+  });
+
+  it("applies to the final streaming response too", () => {
+    const acc = createStreamAccumulator();
+    convertStreamChunk(
+      createChunk({
+        tool_calls: [
+          {
+            index: 0,
+            id: "call_1",
+            type: "function",
+            function: { name: "get_weather", arguments: '{"city":"Pa' },
+          },
+        ],
+      }),
+      acc,
+    );
+    const { response, isComplete } = convertStreamChunk(
+      createChunk({}, "length"),
+      acc,
+    );
+    expect(isComplete).toBe(true);
+    expect(response?.finishReason).toBe("MALFORMED_FUNCTION_CALL");
+    expect(response?.errorCode).toBe("MALFORMED_FUNCTION_CALL");
+    expect(response?.content).toBeUndefined();
+  });
+});

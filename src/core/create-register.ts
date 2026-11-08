@@ -16,6 +16,7 @@
 import type { BaseLlm } from "@google/adk";
 import { LLMRegistry } from "@google/adk";
 import { resetProviderConfig, setProviderConfig } from "../config.js";
+import { LogCode, warn } from "../utils/log.js";
 import type { ProviderDefinition } from "./provider-definition.js";
 
 /** Type that LLMRegistry.register() expects. */
@@ -44,8 +45,9 @@ export function createRegisterFunction(
   return {
     register(options?: Record<string, unknown>): void {
       if (registered) {
-        console.warn(
-          `[adk-llm-bridge] ${definition.id} already registered, skipping`,
+        warn(
+          LogCode.ALREADY_REGISTERED,
+          `${definition.id} already registered, skipping`,
         );
         return;
       }

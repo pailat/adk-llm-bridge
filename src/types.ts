@@ -20,6 +20,12 @@ import type { LlmResponse } from "@google/adk";
 // =============================================================================
 
 /**
+ * How a failed provider call is reported: thrown as a `ProviderLlmError`
+ * (`"throw"`) or yielded as an error `LlmResponse` (`"response"`).
+ */
+export type ErrorMode = "throw" | "response";
+
+/**
  * Base configuration shared by all LLM providers.
  *
  * All provider-specific configurations extend this interface.
@@ -69,6 +75,21 @@ export interface BaseProviderConfig {
    * @defaultValue 2
    */
   maxRetries?: number;
+
+  /**
+   * How a failed provider call is reported to ADK.
+   *
+   * - `"throw"`: throws a {@link ProviderLlmError}. ADK turns it into an event
+   *   with the same `errorCode` (for example `API_ERROR_429`), runs plugins'
+   *   `onModelErrorCallback`, and lets `RoutedLlm` fail over to the next model.
+   * - `"response"`: yields an `LlmResponse` carrying `errorCode`/`errorMessage`
+   *   instead of throwing (the behavior before 0.7).
+   *
+   * Caller-initiated aborts never produce an error in either mode.
+   *
+   * @defaultValue "throw"
+   */
+  errorMode?: ErrorMode;
 }
 
 // =============================================================================
@@ -107,6 +128,21 @@ export interface AIGatewayConfig extends BaseProviderConfig {}
  * ```
  */
 export interface RegisterOptions {
+  /**
+   * How a failed provider call is reported to ADK.
+   *
+   * - `"throw"`: throws a {@link ProviderLlmError}. ADK turns it into an event
+   *   with the same `errorCode` (for example `API_ERROR_429`), runs plugins'
+   *   `onModelErrorCallback`, and lets `RoutedLlm` fail over to the next model.
+   * - `"response"`: yields an `LlmResponse` carrying `errorCode`/`errorMessage`
+   *   instead of throwing (the behavior before 0.7).
+   *
+   * Caller-initiated aborts never produce an error in either mode.
+   *
+   * @defaultValue "throw"
+   */
+  errorMode?: ErrorMode;
+
   /**
    * Base URL for the API endpoint.
    *
@@ -268,6 +304,21 @@ export interface OpenRouterConfig extends BaseProviderConfig {
  * ```
  */
 export interface OpenRouterRegisterOptions {
+  /**
+   * How a failed provider call is reported to ADK.
+   *
+   * - `"throw"`: throws a {@link ProviderLlmError}. ADK turns it into an event
+   *   with the same `errorCode` (for example `API_ERROR_429`), runs plugins'
+   *   `onModelErrorCallback`, and lets `RoutedLlm` fail over to the next model.
+   * - `"response"`: yields an `LlmResponse` carrying `errorCode`/`errorMessage`
+   *   instead of throwing (the behavior before 0.7).
+   *
+   * Caller-initiated aborts never produce an error in either mode.
+   *
+   * @defaultValue "throw"
+   */
+  errorMode?: ErrorMode;
+
   /**
    * Base URL for the API endpoint.
    *
@@ -449,6 +500,21 @@ export interface OpenAIProviderConfig extends BaseProviderConfig {
  */
 export interface OpenAIRegisterOptions {
   /**
+   * How a failed provider call is reported to ADK.
+   *
+   * - `"throw"`: throws a {@link ProviderLlmError}. ADK turns it into an event
+   *   with the same `errorCode` (for example `API_ERROR_429`), runs plugins'
+   *   `onModelErrorCallback`, and lets `RoutedLlm` fail over to the next model.
+   * - `"response"`: yields an `LlmResponse` carrying `errorCode`/`errorMessage`
+   *   instead of throwing (the behavior before 0.7).
+   *
+   * Caller-initiated aborts never produce an error in either mode.
+   *
+   * @defaultValue "throw"
+   */
+  errorMode?: ErrorMode;
+
+  /**
    * API key for authentication.
    *
    * @defaultValue process.env.OPENAI_API_KEY
@@ -506,6 +572,21 @@ export interface XAIProviderConfig extends BaseProviderConfig {}
  * ```
  */
 export interface XAIRegisterOptions {
+  /**
+   * How a failed provider call is reported to ADK.
+   *
+   * - `"throw"`: throws a {@link ProviderLlmError}. ADK turns it into an event
+   *   with the same `errorCode` (for example `API_ERROR_429`), runs plugins'
+   *   `onModelErrorCallback`, and lets `RoutedLlm` fail over to the next model.
+   * - `"response"`: yields an `LlmResponse` carrying `errorCode`/`errorMessage`
+   *   instead of throwing (the behavior before 0.7).
+   *
+   * Caller-initiated aborts never produce an error in either mode.
+   *
+   * @defaultValue "throw"
+   */
+  errorMode?: ErrorMode;
+
   /**
    * API key for authentication.
    *
@@ -577,6 +658,21 @@ export interface AnthropicProviderConfig extends BaseProviderConfig {
  * ```
  */
 export interface AnthropicRegisterOptions {
+  /**
+   * How a failed provider call is reported to ADK.
+   *
+   * - `"throw"`: throws a {@link ProviderLlmError}. ADK turns it into an event
+   *   with the same `errorCode` (for example `API_ERROR_429`), runs plugins'
+   *   `onModelErrorCallback`, and lets `RoutedLlm` fail over to the next model.
+   * - `"response"`: yields an `LlmResponse` carrying `errorCode`/`errorMessage`
+   *   instead of throwing (the behavior before 0.7).
+   *
+   * Caller-initiated aborts never produce an error in either mode.
+   *
+   * @defaultValue "throw"
+   */
+  errorMode?: ErrorMode;
+
   /**
    * API key for authentication.
    *

@@ -1,0 +1,89 @@
+/**
+ * @license
+ * Copyright 2025 PAI
+ * SPDX-License-Identifier: MIT
+ */
+
+/**
+ * Library logging through ADK's logger.
+ *
+ * Everything goes through `logger` from `@google/adk`, so applications control
+ * it with `setLogLevel`, `setLogger` and `resetLogger` like any other ADK
+ * output (and can silence or redirect warnings). Messages are prefixed with
+ * `[adk-llm-bridge]`; every warning carries a stable `code` as a second
+ * argument (`{ code }`) so custom loggers can filter or count by it.
+ *
+ * @module utils/log
+ */
+
+import { logger } from "@google/adk";
+
+/** Prefix of every message this library logs. */
+export const LOG_PREFIX = "[adk-llm-bridge]";
+
+/** Stable identifiers for the warnings this library emits. */
+export const LogCode = {
+  ALREADY_REGISTERED: "ALREADY_REGISTERED",
+  TOOL_CALL_MISSING_ID: "TOOL_CALL_MISSING_ID",
+  TOOL_CALL_MISSING_NAME: "TOOL_CALL_MISSING_NAME",
+  TOOL_RESPONSE_MISSING_ID: "TOOL_RESPONSE_MISSING_ID",
+  TOOL_DECLARATION_MISSING_NAME: "TOOL_DECLARATION_MISSING_NAME",
+  BUILTIN_TOOLS_DROPPED: "BUILTIN_TOOLS_DROPPED",
+  IMAGE_DROPPED_ON_MODEL_TURN: "IMAGE_DROPPED_ON_MODEL_TURN",
+  MEDIA_MIME_UNSUPPORTED: "MEDIA_MIME_UNSUPPORTED",
+  MEDIA_URI_UNSUPPORTED: "MEDIA_URI_UNSUPPORTED",
+  THINKING_TOOL_CHOICE_DOWNGRADED: "THINKING_TOOL_CHOICE_DOWNGRADED",
+} as const;
+
+/** One of the stable warning codes in {@link LogCode}. */
+export type LogCodeValue = (typeof LogCode)[keyof typeof LogCode];
+
+function format(message: string): string {
+  return `${LOG_PREFIX} ${message}`;
+}
+
+/**
+ * Logs a warning through ADK's logger as `[adk-llm-bridge] <message>` with
+ * `{ code }` as the second argument.
+ */
+export function warn(code: LogCodeValue | string, message: string): void {
+  logger.warn(format(message), { code });
+}
+
+/** Logs a debug message through ADK's logger. */
+export function debug(message: string): void {
+  logger.debug(format(message));
+}
+
+const warnedOnce = new Set<string>();
+
+/**
+ * Logs a warning at most once per process for a given `code` (for conditions
+ * that would repeat on every request, such as a permanent downgrade).
+ */
+export function warnOnce(code: LogCodeValue | string, message: string): void {
+  if (warnedOnce.has(code)) return;
+  warnedOnce.add(code);
+  warn(code, message);
+}
+
+/** Clears the process-wide {@link warnOnce} memory. Intended for tests. */
+export function resetWarnOnce(): void {
+  warnedOnce.clear();
+}
+
+/**
+ * De-duplicates warnings within one unit of work (for example one converted
+ * request) so a history with many offending parts logs one line per code, not
+ * one per part.
+ */
+export class WarningScope {
+  private readonly seen = new Set<string>();
+
+  /** Logs `message` unless this scope already warned for `code`. */
+  warnOnce(code: LogCodeValue | string, message: string): void {
+    if (this.seen.has(code)) return;
+    this.seen.add(code);
+    warn(code, message);
+  }
+}

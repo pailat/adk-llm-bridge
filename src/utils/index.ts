@@ -4,5 +4,10 @@
  * SPDX-License-Identifier: MIT
  */
 
-export { safeJsonParse } from "./json.js";
-export { clampPositive, requireNonEmpty, requireValidURL } from "./validate.js";
+export { safeJsonParse, tryParseJson } from "./json.js";
+export {
+  clampPositive,
+  redactUrl,
+  requireNonEmpty,
+  requireValidURL,
+} from "./validate.js";

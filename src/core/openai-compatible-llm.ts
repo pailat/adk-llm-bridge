@@ -197,7 +197,10 @@ export class OpenAICompatibleLlm extends BaseProviderLlm {
     } catch (error) {
       if (abortSignal?.aborted) return;
       recordLlmError(error);
-      yield this.createErrorResponse(error, this.getErrorPrefix());
+      yield this.handleProviderError(error, {
+        prefix: this.getErrorPrefix(),
+        providerId: this._providerId,
+      });
     }
   }
 

@@ -78,6 +78,8 @@ export { BaseLlm } from "@google/adk";
 export { BaseProviderLlm } from "./core/base-provider-llm.js";
 export type { OpenAIClientConfig } from "./core/openai-compatible-llm.js";
 export { OpenAICompatibleLlm } from "./core/openai-compatible-llm.js";
+export type { ProviderLlmErrorInit } from "./core/provider-llm-error.js";
+export { ProviderLlmError } from "./core/provider-llm-error.js";
 
 // =============================================================================
 // AI Gateway Provider
@@ -161,6 +163,7 @@ export type {
   BaseProviderConfig,
   // Custom LLM types
   CustomLlmConfig,
+  ErrorMode,
   // OpenAI types
   OpenAIProviderConfig,
   OpenAIRegisterOptions,

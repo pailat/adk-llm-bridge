@@ -1,10 +1,11 @@
-import { beforeEach, describe, expect, it, spyOn } from "bun:test";
+import { beforeEach, describe, expect, it } from "bun:test";
 import { getConfig } from "../../../src/config.js";
 import {
   _resetAIGatewayRegistration,
   isAIGatewayRegistered,
   registerAIGateway,
 } from "../../../src/providers/ai-gateway/index.js";
+import { captureWarnings } from "../../helpers/fake-logger.js";
 
 describe("registerAIGateway", () => {
   beforeEach(() => {
@@ -18,7 +19,7 @@ describe("registerAIGateway", () => {
   });
 
   it("only registers once (singleton pattern)", () => {
-    const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
+    const warnSpy = captureWarnings();
 
     registerAIGateway();
     registerAIGateway();

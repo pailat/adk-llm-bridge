@@ -21,6 +21,7 @@ import {
 } from "@google/genai";
 import type OpenAI from "openai";
 import type { ReasoningCapability } from "../core/provider-definition.js";
+import { LogCode, WarningScope, warn } from "../utils/log.js";
 import { uriScheme } from "../utils/uri.js";
 import { normalizeSchema } from "./schema.js";
 import { ToolCallIdCorrelator } from "./tool-call-ids.js";
@@ -195,6 +196,8 @@ export function convertRequest(
 ): ConvertedRequest {
   const messages: OpenAI.ChatCompletionMessageParam[] = [];
   const toolCallIdCorrelation = new ToolCallIdCorrelator();
+  // One scope per request: a long history logs each repeated condition once.
+  const warnings = new WarningScope();
 
   const systemContent = extractSystemInstruction(llmRequest);
   if (systemContent) {
@@ -202,10 +205,16 @@ export function convertRequest(
   }
 
   for (const content of llmRequest.contents ?? []) {
-    processContent(content, messages, toolCallIdCorrelation, opts?.reasoning);
+    processContent(
+      content,
+      messages,
+      toolCallIdCorrelation,
+      warnings,
+      opts?.reasoning,
+    );
   }
 
-  const tools = convertTools(llmRequest);
+  const tools = convertTools(llmRequest, warnings);
 
   // Prefer the caller-supplied model (the LLM instance's resolved model id),
   // falling back to the request's model field. Used for provider feature gating
@@ -721,6 +730,7 @@ function processContent(
   content: Content,
   messages: OpenAI.ChatCompletionMessageParam[],
   correlation: ToolCallIdCorrelator,
+  warnings: WarningScope,
   reasoning?: ReasoningCapability,
 ): void {
   if (!content.parts?.length) return;
@@ -761,16 +771,17 @@ function processContent(
       continue;
     }
     if (part.text) texts.push(part.text);
-    const image = partToOpenAIImage(part);
+    const image = partToOpenAIImage(part, warnings);
     if (image) images.push(image);
     if (part.functionCall) {
       if (!part.functionCall.id) {
-        console.warn(
-          "[adk-llm-bridge] functionCall missing id, using generated ID",
+        warn(
+          LogCode.TOOL_CALL_MISSING_ID,
+          "functionCall missing id, using generated ID",
         );
       }
       if (!part.functionCall.name) {
-        console.warn("[adk-llm-bridge] functionCall missing name");
+        warn(LogCode.TOOL_CALL_MISSING_NAME, "functionCall missing name");
       }
       calls.push({
         id: correlation.callId(part.functionCall.id),
@@ -781,7 +792,7 @@ function processContent(
     }
     if (part.functionResponse) {
       if (!part.functionResponse.id) {
-        console.warn("[adk-llm-bridge] functionResponse missing id");
+        warn(LogCode.TOOL_RESPONSE_MISSING_ID, "functionResponse missing id");
       }
       responses.push({
         id:
@@ -815,8 +826,9 @@ function processContent(
     if (images.length) {
       // OpenAI assistant messages cannot carry images; only user messages can.
       // Drop image parts on a model/assistant turn (keep text + tool_calls).
-      console.warn(
-        "[adk-llm-bridge] dropping image part(s) on an assistant/model turn — " +
+      warnings.warnOnce(
+        LogCode.IMAGE_DROPPED_ON_MODEL_TURN,
+        "dropping image part(s) on an assistant/model turn — " +
           "OpenAI assistant messages cannot carry images",
       );
     }
@@ -860,12 +872,14 @@ function processContent(
  */
 function partToOpenAIImage(
   part: Part,
+  warnings: WarningScope,
 ): OpenAI.ChatCompletionContentPartImage | undefined {
   const inline = part.inlineData;
   if (inline?.data && inline.mimeType) {
     if (!inline.mimeType.startsWith("image/")) {
-      console.warn(
-        `[adk-llm-bridge] dropping unsupported inlineData mime type: ${inline.mimeType}`,
+      warnings.warnOnce(
+        LogCode.MEDIA_MIME_UNSUPPORTED,
+        `dropping unsupported inlineData mime type: ${inline.mimeType}`,
       );
       return undefined;
     }
@@ -883,16 +897,18 @@ function partToOpenAIImage(
       file.fileUri.startsWith("https://")
     ) {
       if (!isImage) {
-        console.warn(
-          `[adk-llm-bridge] dropping unsupported fileData mime type: ${file.mimeType}`,
+        warnings.warnOnce(
+          LogCode.MEDIA_MIME_UNSUPPORTED,
+          `dropping unsupported fileData mime type: ${file.mimeType}`,
         );
         return undefined;
       }
       return { type: "image_url", image_url: { url: file.fileUri } };
     }
     // gs:// and other non-fetchable schemes are dropped cleanly.
-    console.warn(
-      `[adk-llm-bridge] dropping non-http fileData URI (scheme: ${uriScheme(file.fileUri)})`,
+    warnings.warnOnce(
+      LogCode.MEDIA_URI_UNSUPPORTED,
+      `dropping non-http fileData URI (scheme: ${uriScheme(file.fileUri)})`,
     );
   }
 
@@ -978,6 +994,7 @@ function toolParameters(fn: {
  */
 function convertTools(
   req: LlmRequest,
+  warnings: WarningScope,
 ): OpenAI.ChatCompletionTool[] | undefined {
   const adkTools = req.config?.tools;
   if (!adkTools?.length) return undefined;
@@ -992,7 +1009,10 @@ function convertTools(
     ) {
       for (const fn of group.functionDeclarations) {
         if (!fn.name) {
-          console.warn("[adk-llm-bridge] Tool function missing name, skipping");
+          warnings.warnOnce(
+            LogCode.TOOL_DECLARATION_MISSING_NAME,
+            "Tool function missing name, skipping",
+          );
           continue;
         }
         tools.push({
@@ -1015,8 +1035,9 @@ function convertTools(
   }
 
   if (droppedBuiltins.size > 0) {
-    console.warn(
-      `[adk-llm-bridge] dropping Gemini-only built-in tool(s) not supported on this provider: ${[
+    warn(
+      LogCode.BUILTIN_TOOLS_DROPPED,
+      `dropping Gemini-only built-in tool(s) not supported on this provider: ${[
         ...droppedBuiltins,
       ].join(", ")}`,
     );
