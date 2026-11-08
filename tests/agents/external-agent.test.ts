@@ -100,11 +100,14 @@ function installTraceCapture(): CapturedSpan[] {
   const spans: CapturedSpan[] = [];
   trace.disable();
   trace.setGlobalTracerProvider({
-    getTracer() {
+    getTracer(_name?: string, version?: string) {
+      // ADK >= 2.5 also opens its own spans (invoke_agent, ...) through the
+      // global provider; only record the ones created by this package's tracer.
+      const ours = version === "adk-llm-bridge";
       return {
         startSpan(name: string) {
           const span = { name, attributes: {} };
-          spans.push(span);
+          if (ours) spans.push(span);
           return {
             setAttributes(attributes: Record<string, unknown>) {
               Object.assign(span.attributes, attributes);
@@ -847,6 +850,36 @@ describe("ExternalAgent telemetry", () => {
       expect(spans[0]?.attributes["gcp.vertex.agent.llm_response"]).toBe("{}");
     });
   }
+
+  describe("OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT (ADK >= 2.5)", () => {
+    const OTEL = "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT";
+    const originalOtel = process.env[OTEL];
+    afterEach(() => {
+      if (originalOtel === undefined) delete process.env[OTEL];
+      else process.env[OTEL] = originalOtel;
+    });
+
+    for (const [value, captured] of [
+      ["NO_CONTENT", false],
+      ["EVENT_ONLY", false],
+      ["SPAN_ONLY", true],
+      ["SPAN_AND_EVENT", true],
+    ] as const) {
+      test(`${OTEL}=${value} ${captured ? "captures" : "redacts"} content`, async () => {
+        process.env[OTEL] = value;
+        const spans = await runWithSpans(undefined);
+        const request = spans[0]?.attributes["gcp.vertex.agent.llm_request"];
+        if (captured) expect(request).toContain("private prompt");
+        else expect(request).toBe("{}");
+      });
+    }
+
+    test("takes precedence over ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS", async () => {
+      process.env[OTEL] = "NO_CONTENT";
+      const spans = await runWithSpans("true");
+      expect(spans[0]?.attributes["gcp.vertex.agent.llm_request"]).toBe("{}");
+    });
+  });
 
   test("marks error events with error.type and ERROR status without the message", async () => {
     const spans = installTraceCapture();

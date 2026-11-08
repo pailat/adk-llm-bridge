@@ -12,11 +12,26 @@ const tracerName = "gcp.vertex.agent";
 const tracerVersion = "adk-llm-bridge";
 
 /**
- * Mirrors ADK's `shouldAddRequestResponseToSpans`: message content is captured
- * in spans unless `ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS` is set to something
- * other than `true`/`1` (e.g. `false`, `0`).
+ * Whether message content may be written to spans.
+ *
+ * ADK >= 2.5 (google/adk-js#1168) controls this with
+ * `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT`
+ * (`NO_CONTENT` | `EVENT_ONLY` | `SPAN_ONLY` | `SPAN_AND_EVENT`), while
+ * ADK 2.4 uses `ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS`. The OTel variable wins
+ * when set (`true`/`1` count as `SPAN_ONLY`); otherwise the legacy variable
+ * applies, capturing unless it is set to something other than `true`/`1`.
  */
 function shouldCaptureMessageContent(): boolean {
+  const otel = process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT;
+  if (otel !== undefined && otel.trim() !== "") {
+    const mode = otel.trim().toUpperCase();
+    return (
+      mode === "SPAN_ONLY" ||
+      mode === "SPAN_AND_EVENT" ||
+      mode === "TRUE" ||
+      mode === "1"
+    );
+  }
   const value = process.env.ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS || "true";
   return value === "true" || value === "1";
 }
