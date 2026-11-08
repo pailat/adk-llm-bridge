@@ -186,6 +186,186 @@ describe("convertAnthropicRequest", () => {
     });
   });
 
+  describe("parametersJsonSchema (LLM-2b)", () => {
+    const jsonSchema = {
+      type: "object",
+      properties: { city: { type: "string" } },
+      required: ["city"],
+      additionalProperties: false,
+    };
+
+    function withDeclaration(
+      declaration: Record<string, unknown>,
+    ): Anthropic.Tool | undefined {
+      const result = convertAnthropicRequest(
+        createLlmRequest({
+          contents: [{ role: "user", parts: [{ text: "hi" }] }],
+          config: { tools: [{ functionDeclarations: [declaration] }] },
+        } as Partial<LlmRequest>),
+      );
+      return result.tools?.[0];
+    }
+
+    it("forwards parametersJsonSchema as-is when parameters is absent", () => {
+      const tool = withDeclaration({
+        name: "get_weather",
+        parametersJsonSchema: jsonSchema,
+      });
+      expect(tool?.input_schema).toEqual(jsonSchema);
+    });
+
+    it("prefers parametersJsonSchema over parameters when both are present", () => {
+      const tool = withDeclaration({
+        name: "get_weather",
+        parameters: {
+          type: "OBJECT",
+          properties: { other: { type: "STRING" } },
+        },
+        parametersJsonSchema: jsonSchema,
+      });
+      expect(tool?.input_schema).toEqual(jsonSchema);
+    });
+
+    it("still normalizes parameters when parametersJsonSchema is absent", () => {
+      const tool = withDeclaration({
+        name: "get_weather",
+        parameters: {
+          type: "OBJECT",
+          properties: { city: { type: "STRING" } },
+        },
+      });
+      expect(tool?.input_schema).toMatchObject({
+        type: "object",
+        properties: { city: { type: "string" } },
+      });
+    });
+
+    it("falls back to an empty object schema when neither is present", () => {
+      const tool = withDeclaration({ name: "ping" });
+      expect(tool?.input_schema).toEqual({ type: "object", properties: {} });
+    });
+  });
+
+  describe("tool call id correlation (LLM-10b)", () => {
+    type Block = { type: string; id?: string; tool_use_id?: string };
+
+    function convert(contents: LlmRequest["contents"]): Block[] {
+      const { messages } = convertAnthropicRequest(
+        createLlmRequest({ contents }),
+      );
+      return messages.flatMap((m) =>
+        Array.isArray(m.content) ? (m.content as unknown as Block[]) : [],
+      );
+    }
+
+    const user = { role: "user", parts: [{ text: "go" }] };
+
+    it("gives a response without id the generated id of its call", () => {
+      const blocks = convert([
+        user,
+        { role: "model", parts: [{ functionCall: { name: "a", args: {} } }] },
+        {
+          role: "user",
+          parts: [{ functionResponse: { name: "a", response: { ok: 1 } } }],
+        },
+      ]);
+
+      const use = blocks.find((b) => b.type === "tool_use");
+      const result = blocks.find((b) => b.type === "tool_result");
+      expect(use?.id).toMatch(/^[a-zA-Z0-9_-]{1,64}$/);
+      expect(result?.tool_use_id).toBe(use?.id as string);
+    });
+
+    it("matches parallel same-name calls in order and other names by name", () => {
+      const blocks = convert([
+        user,
+        {
+          role: "model",
+          parts: [
+            { functionCall: { name: "a", args: {} } },
+            { functionCall: { name: "b", args: {} } },
+          ],
+        },
+        {
+          role: "user",
+          parts: [
+            { functionResponse: { name: "b", response: {} } },
+            { functionResponse: { name: "a", response: {} } },
+          ],
+        },
+      ]);
+
+      const [a, b] = blocks.filter((x) => x.type === "tool_use");
+      const [rb, ra] = blocks.filter((x) => x.type === "tool_result");
+      expect(rb?.tool_use_id).toBe(b?.id as string);
+      expect(ra?.tool_use_id).toBe(a?.id as string);
+      expect(a?.id).not.toBe(b?.id);
+    });
+
+    it("treats an empty-string id as missing", () => {
+      const blocks = convert([
+        user,
+        {
+          role: "model",
+          parts: [{ functionCall: { id: "", name: "a", args: {} } }],
+        },
+        {
+          role: "user",
+          parts: [{ functionResponse: { id: "", name: "a", response: {} } }],
+        },
+      ]);
+
+      const use = blocks.find((b) => b.type === "tool_use");
+      const result = blocks.find((b) => b.type === "tool_result");
+      expect(use?.id).toMatch(/^[a-zA-Z0-9_-]{1,64}$/);
+      expect(result?.tool_use_id).toBe(use?.id as string);
+    });
+
+    it("keeps valid explicit ids untouched", () => {
+      const blocks = convert([
+        user,
+        {
+          role: "model",
+          parts: [{ functionCall: { id: "toolu_01AbC", name: "a", args: {} } }],
+        },
+        {
+          role: "user",
+          parts: [
+            {
+              functionResponse: { id: "toolu_01AbC", name: "a", response: {} },
+            },
+          ],
+        },
+      ]);
+
+      expect(blocks.find((b) => b.type === "tool_use")?.id).toBe("toolu_01AbC");
+      expect(blocks.find((b) => b.type === "tool_result")?.tool_use_id).toBe(
+        "toolu_01AbC",
+      );
+    });
+
+    it("sanitizes ids Anthropic would reject, consistently for call and response", () => {
+      const bad = "adk-1234.5678:xyz/abc";
+      const blocks = convert([
+        user,
+        {
+          role: "model",
+          parts: [{ functionCall: { id: bad, name: "a", args: {} } }],
+        },
+        {
+          role: "user",
+          parts: [{ functionResponse: { id: bad, name: "a", response: {} } }],
+        },
+      ]);
+
+      const use = blocks.find((b) => b.type === "tool_use");
+      const result = blocks.find((b) => b.type === "tool_result");
+      expect(use?.id).not.toBe(bad);
+      expect(use?.id).toMatch(/^[a-zA-Z0-9_-]{1,64}$/);
+      expect(result?.tool_use_id).toBe(use?.id as string);
+    });
+  });
+
   describe("function call handling", () => {
     it("converts function calls to tool_use blocks", () => {
       const request = createLlmRequest({

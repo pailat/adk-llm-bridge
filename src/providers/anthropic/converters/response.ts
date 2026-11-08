@@ -79,6 +79,9 @@ export interface AnthropicStreamAccumulator {
   /** Output tokens accumulated during streaming */
   outputTokens?: number;
 
+  /** Tokens served from the prompt cache (`cache_read_input_tokens`) */
+  cacheReadTokens?: number;
+
   /** Stop reason captured from the message_delta event */
   stopReason?: string | null;
 }
@@ -163,6 +166,11 @@ export function convertAnthropicResponse(
           candidatesTokenCount: message.usage.output_tokens,
           totalTokenCount:
             message.usage.input_tokens + message.usage.output_tokens,
+          ...(message.usage.cache_read_input_tokens != null
+            ? {
+                cachedContentTokenCount: message.usage.cache_read_input_tokens,
+              }
+            : {}),
         }
       : undefined,
   };
@@ -179,6 +187,7 @@ export function createAnthropicStreamAccumulator(): AnthropicStreamAccumulator {
     currentBlockIndex: -1,
     inputTokens: undefined,
     outputTokens: undefined,
+    cacheReadTokens: undefined,
     stopReason: undefined,
   };
 }
@@ -200,6 +209,9 @@ export function convertAnthropicStreamEvent(
       if (event.message?.usage?.input_tokens) {
         acc.inputTokens = event.message.usage.input_tokens;
       }
+      if (event.message?.usage?.cache_read_input_tokens != null) {
+        acc.cacheReadTokens = event.message.usage.cache_read_input_tokens;
+      }
       return { isComplete: false };
     }
 
@@ -207,6 +219,9 @@ export function convertAnthropicStreamEvent(
       // Capture output tokens from message_delta event
       if (event.usage?.output_tokens) {
         acc.outputTokens = event.usage.output_tokens;
+      }
+      if (event.usage?.cache_read_input_tokens != null) {
+        acc.cacheReadTokens = event.usage.cache_read_input_tokens;
       }
       // Capture the stop reason (carried on the message_delta).
       if (event.delta?.stop_reason) {
@@ -359,6 +374,9 @@ export function convertAnthropicStreamEvent(
             promptTokenCount: acc.inputTokens ?? 0,
             candidatesTokenCount: acc.outputTokens ?? 0,
             totalTokenCount: (acc.inputTokens ?? 0) + (acc.outputTokens ?? 0),
+            ...(acc.cacheReadTokens !== undefined
+              ? { cachedContentTokenCount: acc.cacheReadTokens }
+              : {}),
           }
         : undefined;
 
@@ -371,6 +389,7 @@ export function convertAnthropicStreamEvent(
       acc.currentBlockIndex = -1;
       acc.inputTokens = undefined;
       acc.outputTokens = undefined;
+      acc.cacheReadTokens = undefined;
       acc.stopReason = undefined;
 
       return {

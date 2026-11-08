@@ -18,11 +18,15 @@ import type { LlmRequest, LlmResponse } from "@google/adk";
 import { getProviderConfig } from "../../config.js";
 import { DEFAULT_MAX_RETRIES, DEFAULT_TIMEOUT } from "../../constants.js";
 import { BaseProviderLlm } from "../../core/base-provider-llm.js";
+import { annotateLlmSpan, recordLlmError } from "../../core/telemetry.js";
 import type { AnthropicProviderConfig } from "../../types.js";
 import { clampPositive } from "../../utils/validate.js";
 
 /** Environment variable names for Anthropic configuration. */
 const ANTHROPIC_ENV = { API_KEY: "ANTHROPIC_API_KEY" } as const;
+
+/** Marker read by ADK's ContentRequestProcessor to treat a model as Claude. */
+const CLAUDE_MODEL_SYMBOL = Symbol.for("google.adk.claudeModel");
 
 /** Default max tokens for Anthropic requests. */
 const DEFAULT_ANTHROPIC_MAX_TOKENS = 4096;
@@ -159,19 +163,27 @@ export class AnthropicLlm extends BaseProviderLlm {
     this.promptCaching =
       config.promptCaching ?? globalConfig.promptCaching ?? false;
 
+    // Same precedence as the OpenAI-compatible providers (resolveConfig):
+    // instance config -> global config -> default.
     this.client = new AnthropicSDK({
       apiKey,
       timeout: clampPositive(
-        config.timeout ?? DEFAULT_TIMEOUT,
+        config.timeout ?? globalConfig.timeout ?? DEFAULT_TIMEOUT,
         DEFAULT_TIMEOUT,
         1000,
       ),
       maxRetries: clampPositive(
-        config.maxRetries ?? DEFAULT_MAX_RETRIES,
+        config.maxRetries ?? globalConfig.maxRetries ?? DEFAULT_MAX_RETRIES,
         DEFAULT_MAX_RETRIES,
         0,
       ),
     });
+
+    // Opt in to ADK's Claude handling: ContentRequestProcessor keeps the
+    // `adk-*` function call/response ids for Claude models, detected by this
+    // symbol or by a /^claude-/ model name. The symbol also covers aliases such
+    // as `us.anthropic.claude-...` that the name check misses.
+    (this as unknown as Record<symbol, boolean>)[CLAUDE_MODEL_SYMBOL] = true;
   }
 
   /**
@@ -190,9 +202,19 @@ export class AnthropicLlm extends BaseProviderLlm {
     stream = false,
     abortSignal?: AbortSignal,
   ): AsyncGenerator<LlmResponse, void> {
+    annotateLlmSpan({ provider: "anthropic", baseURL: this.client.baseURL });
     try {
+      // Anthropic rejects an empty `messages` array, and recent Claude models
+      // reject a conversation that ends with an assistant turn. Apply ADK's own
+      // fix-up (as GoogleLlm does) on a copy so the caller's request is intact.
+      const request: LlmRequest = {
+        ...llmRequest,
+        contents: [...(llmRequest.contents ?? [])],
+      };
+      this.maybeAppendUserContent(request);
+
       const { messages, system, tools, params, toolChoice } =
-        convertAnthropicRequest(llmRequest);
+        convertAnthropicRequest(request);
 
       if (stream) {
         yield* this.streamResponse(
@@ -215,6 +237,7 @@ export class AnthropicLlm extends BaseProviderLlm {
       }
     } catch (error) {
       if (abortSignal?.aborted) return;
+      recordLlmError(error);
       yield this.createErrorResponse(error, "ANTHROPIC");
     }
   }
@@ -312,6 +335,11 @@ export class AnthropicLlm extends BaseProviderLlm {
       this.buildRequestParams(messages, system, tools, params, toolChoice),
       abortSignal ? { signal: abortSignal } : undefined,
     );
+    annotateLlmSpan({
+      provider: "anthropic",
+      model: response.model,
+      responseId: response.id,
+    });
     return convertAnthropicResponse(response);
   }
 
@@ -336,6 +364,14 @@ export class AnthropicLlm extends BaseProviderLlm {
     const acc = createAnthropicStreamAccumulator();
 
     for await (const event of stream) {
+      if (abortSignal?.aborted) return;
+      if (event.type === "message_start") {
+        annotateLlmSpan({
+          provider: "anthropic",
+          model: event.message?.model,
+          responseId: event.message?.id,
+        });
+      }
       const { response, isComplete } = convertAnthropicStreamEvent(event, acc);
       if (response) yield response;
       if (isComplete) break;

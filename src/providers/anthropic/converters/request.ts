@@ -23,9 +23,11 @@ import type { LlmRequest } from "@google/adk";
 import {
   type Content,
   FunctionCallingConfigMode,
+  type FunctionDeclaration,
   type Part,
 } from "@google/genai";
 import { normalizeSchema as normalizeSharedSchema } from "../../../converters/schema.js";
+import { ToolCallIdCorrelator } from "../../../converters/tool-call-ids.js";
 import { uriScheme } from "../../../utils/uri.js";
 
 /** Name of the synthetic tool used to emulate structured JSON output. */
@@ -160,12 +162,16 @@ export function convertAnthropicRequest(
 ): ConvertedAnthropicRequest {
   const messages: Anthropic.MessageParam[] = [];
 
+  // One correlator per request: a tool_use and the tool_result that answers it
+  // must carry the same id, and Anthropic only accepts ^[a-zA-Z0-9_-]+$.
+  const toolCallIds = new ToolCallIdCorrelator({ sanitize: true });
+
   // Extract system instruction as separate field
   const system = extractSystemInstruction(llmRequest);
 
   // Process contents into messages
   for (const content of llmRequest.contents ?? []) {
-    const msg = processContent(content);
+    const msg = processContent(content, toolCallIds);
     if (msg) {
       messages.push(msg);
     }
@@ -394,7 +400,10 @@ function extractText(parts: Part[]): string {
 /**
  * Processes a Content object and returns an Anthropic message.
  */
-function processContent(content: Content): Anthropic.MessageParam | null {
+function processContent(
+  content: Content,
+  toolCallIds: ToolCallIdCorrelator,
+): Anthropic.MessageParam | null {
   if (!content.parts?.length) return null;
 
   const contentBlocks: Anthropic.ContentBlockParam[] = [];
@@ -428,10 +437,13 @@ function processContent(content: Content): Anthropic.MessageParam | null {
       if (!part.functionCall.name) {
         console.warn("[adk-llm-bridge] functionCall missing name");
       }
+      const id = toolCallIds.callId(part.functionCall.id);
+      const name = part.functionCall.name ?? "";
+      toolCallIds.track({ id, name, generated: !part.functionCall.id });
       contentBlocks.push({
         type: "tool_use",
-        id: part.functionCall.id ?? crypto.randomUUID(),
-        name: part.functionCall.name ?? "",
+        id,
+        name,
         input: part.functionCall.args ?? {},
       });
     }
@@ -444,7 +456,13 @@ function processContent(content: Content): Anthropic.MessageParam | null {
       }
       contentBlocks.push({
         type: "tool_result",
-        tool_use_id: part.functionResponse.id ?? crypto.randomUUID(),
+        tool_use_id:
+          content.role === "model"
+            ? toolCallIds.callId(part.functionResponse.id)
+            : toolCallIds.response(
+                part.functionResponse.id,
+                part.functionResponse.name,
+              ),
         content: JSON.stringify(part.functionResponse.response ?? {}),
       });
     }
@@ -615,6 +633,22 @@ function collectGeminiOnlyToolNames(group: Record<string, unknown>): string[] {
   );
 }
 
+function resolveInputSchema(
+  fn: FunctionDeclaration,
+): Anthropic.Tool.InputSchema {
+  // ADK tools (and third-party toolsets) may declare a plain JSON Schema in
+  // `parametersJsonSchema` instead of the Gemini-style `parameters`. It is
+  // already JSON Schema, so it wins and is forwarded as-is.
+  if (fn.parametersJsonSchema && typeof fn.parametersJsonSchema === "object") {
+    return fn.parametersJsonSchema as Anthropic.Tool.InputSchema;
+  }
+  return (
+    (normalizeSharedSchema(fn.parameters) as
+      | Anthropic.Tool.InputSchema
+      | undefined) ?? { type: "object", properties: {} }
+  );
+}
+
 /**
  * Converts ADK tool declarations to Anthropic format.
  *
@@ -643,12 +677,7 @@ function convertTools(req: LlmRequest): Anthropic.Tool[] | undefined {
         tools.push({
           name: fn.name,
           description: fn.description ?? "",
-          input_schema: (normalizeSharedSchema(fn.parameters) as
-            | Anthropic.Tool.InputSchema
-            | undefined) ?? {
-            type: "object",
-            properties: {},
-          },
+          input_schema: resolveInputSchema(fn),
         });
       }
     }

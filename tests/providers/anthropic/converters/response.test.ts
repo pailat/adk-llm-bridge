@@ -10,7 +10,11 @@ import {
 // Helper to create Anthropic Message with required fields
 function createMessage(overrides: {
   content: Anthropic.Message["content"];
-  usage: { input_tokens: number; output_tokens: number };
+  usage: {
+    input_tokens: number;
+    output_tokens: number;
+    cache_read_input_tokens?: number | null;
+  };
   id?: string;
   stop_reason?: Anthropic.Message["stop_reason"];
   stop_sequence?: string | null;
@@ -29,7 +33,7 @@ function createMessage(overrides: {
       output_tokens: overrides.usage.output_tokens,
       cache_creation: null,
       cache_creation_input_tokens: null,
-      cache_read_input_tokens: null,
+      cache_read_input_tokens: overrides.usage.cache_read_input_tokens ?? null,
       server_tool_use: null,
       service_tier: null,
     },
@@ -682,5 +686,100 @@ describe("structured output (json_output synthetic tool)", () => {
     const resultStr = parts.map((p) => p.text ?? "").join("");
     expect(() => JSON.parse(resultStr)).not.toThrow();
     expect(JSON.parse(resultStr)).toEqual({ a: 1, b: "two" });
+  });
+});
+
+describe("cache read tokens (LLM-5a)", () => {
+  it("maps cache_read_input_tokens to cachedContentTokenCount (non-stream)", () => {
+    const result = convertAnthropicResponse(
+      createMessage({
+        content: [{ type: "text", text: "Hi", citations: null }],
+        usage: {
+          input_tokens: 10,
+          output_tokens: 5,
+          cache_read_input_tokens: 1234,
+        },
+      }),
+    );
+
+    expect(result.usageMetadata?.cachedContentTokenCount).toBe(1234);
+    // promptTokenCount semantics are unchanged (see B-LLM-5b).
+    expect(result.usageMetadata?.promptTokenCount).toBe(10);
+    expect(result.usageMetadata?.totalTokenCount).toBe(15);
+  });
+
+  it("omits cachedContentTokenCount when the API reports none (non-stream)", () => {
+    const result = convertAnthropicResponse(
+      createMessage({
+        content: [{ type: "text", text: "Hi", citations: null }],
+        usage: { input_tokens: 10, output_tokens: 5 },
+      }),
+    );
+
+    expect(result.usageMetadata).toBeDefined();
+    expect("cachedContentTokenCount" in (result.usageMetadata ?? {})).toBe(
+      false,
+    );
+  });
+
+  it("accumulates cache_read_input_tokens from message_start in streams", () => {
+    const acc = createAnthropicStreamAccumulator();
+    convertAnthropicStreamEvent(
+      {
+        type: "message_start",
+        message: {
+          usage: {
+            input_tokens: 7,
+            output_tokens: 0,
+            cache_read_input_tokens: 99,
+          },
+        },
+      } as unknown as Anthropic.MessageStreamEvent,
+      acc,
+    );
+    convertAnthropicStreamEvent(
+      {
+        type: "message_delta",
+        delta: { stop_reason: "end_turn" },
+        usage: { output_tokens: 3 },
+      } as unknown as Anthropic.MessageStreamEvent,
+      acc,
+    );
+    const { response } = convertAnthropicStreamEvent(
+      { type: "message_stop" } as Anthropic.MessageStreamEvent,
+      acc,
+    );
+
+    expect(response?.usageMetadata).toMatchObject({
+      promptTokenCount: 7,
+      candidatesTokenCount: 3,
+      cachedContentTokenCount: 99,
+    });
+    expect(acc.cacheReadTokens).toBeUndefined();
+  });
+
+  it("lets message_delta usage override the cache read count in streams", () => {
+    const acc = createAnthropicStreamAccumulator();
+    convertAnthropicStreamEvent(
+      {
+        type: "message_start",
+        message: { usage: { input_tokens: 7, cache_read_input_tokens: 10 } },
+      } as unknown as Anthropic.MessageStreamEvent,
+      acc,
+    );
+    convertAnthropicStreamEvent(
+      {
+        type: "message_delta",
+        delta: { stop_reason: "end_turn" },
+        usage: { output_tokens: 3, cache_read_input_tokens: 42 },
+      } as unknown as Anthropic.MessageStreamEvent,
+      acc,
+    );
+    const { response } = convertAnthropicStreamEvent(
+      { type: "message_stop" } as Anthropic.MessageStreamEvent,
+      acc,
+    );
+
+    expect(response?.usageMetadata?.cachedContentTokenCount).toBe(42);
   });
 });
