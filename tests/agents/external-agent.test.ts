@@ -7,6 +7,7 @@ import {
   InMemoryRunner,
   InMemorySessionService,
   type InvocationContext,
+  isFinalResponse,
   Runner,
   Workflow,
 } from "@google/adk";
@@ -920,4 +921,325 @@ describe("ExternalAgent telemetry", () => {
       "state_agent",
     );
   });
+});
+
+describe("ExternalAgent delegation final answer (AGENTS-4)", () => {
+  class FailingAgent extends BaseAgent {
+    constructor() {
+      super({ name: "failing_agent" });
+    }
+    protected async *runAsyncImpl(context: InvocationContext) {
+      yield createEvent({
+        invocationId: context.invocationId,
+        author: this.name,
+        errorCode: "BOOM",
+        errorMessage: "child failed",
+      });
+    }
+    protected async *runLiveImpl() {}
+  }
+
+  class EscalatingAgent extends BaseAgent {
+    constructor() {
+      super({ name: "escalating_agent" });
+    }
+    protected async *runAsyncImpl(context: InvocationContext) {
+      yield createEvent({
+        invocationId: context.invocationId,
+        author: this.name,
+        actions: createEventActions({ escalate: true }),
+      });
+    }
+    protected async *runLiveImpl() {}
+  }
+
+  function scripted(
+    script: (
+      request: ExternalAgentRunRequest,
+    ) => AsyncIterable<ExternalAgentEvent>,
+  ): ExternalAgentDriver {
+    return { providerId: CODEX_PROVIDER.id, run: script };
+  }
+
+  const rootTexts = (events: Awaited<ReturnType<typeof collect>>) =>
+    events
+      .filter((event) => event.author === "root_external")
+      .map((event) => event.content?.parts?.[0]?.text)
+      .filter((text): text is string => typeof text === "string");
+
+  test("a failed delegation does not suppress the coordinator's explanation", async () => {
+    const agent = new ExternalAgent({
+      name: "root_external",
+      provider: CODEX_PROVIDER,
+      driver: scripted(async function* (request) {
+        await request.toolGateway?.runSubAgent({
+          agentName: "state_agent",
+          task: "first",
+        });
+        // Second delegation fails: its flag decision replaces the first one.
+        await request.toolGateway?.runSubAgent({
+          agentName: "failing_agent",
+          task: "second",
+        });
+        yield { type: "output", content: "the second delegation failed" };
+      }),
+      subAgents: [new StateAgent(), new FailingAgent()],
+    });
+
+    const texts = rootTexts(await collect(agent, { branch: undefined }));
+
+    expect(texts).toContain("the second delegation failed");
+  });
+
+  test("a new tool call after the delegation means the coordinator keeps the floor", async () => {
+    const agent = new ExternalAgent({
+      name: "root_external",
+      provider: CODEX_PROVIDER,
+      driver: scripted(async function* (request) {
+        await request.toolGateway?.runSubAgent({
+          agentName: "state_agent",
+          task: "first",
+        });
+        yield { type: "tool_call", callId: "c1", name: "shell", input: {} };
+        yield { type: "output", content: "synthesis after more work" };
+      }),
+      subAgents: [new StateAgent()],
+    });
+
+    const texts = rootTexts(await collect(agent, { branch: undefined }));
+
+    expect(texts).toContain("synthesis after more work");
+  });
+
+  test('finalAnswer "coordinator" lets the coordinator synthesize and does not set skipSummarization', async () => {
+    const agent = new ExternalAgent({
+      name: "root_external",
+      provider: CODEX_PROVIDER,
+      delegation: { finalAnswer: "coordinator" },
+      driver: scripted(async function* (request) {
+        await request.toolGateway?.runSubAgent({
+          agentName: "state_agent",
+          task: "a",
+        });
+        yield { type: "output", content: "synthesis of everything" };
+      }),
+      subAgents: [new StateAgent()],
+    });
+
+    const events = await collect(agent, { branch: undefined });
+
+    expect(rootTexts(events)).toContain("synthesis of everything");
+    const transferResponse = events.find((event) =>
+      event.content?.parts?.some(
+        (part) => part.functionResponse?.name === "transfer_to_agent",
+      ),
+    );
+    expect(transferResponse?.actions.transferToAgent).toBe("state_agent");
+    expect(transferResponse?.actions.skipSummarization).toBeUndefined();
+  });
+
+  test('default "subagent" mode marks the transfer response as a final response', async () => {
+    const agent = new ExternalAgent({
+      name: "root_external",
+      provider: CODEX_PROVIDER,
+      driver: scripted(async function* (request) {
+        await request.toolGateway?.runSubAgent({
+          agentName: "state_agent",
+          task: "a",
+        });
+        yield { type: "completed", exitCode: 0 };
+      }),
+      subAgents: [new StateAgent()],
+    });
+
+    const events = await collect(agent, { branch: undefined });
+    const transferResponse = events.find((event) =>
+      event.content?.parts?.some(
+        (part) => part.functionResponse?.name === "transfer_to_agent",
+      ),
+    );
+
+    expect(transferResponse?.actions.skipSummarization).toBe(true);
+    expect(transferResponse && isFinalResponse(transferResponse)).toBe(true);
+  });
+
+  test("a child's escalate reaches the enclosing agent's stream", async () => {
+    const agent = new ExternalAgent({
+      name: "root_external",
+      provider: CODEX_PROVIDER,
+      driver: scripted(async function* (request) {
+        await request.toolGateway?.runSubAgent({
+          agentName: "escalating_agent",
+          task: "stop the loop",
+        });
+        yield { type: "completed", exitCode: 0 };
+      }),
+      subAgents: [new EscalatingAgent()],
+    });
+
+    const events = await collect(agent, { branch: undefined });
+
+    expect(events.some((event) => event.actions.escalate === true)).toBe(true);
+  });
+
+  test("each invocation has its own state (parallel runs do not interfere)", async () => {
+    const make = () =>
+      new ExternalAgent({
+        name: "root_external",
+        provider: CODEX_PROVIDER,
+        driver: scripted(async function* (request) {
+          await request.toolGateway?.runSubAgent({
+            agentName: "state_agent",
+            task: "a",
+          });
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          yield { type: "output", content: "narration" };
+        }),
+        subAgents: [new StateAgent()],
+      });
+    const agentWithTexts = async () =>
+      rootTexts(await collect(make(), { branch: undefined }));
+
+    const [first, second] = await Promise.all([
+      agentWithTexts(),
+      agentWithTexts(),
+    ]);
+
+    expect(first).not.toContain("narration");
+    expect(second).not.toContain("narration");
+  });
+});
+
+describe("ExternalAgent telemetry privacy (no content in span names or titles)", () => {
+  const OTEL = "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT";
+  const LEGACY = "ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS";
+  const saved = { otel: process.env[OTEL], legacy: process.env[LEGACY] };
+  afterEach(() => {
+    for (const [key, value] of [
+      [OTEL, saved.otel],
+      [LEGACY, saved.legacy],
+    ] as const) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+
+  const SECRET_COMMAND = "cat /etc/SECRETFILE-xyz";
+  const SECRET_OUTPUT = "TOPSECRET-ANSWER";
+  const SECRET_PROMPT = "PRIVATE-USER-TEXT";
+  const SECRETS = [
+    "SECRETFILE-xyz",
+    SECRET_OUTPUT,
+    SECRET_PROMPT,
+    "web-query-secret",
+  ];
+
+  async function traceRun(env: { otel?: string; legacy?: string }) {
+    if (env.otel === undefined) delete process.env[OTEL];
+    else process.env[OTEL] = env.otel;
+    if (env.legacy === undefined) delete process.env[LEGACY];
+    else process.env[LEGACY] = env.legacy;
+
+    const spans = installTraceCapture();
+    const agent = new ExternalAgent({
+      name: "claude_agent",
+      provider: CODEX_PROVIDER,
+      driver: new StaticDriver([
+        {
+          type: "tool_call",
+          callId: "c1",
+          name: "Bash",
+          input: { command: SECRET_COMMAND },
+        },
+        {
+          type: "tool_result",
+          callId: "c1",
+          name: "Bash",
+          result: { command: SECRET_COMMAND, stdout: SECRET_OUTPUT },
+        },
+        // Codex-style tool progress carrying the command in metadata.
+        {
+          type: "output",
+          content: "running",
+          partial: true,
+          metadata: {
+            itemType: "command_execution",
+            status: "in_progress",
+            command: SECRET_COMMAND,
+            title: `claude_agent: Bash call: ${SECRET_COMMAND}`,
+          },
+        },
+        {
+          type: "output",
+          content: "searching",
+          partial: true,
+          metadata: { itemType: "web_search", query: "web-query-secret" },
+        },
+        { type: "output", content: SECRET_OUTPUT },
+      ]),
+    });
+    await collect(agent, {
+      userContent: { role: "user", parts: [{ text: SECRET_PROMPT }] },
+    });
+    return spans;
+  }
+
+  const leaks = (spans: CapturedSpan[]) =>
+    SECRETS.filter((secret) =>
+      spans.some((span) =>
+        JSON.stringify({
+          name: span.name,
+          attributes: span.attributes,
+        }).includes(secret),
+      ),
+    );
+
+  for (const [label, env] of [
+    ["OTEL NO_CONTENT", { otel: "NO_CONTENT" }],
+    ["OTEL EVENT_ONLY", { otel: "EVENT_ONLY" }],
+    ["legacy ADK variable set to false", { legacy: "false" }],
+  ] as const) {
+    test(`${label}: no secret in any span name or attribute`, async () => {
+      const spans = await traceRun(env);
+
+      expect(spans.length).toBeGreaterThan(0);
+      expect(leaks(spans)).toEqual([]);
+    });
+  }
+
+  test("NO_CONTENT keeps structural information (tool name, item type, titles without content)", async () => {
+    const spans = await traceRun({ otel: "NO_CONTENT" });
+    const names = spans.map((span) => span.name);
+
+    expect(names).toContain("execute_tool Bash");
+    expect(names).toContain("execute_tool command_execution");
+    expect(names).toContain("execute_tool web_search");
+    const toolCall = spans.find((span) => span.name === "execute_tool Bash");
+    expect(toolCall?.attributes["gen_ai.tool.name"]).toBe("Bash");
+    const titles = spans.map(
+      (span) => span.attributes["gcp.vertex.agent.event_title"],
+    );
+    expect(titles).toContain("functionCall:Bash");
+    expect(titles).toContain("claude_agent: response");
+  });
+
+  for (const [label, env] of [
+    ["default", {}],
+    ["OTEL SPAN_ONLY", { otel: "SPAN_ONLY" }],
+  ] as const) {
+    test(`${label}: tool detail stays in span names and titles`, async () => {
+      const spans = await traceRun(env);
+
+      expect(spans.map((span) => span.name)).toContain(
+        `execute_tool Bash: ${SECRET_COMMAND}`,
+      );
+      expect(
+        spans.some((span) =>
+          String(span.attributes["gcp.vertex.agent.event_title"]).includes(
+            SECRET_COMMAND,
+          ),
+        ),
+      ).toBe(true);
+    });
+  }
 });

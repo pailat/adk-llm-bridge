@@ -8,10 +8,15 @@ import {
   AsyncQueue,
   BaseAgent,
   type BaseAgentConfig,
+  type BaseTool,
   createEvent,
   createEventActions,
   type Event,
   type InvocationContext,
+  isBaseTool,
+  isBaseToolset,
+  ReadonlyContext,
+  type ToolUnion,
 } from "@google/adk";
 import type { Content } from "@google/genai";
 import type { ExternalAgentCredentialProvider } from "./auth/credential-provider.js";
@@ -19,14 +24,31 @@ import { NoopCredentialProvider } from "./auth/credential-provider.js";
 import type { ExternalAgentEvent } from "./events.js";
 import type { ExternalAgentDriver } from "./external-agent-driver.js";
 import { PlaceholderExternalAgentDriver } from "./external-agent-driver.js";
-import { resolveEffectivePermissions } from "./permissions/inheritance.js";
+import {
+  createAnswersConsumedEvent,
+  createConfirmationRequestEvent,
+  describeAnswers,
+  type ExternalAgentConfirmationOptions,
+  guardPermissionRequest,
+  normalizeDecision,
+  type PermissionDecision,
+  type PermissionRequest,
+  permissionSignature,
+  readConfirmationAnswers,
+} from "./permissions/confirmation.js";
+import {
+  deriveSubAgentPermissionPolicy,
+  resolveEffectivePermissions,
+} from "./permissions/inheritance.js";
 import type { ExternalAgentPermissionPolicy } from "./permissions/schema.js";
 import type { ExternalAgentProviderDefinition } from "./provider/schema.js";
 import { toolDetail, traceAdkEvent } from "./telemetry.js";
 import {
-  consumeDelegationFinalAnswer,
-  ToolGateway,
-} from "./tools/tool-gateway.js";
+  type AdkToolBridge,
+  createAdkToolBridge,
+  type SkippedTool,
+} from "./tools/adk-tool-bridge.js";
+import { type DelegationOptions, ToolGateway } from "./tools/tool-gateway.js";
 
 function normalizeToolCallArgs(input: unknown): Record<string, unknown> {
   if (input === undefined) {
@@ -41,6 +63,31 @@ function normalizeToolCallArgs(input: unknown): Record<string, unknown> {
 }
 
 /**
+ * Policy of `agent` capped by every `ExternalAgent` above it in the agent
+ * tree, folded root-down with the same rule `ToolGateway` applies on each
+ * delegation (`deriveSubAgentPermissionPolicy(parentEffective, childOwn)`,
+ * where a parent with no policy counts as `ask`). Other agents in between
+ * (LlmAgent, Sequential...) do not delegate through the gateway and are
+ * skipped. With no ExternalAgent ancestor this is the agent's own policy.
+ */
+function ancestryPermissions(
+  agent: ExternalAgent,
+): ExternalAgentPermissionPolicy | undefined {
+  const chain: ExternalAgent[] = [];
+  for (let node = agent.parentAgent; node; node = node.parentAgent) {
+    if (node instanceof ExternalAgent) chain.unshift(node);
+  }
+  if (chain.length === 0) {
+    return agent.permissions;
+  }
+  let effective = chain[0]?.permissions;
+  for (const next of [...chain.slice(1), agent]) {
+    effective = deriveSubAgentPermissionPolicy(effective, next.permissions);
+  }
+  return effective;
+}
+
+/**
  * Configuration of an {@link ExternalAgent}. Extends ADK's `BaseAgentConfig`, so
  * `beforeAgentCallback` / `afterAgentCallback` and the workflow-node options
  * (`retryConfig`, `timeout`, `inputSchema`, `outputSchema`, `stateSchema`,
@@ -48,11 +95,13 @@ function normalizeToolCallArgs(input: unknown): Record<string, unknown> {
  * a node. The whole object is forwarded to `super()` so `BaseAgent.clone()` can
  * rebuild the agent (provider, driver, permissions included).
  *
- * Caveat: `clone()` reuses the same `driver` instance. Drivers keep resume state
- * keyed per ADK session (Claude SDK) or per agent name (Codex), so two clones
- * running in the same session would resume each other's conversation. When
- * cloning into parallel branches, pass a fresh `driver` (and a distinct `name`)
- * in the overrides: `agent.clone({ name: "b", driver: new XDriver() })`.
+ * `clone()` reuses the same `driver` instance. The Claude SDK driver keeps its
+ * resume state per agent instance, so clones sharing it never resume each
+ * other's transcript. Codex keeps its thread id in session state keyed by agent
+ * name, so clones that run in the same session need distinct names (ADK already
+ * requires unique names within an agent tree):
+ * `agent.clone({ name: "b" })`. Pass a fresh `driver` in the overrides when a
+ * driver holds other per-run state.
  */
 export interface ExternalAgentConfig extends BaseAgentConfig {
   provider: ExternalAgentProviderDefinition;
@@ -61,6 +110,46 @@ export interface ExternalAgentConfig extends BaseAgentConfig {
   instruction?: string;
   workingDirectory?: string;
   permissions?: ExternalAgentPermissionPolicy;
+  /**
+   * Delegation behavior when `subAgents` are present. `finalAnswer: "subagent"`
+   * (default, ADK-like) makes a sub-agent's terminal answer the answer of the
+   * turn; `"coordinator"` lets the coordinator synthesize afterwards.
+   */
+  delegation?: DelegationOptions;
+  /**
+   * How permission prompts of the runtime (the `ask` mode) are answered. Without
+   * it every prompt is denied. A confirmation never widens the effective policy
+   * and `read-only` is never confirmable. Supported by drivers that can
+   * intercept prompts (Claude Agent SDK); the Codex SDK exposes no approval hook.
+   *
+   * `allowedPaths` is checked on the runtime's blocked path and on the path
+   * inputs of file tools, after normalization and symlink resolution.
+   * `allowNetwork: false` is only enforced for `WebFetch`/`WebSearch`: a shell
+   * command (`Bash curl ...`) or an MCP tool can reach the network without the
+   * guard seeing it, so the approver decides those.
+   */
+  confirmation?: ExternalAgentConfirmationOptions;
+  /**
+   * ADK tools and toolsets to expose to the external runtime (as in
+   * `LlmAgent.tools`). Supported by drivers that can host tools (Claude Agent
+   * SDK, through its in-process MCP server); other drivers ignore them and do
+   * not advertise `capabilities.tools`. Tools that require confirmation go
+   * through {@link ExternalAgentConfig.confirmation}. Expose sub-agents with
+   * `subAgents`, never with `AgentTool` (it breaks permission inheritance).
+   *
+   * Limits: of the actions a tool sets on its context, only `stateDelta` is
+   * published. `escalate`, `transferToAgent`, `skipSummarization` and
+   * `artifactDelta` are dropped, and a tool that calls
+   * `toolContext.requestConfirmation()` inside `execute` is not confirmed
+   * (its call fails closed). Use `requireConfirmation` on the tool instead.
+   */
+  tools?: ToolUnion[];
+  /**
+   * Tools that stay available when the effective policy is `read-only`, by
+   * original tool name. In `read-only` every other ADK tool is hidden, because
+   * a tool can have side effects the policy cannot see.
+   */
+  readOnlyTools?: readonly string[];
 }
 
 /**
@@ -69,8 +158,7 @@ export interface ExternalAgentConfig extends BaseAgentConfig {
  * As a `BaseAgent` it is also a `BaseNode`: ADK's inherited `runImpl` delegates
  * to `runAsync`, so no override is needed to drop it into a `Workflow`.
  *
- * `clone()` shares the driver instance with the original (see
- * {@link ExternalAgentConfig}); override `driver` when cloning for concurrent use.
+ * See {@link ExternalAgentConfig} for how `clone()` treats the driver.
  */
 export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
   readonly provider: ExternalAgentProviderDefinition;
@@ -79,6 +167,10 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
   readonly instruction?: string;
   readonly workingDirectory?: string;
   readonly permissions?: ExternalAgentPermissionPolicy;
+  readonly delegation?: DelegationOptions;
+  readonly confirmation?: ExternalAgentConfirmationOptions;
+  readonly tools: ToolUnion[];
+  readonly readOnlyTools: readonly string[];
 
   constructor(config: ExternalAgentConfig) {
     super(config);
@@ -90,6 +182,10 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
     this.instruction = config.instruction;
     this.workingDirectory = config.workingDirectory;
     this.permissions = config.permissions;
+    this.delegation = config.delegation;
+    this.confirmation = config.confirmation;
+    this.tools = config.tools ?? [];
+    this.readOnlyTools = config.readOnlyTools ?? [];
   }
 
   protected async *runAsyncImpl(
@@ -100,11 +196,27 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
       envAllowlist: this.provider.envAllowlist,
     });
     // Never more permissive than the delegating parent, whatever agents ADK put
-    // in between (see permissions/inheritance.ts).
+    // in between (see permissions/inheritance.ts), and never more permissive
+    // than the ExternalAgents above it in the tree, even when ADK routes a turn
+    // straight to this agent (a resumable app resuming its confirmation) and
+    // the session carries no inherited policy.
     const permissions = resolveEffectivePermissions(
       context.session,
-      this.permissions,
+      ancestryPermissions(this),
     );
+
+    // Own controller so abandoning the generator (iterator.return(), e.g. a
+    // ParallelAgent sibling failing or the client disconnecting) cancels the
+    // driver. It is linked to the Runner's signal so upstream aborts propagate.
+    const controller = new AbortController();
+    const abortSignal = context.abortSignal
+      ? AbortSignal.any([context.abortSignal, controller.signal])
+      : controller.signal;
+    let driverDone = false;
+    // A sub-agent paused on the user (confirmation, input, credential,
+    // long-running call): its request event is already on the timeline, so the
+    // coordinator stops, as ADK ends an invocation on a long-running call.
+    let subAgentInterrupted = false;
 
     const queue = new AsyncQueue<Event>();
     const rootAgent = this.rootAgent;
@@ -116,6 +228,12 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
             subAgents,
             parentContext: context,
             parentPermissions: permissions,
+            delegation: this.delegation,
+            onInterrupt: () => {
+              subAgentInterrupted = true;
+              context.endInvocation = true;
+              controller.abort();
+            },
             eventSink: (event) => {
               traceAdkEvent({ event, context, providerId: this.provider.id });
               queue.push(event);
@@ -123,14 +241,84 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
           })
         : undefined;
 
-    // Own controller so abandoning the generator (iterator.return(), e.g. a
-    // ParallelAgent sibling failing or the client disconnecting) cancels the
-    // driver. It is linked to the Runner's signal so upstream aborts propagate.
-    const controller = new AbortController();
-    const abortSignal = context.abortSignal
-      ? AbortSignal.any([context.abortSignal, controller.signal])
-      : controller.signal;
-    let driverDone = false;
+    // Answers the human gave on this turn to confirmation requests this agent
+    // emitted earlier. Each approves/rejects one retry of the same call.
+    const answers = readConfirmationAnswers(context, this.name);
+    const answered = new Map(
+      answers.map((answer) => [answer.signature, answer.confirmed]),
+    );
+    if (answers.length > 0) {
+      const consumed = createAnswersConsumedEvent({
+        context,
+        agentName: this.name,
+        answers,
+      });
+      traceAdkEvent({ event: consumed, context, providerId: this.provider.id });
+      queue.push(consumed);
+    }
+    let confirmationRequested = false;
+    const instruction = answers.length
+      ? [this.instruction, describeAnswers(answers)]
+          .filter((part): part is string => Boolean(part))
+          .join("\n\n")
+      : this.instruction;
+
+    const requestPermission = async (
+      request: PermissionRequest,
+    ): Promise<PermissionDecision> => {
+      const guarded = guardPermissionRequest(permissions, request, {
+        workingDirectory: this.workingDirectory,
+      });
+      if (guarded) {
+        return guarded;
+      }
+      const signature = permissionSignature(request.toolName, request.input);
+      if (answered.has(signature)) {
+        const confirmed = answered.get(signature);
+        answered.delete(signature);
+        return confirmed
+          ? { behavior: "allow" }
+          : { behavior: "deny", message: "Rejected by the user." };
+      }
+      const approver = this.confirmation?.approver;
+      if (approver) {
+        try {
+          return normalizeDecision(await approver(request));
+        } catch {
+          return { behavior: "deny", message: "The approver failed." };
+        }
+      }
+      if (this.confirmation?.adk && !confirmationRequested) {
+        // ADK-native path: ask through `adk_request_confirmation`, end this
+        // invocation, and let the next turn carry the human's answer.
+        confirmationRequested = true;
+        const event = createConfirmationRequestEvent({
+          context,
+          agentName: this.name,
+          request,
+        });
+        traceAdkEvent({ event, context, providerId: this.provider.id });
+        queue.push(event);
+        context.endInvocation = true;
+        controller.abort();
+        return {
+          behavior: "deny",
+          message:
+            "Waiting for the user to confirm this call. Stop now; the task resumes after the answer.",
+        };
+      }
+      return {
+        behavior: "deny",
+        message: this.confirmation?.adk
+          ? "Another confirmation is already pending."
+          : "Denied: no approver is configured for this agent.",
+      };
+    };
+
+    const adkTools =
+      this.tools.length > 0
+        ? await this.resolveAdkTools(context, permissions)
+        : undefined;
 
     void (async () => {
       try {
@@ -138,7 +326,28 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
           provider: this.provider,
           context,
           abortSignal,
-          instruction: this.instruction,
+          instruction,
+          requestPermission,
+          ...(adkTools
+            ? {
+                adkTools,
+                emitStateDelta: (stateDelta: Record<string, unknown>) => {
+                  if (Object.keys(stateDelta).length === 0) return;
+                  const event = createEvent({
+                    invocationId: context.invocationId,
+                    author: this.name,
+                    branch: context.branch,
+                    actions: createEventActions({ stateDelta }),
+                  });
+                  traceAdkEvent({
+                    event,
+                    context,
+                    providerId: this.provider.id,
+                  });
+                  queue.push(event);
+                },
+              }
+            : {}),
           workingDirectory: this.workingDirectory,
           credential,
           permissions,
@@ -156,8 +365,27 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
           // it waits for EOF. Waiting for that EOF strands ADK's Runner even though the turn is
           // already complete. Breaking here calls return() on the driver iterator, which lets the
           // provider release its transport in finally.
-          if (event.type === "completed") {
+          if (
+            event.type === "completed" ||
+            confirmationRequested ||
+            subAgentInterrupted
+          ) {
             break;
+          }
+          if (toolGateway) {
+            // Native ADK transfer makes the sub-agent's turn the final answer
+            // and the coordinator stays silent afterwards: drop the coordinator's
+            // redundant re-narration (a terminal text turn right after a
+            // successful delegation). Partial chunks always pass through, and any
+            // other activity (a new tool call) means the coordinator is still
+            // working.
+            if (event.type === "output" && !event.partial) {
+              if (toolGateway.consumeFinalAnswer()) {
+                continue;
+              }
+            } else if (event.type === "tool_call") {
+              toolGateway.resetFinalAnswer();
+            }
           }
           const adkEvent = this.toAdkEvent(event, context);
           if (adkEvent) {
@@ -170,7 +398,11 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
           }
         }
       } catch (error) {
-        queue.fail(error);
+        // After a confirmation request (ours or a sub-agent's) we aborted the
+        // driver on purpose; its abort error is not a failure of the turn.
+        if (!confirmationRequested && !subAgentInterrupted) {
+          queue.fail(error);
+        }
       } finally {
         driverDone = true;
         // Closing in finally covers normal EOF, an explicit terminal event, cancellation, and an
@@ -188,6 +420,60 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
     }
   }
 
+  /**
+   * Resolves the configured ADK tools for this invocation and applies the
+   * permission policy: under `read-only` only `readOnlyTools` stay exposed.
+   */
+  private async resolveAdkTools(
+    context: InvocationContext,
+    permissions: ExternalAgentPermissionPolicy | undefined,
+  ): Promise<AdkToolBridge> {
+    if (permissions?.mode !== "read-only") {
+      return createAdkToolBridge(this.tools, context);
+    }
+    // Filter on the tool objects by their original name BEFORE the bridge
+    // names them: matching generated names (`adk_tool__get_2`) would let an
+    // unrelated tool literally named `get_2` through `readOnlyTools: ["get"]`.
+    const allowed = new Set(this.readOnlyTools);
+    // Only `BaseTool` objects reach the bridge, so it never lists anything a
+    // second time: a toolset that failed here (an MCP server whose first
+    // connection failed) must not be listed again, unfiltered.
+    const visible: BaseTool[] = [];
+    const skipped: SkippedTool[] = [];
+    for (const entry of this.tools) {
+      if (isBaseTool(entry)) {
+        if (allowed.has(entry.name)) visible.push(entry);
+      } else if (isBaseToolset(entry)) {
+        let tools: BaseTool[];
+        try {
+          tools = await entry.getTools(new ReadonlyContext(context));
+        } catch {
+          skipped.push({
+            name: entry.constructor.name,
+            reason: "toolset-failed",
+          });
+          continue;
+        }
+        visible.push(
+          ...tools.filter((tool) => isBaseTool(tool) && allowed.has(tool.name)),
+        );
+      } else {
+        skipped.push({
+          name: (entry as { name?: string })?.name ?? "(unnamed)",
+          reason: "not-a-tool",
+        });
+      }
+    }
+    const bridge = await createAdkToolBridge(visible, context);
+    return {
+      declarations: bridge.declarations,
+      skipped: [...skipped, ...bridge.skipped],
+      has: (name) => bridge.has(name),
+      execute: (name, args, invocation, options) =>
+        bridge.execute(name, args, invocation, options),
+    };
+  }
+
   protected async *runLiveImpl(
     context: InvocationContext,
   ): AsyncGenerator<Event, void, void> {
@@ -200,15 +486,6 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
   ): Event | undefined {
     switch (event.type) {
       case "output": {
-        // Native ADK transfer makes the sub-agent's turn the final answer and
-        // the coordinator stays silent afterwards. When a delegation just
-        // produced a terminal sub-agent answer, drop the root model's
-        // redundant re-narration turn. Only a terminal (non-partial) text turn
-        // consumes the flag; partial streaming chunks pass through untouched so
-        // we never strip legitimate root narration from a non-delegation turn.
-        if (!event.partial && consumeDelegationFinalAnswer(context)) {
-          return undefined;
-        }
         return createEvent({
           invocationId: context.invocationId,
           author: this.name,

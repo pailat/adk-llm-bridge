@@ -20,8 +20,6 @@ export const CODEX_AGENT_DEFINITION: ExternalAgentDefinition = {
     streaming: true,
     sessions: true,
     permissions: true,
-    tools: true,
-    mcpServers: true,
   },
   createDriver: () => new CodexSdkDriver(),
 };

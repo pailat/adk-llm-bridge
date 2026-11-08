@@ -1001,4 +1001,79 @@ describe("basic-agent-codex credential guard (CODEX-1)", () => {
     });
     expect(options.apiKey).toBeUndefined();
   });
+
+  describe("one error event per failure (E2E F6)", () => {
+    async function runWith(events: readonly Record<string, unknown>[]) {
+      const driver = new CodexSdkDriver({
+        sdk: {
+          startThread: () => ({
+            runStreamed: async () => ({ events: sdkEvents(events) }),
+          }),
+          resumeThread: () => {
+            throw new Error("not used");
+          },
+        },
+      });
+      const collected = [];
+      for await (const event of driver.run({
+        provider: CODEX_PROVIDER,
+        context: { userContent: { parts: [{ text: "go" }] } } as never,
+      })) {
+        collected.push(event);
+      }
+      return collected;
+    }
+
+    test("a stream error followed by turn.failed yields a single error", async () => {
+      const message = "You've hit your usage limit. Try again later.";
+      const events = await runWith([
+        { type: "thread.started", thread_id: "t1" },
+        { type: "turn.started" },
+        { type: "error", message },
+        { type: "turn.failed", error: { message } },
+      ]);
+
+      const errors = events.filter((event) => event.type === "error");
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toMatchObject({ message });
+      expect(events.at(-1)).toMatchObject({ type: "completed", exitCode: 1 });
+    });
+
+    test("turn.failed without a message keeps the stream error message", async () => {
+      const events = await runWith([
+        { type: "error", message: "stream broke" },
+        { type: "turn.failed", error: {} },
+      ]);
+
+      const errors = events.filter((event) => event.type === "error");
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toMatchObject({ message: "stream broke" });
+    });
+
+    test("a stream error not followed by turn.failed is still emitted", async () => {
+      const events = await runWith([
+        { type: "error", message: "transient" },
+        {
+          type: "item.completed",
+          item: { id: "m1", type: "agent_message", text: "recovered" },
+        },
+        { type: "turn.completed" },
+      ]);
+
+      expect(events.map((event) => event.type)).toEqual([
+        "started",
+        "error",
+        "output",
+        "completed",
+      ]);
+    });
+
+    test("a trailing stream error at end of stream is emitted", async () => {
+      const events = await runWith([{ type: "error", message: "last words" }]);
+
+      expect(events.filter((event) => event.type === "error")).toMatchObject([
+        { message: "last words" },
+      ]);
+    });
+  });
 });

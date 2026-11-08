@@ -61,7 +61,24 @@ type ClaudeAgentSdkOptions = {
   allowedTools?: string[];
   resume?: string;
   forkSession?: boolean;
+  canUseTool?: ClaudeAgentSdkCanUseTool;
 };
+
+type ClaudeAgentSdkCanUseTool = (
+  toolName: string,
+  input: Record<string, unknown>,
+  options: {
+    signal?: AbortSignal;
+    toolUseID?: string;
+    title?: string;
+    description?: string;
+    decisionReason?: string;
+    blockedPath?: string;
+  },
+) => Promise<
+  | { behavior: "allow"; updatedInput: Record<string, unknown> }
+  | { behavior: "deny"; message: string }
+>;
 
 type ClaudeAgentSdkMessage = Record<string, unknown>;
 type ClaudeAgentSdkToolResult = {
@@ -168,7 +185,11 @@ export class ClaudeAgentSdkDriver {
   // so the SDK reloads prior user/assistant/tool history from its own on-disk
   // transcript instead of replaying it through the user-only input stream
   // (which would crash with "Expected message role 'user', got 'assistant'").
-  readonly #sdkSessionByAdkSession = new Map<string, string>();
+  //
+  // Keyed first by the requesting agent *instance*: a driver can be shared by
+  // several agents (e.g. `ExternalAgent.clone()` reuses it), and two of them
+  // running in the same ADK session must not resume each other's transcript.
+  readonly #sdkSessionsByAgent = new WeakMap<object, Map<string, string>>();
 
   constructor(config: ClaudeAgentSdkDriverConfig = {}) {
     this.#sdk = config.sdk;
@@ -192,6 +213,16 @@ export class ClaudeAgentSdkDriver {
     this.#systemPrompt = config.systemPrompt;
   }
 
+  #sdkSessionsFor(request: ExternalAgentRunRequest): Map<string, string> {
+    const owner: object = request.agent ?? this;
+    let sessions = this.#sdkSessionsByAgent.get(owner);
+    if (!sessions) {
+      sessions = new Map();
+      this.#sdkSessionsByAgent.set(owner, sessions);
+    }
+    return sessions;
+  }
+
   async *run(
     request: ExternalAgentRunRequest,
   ): AsyncIterable<ExternalAgentEvent> {
@@ -199,10 +230,19 @@ export class ClaudeAgentSdkDriver {
     // RESUME-1: a static #resumeSessionId (config) wins; otherwise resume the SDK
     // session previously captured for this ADK session, if any.
     const adkSessionId = adkSessionIdOf(request);
+    // Resume order: static config, then the id persisted in ADK session state
+    // (survives restarts and replicas), then this process's per-agent memory.
+    const stateKey = request.agent
+      ? claudeSdkSessionStateKey(request.agent.name)
+      : undefined;
+    const persisted = stateKey
+      ? readStateString(request.context, stateKey)
+      : undefined;
     const resolvedResume =
       this.#resumeSessionId ??
+      persisted ??
       (adkSessionId
-        ? this.#sdkSessionByAdkSession.get(adkSessionId)
+        ? this.#sdkSessionsFor(request).get(adkSessionId)
         : undefined);
     const prompt = this.buildPromptInput(request, resolvedResume);
     const options = await this.buildOptionsForRun(request, sdk, resolvedResume);
@@ -213,6 +253,7 @@ export class ClaudeAgentSdkDriver {
       timestamp: Date.now(),
     };
 
+    const persistedIds = new Set<string>();
     let completed = false;
     let failed = false;
     let emittedOutput = false;
@@ -239,7 +280,19 @@ export class ClaudeAgentSdkDriver {
         if (adkSessionId) {
           const captured = extractSdkSessionId(message);
           if (captured) {
-            this.#sdkSessionByAdkSession.set(adkSessionId, captured);
+            this.#sdkSessionsFor(request).set(adkSessionId, captured);
+            if (
+              stateKey &&
+              captured !== persisted &&
+              !persistedIds.has(captured)
+            ) {
+              persistedIds.add(captured);
+              yield {
+                type: "state_delta",
+                stateDelta: { [stateKey]: captured },
+                timestamp: Date.now(),
+              };
+            }
           }
         }
         // ERR-3: if the turn produced no streamed assistant text, fall back to
@@ -319,9 +372,45 @@ export class ClaudeAgentSdkDriver {
         permission.allowDangerouslySkipPermissions,
       resume,
       forkSession: this.#forkSession,
+      canUseTool: this.buildCanUseTool(request),
     };
 
     return removeUndefined(options) as ClaudeAgentSdkOptions;
+  }
+
+  /**
+   * Routes the SDK's permission prompts to the host (`requestPermission`). The
+   * host decides within the effective policy: it never grants more than the
+   * policy allows and always denies under `read-only`. Never returns
+   * `updatedInput` other than the original input, so an approval cannot rewrite
+   * the call. Absent when the host handles no prompts (the SDK then denies
+   * them, as before).
+   */
+  private buildCanUseTool(
+    request: ExternalAgentRunRequest,
+  ): ClaudeAgentSdkCanUseTool | undefined {
+    const requestPermission = request.requestPermission;
+    if (!requestPermission) {
+      return undefined;
+    }
+    return async (toolName, input, options) => {
+      try {
+        const decision = await requestPermission({
+          requestId: options.toolUseID ?? `claude-${crypto.randomUUID()}`,
+          toolName,
+          input,
+          ...(options.title ? { title: options.title } : {}),
+          ...(options.description ? { description: options.description } : {}),
+          ...(options.decisionReason ? { reason: options.decisionReason } : {}),
+          ...(options.blockedPath ? { blockedPath: options.blockedPath } : {}),
+        });
+        return decision.behavior === "allow"
+          ? { behavior: "allow", updatedInput: input }
+          : { behavior: "deny", message: decision.message };
+      } catch {
+        return { behavior: "deny", message: "Permission request failed." };
+      }
+    };
   }
 
   /**
@@ -673,72 +762,164 @@ export class ClaudeAgentSdkDriver {
     resume: string | undefined = this.#resumeSessionId,
   ): Promise<ClaudeAgentSdkOptions> {
     const options = this.buildOptions(request, resume);
-    if (
-      !request.toolGateway ||
-      !request.subAgents ||
-      request.subAgents.length === 0
-    ) {
+    const exposeSubAgents =
+      Boolean(request.toolGateway) && (request.subAgents?.length ?? 0) > 0;
+    const adkDeclarations = request.adkTools?.declarations ?? [];
+    if (!exposeSubAgents && adkDeclarations.length === 0) {
       return options;
     }
 
-    const mcpServer = await this.buildSubAgentMcpServer(request, sdk);
+    const { server, toolNames } = await this.buildBridgeMcpServer(
+      request,
+      sdk,
+      exposeSubAgents,
+    );
     return removeUndefined({
       ...options,
       mcpServers: {
         ...(options.mcpServers ?? {}),
-        adk_bridge: mcpServer,
+        adk_bridge: server,
       },
+      // ADK tools are pre-authorized here on purpose: their confirmation
+      // (`requireConfirmation`) and the read-only exposure filter are enforced by
+      // the bridge before the call reaches the tool.
       allowedTools: [
         ...(options.allowedTools ?? []),
-        "mcp__adk_bridge__run_adk_subagent",
+        ...toolNames.map((name) => `mcp__adk_bridge__${name}`),
       ],
     }) as ClaudeAgentSdkOptions;
   }
 
-  private async buildSubAgentMcpServer(
+  /** Runs one ADK tool for the runtime, resolving confirmations through the host. */
+  private async runAdkTool(
+    request: ExternalAgentRunRequest,
+    name: string,
+    args: Record<string, unknown>,
+  ): Promise<ClaudeAgentSdkToolResult> {
+    const bridge = request.adkTools;
+    if (!bridge) {
+      return toolTextResult("ADK tools are not available.", true);
+    }
+    const functionCallId = `claude-adk-${crypto.randomUUID()}`;
+    let result = await bridge.execute(name, args, request.context, {
+      functionCallId,
+    });
+    if (result.status === "confirmationRequired") {
+      // Never widen: the host decides within the effective policy and denies
+      // when it has no approver.
+      const decision = request.requestPermission
+        ? await request
+            .requestPermission({
+              requestId: functionCallId,
+              toolName: name,
+              input: args,
+              title: result.confirmation?.hint,
+            })
+            .catch(
+              () =>
+                ({
+                  behavior: "deny",
+                  message: "Permission request failed.",
+                }) as const,
+            )
+        : ({
+            behavior: "deny",
+            message: "Denied: no approver is configured for this agent.",
+          } as const);
+      if (decision.behavior !== "allow") {
+        return toolTextResult(
+          `The call to ${name} was not approved: ${decision.message}`,
+          true,
+        );
+      }
+      result = await bridge.execute(name, args, request.context, {
+        functionCallId,
+        toolConfirmation: { confirmed: true },
+      });
+    }
+    if (Object.keys(result.actions.stateDelta).length > 0) {
+      request.emitStateDelta?.(result.actions.stateDelta);
+    }
+    return toolTextResult(
+      JSON.stringify(result.response),
+      result.status !== "ok",
+    );
+  }
+
+  private async buildBridgeMcpServer(
     request: ExternalAgentRunRequest,
     sdk: ClaudeAgentSdkLike,
-  ): Promise<unknown> {
+    exposeSubAgents: boolean,
+  ): Promise<{ server: unknown; toolNames: string[] }> {
     if (!sdk.createSdkMcpServer || !sdk.tool) {
       throw new Error(
-        "Claude Agent SDK MCP support is required to expose ADK subagents. Update @anthropic-ai/claude-agent-sdk or run without subAgents.",
+        "Claude Agent SDK MCP support is required to expose ADK subagents and tools. Update @anthropic-ai/claude-agent-sdk or run without subAgents/tools.",
       );
     }
 
-    const schema = await createRunSubAgentSchema();
-    const available =
-      request.subAgents?.map((agent) => agent.name).join(", ") ?? "";
-    const runSubAgentTool = sdk.tool(
-      "run_adk_subagent",
-      `Run one of the ADK subagents by name. Available subagents: ${available}`,
-      schema,
-      async (args) => {
-        const agentName = stringValue(args.agentName) ?? "";
-        const task = stringValue(args.task) ?? "";
-        const result = await request.toolGateway?.runSubAgent({
-          agentName,
-          task,
-        });
-        if (!result) {
-          return toolTextResult("ADK ToolGateway is not available.", true);
-        }
-        if (result.error) {
-          return toolTextResult(result.error, true);
-        }
-        return toolTextResult(
-          result.output ||
-            `Subagent ${result.agentName} completed with ${result.events} events.`,
-        );
-      },
-      { alwaysLoad: true },
-    );
+    const tools: ClaudeAgentSdkToolDefinition[] = [];
+    const toolNames: string[] = [];
 
-    return sdk.createSdkMcpServer({
-      name: "adk_bridge",
-      version: "0.1.0",
-      tools: [runSubAgentTool],
-      alwaysLoad: true,
-    });
+    if (exposeSubAgents) {
+      const schema = await createRunSubAgentSchema();
+      const available =
+        request.subAgents?.map((agent) => agent.name).join(", ") ?? "";
+      tools.push(
+        sdk.tool(
+          "run_adk_subagent",
+          `Run one of the ADK subagents by name. Available subagents: ${available}`,
+          schema,
+          async (args) => {
+            const agentName = stringValue(args.agentName) ?? "";
+            const task = stringValue(args.task) ?? "";
+            const result = await request.toolGateway?.runSubAgent({
+              agentName,
+              task,
+            });
+            if (!result) {
+              return toolTextResult("ADK ToolGateway is not available.", true);
+            }
+            if (result.error) {
+              return toolTextResult(result.error, true);
+            }
+            return toolTextResult(
+              result.output ||
+                `Subagent ${result.agentName} completed with ${result.events} events.`,
+            );
+          },
+          { alwaysLoad: true },
+        ),
+      );
+      toolNames.push("run_adk_subagent");
+    }
+
+    for (const declaration of request.adkTools?.declarations ?? []) {
+      const shape = await jsonSchemaToZodShape(declaration.inputSchema);
+      if (!shape) {
+        // A schema we cannot translate is skipped rather than exposed untyped.
+        continue;
+      }
+      tools.push(
+        sdk.tool(
+          declaration.name,
+          declaration.description,
+          shape,
+          (args) => this.runAdkTool(request, declaration.name, args),
+          { alwaysLoad: true },
+        ),
+      );
+      toolNames.push(declaration.name);
+    }
+
+    return {
+      server: sdk.createSdkMcpServer({
+        name: "adk_bridge",
+        version: "0.1.0",
+        tools,
+        alwaysLoad: true,
+      }),
+      toolNames,
+    };
   }
 
   private describeError(
@@ -781,6 +962,27 @@ export class ClaudeAgentSdkDriver {
       );
     }
   }
+}
+
+/**
+ * Session-state key under which the Claude SDK session id of an agent is kept.
+ *
+ * Trust model: it lives in ordinary session state, which tools can write, so
+ * a tool can point the next resume at another SDK session the same Claude
+ * installation can read. Do not run untrusted tools in a session whose SDK
+ * transcripts must stay isolated.
+ */
+export function claudeSdkSessionStateKey(agentName: string): string {
+  return `claude_sdk_session:${agentName}`;
+}
+
+function readStateString(
+  context: ExternalAgentRunRequest["context"],
+  key: string,
+): string | undefined {
+  const state = (context?.session?.state ?? {}) as Record<string, unknown>;
+  const value = state[key];
+  return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
 export function mapPolicyToClaudeSdkPermission(
@@ -908,6 +1110,25 @@ function extractSdkSessionId(message: unknown): string | undefined {
     return stringValue(record.session_id);
   }
   return undefined;
+}
+
+/**
+ * Translates a tool's JSON Schema into the zod raw shape the SDK's `tool()`
+ * expects. Returns `undefined` when the schema is not an object schema or zod
+ * cannot translate it.
+ */
+async function jsonSchemaToZodShape(
+  schema: Record<string, unknown>,
+): Promise<Record<string, unknown> | undefined> {
+  try {
+    const { z } = await import("zod/v4");
+    const converted = z.fromJSONSchema(schema as never) as unknown as {
+      shape?: Record<string, unknown>;
+    };
+    return converted.shape;
+  } catch {
+    return undefined;
+  }
 }
 
 async function createRunSubAgentSchema(): Promise<Record<string, unknown>> {

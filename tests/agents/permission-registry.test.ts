@@ -72,4 +72,51 @@ describe("permission inheritance registry is process-wide", () => {
     expect((globalThis as Record<symbol, unknown>)[REGISTRY_KEY]).toBe(before);
     expect((before as WeakMap<object, unknown>).has(session)).toBe(true);
   });
+
+  test("stored and derived policies are deep-frozen", async () => {
+    const mod = await loadCopy("g");
+    const session = {};
+    const allowedPaths = ["/repo"];
+    mod.setInheritedPermissions(session, {
+      mode: "workspace-write",
+      allowedPaths,
+    });
+
+    const stored = mod.getInheritedPermissions(session);
+    expect(Object.isFrozen(stored)).toBe(true);
+    expect(Object.isFrozen(stored?.allowedPaths)).toBe(true);
+    // The caller's array is copied, not frozen or aliased.
+    expect(Object.isFrozen(allowedPaths)).toBe(false);
+    expect(stored?.allowedPaths).not.toBe(allowedPaths);
+    expect(() => {
+      (stored as { mode: string }).mode = "full-access";
+    }).toThrow();
+
+    const effective = mod.resolveEffectivePermissions(session, {
+      mode: "full-access",
+    });
+    expect(Object.isFrozen(effective)).toBe(true);
+  });
+
+  test("a look-alike object parked on the registry key fails closed", async () => {
+    const script = `
+      Object.defineProperty(globalThis, Symbol.for("adk-llm-bridge.permissions.inheritance.v1"), {
+        value: { get() {}, set() {}, has() { return false; } },
+      });
+      const m = await import(${JSON.stringify(
+        new URL("../../src/agents/permissions/inheritance.ts", import.meta.url)
+          .href,
+      )});
+      try { m.getInheritedPermissions({}); console.log("no-throw"); }
+      catch (error) { console.log("throws:" + error.message); }
+    `;
+    const proc = Bun.spawn([process.execPath, "-e", script], {
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const out = await new Response(proc.stdout).text();
+    await proc.exited;
+    expect(out).toContain("throws:");
+    expect(out).toContain("corrupted");
+  });
 });

@@ -98,10 +98,23 @@ interface MessageRule {
  * that auth/billing/missing-binary/quota are non-recoverable and
  * transport/rate-limit are recoverable.
  *
- * Order matters: rate-limit (recoverable) is checked before the generic
- * "quota" non-recoverable rule so a "rate limit" message is not mis-bucketed.
+ * Order matters:
+ * - a plan usage cap comes first: it resets in hours or days, so it is not
+ *   transient throttling even when the message also carries a 429;
+ * - rate-limit (recoverable) is checked before the generic "quota"
+ *   non-recoverable rule so a "rate limit" message is not mis-bucketed.
  */
 const MESSAGE_RULES: readonly MessageRule[] = [
+  {
+    // Subscription/usage caps (Codex: "You've hit your usage limit ... try
+    // again at <time>"). Shared by every driver. "hit your rate limit" stays a
+    // recoverable rate limit. Known over-match: "usage limit" also matches
+    // unrelated messages ("memory usage limit exceeded"), which then classify
+    // as non-recoverable CODEX_QUOTA_EXHAUSTED; accepted, since retrying those
+    // rarely helps either.
+    test: /\b(?:usage limit|hit your (?:(?!rate\b)[\w-]+ )?limit)\b/i,
+    result: { recoverable: false, code: "CODEX_QUOTA_EXHAUSTED" },
+  },
   {
     test: /\b(rate[\s_-]?limit|429|too many requests)\b/i,
     result: { recoverable: true, code: "RATE_LIMIT" },

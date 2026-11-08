@@ -20,7 +20,6 @@ export const GEMINI_CLI_AGENT_DEFINITION: ExternalAgentDefinition = {
   capabilities: {
     streaming: true,
     permissions: true,
-    tools: true,
   },
   createCredentialProvider: () => new EnvCredentialProvider(),
   createDriver: () => new GeminiCliDriver(),

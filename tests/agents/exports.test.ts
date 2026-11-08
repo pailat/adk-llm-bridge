@@ -53,6 +53,7 @@ describe("agents public exports", () => {
     expect(agents.mapPermissionPolicyToFlags).toBeFunction();
     expect(agents.deriveSubAgentPermissionPolicy).toBeFunction();
     expect(agents.ToolGateway).toBeFunction();
+    expect(agents.claudeSdkSessionStateKey("a")).toBe("claude_sdk_session:a");
   });
 
   test("provider-backed agents preserve expected public shape", () => {

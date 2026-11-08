@@ -7,34 +7,11 @@
 import type { Event, InvocationContext } from "@google/adk";
 import type { Content } from "@google/genai";
 import { SpanStatusCode, trace } from "@opentelemetry/api";
+// One copy of the capture rules (OTel GenAI variable, then the ADK 2.4 one).
+import { shouldCaptureMessageContent } from "../core/telemetry.js";
 
 const tracerName = "gcp.vertex.agent";
 const tracerVersion = "adk-llm-bridge";
-
-/**
- * Whether message content may be written to spans.
- *
- * ADK >= 2.5 (google/adk-js#1168) controls this with
- * `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT`
- * (`NO_CONTENT` | `EVENT_ONLY` | `SPAN_ONLY` | `SPAN_AND_EVENT`), while
- * ADK 2.4 uses `ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS`. The OTel variable wins
- * when set (`true`/`1` count as `SPAN_ONLY`); otherwise the legacy variable
- * applies, capturing unless it is set to something other than `true`/`1`.
- */
-function shouldCaptureMessageContent(): boolean {
-  const otel = process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT;
-  if (otel !== undefined && otel.trim() !== "") {
-    const mode = otel.trim().toUpperCase();
-    return (
-      mode === "SPAN_ONLY" ||
-      mode === "SPAN_AND_EVENT" ||
-      mode === "TRUE" ||
-      mode === "1"
-    );
-  }
-  const value = process.env.ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS || "true";
-  return value === "true" || value === "1";
-}
 
 export function traceAdkEvent({
   event,
@@ -45,11 +22,13 @@ export function traceAdkEvent({
   context: InvocationContext;
   providerId: string;
 }): void {
-  const spanName = spanNameForEvent(event);
+  // Evaluated once per event so the name, title and payload attributes agree.
+  const capture = shouldCaptureMessageContent();
+  const spanName = spanNameForEvent(event, capture);
   const tracer = trace.getTracer(tracerName, tracerVersion);
   const span = tracer.startSpan(spanName);
   try {
-    const title = readableEventTitle(event);
+    const title = readableEventTitle(event, capture);
     const metadata = readCustomMetadata(event);
     const llmRequest = buildSyntheticAdkLlmRequest(context, providerId);
     const parentToolName = stringValue(metadata.parentToolName);
@@ -72,8 +51,8 @@ export function traceAdkEvent({
       "gcp.vertex.agent.subagent.name": metadataSubAgentName,
       "gcp.vertex.agent.parent_tool.name": parentToolName,
       "gcp.vertex.agent.parent_tool.call_id": parentToolCallId,
-      "gcp.vertex.agent.llm_request": captureJson(llmRequest),
-      "gcp.vertex.agent.llm_response": captureJson(event),
+      "gcp.vertex.agent.llm_request": captureJson(llmRequest, capture),
+      "gcp.vertex.agent.llm_response": captureJson(event, capture),
     });
 
     if (event.errorCode) {
@@ -93,7 +72,10 @@ export function traceAdkEvent({
         "gen_ai.operation.name": "execute_tool",
         "gen_ai.tool.name": functionCall.name ?? "run_adk_subagent",
         "gen_ai.tool.call.id": functionCall.id ?? event.id,
-        "gcp.vertex.agent.tool_call_args": captureJson(functionCall.args ?? {}),
+        "gcp.vertex.agent.tool_call_args": captureJson(
+          functionCall.args ?? {},
+          capture,
+        ),
         "gcp.vertex.agent.subagent.name":
           stringValue(delegationTarget(functionCall.args)) ||
           metadataSubAgentName,
@@ -106,6 +88,7 @@ export function traceAdkEvent({
         "gen_ai.tool.call.id": functionResponse.id ?? event.id,
         "gcp.vertex.agent.tool_response": captureJson(
           functionResponse.response ?? {},
+          capture,
         ),
         "gcp.vertex.agent.subagent.name":
           delegationTarget(functionResponse.response) || metadataSubAgentName,
@@ -134,7 +117,12 @@ function contentForTrace(content: Content): Content {
   };
 }
 
-function spanNameForEvent(event: Event): string {
+/**
+ * Span names are exported like any attribute, so tool arguments (a shell
+ * command, a search query) only appear in them when message content capture is
+ * on. With capture off the name carries the tool name and nothing else.
+ */
+function spanNameForEvent(event: Event, capture: boolean): string {
   const functionCall = event.content?.parts?.find(
     (part) => part.functionCall,
   )?.functionCall;
@@ -142,7 +130,7 @@ function spanNameForEvent(event: Event): string {
     const subAgentName = delegationTarget(functionCall.args);
     return functionCall.name === "run_adk_subagent" && subAgentName
       ? `execute_tool run_adk_subagent → ${subAgentName}`
-      : `execute_tool ${functionCall.name ?? "<unknown>"}${toolDetail(functionCall.args)}`;
+      : `execute_tool ${functionCall.name ?? "<unknown>"}${capture ? toolDetail(functionCall.args) : ""}`;
   }
 
   const functionResponse = event.content?.parts?.find(
@@ -152,10 +140,10 @@ function spanNameForEvent(event: Event): string {
     const subAgentName = delegationTarget(functionResponse.response);
     return functionResponse.name === "run_adk_subagent" && subAgentName
       ? `execute_tool run_adk_subagent ← ${subAgentName}`
-      : `execute_tool ${functionResponse.name ?? "<unknown>"}${toolDetail(functionResponse.response)}`;
+      : `execute_tool ${functionResponse.name ?? "<unknown>"}${capture ? toolDetail(functionResponse.response) : ""}`;
   }
 
-  const toolProgressSpanName = spanNameForToolProgress(event);
+  const toolProgressSpanName = spanNameForToolProgress(event, capture);
   if (toolProgressSpanName) {
     return toolProgressSpanName;
   }
@@ -163,13 +151,16 @@ function spanNameForEvent(event: Event): string {
   return "call_llm";
 }
 
-function spanNameForToolProgress(event: Event): string | undefined {
+function spanNameForToolProgress(
+  event: Event,
+  capture: boolean,
+): string | undefined {
   const metadata = readCustomMetadata(event);
   const itemType = stringValue(metadata.itemType);
   if (!isToolProgressItemType(itemType)) {
     return undefined;
   }
-  return `execute_tool ${itemType}${toolDetail(metadata)}`;
+  return `execute_tool ${itemType}${capture ? toolDetail(metadata) : ""}`;
 }
 
 function isToolProgressItemType(value: string): boolean {
@@ -193,9 +184,11 @@ export function toolDetail(value: unknown): string {
   return detail ? `: ${truncate(detail, 72)}` : "";
 }
 
-function readableEventTitle(event: Event): string {
+function readableEventTitle(event: Event, capture: boolean): string {
   const metadata = readCustomMetadata(event);
-  const metadataTitle = stringValue(metadata.title);
+  // Driver-provided titles embed tool arguments, and text titles embed the
+  // model output, so neither is used when content capture is off.
+  const metadataTitle = capture ? stringValue(metadata.title) : "";
   if (metadataTitle) {
     return metadataTitle;
   }
@@ -220,7 +213,9 @@ function readableEventTitle(event: Event): string {
       (part): part is string => typeof part === "string" && part.length > 0,
     );
   if (text) {
-    return truncate(text, 80);
+    return capture
+      ? truncate(text, 80)
+      : `${event.author ?? "external_agent"}: response`;
   }
 
   const itemType = stringValue(metadata.itemType);
@@ -262,8 +257,8 @@ function delegationTarget(args: unknown): string {
   return stringValue(record.agent_name) || stringValue(record.agentName);
 }
 
-function captureJson(value: unknown): string {
-  return shouldCaptureMessageContent() ? safeJsonSerialize(value) : "{}";
+function captureJson(value: unknown, capture: boolean): string {
+  return capture ? safeJsonSerialize(value) : "{}";
 }
 
 function safeJsonSerialize(value: unknown): string {

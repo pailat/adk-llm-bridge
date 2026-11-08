@@ -7,10 +7,15 @@
 import type { BaseAgent, BaseTool, InvocationContext } from "@google/adk";
 import type { ExternalAgentCredential } from "./auth/schema.js";
 import type { ExternalAgentEvent } from "./events.js";
+import type {
+  PermissionDecision,
+  PermissionRequest,
+} from "./permissions/confirmation.js";
 import type { ExternalAgentPermissionPolicy } from "./permissions/schema.js";
 import type { ExternalAgentProviderDefinition } from "./provider/schema.js";
 import type { AgentRuntimeCapabilities } from "./runtime/capabilities.js";
 import type { AgentRuntimeSession } from "./runtime/runtime-session.js";
+import type { AdkToolBridge } from "./tools/adk-tool-bridge.js";
 import type { ToolGateway } from "./tools/tool-gateway.js";
 
 export interface ExternalAgentRunRequest {
@@ -25,6 +30,30 @@ export interface ExternalAgentRunRequest {
   subAgents?: readonly BaseAgent[];
   tools?: readonly BaseTool[];
   toolGateway?: ToolGateway;
+  /**
+   * ADK tools (`ExternalAgentConfig.tools`) the runtime may call, already
+   * filtered by the effective permission policy (in `read-only` only the
+   * explicitly allow-listed ones). Drivers that can host tools (the Claude SDK
+   * through its in-process MCP server) advertise `adkTools.declarations` and run
+   * calls with `adkTools.execute`. Tools that gate on confirmation come back as
+   * `confirmationRequired`; resolve them with {@link requestPermission}.
+   */
+  adkTools?: AdkToolBridge;
+  /**
+   * Publishes session-state changes made by an ADK tool call as a `state_delta`
+   * event on the agent's stream. Present whenever {@link adkTools} is.
+   */
+  emitStateDelta?: (stateDelta: Record<string, unknown>) => void;
+  /**
+   * Asks the host whether the runtime may run a tool call it is not
+   * pre-authorized for (the `ask` flow). Resolves to a decision that never
+   * exceeds the effective permission policy; `read-only` always denies. Drivers
+   * that can intercept permission prompts (Claude `canUseTool`) call it and
+   * must treat a rejection as a denial. Absent when the host handles no prompts.
+   */
+  requestPermission?: (
+    request: PermissionRequest,
+  ) => Promise<PermissionDecision>;
   runtimeSession?: AgentRuntimeSession;
   /**
    * First-class cancellation signal for the run. When this signal aborts,

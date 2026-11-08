@@ -90,6 +90,48 @@ describe("classifyRecoverable", () => {
     });
   });
 
+  describe("plan usage caps (e2e-agents-F6)", () => {
+    const quotaMessages = [
+      "You've hit your usage limit. Upgrade to Pro or try again at 3:45 PM.",
+      "You hit your usage limit",
+      "You've hit your weekly limit",
+      "Usage limit reached for this plan",
+      "429: You've hit your usage limit",
+    ];
+    for (const message of quotaMessages) {
+      test(`"${message}" -> non-recoverable CODEX_QUOTA_EXHAUSTED`, () => {
+        const expected = { recoverable: false, code: "CODEX_QUOTA_EXHAUSTED" };
+        expect(classifyRecoverable({ message })).toEqual(expected);
+        expect(
+          classifyRecoverable({ message, fallbackCode: "CODEX_TURN_FAILED" }),
+        ).toEqual(expected);
+      });
+    }
+
+    const rateLimitMessages = [
+      "429 rate limit exceeded",
+      "rate limit quota reached",
+      "You've hit your rate limit, retry in 20s",
+    ];
+    for (const message of rateLimitMessages) {
+      test(`"${message}" stays a recoverable RATE_LIMIT`, () => {
+        expect(classifyRecoverable({ message })).toEqual({
+          recoverable: true,
+          code: "RATE_LIMIT",
+        });
+      });
+    }
+
+    test("an unknown turn failure keeps the fallback", () => {
+      expect(
+        classifyRecoverable({
+          message: "turn failed for an unknown reason",
+          fallbackCode: "CODEX_TURN_FAILED",
+        }),
+      ).toEqual({ recoverable: true, code: "CODEX_TURN_FAILED" });
+    });
+  });
+
   test("unknown input falls back to recoverable + UNKNOWN_ERROR by default", () => {
     expect(
       classifyRecoverable({ message: "something weird happened" }),

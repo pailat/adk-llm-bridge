@@ -1066,6 +1066,56 @@ describe("ClaudeAgentSdkDriver", () => {
     expect("sessionId" in (capturedOptions[1] ?? {})).toBe(false);
   });
 
+  test("agents sharing one driver do not resume each other's SDK session", async () => {
+    const resumes: Array<string | undefined> = [];
+    let counter = 0;
+    const driver = new ClaudeAgentSdkDriver({
+      sdk: {
+        query: ({ options }) => {
+          resumes.push((options as { resume?: string }).resume);
+          const id = `sdk-${++counter}`;
+          return (async function* () {
+            yield { type: "system", subtype: "init", session_id: id } as never;
+            yield {
+              type: "result",
+              subtype: "success",
+              result: "ok",
+              session_id: id,
+            } as never;
+          })() as never;
+        },
+      },
+    });
+    const sharedSession = { id: "adk-session-shared", events: [] };
+    const run = async (agent: { name: string }) => {
+      for await (const _event of driver.run({
+        provider: CLAUDE_PROVIDER,
+        agent: agent as never,
+        context: {
+          agent,
+          branch: "root",
+          session: sharedSession,
+          userContent: { role: "user", parts: [{ text: "hello" }] },
+        } as never,
+        permissions: { mode: "ask" },
+      })) {
+        void _event;
+      }
+    };
+    // Two clones of the same definition (same name, distinct instances).
+    const cloneA = { name: "claude" };
+    const cloneB = { name: "claude" };
+
+    await Promise.all([run(cloneA), run(cloneB)]);
+    await run(cloneA);
+    await run(cloneB);
+
+    // First turns start fresh; second turns resume their own transcript only.
+    expect(resumes.slice(0, 2)).toEqual([undefined, undefined]);
+    expect(resumes[2]).toBe("sdk-1");
+    expect(resumes[3]).toBe("sdk-2");
+  });
+
   test("two turns of one ADK session resume and send exactly one user-role message", async () => {
     const calls: Array<{
       prompt: unknown;

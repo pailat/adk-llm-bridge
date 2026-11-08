@@ -5,27 +5,15 @@
  */
 
 import { type ExternalAgentEvent, isExternalAgentEvent } from "../events.js";
-import type { ExternalAgentRunRequest } from "../external-agent-driver.js";
+import {
+  type ExternalAgentRunRequest,
+  resolveAbortSignal,
+} from "../external-agent-driver.js";
 import type { ExternalAgentPermissionPolicy } from "../permissions/schema.js";
 import { CODEX_PROVIDER } from "../provider/codex.js";
 import { asRecord, copyIfPresent, stringValue } from "./shared.js";
+import { spawnSubprocess, superviseSubprocess } from "./spawn.js";
 import { SubprocessJsonlDriver } from "./subprocess-jsonl.js";
-
-declare const Bun: {
-  spawn(
-    command: string[],
-    options: {
-      cwd?: string;
-      env?: Record<string, string>;
-      stdout: "pipe";
-      stderr: "pipe";
-    },
-  ): {
-    stdout: ReadableStream<Uint8Array>;
-    stderr: ReadableStream<Uint8Array>;
-    exited: Promise<number>;
-  };
-};
 
 export interface CodexCliSpawnOptions {
   cwd?: string;
@@ -33,9 +21,15 @@ export interface CodexCliSpawnOptions {
 }
 
 export interface CodexCliSubprocess {
-  stdout?: LineSource;
-  stderr?: LineSource;
+  stdout?: LineSource | null;
+  stderr?: LineSource | null;
   exited: Promise<number>;
+  /**
+   * Terminates the process. Called when the run is aborted or abandoned
+   * before the process exited. Optional for custom spawns; the default spawn
+   * always provides it.
+   */
+  kill?: () => void;
 }
 
 export type LineSource =
@@ -53,11 +47,18 @@ export interface CodexCliDriverConfig {
   args?: readonly string[];
   spawn?: CodexCliSpawn;
   env?: Record<string, string | undefined>;
+  /**
+   * Pass `--skip-git-repo-check` to `codex exec`, allowing runs outside a
+   * git repository (for example a temp directory). Off by default, matching
+   * the Codex SDK driver option of the same name.
+   */
+  skipGitRepoCheck?: boolean;
 }
 
 export class CodexCliDriver extends SubprocessJsonlDriver {
   readonly #spawn: CodexCliSpawn;
   readonly #env: Record<string, string | undefined>;
+  readonly #skipGitRepoCheck: boolean;
 
   constructor(config: CodexCliDriverConfig = {}) {
     super({
@@ -65,50 +66,81 @@ export class CodexCliDriver extends SubprocessJsonlDriver {
       command: config.command ?? CODEX_PROVIDER.command ?? "codex",
       args: config.args,
     });
-    this.#spawn = config.spawn ?? spawnWithBun;
+    this.#spawn = config.spawn ?? spawnSubprocess;
     this.#env = config.env ?? process.env;
+    this.#skipGitRepoCheck = config.skipGitRepoCheck ?? false;
   }
 
   async *run(
     request: ExternalAgentRunRequest,
   ): AsyncIterable<ExternalAgentEvent> {
     const args = this.buildArgs(request);
+    const signal = resolveAbortSignal(request);
+    if (signal?.aborted) {
+      return;
+    }
     const child = this.#spawn(this.command, args, {
       cwd: request.workingDirectory,
       env: this.buildEnv(request),
     });
+    const supervisor = superviseSubprocess(child, signal);
 
-    yield {
-      type: "started",
-      providerId: this.providerId,
-      timestamp: Date.now(),
-    };
+    try {
+      yield {
+        type: "started",
+        providerId: this.providerId,
+        timestamp: Date.now(),
+      };
 
-    if (child.stdout) {
-      for await (const line of readLines(child.stdout)) {
-        if (line.trim().length === 0) {
-          continue;
+      // Drain stderr while stdout is read so a chatty stderr cannot fill its
+      // pipe and stall the process; its lines are reported after stdout.
+      const stderrLines: string[] = [];
+      const stderrPromise = child.stderr
+        ? collectLines(child.stderr, stderrLines)
+        : Promise.resolve();
+
+      if (child.stdout) {
+        for await (const line of readLines(child.stdout)) {
+          if (signal?.aborted) {
+            return;
+          }
+          if (line.trim().length === 0) {
+            continue;
+          }
+          yield this.parseLine(line);
         }
-        yield this.parseLine(line);
       }
-    }
+      await stderrPromise;
+      if (signal?.aborted) {
+        return;
+      }
 
-    if (child.stderr) {
-      for await (const line of readLines(child.stderr)) {
-        if (line.trim().length === 0 || isIgnorableCodexStderr(line)) {
+      for (const line of stderrLines) {
+        if (isIgnorableCodexStderr(line)) {
           continue;
         }
         yield { type: "error", message: line, recoverable: false };
       }
-    }
 
-    const exitCode = await child.exited;
-    yield { type: "completed", exitCode, timestamp: Date.now() };
+      const exitCode = await child.exited;
+      supervisor.markExited();
+      if (signal?.aborted) {
+        return;
+      }
+      yield { type: "completed", exitCode, timestamp: Date.now() };
+    } finally {
+      supervisor.release();
+    }
   }
 
   buildArgs(request: ExternalAgentRunRequest): readonly string[] {
     const prompt = buildPrompt(request);
-    return [...mapPolicyToCodexArgs(request.permissions), ...this.args, prompt];
+    return [
+      ...mapPolicyToCodexArgs(request.permissions),
+      ...(this.#skipGitRepoCheck ? ["--skip-git-repo-check"] : []),
+      ...this.args,
+      prompt,
+    ];
   }
 
   buildEnv(request: ExternalAgentRunRequest): Record<string, string> {
@@ -387,23 +419,15 @@ function isIgnorableCodexStderr(line: string): boolean {
   return line.trim() === "Reading additional input from stdin...";
 }
 
-function spawnWithBun(
-  command: string,
-  args: readonly string[],
-  options: CodexCliSpawnOptions,
-): CodexCliSubprocess {
-  const child = Bun.spawn([command, ...args], {
-    cwd: options.cwd,
-    env: options.env,
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-
-  return {
-    stdout: child.stdout,
-    stderr: child.stderr,
-    exited: child.exited,
-  };
+async function collectLines(
+  source: LineSource,
+  target: string[],
+): Promise<void> {
+  for await (const line of readLines(source)) {
+    if (line.trim().length > 0) {
+      target.push(line);
+    }
+  }
 }
 
 function numberValue(value: unknown): number | undefined {

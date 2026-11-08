@@ -15,7 +15,10 @@ import {
   PluginManager,
 } from "@google/adk";
 import { FinishReason } from "@google/genai";
-import { AgentInvocationGateway } from "../../runtime/agent-invocation-gateway.js";
+import {
+  AgentInvocationGateway,
+  type AgentInvocationInterruptKind,
+} from "../../runtime/agent-invocation-gateway.js";
 import { stringValue } from "../driver/shared.js";
 import {
   deriveSubAgentPermissionPolicy,
@@ -36,33 +39,49 @@ export interface RunSubAgentExecutionSummary {
   durationMs: number;
 }
 
+/**
+ * A delegation that paused on a human: the sub-agent emitted an
+ * `adk_request_confirmation` / `adk_request_input` / `adk_request_credential`
+ * call or a long-running tool call (see `AgentInvocationResult.interrupt`).
+ * The request event was already surfaced on the timeline; the user answers it
+ * with a `functionResponse` on the next turn.
+ */
+export interface RunSubAgentInterrupt {
+  kind: AgentInvocationInterruptKind;
+  /** Ids that must be answered to resume. */
+  functionCallIds: readonly string[];
+}
+
 export interface RunSubAgentResult {
   agentName: string;
   output: string;
   events: number;
   summary: RunSubAgentExecutionSummary;
   stateDelta?: Record<string, unknown>;
+  /**
+   * Set when the delegation failed, and also when it paused on the user
+   * (`interrupt`): a paused delegation is never reported as a success.
+   */
   error?: string;
+  interrupt?: RunSubAgentInterrupt;
 }
 
 export type ToolGatewayEventSink = (event: Event) => void;
 
 /**
- * Contexts on which a delegation produced a terminal answer authored by the
- * sub-agent. The ExternalAgent uses this signal to suppress the root model's
- * redundant re-narration turn, matching native ADK transfer (the coordinator
- * stays silent after the sub-agent answers).
+ * Who owns the final answer after a delegation succeeds with a terminal text.
+ *
+ * - `"subagent"` (default, ADK-like): after `transfer_to_agent` the transferred
+ *   agent's turn is the answer and the coordinator stays silent. The transfer
+ *   functionResponse carries `actions.skipSummarization`, and the coordinator's
+ *   next terminal text turn is dropped.
+ * - `"coordinator"`: the coordinator may synthesize after one or several
+ *   delegations (fan-out/aggregation); nothing is suppressed.
  */
-const delegationFinalAnswerContexts = new WeakSet<InvocationContext>();
+export type DelegationFinalAnswer = "subagent" | "coordinator";
 
-export function markDelegationFinalAnswer(context: InvocationContext): void {
-  delegationFinalAnswerContexts.add(context);
-}
-
-export function consumeDelegationFinalAnswer(
-  context: InvocationContext,
-): boolean {
-  return delegationFinalAnswerContexts.delete(context);
+export interface DelegationOptions {
+  finalAnswer?: DelegationFinalAnswer;
 }
 
 export interface ToolGatewayConfig {
@@ -81,6 +100,15 @@ export interface ToolGatewayConfig {
    * shape is emitted instead.
    */
   nativeDelegationShape?: boolean;
+  /** Final-answer ownership after a delegation. Default `finalAnswer: "subagent"`. */
+  delegation?: DelegationOptions;
+  /**
+   * Called when a delegation pauses on the user (before `runSubAgent`
+   * resolves). `ExternalAgent` uses it to end the coordinator's invocation, as
+   * ADK does for a long-running call, so the coordinator does not carry on
+   * while the user is being asked.
+   */
+  onInterrupt?: (result: RunSubAgentResult) => void;
 }
 
 export class ToolGateway {
@@ -92,6 +120,16 @@ export class ToolGateway {
   readonly #exposeSubAgentEvents: boolean;
   readonly #nativeDelegationShape: boolean;
   readonly #invocationGateway: AgentInvocationGateway;
+  readonly #finalAnswer: DelegationFinalAnswer;
+  readonly #onInterrupt?: (result: RunSubAgentResult) => void;
+  /**
+   * True while the most recent delegation ended with a terminal sub-agent
+   * answer that the coordinator must not repeat. Per gateway instance (one per
+   * ExternalAgent invocation), so it is neither context-wide nor shared across
+   * bundles. Recomputed by every delegation: a failed or text-less delegation
+   * clears it.
+   */
+  #finalAnswerPending = false;
 
   constructor(config: ToolGatewayConfig) {
     this.#rootAgent = config.rootAgent;
@@ -101,6 +139,8 @@ export class ToolGateway {
     this.#eventSink = config.eventSink;
     this.#exposeSubAgentEvents = config.exposeSubAgentEvents ?? true;
     this.#nativeDelegationShape = config.nativeDelegationShape ?? true;
+    this.#finalAnswer = config.delegation?.finalAnswer ?? "subagent";
+    this.#onInterrupt = config.onInterrupt;
     this.#invocationGateway = new AgentInvocationGateway({
       resolveAgent: (agentName) => this.findSubAgent(agentName),
     });
@@ -108,6 +148,21 @@ export class ToolGateway {
 
   listSubAgents(): readonly BaseAgent[] {
     return this.#subAgents;
+  }
+
+  /**
+   * Returns true (once) when the coordinator's next terminal text turn is a
+   * redundant re-narration of a sub-agent answer and must be dropped.
+   */
+  consumeFinalAnswer(): boolean {
+    const pending = this.#finalAnswerPending;
+    this.#finalAnswerPending = false;
+    return pending;
+  }
+
+  /** The coordinator started new activity (e.g. another tool call): nothing to suppress. */
+  resetFinalAnswer(): void {
+    this.#finalAnswerPending = false;
   }
 
   async runSubAgent(input: RunSubAgentInput): Promise<RunSubAgentResult> {
@@ -129,6 +184,8 @@ export class ToolGateway {
     }
 
     const callId = createBridgeCallId();
+    // A new delegation starts: whatever the previous one decided is stale.
+    this.#finalAnswerPending = false;
     this.emit(this.createFunctionCallEvent(input, callId));
 
     // In native mode the transfer signal must fire BEFORE the sub-agent runs
@@ -148,6 +205,11 @@ export class ToolGateway {
       agentName: agent.name,
       input: { role: "user", parts: [{ text: input.task }] },
       parentContext: withToolGatewaySession(this.#parentContext),
+      // Native transfer shares the session: the child sees the parent's state
+      // and history, and its state changes merge back. Explicit because the
+      // gateway defaults are not ours to rely on.
+      sessionStateMode: "merge",
+      sessionHistoryMode: "inherit",
       branch: this.#nativeDelegationShape
         ? this.#parentContext.branch
         : childBranch(this.#parentContext.branch, agent.name),
@@ -188,13 +250,25 @@ export class ToolGateway {
       },
     });
 
+    const interrupt: RunSubAgentInterrupt | undefined = invocation.interrupt
+      ? {
+          kind: invocation.interrupt.kind,
+          functionCallIds: [...invocation.interrupt.functionCallIds],
+        }
+      : undefined;
+    const error =
+      invocation.error ??
+      (interrupt
+        ? `Sub-agent ${agent.name} is waiting for user input (${interrupt.kind}). Stop now; the task resumes after the user answers.`
+        : undefined);
     const result: RunSubAgentResult = {
       agentName: agent.name,
       output: invocation.output,
       events: invocation.summary.events,
       summary: invocation.summary,
       ...(invocation.stateDelta ? { stateDelta: invocation.stateDelta } : {}),
-      ...(invocation.error ? { error: invocation.error } : {}),
+      ...(error ? { error } : {}),
+      ...(interrupt ? { interrupt } : {}),
     };
 
     // Legacy mode keeps the loop-then-response order with the aggregated
@@ -208,14 +282,16 @@ export class ToolGateway {
     // sub-agent answer is the final answer. Signal the ExternalAgent to drop
     // the root model's redundant re-narration turn (native coordinators stay
     // silent after transfer).
-    if (
+    // A paused delegation has no final answer yet.
+    this.#finalAnswerPending =
       this.#nativeDelegationShape &&
-      !invocation.error &&
-      invocation.summary.textEvents > 0
-    ) {
-      markDelegationFinalAnswer(this.#parentContext);
-    }
+      this.#finalAnswer === "subagent" &&
+      !error &&
+      invocation.summary.textEvents > 0;
 
+    if (interrupt) {
+      this.#onInterrupt?.(result);
+    }
     return result;
   }
 
@@ -224,7 +300,7 @@ export class ToolGateway {
    * Legacy mode surfaces everything. Native mode drops content-less events
    * (blank bubbles) EXCEPT those carrying a non-empty `actions.stateDelta`
    * (e.g. the codex driver's `codex_thread` marker emitted the moment the
-   * thread starts). Surfacing the state-only event lets the ADK runner commit
+   * thread starts) or `actions.escalate`. Surfacing the state-only event lets the ADK runner commit
    * its stateDelta to session.state exactly as native sub-agents commit their
    * own state, so codex resume keeps working without the transfer response
    * having to carry the delta.
@@ -247,7 +323,12 @@ export class ToolGateway {
     if (hasRenderableContent) {
       return true;
     }
-    return Object.keys(event.actions?.stateDelta ?? {}).length > 0;
+    // Keep content-less events that still carry a control signal: a child's
+    // `escalate` must reach enclosing LoopAgents.
+    return (
+      Object.keys(event.actions?.stateDelta ?? {}).length > 0 ||
+      event.actions?.escalate === true
+    );
   }
 
   private findSubAgent(agentName: string): BaseAgent | undefined {
@@ -363,6 +444,11 @@ export class ToolGateway {
         branch: this.#parentContext.branch,
         actions: createEventActions({
           transferToAgent: result.agentName,
+          // ADK-like: the transferred agent's turn is the final answer, so
+          // `isFinalResponse` treats the transfer response as final.
+          ...(this.#finalAnswer === "subagent"
+            ? { skipSummarization: true }
+            : {}),
         }),
         content: {
           role: "user",

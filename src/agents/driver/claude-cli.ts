@@ -5,33 +5,27 @@
  */
 
 import type { ExternalAgentEvent } from "../events.js";
-import type { ExternalAgentRunRequest } from "../external-agent-driver.js";
+import {
+  type ExternalAgentRunRequest,
+  resolveAbortSignal,
+} from "../external-agent-driver.js";
 import { mapPermissionPolicyToFlags } from "../permissions/mapper.js";
 import type { ExternalAgentPermissionPolicy } from "../permissions/schema.js";
 import { CLAUDE_PROVIDER } from "../provider/schema.js";
 import { asRecord, copyIfPresent, stringValue } from "./shared.js";
+import { spawnSubprocess, superviseSubprocess } from "./spawn.js";
 import { SubprocessJsonlDriver } from "./subprocess-jsonl.js";
-
-declare const Bun: {
-  spawn(
-    command: string[],
-    options: {
-      cwd?: string;
-      env?: Record<string, string>;
-      stdout: "pipe";
-      stderr: "pipe";
-    },
-  ): {
-    stdout: ReadableStream<Uint8Array>;
-    stderr: ReadableStream<Uint8Array>;
-    exited: Promise<number>;
-  };
-};
 
 export interface ClaudeCliSubprocess {
   stdout?: LineSource | null;
   stderr?: LineSource | null;
   exited: Promise<number>;
+  /**
+   * Terminates the process. Called when the run is aborted or abandoned
+   * before the process exited. Optional for custom spawns; the default spawn
+   * always provides it.
+   */
+  kill?: () => void;
 }
 
 export interface ClaudeCliSpawnOptions {
@@ -67,7 +61,7 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
       command: config.command ?? CLAUDE_PROVIDER.command ?? "claude",
       args: config.args,
     });
-    this.#spawn = config.spawn ?? spawnWithBun;
+    this.#spawn = config.spawn ?? spawnSubprocess;
     this.#env = config.env ?? process.env;
   }
 
@@ -83,41 +77,75 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
       timestamp: Date.now(),
     };
 
+    const signal = resolveAbortSignal(request);
+    if (signal?.aborted) {
+      return;
+    }
+
     const child = this.#spawn(this.command, args, {
       cwd: request.workingDirectory,
       env,
     });
+    const supervisor = superviseSubprocess(child, signal);
 
-    const stderrLines: string[] = [];
-    const stderrPromise = child.stderr
-      ? collectLines(child.stderr, stderrLines)
-      : Promise.resolve();
+    try {
+      const stderrLines: string[] = [];
+      const stderrPromise = child.stderr
+        ? collectLines(child.stderr, stderrLines)
+        : Promise.resolve();
 
-    for await (const line of readLines(child.stdout)) {
-      const event = this.parseClaudeLine(line);
-      if (event) {
-        yield event;
+      // Claude Code repeats the final assistant text in `result.result`.
+      // Emit it only when no assistant text was streamed (as the SDK driver
+      // does with `emittedOutput`), otherwise the answer appears twice.
+      let emittedAssistantText = false;
+      for await (const line of readLines(child.stdout)) {
+        if (signal?.aborted) {
+          return;
+        }
+        const parsed = this.parseClaudeStreamLine(line);
+        if (!parsed) {
+          continue;
+        }
+        if (parsed.source === "assistant" && parsed.event.type === "output") {
+          emittedAssistantText = true;
+        }
+        if (parsed.source === "result" && parsed.event.type === "output") {
+          if (emittedAssistantText) {
+            continue;
+          }
+          emittedAssistantText = true;
+        }
+        yield parsed.event;
       }
-    }
+      if (signal?.aborted) {
+        return;
+      }
 
-    const exitCode = await child.exited;
-    await stderrPromise;
+      const exitCode = await child.exited;
+      supervisor.markExited();
+      await stderrPromise;
+      if (signal?.aborted) {
+        return;
+      }
 
-    if (exitCode === 0) {
+      if (exitCode === 0) {
+        yield { type: "completed", exitCode, timestamp: Date.now() };
+        return;
+      }
+
+      yield {
+        type: "error",
+        message:
+          stderrLines.join("\n").trim() ||
+          `Claude CLI exited with code ${exitCode}`,
+        code: "CLAUDE_CLI_EXIT",
+        recoverable: true,
+        timestamp: Date.now(),
+      };
       yield { type: "completed", exitCode, timestamp: Date.now() };
-      return;
+    } finally {
+      supervisor.release();
     }
-
-    yield {
-      type: "error",
-      message:
-        stderrLines.join("\n").trim() ||
-        `Claude CLI exited with code ${exitCode}`,
-      code: "CLAUDE_CLI_EXIT",
-      recoverable: true,
-      timestamp: Date.now(),
-    };
-    yield { type: "completed", exitCode, timestamp: Date.now() };
   }
 
   buildArgs(request: ExternalAgentRunRequest): readonly string[] {
@@ -166,7 +194,32 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
     const parsed = JSON.parse(trimmed) as ClaudeStreamEvent;
     return normalizeClaudeEvent(parsed);
   }
+
+  private parseClaudeStreamLine(
+    line: string,
+  ): { event: ExternalAgentEvent; source: ClaudeEventSource } | undefined {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      return undefined;
+    }
+    const parsed = JSON.parse(trimmed) as ClaudeStreamEvent;
+    const event = normalizeClaudeEvent(parsed);
+    if (!event) {
+      return undefined;
+    }
+    const source: ClaudeEventSource =
+      parsed.type === "assistant"
+        ? "assistant"
+        : parsed.type === "result" ||
+            parsed.type === "completed" ||
+            parsed.type === "complete"
+          ? "result"
+          : "other";
+    return { event, source };
+  }
 }
+
+type ClaudeEventSource = "assistant" | "result" | "other";
 
 type ClaudeStreamEvent =
   | ExternalAgentEvent
@@ -199,13 +252,13 @@ export function mapClaudePermissionArgs(
   if (flags.readOnly) {
     args.push("--permission-mode", "plan");
   } else if (flags.requireApproval) {
-    args.push("--permission-mode", "default");
+    args.push("--permission-mode", "manual");
   } else if (flags.workspaceWrite) {
     args.push("--permission-mode", "acceptEdits");
   } else if (flags.fullAccess) {
     args.push("--permission-mode", "bypassPermissions");
   } else {
-    args.push("--permission-mode", "default");
+    args.push("--permission-mode", "manual");
   }
 
   for (const path of flags.paths ?? []) {
@@ -429,23 +482,4 @@ async function* toAsyncIterable<T>(
   } finally {
     reader.releaseLock();
   }
-}
-
-function spawnWithBun(
-  command: string,
-  args: readonly string[],
-  options: ClaudeCliSpawnOptions,
-): ClaudeCliSubprocess {
-  const child = Bun.spawn([command, ...args], {
-    cwd: options.cwd,
-    env: options.env,
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-
-  return {
-    stdout: child.stdout,
-    stderr: child.stderr,
-    exited: child.exited,
-  };
 }

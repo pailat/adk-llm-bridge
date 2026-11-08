@@ -1,8 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import {
   ClaudeCliDriver,
+  type ClaudeCliSpawn,
   mapClaudePermissionArgs,
 } from "../../../src/agents/driver/claude-cli.js";
+import type { ExternalAgentEvent } from "../../../src/agents/events.js";
 import { CLAUDE_PROVIDER } from "../../../src/agents/provider/schema.js";
 
 describe("Claude CLI provider", () => {
@@ -43,7 +45,7 @@ describe("ClaudeCliDriver", () => {
       "stream-json",
       "--verbose",
       "--permission-mode",
-      "default",
+      "manual",
     ]);
   });
 
@@ -117,7 +119,7 @@ describe("ClaudeCliDriver", () => {
     ]);
     expect(mapClaudePermissionArgs({ mode: "ask" })).toEqual([
       "--permission-mode",
-      "default",
+      "manual",
     ]);
     expect(mapClaudePermissionArgs({ mode: "workspace-write" })).toEqual([
       "--permission-mode",
@@ -127,5 +129,71 @@ describe("ClaudeCliDriver", () => {
       "--permission-mode",
       "bypassPermissions",
     ]);
+  });
+
+  test("maps an unset policy to the documented manual mode, not the default alias", () => {
+    expect(mapClaudePermissionArgs()).toEqual(["--permission-mode", "manual"]);
+  });
+});
+
+describe("ClaudeCliDriver final text (E2E F5)", () => {
+  function spawnLines(lines: readonly unknown[]): ClaudeCliSpawn {
+    return () => ({
+      stdout: lines.map((line) => `${JSON.stringify(line)}\n`),
+      stderr: [],
+      exited: Promise.resolve(0),
+    });
+  }
+
+  async function outputs(lines: readonly unknown[]): Promise<string[]> {
+    const driver = new ClaudeCliDriver({ spawn: spawnLines(lines), env: {} });
+    const events: ExternalAgentEvent[] = [];
+    for await (const event of driver.run({
+      provider: CLAUDE_PROVIDER,
+      context: {} as never,
+      instruction: "Reply PONG",
+    })) {
+      events.push(event);
+    }
+    expect(events.at(-1)).toMatchObject({ type: "completed", exitCode: 0 });
+    return events.flatMap((event) =>
+      event.type === "output" ? [event.content] : [],
+    );
+  }
+
+  test("does not repeat result.result after the assistant text", async () => {
+    expect(
+      await outputs([
+        { type: "system", subtype: "init" },
+        {
+          type: "assistant",
+          message: { content: [{ type: "text", text: "PONG" }] },
+        },
+        { type: "result", subtype: "success", result: "PONG" },
+      ]),
+    ).toEqual(["PONG"]);
+  });
+
+  test("keeps result.result when no assistant text was emitted", async () => {
+    expect(
+      await outputs([
+        { type: "system", subtype: "init" },
+        { type: "result", subtype: "success", result: "PONG" },
+      ]),
+    ).toEqual(["PONG"]);
+  });
+
+  test("assistant tool-use turns without text do not suppress the result", async () => {
+    expect(
+      await outputs([
+        {
+          type: "assistant",
+          message: {
+            content: [{ type: "tool_use", name: "Read", input: {} }],
+          },
+        },
+        { type: "result", subtype: "success", result: "Done." },
+      ]),
+    ).toEqual(["Done."]);
   });
 });

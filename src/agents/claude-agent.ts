@@ -28,6 +28,7 @@ export const CLAUDE_AGENT_DEFINITION: ExternalAgentDefinition = {
     tools: true,
     subagents: true,
     mcpServers: true,
+    approvals: true,
   },
   createCredentialProvider: () => new EnvCredentialProvider(),
   createDriver: () => new ClaudeAgentSdkDriver(),

@@ -34,6 +34,7 @@ export { CODEX_AGENT_DEFINITION, CodexAgent } from "./codex-agent.js";
 export type { ClaudeAgentSdkDriverConfig } from "./driver/claude-agent-sdk.js";
 export {
   ClaudeAgentSdkDriver,
+  claudeSdkSessionStateKey,
   mapPolicyToClaudeSdkPermission,
 } from "./driver/claude-agent-sdk.js";
 export type {
@@ -116,6 +117,12 @@ export {
   GEMINI_CLI_AGENT_DEFINITION,
   GeminiCliAgent,
 } from "./gemini-cli-agent.js";
+export type {
+  ExternalAgentConfirmationOptions,
+  PermissionApprover,
+  PermissionDecision,
+  PermissionRequest,
+} from "./permissions/confirmation.js";
 export { deriveSubAgentPermissionPolicy } from "./permissions/inheritance.js";
 export {
   mapPermissionModeToPolicy,
@@ -154,7 +161,10 @@ export { classifyRecoverable } from "./runtime/error-classification.js";
 export type { AgentRuntimeRequestMetadata } from "./runtime/runtime-request.js";
 export type { AgentRuntimeSession } from "./runtime/runtime-session.js";
 export type {
+  DelegationFinalAnswer,
+  DelegationOptions,
   RunSubAgentInput,
+  RunSubAgentInterrupt,
   RunSubAgentResult,
   ToolGatewayConfig,
 } from "./tools/tool-gateway.js";

@@ -90,15 +90,40 @@ const REGISTRY_KEY = Symbol.for("adk-llm-bridge.permissions.inheritance.v1");
 
 type PolicyRegistry = WeakMap<object, ExternalAgentPermissionPolicy>;
 
+// Captured once so a hostile object parked on the registry key cannot swap the
+// methods we call (we never call `registry.get(...)`, always `WeakMap.prototype`).
+const weakMapGet = WeakMap.prototype.get;
+const weakMapSet = WeakMap.prototype.set;
+const weakMapHas = WeakMap.prototype.has;
+
+/**
+ * Brand check: only a genuine `WeakMap` (internal slot, works across realms)
+ * passes; a look-alike object with `get`/`set`/`has` methods does not.
+ */
 function isPolicyRegistry(value: unknown): value is PolicyRegistry {
-  const candidate = value as Partial<PolicyRegistry> | null | undefined;
-  return (
-    typeof candidate === "object" &&
-    candidate !== null &&
-    typeof candidate.get === "function" &&
-    typeof candidate.set === "function" &&
-    typeof candidate.has === "function"
-  );
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  try {
+    weakMapHas.call(value, registryProbe);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const registryProbe = {};
+
+function deepFreezePolicy(
+  policy: ExternalAgentPermissionPolicy,
+): ExternalAgentPermissionPolicy {
+  const copy: ExternalAgentPermissionPolicy = {
+    ...policy,
+    ...(policy.allowedPaths
+      ? { allowedPaths: Object.freeze([...policy.allowedPaths]) }
+      : {}),
+  };
+  return Object.freeze(copy);
 }
 
 /**
@@ -110,6 +135,11 @@ function isPolicyRegistry(value: unknown): value is PolicyRegistry {
  * non-enumerable, non-writable, non-configurable property and never replaced.
  * If something else already occupies the key with an incompatible value we
  * fail closed instead of running without inheritance.
+ *
+ * Per realm: `globalThis` is per realm (worker threads, `node:vm` contexts), so
+ * each realm has its own registry; sessions never cross realms by reference,
+ * so that is the correct scope. Stored and returned policies are deep-frozen so
+ * no consumer can widen a policy in place.
  */
 function policyRegistry(): PolicyRegistry {
   const host = globalThis as unknown as Record<symbol, unknown>;
@@ -141,10 +171,13 @@ export function setInheritedPermissions(
   policy: ExternalAgentPermissionPolicy,
 ): void {
   const registry = policyRegistry();
-  const existing = registry.get(session);
-  registry.set(
+  const existing = weakMapGet.call(registry, session);
+  weakMapSet.call(
+    registry,
     session,
-    existing ? deriveSubAgentPermissionPolicy(existing, policy) : { ...policy },
+    deepFreezePolicy(
+      existing ? deriveSubAgentPermissionPolicy(existing, policy) : policy,
+    ),
   );
 }
 
@@ -166,7 +199,7 @@ export function inheritSessionPermissions(
 export function getInheritedPermissions(
   session: object | undefined,
 ): ExternalAgentPermissionPolicy | undefined {
-  return session ? policyRegistry().get(session) : undefined;
+  return session ? weakMapGet.call(policyRegistry(), session) : undefined;
 }
 
 /**
@@ -179,5 +212,7 @@ export function resolveEffectivePermissions(
   own: ExternalAgentPermissionPolicy | undefined,
 ): ExternalAgentPermissionPolicy | undefined {
   const inherited = getInheritedPermissions(session);
-  return inherited ? deriveSubAgentPermissionPolicy(inherited, own) : own;
+  return inherited
+    ? deepFreezePolicy(deriveSubAgentPermissionPolicy(inherited, own))
+    : own;
 }

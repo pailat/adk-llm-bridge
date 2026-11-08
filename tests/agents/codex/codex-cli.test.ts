@@ -334,4 +334,70 @@ describe("Codex CLI driver", () => {
     expect(agent.provider).toEqual(CODEX_PROVIDER);
     expect(agent.driver).toBe(driver);
   });
+
+  test("skipGitRepoCheck adds --skip-git-repo-check to codex exec (E2E F3)", () => {
+    const driver = new CodexCliDriver({ skipGitRepoCheck: true });
+
+    expect(driver.buildArgs(request())).toEqual([
+      "--ask-for-approval",
+      "never",
+      "exec",
+      "--json",
+      "--sandbox",
+      "read-only",
+      "--skip-git-repo-check",
+      "system instruction\n\nuser request",
+    ]);
+    expect(
+      driver.buildArgs(request({ permissions: { mode: "full-access" } })),
+    ).toEqual([
+      "--dangerously-bypass-approvals-and-sandbox",
+      "exec",
+      "--json",
+      "--skip-git-repo-check",
+      "system instruction\n\nuser request",
+    ]);
+  });
+
+  test("skipGitRepoCheck is off by default", () => {
+    expect(new CodexCliDriver().buildArgs(request())).not.toContain(
+      "--skip-git-repo-check",
+    );
+    expect(
+      new CodexCliDriver({ skipGitRepoCheck: false }).buildArgs(request()),
+    ).not.toContain("--skip-git-repo-check");
+  });
+
+  test("stderr is drained while stdout is still open", async () => {
+    // stdout only ends after stderr was fully read: a driver that reads the
+    // two pipes one after the other would deadlock here.
+    let stderrDone!: () => void;
+    const stderrRead = new Promise<void>((resolve) => {
+      stderrDone = resolve;
+    });
+    const spawn: CodexCliSpawn = () => ({
+      stdout: (async function* () {
+        await stderrRead;
+        yield `${JSON.stringify({
+          type: "item.completed",
+          item: { id: "m1", type: "agent_message", text: "ok" },
+        })}\n`;
+      })(),
+      stderr: (async function* () {
+        yield "warning: something\n";
+        stderrDone();
+      })(),
+      exited: Promise.resolve(0),
+    });
+
+    const events = await collect(new CodexCliDriver({ spawn }).run(request()));
+
+    expect(events.map((event) => event.type)).toEqual([
+      "started",
+      "output",
+      "error",
+      "completed",
+    ]);
+    expect(events[2]).toMatchObject({ message: "warning: something" });
+  });
 });

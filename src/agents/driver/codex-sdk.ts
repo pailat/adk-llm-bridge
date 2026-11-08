@@ -189,8 +189,6 @@ export class CodexSdkDriver {
       streaming: true,
       sessions: true,
       permissions: true,
-      tools: true,
-      mcpServers: true,
     };
   }
 
@@ -264,21 +262,50 @@ export class CodexSdkDriver {
         return delta;
       };
 
+      // One failure surfaces as a stream `error` followed by `turn.failed`.
+      // Hold the stream error back until the next event: when it is the
+      // `turn.failed` for the same failure, only that one error is emitted.
+      let pendingStreamError: ExternalAgentEvent | undefined;
       stream: for await (const event of events) {
-        if (stringValue(event.type) === "thread.started") {
+        const eventType = stringValue(event.type);
+        if (eventType === "error") {
+          if (pendingStreamError) {
+            yield pendingStreamError;
+          }
+          pendingStreamError = this.normalizeEvent(event)[0];
+          continue;
+        }
+        let normalizedEvent = event;
+        if (pendingStreamError) {
+          const held = pendingStreamError;
+          pendingStreamError = undefined;
+          if (eventType !== "turn.failed") {
+            yield held;
+          } else if (
+            held.type === "error" &&
+            !stringValue(asRecord(event.error).message)
+          ) {
+            // Keep the stream error's message when `turn.failed` has none.
+            normalizedEvent = { ...event, error: { message: held.message } };
+          }
+        }
+        if (eventType === "thread.started") {
           const delta = emitThreadId(threadStartedId(event));
           if (delta) {
             yield delta;
           }
           continue;
         }
-        for (const normalized of this.normalizeEvent(event)) {
+        for (const normalized of this.normalizeEvent(normalizedEvent)) {
           if (normalized.type === "completed") {
             terminalEvent = normalized;
             break stream;
           }
           yield normalized;
         }
+      }
+      if (pendingStreamError) {
+        yield pendingStreamError;
       }
 
       // Fallback: if `thread.started` was never observed (older event stream),

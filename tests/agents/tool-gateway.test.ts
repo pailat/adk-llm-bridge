@@ -6,6 +6,7 @@ import {
   createEvent,
   createEventActions,
   FunctionTool,
+  InMemoryRunner,
   InvocationContext,
   LlmAgent,
   type LlmRequest,
@@ -13,12 +14,16 @@ import {
   LoopAgent,
   ParallelAgent,
   PluginManager,
+  REQUEST_CONFIRMATION_FUNCTION_CALL_NAME,
   SequentialAgent,
 } from "@google/adk";
+import { z } from "zod";
 import {
   ExternalAgent,
   type ExternalAgentDriver,
+  type ExternalAgentEvent,
   type ExternalAgentRunRequest,
+  type RunSubAgentResult,
   ToolGateway,
 } from "../../src/agents/index.js";
 import type { ExternalAgentPermissionPolicy } from "../../src/agents/permissions/schema.js";
@@ -952,5 +957,291 @@ describe("permission inheritance through intermediate ADK agents", () => {
     expect(JSON.stringify(driver.request?.context.session.state)).not.toContain(
       "read-only",
     );
+  });
+});
+
+/** Calls `deploy` (which requires confirmation), then answers once it ran. */
+class DeployingFakeLlm extends BaseLlm {
+  constructor() {
+    super({ model: "fake-deploy-model" });
+  }
+
+  async *generateContentAsync(
+    llmRequest: LlmRequest,
+  ): AsyncGenerator<LlmResponse, void> {
+    const deployed = llmRequest.contents.some((content) =>
+      content.parts?.some((part) => part.functionResponse?.name === "deploy"),
+    );
+    yield deployed
+      ? { content: { role: "model", parts: [{ text: "deployed" }] } }
+      : {
+          content: {
+            role: "model",
+            parts: [
+              {
+                functionCall: {
+                  id: "deploy-1",
+                  name: "deploy",
+                  args: { env: "prod" },
+                },
+              },
+            ],
+          },
+        };
+  }
+
+  async connect(): Promise<BaseLlmConnection> {
+    throw new Error("DeployingFakeLlm.connect is not implemented");
+  }
+}
+
+function confirmingDeployer() {
+  const executed: unknown[] = [];
+  const deploy = new FunctionTool({
+    name: "deploy",
+    description: "Deploys to an environment.",
+    parameters: z.object({ env: z.string() }),
+    requireConfirmation: true,
+    execute: async (args) => {
+      executed.push(args);
+      return { ok: true };
+    },
+  });
+  const agent = new LlmAgent({
+    name: "deployer",
+    model: new DeployingFakeLlm(),
+    tools: [deploy],
+  });
+  return { agent, executed };
+}
+
+describe("ToolGateway sub-agent interrupts (M2)", () => {
+  test("a sub-agent waiting for confirmation is reported as an interrupt, never as success", async () => {
+    const { agent: deployer, executed } = confirmingDeployer();
+    const root = new TextAgent("root");
+    const emitted: ReturnType<typeof createEvent>[] = [];
+    const interrupts: RunSubAgentResult[] = [];
+    const gateway = new ToolGateway({
+      rootAgent: root,
+      subAgents: [deployer],
+      parentContext: new InvocationContext({
+        invocationId: "inv-1",
+        agent: root,
+        session: parentContext(root).session,
+        pluginManager: new PluginManager(),
+        userContent: { role: "user", parts: [{ text: "go" }] },
+      }),
+      eventSink: (event) => emitted.push(event),
+      onInterrupt: (result) => interrupts.push(result),
+    });
+
+    const result = await gateway.runSubAgent({
+      agentName: "deployer",
+      task: "deploy prod",
+    });
+
+    expect(executed).toEqual([]);
+    expect(result.error).toContain(
+      "Sub-agent deployer is waiting for user input (confirmation)",
+    );
+    expect(result.interrupt?.kind).toBe("confirmation");
+    expect(result.interrupt?.functionCallIds.length).toBe(1);
+    expect(interrupts).toEqual([result]);
+    // No final answer to protect: the coordinator's next text is not dropped.
+    expect(gateway.consumeFinalAnswer()).toBe(false);
+    // The request the user must answer is on the timeline, as a long-running call.
+    const requestEvent = emitted.find((event) =>
+      event.content?.parts?.some(
+        (part) =>
+          part.functionCall?.name === REQUEST_CONFIRMATION_FUNCTION_CALL_NAME,
+      ),
+    );
+    expect(requestEvent?.longRunningToolIds).toEqual([
+      ...(result.interrupt?.functionCallIds ?? []),
+    ]);
+  });
+
+  test("a delegation that completes reports no interrupt", async () => {
+    const worker = new TextAgent("worker");
+    const root = new TextAgent("root");
+    let interrupted = false;
+    const gateway = new ToolGateway({
+      rootAgent: root,
+      subAgents: [worker],
+      parentContext: parentContext(root),
+      onInterrupt: () => {
+        interrupted = true;
+      },
+    });
+
+    const result = await gateway.runSubAgent({
+      agentName: "worker",
+      task: "do it",
+    });
+
+    expect(result.interrupt).toBeUndefined();
+    expect(result.error).toBeUndefined();
+    expect(interrupted).toBe(false);
+  });
+
+  test("ExternalAgent stops the coordinator and the next turn's answer resumes the sub-agent", async () => {
+    const { agent: deployer, executed } = confirmingDeployer();
+    const toolResults: RunSubAgentResult[] = [];
+    const driver: ExternalAgentDriver = {
+      providerId: CODEX_PROVIDER.id,
+      async *run(request: ExternalAgentRunRequest) {
+        const result = await request.toolGateway?.runSubAgent({
+          agentName: "deployer",
+          task: "deploy prod",
+        });
+        if (result) toolResults.push(result);
+        yield {
+          type: "output",
+          content: "All done, deployed.",
+        } satisfies ExternalAgentEvent;
+      },
+    };
+    const coordinator = new ExternalAgent({
+      name: "coordinator",
+      provider: CODEX_PROVIDER,
+      driver,
+      subAgents: [deployer],
+    });
+    // A resumable app routes the answer to the agent that asked (ADK's
+    // determineAgentForResumption); without it the Runner restarts the root.
+    const runner = new InMemoryRunner({
+      agent: coordinator,
+      appName: "app",
+      resumabilityConfig: { isResumable: true },
+    });
+    const session = await runner.sessionService.createSession({
+      appName: "app",
+      userId: "u",
+    });
+
+    const firstTurn = [];
+    for await (const event of runner.runAsync({
+      userId: "u",
+      sessionId: session.id,
+      newMessage: { role: "user", parts: [{ text: "deploy" }] },
+    })) {
+      firstTurn.push(event);
+    }
+
+    expect(toolResults[0]?.interrupt?.kind).toBe("confirmation");
+    const texts = firstTurn.flatMap((event) =>
+      (event.content?.parts ?? []).flatMap((part) =>
+        part.text ? [`${event.author}:${part.text}`] : [],
+      ),
+    );
+    // Whatever the coordinator says after the pause never reaches the user.
+    expect(texts).not.toContain("coordinator:All done, deployed.");
+    const requestCall = firstTurn
+      .flatMap((event) => event.content?.parts ?? [])
+      .find(
+        (part) =>
+          part.functionCall?.name === REQUEST_CONFIRMATION_FUNCTION_CALL_NAME,
+      )?.functionCall;
+    expect(requestCall?.id).toBeDefined();
+    expect(executed).toEqual([]);
+
+    const secondTurn = [];
+    for await (const event of runner.runAsync({
+      userId: "u",
+      sessionId: session.id,
+      newMessage: {
+        role: "user",
+        parts: [
+          {
+            functionResponse: {
+              id: requestCall?.id,
+              name: REQUEST_CONFIRMATION_FUNCTION_CALL_NAME,
+              response: { confirmed: true },
+            },
+          },
+        ],
+      },
+    })) {
+      secondTurn.push(event);
+    }
+
+    expect(executed).toEqual([{ env: "prod" }]);
+    expect(
+      secondTurn.some(
+        (event) =>
+          event.author === "deployer" &&
+          event.content?.parts?.some((part) => part.text === "deployed"),
+      ),
+    ).toBe(true);
+  });
+
+  test("without a resumable app the answer is not replayed into a fresh delegation", async () => {
+    const { agent: deployer, executed } = confirmingDeployer();
+    const coordinator = new ExternalAgent({
+      name: "coordinator",
+      provider: CODEX_PROVIDER,
+      driver: {
+        providerId: CODEX_PROVIDER.id,
+        async *run(request: ExternalAgentRunRequest) {
+          await request.toolGateway?.runSubAgent({
+            agentName: "deployer",
+            task: "deploy prod",
+          });
+          yield {
+            type: "output",
+            content: "done",
+          } satisfies ExternalAgentEvent;
+        },
+      },
+      subAgents: [deployer],
+    });
+    const runner = new InMemoryRunner({ agent: coordinator, appName: "app" });
+    const session = await runner.sessionService.createSession({
+      appName: "app",
+      userId: "u",
+    });
+    const run = async (
+      newMessage: Parameters<typeof runner.runAsync>[0]["newMessage"],
+    ) => {
+      const events = [];
+      for await (const event of runner.runAsync({
+        userId: "u",
+        sessionId: session.id,
+        newMessage,
+      })) {
+        events.push(event);
+      }
+      return events;
+    };
+    const confirmationIds = (events: Awaited<ReturnType<typeof run>>) =>
+      events
+        .flatMap((event) => event.content?.parts ?? [])
+        .filter(
+          (part) =>
+            part.functionCall?.name === REQUEST_CONFIRMATION_FUNCTION_CALL_NAME,
+        )
+        .map((part) => part.functionCall?.id);
+
+    const [firstId] = confirmationIds(
+      await run({ role: "user", parts: [{ text: "deploy" }] }),
+    );
+    const second = await run({
+      role: "user",
+      parts: [
+        {
+          functionResponse: {
+            id: firstId,
+            name: REQUEST_CONFIRMATION_FUNCTION_CALL_NAME,
+            response: { confirmed: true },
+          },
+        },
+      ],
+    });
+
+    // The coordinator restarts and the new delegation asks again: fail closed.
+    expect(executed).toEqual([]);
+    const [secondId] = confirmationIds(second);
+    expect(secondId).toBeDefined();
+    expect(secondId).not.toBe(firstId);
   });
 });

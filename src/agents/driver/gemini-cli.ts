@@ -5,27 +5,15 @@
  */
 
 import type { ExternalAgentEvent } from "../events.js";
-import type { ExternalAgentRunRequest } from "../external-agent-driver.js";
+import {
+  type ExternalAgentRunRequest,
+  resolveAbortSignal,
+} from "../external-agent-driver.js";
 import { mapPermissionPolicyToFlags } from "../permissions/mapper.js";
 import type { ExternalAgentPermissionPolicy } from "../permissions/schema.js";
 import { GEMINI_CLI_PROVIDER } from "../provider/gemini-cli.js";
+import { spawnSubprocess, superviseSubprocess } from "./spawn.js";
 import { SubprocessJsonlDriver } from "./subprocess-jsonl.js";
-
-declare const Bun: {
-  spawn(
-    command: string[],
-    options: {
-      cwd?: string;
-      env?: Record<string, string>;
-      stdout: "pipe";
-      stderr: "pipe";
-    },
-  ): {
-    stdout: ReadableStream<Uint8Array>;
-    stderr: ReadableStream<Uint8Array>;
-    exited: Promise<number>;
-  };
-};
 
 export interface GeminiCliSubprocess {
   stdout?:
@@ -39,6 +27,12 @@ export interface GeminiCliSubprocess {
     | ReadableStream<Uint8Array | string>
     | null;
   exited: Promise<number>;
+  /**
+   * Terminates the process. Called when the run is aborted or abandoned
+   * before the process exited. Optional for custom spawns; the default spawn
+   * always provides it.
+   */
+  kill?: () => void;
 }
 
 export interface GeminiCliSpawnOptions {
@@ -67,7 +61,7 @@ export class GeminiCliDriver extends SubprocessJsonlDriver {
       providerId: GEMINI_CLI_PROVIDER.id,
       command: config.command ?? GEMINI_CLI_PROVIDER.command ?? "gemini",
     });
-    this.#spawn = config.spawn ?? bunSpawn;
+    this.#spawn = config.spawn ?? spawnSubprocess;
     this.#env = config.env ?? process.env;
   }
 
@@ -84,37 +78,57 @@ export class GeminiCliDriver extends SubprocessJsonlDriver {
       timestamp: Date.now(),
     };
 
+    const signal = resolveAbortSignal(request);
+    if (signal?.aborted) {
+      return;
+    }
+
     const child = this.#spawn(this.command, args, {
       cwd: request.workingDirectory,
       env,
     });
+    const supervisor = superviseSubprocess(child, signal);
 
-    if (child.stderr) {
-      void drainStderr(child.stderr);
-    }
-
-    const toolNames = new Map<string, string>();
-    for await (const line of readLines(child.stdout)) {
-      const event = this.parseGeminiLine(line, toolNames);
-      if (event) {
-        yield event;
+    try {
+      if (child.stderr) {
+        drainStderr(child.stderr).catch(() => undefined);
       }
-    }
 
-    const exitCode = await child.exited;
-    if (exitCode === 0) {
+      const toolNames = new Map<string, string>();
+      for await (const line of readLines(child.stdout)) {
+        if (signal?.aborted) {
+          return;
+        }
+        const event = this.parseGeminiLine(line, toolNames);
+        if (event) {
+          yield event;
+        }
+      }
+      if (signal?.aborted) {
+        return;
+      }
+
+      const exitCode = await child.exited;
+      supervisor.markExited();
+      if (signal?.aborted) {
+        return;
+      }
+      if (exitCode === 0) {
+        yield { type: "completed", exitCode, timestamp: Date.now() };
+        return;
+      }
+
+      yield {
+        type: "error",
+        message: `Gemini CLI exited with code ${exitCode}`,
+        code: "GEMINI_CLI_EXIT",
+        recoverable: true,
+        timestamp: Date.now(),
+      };
       yield { type: "completed", exitCode, timestamp: Date.now() };
-      return;
+    } finally {
+      supervisor.release();
     }
-
-    yield {
-      type: "error",
-      message: `Gemini CLI exited with code ${exitCode}`,
-      code: "GEMINI_CLI_EXIT",
-      recoverable: true,
-      timestamp: Date.now(),
-    };
-    yield { type: "completed", exitCode, timestamp: Date.now() };
   }
 
   parseGeminiLine(
@@ -468,18 +482,3 @@ async function drainStderr(
     // subprocess cannot block if it emits diagnostics.
   }
 }
-
-const bunSpawn: GeminiCliSpawn = (command, args, options) => {
-  const subprocess = Bun.spawn([command, ...args], {
-    cwd: options.cwd,
-    env: options.env,
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-
-  return {
-    stdout: subprocess.stdout,
-    stderr: subprocess.stderr,
-    exited: subprocess.exited,
-  };
-};
