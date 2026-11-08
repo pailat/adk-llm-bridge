@@ -218,9 +218,18 @@ from the 0.6.0 tag.
   ADK `main`, dependency audit, CodeQL, Dependabot, and npm trusted publishing
   with provenance. `ci` and `prepublishOnly` check the published declarations
   and permission inheritance in the built bundles.
+- `CodexCliDriver.parseLine` now throws for `codex exec --json` lines that
+  carry no bridge event (lifecycle and unknown events), as
+  `SubprocessJsonlDriver.parseLine` does, instead of returning them as
+  `output`. The new `CodexCliDriver.parseEvent` returns `undefined` for them.
 
 ### Fixed
 
+- `CodexCliDriver` no longer emits raw `codex exec --json` lifecycle or unknown
+  events (for example `{"type":"turn.started"}`) as assistant text. CLI errors
+  go through the same classifier as the SDK driver: a usage cap is one
+  non-recoverable `CODEX_QUOTA_EXHAUSTED` event, and a `turn.failed` that
+  repeats the previous `error` is dropped.
 - `outputSchema` and tool parameter schemas with zod length or count
   constraints (`.min()`/`.max()` on arrays, strings and records) no longer fail
   with 400 on OpenAI and xAI. ADK emits these counts as strings

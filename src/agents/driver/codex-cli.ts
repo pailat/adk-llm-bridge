@@ -11,6 +11,7 @@ import {
 } from "../external-agent-driver.js";
 import type { ExternalAgentPermissionPolicy } from "../permissions/schema.js";
 import { CODEX_PROVIDER } from "../provider/codex.js";
+import { classifyRecoverable } from "../runtime/error-classification.js";
 import { asRecord, copyIfPresent, stringValue } from "./shared.js";
 import { spawnSubprocess, superviseSubprocess } from "./spawn.js";
 import { SubprocessJsonlDriver } from "./subprocess-jsonl.js";
@@ -100,6 +101,9 @@ export class CodexCliDriver extends SubprocessJsonlDriver {
         : Promise.resolve();
 
       if (child.stdout) {
+        // `codex exec --json` reports one failure twice: an `error` event and
+        // then a `turn.failed` carrying the same message. Surface it once.
+        let lastErrorMessage: string | undefined;
         for await (const line of readLines(child.stdout)) {
           if (signal?.aborted) {
             return;
@@ -107,7 +111,21 @@ export class CodexCliDriver extends SubprocessJsonlDriver {
           if (line.trim().length === 0) {
             continue;
           }
-          yield this.parseLine(line);
+          const parsed = this.#parse(line);
+          if (!parsed) {
+            continue;
+          }
+          const { event, sourceType } = parsed;
+          if (event.type === "error") {
+            if (
+              sourceType === "turn.failed" &&
+              event.message === lastErrorMessage
+            ) {
+              continue;
+            }
+            lastErrorMessage = event.message;
+          }
+          yield event;
         }
       }
       await stderrPromise;
@@ -163,12 +181,39 @@ export class CodexCliDriver extends SubprocessJsonlDriver {
     return env;
   }
 
+  /**
+   * Parses one `codex exec --json` line. Returns `undefined` for lifecycle
+   * and unknown events (`turn.started`, `item.started` without text, ...),
+   * which carry nothing the bridge reports.
+   */
+  parseEvent(line: string): ExternalAgentEvent | undefined {
+    return this.#parse(line)?.event;
+  }
+
+  /**
+   * Like {@link parseEvent}, but throws for a line that carries no bridge
+   * event, matching the base `SubprocessJsonlDriver.parseLine` contract.
+   */
   override parseLine(line: string): ExternalAgentEvent {
-    const parsed = JSON.parse(line) as unknown;
-    if (isExternalAgentEvent(parsed)) {
-      return parsed;
+    const event = this.parseEvent(line);
+    if (!event) {
+      throw new Error("Codex JSONL line carries no external agent event");
     }
-    return normalizeCodexEvent(parsed);
+    return event;
+  }
+
+  #parse(line: string): ParsedCodexLine | undefined {
+    const parsed = JSON.parse(line) as unknown;
+    // Codex's own `{"type":"error","message":...}` also passes the bridge
+    // event guard, so error lines are always normalized and classified.
+    if (isExternalAgentEvent(parsed) && parsed.type !== "error") {
+      return { event: parsed, sourceType: parsed.type };
+    }
+    const event = normalizeCodexEvent(parsed);
+    if (!event) {
+      return undefined;
+    }
+    return { event, sourceType: codexEventType(asRecord(parsed)) };
   }
 }
 
@@ -208,37 +253,87 @@ export function mapPolicyToCodexArgs(
   }
 }
 
-function normalizeCodexEvent(value: unknown): ExternalAgentEvent {
+interface ParsedCodexLine {
+  event: ExternalAgentEvent;
+  /** The raw Codex event type, used to drop a duplicated `turn.failed`. */
+  sourceType: string;
+}
+
+/** Codex event types whose payload is assistant text. */
+const TEXT_EVENT_TYPES = new Set([
+  "response.output_text.delta",
+  "agent_message",
+  "agent_message_delta",
+]);
+
+function codexEventType(record: Record<string, unknown>): string {
+  return stringValue(record.type) ?? stringValue(record.event) ?? "unknown";
+}
+
+function codexError(
+  message: string,
+  source: Record<string, unknown>,
+  timestamp: number | undefined,
+): ExternalAgentEvent {
+  const explicitCode = stringValue(source.code);
+  // Same classifier as the Codex SDK driver: a usage cap becomes a
+  // non-recoverable CODEX_QUOTA_EXHAUSTED, a rate limit stays recoverable.
+  // An explicit code on the line wins; the classifier then only decides
+  // recoverability.
+  const classified = classifyRecoverable({
+    subtype: explicitCode,
+    message,
+    fallbackCode: "EXTERNAL_AGENT_ERROR",
+    defaultRecoverable: false,
+  });
+  return {
+    type: "error",
+    message,
+    code: explicitCode ?? classified.code,
+    recoverable:
+      typeof source.recoverable === "boolean"
+        ? source.recoverable
+        : classified.recoverable,
+    timestamp,
+  };
+}
+
+/**
+ * Maps one Codex JSONL event to a bridge event. Only known text-bearing
+ * events produce `output`; lifecycle and unknown events return `undefined`
+ * so raw JSONL never reaches the assistant text.
+ */
+function normalizeCodexEvent(value: unknown): ExternalAgentEvent | undefined {
   const record = asRecord(value);
-  const type =
-    stringValue(record.type) ?? stringValue(record.event) ?? "unknown";
+  const type = codexEventType(record);
   const timestamp = numberValue(record.timestamp);
 
   // `codex exec --json` ends a failed turn with `turn.failed`
   // ({ error: { message } }), which does not contain the word "error".
   if (type.includes("error") || type.includes("failed")) {
-    return {
-      type: "error",
-      message:
-        stringValue(record.message) ??
-        stringValue(record.error) ??
-        stringValue(asRecord(record.error).message) ??
-        JSON.stringify(value),
-      code: stringValue(record.code),
-      recoverable: false,
-      timestamp,
-    };
+    const message =
+      stringValue(record.message) ??
+      stringValue(record.error) ??
+      stringValue(asRecord(record.error).message) ??
+      JSON.stringify(value);
+    return codexError(message, record, timestamp);
   }
 
   const item = asRecord(record.item);
   const itemType = stringValue(item.type);
   if (itemType === "agent_message") {
-    return {
-      type: "output",
-      content: extractText(item) ?? JSON.stringify(item),
-      stream: "stdout",
-      timestamp,
-    };
+    // Like the SDK driver, only the completed message is assistant text;
+    // `item.started` / `item.updated` would duplicate it.
+    const text = type === "item.completed" ? extractText(item) : undefined;
+    return text
+      ? { type: "output", content: text, stream: "stdout", timestamp }
+      : undefined;
+  }
+
+  if (itemType === "error") {
+    const message =
+      stringValue(item.message) ?? extractErrorMessage(item.error);
+    return message ? codexError(message, item, timestamp) : undefined;
   }
 
   const toolName = extractToolName(record);
@@ -282,12 +377,14 @@ function normalizeCodexEvent(value: unknown): ExternalAgentEvent {
     };
   }
 
-  return {
-    type: "output",
-    content: extractText(value) ?? JSON.stringify(value),
-    stream: "stdout",
-    timestamp,
-  };
+  if (TEXT_EVENT_TYPES.has(type)) {
+    const text = extractText(record);
+    return text
+      ? { type: "output", content: text, stream: "stdout", timestamp }
+      : undefined;
+  }
+
+  return undefined;
 }
 
 function extractToolName(record: Record<string, unknown>): string | undefined {

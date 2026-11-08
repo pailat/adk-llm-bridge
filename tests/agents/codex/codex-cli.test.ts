@@ -400,4 +400,235 @@ describe("Codex CLI driver", () => {
     ]);
     expect(events[2]).toMatchObject({ message: "warning: something" });
   });
+  describe("JSONL normalization (E2E N1/N2)", () => {
+    function spawnLines(
+      lines: readonly unknown[],
+      exitCode = 0,
+    ): CodexCliSpawn {
+      return () => ({
+        stdout: chunks(lines.map((line) => JSON.stringify(line))),
+        exited: Promise.resolve(exitCode),
+      });
+    }
+
+    test("lifecycle and unknown events produce no output (N1)", async () => {
+      const events = await collect(
+        new CodexCliDriver({
+          spawn: spawnLines([
+            { type: "thread.started", thread_id: "t-1" },
+            { type: "turn.started" },
+            { type: "item.started", item: { id: "r1", type: "reasoning" } },
+            {
+              type: "item.started",
+              item: { id: "m1", type: "agent_message" },
+            },
+            {
+              type: "item.updated",
+              item: { id: "m1", type: "agent_message", text: "partial" },
+            },
+            {
+              type: "item.completed",
+              item: { id: "r1", type: "reasoning", text: "thinking" },
+            },
+            { type: "some.future.event", message: "not assistant text" },
+            { foo: "bar" },
+          ]),
+        }).run(request()),
+      );
+
+      expect(events.filter((event) => event.type === "output")).toEqual([]);
+      expect(JSON.stringify(events)).not.toContain("turn.started");
+      expect(events.map((event) => event.type)).toEqual([
+        "started",
+        "started",
+        "completed",
+      ]);
+    });
+
+    test("parseEvent drops lifecycle lines and parseLine throws for them", () => {
+      const driver = new CodexCliDriver();
+      const line = JSON.stringify({ type: "turn.started" });
+      expect(driver.parseEvent(line)).toBeUndefined();
+      expect(() => driver.parseLine(line)).toThrow(
+        "Codex JSONL line carries no external agent event",
+      );
+    });
+
+    test("agent_message text is unchanged", async () => {
+      const events = await collect(
+        new CodexCliDriver({
+          spawn: spawnLines([
+            { type: "turn.started" },
+            {
+              type: "item.completed",
+              item: { id: "m1", type: "agent_message", text: "PONG" },
+            },
+            { type: "turn.completed" },
+          ]),
+        }).run(request()),
+      );
+      expect(events.filter((event) => event.type === "output")).toEqual([
+        {
+          type: "output",
+          content: "PONG",
+          stream: "stdout",
+          timestamp: undefined,
+        },
+      ]);
+    });
+
+    test("a usage-limit failure yields one non-recoverable CODEX_QUOTA_EXHAUSTED error (N2)", async () => {
+      const message =
+        "You've hit your usage limit. Upgrade to Pro or try again at Nov 12th, 2026 9:00 AM.";
+      const events = await collect(
+        new CodexCliDriver({
+          spawn: spawnLines(
+            [
+              { type: "thread.started", thread_id: "t-1" },
+              { type: "turn.started" },
+              { type: "error", message },
+              { type: "turn.failed", error: { message } },
+            ],
+            1,
+          ),
+        }).run(request()),
+      );
+      const errors = events.filter((event) => event.type === "error");
+      expect(errors).toEqual([
+        {
+          type: "error",
+          message,
+          code: "CODEX_QUOTA_EXHAUSTED",
+          recoverable: false,
+          timestamp: undefined,
+        },
+      ]);
+      expect(events.filter((event) => event.type === "output")).toEqual([]);
+      expect(events.at(-1)).toMatchObject({ type: "completed", exitCode: 1 });
+    });
+
+    test("a generic failure yields one EXTERNAL_AGENT_ERROR error", async () => {
+      const message = "stream disconnected unexpectedly";
+      const events = await collect(
+        new CodexCliDriver({
+          spawn: spawnLines(
+            [
+              { type: "error", message },
+              { type: "turn.failed", error: { message } },
+            ],
+            1,
+          ),
+        }).run(request()),
+      );
+      expect(events.filter((event) => event.type === "error")).toEqual([
+        {
+          type: "error",
+          message,
+          code: "EXTERNAL_AGENT_ERROR",
+          recoverable: false,
+          timestamp: undefined,
+        },
+      ]);
+    });
+
+    test("distinct error and turn.failed messages both surface", async () => {
+      const events = await collect(
+        new CodexCliDriver({
+          spawn: spawnLines(
+            [
+              { type: "error", message: "Reconnecting... 1/5" },
+              {
+                type: "turn.failed",
+                error: { message: "You hit your usage limit" },
+              },
+            ],
+            1,
+          ),
+        }).run(request()),
+      );
+      expect(
+        events
+          .filter((event) => event.type === "error")
+          .map((event) => [event.message, event.code]),
+      ).toEqual([
+        ["Reconnecting... 1/5", "EXTERNAL_AGENT_ERROR"],
+        ["You hit your usage limit", "CODEX_QUOTA_EXHAUSTED"],
+      ]);
+    });
+
+    test("a rate limit stays recoverable and an explicit code is kept", async () => {
+      const events = await collect(
+        new CodexCliDriver({
+          spawn: spawnLines([
+            { type: "error", message: "429 Too Many Requests" },
+            { type: "error", message: "boom", code: "CUSTOM_CODE" },
+          ]),
+        }).run(request()),
+      );
+      expect(
+        events
+          .filter((event) => event.type === "error")
+          .map((event) => [event.code, event.recoverable]),
+      ).toEqual([
+        ["RATE_LIMIT", true],
+        ["CUSTOM_CODE", false],
+      ]);
+    });
+
+    test("an explicit code wins over the message heuristic", () => {
+      const event = new CodexCliDriver().parseEvent(
+        JSON.stringify({
+          type: "error",
+          message: "429 Too Many Requests",
+          code: "MY_CODE",
+        }),
+      );
+      expect(event).toEqual({
+        type: "error",
+        message: "429 Too Many Requests",
+        code: "MY_CODE",
+        recoverable: true,
+        timestamp: undefined,
+      });
+    });
+
+    test("a bridge-native error line keeps its explicit recoverable flag", () => {
+      const event = new CodexCliDriver().parseEvent(
+        JSON.stringify({
+          type: "error",
+          message: "boom",
+          code: "X",
+          recoverable: true,
+        }),
+      );
+      expect(event).toEqual({
+        type: "error",
+        message: "boom",
+        code: "X",
+        recoverable: true,
+        timestamp: undefined,
+      });
+    });
+
+    test("an item of type error becomes an error event, not output", async () => {
+      const events = await collect(
+        new CodexCliDriver({
+          spawn: spawnLines([
+            {
+              type: "item.completed",
+              item: { id: "e1", type: "error", message: "tool crashed" },
+            },
+          ]),
+        }).run(request()),
+      );
+      expect(events.filter((event) => event.type === "output")).toEqual([]);
+      expect(events).toContainEqual({
+        type: "error",
+        message: "tool crashed",
+        code: "EXTERNAL_AGENT_ERROR",
+        recoverable: false,
+        timestamp: undefined,
+      });
+    });
+  });
 });
