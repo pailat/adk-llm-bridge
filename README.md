@@ -377,6 +377,17 @@ filesystem, and tombstone requirements.
 See **[codex-workflow](./examples/codex-workflow)** for a runnable dynamic
 planner → implementer → reviewer flow using only Codex agents.
 
+### Using workflows with ADK's `Workflow`
+
+`WorkflowAgent` and `ScriptWorkflowAgent` are `BaseAgent`s, so they can be nodes
+of an ADK `Workflow` (`edges` or `ctx.runNode`): their final answer is the node
+output, and `timeout`, `inputSchema`, `outputSchema`, `stateSchema` and
+`isolationScope` are forwarded to ADK. ADK's `Workflow` is still
+`@experimental`; ours is the durable layer (checkpoints, replay checks, leases,
+sandboxed scripts), not a replacement. See
+**[workflows and ADK's `Workflow`](./docs/workflow-adk-interop.md)** for when to
+use each, cross-turn `resolveExecutionId`, and caveats.
+
 ## Configuration
 
 ### Environment Variables

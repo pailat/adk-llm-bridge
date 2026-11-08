@@ -431,6 +431,26 @@ describe("ScriptWorkflowAgent", () => {
     const events = await collect(workflow);
     expect(events.at(-2)?.author).toBe("script_workflow");
     expect(events.at(-2)?.content).toEqual(output);
+    expect(events.at(-2)?.output).toBe("structured");
+    expect(events.at(-2)?.nodeInfo?.messageAsOutput).toBe(true);
+  });
+
+  test("forwards ADK node settings to the BaseAgent", () => {
+    const workflow = new ScriptWorkflowAgent({
+      name: "script_workflow",
+      definition: defineScriptWorkflow({
+        id: "node-config",
+        version: "1",
+        source: "return 1;",
+      }),
+      runtime: new GeneratorScriptRuntime(function* () {
+        yield operation("emit", { event: { type: "custom", name: "n" } });
+        return "ok";
+      }),
+      timeout: 4,
+    });
+
+    expect(workflow.timeout).toBe(4);
   });
 
   test("propagates workspace coordination to script steps", async () => {

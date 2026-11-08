@@ -25,7 +25,11 @@ import type {
 import type { WorkflowEvent } from "./events.js";
 import { isWorkflowEvent } from "./events.js";
 import { attachCause } from "./internal/error-support.js";
-import { AsyncEventQueue } from "./runtime/async-event-queue.js";
+import {
+  pickWorkflowNodeConfig,
+  type WorkflowNodeConfig,
+} from "./node-config.js";
+import { streamWorkflowRuntime } from "./runtime/stream-runtime.js";
 import {
   type WorkflowExecutionIdResolver,
   WorkflowRuntime,
@@ -36,7 +40,7 @@ import type { WorkflowScriptRuntime } from "./sandbox/types.js";
 import { runWorkflowScript } from "./sandbox/workflow-script-runner.js";
 import type { WorkflowWorkspaceConfig } from "./workspace/workspace-adapter.js";
 
-export interface ScriptWorkflowAgentConfig {
+export interface ScriptWorkflowAgentConfig extends WorkflowNodeConfig {
   name: string;
   description?: string;
   definition: ScriptWorkflowDefinition;
@@ -89,6 +93,7 @@ export class ScriptWorkflowAgent extends BaseAgent {
       name: config.name,
       description: config.description ?? config.definition.description,
       subAgents,
+      ...pickWorkflowNodeConfig(config),
     });
     this.definition = config.definition;
     this.#checkpointStore = config.checkpointStore;
@@ -116,64 +121,42 @@ export class ScriptWorkflowAgent extends BaseAgent {
   ): AsyncGenerator<Event, void, void> {
     const declaredAgents = new Map(this.#declaredAgents);
     let dynamicAgents: DynamicAgentScope | undefined;
-    let executionPromise: Promise<unknown> | undefined;
-    let executionSettled = false;
-    const invocationAbort = new AbortController();
     try {
       dynamicAgents = await this.createDynamicAgentScope(
         context,
         declaredAgents,
       );
-      const queue = new AsyncEventQueue<Event>();
       const executionDefinition = this.createExecutionDefinition(dynamicAgents);
       const gateway =
         this.#gateway ??
         new AgentInvocationGateway({
           resolveAgent: (name) => declaredAgents.get(name),
         });
-      const runtime = new WorkflowRuntime({
-        definition: executionDefinition,
-        checkpointDefinition: this.definition,
-        parentContext: context,
-        agentName: this.name,
-        declaredAgents,
-        gateway,
-        eventSink: async (event) => {
-          queue.push(event);
-          const workflowEvent = event.customMetadata?.workflowEvent;
-          if (this.#onEvent && isWorkflowEvent(workflowEvent)) {
-            await this.#onEvent(workflowEvent);
-          }
-        },
-        checkpointStore: this.#checkpointStore,
-        resolveExecutionId: this.#resolveExecutionId,
-        hooks: this.#runtimeHooks,
-        workspace: this.#workspace,
-        abortSignal: invocationAbort.signal,
-      });
-
-      executionPromise = runtime.execute();
-      void executionPromise.then(
-        () => {
-          executionSettled = true;
-          queue.close();
-        },
-        (error) => {
-          executionSettled = true;
-          queue.fail(error);
-        },
+      yield* streamWorkflowRuntime(
+        ({ push, signal }) =>
+          new WorkflowRuntime({
+            definition: executionDefinition,
+            checkpointDefinition: this.definition,
+            parentContext: context,
+            agentName: this.name,
+            declaredAgents,
+            gateway,
+            eventSink: async (event) => {
+              push(event);
+              const workflowEvent = event.customMetadata?.workflowEvent;
+              if (this.#onEvent && isWorkflowEvent(workflowEvent)) {
+                await this.#onEvent(workflowEvent);
+              }
+            },
+            checkpointStore: this.#checkpointStore,
+            resolveExecutionId: this.#resolveExecutionId,
+            hooks: this.#runtimeHooks,
+            workspace: this.#workspace,
+            abortSignal: signal,
+            structuredOutput: this.outputSchema !== undefined,
+          }),
       );
-      yield* queue;
     } finally {
-      if (executionPromise && !executionSettled) {
-        invocationAbort.abort(
-          new WorkflowError(
-            "WORKFLOW_ABORTED",
-            "Workflow invocation iterator closed before execution completed",
-          ),
-        );
-      }
-      await executionPromise?.catch(() => undefined);
       await dynamicAgents?.releaseAll();
     }
   }

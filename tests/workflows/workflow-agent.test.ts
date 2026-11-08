@@ -233,4 +233,165 @@ describe("WorkflowAgent", () => {
     const events = await collect(workflow);
     expect(events.at(-2)?.content).toBe(content);
   });
+
+  test("marks the final event as the ADK node output", async () => {
+    const workflow = new WorkflowAgent({
+      name: "workflow",
+      definition: defineWorkflow({
+        id: "node-output",
+        version: "1",
+        handler: () => "answer",
+      }),
+    });
+
+    const events = await collect(workflow);
+    const final = events.find(
+      (event) => event.customMetadata?.workflowEvent?.type === "output",
+    );
+    expect(final?.output).toBe("answer");
+    expect(final?.nodeInfo?.messageAsOutput).toBe(true);
+    expect(events.filter((event) => event.output !== undefined)).toHaveLength(
+      1,
+    );
+  });
+
+  test("uses the visible text of Content as node output, ignoring thoughts", async () => {
+    const workflow = new WorkflowAgent({
+      name: "workflow",
+      definition: defineWorkflow({
+        id: "node-output-content",
+        version: "1",
+        handler: () => ({
+          role: "model",
+          parts: [
+            { text: "hidden", thought: true },
+            { text: "a" },
+            { text: "b" },
+          ],
+        }),
+      }),
+    });
+
+    const events = await collect(workflow);
+    expect(events.find((event) => event.output !== undefined)?.output).toBe(
+      "ab",
+    );
+  });
+
+  test("keeps Content as node output when it has no text", async () => {
+    const content: Content = {
+      role: "model",
+      parts: [{ inlineData: { data: "AA==", mimeType: "image/png" } }],
+    };
+    const workflow = new WorkflowAgent({
+      name: "workflow",
+      definition: defineWorkflow({
+        id: "node-output-binary",
+        version: "1",
+        handler: () => content,
+      }),
+    });
+
+    const events = await collect(workflow);
+    expect(events.find((event) => event.output !== undefined)?.output).toBe(
+      content,
+    );
+  });
+
+  test("aborts the runtime when the consumer closes the event stream", async () => {
+    let aborted = false;
+    let reachedSecondStep = false;
+    class SlowAgent extends BaseAgent {
+      constructor() {
+        super({ name: "slow" });
+      }
+
+      protected async *runAsyncImpl(context: InvocationContext) {
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, 2_000);
+          context.abortSignal?.addEventListener(
+            "abort",
+            () => {
+              aborted = true;
+              clearTimeout(timer);
+              resolve();
+            },
+            { once: true },
+          );
+        });
+        yield createEvent({
+          invocationId: context.invocationId,
+          author: this.name,
+          content: { role: "model", parts: [{ text: "late" }] },
+        });
+      }
+
+      protected async *runLiveImpl() {}
+    }
+    const workflow = new WorkflowAgent({
+      name: "workflow",
+      subAgents: [new SlowAgent()],
+      definition: defineWorkflow({
+        id: "abort-on-close",
+        version: "1",
+        handler: async (ctx) => {
+          await ctx.run({ id: "one", agentName: "slow", input: "x" });
+          reachedSecondStep = true;
+          await ctx.run({ id: "two", agentName: "slow", input: "x" });
+          return "done";
+        },
+      }),
+    });
+
+    const iterator = workflow
+      .runAsync(invocation(workflow))
+      [Symbol.asyncIterator]();
+    // First events are lifecycle/checkpoint ones; step one is still running.
+    await iterator.next();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const started = Date.now();
+    await iterator.return?.();
+
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(aborted).toBe(true);
+    expect(reachedSecondStep).toBe(false);
+  });
+
+  test("parses JSON text as node output only when outputSchema is declared", async () => {
+    const make = (outputSchema?: unknown) =>
+      new WorkflowAgent({
+        name: "workflow",
+        definition: defineWorkflow({
+          id: "structured",
+          version: "1",
+          handler: () => '{"a":1}',
+        }),
+        ...(outputSchema ? { outputSchema: outputSchema as never } : {}),
+      });
+    const plain = await collect(make());
+    expect(plain.find((e) => e.output !== undefined)?.output).toBe('{"a":1}');
+
+    const parsed = await collect(
+      make({ safeParse: () => ({ success: true }) }),
+    );
+    expect(parsed.find((e) => e.output !== undefined)?.output).toEqual({
+      a: 1,
+    });
+  });
+
+  test("forwards ADK node settings to the BaseAgent", () => {
+    const workflow = new WorkflowAgent({
+      name: "workflow",
+      definition: defineWorkflow({
+        id: "node-config",
+        version: "1",
+        handler: () => "ok",
+      }),
+      timeout: 3,
+      isolationScope: "scope-a",
+    });
+
+    expect(workflow.timeout).toBe(3);
+    expect(workflow.isolationScope).toBe("scope-a");
+  });
 });

@@ -131,6 +131,12 @@ export interface WorkflowRuntimeConfig {
   workspace?: WorkflowWorkspaceConfig;
   /** Host-owned cancellation signal scoped to this runtime invocation. */
   abortSignal?: AbortSignal;
+  /**
+   * Publish the final text as parsed JSON on `event.output`, as ADK does for an
+   * `LlmAgent` with an `outputSchema`. Falls back to the text when it is not
+   * valid JSON.
+   */
+  structuredOutput?: boolean;
 }
 
 /** Executes one trusted workflow definition inside an ADK invocation. */
@@ -147,6 +153,7 @@ export class WorkflowRuntime {
   readonly #resolveExecutionId: WorkflowExecutionIdResolver;
   readonly #workspace?: WorkflowWorkspaceConfig;
   readonly #abortSignal?: AbortSignal;
+  readonly #structuredOutput: boolean;
   readonly #limits: Required<WorkflowExecutionLimits>;
   readonly #globalSemaphore: AsyncSemaphore;
   readonly #agentSemaphores = new WeakMap<BaseAgent, AsyncSemaphore>();
@@ -173,6 +180,7 @@ export class WorkflowRuntime {
       config.resolveExecutionId ?? ((context) => context.invocationId);
     this.#workspace = config.workspace;
     this.#abortSignal = config.abortSignal;
+    this.#structuredOutput = config.structuredOutput === true;
     this.#limits = validateLimits(config.definition.limits);
     this.#globalSemaphore = new AsyncSemaphore(this.#limits.maxConcurrency);
   }
@@ -275,15 +283,15 @@ export class WorkflowRuntime {
     const concurrency = options.concurrency ?? this.#limits.maxConcurrency;
     const localSemaphore = new AsyncSemaphore(concurrency);
     const parallelAbort = new AbortController();
-    const scope = combineAbortSignals([
+    const scopeSignal = AbortSignal.any([
       this.executionSignal(),
       parallelAbort.signal,
     ]);
 
     const pending = steps.map((step) =>
-      localSemaphore.use(scope.signal, async () => {
+      localSemaphore.use(scopeSignal, async () => {
         try {
-          return await this.runStep(step, scope.signal);
+          return await this.runStep(step, scopeSignal);
         } catch (caught) {
           if (failureMode === "fail-fast") throw caught;
           return failureFromError(step, caught);
@@ -297,8 +305,6 @@ export class WorkflowRuntime {
       parallelAbort.abort(caught);
       await Promise.allSettled(pending);
       throw caught;
-    } finally {
-      scope.dispose();
     }
   }
 
@@ -373,9 +379,9 @@ export class WorkflowRuntime {
 
     const lease = await this.acquireWorkspaceLease(step, signal);
     const leaseLossSignal = lease?.lossSignal;
-    const attemptScope = combineAbortSignals(
-      leaseLossSignal ? [signal, leaseLossSignal] : [signal],
-    );
+    const attemptSignal = leaseLossSignal
+      ? AbortSignal.any([signal, leaseLossSignal])
+      : signal;
     const idempotencyKey = await workflowAttemptIdempotencyKey({
       workflowId: this.#definition.id,
       workflowVersion: this.#definition.version,
@@ -401,13 +407,9 @@ export class WorkflowRuntime {
           idempotencyKey,
           lease,
         });
-        throwIfAttemptAborted(
-          attemptScope.signal,
-          leaseLossSignal,
-          attemptContext,
-        );
+        throwIfAttemptAborted(attemptSignal, leaseLossSignal, attemptContext);
         if (attemptIndex > 0) {
-          await retryDelay(step, attemptIndex, attemptScope.signal);
+          await retryDelay(step, attemptIndex, attemptSignal);
           await this.checkpointCoordinator().startAttempt(
             step,
             prepared.inputHash,
@@ -422,11 +424,7 @@ export class WorkflowRuntime {
         } satisfies WorkflowStepStartedEvent);
 
         const replay = await this.#hooks?.beforeAttempt?.(attemptContext);
-        throwIfAttemptAborted(
-          attemptScope.signal,
-          leaseLossSignal,
-          attemptContext,
-        );
+        throwIfAttemptAborted(attemptSignal, leaseLossSignal, attemptContext);
         if (replay) {
           const replayed = validateAttemptReplay(attemptContext, replay);
           await this.checkpointCoordinator().completeStep(replayed);
@@ -442,22 +440,14 @@ export class WorkflowRuntime {
         const result = await this.runAgentAttempt(
           step,
           declaredAgent,
-          attemptScope.signal,
+          attemptSignal,
           attemptContext,
         );
-        throwIfAttemptAborted(
-          attemptScope.signal,
-          leaseLossSignal,
-          attemptContext,
-        );
+        throwIfAttemptAborted(attemptSignal, leaseLossSignal, attemptContext);
         if (!result.error) {
           const completed = stepResult(step, result, attempt, startedAt);
           await this.#hooks?.afterAttempt?.(attemptContext, completed);
-          throwIfAttemptAborted(
-            attemptScope.signal,
-            leaseLossSignal,
-            attemptContext,
-          );
+          throwIfAttemptAborted(attemptSignal, leaseLossSignal, attemptContext);
           await this.checkpointCoordinator().completeStep(completed);
           await this.#hooks?.afterStep?.(hookContext, completed);
           await this.emitWorkflowEvent({
@@ -495,7 +485,6 @@ export class WorkflowRuntime {
       operationError = caught;
       throw caught;
     } finally {
-      attemptScope.dispose();
       await releaseWorkspaceLease(lease, operationError);
     }
   }
@@ -626,6 +615,10 @@ export class WorkflowRuntime {
         content,
         turnComplete: true,
         customMetadata: workflowMetadata(workflowEvent),
+        // ADK graph nodes hand `event.output` to the next node and to
+        // `ctx.runNode()`; without it an agent used as a node yields undefined.
+        output: nodeOutputOf(output, this.#structuredOutput),
+        nodeInfo: { messageAsOutput: true },
       }),
     );
   }
@@ -1105,29 +1098,34 @@ function createExecutionAbortScope(
   };
 }
 
-function combineAbortSignals(signals: readonly AbortSignal[]): {
-  signal: AbortSignal;
-  dispose: () => void;
-} {
-  const controller = new AbortController();
-  const listeners = new Map<AbortSignal, () => void>();
-  for (const signal of signals) {
-    const abort = () => controller.abort(signal.reason);
-    if (signal.aborted) {
-      abort();
-      break;
-    }
-    listeners.set(signal, abort);
-    signal.addEventListener("abort", abort, { once: true });
+/**
+ * Node output of a workflow result, following ADK's `maybeSetOutput`
+ * (`run_llm_agent_as_node`): visible (non-thought) text joined with `""`; with
+ * `structured`, non-blank text is parsed as JSON and kept as text if that
+ * fails. A `Content` without text is passed through unchanged.
+ */
+function nodeOutputOf(
+  output: Exclude<WorkflowOutput, undefined>,
+  structured: boolean,
+): unknown {
+  let text: string;
+  if (typeof output === "string") {
+    text = output;
+  } else {
+    text = (output.parts ?? [])
+      .filter((part) => typeof part.text === "string" && part.thought !== true)
+      .map((part) => part.text)
+      .join("");
+    if (text === "") return output;
   }
-  return {
-    signal: controller.signal,
-    dispose: () => {
-      for (const [signal, listener] of listeners) {
-        signal.removeEventListener("abort", listener);
-      }
-    },
-  };
+  if (structured && text.trim() !== "") {
+    try {
+      return JSON.parse(text);
+    } catch {
+      return text;
+    }
+  }
+  return text;
 }
 
 function throwIfAborted(signal: AbortSignal): void {

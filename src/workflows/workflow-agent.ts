@@ -8,7 +8,11 @@ import { BaseAgent, type Event, type InvocationContext } from "@google/adk";
 import { AgentInvocationGateway } from "../runtime/agent-invocation-gateway.js";
 import type { WorkflowCheckpointStore } from "./checkpoint/store.js";
 import type { TrustedWorkflowDefinition } from "./definition.js";
-import { AsyncEventQueue } from "./runtime/async-event-queue.js";
+import {
+  pickWorkflowNodeConfig,
+  type WorkflowNodeConfig,
+} from "./node-config.js";
+import { streamWorkflowRuntime } from "./runtime/stream-runtime.js";
 import {
   type WorkflowExecutionIdResolver,
   WorkflowRuntime,
@@ -16,7 +20,7 @@ import {
 } from "./runtime/workflow-runtime.js";
 import type { WorkflowWorkspaceConfig } from "./workspace/workspace-adapter.js";
 
-export interface WorkflowAgentConfig {
+export interface WorkflowAgentConfig extends WorkflowNodeConfig {
   name: string;
   description?: string;
   definition: TrustedWorkflowDefinition;
@@ -49,6 +53,7 @@ export class WorkflowAgent extends BaseAgent {
       name: config.name,
       description: config.description ?? config.definition.description,
       subAgents,
+      ...pickWorkflowNodeConfig(config),
     });
     this.definition = config.definition;
     this.#checkpointStore = config.checkpointStore;
@@ -68,25 +73,23 @@ export class WorkflowAgent extends BaseAgent {
   protected async *runAsyncImpl(
     context: InvocationContext,
   ): AsyncGenerator<Event, void, void> {
-    const queue = new AsyncEventQueue<Event>();
-    const runtime = new WorkflowRuntime({
-      definition: this.definition,
-      parentContext: context,
-      agentName: this.name,
-      declaredAgents: this.#declaredAgents,
-      gateway: this.#gateway,
-      eventSink: (event) => queue.push(event),
-      hooks: this.#runtimeHooks,
-      checkpointStore: this.#checkpointStore,
-      resolveExecutionId: this.#resolveExecutionId,
-      workspace: this.#workspace,
-    });
-
-    void runtime.execute().then(
-      () => queue.close(),
-      (error) => queue.fail(error),
+    yield* streamWorkflowRuntime(
+      ({ push, signal }) =>
+        new WorkflowRuntime({
+          definition: this.definition,
+          parentContext: context,
+          agentName: this.name,
+          declaredAgents: this.#declaredAgents,
+          gateway: this.#gateway,
+          eventSink: push,
+          hooks: this.#runtimeHooks,
+          checkpointStore: this.#checkpointStore,
+          resolveExecutionId: this.#resolveExecutionId,
+          workspace: this.#workspace,
+          abortSignal: signal,
+          structuredOutput: this.outputSchema !== undefined,
+        }),
     );
-    yield* queue;
   }
 
   protected async *runLiveImpl(
