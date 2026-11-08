@@ -22,6 +22,40 @@ import {
   parseToolArguments,
 } from "../../../converters/tool-arguments.js";
 import { JSON_OUTPUT_TOOL_NAME } from "./request.js";
+import { encodeThinkingSignature } from "./thinking-signature.js";
+
+/**
+ * Builds the ADK thought part for an Anthropic `thinking` block, or undefined
+ * when it carries nothing.
+ *
+ * ADK drops any history event whose first part has `text === ""`
+ * (`shouldIncludeEventInContext`), which would silently remove the whole turn
+ * (including its tool calls) from the next request. A thinking block with empty
+ * text (reasoning omitted) is therefore stored without `text`, and its
+ * signature is marked so the request converter still replays it as a
+ * `thinking` block with `thinking: ""`.
+ */
+function thinkingBlockToPart(
+  thinking: string,
+  signature: string,
+): Part | undefined {
+  if (thinking) {
+    return {
+      text: thinking,
+      thought: true,
+      ...(signature
+        ? { thoughtSignature: encodeThinkingSignature(signature) }
+        : undefined),
+    };
+  }
+  if (!signature) return undefined;
+  return {
+    thought: true,
+    thoughtSignature: encodeThinkingSignature(signature, {
+      emptyThinking: true,
+    }),
+  };
+}
 
 /**
  * Maps an Anthropic `stop_reason` to the ADK/genai {@link FinishReason} enum.
@@ -71,6 +105,8 @@ export interface AnthropicStreamAccumulator {
     {
       thinking: string;
       signature: string;
+      /** Opaque payload of a `redacted_thinking` block (no text/signature). */
+      redacted?: string;
     }
   >;
 
@@ -152,7 +188,8 @@ export function convertAnthropicResponse(
       : undefined;
 
   for (const block of message.content) {
-    if (block.type === "text") {
+    // Never emit an empty text part: ADK drops events starting with one.
+    if (block.type === "text" && block.text) {
       parts.push({ text: block.text });
     }
 
@@ -160,18 +197,15 @@ export function convertAnthropicResponse(
     // (encrypted full reasoning) is preserved on thoughtSignature so it can be
     // echoed back on multi-turn requests.
     if (block.type === "thinking") {
-      parts.push({
-        text: block.thinking,
-        thought: true,
-        thoughtSignature: block.signature,
-      });
+      const part = thinkingBlockToPart(block.thinking, block.signature);
+      if (part) parts.push(part);
     }
 
     // Redacted thinking carries only opaque encrypted data (no signature/text).
-    if (block.type === "redacted_thinking") {
+    if (block.type === "redacted_thinking" && block.data) {
       parts.push({
         thought: true,
-        thoughtSignature: block.data,
+        thoughtSignature: encodeThinkingSignature(block.data),
       });
     }
 
@@ -306,12 +340,26 @@ export function convertAnthropicStreamEvent(
 
       // Redacted thinking arrives whole (opaque encrypted data, no deltas).
       if (event.content_block.type === "redacted_thinking") {
+        // Also keep it for the final response: only non-partial events are
+        // stored in the session, and the block must be replayed next turn.
+        if (event.content_block.data) {
+          acc.thinkingBlocks.set(event.index, {
+            thinking: "",
+            signature: "",
+            redacted: event.content_block.data,
+          });
+        }
         return {
           response: {
             content: {
               role: "model",
               parts: [
-                { thought: true, thoughtSignature: event.content_block.data },
+                {
+                  thought: true,
+                  thoughtSignature: encodeThinkingSignature(
+                    event.content_block.data,
+                  ),
+                },
               ],
             },
             partial: true,
@@ -328,6 +376,7 @@ export function convertAnthropicStreamEvent(
 
       if (delta.type === "text_delta") {
         acc.text += delta.text;
+        if (!delta.text) return { isComplete: false };
         return {
           response: {
             content: { role: "model", parts: [{ text: delta.text }] },
@@ -352,6 +401,7 @@ export function convertAnthropicStreamEvent(
         };
         block.thinking += delta.thinking;
         acc.thinkingBlocks.set(event.index, block);
+        if (!delta.thinking) return { isComplete: false };
         return {
           response: {
             content: {
@@ -389,13 +439,15 @@ export function convertAnthropicStreamEvent(
       )) {
         const block = acc.thinkingBlocks.get(index);
         if (!block) continue;
-        parts.push({
-          text: block.thinking,
-          thought: true,
-          ...(block.signature
-            ? { thoughtSignature: block.signature }
-            : undefined),
-        });
+        if (block.redacted) {
+          parts.push({
+            thought: true,
+            thoughtSignature: encodeThinkingSignature(block.redacted),
+          });
+          continue;
+        }
+        const part = thinkingBlockToPart(block.thinking, block.signature);
+        if (part) parts.push(part);
       }
 
       if (acc.text) {

@@ -30,6 +30,10 @@ import { normalizeSchema as normalizeSharedSchema } from "../../../converters/sc
 import { ToolCallIdCorrelator } from "../../../converters/tool-call-ids.js";
 import { LogCode, WarningScope, warn } from "../../../utils/log.js";
 import { uriScheme } from "../../../utils/uri.js";
+import {
+  type ReadThinkingSignature,
+  readThinking,
+} from "./thinking-signature.js";
 
 /** Name of the synthetic tool used to emulate structured JSON output. */
 export const JSON_OUTPUT_TOOL_NAME = "json_output";
@@ -419,8 +423,19 @@ function processContent(
     // signature) — re-sending them as plain text drops the signature and
     // breaks multi-turn tool+thinking requests with a 400. Handled before the
     // plain-text branch so a thought part never falls through to `type: text`.
-    if (part.thought) {
-      const block = thoughtPartToAnthropicBlock(part);
+    //
+    // ADK's BuiltInPlanner strips `thought: true` from the whole history but
+    // keeps `thoughtSignature`. Our signatures are namespaced, so a part is
+    // also recognized as a thought when it carries our prefix (never for a
+    // function call/response part, and never for a foreign, e.g. Gemini,
+    // signature). Un-prefixed signatures from older sessions still need
+    // `thought: true`.
+    const thinking =
+      part.functionCall || part.functionResponse
+        ? undefined
+        : readThinking(part);
+    if (part.thought || thinking) {
+      const block = thoughtPartToAnthropicBlock(part, thinking);
       if (block) contentBlocks.push(block);
       continue;
     }
@@ -496,7 +511,8 @@ function processContent(
  * thinking block Anthropic requires for multi-turn tool+thinking continuations.
  * A thought part WITH text maps back to a `thinking` block (signature carried on
  * `signature`); a thought part WITHOUT text maps back to a `redacted_thinking`
- * block (the opaque encrypted payload carried on `data`).
+ * block (the opaque encrypted payload carried on `data`). `signature` is the
+ * already-decoded value from {@link readThinkingSignature}.
  *
  * A thought part with neither text nor signature carries nothing replayable and
  * is dropped (returns undefined) rather than emitted as an empty block.
@@ -505,8 +521,9 @@ function processContent(
  */
 function thoughtPartToAnthropicBlock(
   part: Part,
+  thinking: ReadThinkingSignature | undefined,
 ): Anthropic.ContentBlockParam | undefined {
-  const signature = part.thoughtSignature;
+  const signature = thinking?.signature;
 
   if (part.text) {
     // Visible thinking: replay as a signed thinking block. Anthropic requires a
@@ -515,13 +532,17 @@ function thoughtPartToAnthropicBlock(
     return { type: "thinking", thinking: part.text, signature };
   }
 
-  // No text: this came from a redacted_thinking block (opaque encrypted data
-  // stored on thoughtSignature). Replay it as redacted_thinking.
-  if (signature) {
-    return { type: "redacted_thinking", data: signature };
+  if (!signature) return undefined;
+
+  // A `thinking` block whose text was empty is stored without text (ADK drops
+  // events starting with an empty text part) and marked in the signature.
+  if (thinking.emptyThinking) {
+    return { type: "thinking", thinking: "", signature };
   }
 
-  return undefined;
+  // No text and no marker: this came from a redacted_thinking block (opaque
+  // encrypted data stored on thoughtSignature). Replay it as redacted_thinking.
+  return { type: "redacted_thinking", data: signature };
 }
 
 /** Anthropic image media types supported for base64 source blocks. */

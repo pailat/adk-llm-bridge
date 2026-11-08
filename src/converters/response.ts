@@ -209,6 +209,28 @@ function reasoningDetailsText(details: Record<string, unknown>[]): string {
 }
 
 /**
+ * Builds the thought {@link Part} for a `reasoning_details` array.
+ *
+ * `text` is omitted (not `""`) when the details carry no display text, which is
+ * the case for encrypted-only payloads (for example xAI Grok). ADK drops any
+ * event whose first part has `text === ""` from the conversation history
+ * (`shouldIncludeEventInContext`), so an empty-text thought part in front of a
+ * function call makes the call disappear and the next turn fail with "No
+ * function call event found". The signature still carries the full details for
+ * the multi-turn round-trip.
+ *
+ * @internal
+ */
+function thoughtPartFromDetails(details: Record<string, unknown>[]): Part {
+  const text = reasoningDetailsText(details);
+  return {
+    ...(text ? { text } : {}),
+    thought: true,
+    thoughtSignature: JSON.stringify(details),
+  };
+}
+
+/**
  * Builds the ADK thought {@link Part} for a non-streaming message.
  *
  * Prefers the structured `reasoning_details` array (carries the signature, which
@@ -220,13 +242,7 @@ function reasoningDetailsText(details: Record<string, unknown>[]): string {
  */
 function buildThoughtPart(source: unknown): Part | undefined {
   const details = extractReasoningDetails(source);
-  if (details) {
-    return {
-      text: reasoningDetailsText(details),
-      thought: true,
-      thoughtSignature: JSON.stringify(details),
-    };
-  }
+  if (details) return thoughtPartFromDetails(details);
   const reasoning = extractReasoning(source);
   if (reasoning) {
     return { text: reasoning, thought: true };
@@ -389,11 +405,7 @@ export function convertStreamChunk(
       const details = Array.from(acc.reasoningDetails.entries())
         .sort((a, b) => a[0] - b[0])
         .map(([, value]) => value);
-      parts.push({
-        text: reasoningDetailsText(details),
-        thought: true,
-        thoughtSignature: JSON.stringify(details),
-      });
+      parts.push(thoughtPartFromDetails(details));
     } else if (acc.reasoning) {
       parts.push({ text: acc.reasoning, thought: true });
     }

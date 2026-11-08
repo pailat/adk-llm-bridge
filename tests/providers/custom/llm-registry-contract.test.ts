@@ -85,6 +85,21 @@ describe("ADK LLMRegistry contract", () => {
     expect(LLMRegistry.resolve("zz-contract-cache-first")).toBe(Old);
   });
 
+  it("replaces a class in place only for the same key, not for an equal RegExp", () => {
+    const shared = /zz-contract-key-shared-.+/;
+    const A = makeClass([shared]);
+    const B = makeClass([shared]);
+    LLMRegistry.register(A);
+    LLMRegistry.register(B);
+    expect(LLMRegistry.resolve("zz-contract-key-shared-1")).toBe(B);
+
+    const C = makeClass([/zz-contract-key-equal-.+/]);
+    const D = makeClass([/zz-contract-key-equal-.+/]);
+    LLMRegistry.register(C);
+    LLMRegistry.register(D);
+    expect(LLMRegistry.resolve("zz-contract-key-equal-1")).toBe(C);
+  });
+
   it("exposes no way to unregister a class", () => {
     expect("unregister" in LLMRegistry).toBe(false);
   });

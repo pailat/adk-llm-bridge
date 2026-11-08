@@ -4,7 +4,14 @@ import {
   annotateLlmSpan,
   recordLlmError,
   serverAddress,
+  shouldCaptureMessageContent,
 } from "../../src/core/telemetry.js";
+import { useCleanEnv } from "../helpers/env.js";
+
+const CAPTURE_ENV = [
+  "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT",
+  "ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS",
+] as const;
 
 function fakeSpan() {
   const record = {
@@ -119,5 +126,80 @@ describe("recordLlmError", () => {
 
   it("is a no-op without an active span", () => {
     expect(() => recordLlmError(new Error("x"))).not.toThrow();
+  });
+});
+
+describe("message-content capture gating (E2E F4 pattern)", () => {
+  useCleanEnv(CAPTURE_ENV);
+
+  const secret = "user asked: summarize my diagnosis for Jane Roe";
+
+  it("matches the agents telemetry precedence rules", () => {
+    expect(shouldCaptureMessageContent()).toBe(true);
+    process.env.ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS = "false";
+    expect(shouldCaptureMessageContent()).toBe(false);
+    process.env.ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS = "1";
+    expect(shouldCaptureMessageContent()).toBe(true);
+    // The OTel variable wins when set.
+    process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT =
+      "NO_CONTENT";
+    expect(shouldCaptureMessageContent()).toBe(false);
+    for (const mode of ["SPAN_ONLY", "span_and_event", "true", "1"]) {
+      process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT = mode;
+      expect(shouldCaptureMessageContent()).toBe(true);
+    }
+    process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT =
+      "EVENT_ONLY";
+    expect(shouldCaptureMessageContent()).toBe(false);
+  });
+
+  it("records only the error class, never the message, when capture is off", () => {
+    process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT =
+      "NO_CONTENT";
+    const { span, record } = fakeSpan();
+    const error = Object.assign(new Error(secret), { status: 400 });
+    recordLlmError(error, span);
+    expect(JSON.stringify(record)).not.toContain("Jane Roe");
+    expect(record.exceptions).toEqual([{ name: "400" }]);
+    expect(record.attributes["error.type"]).toBe("400");
+    expect(record.status).toEqual({ code: SpanStatusCode.ERROR });
+  });
+
+  it("does the same for non-Error values", () => {
+    process.env.ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS = "false";
+    const { span, record } = fakeSpan();
+    recordLlmError(secret, span);
+    expect(JSON.stringify(record)).not.toContain("Jane Roe");
+    expect(record.exceptions).toEqual([{ name: "_OTHER" }]);
+  });
+
+  it("keeps the message when capture is on", () => {
+    process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT =
+      "SPAN_ONLY";
+    const { span, record } = fakeSpan();
+    const error = new Error("rate limited");
+    recordLlmError(error, span);
+    expect(record.exceptions).toEqual([error]);
+  });
+
+  it("annotateLlmSpan never writes anything but identity attributes", () => {
+    process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT =
+      "NO_CONTENT";
+    const { span, record } = fakeSpan();
+    annotateLlmSpan(
+      {
+        provider: "openai",
+        model: "gpt-4o",
+        responseId: "cmpl-1",
+        baseURL: "https://api.openai.com/v1",
+      },
+      span,
+    );
+    expect(Object.keys(record.attributes).sort()).toEqual([
+      "gen_ai.provider.name",
+      "gen_ai.response.id",
+      "gen_ai.response.model",
+      "server.address",
+    ]);
   });
 });

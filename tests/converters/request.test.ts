@@ -1516,6 +1516,32 @@ describe("convertRequest", () => {
         expect(msg.reasoning_details).toEqual(details);
       });
 
+      it("never treats a function call or response part as a thought, even with a reasoning signature", () => {
+        const request = createLlmRequest({
+          contents: [
+            {
+              role: "model",
+              parts: [
+                {
+                  functionCall: { id: "c1", name: "f", args: { a: 1 } },
+                  thoughtSignature: JSON.stringify(details),
+                },
+              ],
+            },
+          ],
+        });
+        const msg = convertRequest(request, "anthropic/claude-sonnet-4.5", OR)
+          .messages[0] as Record<string, unknown>;
+        expect(msg.tool_calls).toEqual([
+          {
+            id: "c1",
+            type: "function",
+            function: { name: "f", arguments: '{"a":1}' },
+          },
+        ]);
+        expect(msg).not.toHaveProperty("reasoning_details");
+      });
+
       it("does not treat foreign signatures (Gemini base64, other JSON) as reasoning", () => {
         for (const signature of [
           "CiQBjz1rX3abc/+=",
@@ -1555,6 +1581,28 @@ describe("convertRequest", () => {
           reasoning: { style: "openai-effort" },
         }).messages[0] as Record<string, unknown>;
         expect(msg.content).toBe("answer");
+      });
+
+      it("round-trips an encrypted-only thought part that has no text", () => {
+        const encrypted = [
+          { type: "reasoning.encrypted", data: "gAAAA-opaque", index: 0 },
+        ];
+        const request = createLlmRequest({
+          contents: [
+            {
+              role: "model",
+              parts: [
+                { thought: true, thoughtSignature: JSON.stringify(encrypted) },
+                { functionCall: { id: "c1", name: "f", args: {} } },
+              ],
+            },
+          ],
+        });
+        const msg = convertRequest(request, "x-ai/grok-4.3", OR)
+          .messages[0] as Record<string, unknown>;
+        expect(msg.reasoning_details).toEqual(encrypted);
+        expect((msg.tool_calls as unknown[]).length).toBe(1);
+        expect(msg.content).toBeNull();
       });
 
       it("drops display-only thought text and adds no reasoning_details key", () => {

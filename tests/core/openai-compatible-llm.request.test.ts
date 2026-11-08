@@ -556,6 +556,34 @@ describe("OpenAICompatibleLlm span annotation", () => {
     }
   });
 
+  it("keeps provider error text out of the span when content capture is off", async () => {
+    const previous =
+      process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT;
+    process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT =
+      "NO_CONTENT";
+    const { state, restore } = captureSpan();
+    try {
+      const llm = makeLlm("gpt-4o", { errorMode: "response" });
+      spyCreate(llm, () => {
+        throw Object.assign(new Error("blocked: summarize Jane Roe's chart"), {
+          status: 400,
+        });
+      });
+      const out = await drain(llm.generateContentAsync(userRequest(), false));
+      // The LlmResponse (not the span) still carries the message.
+      expect(out[0]?.errorMessage).toContain("Jane Roe");
+      expect(JSON.stringify(state)).not.toContain("Jane Roe");
+      expect(state.attributes["error.type"]).toBe("400");
+    } finally {
+      restore();
+      if (previous === undefined)
+        delete process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT;
+      else
+        process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT =
+          previous;
+    }
+  });
+
   it("does not record an error for caller aborts", async () => {
     const { state, restore } = captureSpan();
     try {

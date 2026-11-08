@@ -6,6 +6,10 @@ import {
   convertAnthropicStreamEvent,
   createAnthropicStreamAccumulator,
 } from "../../../../src/providers/anthropic/converters/response.js";
+import {
+  EMPTY_THINKING_SIGNATURE_PREFIX,
+  THINKING_SIGNATURE_PREFIX,
+} from "../../../../src/providers/anthropic/converters/thinking-signature.js";
 
 // Helper to create Anthropic Message with required fields
 function createMessage(overrides: {
@@ -496,7 +500,9 @@ describe("convertAnthropicStreamEvent", () => {
       const thought = result.content?.parts?.[0];
       expect(thought?.thought).toBe(true);
       expect(thought?.text).toBe("Let me reason about this...");
-      expect(thought?.thoughtSignature).toBe("sig-abc-123");
+      expect(thought?.thoughtSignature).toBe(
+        `${THINKING_SIGNATURE_PREFIX}sig-abc-123`,
+      );
       expect(result.content?.parts?.[1].text).toBe("The answer is 42.");
     });
 
@@ -513,7 +519,9 @@ describe("convertAnthropicStreamEvent", () => {
 
       const thought = result.content?.parts?.[0];
       expect(thought?.thought).toBe(true);
-      expect(thought?.thoughtSignature).toBe("encrypted-blob");
+      expect(thought?.thoughtSignature).toBe(
+        `${THINKING_SIGNATURE_PREFIX}encrypted-blob`,
+      );
       expect(thought?.text).toBeUndefined();
     });
   });
@@ -561,7 +569,9 @@ describe("convertAnthropicStreamEvent", () => {
       const thought = final.response?.content?.parts?.[0];
       expect(thought?.thought).toBe(true);
       expect(thought?.text).toBe("Step 1...");
-      expect(thought?.thoughtSignature).toBe("sig-xyz");
+      expect(thought?.thoughtSignature).toBe(
+        `${THINKING_SIGNATURE_PREFIX}sig-xyz`,
+      );
       expect(acc.thinkingBlocks.size).toBe(0);
     });
 
@@ -580,7 +590,9 @@ describe("convertAnthropicStreamEvent", () => {
       const part = result.response?.content?.parts?.[0];
       expect(result.response?.partial).toBe(true);
       expect(part?.thought).toBe(true);
-      expect(part?.thoughtSignature).toBe("enc-blob");
+      expect(part?.thoughtSignature).toBe(
+        `${THINKING_SIGNATURE_PREFIX}enc-blob`,
+      );
     });
   });
 });
@@ -980,5 +992,161 @@ describe("malformed tool calls (LLM-6)", () => {
 
     expect(result.finishReason).not.toBe(FinishReason.MALFORMED_FUNCTION_CALL);
     expect(result.content?.parts?.[0]?.functionCall?.name).toBe("lookup");
+  });
+});
+
+describe("no empty text parts (E2E F1)", () => {
+  // ADK's shouldIncludeEventInContext drops any history event whose first part
+  // has `text === ""`, which removes the turn and its tool calls from the next
+  // request ("No function call event found for function responses ids").
+  const noEmptyText = (parts: Anthropic.MessageStreamEvent | unknown) =>
+    (parts as { text?: string }[]).every((p) => p.text !== "");
+
+  const send = (
+    acc: ReturnType<typeof createAnthropicStreamAccumulator>,
+    event: unknown,
+  ) => convertAnthropicStreamEvent(event as Anthropic.MessageStreamEvent, acc);
+
+  it("omits text on an empty thinking block (non-stream) and marks its signature", () => {
+    const result = convertAnthropicResponse(
+      createMessage({
+        content: [
+          { type: "thinking", thinking: "", signature: "SIG" },
+          { type: "tool_use", id: "toolu_1", name: "lookup", input: {} },
+        ] as Anthropic.Message["content"],
+        stop_reason: "tool_use",
+        usage: { input_tokens: 1, output_tokens: 1 },
+      }),
+    );
+
+    const parts = result.content?.parts ?? [];
+    expect(noEmptyText(parts)).toBe(true);
+    expect(parts[0]?.text).toBeUndefined();
+    expect(parts[0]?.thought).toBe(true);
+    expect(parts[0]?.thoughtSignature).toBe(
+      `${EMPTY_THINKING_SIGNATURE_PREFIX}SIG`,
+    );
+    expect(parts[1]?.functionCall?.name).toBe("lookup");
+  });
+
+  it("drops an empty text block and an empty thinking block without signature (non-stream)", () => {
+    const result = convertAnthropicResponse(
+      createMessage({
+        content: [
+          { type: "thinking", thinking: "", signature: "" },
+          { type: "text", text: "", citations: null },
+          { type: "text", text: "Hello", citations: null },
+        ] as Anthropic.Message["content"],
+        usage: { input_tokens: 1, output_tokens: 1 },
+      }),
+    );
+
+    expect(result.content?.parts).toEqual([{ text: "Hello" }]);
+  });
+
+  it("omits text on an empty streamed thinking block that has a signature", () => {
+    const acc = createAnthropicStreamAccumulator();
+    send(acc, {
+      type: "content_block_start",
+      index: 0,
+      content_block: { type: "thinking", thinking: "", signature: "" },
+    });
+    send(acc, {
+      type: "content_block_delta",
+      index: 0,
+      delta: { type: "signature_delta", signature: "SIG" },
+    });
+    send(acc, {
+      type: "content_block_start",
+      index: 1,
+      content_block: { type: "tool_use", id: "toolu_1", name: "lookup" },
+    });
+    send(acc, {
+      type: "content_block_delta",
+      index: 1,
+      delta: { type: "input_json_delta", partial_json: "{}" },
+    });
+    send(acc, {
+      type: "message_delta",
+      delta: { stop_reason: "tool_use" },
+      usage: { output_tokens: 3 },
+    });
+    const parts = send(acc, { type: "message_stop" }).response?.content?.parts;
+
+    expect(noEmptyText(parts)).toBe(true);
+    expect(parts?.[0]).toEqual({
+      thought: true,
+      thoughtSignature: `${EMPTY_THINKING_SIGNATURE_PREFIX}SIG`,
+    });
+    expect(parts?.[1]?.functionCall?.name).toBe("lookup");
+  });
+
+  it("emits no part for a streamed thinking block without text or signature", () => {
+    const acc = createAnthropicStreamAccumulator();
+    send(acc, {
+      type: "content_block_start",
+      index: 0,
+      content_block: { type: "thinking", thinking: "", signature: "" },
+    });
+    acc.text = "Answer";
+    const parts = send(acc, { type: "message_stop" }).response?.content?.parts;
+
+    expect(parts).toEqual([{ text: "Answer" }]);
+  });
+
+  it("does not emit partial responses for empty text or thinking deltas", () => {
+    const acc = createAnthropicStreamAccumulator();
+    send(acc, {
+      type: "content_block_start",
+      index: 0,
+      content_block: { type: "thinking", thinking: "", signature: "" },
+    });
+
+    const thinking = send(acc, {
+      type: "content_block_delta",
+      index: 0,
+      delta: { type: "thinking_delta", thinking: "" },
+    });
+    const text = send(acc, {
+      type: "content_block_delta",
+      index: 1,
+      delta: { type: "text_delta", text: "" },
+    });
+
+    expect(thinking.response).toBeUndefined();
+    expect(text.response).toBeUndefined();
+  });
+
+  it("keeps a streamed redacted_thinking block in the final response", () => {
+    const acc = createAnthropicStreamAccumulator();
+    const start = send(acc, {
+      type: "content_block_start",
+      index: 0,
+      content_block: { type: "redacted_thinking", data: "ENC" },
+    });
+    acc.text = "Done";
+    const final = send(acc, { type: "message_stop" }).response?.content?.parts;
+
+    // The partial is still emitted for live consumers...
+    expect(start.response?.partial).toBe(true);
+    // ...and the stored final event carries the block, after no empty text.
+    expect(final).toEqual([
+      { thought: true, thoughtSignature: `${THINKING_SIGNATURE_PREFIX}ENC` },
+      { text: "Done" },
+    ]);
+  });
+
+  it("ignores a redacted_thinking block with no payload", () => {
+    const result = convertAnthropicResponse(
+      createMessage({
+        content: [
+          { type: "redacted_thinking", data: "" },
+          { type: "text", text: "Hi", citations: null },
+        ] as Anthropic.Message["content"],
+        usage: { input_tokens: 1, output_tokens: 1 },
+      }),
+    );
+
+    expect(result.content?.parts).toEqual([{ text: "Hi" }]);
   });
 });

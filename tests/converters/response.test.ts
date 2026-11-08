@@ -789,3 +789,128 @@ describe("malformed tool-call arguments", () => {
     expect(response?.content).toBeUndefined();
   });
 });
+
+describe("encrypted-only reasoning_details (no display text)", () => {
+  // xAI Grok returns reasoning only as an encrypted blob. ADK drops any event
+  // whose parts[0].text is "" from the history, which silently removes the
+  // function call that follows (P1 regression, E2E finding F1).
+  const encrypted = [
+    { type: "reasoning.encrypted", data: "gAAAA-opaque", index: 0 },
+  ];
+  const toolCall = {
+    id: "call_1",
+    type: "function",
+    function: { name: "get_weather", arguments: '{"city":"Lima"}' },
+  };
+
+  function noEmptyFirstText(parts: { text?: string }[] | undefined): void {
+    expect(parts?.[0]?.text).not.toBe("");
+  }
+
+  it("omits text on the thought part instead of emitting an empty string", () => {
+    const response = convertResponse(
+      createCompletion({
+        choices: [
+          {
+            index: 0,
+            finish_reason: "tool_calls",
+            logprobs: null,
+            message: {
+              role: "assistant",
+              content: null,
+              tool_calls: [toolCall],
+              reasoning_details: encrypted,
+            },
+          },
+        ],
+      } as unknown as Partial<ChatCompletion>),
+    );
+    const parts = response.content?.parts ?? [];
+    expect(parts).toHaveLength(2);
+    expect(parts[0]?.thought).toBe(true);
+    expect("text" in (parts[0] ?? {})).toBe(false);
+    expect(JSON.parse(parts[0]?.thoughtSignature ?? "[]")).toEqual(encrypted);
+    expect(parts[1]?.functionCall?.name).toBe("get_weather");
+    noEmptyFirstText(parts);
+  });
+
+  it("does the same on the final streaming response", () => {
+    const acc = createStreamAccumulator();
+    convertStreamChunk(
+      createChunk({
+        reasoning_details: encrypted,
+        tool_calls: [
+          {
+            index: 0,
+            id: "call_1",
+            type: "function",
+            function: { name: "get_weather", arguments: '{"city":"Lima"}' },
+          },
+        ],
+      } as never),
+      acc,
+    );
+    const { response, isComplete } = convertStreamChunk(
+      createChunk({}, "tool_calls"),
+      acc,
+    );
+    expect(isComplete).toBe(true);
+    const parts = response?.content?.parts ?? [];
+    expect(parts[0]?.thought).toBe(true);
+    expect("text" in (parts[0] ?? {})).toBe(false);
+    expect(parts[1]?.functionCall?.name).toBe("get_weather");
+    noEmptyFirstText(parts);
+  });
+
+  it("keeps display text when the details carry some", () => {
+    const response = convertResponse(
+      createCompletion({
+        choices: [
+          {
+            index: 0,
+            finish_reason: "stop",
+            logprobs: null,
+            message: {
+              role: "assistant",
+              content: "answer",
+              reasoning_details: [
+                { type: "reasoning.text", text: "step 1", signature: "s" },
+                ...encrypted,
+              ],
+            },
+          },
+        ],
+      } as unknown as Partial<ChatCompletion>),
+    );
+    expect(response.content?.parts?.[0]).toMatchObject({
+      text: "step 1",
+      thought: true,
+    });
+  });
+
+  it("never yields an empty-string first part for any reasoning shape", () => {
+    for (const message of [
+      { content: null, reasoning_details: encrypted },
+      {
+        content: null,
+        reasoning_details: [{ type: "reasoning.text", text: "" }],
+      },
+      { content: "x", reasoning: "" },
+      { content: "x", reasoning_content: "" },
+    ]) {
+      const response = convertResponse(
+        createCompletion({
+          choices: [
+            {
+              index: 0,
+              finish_reason: "stop",
+              logprobs: null,
+              message: { role: "assistant", ...message },
+            },
+          ],
+        } as unknown as Partial<ChatCompletion>),
+      );
+      noEmptyFirstText(response.content?.parts);
+    }
+  });
+});

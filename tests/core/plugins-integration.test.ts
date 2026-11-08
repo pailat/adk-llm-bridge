@@ -11,6 +11,7 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import {
   BasePlugin,
   type CallbackContext,
+  FunctionTool,
   InMemoryRunner,
   LlmAgent,
   type LlmRequest,
@@ -302,5 +303,94 @@ describe("OpenAICompatibleLlm with ADK plugins", () => {
     expect(events[0]?.errorCode).toBe("MALFORMED_FUNCTION_CALL");
     expect(events[0]?.errorMessage).toContain("get_weather (invalid-json)");
     expect(events[0]?.content?.parts?.some((p) => p.functionCall)).toBeFalsy();
+  });
+
+  it("keeps a function call that follows encrypted-only reasoning in the history (E2E F1)", async () => {
+    // Grok-style reasoning: only an encrypted blob, no display text. ADK drops
+    // events whose first part has text "", so a thought part with text "" used
+    // to erase the call and fail the next request.
+    const encrypted = [
+      { type: "reasoning.encrypted", data: "gAAAA-opaque", index: 0 },
+    ];
+    const requests: Record<string, unknown>[] = [];
+    const llm = makeLlm((params) => {
+      requests.push(params);
+      if (requests.length === 1) {
+        return {
+          id: "c1",
+          object: "chat.completion",
+          created: 0,
+          model: "gpt-4o",
+          choices: [
+            {
+              index: 0,
+              finish_reason: "tool_calls",
+              message: {
+                role: "assistant",
+                content: null,
+                reasoning_details: encrypted,
+                tool_calls: [
+                  {
+                    id: "call_1",
+                    type: "function",
+                    function: { name: "lookup", arguments: '{"q":"Lima"}' },
+                  },
+                ],
+              },
+            },
+          ],
+        };
+      }
+      return {
+        id: "c2",
+        object: "chat.completion",
+        created: 0,
+        model: "gpt-4o",
+        choices: [
+          {
+            index: 0,
+            finish_reason: "stop",
+            message: { role: "assistant", content: "Lima is in Peru." },
+          },
+        ],
+      };
+    });
+    const agent = new LlmAgent({
+      name: "root",
+      model: llm,
+      tools: [
+        new FunctionTool({
+          name: "lookup",
+          description: "Looks a city up.",
+          execute: () => ({ country: "Peru" }),
+        }),
+      ],
+    });
+    const runner = new InMemoryRunner({ agent, appName: "app" });
+    const session = await runner.sessionService.createSession({
+      appName: "app",
+      userId: "u",
+    });
+    const events = [];
+    for await (const event of runner.runAsync({
+      userId: "u",
+      sessionId: session.id,
+      newMessage: { role: "user", parts: [{ text: "Where is Lima?" }] },
+    })) {
+      events.push(event);
+    }
+
+    expect(requests).toHaveLength(2);
+    expect(events.at(-1)?.errorCode).toBeUndefined();
+    expect(events.at(-1)?.content?.parts?.[0]?.text).toBe("Lima is in Peru.");
+
+    // The second request replays the assistant turn with its tool call,
+    // followed by the tool result.
+    const messages = requests[1]?.messages as Record<string, unknown>[];
+    const assistant = messages.find((m) => m.role === "assistant");
+    const calls = (assistant?.tool_calls ?? []) as { id: string }[];
+    expect(calls[0]?.id).toBe("call_1");
+    const tool = messages.find((m) => m.role === "tool");
+    expect(tool?.tool_call_id).toBe("call_1");
   });
 });

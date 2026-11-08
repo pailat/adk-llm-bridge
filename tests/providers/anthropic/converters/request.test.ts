@@ -9,6 +9,11 @@ import {
   convertAnthropicStructuredOutput,
   convertAnthropicToolChoice,
 } from "../../../../src/providers/anthropic/converters/request.js";
+import { convertAnthropicResponse } from "../../../../src/providers/anthropic/converters/response.js";
+import {
+  EMPTY_THINKING_SIGNATURE_PREFIX,
+  THINKING_SIGNATURE_PREFIX,
+} from "../../../../src/providers/anthropic/converters/thinking-signature.js";
 import { LogCode } from "../../../../src/utils/log.js";
 import { captureWarnings } from "../../../helpers/fake-logger.js";
 
@@ -365,6 +370,261 @@ describe("convertAnthropicRequest", () => {
       expect(use?.id).not.toBe(bad);
       expect(use?.id).toMatch(/^[a-zA-Z0-9_-]{1,64}$/);
       expect(result?.tool_use_id).toBe(use?.id as string);
+    });
+  });
+
+  describe("thinking signature namespace (LLM-3b)", () => {
+    type Block = {
+      type: string;
+      thinking?: string;
+      signature?: string;
+      data?: string;
+      text?: string;
+      name?: string;
+    };
+    const ns = (value: string) => `${THINKING_SIGNATURE_PREFIX}${value}`;
+    const user = { role: "user", parts: [{ text: "go" }] };
+
+    function assistantBlocks(contents: LlmRequest["contents"]): Block[] {
+      const { messages } = convertAnthropicRequest(
+        createLlmRequest({ contents }),
+      );
+      const assistant = messages.find((m) => m.role === "assistant");
+      return (assistant?.content ?? []) as unknown as Block[];
+    }
+
+    it("replays a namespaced thinking part as a thinking block when a planner stripped thought:true", () => {
+      // BuiltInPlanner removes `thought` from every part but keeps the signature.
+      const blocks = assistantBlocks([
+        user,
+        {
+          role: "model",
+          parts: [
+            { text: "I should call the tool", thoughtSignature: ns("sig-1") },
+            { functionCall: { id: "toolu_1", name: "lookup", args: {} } },
+          ],
+        },
+        {
+          role: "user",
+          parts: [
+            {
+              functionResponse: { id: "toolu_1", name: "lookup", response: {} },
+            },
+          ],
+        },
+      ]);
+
+      expect(blocks.map((b) => b.type)).toEqual(["thinking", "tool_use"]);
+      expect(blocks[0]).toMatchObject({
+        thinking: "I should call the tool",
+        signature: "sig-1",
+      });
+    });
+
+    it("replays a planner-stripped redacted_thinking payload", () => {
+      const blocks = assistantBlocks([
+        user,
+        {
+          role: "model",
+          parts: [{ thoughtSignature: ns("opaque") }, { text: "Answer" }],
+        },
+      ]);
+
+      expect(blocks).toEqual([
+        { type: "redacted_thinking", data: "opaque" },
+        { type: "text", text: "Answer" },
+      ]);
+    });
+
+    it("still reads the namespaced form with thought:true", () => {
+      const blocks = assistantBlocks([
+        user,
+        {
+          role: "model",
+          parts: [{ text: "hmm", thought: true, thoughtSignature: ns("s") }],
+        },
+      ]);
+
+      expect(blocks[0]).toMatchObject({ type: "thinking", signature: "s" });
+    });
+
+    it("keeps reading legacy un-prefixed signatures when thought:true is present", () => {
+      const blocks = assistantBlocks([
+        user,
+        {
+          role: "model",
+          parts: [
+            { text: "old", thought: true, thoughtSignature: "legacy-sig" },
+            { thought: true, thoughtSignature: "legacy-redacted" },
+          ],
+        },
+      ]);
+
+      expect(blocks).toEqual([
+        { type: "thinking", thinking: "old", signature: "legacy-sig" },
+        { type: "redacted_thinking", data: "legacy-redacted" },
+      ]);
+    });
+
+    it("never replays a foreign (Gemini) signature without thought:true as thinking", () => {
+      const blocks = assistantBlocks([
+        user,
+        {
+          role: "model",
+          parts: [
+            { text: "plain answer", thoughtSignature: "gemini-sig" },
+            {
+              functionCall: { id: "toolu_1", name: "lookup", args: {} },
+              thoughtSignature: "gemini-call-sig",
+            },
+          ],
+        },
+      ]);
+
+      expect(blocks.map((b) => b.type)).toEqual(["text", "tool_use"]);
+      expect(blocks[0]?.text).toBe("plain answer");
+    });
+
+    it("does not treat a namespaced signature on a function call as thinking", () => {
+      const blocks = assistantBlocks([
+        user,
+        {
+          role: "model",
+          parts: [
+            {
+              functionCall: { id: "toolu_1", name: "lookup", args: {} },
+              thoughtSignature: ns("x"),
+            },
+          ],
+        },
+      ]);
+
+      expect(blocks.map((b) => b.type)).toEqual(["tool_use"]);
+    });
+
+    it("drops a namespaced part with an empty payload instead of emitting an empty block", () => {
+      const blocks = assistantBlocks([
+        user,
+        {
+          role: "model",
+          parts: [
+            { thoughtSignature: THINKING_SIGNATURE_PREFIX },
+            { text: "ok" },
+          ],
+        },
+      ]);
+
+      expect(blocks).toEqual([{ type: "text", text: "ok" }]);
+    });
+
+    it("replays an empty-text thinking block (stored without text) as thinking with an empty string, not as redacted_thinking", () => {
+      const blocks = assistantBlocks([
+        user,
+        {
+          role: "model",
+          parts: [
+            {
+              thought: true,
+              thoughtSignature: `${EMPTY_THINKING_SIGNATURE_PREFIX}SIG`,
+            },
+            { functionCall: { id: "toolu_1", name: "lookup", args: {} } },
+          ],
+        },
+      ]);
+
+      expect(blocks[0]).toEqual({
+        type: "thinking",
+        thinking: "",
+        signature: "SIG",
+      });
+      expect(blocks[1]?.type).toBe("tool_use");
+    });
+
+    it("replays an empty-text thinking block after a planner stripped thought:true", () => {
+      const blocks = assistantBlocks([
+        user,
+        {
+          role: "model",
+          parts: [
+            { thoughtSignature: `${EMPTY_THINKING_SIGNATURE_PREFIX}SIG` },
+            { text: "ok" },
+          ],
+        },
+      ]);
+
+      expect(blocks[0]).toEqual({
+        type: "thinking",
+        thinking: "",
+        signature: "SIG",
+      });
+    });
+
+    it("round-trips empty thinking and redacted blocks from the response converter", () => {
+      const converted = convertAnthropicResponse({
+        id: "msg_2",
+        type: "message",
+        role: "assistant",
+        model: "claude-sonnet-4-5-20250929",
+        stop_reason: "tool_use",
+        stop_sequence: null,
+        content: [
+          { type: "thinking", thinking: "", signature: "SIG" },
+          { type: "redacted_thinking", data: "ENC" },
+          { type: "tool_use", id: "toolu_2", name: "lookup", input: {} },
+        ],
+        usage: { input_tokens: 1, output_tokens: 1 },
+      } as unknown as Anthropic.Message);
+      const stripped = (converted.content?.parts ?? []).map((part) => {
+        const { thought: _thought, ...rest } = part;
+        return rest;
+      });
+
+      const blocks = assistantBlocks([
+        user,
+        { role: "model", parts: stripped },
+      ]);
+
+      expect(blocks.map((b) => b.type)).toEqual([
+        "thinking",
+        "redacted_thinking",
+        "tool_use",
+      ]);
+      expect(blocks[0]).toMatchObject({ thinking: "", signature: "SIG" });
+      expect(blocks[1]).toMatchObject({ data: "ENC" });
+    });
+
+    it("round-trips what the response converter produces, even after the planner strips thought", () => {
+      const converted = convertAnthropicResponse({
+        id: "msg_1",
+        type: "message",
+        role: "assistant",
+        model: "claude-sonnet-4-5-20250929",
+        stop_reason: "tool_use",
+        stop_sequence: null,
+        content: [
+          { type: "thinking", thinking: "plan", signature: "SIG" },
+          { type: "redacted_thinking", data: "ENC" },
+          { type: "tool_use", id: "toolu_9", name: "lookup", input: {} },
+        ],
+        usage: { input_tokens: 1, output_tokens: 1 },
+      } as unknown as Anthropic.Message);
+      const stripped = (converted.content?.parts ?? []).map((part) => {
+        const { thought: _thought, ...rest } = part;
+        return rest;
+      });
+
+      const blocks = assistantBlocks([
+        user,
+        { role: "model", parts: stripped },
+      ]);
+
+      expect(blocks.map((b) => b.type)).toEqual([
+        "thinking",
+        "redacted_thinking",
+        "tool_use",
+      ]);
+      expect(blocks[0]).toMatchObject({ thinking: "plan", signature: "SIG" });
+      expect(blocks[1]).toMatchObject({ data: "ENC" });
     });
   });
 

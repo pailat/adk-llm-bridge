@@ -762,6 +762,8 @@ function processContent(
     if (
       part.thought ||
       (reasoning?.style === "openrouter" &&
+        !part.functionCall &&
+        !part.functionResponse &&
         isReasoningDetailsSignature(part.thoughtSignature))
     ) {
       if (reasoning?.style === "openrouter") {

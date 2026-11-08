@@ -1,5 +1,9 @@
 import { describe, expect, it } from "bun:test";
-import { safeJsonParse, tryParseJson } from "../../src/utils/json.js";
+import {
+  parseJsonObject,
+  safeJsonParse,
+  tryParseJson,
+} from "../../src/utils/json.js";
 
 describe("safeJsonParse", () => {
   it("parses normal JSON unchanged", () => {
@@ -168,5 +172,49 @@ describe("tryParseJson", () => {
       ok: true,
       value: { id: "1021987000032211189" },
     });
+  });
+});
+
+describe("parseJsonObject without context.source (legacy fallback)", () => {
+  it("quotes integers of 17+ digits like the previous implementation", () => {
+    expect(parseJsonObject('{"id": 1021987000032211189}', false)).toEqual({
+      ok: true,
+      value: { id: "1021987000032211189" },
+    });
+    expect(
+      parseJsonObject(
+        '{"a":[12345678901234567],"b":-12345678901234567}',
+        false,
+      ),
+    ).toEqual({
+      ok: true,
+      value: { a: ["12345678901234567"], b: "-12345678901234567" },
+    });
+  });
+
+  it("leaves safe integers and long decimals as numbers", () => {
+    expect(
+      parseJsonObject(
+        '{"n": 1234567890123456, "d": 1.12345678901234567}',
+        false,
+      ),
+    ).toEqual({
+      ok: true,
+      value: { n: 1234567890123456, d: 1.1234567890123457 },
+    });
+  });
+
+  it("reports invalid and non-object input the same way", () => {
+    expect(parseJsonObject('{"a":1', false).ok).toBe(false);
+    expect(parseJsonObject("[1]", false)).toEqual({
+      ok: false,
+      reason: "not-an-object",
+    });
+    expect(parseJsonObject("", false)).toEqual({ ok: true, value: {} });
+  });
+
+  it("agrees with the source-based path for ordinary payloads", () => {
+    const text = '{"city":"Paris","n":3,"nested":{"ok":true,"list":[1,2]}}';
+    expect(parseJsonObject(text, false)).toEqual(parseJsonObject(text, true));
   });
 });

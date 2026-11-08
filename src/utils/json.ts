@@ -86,13 +86,27 @@ function quoteLargeIntegers(str: string): string {
  * @internal
  */
 export function tryParseJson(str: string): JsonParseResult {
+  return parseJsonObject(str, SUPPORTS_PARSE_SOURCE);
+}
+
+/**
+ * Implementation of {@link tryParseJson} with the `context.source` capability
+ * injected, so the legacy fallback path stays testable on runtimes that have
+ * the capability.
+ *
+ * @internal
+ */
+export function parseJsonObject(
+  str: string,
+  supportsParseSource: boolean,
+): JsonParseResult {
   if (typeof str !== "string" || str.trim() === "") {
     return { ok: true, value: {} };
   }
 
   let parsed: unknown;
   try {
-    parsed = SUPPORTS_PARSE_SOURCE
+    parsed = supportsParseSource
       ? JSON.parse(str, preserveUnsafeIntegers as never)
       : JSON.parse(quoteLargeIntegers(str));
   } catch (error) {

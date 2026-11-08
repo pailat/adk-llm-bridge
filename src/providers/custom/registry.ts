@@ -136,7 +136,11 @@ function resolvesInAdk(model: string): boolean {
  * `tests/providers/custom/llm-registry-contract.test.ts`):
  * - a pattern must match the **whole** model name (`^(?:pattern)$`);
  * - the first registered matching pattern wins, and ADK's own (`gemini-.*`,
- *   `apigee/.*`, `chrome/.*`) are registered before any of ours;
+ *   `apigee/.*`, `chrome/.*`) are registered before any of ours. Registering
+ *   again under the **same key** (the same string, or the same `RegExp`
+ *   object) replaces the class in its original position instead (ADK only
+ *   logs it at info level), which is not the case for distinct but equal
+ *   `RegExp` objects;
  * - there is no `unregister`, so a registration lasts for the process;
  * - resolutions are cached (LRU of 32) and the cache is **not** invalidated by
  *   later registrations. Register custom providers at startup, before any
