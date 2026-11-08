@@ -19,6 +19,7 @@ import { NoopCredentialProvider } from "./auth/credential-provider.js";
 import type { ExternalAgentEvent } from "./events.js";
 import type { ExternalAgentDriver } from "./external-agent-driver.js";
 import { PlaceholderExternalAgentDriver } from "./external-agent-driver.js";
+import { resolveEffectivePermissions } from "./permissions/inheritance.js";
 import type { ExternalAgentPermissionPolicy } from "./permissions/schema.js";
 import type { ExternalAgentProviderDefinition } from "./provider/schema.js";
 import { toolDetail, traceAdkEvent } from "./telemetry.js";
@@ -26,25 +27,6 @@ import {
   consumeDelegationFinalAnswer,
   ToolGateway,
 } from "./tools/tool-gateway.js";
-
-function readPermissionOverride(
-  context: InvocationContext,
-): ExternalAgentPermissionPolicy | undefined {
-  const override = (context as { externalAgentPermissionOverride?: unknown })
-    .externalAgentPermissionOverride;
-  return isPermissionPolicy(override) ? override : undefined;
-}
-
-function isPermissionPolicy(
-  value: unknown,
-): value is ExternalAgentPermissionPolicy {
-  return Boolean(
-    value &&
-      typeof value === "object" &&
-      "mode" in value &&
-      typeof (value as { mode?: unknown }).mode === "string",
-  );
-}
 
 function normalizeToolCallArgs(input: unknown): Record<string, unknown> {
   if (input === undefined) {
@@ -110,21 +92,6 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
     this.permissions = config.permissions;
   }
 
-  protected createInvocationContext(
-    parentContext: InvocationContext,
-  ): InvocationContext {
-    const context = super.createInvocationContext(parentContext);
-    const inherited = readPermissionOverride(parentContext);
-    if (inherited) {
-      (
-        context as {
-          externalAgentPermissionOverride?: ExternalAgentPermissionPolicy;
-        }
-      ).externalAgentPermissionOverride = inherited;
-    }
-    return context;
-  }
-
   protected async *runAsyncImpl(
     context: InvocationContext,
   ): AsyncGenerator<Event, void, void> {
@@ -132,7 +99,12 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
       providerId: this.provider.id,
       envAllowlist: this.provider.envAllowlist,
     });
-    const permissions = readPermissionOverride(context) ?? this.permissions;
+    // Never more permissive than the delegating parent, whatever agents ADK put
+    // in between (see permissions/inheritance.ts).
+    const permissions = resolveEffectivePermissions(
+      context.session,
+      this.permissions,
+    );
 
     const queue = new AsyncQueue<Event>();
     const rootAgent = this.rootAgent;

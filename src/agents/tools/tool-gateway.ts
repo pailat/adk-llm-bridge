@@ -17,7 +17,10 @@ import {
 import { FinishReason } from "@google/genai";
 import { AgentInvocationGateway } from "../../runtime/agent-invocation-gateway.js";
 import { stringValue } from "../driver/shared.js";
-import { deriveSubAgentPermissionPolicy } from "../permissions/inheritance.js";
+import {
+  deriveSubAgentPermissionPolicy,
+  setInheritedPermissions,
+} from "../permissions/inheritance.js";
 import type { ExternalAgentPermissionPolicy } from "../permissions/schema.js";
 
 export interface RunSubAgentInput {
@@ -149,13 +152,12 @@ export class ToolGateway {
         ? this.#parentContext.branch
         : childBranch(this.#parentContext.branch, agent.name),
       prepareContext: (childContext) => {
-        (
-          childContext as InvocationContext & {
-            externalAgentPermissionOverride?: ExternalAgentPermissionPolicy;
-          }
-        ).externalAgentPermissionOverride = deriveSubAgentPermissionPolicy(
-          this.#parentPermissions,
-          readAgentPermissions(agent),
+        setInheritedPermissions(
+          childContext.session,
+          deriveSubAgentPermissionPolicy(
+            this.#parentPermissions,
+            readAgentPermissions(agent),
+          ),
         );
         if (!this.#nativeDelegationShape) {
           const delegatedTaskEvent = childContext.session.events.at(-1) as

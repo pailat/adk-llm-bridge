@@ -16,6 +16,7 @@ import {
   type Session,
 } from "@google/adk";
 import type { Content } from "@google/genai";
+import { inheritSessionPermissions } from "../agents/permissions/inheritance.js";
 
 export interface AgentInvocationExecutionSummary {
   events: number;
@@ -154,6 +155,9 @@ export class AgentInvocationGateway {
       request.sessionStateMode ?? "merge",
       request.sessionHistoryMode ?? "inherit",
     );
+    // Every delegation hop keeps the caller's permission ceiling, whatever the
+    // state/history modes: the policy is keyed by session object, not by state.
+    inheritSessionPermissions(request.parentContext.session, child.session);
     const childContext = createChildInvocationContext({
       agent,
       parentContext: request.parentContext,
@@ -298,11 +302,11 @@ function createChildInvocationContext({
   abortSignal: AbortSignal | undefined;
   session: Session;
 }): InvocationContext {
-  // Mismo patrón que BaseAgent.createInvocationContext de ADK 2.x: el spread
-  // conserva el contador compartido de llamadas LLM (maxLlmCalls) y los campos
-  // nuevos (isolationScope, nodeToolDepth, a2aMetadata, workflowInstructionScope,
-  // ...) que una lista manual de campos perdería. No usamos parentContext.clone()
-  // porque el contexto del padre puede ser un objeto plano (ver withToolGatewaySession).
+  // Same pattern as ADK 2.x BaseAgent.createInvocationContext: the spread keeps
+  // the shared LLM-call counter (maxLlmCalls) and the newer fields
+  // (isolationScope, nodeToolDepth, a2aMetadata, workflowInstructionScope, ...)
+  // that a hand-written field list would drop. parentContext.clone() is not used
+  // because the parent context may be a plain object (see withToolGatewaySession).
   return new InvocationContext({
     ...parentContext,
     branch,

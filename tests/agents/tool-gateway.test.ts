@@ -10,7 +10,10 @@ import {
   LlmAgent,
   type LlmRequest,
   type LlmResponse,
+  LoopAgent,
+  ParallelAgent,
   PluginManager,
+  SequentialAgent,
 } from "@google/adk";
 import {
   ExternalAgent,
@@ -18,6 +21,7 @@ import {
   type ExternalAgentRunRequest,
   ToolGateway,
 } from "../../src/agents/index.js";
+import type { ExternalAgentPermissionPolicy } from "../../src/agents/permissions/schema.js";
 import { CODEX_PROVIDER } from "../../src/agents/provider/schema.js";
 
 class CaptureDriver implements ExternalAgentDriver {
@@ -737,4 +741,216 @@ describe("ToolGateway parent context without a session", () => {
       expect(worker.seen?.invocationId).toBe("inv-1");
     });
   }
+});
+
+describe("permission inheritance through intermediate ADK agents", () => {
+  const FULL = { mode: "full-access", allowNetwork: true } as const;
+
+  class TransferLlm extends BaseLlm {
+    constructor(private readonly target: string) {
+      super({ model: "fake-transfer" });
+    }
+
+    async *generateContentAsync(
+      request: LlmRequest,
+    ): AsyncGenerator<LlmResponse, void> {
+      const transferred = request.contents.some((content) =>
+        content.parts?.some((part) => part.functionResponse),
+      );
+      yield transferred
+        ? { content: { role: "model", parts: [{ text: "coordinated" }] } }
+        : {
+            content: {
+              role: "model",
+              parts: [
+                {
+                  functionCall: {
+                    id: "t-1",
+                    name: "transfer_to_agent",
+                    args: { agent_name: this.target },
+                  },
+                },
+              ],
+            },
+          };
+    }
+
+    async connect(): Promise<BaseLlmConnection> {
+      throw new Error("not implemented");
+    }
+  }
+
+  class ContextCloningAgent extends BaseAgent {
+    constructor(
+      name: string,
+      private readonly inner: BaseAgent,
+    ) {
+      super({ name, subAgents: [inner] });
+    }
+
+    protected async *runAsyncImpl(context: InvocationContext) {
+      yield* this.inner.runAsync(context.clone({ branch: "cloned" }));
+    }
+
+    protected async *runLiveImpl() {}
+  }
+
+  function worker(driver: CaptureDriver, permissions = FULL, name = "worker") {
+    return new ExternalAgent({
+      name,
+      provider: CODEX_PROVIDER,
+      driver,
+      permissions,
+    });
+  }
+
+  async function delegate(
+    target: BaseAgent,
+    parentPermissions?: ExternalAgentPermissionPolicy,
+  ) {
+    const root = new TextAgent("root");
+    const gateway = new ToolGateway({
+      rootAgent: root,
+      subAgents: [target],
+      parentContext: parentContext(root),
+      parentPermissions,
+    });
+    const result = await gateway.runSubAgent({
+      agentName: target.name,
+      task: "go",
+    });
+    expect(result.error).toBeUndefined();
+  }
+
+  const READ_ONLY = { mode: "read-only", allowNetwork: false } as const;
+
+  test("SequentialAgent in between does not escalate", async () => {
+    const driver = new CaptureDriver();
+    await delegate(
+      new SequentialAgent({ name: "seq", subAgents: [worker(driver)] }),
+      { mode: "read-only" },
+    );
+    expect(driver.request?.permissions).toEqual(READ_ONLY);
+  });
+
+  test("ParallelAgent in between does not escalate", async () => {
+    const driver = new CaptureDriver();
+    await delegate(
+      new ParallelAgent({ name: "par", subAgents: [worker(driver)] }),
+      { mode: "read-only" },
+    );
+    expect(driver.request?.permissions).toEqual(READ_ONLY);
+  });
+
+  test("LoopAgent in between does not escalate", async () => {
+    const driver = new CaptureDriver();
+    await delegate(
+      new LoopAgent({
+        name: "loop",
+        maxIterations: 1,
+        subAgents: [worker(driver)],
+      }),
+      { mode: "read-only" },
+    );
+    expect(driver.request?.permissions).toEqual(READ_ONLY);
+  });
+
+  test("LlmAgent transfer in between does not escalate", async () => {
+    const driver = new CaptureDriver();
+    const coordinator = new LlmAgent({
+      name: "coord",
+      model: new TransferLlm("worker"),
+      subAgents: [worker(driver)],
+    });
+    await delegate(coordinator, { mode: "read-only" });
+    expect(driver.request?.permissions).toEqual(READ_ONLY);
+  });
+
+  test("InvocationContext.clone() in between does not escalate", async () => {
+    const driver = new CaptureDriver();
+    await delegate(new ContextCloningAgent("host", worker(driver)), {
+      mode: "read-only",
+    });
+    expect(driver.request?.permissions).toEqual(READ_ONLY);
+  });
+
+  test("a clone() of the ExternalAgent is bound by the inherited policy", async () => {
+    const driver = new CaptureDriver();
+    const copy = worker(driver).clone({ name: "worker_copy" });
+    await delegate(new SequentialAgent({ name: "seq", subAgents: [copy] }), {
+      mode: "read-only",
+    });
+    expect(driver.request?.permissions).toEqual(READ_ONLY);
+  });
+
+  test("the child's own stricter policy still applies", async () => {
+    const driver = new CaptureDriver();
+    await delegate(
+      new SequentialAgent({
+        name: "seq",
+        subAgents: [worker(driver, { mode: "read-only" })],
+      }),
+      FULL,
+    );
+    expect(driver.request?.permissions).toMatchObject({ mode: "read-only" });
+  });
+
+  test("parallel delegations do not share policy", async () => {
+    const strictDriver = new CaptureDriver();
+    const looseDriver = new CaptureDriver();
+    const strict = new SequentialAgent({
+      name: "strict",
+      subAgents: [worker(strictDriver, FULL, "w1")],
+    });
+    const loose = new SequentialAgent({
+      name: "loose",
+      subAgents: [worker(looseDriver, FULL, "w2")],
+    });
+    const root = new TextAgent("root");
+    const strictGateway = new ToolGateway({
+      rootAgent: root,
+      subAgents: [strict],
+      parentContext: parentContext(root),
+      parentPermissions: { mode: "read-only" },
+    });
+    const looseGateway = new ToolGateway({
+      rootAgent: root,
+      subAgents: [loose],
+      parentContext: parentContext(root),
+      parentPermissions: FULL,
+    });
+
+    await Promise.all([
+      strictGateway.runSubAgent({ agentName: "strict", task: "a" }),
+      looseGateway.runSubAgent({ agentName: "loose", task: "b" }),
+    ]);
+
+    expect(strictDriver.request?.permissions).toEqual(READ_ONLY);
+    expect(looseDriver.request?.permissions).toEqual(FULL);
+  });
+
+  test("a root run without delegation keeps the agent's own permissions", async () => {
+    const driver = new CaptureDriver();
+    const agent = worker(driver);
+    for await (const _event of agent.runAsync(parentContext(agent))) {
+      // drain
+    }
+    expect(driver.request?.permissions).toEqual(FULL);
+  });
+
+  test("the policy is not exposed on the context or in session state", async () => {
+    const driver = new CaptureDriver();
+    await delegate(
+      new SequentialAgent({ name: "seq", subAgents: [worker(driver)] }),
+      { mode: "read-only" },
+    );
+    const context = driver.request?.context as unknown as Record<
+      string,
+      unknown
+    >;
+    expect(context.externalAgentPermissionOverride).toBeUndefined();
+    expect(JSON.stringify(driver.request?.context.session.state)).not.toContain(
+      "read-only",
+    );
+  });
 });

@@ -8,6 +8,10 @@ import {
   LlmCallsLimitExceededError,
   PluginManager,
 } from "@google/adk";
+import {
+  getInheritedPermissions,
+  setInheritedPermissions,
+} from "../../src/agents/permissions/inheritance.js";
 import { AgentInvocationGateway } from "../../src/runtime/agent-invocation-gateway.js";
 
 class CaptureAgent extends BaseAgent {
@@ -488,7 +492,7 @@ describe("AgentInvocationGateway", () => {
     const child = worker.context as InvocationContext;
     expect(child.isolationScope).toBe("scope-1");
     expect(child.nodeToolDepth).toBe(context.nodeToolDepth);
-    // Un solo contador por invocación: padre + hijo agotan maxLlmCalls juntos.
+    // Single counter per invocation: parent and child exhaust maxLlmCalls together.
     context.incrementLlmCallCount();
     child.incrementLlmCallCount();
     expect(() => child.incrementLlmCallCount()).toThrow();
@@ -772,5 +776,57 @@ describe("AgentInvocationGateway", () => {
     });
 
     expect(result.stateDelta).toBeUndefined();
+  });
+
+  describe("permission inheritance", () => {
+    const modes = [
+      { sessionStateMode: "merge", sessionHistoryMode: "inherit" },
+      { sessionStateMode: "replace", sessionHistoryMode: "replace" },
+      { sessionStateMode: "merge", sessionHistoryMode: "replace" },
+      { sessionStateMode: "replace", sessionHistoryMode: "inherit" },
+    ] as const;
+
+    for (const mode of modes) {
+      test(`child session carries the parent policy (${mode.sessionStateMode}/${mode.sessionHistoryMode})`, async () => {
+        const worker = new CaptureAgent();
+        const context = parentContext(new CaptureAgent("root"));
+        setInheritedPermissions(context.session, {
+          mode: "read-only",
+          allowNetwork: false,
+        });
+        const gateway = new AgentInvocationGateway({
+          resolveAgent: () => worker,
+        });
+
+        await gateway.run({
+          agentName: "worker",
+          input: { role: "user", parts: [{ text: "go" }] },
+          parentContext: context,
+          ...mode,
+        });
+
+        expect(worker.context?.session).not.toBe(context.session);
+        expect(getInheritedPermissions(worker.context?.session)).toEqual({
+          mode: "read-only",
+          allowNetwork: false,
+        });
+      });
+    }
+
+    test("a session without policy stays without one", async () => {
+      const worker = new CaptureAgent();
+      const context = parentContext(new CaptureAgent("root"));
+      const gateway = new AgentInvocationGateway({
+        resolveAgent: () => worker,
+      });
+
+      await gateway.run({
+        agentName: "worker",
+        input: { role: "user", parts: [{ text: "go" }] },
+        parentContext: context,
+      });
+
+      expect(getInheritedPermissions(worker.context?.session)).toBeUndefined();
+    });
   });
 });
