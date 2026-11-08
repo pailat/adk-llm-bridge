@@ -182,12 +182,15 @@ function normalizeCodexEvent(value: unknown): ExternalAgentEvent {
     stringValue(record.type) ?? stringValue(record.event) ?? "unknown";
   const timestamp = numberValue(record.timestamp);
 
-  if (type.includes("error")) {
+  // `codex exec --json` ends a failed turn with `turn.failed`
+  // ({ error: { message } }), which does not contain the word "error".
+  if (type.includes("error") || type.includes("failed")) {
     return {
       type: "error",
       message:
         stringValue(record.message) ??
         stringValue(record.error) ??
+        stringValue(asRecord(record.error).message) ??
         JSON.stringify(value),
       code: stringValue(record.code),
       recoverable: false,

@@ -129,6 +129,33 @@ describe("Codex CLI driver", () => {
     });
   });
 
+  test("maps a failed turn (turn.failed) to an error event, not output text", async () => {
+    const spawn: CodexCliSpawn = () => ({
+      stdout: chunks([
+        JSON.stringify({ type: "thread.started", thread_id: "t-1" }),
+        JSON.stringify({ type: "turn.started" }),
+        JSON.stringify({
+          type: "turn.failed",
+          error: { message: "You hit your usage limit" },
+        }),
+      ]),
+      exited: Promise.resolve(1),
+    });
+    const driver = new CodexCliDriver({ spawn });
+    const events = await collect(driver.run(request()));
+    const errors = events.filter((event) => event.type === "error");
+    expect(errors[0]).toMatchObject({
+      type: "error",
+      message: "You hit your usage limit",
+    });
+    expect(
+      events.some(
+        (event) =>
+          event.type === "output" && event.content.includes("turn.failed"),
+      ),
+    ).toBe(false);
+  });
+
   test("normalizes Codex JSONL events", async () => {
     const spawn: CodexCliSpawn = () => ({
       stdout: chunks([

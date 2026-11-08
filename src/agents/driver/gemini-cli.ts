@@ -93,8 +93,9 @@ export class GeminiCliDriver extends SubprocessJsonlDriver {
       void drainStderr(child.stderr);
     }
 
+    const toolNames = new Map<string, string>();
     for await (const line of readLines(child.stdout)) {
-      const event = this.parseGeminiLine(line);
+      const event = this.parseGeminiLine(line, toolNames);
       if (event) {
         yield event;
       }
@@ -116,14 +117,17 @@ export class GeminiCliDriver extends SubprocessJsonlDriver {
     yield { type: "completed", exitCode, timestamp: Date.now() };
   }
 
-  parseGeminiLine(line: string): ExternalAgentEvent | undefined {
+  parseGeminiLine(
+    line: string,
+    toolNames: Map<string, string> = new Map(),
+  ): ExternalAgentEvent | undefined {
     const trimmed = line.trim();
     if (!trimmed) {
       return undefined;
     }
 
     const parsed = JSON.parse(trimmed) as GeminiStreamEvent;
-    return normalizeGeminiEvent(parsed);
+    return normalizeGeminiEvent(parsed, toolNames);
   }
 }
 
@@ -132,13 +136,20 @@ type GeminiStreamEvent =
   | {
       type?: string;
       event?: string;
+      role?: string;
+      status?: string;
+      tool_name?: string;
+      tool_id?: string;
+      parameters?: unknown;
+      output?: string;
+      severity?: string;
       text?: string;
       content?: string;
       message?: string;
       name?: string;
       input?: unknown;
       toolCall?: { name?: string; input?: unknown };
-      error?: string | { message?: string; code?: string };
+      error?: string | { message?: string; code?: string; type?: string };
       code?: string;
       exitCode?: number;
       signal?: string;
@@ -217,7 +228,15 @@ function buildGeminiEnv(
 
 function normalizeGeminiEvent(
   event: GeminiStreamEvent,
+  toolNames: Map<string, string> = new Map(),
 ): ExternalAgentEvent | undefined {
+  // `gemini --output-format stream-json` (core/src/output/types.ts) emits
+  // init | message | tool_use | tool_result | error | result. A `message`
+  // with role "user" echoes the prompt; it is not model output.
+  if (isGeminiNativeEvent(event)) {
+    return normalizeGeminiNativeEvent(event, toolNames);
+  }
+
   if (isNormalizedExternalEvent(event)) {
     return event;
   }
@@ -269,6 +288,91 @@ function normalizeGeminiEvent(
   }
 
   return undefined;
+}
+
+function isGeminiNativeEvent(event: GeminiStreamEvent): boolean {
+  const e = event as {
+    type?: string;
+    role?: unknown;
+    severity?: unknown;
+    status?: unknown;
+  };
+  return (
+    e.type === "tool_use" ||
+    e.type === "tool_result" ||
+    e.type === "init" ||
+    (e.type === "message" && typeof e.role === "string") ||
+    (e.type === "error" && typeof e.severity === "string") ||
+    (e.type === "result" && typeof e.status === "string")
+  );
+}
+
+function normalizeGeminiNativeEvent(
+  event: GeminiStreamEvent,
+  toolNames: Map<string, string>,
+): ExternalAgentEvent | undefined {
+  const e = event as Exclude<GeminiStreamEvent, ExternalAgentEvent>;
+  switch (e.type) {
+    case "message":
+      if (e.role !== "assistant" || typeof e.content !== "string") {
+        return undefined;
+      }
+      return { type: "output", content: e.content, timestamp: Date.now() };
+    case "tool_use": {
+      if (typeof e.tool_name !== "string") {
+        return undefined;
+      }
+      if (typeof e.tool_id === "string") {
+        toolNames.set(e.tool_id, e.tool_name);
+      }
+      return {
+        type: "tool_call",
+        name: e.tool_name,
+        input: e.parameters,
+        callId: e.tool_id,
+        timestamp: Date.now(),
+      };
+    }
+    case "tool_result": {
+      const errorMessage =
+        typeof e.error === "object" ? e.error?.message : e.error;
+      return {
+        type: "tool_result",
+        name:
+          (typeof e.tool_id === "string" && toolNames.get(e.tool_id)) ||
+          "unknown",
+        result: e.output,
+        callId: e.tool_id,
+        error:
+          e.status === "error"
+            ? (errorMessage ?? "Tool execution failed")
+            : undefined,
+        timestamp: Date.now(),
+      };
+    }
+    case "error":
+      return {
+        type: "error",
+        message: typeof e.message === "string" ? e.message : "Gemini CLI error",
+        recoverable: e.severity !== "error",
+        timestamp: Date.now(),
+      };
+    case "result": {
+      if (e.status === "error") {
+        const err = typeof e.error === "object" ? e.error : undefined;
+        return {
+          type: "error",
+          message: err?.message ?? "Gemini CLI run failed",
+          code: err?.type,
+          recoverable: false,
+          timestamp: Date.now(),
+        };
+      }
+      return { type: "completed", timestamp: Date.now() };
+    }
+    default:
+      return undefined;
+  }
 }
 
 function isNormalizedExternalEvent(

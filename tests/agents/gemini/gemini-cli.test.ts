@@ -208,4 +208,74 @@ describe("GeminiCliDriver", () => {
       "--approval-mode=yolo",
     ]);
   });
+  test("parses the native stream-json schema (init/message/tool_use/tool_result/error/result)", () => {
+    const driver = new GeminiCliDriver();
+    const toolNames = new Map<string, string>();
+    const parse = (value: unknown) =>
+      driver.parseGeminiLine(JSON.stringify(value), toolNames);
+
+    expect(
+      parse({ type: "init", timestamp: "t", session_id: "s", model: "m" }),
+    ).toBeUndefined();
+    // The CLI echoes the user prompt as a message with role "user".
+    expect(
+      parse({ type: "message", role: "user", content: "SECRET PROMPT" }),
+    ).toBeUndefined();
+    expect(
+      parse({ type: "message", role: "assistant", content: "hi", delta: true }),
+    ).toMatchObject({ type: "output", content: "hi" });
+    expect(
+      parse({
+        type: "tool_use",
+        tool_name: "read_file",
+        tool_id: "a1",
+        parameters: { path: "x" },
+      }),
+    ).toMatchObject({
+      type: "tool_call",
+      name: "read_file",
+      callId: "a1",
+      input: { path: "x" },
+    });
+    expect(
+      parse({
+        type: "tool_result",
+        tool_id: "a1",
+        status: "success",
+        output: "data",
+      }),
+    ).toMatchObject({
+      type: "tool_result",
+      name: "read_file",
+      callId: "a1",
+      result: "data",
+      error: undefined,
+    });
+    expect(
+      parse({
+        type: "tool_result",
+        tool_id: "a1",
+        status: "error",
+        error: { type: "x", message: "denied" },
+      }),
+    ).toMatchObject({ type: "tool_result", error: "denied" });
+    expect(
+      parse({ type: "error", severity: "warning", message: "loop" }),
+    ).toMatchObject({ type: "error", recoverable: true });
+    expect(parse({ type: "result", status: "success" })).toMatchObject({
+      type: "completed",
+    });
+    expect(
+      parse({
+        type: "result",
+        status: "error",
+        error: { type: "quota", message: "out of quota" },
+      }),
+    ).toMatchObject({
+      type: "error",
+      message: "out of quota",
+      code: "quota",
+      recoverable: false,
+    });
+  });
 });
