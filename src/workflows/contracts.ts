@@ -181,11 +181,27 @@ export type WorkflowHandler = (
   context: WorkflowContext,
 ) => WorkflowOutput | Promise<WorkflowOutput>;
 
+/**
+ * A step whose sub-agent stopped waiting for a human or an external system
+ * (ADK `adk_request_input`, `adk_request_confirmation`,
+ * `adk_request_credential`, or a long-running tool call). Persisted in the
+ * checkpoint so a later turn can answer it.
+ */
+export interface WorkflowStepInterrupt {
+  kind: "input" | "credential" | "confirmation" | "long-running";
+  /** Function-call ids that must be answered to resume the step. */
+  functionCallIds: string[];
+  /** ADK `UserInputRequest` view of the pending requests (JSON form). */
+  requests: Array<Record<string, unknown>>;
+  /** Events of the interrupted delegation (JSON form), needed to resume it. */
+  events: Array<Record<string, unknown>>;
+}
+
 export interface WorkflowExecutionSummary {
   workflowId: string;
   workflowVersion: string;
   executionId: string;
-  status: "completed" | "failed" | "cancelled";
+  status: "completed" | "failed" | "cancelled" | "waiting";
   steps: number;
   replayedSteps: number;
   startedAt: number;
@@ -203,6 +219,7 @@ export type WorkflowErrorCode =
   | "WORKFLOW_SANDBOX_UNAVAILABLE"
   | "WORKFLOW_SCRIPT_INVALID"
   | "WORKFLOW_SOURCE_MISMATCH"
+  | "WORKFLOW_STEP_INTERRUPTED"
   | "WORKFLOW_STEP_MISMATCH"
   | "WORKFLOW_UNKNOWN_AGENT"
   | "WORKFLOW_VERSION_MISMATCH"
@@ -235,5 +252,35 @@ export class WorkflowError extends Error {
       message: this.message,
       ...(this.details ? { details: this.details } : {}),
     };
+  }
+}
+
+/**
+ * Thrown by `WorkflowContext.run` / `parallel` when a step is waiting for
+ * input. It unwinds the handler; the runtime catches it, keeps the checkpoint
+ * (step status `waiting`) and ends the run without failing the workflow.
+ * Handlers must not swallow it.
+ */
+export class WorkflowInterruptedError extends WorkflowError {
+  readonly interrupts: ReadonlyArray<{
+    stepId: string;
+    interrupt: WorkflowStepInterrupt;
+  }>;
+
+  constructor(
+    interrupts: ReadonlyArray<{
+      stepId: string;
+      interrupt: WorkflowStepInterrupt;
+    }>,
+  ) {
+    super(
+      "WORKFLOW_STEP_INTERRUPTED",
+      `Workflow is waiting for input on step: ${interrupts
+        .map((entry) => entry.stepId)
+        .join(", ")}`,
+      { stepIds: interrupts.map((entry) => entry.stepId) },
+    );
+    this.name = "WorkflowInterruptedError";
+    this.interrupts = interrupts;
   }
 }

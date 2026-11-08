@@ -29,7 +29,12 @@ export async function* streamWorkflowRuntime(
   createRuntime: (handles: WorkflowRuntimeStreamHandles) => {
     execute(): Promise<unknown>;
   },
+  active?: ActiveExecutions,
 ): AsyncGenerator<Event, void, void> {
+  // ADK retries a timed-out node without waiting for the previous run to wind
+  // down. Wait for it here so the new run sees the failure that run records
+  // instead of a step still marked `running`, and never writes concurrently.
+  await active?.settled();
   const queue = new AsyncQueue<Event>();
   const abort = new AbortController();
   let execution: Promise<unknown> | undefined;
@@ -40,6 +45,7 @@ export async function* streamWorkflowRuntime(
       signal: abort.signal,
     });
     execution = runtime.execute();
+    active?.track(execution);
     void execution.then(
       () => {
         settled = true;
@@ -61,5 +67,28 @@ export async function* streamWorkflowRuntime(
       );
     }
     await execution?.catch(() => undefined);
+  }
+}
+
+/**
+ * Executions of one agent instance that have not settled yet, so a re-entry
+ * (ADK node retry with the same invocation id) can wait for the previous one.
+ */
+export class ActiveExecutions {
+  readonly #running = new Set<Promise<unknown>>();
+
+  track(execution: Promise<unknown>): void {
+    const settled = execution.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.#running.add(settled);
+    void settled.then(() => this.#running.delete(settled));
+  }
+
+  async settled(): Promise<void> {
+    while (this.#running.size > 0) {
+      await Promise.all([...this.#running]);
+    }
   }
 }

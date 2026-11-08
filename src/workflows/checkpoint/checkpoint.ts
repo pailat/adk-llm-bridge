@@ -9,6 +9,7 @@ import type {
   WorkflowSerializedError,
   WorkflowStep,
   WorkflowStepFailure,
+  WorkflowStepInterrupt,
   WorkflowStepResult,
 } from "../contracts.js";
 import { WorkflowError } from "../contracts.js";
@@ -104,12 +105,15 @@ export function validateWorkflowCheckpoint(
 
 export type WorkflowStepResolution =
   | { action: "execute"; attempt: number }
-  | { action: "replay"; result: WorkflowStepResult };
+  | { action: "replay"; result: WorkflowStepResult }
+  /** The step is waiting for input; continue it with the answer. */
+  | { action: "resume"; attempt: number; interrupt: WorkflowStepInterrupt };
 
 export function resolveWorkflowStep(
   checkpoint: WorkflowCheckpointV1,
   step: WorkflowStep,
   inputHash: string,
+  options: { retryFailed?: boolean } = {},
 ): WorkflowStepResolution {
   const saved = checkpoint.steps[step.id];
   if (!saved) {
@@ -147,7 +151,20 @@ export function resolveWorkflowStep(
       result: { ...saved.result, replayed: true },
     };
   }
+  if (saved.status === "waiting" && saved.interrupt) {
+    return {
+      action: "resume",
+      attempt: saved.attempts,
+      interrupt: saved.interrupt,
+    };
+  }
   if (step.resumePolicy === "retry") {
+    return { action: "execute", attempt: saved.attempts + 1 };
+  }
+  if (saved.status === "failed" && options.retryFailed === true) {
+    // The previous attempt ended with a recorded failure, so re-running it is
+    // what the host asked for by enabling retries; `running` steps stay
+    // indeterminate because their outcome is unknown.
     return { action: "execute", attempt: saved.attempts + 1 };
   }
   if (saved.status === "running") {
@@ -188,6 +205,39 @@ export function withWorkflowStepRunning(
   });
 }
 
+/**
+ * Marks a step as waiting for input. The original workflow input is kept on the
+ * checkpoint until the workflow ends, because the turn that answers the step
+ * carries the answer, not the input the checkpoint was created for.
+ */
+export function withWorkflowStepWaiting(
+  checkpoint: WorkflowCheckpointV1,
+  step: WorkflowStep,
+  inputHash: string,
+  attempt: number,
+  interrupt: WorkflowStepInterrupt,
+  workflowInput: Content,
+  now = Date.now(),
+): WorkflowCheckpointV1 {
+  const previous = checkpoint.steps[step.id];
+  const updated = updateCheckpoint(checkpoint, now, {
+    [step.id]: {
+      id: step.id,
+      agentName: step.agentName,
+      ...(step.agentRevision === undefined
+        ? {}
+        : { agentRevision: step.agentRevision }),
+      inputHash,
+      status: "waiting",
+      attempts: attempt,
+      startedAt: previous?.startedAt ?? now,
+      updatedAt: now,
+      interrupt,
+    },
+  });
+  return { ...updated, input: workflowInput };
+}
+
 export function withWorkflowStepCompleted(
   checkpoint: WorkflowCheckpointV1,
   result: WorkflowStepResult,
@@ -202,6 +252,7 @@ export function withWorkflowStepCompleted(
       attempts: result.attempts,
       result: durableResult,
       error: undefined,
+      interrupt: undefined,
       updatedAt: now,
       completedAt: now,
     },
@@ -221,6 +272,7 @@ export function withWorkflowStepFailed(
       attempts: failure.attempts,
       result: undefined,
       error: failure.error,
+      interrupt: undefined,
       updatedAt: now,
       completedAt: now,
     },
@@ -236,6 +288,7 @@ export function withWorkflowCompleted(
     ...checkpoint,
     status: "completed",
     output,
+    input: undefined,
     error: undefined,
     updatedAt: now,
     completedAt: now,
@@ -252,6 +305,7 @@ export function withWorkflowFailed(
     ...checkpoint,
     status,
     output: undefined,
+    input: undefined,
     error,
     updatedAt: now,
     completedAt: now,

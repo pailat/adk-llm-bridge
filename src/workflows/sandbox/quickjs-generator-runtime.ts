@@ -182,11 +182,23 @@ class QuickJSSyncGeneratorSession implements WorkflowScriptGeneratorSession {
     this.#deadline = Date.now() + this.#limits.cpuTimeMs;
     const argument = context.newString(serialized);
     try {
-      const result = context.callFunction(
-        nextFunction,
-        context.undefined,
-        argument,
-      );
+      let result: ReturnType<QuickJSContext["callFunction"]>;
+      try {
+        result = context.callFunction(
+          nextFunction,
+          context.undefined,
+          argument,
+        );
+      } catch (error) {
+        // Unbounded guest recursion can surface as a host RangeError.
+        if (error instanceof RangeError) {
+          throw new WorkflowError(
+            "WORKFLOW_LIMIT_EXCEEDED",
+            `QuickJS execution limit exceeded: ${error.message}`,
+          );
+        }
+        throw error;
+      }
       if (result.error) {
         const message = guestError(context, result.error);
         result.error.dispose();
@@ -238,8 +250,18 @@ class QuickJSSyncGeneratorSession implements WorkflowScriptGeneratorSession {
     this.#nextFunction = undefined;
     this.#context.dispose();
     this.#context = undefined;
-    this.#runtime.dispose();
+    const runtime = this.#runtime;
     this.#runtime = undefined;
+    try {
+      runtime.dispose();
+    } catch (error) {
+      // QuickJS asserts (wasm `Aborted(...)`) when a guest that overflowed the
+      // stack leaves unreachable objects behind. The execution limit error
+      // that caused the disposal must stay the visible failure, so contain it.
+      if (!/^Aborted\(/u.test(error instanceof Error ? error.message : "")) {
+        throw error;
+      }
+    }
     this.#onDispose?.();
   }
 }

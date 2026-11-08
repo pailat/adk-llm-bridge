@@ -298,4 +298,135 @@ describe("ADK Workflow interop", () => {
     );
     expect(keys).toHaveLength(2);
   });
+
+  describe("node retryConfig", () => {
+    class FlakyAgent extends BaseAgent {
+      calls = 0;
+      readonly #plan: Array<"fail" | "slow" | "ok">;
+
+      constructor(name: string, plan: Array<"fail" | "slow" | "ok">) {
+        super({ name });
+        this.#plan = plan;
+      }
+
+      protected async *runAsyncImpl(context: InvocationContext) {
+        const mode = this.#plan[Math.min(this.calls, this.#plan.length - 1)];
+        this.calls += 1;
+        if (mode === "fail") throw new Error("transient");
+        if (mode === "slow") {
+          await new Promise<void>((resolve) => {
+            // Blocks until the node timeout aborts it; the long fallback never fires.
+            const timer = setTimeout(resolve, 10_000);
+            context.abortSignal?.addEventListener(
+              "abort",
+              () => {
+                clearTimeout(timer);
+                resolve();
+              },
+              { once: true },
+            );
+          });
+        }
+        yield createEvent({
+          invocationId: context.invocationId,
+          author: this.name,
+          content: { role: "model", parts: [{ text: `${this.name}:ok` }] },
+        });
+      }
+
+      protected async *runLiveImpl() {}
+    }
+
+    function twoStepWorkflow(
+      first: BaseAgent,
+      second: BaseAgent,
+      options: Record<string, unknown>,
+    ) {
+      return new WorkflowAgent({
+        name: "durable",
+        subAgents: [first, second],
+        definition: defineWorkflow({
+          id: "retry",
+          version: "1",
+          handler: async (ctx) => {
+            const a = await ctx.run({
+              id: "first",
+              agentName: first.name,
+              input: ctx.inputText,
+            });
+            const b = await ctx.run({
+              id: "second",
+              agentName: second.name,
+              input: ctx.inputText,
+            });
+            return `${a.output}|${b.output}`;
+          },
+        }),
+        ...options,
+      });
+    }
+
+    const retryConfig = {
+      maxAttempts: 2,
+      initialDelay: 0.01,
+      jitter: 0,
+    };
+
+    test("an ADK retry replays finished steps and re-runs the failed one", async () => {
+      const first = new FlakyAgent("first", ["ok"]);
+      const second = new FlakyAgent("second", ["fail", "ok"]);
+      const graph = new Workflow({
+        name: "retry",
+        edges: [["START", twoStepWorkflow(first, second, { retryConfig })]],
+      });
+
+      const { events, error } = await run(graph);
+
+      expect(error).toBeUndefined();
+      expect(first.calls).toBe(1);
+      expect(second.calls).toBe(2);
+      expect(events.some((e) => e.output === "first:ok|second:ok")).toBe(true);
+    });
+
+    test("without retryConfig a re-entered failed step is not re-run", async () => {
+      const first = new FlakyAgent("first", ["ok"]);
+      const second = new FlakyAgent("second", ["fail", "ok"]);
+      const durable = twoStepWorkflow(first, second, {});
+      const graph = new Workflow({
+        name: "noretry",
+        edges: [["START", durable]],
+      });
+
+      const { events, error } = await run(graph);
+
+      const failed =
+        error !== undefined ||
+        events.some((e) => (e as { isNodeError?: boolean }).isNodeError);
+      expect(failed).toBe(true);
+      expect(second.calls).toBe(1);
+    });
+
+    test("a node timeout records the step as failed and the retry completes", async () => {
+      const first = new FlakyAgent("first", ["ok"]);
+      const second = new FlakyAgent("second", ["slow", "ok"]);
+      const graph = new Workflow({
+        name: "timeout-retry",
+        edges: [
+          [
+            "START",
+            // The timeout applies to each attempt, so it must leave room for a
+            // full replay attempt on a loaded machine.
+            twoStepWorkflow(first, second, { retryConfig, timeout: 0.6 }),
+          ],
+        ],
+      });
+
+      const { events, error } = await run(graph);
+
+      expect(error).toBeUndefined();
+      expect(first.calls).toBe(1);
+      expect(second.calls).toBe(2);
+      expect(events.some((e) => e.output === "first:ok|second:ok")).toBe(true);
+    });
+  });
 });

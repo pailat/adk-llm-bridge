@@ -17,6 +17,7 @@ import {
   withWorkflowStepCompleted,
   withWorkflowStepFailed,
   withWorkflowStepRunning,
+  withWorkflowStepWaiting,
 } from "../checkpoint/checkpoint.js";
 import { hashWorkflowInput } from "../checkpoint/hash.js";
 import {
@@ -34,6 +35,7 @@ import type {
   WorkflowSerializedError,
   WorkflowStep,
   WorkflowStepFailure,
+  WorkflowStepInterrupt,
   WorkflowStepResult,
 } from "../contracts.js";
 import { WorkflowError } from "../contracts.js";
@@ -45,6 +47,8 @@ export interface WorkflowCheckpointCoordinatorConfig {
   input: Content;
   context: InvocationContext;
   store: WorkflowCheckpointStore;
+  /** Re-execute steps whose last attempt failed when the run is re-entered. */
+  retryFailedSteps?: boolean;
   onWrite: (
     write: WorkflowCheckpointWrite,
     stepId?: string,
@@ -104,11 +108,31 @@ export class WorkflowCheckpointCoordinator {
     });
   }
 
+  /** Original input stored with a waiting checkpoint, when there is one. */
+  static async savedInput(
+    store: WorkflowCheckpointStore,
+    context: InvocationContext,
+    workflowId: string,
+    executionId: string,
+    answeredIds: ReadonlySet<string>,
+  ): Promise<Content | undefined> {
+    const saved = await store.load({ context, workflowId, executionId });
+    if (!saved || !isWorkflowCheckpointV1(saved)) return undefined;
+    const answered = Object.values(saved.steps).some(
+      (step) =>
+        step.status === "waiting" &&
+        step.interrupt?.functionCallIds.some((id) => answeredIds.has(id)),
+    );
+    return answered ? saved.input : undefined;
+  }
+
   async prepareStep(step: WorkflowStep): Promise<PreparedWorkflowStep> {
     const inputHash = await hashWorkflowInput(step.input);
     return this.#exclusive(async () => {
       const checkpoint = this.checkpoint();
-      const resolution = resolveWorkflowStep(checkpoint, step, inputHash);
+      const resolution = resolveWorkflowStep(checkpoint, step, inputHash, {
+        retryFailed: this.#config.retryFailedSteps,
+      });
       if (resolution.action === "execute") {
         const candidate = withWorkflowStepRunning(
           checkpoint,
@@ -142,6 +166,26 @@ export class WorkflowCheckpointCoordinator {
     await this.#exclusive(async () => {
       const candidate = withWorkflowStepCompleted(this.checkpoint(), result);
       await this.#persist(candidate, result.id);
+    });
+  }
+
+  /** Persists the step as waiting for input, keeping the workflow input. */
+  async waitStep(
+    step: WorkflowStep,
+    inputHash: string,
+    attempt: number,
+    interrupt: WorkflowStepInterrupt,
+  ): Promise<void> {
+    await this.#exclusive(async () => {
+      const candidate = withWorkflowStepWaiting(
+        this.checkpoint(),
+        step,
+        inputHash,
+        attempt,
+        interrupt,
+        this.#config.input,
+      );
+      await this.#persist(candidate, step.id);
     });
   }
 

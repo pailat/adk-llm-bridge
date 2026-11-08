@@ -301,12 +301,17 @@ describe("WorkflowAgent", () => {
   test("aborts the runtime when the consumer closes the event stream", async () => {
     let aborted = false;
     let reachedSecondStep = false;
+    let markStarted: () => void = () => {};
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
     class SlowAgent extends BaseAgent {
       constructor() {
         super({ name: "slow" });
       }
 
       protected async *runAsyncImpl(context: InvocationContext) {
+        markStarted();
         await new Promise<void>((resolve) => {
           const timer = setTimeout(resolve, 2_000);
           context.abortSignal?.addEventListener(
@@ -348,11 +353,11 @@ describe("WorkflowAgent", () => {
       [Symbol.asyncIterator]();
     // First events are lifecycle/checkpoint ones; step one is still running.
     await iterator.next();
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    const started = Date.now();
+    await started;
+    const closedAt = Date.now();
     await iterator.return?.();
 
-    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(Date.now() - closedAt).toBeLessThan(1_000);
     expect(aborted).toBe(true);
     expect(reachedSecondStep).toBe(false);
   });

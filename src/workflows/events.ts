@@ -45,6 +45,17 @@ export interface WorkflowStepReplayedEvent extends WorkflowEventBase {
   result: WorkflowStepResult;
 }
 
+/** A step's sub-agent stopped waiting for input (HITL); answer to resume. */
+export interface WorkflowStepWaitingEvent extends WorkflowEventBase {
+  type: "step_waiting";
+  stepId: string;
+  agentName: string;
+  attempt: number;
+  kind: "input" | "credential" | "confirmation" | "long-running";
+  /** Function-call ids to answer with `functionResponse` parts. */
+  functionCallIds: readonly string[];
+}
+
 export interface WorkflowCheckpointSavedEvent extends WorkflowEventBase {
   type: "checkpoint_saved";
   checkpointKey: string;
@@ -67,6 +78,13 @@ export interface WorkflowCompletedEvent extends WorkflowEventBase {
   summary: WorkflowExecutionSummary;
 }
 
+/** The run ended because one or more steps wait for input; it is resumable. */
+export interface WorkflowWaitingEvent extends WorkflowEventBase {
+  type: "workflow_waiting";
+  summary: WorkflowExecutionSummary;
+  stepIds: readonly string[];
+}
+
 export interface WorkflowCustomEvent extends WorkflowEventBase {
   type: "custom";
   name: string;
@@ -87,10 +105,12 @@ export type WorkflowEvent =
   | WorkflowStepCompletedEvent
   | WorkflowStepFailedEvent
   | WorkflowStepReplayedEvent
+  | WorkflowStepWaitingEvent
   | WorkflowCheckpointSavedEvent
   | WorkflowOutputEvent
   | WorkflowErrorEvent
   | WorkflowCompletedEvent
+  | WorkflowWaitingEvent
   | WorkflowCustomEvent;
 
 const WORKFLOW_EVENT_TYPES = new Set<WorkflowEvent["type"]>([
@@ -99,10 +119,12 @@ const WORKFLOW_EVENT_TYPES = new Set<WorkflowEvent["type"]>([
   "step_completed",
   "step_failed",
   "step_replayed",
+  "step_waiting",
   "checkpoint_saved",
   "output",
   "error",
   "workflow_completed",
+  "workflow_waiting",
   "custom",
 ]);
 

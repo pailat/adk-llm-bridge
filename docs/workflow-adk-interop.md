@@ -62,8 +62,8 @@ What you get:
   final text is parsed as JSON (kept as text if it is not valid JSON), like an
   ADK `LlmAgent`, so the handler should return JSON text; a `Content` without
   text skips schema validation.
-- `timeout`, `inputSchema`, `outputSchema`, `stateSchema` and `isolationScope`
-  in the agent config are forwarded to ADK. They only apply when the agent runs
+- `timeout`, `retryConfig`, `rerunOnResume`, `inputSchema`, `outputSchema`,
+  `stateSchema` and `isolationScope` in the agent config are forwarded to ADK. They only apply when the agent runs
   as a node, not as the Runner's root agent.
 - Inside a `Workflow`, ADK aborts the node's invocation signal when the graph
   fails or a node `timeout` expires. When the consumer closes the event stream
@@ -80,13 +80,64 @@ Things to know:
   workflows read the user message from the session (`ctx.input` /
   `ctx.inputText`); the `input` passed to `ctx.runNode(agent, input)` is not
   used.
-- The default execution id is the ADK invocation id. The TypeScript Runner
-  creates a new invocation id for every turn, so a node resumed in a later turn
-  would start a new execution and find no checkpoint. Provide a stable
-  `resolveExecutionId` (for example from the session id and node name) when the
-  workflow must resume across turns.
+- The default execution id is the ADK invocation id, except on a turn that
+  answers a waiting step (see below), which reuses the id of the run that
+  raised it. The TypeScript Runner creates a new invocation id for every turn,
+  so any other workflow that must resume across turns needs a stable
+  `resolveExecutionId` (for example from the session id and node name).
 - Running the same workflow agent several times in one invocation (several
   `ctx.runNode` calls) shares the invocation id. Use `useSubBranch: true` with
   distinct `runId`s and include `ctx.branch` in `resolveExecutionId` so each run
   has its own checkpoint.
-- Steps that end in an ADK interrupt (human input) are not propagated yet.
+
+## Retries and timeouts of a node
+
+ADK retries a node (`retryConfig`) or stops it (`timeout`) by re-entering or
+closing the agent with the same invocation id, so the same execution id and
+checkpoint are used:
+
+- A closed run aborts its steps and waits for them to settle. A step that was
+  mid-flight is recorded as `failed` (never left `running`), and a re-entry
+  waits for the previous run of the same agent instance to finish first.
+- On re-entry finished steps replay from the checkpoint. Steps whose last
+  attempt failed run again as the next attempt when `retryFailedSteps` is on.
+  It defaults to `true` when `retryConfig` is set and to `false` otherwise (a
+  failed step then requires `resumePolicy: "retry"`, as before).
+- A step recorded `running` by a crash is still `WORKFLOW_INDETERMINATE_STEP`;
+  only recorded failures are retried automatically.
+- The node `timeout` and ADK's retry delay apply per attempt, so leave room for
+  replaying the finished steps.
+
+## Steps that wait for input (HITL)
+
+When a sub-agent stops on an ADK interrupt (`adk_request_input`,
+`adk_request_confirmation`, `adk_request_credential`, or a long-running tool
+call), the workflow does not fail:
+
+1. The step is saved as `waiting` in the checkpoint, together with the
+   interrupt (kind, function-call ids, the delegation events) and the original
+   workflow input. Other steps of a `ctx.parallel` call run to completion.
+2. The run ends cleanly with `step_waiting` and `workflow_waiting` events
+   (`summary.status` is `"waiting"`). The sub-agent's own events, which carry
+   `longRunningToolIds`, were already forwarded, so an ADK Runner or UI can
+   show and answer the request, and an ADK `Workflow` marks the node as waiting.
+3. The next turn answers with `functionResponse` parts whose ids match. The
+   workflow restores its original input, replays finished steps and continues
+   the waiting step with the answer; it may complete, fail or wait again. A
+   turn without a matching answer keeps waiting without running the agent, and
+   a response that answers nothing is rejected with `WORKFLOW_INPUT_MISMATCH`.
+
+The default execution id finds the waiting run from the `step_waiting` event in
+the session, so no custom `resolveExecutionId` is needed. `rerunOnResume` is
+`true` by default for workflow agents so ADK re-enters them on resume.
+`ctx.run` rejects with `WorkflowInterruptedError`: handlers must not catch it.
+The resumed delegation is not retried automatically. Checkpoints with `waiting`
+steps are not readable by earlier versions.
+
+## Future work
+
+Rebuilding the durable runtime on ADK's `Workflow` was considered and dropped:
+it is `@experimental`, resumes without checking the input or agent revision,
+and has no checkpoint stores, leases or sandbox. A possible follow-up is an
+optional adapter, in its own experimental subpath, that exposes a durable step
+as an ADK `BaseNode`.

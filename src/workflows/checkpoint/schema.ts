@@ -7,6 +7,7 @@
 import type { Content } from "@google/genai";
 import type {
   WorkflowSerializedError,
+  WorkflowStepInterrupt,
   WorkflowStepResult,
 } from "../contracts.js";
 import { MAX_WORKFLOW_AGENT_REVISION_LENGTH } from "../contracts.js";
@@ -19,7 +20,11 @@ export type WorkflowCheckpointStatus =
   | "failed"
   | "cancelled";
 
-export type WorkflowCheckpointStepStatus = "running" | "completed" | "failed";
+export type WorkflowCheckpointStepStatus =
+  | "running"
+  | "waiting"
+  | "completed"
+  | "failed";
 
 export interface WorkflowCheckpointStepV1 {
   id: string;
@@ -33,6 +38,8 @@ export interface WorkflowCheckpointStepV1 {
   completedAt?: number;
   result?: WorkflowStepResult;
   error?: WorkflowSerializedError;
+  /** Present only while `status` is `waiting`. */
+  interrupt?: WorkflowStepInterrupt;
 }
 
 /** Durable representation written to ADK session state. */
@@ -42,6 +49,11 @@ export interface WorkflowCheckpointV1 {
   workflowVersion: string;
   executionId: string;
   inputHash: string;
+  /**
+   * Original workflow input, kept only while a step is `waiting` so the turn
+   * that answers it (whose user message is the answer) can restore it.
+   */
+  input?: Content;
   /** Present for script workflows; trusted handlers are versioned explicitly. */
   sourceHash?: string;
   status: WorkflowCheckpointStatus;
@@ -86,6 +98,7 @@ function isWorkflowCheckpointV1Value(
       value.completedAt < value.startedAt) ||
     !isPlainRecord(value.steps) ||
     !isWorkflowOutput(value.output) ||
+    !isWorkflowContent(value.input) ||
     (value.error !== undefined && !isSerializedError(value.error))
   ) {
     return false;
@@ -158,6 +171,7 @@ function isStep(
       isBoundedRevision(value.agentRevision)) &&
     isNonEmptyString(value.inputHash) &&
     (value.status === "running" ||
+      value.status === "waiting" ||
       value.status === "completed" ||
       value.status === "failed") &&
     Number.isSafeInteger(value.attempts) &&
@@ -171,7 +185,23 @@ function isStep(
       value.status === "running" &&
       (value.result !== undefined ||
         value.error !== undefined ||
-        value.completedAt !== undefined)
+        value.completedAt !== undefined ||
+        value.interrupt !== undefined)
+    ) {
+      return false;
+    }
+    if (
+      value.status === "waiting" &&
+      (value.result !== undefined ||
+        value.error !== undefined ||
+        value.completedAt !== undefined ||
+        !isStepInterrupt(value.interrupt))
+    ) {
+      return false;
+    }
+    if (
+      (value.status === "completed" || value.status === "failed") &&
+      value.interrupt !== undefined
     ) {
       return false;
     }
@@ -194,6 +224,25 @@ function isStep(
     return true;
   }
   return false;
+}
+
+function isStepInterrupt(value: unknown): value is WorkflowStepInterrupt {
+  return (
+    isPlainRecord(value) &&
+    !hasAccessorProperty(value) &&
+    (value.kind === "input" ||
+      value.kind === "credential" ||
+      value.kind === "confirmation" ||
+      value.kind === "long-running") &&
+    Array.isArray(value.functionCallIds) &&
+    value.functionCallIds.length > 0 &&
+    value.functionCallIds.every(isNonEmptyString) &&
+    Array.isArray(value.requests) &&
+    value.requests.every(isPlainRecord) &&
+    Array.isArray(value.events) &&
+    value.events.every(isPlainRecord) &&
+    isJsonSafe(value, new Set(), true)
+  );
 }
 
 function isBoundedRevision(value: unknown): value is string {
@@ -255,6 +304,7 @@ function isWorkflowErrorCode(value: unknown): boolean {
     value === "WORKFLOW_SANDBOX_UNAVAILABLE" ||
     value === "WORKFLOW_SCRIPT_INVALID" ||
     value === "WORKFLOW_SOURCE_MISMATCH" ||
+    value === "WORKFLOW_STEP_INTERRUPTED" ||
     value === "WORKFLOW_STEP_MISMATCH" ||
     value === "WORKFLOW_UNKNOWN_AGENT" ||
     value === "WORKFLOW_VERSION_MISMATCH" ||

@@ -4,7 +4,12 @@
  * SPDX-License-Identifier: MIT
  */
 
-import { BaseAgent, type Event, type InvocationContext } from "@google/adk";
+import {
+  BaseAgent,
+  type Event,
+  type InvocationContext,
+  type NodeContext,
+} from "@google/adk";
 import { AgentInvocationGateway } from "../runtime/agent-invocation-gateway.js";
 import type {
   WorkflowAgentDescriptor,
@@ -26,10 +31,15 @@ import type { WorkflowEvent } from "./events.js";
 import { isWorkflowEvent } from "./events.js";
 import { attachCause } from "./internal/error-support.js";
 import {
+  invocationContextForNode,
   pickWorkflowNodeConfig,
+  resolveRetryFailedSteps,
   type WorkflowNodeConfig,
 } from "./node-config.js";
-import { streamWorkflowRuntime } from "./runtime/stream-runtime.js";
+import {
+  ActiveExecutions,
+  streamWorkflowRuntime,
+} from "./runtime/stream-runtime.js";
 import {
   type WorkflowExecutionIdResolver,
   WorkflowRuntime,
@@ -78,6 +88,8 @@ export class ScriptWorkflowAgent extends BaseAgent {
       ) => WorkflowAgentFactory | Promise<WorkflowAgentFactory>)
     | undefined;
   readonly #checkpointStore: WorkflowCheckpointStore | undefined;
+  readonly #retryFailedSteps: boolean;
+  readonly #activeExecutions = new ActiveExecutions();
   readonly #resolveExecutionId: WorkflowExecutionIdResolver | undefined;
   readonly #runtimeHooks: WorkflowRuntimeHooks | undefined;
   readonly #workspace: WorkflowWorkspaceConfig | undefined;
@@ -98,6 +110,7 @@ export class ScriptWorkflowAgent extends BaseAgent {
     this.definition = config.definition;
     this.#checkpointStore = config.checkpointStore;
     this.#resolveExecutionId = config.resolveExecutionId;
+    this.#retryFailedSteps = resolveRetryFailedSteps(config);
     this.#runtimeHooks = config.runtimeHooks;
     this.#workspace = config.workspace;
     this.#limits = mergeLimits(config.definition.limits, config.limits);
@@ -154,11 +167,20 @@ export class ScriptWorkflowAgent extends BaseAgent {
             workspace: this.#workspace,
             abortSignal: signal,
             structuredOutput: this.outputSchema !== undefined,
+            retryFailedSteps: this.#retryFailedSteps,
           }),
+        this.#activeExecutions,
       );
     } finally {
       await dynamicAgents?.releaseAll();
     }
+  }
+
+  protected override async *runImpl(
+    ctx: NodeContext,
+    _nodeInput: unknown,
+  ): AsyncGenerator<Event, void, void> {
+    yield* this.runAsync(invocationContextForNode(ctx));
   }
 
   protected async *runLiveImpl(

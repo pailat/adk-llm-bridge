@@ -5,7 +5,6 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { BaseAgent } from "@google/adk";
 import packageJson from "../../package.json";
 import * as root from "../../src/index.js";
 import type {
@@ -26,8 +25,10 @@ describe("workflows public exports", () => {
   });
 
   test("./workflows exposes the first-class workflow surface", () => {
-    expect(workflows.BaseAgent).toBe(BaseAgent);
+    // ADK primitives are imported from "@google/adk", not re-exported here.
+    expect("BaseAgent" in workflows).toBe(false);
     expect(workflows.WorkflowAgent).toBeFunction();
+    expect(workflows.WorkflowInterruptedError).toBeFunction();
     expect(workflows.ScriptWorkflowAgent).toBeFunction();
     expect(workflows.defineWorkflow).toBeFunction();
     expect(workflows.defineScriptWorkflow).toBeFunction();

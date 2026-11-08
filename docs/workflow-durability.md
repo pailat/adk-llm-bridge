@@ -41,6 +41,16 @@ New writes remove runtime-only step events and replay markers before hashing or
 persistence. Both bundled checkpoint stores reject malformed durable graphs
 and enforce a configurable 4 MiB UTF-8 JSON limit by default.
 
+## Waiting steps
+
+A step whose sub-agent asks for input is stored with `status: "waiting"` and an
+`interrupt` (kind, function-call ids, requests and the delegation events, all
+JSON). The checkpoint also keeps the original workflow `input` until the
+workflow ends, because the turn that answers the step carries only the answer.
+Both fields are optional, so existing checkpoints load unchanged; a checkpoint
+that contains a waiting step cannot be read by earlier versions. Interrupt
+events count toward the checkpoint size limit.
+
 ## Workspace leases and fencing
 
 `FileSystemWorkspaceAdapter` assigns every acquired lease a monotonic

@@ -159,4 +159,31 @@ describe("QuickJSSyncGeneratorRuntime limits", () => {
     expect(session.disposed).toBe(true);
     expect(() => session.next()).toThrow("disposed");
   });
+
+  test("reports unbounded recursion as a limit error and survives disposal", async () => {
+    const runtime = new QuickJSSyncGeneratorRuntime({ loader: releaseLoader });
+    const session = await runtime.createSession({
+      source: "function f() { return f() + 1; } return f();",
+      limits: { cpuTimeMs: 300 },
+    });
+    let caught: unknown;
+    try {
+      session.next();
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(WorkflowError);
+    expect(caught).toMatchObject({ code: "WORKFLOW_LIMIT_EXCEEDED" });
+    // The wasm assertion raised while freeing the overflowed runtime must not
+    // replace the limit error nor escape from dispose().
+    expect(() => session.dispose()).not.toThrow();
+    expect(session.disposed).toBe(true);
+
+    const next = await runtime.createSession({ source: "return 'alive';" });
+    try {
+      expect(next.next()).toEqual({ done: true, value: "alive" });
+    } finally {
+      next.dispose();
+    }
+  });
 });

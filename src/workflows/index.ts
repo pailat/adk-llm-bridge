@@ -4,8 +4,6 @@
  * SPDX-License-Identifier: MIT
  */
 
-export { BaseAgent } from "@google/adk";
-
 export * from "../runtime/agent-invocation-gateway.js";
 
 export * from "./agents/index.js";

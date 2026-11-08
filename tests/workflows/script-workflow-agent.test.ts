@@ -453,6 +453,30 @@ describe("ScriptWorkflowAgent", () => {
     expect(workflow.timeout).toBe(4);
   });
 
+  test("reports unbounded script recursion as a limit error and keeps working", async () => {
+    const agentFor = (source: string) =>
+      new ScriptWorkflowAgent({
+        name: "recursive_script",
+        definition: defineScriptWorkflow({
+          id: "recursion",
+          version: "1",
+          source,
+          limits: { cpuTimeMs: 300, timeoutMs: 8_000 },
+        }),
+      });
+
+    // Uses the real QuickJS runtime: the wasm assertion raised while freeing an
+    // overflowed runtime used to replace the limit error.
+    await expect(
+      collect(agentFor("function f() { return f() + 1; } return f();")),
+    ).rejects.toMatchObject({ code: "WORKFLOW_LIMIT_EXCEEDED" });
+
+    const events = await collect(agentFor('return "still alive";'));
+    expect(
+      events.some((event) => event.content?.parts?.[0]?.text === "still alive"),
+    ).toBe(true);
+  });
+
   test("propagates workspace coordination to script steps", async () => {
     const workspace = new InMemoryWorkspaceAdapter();
     const worker = new ReplyAgent("worker", ["implemented"]);

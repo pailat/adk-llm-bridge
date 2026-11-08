@@ -21,7 +21,10 @@ import type {
   WorkflowCheckpointStore,
   WorkflowCheckpointWrite,
 } from "../checkpoint/store.js";
-import { ADKSessionCheckpointStore } from "../checkpoint/store.js";
+import {
+  ADKSessionCheckpointStore,
+  WORKFLOW_CHECKPOINT_STATE_PREFIX,
+} from "../checkpoint/store.js";
 import {
   DEFAULT_WORKFLOW_EXECUTION_LIMITS,
   MAX_WORKFLOW_AGENT_REVISION_LENGTH,
@@ -33,10 +36,12 @@ import {
   WorkflowError,
   type WorkflowExecutionLimits,
   type WorkflowExecutionSummary,
+  WorkflowInterruptedError,
   type WorkflowOutput,
   type WorkflowParallelOptions,
   type WorkflowStep,
   type WorkflowStepFailure,
+  type WorkflowStepInterrupt,
   type WorkflowStepOutcome,
   type WorkflowStepResult,
 } from "../contracts.js";
@@ -56,8 +61,12 @@ import type {
   WorkflowStepFailedEvent,
   WorkflowStepReplayedEvent,
   WorkflowStepStartedEvent,
+  WorkflowStepWaitingEvent,
   WorkflowUserEvent,
+  WorkflowWaitingEvent,
 } from "../events.js";
+import { isWorkflowEvent } from "../events.js";
+import { withStepSpan, withWorkflowSpan } from "../telemetry.js";
 import type {
   WorkflowWorkspaceConfig,
   WorkspaceLease,
@@ -137,6 +146,12 @@ export interface WorkflowRuntimeConfig {
    * valid JSON.
    */
   structuredOutput?: boolean;
+  /**
+   * Re-execute steps whose last recorded attempt failed when the same execution
+   * is entered again (an ADK node retry with the same invocation id). Steps left
+   * `running` stay indeterminate unless they declare `resumePolicy: "retry"`.
+   */
+  retryFailedSteps?: boolean;
 }
 
 /** Executes one trusted workflow definition inside an ADK invocation. */
@@ -154,12 +169,15 @@ export class WorkflowRuntime {
   readonly #workspace?: WorkflowWorkspaceConfig;
   readonly #abortSignal?: AbortSignal;
   readonly #structuredOutput: boolean;
+  readonly #retryFailedSteps: boolean;
   readonly #limits: Required<WorkflowExecutionLimits>;
   readonly #globalSemaphore: AsyncSemaphore;
   readonly #agentSemaphores = new WeakMap<BaseAgent, AsyncSemaphore>();
   readonly #seenStepIds = new Set<string>();
   #executionSignal?: AbortSignal;
   #executionId?: string;
+  /** Original input restored from a waiting checkpoint (answer turn). */
+  #inputOverride?: Content;
   #checkpointCoordinator?: WorkflowCheckpointCoordinator;
   #stepCount = 0;
   #replayedStepCount = 0;
@@ -177,15 +195,27 @@ export class WorkflowRuntime {
     this.#checkpointStore =
       config.checkpointStore ?? new ADKSessionCheckpointStore();
     this.#resolveExecutionId =
-      config.resolveExecutionId ?? ((context) => context.invocationId);
+      config.resolveExecutionId ??
+      ((context) => waitingExecutionId(context, this.#checkpointDefinition.id));
     this.#workspace = config.workspace;
     this.#abortSignal = config.abortSignal;
     this.#structuredOutput = config.structuredOutput === true;
+    this.#retryFailedSteps = config.retryFailedSteps === true;
     this.#limits = validateLimits(config.definition.limits);
     this.#globalSemaphore = new AsyncSemaphore(this.#limits.maxConcurrency);
   }
 
-  async execute(): Promise<WorkflowExecutionSummary> {
+  execute(): Promise<WorkflowExecutionSummary> {
+    return withWorkflowSpan(
+      {
+        workflowName: this.#agentName,
+        sessionId: this.#parentContext.session?.id,
+      },
+      () => this.executeWorkflow(),
+    );
+  }
+
+  private async executeWorkflow(): Promise<WorkflowExecutionSummary> {
     const startedAt = Date.now();
     const abortScope = createExecutionAbortScope(
       [this.#parentContext.abortSignal, this.#abortSignal],
@@ -198,12 +228,14 @@ export class WorkflowRuntime {
       throwIfAborted(abortScope.signal);
       this.#executionId = await this.#resolveExecutionId(this.#parentContext);
       validateExecutionId(this.#executionId);
+      this.#inputOverride = await this.restoreWaitingInput();
       this.#checkpointCoordinator = new WorkflowCheckpointCoordinator({
         definition: this.#checkpointDefinition,
         executionId: this.#executionId,
         input: this.workflowInput(),
         context: this.#parentContext,
         store: this.#checkpointStore,
+        retryFailedSteps: this.#retryFailedSteps,
         onWrite: (write, stepId) => this.emitCheckpointSaved(write, stepId),
       });
       await this.#checkpointCoordinator.initialize();
@@ -225,6 +257,18 @@ export class WorkflowRuntime {
       } satisfies WorkflowCompletedEvent);
       return summary;
     } catch (caught) {
+      if (caught instanceof WorkflowInterruptedError) {
+        // Steps are waiting for input: the checkpoint already records them, so
+        // the run ends cleanly and a later turn resumes it.
+        const summary = this.summary("waiting", startedAt);
+        await this.emitWorkflowEvent({
+          ...this.envelope(),
+          type: "workflow_waiting",
+          summary,
+          stepIds: caught.interrupts.map((entry) => entry.stepId),
+        } satisfies WorkflowWaitingEvent);
+        return summary;
+      }
       const error = asWorkflowError(caught);
       if (checkpointInitialized) {
         await this.#checkpointCoordinator?.failWorkflow(
@@ -288,11 +332,18 @@ export class WorkflowRuntime {
       parallelAbort.signal,
     ]);
 
+    const interrupts: WorkflowInterruptedError["interrupts"][number][] = [];
     const pending = steps.map((step) =>
       localSemaphore.use(scopeSignal, async () => {
         try {
           return await this.runStep(step, scopeSignal);
         } catch (caught) {
+          if (caught instanceof WorkflowInterruptedError) {
+            // A waiting step does not cancel its siblings; the run ends once
+            // all of them settled.
+            interrupts.push(...caught.interrupts);
+            return undefined as unknown as WorkflowStepOutcome;
+          }
           if (failureMode === "fail-fast") throw caught;
           return failureFromError(step, caught);
         }
@@ -300,7 +351,9 @@ export class WorkflowRuntime {
     );
 
     try {
-      return await Promise.all(pending);
+      const outcomes = await Promise.all(pending);
+      if (interrupts.length > 0) throw new WorkflowInterruptedError(interrupts);
+      return outcomes;
     } catch (caught) {
       parallelAbort.abort(caught);
       await Promise.allSettled(pending);
@@ -360,132 +413,227 @@ export class WorkflowRuntime {
       return result;
     }
 
-    const hookResult = await this.#hooks?.beforeStep?.(hookContext);
-    throwIfAborted(signal);
-    if (hookResult) {
-      const result = {
-        ...hookResult,
-        replayed: true,
-      } satisfies WorkflowStepResult;
-      await this.checkpointCoordinator().completeStep(result);
-      this.#replayedStepCount++;
-      await this.emitWorkflowEvent({
-        ...this.envelope(),
-        type: "step_replayed",
-        result,
-      } satisfies WorkflowStepReplayedEvent);
-      return result;
-    }
+    // A waiting step continues with the answer carried by this turn; without
+    // one it keeps waiting.
+    const resume =
+      prepared.resolution.action === "resume"
+        ? this.resumeOf(step, prepared.resolution.interrupt)
+        : undefined;
 
-    const lease = await this.acquireWorkspaceLease(step, signal);
-    const leaseLossSignal = lease?.lossSignal;
-    const attemptSignal = leaseLossSignal
-      ? AbortSignal.any([signal, leaseLossSignal])
-      : signal;
-    const idempotencyKey = await workflowAttemptIdempotencyKey({
-      workflowId: this.#definition.id,
-      workflowVersion: this.#definition.version,
-      executionId: this.executionId(),
-      stepId: step.id,
-      agentName: step.agentName,
-      agentRevision: normalizedAgentRevision(step.agentRevision),
-      inputHash: prepared.inputHash,
-    });
-    let operationError: unknown;
+    // Attempt number of a step left `running` in the checkpoint; cleared once the
+    // step completes or its failure is recorded. A resumed step stays `waiting`
+    // (still answerable) if its continuation is aborted.
+    let unsettledAttempt: number | undefined = resume
+      ? undefined
+      : prepared.resolution.attempt;
     try {
-      const maxAttempts = validateRetry(step, this.#limits.maxAttemptsPerStep);
-      const startedAt = Date.now();
-      let lastError: WorkflowError | undefined;
-      for (let attemptIndex = 0; attemptIndex < maxAttempts; attemptIndex++) {
-        const attempt = prepared.resolution.attempt + attemptIndex;
-        const attemptContext = createWorkflowAttemptContext({
-          definition: this.#definition,
-          executionId: this.executionId(),
-          step,
-          attempt,
-          inputHash: prepared.inputHash,
-          idempotencyKey,
-          lease,
-        });
-        throwIfAttemptAborted(attemptSignal, leaseLossSignal, attemptContext);
-        if (attemptIndex > 0) {
-          await retryDelay(step, attemptIndex, attemptSignal);
-          await this.checkpointCoordinator().startAttempt(
-            step,
-            prepared.inputHash,
-            attempt,
-          );
-        }
+      const hookResult = resume
+        ? undefined
+        : await this.#hooks?.beforeStep?.(hookContext);
+      throwIfAborted(signal);
+      if (hookResult) {
+        const result = {
+          ...hookResult,
+          replayed: true,
+        } satisfies WorkflowStepResult;
+        await this.checkpointCoordinator().completeStep(result);
+        unsettledAttempt = undefined;
+        this.#replayedStepCount++;
         await this.emitWorkflowEvent({
           ...this.envelope(),
-          type: "step_started",
-          step,
-          attempt,
-        } satisfies WorkflowStepStartedEvent);
-
-        const replay = await this.#hooks?.beforeAttempt?.(attemptContext);
-        throwIfAttemptAborted(attemptSignal, leaseLossSignal, attemptContext);
-        if (replay) {
-          const replayed = validateAttemptReplay(attemptContext, replay);
-          await this.checkpointCoordinator().completeStep(replayed);
-          this.#replayedStepCount++;
-          await this.emitWorkflowEvent({
-            ...this.envelope(),
-            type: "step_replayed",
-            result: replayed,
-          } satisfies WorkflowStepReplayedEvent);
-          return replayed;
-        }
-
-        const result = await this.runAgentAttempt(
-          step,
-          declaredAgent,
-          attemptSignal,
-          attemptContext,
-        );
-        throwIfAttemptAborted(attemptSignal, leaseLossSignal, attemptContext);
-        if (!result.error) {
-          const completed = stepResult(step, result, attempt, startedAt);
-          await this.#hooks?.afterAttempt?.(attemptContext, completed);
-          throwIfAttemptAborted(attemptSignal, leaseLossSignal, attemptContext);
-          await this.checkpointCoordinator().completeStep(completed);
-          await this.#hooks?.afterStep?.(hookContext, completed);
-          await this.emitWorkflowEvent({
-            ...this.envelope(),
-            type: "step_completed",
-            result: completed,
-          } satisfies WorkflowStepCompletedEvent);
-          return completed;
-        }
-
-        lastError = new WorkflowError(
-          "WORKFLOW_EXECUTION_ERROR",
-          `Workflow step ${step.id} failed: ${result.error}`,
-          { agentName: step.agentName, stepId: step.id, attempt },
-        );
-        const failure = failureFromError(step, lastError, attempt, startedAt);
-        await this.#hooks?.attemptFailed?.(attemptContext, failure);
-        await this.checkpointCoordinator().failStep(failure);
+          type: "step_replayed",
+          result,
+        } satisfies WorkflowStepReplayedEvent);
+        return result;
       }
 
-      const failure = failureFromError(
-        step,
-        lastError ?? new Error(`Workflow step ${step.id} failed`),
-        prepared.resolution.attempt + maxAttempts - 1,
-        startedAt,
-      );
-      await this.#hooks?.stepFailed?.(hookContext, failure);
-      await this.emitWorkflowEvent({
-        ...this.envelope(),
-        type: "step_failed",
-        failure,
-      } satisfies WorkflowStepFailedEvent);
-      throw lastError;
+      const lease = await this.acquireWorkspaceLease(step, signal);
+      const leaseLossSignal = lease?.lossSignal;
+      const attemptSignal = leaseLossSignal
+        ? AbortSignal.any([signal, leaseLossSignal])
+        : signal;
+      const idempotencyKey = await workflowAttemptIdempotencyKey({
+        workflowId: this.#definition.id,
+        workflowVersion: this.#definition.version,
+        executionId: this.executionId(),
+        stepId: step.id,
+        agentName: step.agentName,
+        agentRevision: normalizedAgentRevision(step.agentRevision),
+        inputHash: prepared.inputHash,
+      });
+      let operationError: unknown;
+      try {
+        // The answer is consumed by the resumed delegation, so it is not retried.
+        const maxAttempts = resume
+          ? 1
+          : validateRetry(step, this.#limits.maxAttemptsPerStep);
+        const startedAt = Date.now();
+        let lastError: WorkflowError | undefined;
+        for (let attemptIndex = 0; attemptIndex < maxAttempts; attemptIndex++) {
+          const attempt = prepared.resolution.attempt + attemptIndex;
+          if (!(resume && attemptIndex === 0)) unsettledAttempt = attempt;
+          const attemptContext = createWorkflowAttemptContext({
+            definition: this.#definition,
+            executionId: this.executionId(),
+            step,
+            attempt,
+            inputHash: prepared.inputHash,
+            idempotencyKey,
+            lease,
+          });
+          throwIfAttemptAborted(attemptSignal, leaseLossSignal, attemptContext);
+          if (attemptIndex > 0) {
+            await retryDelay(step, attemptIndex, attemptSignal);
+            await this.checkpointCoordinator().startAttempt(
+              step,
+              prepared.inputHash,
+              attempt,
+            );
+          }
+          await this.emitWorkflowEvent({
+            ...this.envelope(),
+            type: "step_started",
+            step,
+            attempt,
+          } satisfies WorkflowStepStartedEvent);
+
+          const replay = await this.#hooks?.beforeAttempt?.(attemptContext);
+          throwIfAttemptAborted(attemptSignal, leaseLossSignal, attemptContext);
+          if (replay) {
+            const replayed = validateAttemptReplay(attemptContext, replay);
+            await this.checkpointCoordinator().completeStep(replayed);
+            unsettledAttempt = undefined;
+            this.#replayedStepCount++;
+            await this.emitWorkflowEvent({
+              ...this.envelope(),
+              type: "step_replayed",
+              result: replayed,
+            } satisfies WorkflowStepReplayedEvent);
+            return replayed;
+          }
+
+          const result = await this.runAgentAttempt(
+            step,
+            declaredAgent,
+            attemptSignal,
+            attemptContext,
+            attemptIndex === 0 ? resume : undefined,
+          );
+          throwIfAttemptAborted(attemptSignal, leaseLossSignal, attemptContext);
+          if (result.interrupt && !result.error) {
+            const interrupt = toStepInterrupt(result.interrupt);
+            await this.checkpointCoordinator().waitStep(
+              step,
+              prepared.inputHash,
+              attempt,
+              interrupt,
+            );
+            unsettledAttempt = undefined;
+            await this.emitWorkflowEvent({
+              ...this.envelope(),
+              type: "step_waiting",
+              stepId: step.id,
+              agentName: step.agentName,
+              attempt,
+              kind: interrupt.kind,
+              functionCallIds: interrupt.functionCallIds,
+            } satisfies WorkflowStepWaitingEvent);
+            throw new WorkflowInterruptedError([
+              { stepId: step.id, interrupt },
+            ]);
+          }
+          if (!result.error) {
+            const completed = stepResult(step, result, attempt, startedAt);
+            await this.#hooks?.afterAttempt?.(attemptContext, completed);
+            throwIfAttemptAborted(
+              attemptSignal,
+              leaseLossSignal,
+              attemptContext,
+            );
+            await this.checkpointCoordinator().completeStep(completed);
+            unsettledAttempt = undefined;
+            await this.#hooks?.afterStep?.(hookContext, completed);
+            await this.emitWorkflowEvent({
+              ...this.envelope(),
+              type: "step_completed",
+              result: completed,
+            } satisfies WorkflowStepCompletedEvent);
+            return completed;
+          }
+
+          lastError = new WorkflowError(
+            "WORKFLOW_EXECUTION_ERROR",
+            `Workflow step ${step.id} failed: ${result.error}`,
+            { agentName: step.agentName, stepId: step.id, attempt },
+          );
+          const failure = failureFromError(step, lastError, attempt, startedAt);
+          await this.#hooks?.attemptFailed?.(attemptContext, failure);
+          await this.checkpointCoordinator().failStep(failure);
+          unsettledAttempt = undefined;
+        }
+
+        const failure = failureFromError(
+          step,
+          lastError ?? new Error(`Workflow step ${step.id} failed`),
+          prepared.resolution.attempt + maxAttempts - 1,
+          startedAt,
+        );
+        await this.#hooks?.stepFailed?.(hookContext, failure);
+        await this.emitWorkflowEvent({
+          ...this.envelope(),
+          type: "step_failed",
+          failure,
+        } satisfies WorkflowStepFailedEvent);
+        throw lastError;
+      } catch (caught) {
+        if (!(caught instanceof WorkflowInterruptedError)) {
+          operationError = caught;
+        }
+        throw caught;
+      } finally {
+        await releaseWorkspaceLease(lease, operationError);
+      }
     } catch (caught) {
-      operationError = caught;
+      // The attempt has ended (agent stopped, aborted or a hook threw). Record a
+      // failure instead of leaving the step `running`, which a resume would
+      // report as indeterminate.
+      if (unsettledAttempt !== undefined) {
+        await this.recordStepFailure(step, unsettledAttempt, caught);
+      }
       throw caught;
-    } finally {
-      await releaseWorkspaceLease(lease, operationError);
+    }
+  }
+
+  /** The answer to a waiting step carried by this turn, or "still waiting". */
+  private resumeOf(
+    step: WorkflowStep,
+    interrupt: WorkflowStepInterrupt,
+  ): StepResume {
+    const answer = this.#parentContext.userContent;
+    const answered = functionResponseIds(answer);
+    if (
+      !answer ||
+      !interrupt.functionCallIds.some((callId) => answered.has(callId))
+    ) {
+      throw new WorkflowInterruptedError([{ stepId: step.id, interrupt }]);
+    }
+    return {
+      answer,
+      events: interrupt.events as unknown as readonly Event[],
+    };
+  }
+
+  private async recordStepFailure(
+    step: WorkflowStep,
+    attempt: number,
+    caught: unknown,
+  ): Promise<void> {
+    try {
+      await this.checkpointCoordinator().failStep(
+        failureFromError(step, caught, attempt),
+      );
+    } catch {
+      // A broken store cannot record the failure; the original error wins.
     }
   }
 
@@ -522,6 +670,7 @@ export class WorkflowRuntime {
     agent: BaseAgent,
     signal: AbortSignal,
     attemptContext: WorkflowAttemptContext,
+    resume?: StepResume,
   ): Promise<AgentInvocationResult> {
     let agentSemaphore = this.#agentSemaphores.get(agent);
     if (!agentSemaphore) {
@@ -530,19 +679,57 @@ export class WorkflowRuntime {
     }
     return agentSemaphore.use(signal, () =>
       this.#globalSemaphore.use(signal, () =>
-        this.#gateway.run({
-          agentName: step.agentName,
-          input: stepInputContent(step),
-          parentContext: this.#parentContext,
-          branch: childBranch(this.#parentContext.branch, step.agentName),
-          abortSignal: signal,
-          sessionState: {
-            [WORKFLOW_ATTEMPT_CONTEXT_STATE_KEY]: attemptContext,
-          },
-          eventSink: (event) => this.#eventSink(event),
-        }),
+        this.runGatewayAttempt(step, signal, attemptContext, resume),
       ),
     );
+  }
+
+  /** One `execute_node` span per step attempt; sub-agent spans nest under it. */
+  private async runGatewayAttempt(
+    step: WorkflowStep,
+    signal: AbortSignal,
+    attemptContext: WorkflowAttemptContext,
+    resume?: StepResume,
+  ): Promise<AgentInvocationResult> {
+    try {
+      return await withStepSpan(
+        {
+          name: step.id,
+          nodePath: `${this.#agentName}.${step.id}`,
+          runId: attemptContext.executionId,
+          attempt: attemptContext.attempt - 1,
+        },
+        async (handle) => {
+          const result = await this.#gateway.run({
+            agentName: step.agentName,
+            input: resume ? resume.answer : stepInputContent(step),
+            parentContext: this.#parentContext,
+            branch: childBranch(this.#parentContext.branch, step.agentName),
+            abortSignal: signal,
+            sessionState: {
+              [WORKFLOW_ATTEMPT_CONTEXT_STATE_KEY]: attemptContext,
+            },
+            // Explicit so gateway default changes cannot alter workflow steps.
+            // A resumed delegation already carries its own history in
+            // `resume.events`; inheriting the parent's would duplicate it.
+            sessionStateMode: "merge",
+            sessionHistoryMode: resume ? "replace" : "inherit",
+            ...(resume ? { resume: { events: resume.events } } : {}),
+            eventSink: (event) => this.#eventSink(event),
+          });
+          if (result.interrupt) {
+            handle.waiting(result.interrupt.functionCallIds.length);
+          }
+          // A failed agent run is a result, not an exception; surface it to the
+          // span (error.type only, never the message) and unwrap below.
+          if (result.error) throw new AgentAttemptFailure(result);
+          return result;
+        },
+      );
+    } catch (caught) {
+      if (caught instanceof AgentAttemptFailure) return caught.result;
+      throw caught;
+    }
   }
 
   private executionSignal(): AbortSignal {
@@ -571,8 +758,25 @@ export class WorkflowRuntime {
     return this.#checkpointCoordinator;
   }
 
+  /**
+   * On the turn that answers a waiting step, the user message is the answer;
+   * the workflow keeps running on the input it was started with.
+   */
+  private async restoreWaitingInput(): Promise<Content | undefined> {
+    const answered = functionResponseIds(this.#parentContext.userContent);
+    if (answered.size === 0) return undefined;
+    return WorkflowCheckpointCoordinator.savedInput(
+      this.#checkpointStore,
+      this.#parentContext,
+      this.#checkpointDefinition.id,
+      this.executionId(),
+      answered,
+    );
+  }
+
   private workflowInput(): Content {
     return (
+      this.#inputOverride ??
       this.#parentContext.userContent ?? {
         role: "user",
         parts: [],
@@ -1001,11 +1205,28 @@ function stepResult(
     output: invocation.output,
     ...(content ? { content } : {}),
     events: invocation.events,
-    ...(invocation.stateDelta ? { stateDelta: invocation.stateDelta } : {}),
+    ...stepStateDelta(invocation.stateDelta),
     attempts,
     startedAt,
     completedAt: Date.now(),
   };
+}
+
+/**
+ * State written by the step's agent, minus the checkpoints of nested workflow
+ * agents. Those are persisted by the nested workflow's own events; embedding
+ * them in this checkpoint would nest whole checkpoints inside each other
+ * (rejected by validation and quadratic in size), and replaying an old copy
+ * would overwrite the newer one.
+ */
+function stepStateDelta(
+  stateDelta: Record<string, unknown> | undefined,
+): { stateDelta: Record<string, unknown> } | Record<string, never> {
+  if (!stateDelta) return {};
+  const entries = Object.entries(stateDelta).filter(
+    ([key]) => !key.startsWith(`${WORKFLOW_CHECKPOINT_STATE_PREFIX}:`),
+  );
+  return entries.length > 0 ? { stateDelta: Object.fromEntries(entries) } : {};
 }
 
 function failureFromError(
@@ -1180,6 +1401,10 @@ function workflowEventTitle(event: WorkflowEvent): string {
       return `Workflow ${event.workflowId}: ${event.failure.id} failed`;
     case "step_replayed":
       return `Workflow ${event.workflowId}: ${event.result.id} replayed`;
+    case "step_waiting":
+      return `Workflow ${event.workflowId}: ${event.stepId} waiting for input`;
+    case "workflow_waiting":
+      return `Workflow ${event.workflowId}: waiting for input`;
     case "checkpoint_saved":
       return `Workflow ${event.workflowId}: checkpoint saved`;
     case "output":
@@ -1191,4 +1416,69 @@ function workflowEventTitle(event: WorkflowEvent): string {
     case "custom":
       return `Workflow ${event.workflowId}: ${event.name}`;
   }
+}
+
+/** Carries a failed gateway result through the step span as an error. */
+class AgentAttemptFailure extends Error {
+  constructor(readonly result: AgentInvocationResult) {
+    super("Workflow agent attempt failed");
+    this.name = "AgentAttemptFailure";
+  }
+}
+
+interface StepResume {
+  /** The user message answering the pending function calls. */
+  answer: Content;
+  /** Events of the interrupted delegation, as stored in the checkpoint. */
+  events: readonly Event[];
+}
+
+function functionResponseIds(content: Content | undefined): Set<string> {
+  const ids = new Set<string>();
+  for (const part of content?.parts ?? []) {
+    const id = part.functionResponse?.id;
+    if (typeof id === "string" && id !== "") ids.add(id);
+  }
+  return ids;
+}
+
+/** JSON form of a gateway interrupt, as persisted in the checkpoint. */
+function toStepInterrupt(
+  interrupt: NonNullable<AgentInvocationResult["interrupt"]>,
+): WorkflowStepInterrupt {
+  return JSON.parse(
+    JSON.stringify({
+      kind: interrupt.kind,
+      functionCallIds: interrupt.functionCallIds,
+      requests: interrupt.requests,
+      events: interrupt.events,
+    }),
+  ) as WorkflowStepInterrupt;
+}
+
+/**
+ * Default execution id. A turn that answers a waiting step belongs to the run
+ * that raised it, so it reuses that run's id (found in the `step_waiting`
+ * events of the session); every other turn starts a run keyed by invocation.
+ */
+function waitingExecutionId(
+  context: InvocationContext,
+  workflowId: string,
+): string {
+  const answered = functionResponseIds(context.userContent);
+  if (answered.size > 0) {
+    const events = context.session?.events ?? [];
+    for (let index = events.length - 1; index >= 0; index--) {
+      const waiting = events[index]?.customMetadata?.workflowEvent;
+      if (
+        isWorkflowEvent(waiting) &&
+        waiting.type === "step_waiting" &&
+        waiting.workflowId === workflowId &&
+        waiting.functionCallIds.some((callId) => answered.has(callId))
+      ) {
+        return waiting.executionId;
+      }
+    }
+  }
+  return context.invocationId;
 }
