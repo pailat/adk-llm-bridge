@@ -250,12 +250,13 @@ function createChildInvocationContext({
     content: input,
   });
 
+  // Mismo patrón que BaseAgent.createInvocationContext de ADK 2.x: el spread
+  // conserva el contador compartido de llamadas LLM (maxLlmCalls) y los campos
+  // nuevos (isolationScope, nodeToolDepth, a2aMetadata, workflowInstructionScope,
+  // ...) que una lista manual de campos perdería. No usamos parentContext.clone()
+  // porque el contexto del padre puede ser un objeto plano (ver withToolGatewaySession).
   return new InvocationContext({
-    artifactService: parentContext.artifactService,
-    sessionService: parentContext.sessionService,
-    memoryService: parentContext.memoryService,
-    credentialService: parentContext.credentialService,
-    invocationId: parentContext.invocationId,
+    ...parentContext,
     branch,
     agent,
     userContent: input,
@@ -266,12 +267,6 @@ function createChildInvocationContext({
       sessionStateMode,
       sessionHistoryMode,
     ),
-    endInvocation: parentContext.endInvocation,
-    transcriptionCache: parentContext.transcriptionCache,
-    runConfig: parentContext.runConfig,
-    liveRequestQueue: parentContext.liveRequestQueue,
-    activeStreamingTools: parentContext.activeStreamingTools,
-    pluginManager: parentContext.pluginManager,
     abortSignal,
   });
 }

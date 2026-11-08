@@ -338,7 +338,10 @@ for (const profile of RUNTIME_FIXTURES) {
       expect(responsesAfterAbort).toEqual([]);
     });
 
-    it(`${label(profile, "ignored-cancellation-is-rejected")}`, async () => {
+    it(`${label(profile, "ignored-cancellation-is-contained")}`, async () => {
+      // The fixture server ignores the abort and would complete normally. The
+      // bridge must still stop on its own (openai 7 aborts the stream and the
+      // bridge checks the signal), so no turnComplete may leak after abort.
       const controller = new AbortController();
       const responses = llm(profile).generateContentAsync(
         request(
@@ -354,9 +357,12 @@ for (const profile of RUNTIME_FIXTURES) {
       });
       controller.abort();
       const responsesAfterAbort = await drain(responses);
-      expect(() => assertCancellationStopped(responsesAfterAbort)).toThrow(
-        "stream completed normally after cancellation",
-      );
+      assertCancellationStopped(responsesAfterAbort);
+      expect(responsesAfterAbort).toEqual([]);
+      // The helper itself must still reject a stream that completes normally.
+      expect(() =>
+        assertCancellationStopped([{ turnComplete: true } as LlmResponse]),
+      ).toThrow("stream completed normally after cancellation");
     });
 
     it(`${label(profile, "partial-stream-eof-is-rejected")}`, async () => {

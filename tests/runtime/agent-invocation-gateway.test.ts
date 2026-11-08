@@ -468,4 +468,29 @@ describe("AgentInvocationGateway", () => {
         .callerData,
     ).toBe("custom");
   });
+
+  test("child context shares the parent LLM call budget and ADK 2 scope fields", async () => {
+    const worker = new CaptureAgent();
+    const root = new CaptureAgent("root");
+    const context = parentContext(root);
+    context.runConfig = { maxLlmCalls: 2 } as InvocationContext["runConfig"];
+    context.isolationScope = "scope-1";
+    const gateway = new AgentInvocationGateway({ resolveAgent: () => worker });
+
+    await gateway.run({
+      agentName: "worker",
+      input: { role: "user", parts: [{ text: "task" }] },
+      parentContext: context,
+      branch: "root.worker",
+    });
+
+    const child = worker.context as InvocationContext;
+    expect(child.isolationScope).toBe("scope-1");
+    expect(child.nodeToolDepth).toBe(context.nodeToolDepth);
+    // Un solo contador por invocación: padre + hijo agotan maxLlmCalls juntos.
+    context.incrementLlmCallCount();
+    child.incrementLlmCallCount();
+    expect(() => child.incrementLlmCallCount()).toThrow();
+    expect(() => context.incrementLlmCallCount()).toThrow();
+  });
 });

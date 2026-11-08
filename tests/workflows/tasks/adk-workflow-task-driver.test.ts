@@ -243,7 +243,7 @@ describe("AdkWorkflowTaskDriver", () => {
     expect(
       Object.isFrozen(
         (
-          worker.context?.session.state.workflowTask as {
+          worker.context!.session.state.workflowTask as {
             ownership: readonly unknown[];
           }
         ).ownership,

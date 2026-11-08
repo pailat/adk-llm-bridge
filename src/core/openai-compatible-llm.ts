@@ -242,6 +242,9 @@ export class OpenAICompatibleLlm extends BaseProviderLlm {
     let finalResponse: LlmResponse | undefined;
 
     for await (const chunk of stream) {
+      // Honor cancellation explicitly: never rely on the SDK (or a server that
+      // ignores the abort) to stop delivering chunks after the caller aborted.
+      if (abortSignal?.aborted) return;
       const { response, isComplete } = convertStreamChunk(chunk, acc);
       if (isComplete) {
         // Hold the final response; do not break — a usage-only chunk may follow.
@@ -250,6 +253,8 @@ export class OpenAICompatibleLlm extends BaseProviderLlm {
       }
       if (response) yield response;
     }
+
+    if (abortSignal?.aborted) return;
 
     if (finalResponse) {
       // acc.usage is repopulated by a post-finish usage chunk (if any); prefer

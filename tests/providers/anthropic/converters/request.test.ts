@@ -768,11 +768,11 @@ describe("convertAnthropicRequest", () => {
       expect(result.tools).toHaveLength(2);
       // First tool: no cache_control.
       expect(
-        (result.tools?.[0] as { cache_control?: unknown }).cache_control,
+        (result.tools![0] as { cache_control?: unknown }).cache_control,
       ).toBeUndefined();
       // Last tool: cache_control present.
       expect(
-        (result.tools?.[1] as { cache_control?: unknown }).cache_control,
+        (result.tools![1] as { cache_control?: unknown }).cache_control,
       ).toEqual({ type: "ephemeral" });
     });
 
@@ -809,7 +809,7 @@ describe("convertAnthropicRequest", () => {
       // System stays a plain string; tools carry no cache_control.
       expect(typeof result.system).toBe("string");
       expect(
-        (result.tools?.[0] as { cache_control?: unknown }).cache_control,
+        (result.tools![0] as { cache_control?: unknown }).cache_control,
       ).toBeUndefined();
     });
   });
