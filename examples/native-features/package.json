@@ -17,11 +17,11 @@
     "web:dev": "bunx @google/adk-devtools run agent.ts"
   },
   "dependencies": {
-    "@google/adk": "^1.2.0",
+    "@google/adk": "^2.4.0",
     "adk-llm-bridge": "file:../..",
-    "zod": "^4.2.1"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
-    "@types/bun": "latest"
+    "@types/bun": "^1.4.4"
   }
 }
