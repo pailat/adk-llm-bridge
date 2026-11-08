@@ -122,6 +122,31 @@ export class WorkflowCheckpointCoordinator {
     });
   }
 
+  /**
+   * Whether the stored run is still unresolved and waiting for input: its
+   * checkpoint is `running` (not completed, failed or cancelled), has a
+   * `waiting` step and belongs to the current workflow version.
+   */
+  static async isWaiting(
+    store: WorkflowCheckpointStore,
+    context: InvocationContext,
+    definition: Pick<WorkflowDefinition, "id" | "version">,
+    executionId: string,
+  ): Promise<boolean> {
+    const saved = await store.load({
+      context,
+      workflowId: definition.id,
+      executionId,
+    });
+    return (
+      isWorkflowCheckpointV1(saved) &&
+      saved.executionId === executionId &&
+      saved.workflowVersion === definition.version &&
+      saved.status === "running" &&
+      Object.values(saved.steps).some((step) => step.status === "waiting")
+    );
+  }
+
   /** Original input stored with a waiting checkpoint, when there is one. */
   static async savedInput(
     store: WorkflowCheckpointStore,

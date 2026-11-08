@@ -196,7 +196,7 @@ export class WorkflowRuntime {
       config.checkpointStore ?? new ADKSessionCheckpointStore();
     this.#resolveExecutionId =
       config.resolveExecutionId ??
-      ((context) => waitingExecutionId(context, this.#checkpointDefinition.id));
+      ((context) => this.defaultExecutionId(context));
     this.#workspace = config.workspace;
     this.#abortSignal = config.abortSignal;
     this.#structuredOutput = config.structuredOutput === true;
@@ -758,6 +758,39 @@ export class WorkflowRuntime {
       );
     }
     return this.#checkpointCoordinator;
+  }
+
+  /**
+   * Default execution id. A turn that answers a waiting step reuses the id of
+   * the run that raised it. While the most recent run of this workflow agent
+   * in the session still waits (its checkpoint is `running` with a `waiting`
+   * step, for the same workflow version), every other turn reuses that id too,
+   * so it keeps waiting or is rejected instead of starting a fresh run. Any
+   * other turn starts a run keyed by invocation id.
+   */
+  private async defaultExecutionId(
+    context: InvocationContext,
+  ): Promise<string> {
+    const workflowId = this.#checkpointDefinition.id;
+    const answered = answeredExecutionId(context, workflowId, this.#agentName);
+    if (answered !== undefined) return answered;
+    const latest = latestWaitingExecutionId(
+      context,
+      workflowId,
+      this.#agentName,
+    );
+    if (
+      latest !== undefined &&
+      (await WorkflowCheckpointCoordinator.isWaiting(
+        this.#checkpointStore,
+        context,
+        this.#checkpointDefinition,
+        latest,
+      ))
+    ) {
+      return latest;
+    }
+    return context.invocationId;
   }
 
   /**
@@ -1459,28 +1492,55 @@ function toStepInterrupt(
 }
 
 /**
- * Default execution id. A turn that answers a waiting step belongs to the run
- * that raised it, so it reuses that run's id (found in the `step_waiting`
- * events of the session); every other turn starts a run keyed by invocation.
+ * Execution id of the waiting run, emitted by this workflow agent, whose
+ * `step_waiting` call ids this turn answers with `functionResponse` parts.
  */
-function waitingExecutionId(
+function answeredExecutionId(
   context: InvocationContext,
   workflowId: string,
-): string {
+  agentName: string,
+): string | undefined {
   const answered = functionResponseIds(context.userContent);
-  if (answered.size > 0) {
-    const events = context.session?.events ?? [];
-    for (let index = events.length - 1; index >= 0; index--) {
-      const waiting = events[index]?.customMetadata?.workflowEvent;
-      if (
-        isWorkflowEvent(waiting) &&
-        waiting.type === "step_waiting" &&
-        waiting.workflowId === workflowId &&
-        waiting.functionCallIds.some((callId) => answered.has(callId))
-      ) {
-        return waiting.executionId;
-      }
+  if (answered.size === 0) return undefined;
+  const events = context.session?.events ?? [];
+  for (let index = events.length - 1; index >= 0; index--) {
+    const event = events[index];
+    const waiting = event?.customMetadata?.workflowEvent;
+    if (
+      event?.author === agentName &&
+      isWorkflowEvent(waiting) &&
+      waiting.type === "step_waiting" &&
+      waiting.workflowId === workflowId &&
+      waiting.functionCallIds.some((callId) => answered.has(callId))
+    ) {
+      return waiting.executionId;
     }
   }
-  return context.invocationId;
+  return undefined;
+}
+
+/**
+ * Execution id of the most recent `step_waiting` event this workflow agent
+ * emitted in the session, if any. Whether that run still waits is decided by
+ * its checkpoint, not by the events.
+ */
+function latestWaitingExecutionId(
+  context: InvocationContext,
+  workflowId: string,
+  agentName: string,
+): string | undefined {
+  const events = context.session?.events ?? [];
+  for (let index = events.length - 1; index >= 0; index--) {
+    const event = events[index];
+    const waiting = event?.customMetadata?.workflowEvent;
+    if (
+      event?.author === agentName &&
+      isWorkflowEvent(waiting) &&
+      waiting.type === "step_waiting" &&
+      waiting.workflowId === workflowId
+    ) {
+      return waiting.executionId;
+    }
+  }
+  return undefined;
 }

@@ -15,6 +15,7 @@ import {
   getPendingUserInputRequests,
   InvocationContext,
   isFinalResponse,
+  isLlmAgent,
   isLlmCallsLimitExceededError,
   type Session,
   type UserInputKind,
@@ -49,9 +50,16 @@ export type AgentInvocationErrorKind =
 export type AgentInvocationInterruptKind = UserInputKind | "long-running";
 
 /**
- * The child stopped waiting for a human or an external system (ADK
- * `adk_request_input`, `adk_request_confirmation`, `adk_request_credential`
- * function calls, or a final event carrying `longRunningToolIds`).
+ * The child stopped waiting for a human or an external system: an unanswered
+ * ADK `adk_request_input`, `adk_request_confirmation` or
+ * `adk_request_credential` function call, or an unanswered long-running tool
+ * call (an id in any event's `longRunningToolIds`). A long-running call counts
+ * as answered only by a later `functionResponse` with the same id authored by
+ * `user` (the resume input); the tool's own immediate response, which ADK 2.4
+ * emits before the model continues with more events, does not answer it. ADK
+ * `NodeTool` calls are not interrupts themselves (ADK marks them long-running
+ * only so a paused node can resume); when the wrapped node pauses, its own
+ * interrupt events, which are part of the delegation, carry the ids to answer.
  *
  * To continue, call `run()` again with the same `agentName`, `resume: { events:
  * interrupt.events }` and `input` set to a `user` content whose
@@ -201,7 +209,7 @@ export class AgentInvocationGateway {
 
     const resumeEvents = request.resume?.events ?? [];
     if (request.resume) {
-      const pending = findInterrupt(resumeEvents);
+      const pending = findInterrupt(resumeEvents, agent);
       const answered = new Set(
         (request.input.parts ?? [])
           .map((part) => part.functionResponse?.id)
@@ -349,7 +357,10 @@ export class AgentInvocationGateway {
 
     const transcript =
       text.length > 0 ? text.join("\n") : fallbackOutput.join("\n");
-    const interrupt = findInterrupt([...resumeEvents, inputEvent, ...events]);
+    const interrupt = findInterrupt(
+      [...resumeEvents, inputEvent, ...events],
+      agent,
+    );
 
     return {
       agentName: agent.name,
@@ -524,19 +535,27 @@ function isFinal(event: Event): boolean {
 
 /**
  * Whether the events end waiting for a human or external system. Uses ADK's
- * own `getPendingUserInputRequests` (unanswered `adk_request_*` calls) plus a
- * trailing event that carries `longRunningToolIds`.
+ * own `getPendingUserInputRequests` (unanswered `adk_request_*` calls) plus
+ * every unanswered long-running call, wherever its event is: ADK 2.4's
+ * `LlmAgent` emits the call, the tool's pending response and then keeps going,
+ * so the call is not necessarily on the last event. ADK's `Workflow` likewise
+ * marks a node as interrupted by any event carrying `longRunningToolIds`.
+ * `NodeTool` calls of `agent` (or of the sub-agent that authored the call) are
+ * skipped: see {@link nodeToolCallIds}.
  */
 function findInterrupt(
   allEvents: readonly Event[],
+  agent: BaseAgent,
 ): AgentInvocationInterrupt | undefined {
   const events = allEvents.filter((event) => !event.partial);
   const requests = getPendingUserInputRequests(events);
-  const trailing = events.at(-1)?.longRunningToolIds ?? [];
+  const nodeToolCalls = nodeToolCallIds(events, agent);
   const functionCallIds = [
     ...new Set([
       ...requests.map((request) => request.interruptId),
-      ...trailing,
+      ...pendingLongRunningCallIds(events).filter(
+        (id) => !nodeToolCalls.has(id),
+      ),
     ]),
   ];
   if (functionCallIds.length === 0) {
@@ -548,6 +567,78 @@ function findInterrupt(
     requests,
     events,
   };
+}
+
+/**
+ * Ids in `longRunningToolIds` not answered by a later `user` function response.
+ * The response the tool itself returns is authored by the agent, so it never
+ * answers the call.
+ */
+function pendingLongRunningCallIds(events: readonly Event[]): string[] {
+  const pending = new Set<string>();
+  for (const event of events) {
+    if (event.author === "user") {
+      for (const part of event.content?.parts ?? []) {
+        const id = part.functionResponse?.id;
+        if (typeof id === "string") pending.delete(id);
+      }
+    }
+    for (const id of event.longRunningToolIds ?? []) {
+      if (typeof id === "string" && id !== "") pending.add(id);
+    }
+  }
+  return [...pending];
+}
+
+/** Brand ADK puts on every `NodeTool` (`isNodeTool` is not a public export). */
+const NODE_TOOL_BRAND = Symbol.for("google.adk.workflow.nodeTool");
+
+function isNodeTool(value: unknown): boolean {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    (value as Record<symbol, unknown>)[NODE_TOOL_BRAND] === true
+  );
+}
+
+/**
+ * Long-running call ids whose tool is an ADK `NodeTool`. ADK builds every
+ * `NodeTool` with `isLongRunning: true` so a paused node can resume, but the
+ * call is not a human request: a completed node returns its output as the
+ * function response, and a paused node returns nothing while the node's own
+ * interrupt events (with their own `longRunningToolIds`) surface in the stream
+ * and are reported instead.
+ *
+ * The tool is looked up by call name on the `LlmAgent` that authored the call
+ * event (`agent` or one of its sub-agents), in its `tools` list only. Tools
+ * provided by a `BaseToolset` are not resolved (that could do I/O, such as an
+ * MCP listing), so a `NodeTool` inside a toolset still counts as long-running.
+ */
+function nodeToolCallIds(
+  events: readonly Event[],
+  agent: BaseAgent,
+): Set<string> {
+  const ids = new Set<string>();
+  for (const event of events) {
+    const longRunning = event.longRunningToolIds ?? [];
+    if (longRunning.length === 0 || !event.author) continue;
+    const owner =
+      event.author === agent.name ? agent : agent.findAgent(event.author);
+    if (!owner || !isLlmAgent(owner)) continue;
+    for (const call of getFunctionCalls(event)) {
+      if (
+        call.id &&
+        longRunning.includes(call.id) &&
+        owner.tools.some(
+          (tool) =>
+            isNodeTool(tool) && (tool as { name?: unknown }).name === call.name,
+        )
+      ) {
+        ids.add(call.id);
+      }
+    }
+  }
+  return ids;
 }
 
 /**

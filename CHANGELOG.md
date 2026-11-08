@@ -225,6 +225,15 @@ from the 0.6.0 tag.
 
 ### Fixed
 
+- Workflow HITL: with the default execution id, every turn while a run waits
+  for input now goes to that run instead of starting a fresh one. A turn that
+  answers nothing is rejected with `WORKFLOW_INPUT_MISMATCH`, or, if it repeats
+  the original input, replays the finished steps and keeps waiting. A
+  long-running tool call now counts as an interrupt even when it is not on the
+  last event (as with ADK 2.4's `LlmAgent` and `LongRunningFunctionTool`), so
+  the step waits instead of completing. ADK `NodeTool` calls are not
+  interrupts themselves; a paused node's own request is. Gateway,
+  `ToolGateway` and `ExternalAgent` delegations report the same interrupt.
 - `CodexCliDriver` no longer emits raw `codex exec --json` lifecycle or unknown
   events (for example `{"type":"turn.started"}`) as assistant text. CLI errors
   go through the same classifier as the SDK driver: a usage cap is one

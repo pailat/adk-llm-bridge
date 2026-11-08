@@ -1,16 +1,25 @@
 import { describe, expect, test } from "bun:test";
 import {
   BaseAgent,
+  BaseLlm,
+  type BaseLlmConnection,
   createEvent,
   createEventActions,
   type Event,
   InvocationContext,
+  LlmAgent,
   LlmCallsLimitExceededError,
+  type LlmRequest,
+  type LlmResponse,
+  LongRunningFunctionTool,
+  NodeTool,
   PluginManager,
   REQUEST_CONFIRMATION_FUNCTION_CALL_NAME,
   REQUEST_CREDENTIAL_FUNCTION_CALL_NAME,
   REQUEST_INPUT_FUNCTION_CALL_NAME,
+  Workflow,
 } from "@google/adk";
+import { z } from "zod";
 import {
   getInheritedPermissions,
   setInheritedPermissions,
@@ -1206,6 +1215,266 @@ describe("AgentInvocationGateway", () => {
         "req-2",
       ]);
       expect(resumed.interrupt?.events).toHaveLength(4);
+    });
+
+    // ADK 2.4 LlmAgent + LongRunningFunctionTool: the call, the tool's own
+    // pending response (authored by the agent) and then the model's text.
+    const longRunningTurn = () => [
+      createEvent({
+        invocationId: "inv-1",
+        author: "worker",
+        content: {
+          role: "model",
+          parts: [
+            {
+              functionCall: {
+                id: "lro-1",
+                name: "ask_human",
+                args: { question: "ok?" },
+              },
+            },
+          ],
+        },
+        longRunningToolIds: ["lro-1"],
+      }),
+      createEvent({
+        invocationId: "inv-1",
+        author: "worker",
+        content: {
+          role: "user",
+          parts: [
+            {
+              functionResponse: {
+                id: "lro-1",
+                name: "ask_human",
+                response: { status: "pending" },
+              },
+            },
+          ],
+        },
+      }),
+      createEvent({
+        invocationId: "inv-1",
+        author: "worker",
+        content: { role: "model", parts: [{ text: "Waiting for a human." }] },
+      }),
+    ];
+
+    test("a long-running call followed by its pending response and text is an interrupt", async () => {
+      const worker = new CaptureAgent("worker", longRunningTurn());
+
+      const result = await new AgentInvocationGateway({
+        resolveAgent: () => worker,
+      }).run({
+        agentName: "worker",
+        input: { role: "user", parts: [{ text: "go" }] },
+        parentContext: parentContext(new CaptureAgent("root")),
+      });
+
+      expect(result.error).toBeUndefined();
+      expect(result.interrupt).toMatchObject({
+        kind: "long-running",
+        functionCallIds: ["lro-1"],
+        requests: [],
+      });
+      // input event + the three events of the turn
+      expect(result.interrupt?.events).toHaveLength(4);
+    });
+
+    test("a long-running call answered by the resume input is no longer an interrupt", async () => {
+      const context = parentContext(new CaptureAgent("root"));
+      const interrupted = await new AgentInvocationGateway({
+        resolveAgent: () => new CaptureAgent("worker", longRunningTurn()),
+      }).run({
+        agentName: "worker",
+        input: { role: "user", parts: [{ text: "go" }] },
+        parentContext: context,
+      });
+      const second = new CaptureAgent("worker", [
+        createEvent({
+          invocationId: "inv-1",
+          author: "worker",
+          content: { role: "model", parts: [{ text: "DONE" }] },
+        }),
+      ]);
+
+      const resumed = await new AgentInvocationGateway({
+        resolveAgent: () => second,
+      }).run({
+        agentName: "worker",
+        input: answer("lro-1", "ask_human"),
+        parentContext: context,
+        resume: { events: interrupted.interrupt?.events ?? [] },
+      });
+
+      expect(resumed.error).toBeUndefined();
+      expect(resumed.output).toBe("DONE");
+      expect(resumed.interrupt).toBeUndefined();
+      expect(second.context).toBeDefined();
+    });
+
+    test("a long-running call on a partial event only is not an interrupt", async () => {
+      const worker = new CaptureAgent("worker", [
+        createEvent({
+          invocationId: "inv-1",
+          author: "worker",
+          partial: true,
+          content: {
+            role: "model",
+            parts: [{ functionCall: { id: "lro-1", name: "ask_human" } }],
+          },
+          longRunningToolIds: ["lro-1"],
+        }),
+        createEvent({
+          invocationId: "inv-1",
+          author: "worker",
+          content: { role: "model", parts: [{ text: "done" }] },
+        }),
+      ]);
+
+      const result = await new AgentInvocationGateway({
+        resolveAgent: () => worker,
+      }).run({
+        agentName: "worker",
+        input: { role: "user", parts: [{ text: "go" }] },
+        parentContext: parentContext(new CaptureAgent("root")),
+      });
+
+      expect(result.interrupt).toBeUndefined();
+    });
+  });
+
+  describe("long-running tools of a real LlmAgent", () => {
+    /** Calls `toolName` once (id `c1`), then answers with text. */
+    const oneCallLlm = (toolName: string, args: Record<string, unknown>) => {
+      let calls = 0;
+      return new (class extends BaseLlm {
+        constructor() {
+          super({ model: `fake-${toolName}` });
+        }
+        async *generateContentAsync(
+          _request: LlmRequest,
+        ): AsyncGenerator<LlmResponse, void> {
+          calls++;
+          yield calls === 1
+            ? {
+                content: {
+                  role: "model",
+                  parts: [{ functionCall: { id: "c1", name: toolName, args } }],
+                },
+              }
+            : { content: { role: "model", parts: [{ text: "done" }] } };
+        }
+        async connect(): Promise<BaseLlmConnection> {
+          throw new Error("not implemented");
+        }
+      })();
+    };
+
+    class NodeAgent extends BaseAgent {
+      constructor(
+        name: string,
+        private readonly ask: boolean,
+      ) {
+        super({ name });
+      }
+      protected async *runAsyncImpl(context: InvocationContext) {
+        yield createEvent({
+          invocationId: context.invocationId,
+          author: this.name,
+          content: {
+            role: "model",
+            parts: [
+              this.ask
+                ? {
+                    functionCall: {
+                      id: "inner-1",
+                      name: REQUEST_INPUT_FUNCTION_CALL_NAME,
+                      args: { message: "Name?" },
+                    },
+                  }
+                : { text: "node output" },
+            ],
+          },
+          ...(this.ask ? { longRunningToolIds: ["inner-1"] } : {}),
+        });
+      }
+      protected async *runLiveImpl() {}
+    }
+
+    const nodeTool = (ask: boolean) =>
+      new NodeTool(
+        new Workflow({
+          name: "wf",
+          inputSchema: z.object({ request: z.string() }),
+          edges: [["START", new NodeAgent("inner", ask)]],
+        } as never),
+        "wf",
+      );
+
+    const run = (agent: BaseAgent) =>
+      new AgentInvocationGateway({ resolveAgent: () => agent }).run({
+        agentName: agent.name,
+        input: { role: "user", parts: [{ text: "go" }] },
+        parentContext: parentContext(new CaptureAgent("root")),
+      });
+
+    test("a completed NodeTool call is not an interrupt", async () => {
+      const result = await run(
+        new LlmAgent({
+          name: "coordinator",
+          model: oneCallLlm("wf", { request: "x" }),
+          tools: [nodeTool(false)],
+        }),
+      );
+
+      expect(result.error).toBeUndefined();
+      expect(result.interrupt).toBeUndefined();
+      expect(result.output).toBe("done");
+      // ADK still flags the NodeTool call as long-running.
+      expect(
+        result.events.some((event) => event.longRunningToolIds?.includes("c1")),
+      ).toBe(true);
+    });
+
+    test("a NodeTool whose node pauses is an interrupt through the node's ids", async () => {
+      const result = await run(
+        new LlmAgent({
+          name: "coordinator",
+          model: oneCallLlm("wf", { request: "x" }),
+          tools: [nodeTool(true)],
+        }),
+      );
+
+      expect(result.error).toBeUndefined();
+      expect(result.interrupt?.kind).toBe("input");
+      expect(result.interrupt?.functionCallIds).toContain("inner-1");
+      expect(result.interrupt?.functionCallIds).not.toContain("c1");
+    });
+
+    test("a LongRunningFunctionTool with an interim response is an interrupt", async () => {
+      const result = await run(
+        new LlmAgent({
+          name: "asker",
+          model: oneCallLlm("ask_human", { question: "ok?" }),
+          tools: [
+            new LongRunningFunctionTool({
+              name: "ask_human",
+              description: "Ask a human.",
+              parameters: z.object({ question: z.string() }),
+              execute: async () => ({ status: "pending" }),
+            }),
+          ],
+        }),
+      );
+
+      expect(result.error).toBeUndefined();
+      expect(result.interrupt).toMatchObject({
+        kind: "long-running",
+        functionCallIds: ["c1"],
+      });
+      // The model kept going after the tool's pending response.
+      expect(result.events.at(-1)?.content?.parts?.[0]?.text).toBe("done");
     });
   });
 });

@@ -80,11 +80,12 @@ Things to know:
   workflows read the user message from the session (`ctx.input` /
   `ctx.inputText`); the `input` passed to `ctx.runNode(agent, input)` is not
   used.
-- The default execution id is the ADK invocation id, except on a turn that
-  answers a waiting step (see below), which reuses the id of the run that
-  raised it. The TypeScript Runner creates a new invocation id for every turn,
-  so any other workflow that must resume across turns needs a stable
-  `resolveExecutionId` (for example from the session id and node name).
+- The default execution id is the ADK invocation id, except while a run waits
+  for input (see below): every turn then reuses the id of the waiting run. The
+  TypeScript Runner creates a new invocation id for every turn, so any other
+  workflow that must resume across turns (for example after a crash or a
+  failed step) needs a stable `resolveExecutionId` (for example from the
+  session id and node name).
 - ADK's `Workflow` accepts at most one terminal output per run. Edges that fan
   out from `START` to two nodes with no outgoing edges fail once both produce
   output (`multiple terminal nodes produced output (2). A workflow must have at
@@ -115,9 +116,22 @@ checkpoint are used:
 
 ## Steps that wait for input (HITL)
 
-When a sub-agent stops on an ADK interrupt (`adk_request_input`,
-`adk_request_confirmation`, `adk_request_credential`, or a long-running tool
-call), the workflow does not fail:
+When a sub-agent stops on an ADK interrupt (an unanswered `adk_request_input`,
+`adk_request_confirmation` or `adk_request_credential` call, or an unanswered
+long-running tool call), the workflow does not fail. A long-running call is any
+id in an event's `longRunningToolIds`, wherever that event is in the turn: ADK
+2.4's `LlmAgent` emits the call, the tool's own pending response and then keeps
+going (often with a text event), and the call still counts as waiting. Only a
+later `functionResponse` with the same id from the user answers it. A
+`LongRunningFunctionTool` therefore always pauses the step, even when it returns
+its final result at once; a tool that finishes immediately should be a plain
+`FunctionTool`. ADK `NodeTool` calls are the exception: ADK marks them
+long-running only so a paused node can resume, so they never pause the step by
+themselves. When the wrapped node pauses, its own request (for example an
+`adk_request_input` call) is what the step waits on. A `NodeTool` is recognized
+in the `tools` list of the `LlmAgent` that made the call (the step's agent or
+one of its sub-agents); one provided by a toolset is treated like any other
+long-running tool.
 
 1. The step is saved as `waiting` in the checkpoint, together with the
    interrupt (kind, function-call ids, the delegation events) and the original
@@ -128,13 +142,39 @@ call), the workflow does not fail:
    show and answer the request, and an ADK `Workflow` marks the node as waiting.
 3. The next turn answers with `functionResponse` parts whose ids match. The
    workflow restores its original input, replays finished steps and continues
-   the waiting step with the answer; it may complete, fail or wait again. A
-   turn without a matching answer keeps waiting without running the agent, and
-   a response that answers nothing is rejected with `WORKFLOW_INPUT_MISMATCH`.
+   the waiting step with the answer; it may complete, fail or wait again.
+   Every other turn goes to the same waiting run and runs no agent: a different
+   message, or a `functionResponse` that answers nothing, is rejected with
+   `WORKFLOW_INPUT_MISMATCH` (no `workflow_started`, the run keeps waiting); the
+   original message again replays the finished steps and ends with
+   `workflow_waiting`.
 
-The default execution id finds the waiting run from the `step_waiting` event in
-the session, so no custom `resolveExecutionId` is needed. `rerunOnResume` is
-`true` by default for workflow agents so ADK re-enters them on resume.
+The default execution id finds the waiting run from the most recent
+`step_waiting` event this workflow agent emitted in the session, so no custom
+`resolveExecutionId` is needed. That run counts as waiting while its
+checkpoint is `running` with a `waiting` step and has the current workflow
+version. Once it completed, failed or was cancelled, or the workflow version
+changed, a turn that does not answer it starts a fresh run; a turn that still
+answers its call ids is routed to it and rejected (a completed run with
+`WORKFLOW_INPUT_MISMATCH`, a new version with `WORKFLOW_VERSION_MISMATCH`), so
+a stale answer never reaches an agent.
+
+While a run waits, the session stays on it until the request is answered. This
+also holds when the workflow agent is a sub-agent of a coordinator `LlmAgent`:
+ADK sends a plain-text turn to the coordinator, and if it transfers to the
+workflow again (even with a new request), the workflow is routed to the waiting
+run and rejects the turn with `WORKFLOW_INPUT_MISMATCH`. The same happens for a
+gateway delegation with `sessionHistoryMode: "inherit"`, whose history contains
+the earlier `step_waiting` event; with the default `replace` mode the child does
+not see it and starts a fresh run. To get out of a waiting run:
+
+- answer it with a `functionResponse` that carries a refusal or an error, so
+  the agent ends the step;
+- start a new session; or
+- set a custom `resolveExecutionId` that keys runs the way you need.
+
+`rerunOnResume` is `true` by default for workflow agents so ADK re-enters them
+on resume.
 `ctx.run` rejects with `WorkflowInterruptedError`: handlers must not catch it.
 The resumed delegation is not retried automatically. Checkpoints with `waiting`
 steps are not readable by earlier versions.
