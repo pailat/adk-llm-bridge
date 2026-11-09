@@ -144,9 +144,15 @@ describe("message-content capture gating", () => {
     process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT =
       "NO_CONTENT";
     expect(shouldCaptureMessageContent()).toBe(false);
-    for (const mode of ["SPAN_ONLY", "span_and_event", "true", "1"]) {
+    for (const mode of ["SPAN_ONLY", "span_and_event", " SPAN_ONLY "]) {
       process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT = mode;
       expect(shouldCaptureMessageContent()).toBe(true);
+    }
+    // As on ADK main, the old boolean form means EVENT_ONLY: content goes to
+    // log records, never to spans.
+    for (const mode of ["true", "TRUE", " 1 ", "false", "0", "yes"]) {
+      process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT = mode;
+      expect(shouldCaptureMessageContent()).toBe(false);
     }
     process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT =
       "EVENT_ONLY";

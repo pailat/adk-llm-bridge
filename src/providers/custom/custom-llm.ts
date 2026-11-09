@@ -11,7 +11,7 @@ import {
   resolveConfig,
 } from "../../core/config-resolver.js";
 import {
-  ERROR_PREFIX_PATTERN,
+  isErrorPrefix,
   OpenAICompatibleLlm,
 } from "../../core/openai-compatible-llm.js";
 import type { ProviderDefinition } from "../../core/provider-definition.js";
@@ -53,7 +53,7 @@ export function resolveCustomConfig(
  */
 function customErrorPrefix(name: string | undefined): string {
   const prefix = (name ?? "").toUpperCase().replace(/[^A-Z0-9]/g, "_");
-  return ERROR_PREFIX_PATTERN.test(prefix) ? prefix : "CUSTOM";
+  return isErrorPrefix(prefix) ? prefix : "CUSTOM";
 }
 
 /**

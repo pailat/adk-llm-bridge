@@ -533,6 +533,42 @@ describe("AnthropicLlm", () => {
       expect(request.contents).toHaveLength(2);
     });
 
+    it("treats contents with no parts as absent", async () => {
+      const llm = makeLlm();
+      const captured = captureBody(llm);
+      const request = {
+        contents: [{ role: "user", parts: [] }],
+        liveConnectConfig: {},
+        toolsDict: {},
+      } as unknown as LlmRequest;
+
+      await drain(llm.generateContentAsync(request));
+
+      const messages = (captured.body as { messages: { role: string }[] })
+        .messages;
+      expect(messages.map((m) => m.role)).toEqual(["user"]);
+      expect(request.contents).toEqual([{ role: "user", parts: [] }]);
+    });
+
+    it("does not add a turn after a trailing model turn with no parts", async () => {
+      const llm = makeLlm();
+      const captured = captureBody(llm);
+      const request = {
+        contents: [
+          { role: "user", parts: [{ text: "Hi" }] },
+          { role: "model", parts: [] },
+        ],
+        liveConnectConfig: {},
+        toolsDict: {},
+      } as unknown as LlmRequest;
+
+      await drain(llm.generateContentAsync(request));
+
+      expect((captured.body as { messages: unknown[] }).messages).toHaveLength(
+        1,
+      );
+    });
+
     it("leaves a history that already ends with a user turn untouched", async () => {
       const llm = makeLlm();
       const captured = captureBody(llm);

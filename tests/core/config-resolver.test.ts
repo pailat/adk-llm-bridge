@@ -249,3 +249,72 @@ describe("numeric config", () => {
     expect(Number.isInteger(defaults.maxRetries)).toBe(true);
   });
 });
+
+describe("blank and undefined instance values", () => {
+  const HEADER_DEFINITION: ProviderDefinition = {
+    ...TEST_DEFINITION,
+    requireApiKey: true,
+    buildHeaders: (config): Record<string, string> => {
+      const org = config.organization;
+      return typeof org === "string" ? { "X-Org": org } : {};
+    },
+  };
+
+  beforeEach(() => {
+    resetProviderConfig("ai-gateway");
+    delete process.env.ISSUE85_TEST_API_KEY;
+  });
+
+  afterEach(() => {
+    resetProviderConfig("ai-gateway");
+    delete process.env.ISSUE85_TEST_API_KEY;
+  });
+
+  it.each(["", "   "])(
+    "an instance apiKey of %p falls through to the global key",
+    (apiKey) => {
+      setProviderConfig("ai-gateway", { apiKey: "global-key" });
+      expect(
+        resolveConfig(HEADER_DEFINITION, { model: "m", apiKey }).apiKey,
+      ).toBe("global-key");
+    },
+  );
+
+  it("a blank instance and global apiKey fall through to the environment", () => {
+    process.env.ISSUE85_TEST_API_KEY = "environment-key";
+    setProviderConfig("ai-gateway", { apiKey: " " });
+    expect(
+      resolveConfig(HEADER_DEFINITION, { model: "m", apiKey: "" }).apiKey,
+    ).toBe("environment-key");
+  });
+
+  it("a blank apiKey everywhere still fails as missing", () => {
+    expect(() =>
+      resolveConfig(HEADER_DEFINITION, { model: "m", apiKey: " " }),
+    ).toThrow("API key is required");
+  });
+
+  it("an instance key set to undefined keeps the global value for headers", () => {
+    setProviderConfig("ai-gateway", {
+      apiKey: "k",
+      organization: "global-org",
+    } as never);
+    const resolved = resolveConfig(HEADER_DEFINITION, {
+      model: "m",
+      organization: undefined,
+    } as never);
+    expect(resolved.headers).toEqual({ "X-Org": "global-org" });
+  });
+
+  it("a defined instance value still wins for headers", () => {
+    setProviderConfig("ai-gateway", {
+      apiKey: "k",
+      organization: "global-org",
+    } as never);
+    const resolved = resolveConfig(HEADER_DEFINITION, {
+      model: "m",
+      organization: "instance-org",
+    } as never);
+    expect(resolved.headers).toEqual({ "X-Org": "instance-org" });
+  });
+});

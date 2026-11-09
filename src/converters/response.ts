@@ -15,6 +15,7 @@ import {
   malformedToolCallResponse,
   parseToolArguments,
 } from "./tool-arguments.js";
+import { generateToolCallId } from "./tool-call-ids.js";
 
 /**
  * Maps an OpenAI `finish_reason` to the ADK/genai {@link FinishReason} enum.
@@ -109,7 +110,8 @@ export function convertResponse(response: OpenAI.ChatCompletion): LlmResponse {
     }
     parts.push({
       functionCall: {
-        id: tc.id,
+        // Some gateways send an empty id; ADK pairs the response by id.
+        id: tc.id || generateToolCallId(),
         name: tc.function.name,
         args: parsed.args,
       },
@@ -260,6 +262,12 @@ function buildThoughtPart(source: unknown): Part | undefined {
  * `prompt_tokens_details.cached_tokens` as `cachedContentTokenCount`
  * (`promptTokenCount` keeps OpenAI's meaning: it already includes cached tokens).
  *
+ * `completion_tokens` includes the reasoning tokens, while genai's
+ * `candidatesTokenCount` does not (Gemini reports thoughts apart). So
+ * `candidatesTokenCount` is `completion_tokens` minus the reasoning tokens, and
+ * candidates plus thoughts equals `completion_tokens`. `totalTokenCount` is the
+ * provider's total.
+ *
  * @internal
  */
 function buildUsageMetadata(
@@ -273,6 +281,10 @@ function buildUsageMetadata(
   const reasoningTokens = usage.completion_tokens_details?.reasoning_tokens;
   if (reasoningTokens !== undefined && reasoningTokens !== null) {
     metadata.thoughtsTokenCount = reasoningTokens;
+    metadata.candidatesTokenCount = Math.max(
+      0,
+      usage.completion_tokens - reasoningTokens,
+    );
   }
   const cachedTokens = usage.prompt_tokens_details?.cached_tokens;
   if (cachedTokens !== undefined && cachedTokens !== null) {
@@ -360,8 +372,7 @@ export function convertStreamChunk(
   const detailFragments = extractReasoningDetails(delta);
   if (detailFragments) {
     for (const frag of detailFragments) {
-      const idx =
-        typeof frag.index === "number" ? frag.index : acc.reasoningDetails.size;
+      const idx = reasoningDetailKey(acc.reasoningDetails, frag);
       const existing = acc.reasoningDetails.get(idx);
       if (!existing) {
         acc.reasoningDetails.set(idx, { ...frag });
@@ -387,14 +398,17 @@ export function convertStreamChunk(
 
   if (delta?.tool_calls) {
     for (const tc of delta.tool_calls) {
-      const idx = tc.index ?? acc.toolCalls.size;
+      const idx = toolCallKey(acc.toolCalls, tc);
       let a = acc.toolCalls.get(idx);
       if (!a) {
         a = { id: "", name: "", arguments: "" };
         acc.toolCalls.set(idx, a);
       }
       if (tc.id) a.id = tc.id;
-      if (tc.function?.name) a.name += tc.function.name;
+      const name = tc.function?.name;
+      // Most gateways stream the name once or in pieces; some repeat the
+      // whole name (or the name so far) on every fragment.
+      if (name) a.name = name.startsWith(a.name) ? name : a.name + name;
       if (tc.function?.arguments) a.arguments += tc.function.arguments;
     }
   }
@@ -421,7 +435,11 @@ export function convertStreamChunk(
           continue;
         }
         parts.push({
-          functionCall: { id: tc.id, name: tc.name, args: parsed.args },
+          functionCall: {
+            id: tc.id || generateToolCallId(),
+            name: tc.name,
+            args: parsed.args,
+          },
         });
       }
     }
@@ -500,4 +518,64 @@ export function createStreamAccumulator(): StreamAccumulator {
     reasoningDetails: new Map(),
     toolCalls: new Map(),
   };
+}
+
+/** Last key inserted in a map (maps keep insertion order). */
+function lastKey<V>(map: Map<number, V>): number | undefined {
+  let last: number | undefined;
+  for (const key of map.keys()) last = key;
+  return last;
+}
+
+/** A key above every key in use. */
+function nextKey<V>(map: Map<number, V>): number {
+  let max = -1;
+  for (const key of map.keys()) max = Math.max(max, key);
+  return max + 1;
+}
+
+/**
+ * Accumulator key of a streamed tool-call fragment.
+ *
+ * @remarks
+ * The fragment's `index` when it has one. Without it, a fragment with no id,
+ * or with the id of the last call, continues the last call; a new id starts a
+ * new call.
+ *
+ * @internal
+ */
+function toolCallKey(
+  calls: StreamAccumulator["toolCalls"],
+  fragment: { index?: number; id?: string },
+): number {
+  if (typeof fragment.index === "number") return fragment.index;
+  const last = lastKey(calls);
+  if (last !== undefined) {
+    const lastId = calls.get(last)?.id;
+    if (!fragment.id || !lastId || fragment.id === lastId) return last;
+  }
+  return nextKey(calls);
+}
+
+/**
+ * Accumulator key of a streamed `reasoning_details` fragment.
+ *
+ * @remarks
+ * The fragment's `index` when it has one. Without it, the fragment continues
+ * the last entry unless it names a different `type` (an encrypted block after
+ * a text block is a new entry).
+ *
+ * @internal
+ */
+function reasoningDetailKey(
+  details: StreamAccumulator["reasoningDetails"],
+  fragment: Record<string, unknown>,
+): number {
+  if (typeof fragment.index === "number") return fragment.index;
+  const last = lastKey(details);
+  if (last !== undefined) {
+    const lastType = details.get(last)?.type;
+    if (fragment.type === undefined || fragment.type === lastType) return last;
+  }
+  return nextKey(details);
 }

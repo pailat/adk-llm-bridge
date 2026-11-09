@@ -24,9 +24,11 @@ import { httpStatusOf } from "./provider-llm-error.js";
 /**
  * Whether message content may be written to spans.
  *
- * `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` wins when set
- * (`SPAN_ONLY`, `SPAN_AND_EVENT`, `true` and `1` capture; `NO_CONTENT`,
- * `EVENT_ONLY` and anything else do not). Otherwise the ADK 2.4 variable
+ * `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` wins when set: only
+ * `SPAN_ONLY` and `SPAN_AND_EVENT` (any case) capture. `NO_CONTENT`,
+ * `EVENT_ONLY` and anything else do not; as on ADK main, the old boolean
+ * values `true` and `1` mean `EVENT_ONLY`, so they keep content off spans too.
+ * Otherwise the ADK 2.4 variable
  * `ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS` applies, capturing unless it is set
  * to something other than `true`/`1`. Also used by `src/agents/telemetry.ts`.
  */
@@ -34,12 +36,7 @@ export function shouldCaptureMessageContent(): boolean {
   const otel = process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT;
   if (otel !== undefined && otel.trim() !== "") {
     const mode = otel.trim().toUpperCase();
-    return (
-      mode === "SPAN_ONLY" ||
-      mode === "SPAN_AND_EVENT" ||
-      mode === "TRUE" ||
-      mode === "1"
-    );
+    return mode === "SPAN_ONLY" || mode === "SPAN_AND_EVENT";
   }
   const value = process.env.ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS || "true";
   return value === "true" || value === "1";

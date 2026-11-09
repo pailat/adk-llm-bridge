@@ -607,3 +607,63 @@ describe("OpenAICompatibleLlm span annotation", () => {
     }
   });
 });
+
+describe("OpenAICompatibleLlm user-turn fix-up (as ADK's GoogleLlm)", () => {
+  const HANDLE = "Handle the requests as specified in the System Instruction.";
+  const CONTINUE =
+    "Continue processing previous requests as instructed. Exit or provide a summary if no more outputs are needed.";
+
+  async function sentMessages(contents: LlmRequest["contents"]) {
+    const llm = makeLlm("gpt-4.1");
+    const { calls } = spyCreate(llm, SIMPLE_COMPLETION);
+    const request = userRequest({
+      contents,
+      config: { systemInstruction: "Be brief." },
+    });
+    await drain(llm.generateContentAsync(request));
+    return { messages: calls[0]?.messages, request };
+  }
+
+  it("adds a user turn when there are no contents", async () => {
+    const { messages } = await sentMessages([]);
+    expect(messages).toEqual([
+      { role: "system", content: "Be brief." },
+      { role: "user", content: HANDLE },
+    ]);
+  });
+
+  it("adds a user turn when the history ends on a model turn", async () => {
+    const { messages } = await sentMessages([
+      { role: "user", parts: [{ text: "Hi" }] },
+      { role: "model", parts: [{ text: "Hello" }] },
+    ]);
+    expect(messages?.at(-1)).toEqual({ role: "user", content: CONTINUE });
+  });
+
+  it("treats contents with no parts as absent", async () => {
+    const { messages } = await sentMessages([{ role: "user", parts: [] }]);
+    expect(messages).toEqual([
+      { role: "system", content: "Be brief." },
+      { role: "user", content: HANDLE },
+    ]);
+  });
+
+  it("does not add a turn after a trailing model turn with no parts", async () => {
+    const { messages } = await sentMessages([
+      { role: "user", parts: [{ text: "Hi" }] },
+      { role: "model", parts: [] },
+    ]);
+    expect(messages).toEqual([
+      { role: "system", content: "Be brief." },
+      { role: "user", content: "Hi" },
+    ]);
+  });
+
+  it("leaves the caller's request unchanged", async () => {
+    const contents = [{ role: "model", parts: [{ text: "Hello" }] }];
+    const { request } = await sentMessages(contents);
+    expect(request.contents).toEqual([
+      { role: "model", parts: [{ text: "Hello" }] },
+    ]);
+  });
+});

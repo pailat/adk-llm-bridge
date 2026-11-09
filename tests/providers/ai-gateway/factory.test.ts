@@ -13,7 +13,7 @@ describeProviderFactory({
 });
 
 describe("AIGateway factory (provider-specific)", () => {
-  it("works with different providers", () => {
+  it("keeps the requested provider/model id for each provider", () => {
     const models = [
       "anthropic/claude-sonnet-4",
       "openai/gpt-4o",

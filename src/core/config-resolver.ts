@@ -50,6 +50,16 @@ function resolveEnvVarWithKey(keys: string[]): ResolvedEnvVar | undefined {
   return undefined;
 }
 
+function nonBlank(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+function withoutUndefined(config: object): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(config).filter(([, value]) => value !== undefined),
+  );
+}
+
 function resolveBaseURL(
   definition: ProviderDefinition,
   instanceConfig: BaseProviderConfig,
@@ -105,7 +115,11 @@ function resolveBaseURL(
  * global URL fails instead of falling through to a lower-precedence source.
  * URL errors identify the source but never include the configured value, which
  * may contain credentials or other secrets. The base URL is returned trimmed,
- * and environment values are trimmed, a blank one counting as unset.
+ * and environment values are trimmed, a blank one counting as unset. When the
+ * definition sets `requireApiKey`, a blank `apiKey` counts as unset at the
+ * instance and global levels too (otherwise an explicit `""` sends no
+ * credential). An instance key set to `undefined` does not override the
+ * global value passed to the definition's `buildHeaders`.
  *
  * @param definition - The provider definition with defaults and env var names
  * @param instanceConfig - Instance-level configuration
@@ -125,9 +139,15 @@ export function resolveConfig(
       | Record<string, unknown>
       | undefined) ?? {};
 
+  // Where a key is required, a blank one can never work, so it counts as
+  // unset (as in the environment) and cannot hide a valid lower-precedence
+  // key. Elsewhere an explicit `""` means "send no credential".
+  const explicitKey = definition.requireApiKey
+    ? nonBlank
+    : (value: unknown) => value as string | undefined;
   const apiKey =
-    instanceConfig.apiKey ??
-    (globalConfig.apiKey as string | undefined) ??
+    explicitKey(instanceConfig.apiKey) ??
+    explicitKey(globalConfig.apiKey) ??
     resolveEnvVar(definition.envKeys.apiKey) ??
     "";
 
@@ -141,10 +161,11 @@ export function resolveConfig(
 
   const baseURL = resolveBaseURL(definition, instanceConfig, globalConfig);
 
+  // An instance key set to `undefined` is unset, so it keeps the global value.
   const headers =
     definition.buildHeaders?.({
       ...globalConfig,
-      ...instanceConfig,
+      ...withoutUndefined(instanceConfig),
     }) ?? {};
 
   return {

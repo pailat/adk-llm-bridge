@@ -32,7 +32,7 @@ describe("createCustomLlm", () => {
   });
 
   describe("common use cases", () => {
-    it("works for Ollama", () => {
+    it("creates an LLM with the model id for Ollama", () => {
       const llm = createCustomLlm({
         name: "ollama",
         model: "llama3",
@@ -41,7 +41,7 @@ describe("createCustomLlm", () => {
       expect(llm.model).toBe("llama3");
     });
 
-    it("works for vLLM", () => {
+    it("creates an LLM with the model id for vLLM", () => {
       const llm = createCustomLlm({
         name: "vllm",
         model: "meta-llama/Llama-3-8b",
@@ -50,7 +50,7 @@ describe("createCustomLlm", () => {
       expect(llm.model).toBe("meta-llama/Llama-3-8b");
     });
 
-    it("works for Azure OpenAI", () => {
+    it("creates an LLM with the model id for Azure OpenAI", () => {
       const llm = createCustomLlm({
         name: "azure",
         model: "gpt-4",
@@ -63,7 +63,7 @@ describe("createCustomLlm", () => {
       expect(llm.model).toBe("gpt-4");
     });
 
-    it("works for LM Studio", () => {
+    it("creates an LLM with the model id for LM Studio", () => {
       const llm = createCustomLlm({
         name: "lmstudio",
         model: "local-model",

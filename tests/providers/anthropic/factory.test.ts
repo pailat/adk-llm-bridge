@@ -53,7 +53,7 @@ describe("Anthropic factory (provider-specific)", () => {
     expect(llm.model).toBe("claude-sonnet-4-5-20250929");
   });
 
-  it("works with different claude models", () => {
+  it("keeps the requested model id for each claude model", () => {
     const models = [
       "claude-sonnet-4-5-20250929",
       "claude-opus-4-5",

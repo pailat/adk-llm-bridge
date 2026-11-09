@@ -82,7 +82,7 @@ describe("package root exports", () => {
     "LogCode",
     "warnOnce",
     "adkModelNotFoundMessage",
-    "ERROR_PREFIX_PATTERN",
+    "isErrorPrefix",
     "MAX_TIMEOUT_MS",
     "checkIntegerOptions",
   ])("keeps the internal %s out of the root", (name) => {

@@ -168,7 +168,7 @@ export interface RegisterOptions extends BaseRegisterOptions {
   /**
    * API key for authentication.
    *
-   * @defaultValue process.env.AI_GATEWAY_API_KEY || process.env.OPENAI_API_KEY
+   * @defaultValue process.env.AI_GATEWAY_API_KEY
    */
   apiKey?: string;
 }

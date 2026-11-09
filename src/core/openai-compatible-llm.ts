@@ -68,15 +68,23 @@ export interface OpenAIClientConfig {
 }
 
 /**
- * Error prefixes keep `<PREFIX>_ERROR` a stable UPPER_SNAKE code: only A-Z,
- * 0-9 and `_`, with at least one letter or digit.
+ * Whether `prefix` keeps `<PREFIX>_ERROR` a stable UPPER_SNAKE code: only
+ * A-Z, 0-9 and `_`, with at least one letter or digit.
+ *
+ * @remarks
+ * Two single-class patterns, so the check stays linear in the input length.
+ *
+ * @param prefix - The candidate prefix.
+ * @returns `true` when the prefix is valid.
  *
  * @internal
  */
-export const ERROR_PREFIX_PATTERN = /^[A-Z0-9_]*[A-Z0-9][A-Z0-9_]*$/;
+export function isErrorPrefix(prefix: string): boolean {
+  return /^[A-Z0-9_]+$/.test(prefix) && /[A-Z0-9]/.test(prefix);
+}
 
 function checkErrorPrefix(prefix: string): string {
-  if (!ERROR_PREFIX_PATTERN.test(prefix)) {
+  if (!isErrorPrefix(prefix)) {
     throw new InputValidationError(
       `[adk-llm-bridge] errorPrefix must be UPPER_SNAKE (A-Z, 0-9 and _, with a letter or digit), got ${JSON.stringify(prefix)}.`,
     );
@@ -287,7 +295,7 @@ export class OpenAICompatibleLlm extends BaseProviderLlm {
         baseURL: this.client.baseURL,
       });
       const { messages, tools, params, toolChoice } = convertRequest(
-        llmRequest,
+        this.withUserTurn(llmRequest),
         this.model,
         { reasoning: this._reasoning, maxTokensParam: this._maxTokensParam },
       );

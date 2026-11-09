@@ -81,6 +81,30 @@ export abstract class BaseProviderLlm extends BaseLlm {
   ): AsyncGenerator<LlmResponse, void>;
 
   /**
+   * A copy of the request whose contents a provider can send as they are.
+   *
+   * @remarks
+   * Contents with no parts are dropped (the converters send nothing for
+   * them), then ADK's `maybeAppendUserContent` adds a user turn when no
+   * contents remain or the last one is not from the user, as ADK's `GoogleLlm`
+   * does. Many endpoints reject a request with no user message or one that
+   * ends with an assistant turn. The caller's request is not changed.
+   *
+   * @param llmRequest - The request from ADK.
+   * @returns A shallow copy with its own `contents` array.
+   */
+  protected withUserTurn(llmRequest: LlmRequest): LlmRequest {
+    const request: LlmRequest = {
+      ...llmRequest,
+      contents: (llmRequest.contents ?? []).filter(
+        (content) => content.parts?.length,
+      ),
+    };
+    this.maybeAppendUserContent(request);
+    return request;
+  }
+
+  /**
    * Establishes a bidirectional streaming connection.
    *
    * This method is required by ADK's BaseLlm interface but is not supported

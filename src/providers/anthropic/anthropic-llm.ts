@@ -190,13 +190,8 @@ export class AnthropicLlm extends BaseProviderLlm {
     let incomplete = false;
     try {
       // Anthropic rejects an empty `messages` array, and recent Claude models
-      // reject a conversation that ends with an assistant turn. Apply ADK's own
-      // fix-up (as GoogleLlm does) on a copy so the caller's request is intact.
-      const request: LlmRequest = {
-        ...llmRequest,
-        contents: [...(llmRequest.contents ?? [])],
-      };
-      this.maybeAppendUserContent(request);
+      // reject a conversation that ends with an assistant turn.
+      const request = this.withUserTurn(llmRequest);
 
       const { messages, system, tools, params, toolChoice, structuredOutput } =
         convertAnthropicRequest(request);
