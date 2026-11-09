@@ -393,16 +393,16 @@ type GeminiStreamEvent = {
  *
  * @param prompt - The prompt text.
  * @param permissions - The policy; see {@link mapGeminiPermissionArgs}.
- * @returns `--prompt=<prompt> --output-format stream-json` followed by the
- * permission flags. The prompt is joined to its flag, so a prompt that starts
- * with `-` (for example `--yolo`) is never read as a flag.
+ * @returns `--prompt <prompt> --output-format stream-json` followed by the
+ * permission flags.
  */
 export function buildGeminiArgs(
   prompt: string,
   permissions?: ExternalAgentPermissionPolicy,
 ): string[] {
   return [
-    `--prompt=${prompt}`,
+    "--prompt",
+    prompt,
     "--output-format",
     "stream-json",
     ...mapGeminiPermissionArgs(permissions),
