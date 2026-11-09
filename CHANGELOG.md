@@ -4,7 +4,7 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.7.0] - Unreleased
+## [0.7.0] - 2026-11-09
 
 0.7.0 is the first npm release after 0.5.3: 0.6.0 was published on GitHub only.
 It contains everything from [0.6.0](#060---2026-06-20) plus the changes below.
@@ -1398,6 +1398,7 @@ Released on GitHub only; first npm release containing it is 0.7.0.
 - `scripts/build.ts` and `scripts/fix-declaration-imports.mjs` (superseded by
   `bunup`, which emits correct ESM import specifiers).
 
+[0.7.0]: https://github.com/pailat/adk-llm-bridge/releases/tag/v0.7.0
 [0.6.1]: https://github.com/pailat/adk-llm-bridge/releases/tag/v0.6.1
 [0.6.0]: https://github.com/pailat/adk-llm-bridge/releases/tag/v0.6.0
 [0.5.3]: https://github.com/pailat/adk-llm-bridge/releases/tag/v0.5.3
