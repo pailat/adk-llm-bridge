@@ -20,6 +20,14 @@ Examples of using `adk-llm-bridge` with Google ADK and multiple LLM providers.
 | [native-features](./native-features) | Anthropic / OpenAI | CLI showcasing sampling, reasoning, structured output, multimodal, tool choice & streaming |
 | [codex-workflow](./codex-workflow) | OpenAI Codex | Dynamic planner → implementer → reviewer workflow using only Codex agents |
 
+## Requirements
+
+Every example needs Bun and Node.js 22 or newer. `@google/genai` and
+`@opentelemetry/api` are required peers of `adk-llm-bridge` 0.7. The examples do
+not list them in their own `package.json`: inside this workspace they come from
+the root install. If you copy an example out of the repository, install both
+next to `@google/adk` and `adk-llm-bridge`.
+
 ## Feature Portability
 
 The examples demonstrate bridge mappings; they do not guarantee that every

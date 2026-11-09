@@ -27,6 +27,8 @@ export CUSTOM_LLM_BASE_URL=http://localhost:11434/v1
 ```
 
 ```ts
+import { Custom } from "adk-llm-bridge";
+
 const local = Custom("llama3");
 ```
 
@@ -34,6 +36,8 @@ Explicit configuration overrides both variables, including an explicitly
 empty `apiKey` for a local server:
 
 ```ts
+import { Custom } from "adk-llm-bridge";
+
 const local = Custom("llama3", {
   baseURL: "http://localhost:11434/v1",
   apiKey: "",
@@ -46,6 +50,8 @@ process environment changes later, while preserving the finite-route collision
 checks:
 
 ```ts
+import { registerCustomProvider } from "adk-llm-bridge";
+
 registerCustomProvider("ollama", {
   models: ["llama3"],
   // baseURL and apiKey may come from the Custom environment variables.

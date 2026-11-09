@@ -75,3 +75,10 @@ SMOKE_PROMPT="Summarize what this example does." bun run smoke
 
 To change the agent's behavior or permissions, edit `agent.ts` and update the
 `CodexAgent` config (`instruction`, `permissions`, `workingDirectory`).
+
+The agent runs read-only with the network off and sets no `allowedPaths`.
+Codex runs its file tools without asking the bridge, so the Codex drivers
+refuse `allowedPaths` with `EXTERNAL_AGENT_PATHS_UNENFORCEABLE`; Codex's own
+read-only sandbox decides what it reaches. To keep `allowedPaths` anyway,
+build the driver with `allowUnenforcedPaths: true`; the paths are then not
+checked, and only Codex's sandbox limits access.

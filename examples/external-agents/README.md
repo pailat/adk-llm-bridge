@@ -133,6 +133,6 @@ External runtime usage is opt-in:
 import { CodexAgent, ClaudeAgent } from "adk-llm-bridge/agents";
 ```
 
-Claude Agent SDK execution is side-effectful and uses the permissions configured on the `ClaudeAgent`; this example defaults to `ask` mode and limits allowed paths to the current working directory plus any paths in `ARCHITECTURE_ANALYSIS_PATHS`. Subagent permissions are inherited conservatively, so `CodexBillingSpecialist` cannot expand beyond the root agent restrictions.
+Claude Agent SDK execution is side-effectful and uses the permissions configured on the `ClaudeAgent`; this example defaults to `ask` mode and limits allowed paths to the current working directory plus any paths in `ARCHITECTURE_ANALYSIS_PATHS`. Mode and network are inherited conservatively, so `CodexBillingSpecialist` cannot get a less restrictive mode than the root's `ask` (it runs `read-only`) or the network the root does not have. Paths are different: Codex cannot check them (its file tools do not ask the bridge), so its driver is built with `allowUnenforcedPaths: true`. The inherited paths are then not enforced, and only Codex's own read-only sandbox limits what it reads. Without that option the sub-agent is refused with `EXTERNAL_AGENT_PATHS_UNENFORCEABLE`.
 
 The example `tsconfig.json` maps `adk-llm-bridge`, `adk-llm-bridge/agents`, and `@google/adk` for local type-checking, avoiding duplicate nominal ADK symbols while using a file dependency. The agent imports the ADK runtime ESM build directly so Bun does not execute declaration files at runtime.

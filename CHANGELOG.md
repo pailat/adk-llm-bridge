@@ -13,6 +13,19 @@ from the 0.6.0 tag.
 
 ### Breaking
 
+- **OpenAI-compatible `candidatesTokenCount` no longer includes reasoning
+  tokens.** It is now `completion_tokens` minus
+  `completion_tokens_details.reasoning_tokens`, as genai and Gemini define it,
+  and `thoughtsTokenCount` keeps the reasoning part. Candidates plus thoughts
+  equals `completion_tokens`; `totalTokenCount` is unchanged. ADK main adds
+  the two for `gen_ai.usage.output_tokens`, which double counted reasoning
+  before. ADK 2.4 writes only `candidatesTokenCount` to that attribute, so on
+  2.4 it no longer counts reasoning tokens, the same as for Gemini.
+- **`OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true` (or `1`) keeps
+  content off the bridge's spans.** As on ADK main, the old boolean form means
+  `EVENT_ONLY` (content on log records only). Only `SPAN_ONLY` and
+  `SPAN_AND_EVENT` put content on spans. When the variable is unset, the
+  bridge still follows `ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS`.
 - **Node.js `>=22.0.0` is now required** (`openai` 7 requires it).
 - **AI Gateway reads only `AI_GATEWAY_API_KEY` and `AI_GATEWAY_URL`.** It no
   longer falls back to `OPENAI_API_KEY` / `OPENAI_BASE_URL`. A host that set
@@ -85,8 +98,12 @@ from the 0.6.0 tag.
     to restore the host setup;
   - under a `read-only` policy, the Claude Agent SDK driver removes write and
     shell tools (Edit, Write, MultiEdit, NotebookEdit, Bash, PowerShell) from
-    the model's tool list. WebFetch/WebSearch are removed in every mode unless
-    `allowNetwork: true`. Calls to removed tools are still denied;
+    the model's tool list. WebFetch/WebSearch are removed from the default
+    tool list in every mode unless `allowNetwork: true`. Calls to removed
+    tools are still denied. A Claude agent whose `tools` name WebFetch or
+    WebSearch (in any case) while the network is off is refused at run start
+    with `EXTERNAL_AGENT_NETWORK_UNENFORCEABLE` instead of running without
+    them;
   - external agent spans changed shape: a delegation is one
     `execute_tool transfer_to_agent` span instead of a call/response pair of
     0 ms spans, Codex item progress no longer has its own
@@ -213,9 +230,8 @@ from the 0.6.0 tag.
     `pathBounds` field, which `assertPermissionPolicy` validates;
   - `adk-llm-bridge/agents` no longer exports `SubprocessJsonlDriver`,
     `SubprocessJsonlDriverConfig`, `contentsToSdkMessages`,
-    `ClaudeContentBlockParam`, `ClaudeMessageParam`, `SDKUserMessage`,
     `summarizeHistoryForColdStart`, `userContentToCodexInput`,
-    `CodexInputMapperOptions`, `CodexInputMapping`, `CodexInputPart`,
+    `CodexInputMapperOptions`, `CodexInputMapping`,
     `collectContents`, `flattenContentsToPrompt`,
     `mapPolicyToClaudeSdkPermission`, `mapPolicyToCodexArgs`,
     `mapPolicyToCodexSdkThreadOptions`, `mapClaudePermissionArgs`,
@@ -293,10 +309,96 @@ from the 0.6.0 tag.
     used `GIT_CONFIGURATION_INVALID` before, which now covers caller input
     only: a `repoRoot` outside a repository, an unknown `baseRevision` and an
     invalid `commandTimeoutMs` are `GIT_CONFIGURATION_INVALID` instead of a
-    raw `ExecException` or `TypeError`.
+    raw `ExecException` or `TypeError`;
+  - a recorded step failure is replayed when the execution is entered again
+    (a `step_failed` event with `failure.replayed: true`, and the same error
+    code, message and details), instead of throwing a new
+    `WORKFLOW_EXECUTION_ERROR` "requires resumePolicy retry". A turn that
+    answers a waiting step always replays it, even with `retryFailedSteps` or
+    `resumePolicy: "retry"`; other re-entries still re-run it with either.
+    `WorkflowStepResolution` gains the `"replay-failure"` action and
+    `WorkflowStepFailure` the optional `replayed` flag;
+  - `WORKFLOW_INPUT_MISMATCH`, `WORKFLOW_VERSION_MISMATCH`,
+    `WORKFLOW_SOURCE_MISMATCH` and the id mismatches of
+    `validateWorkflowCheckpoint` name the stored value `details.checkpoint`
+    and the value of the current turn `details.current` (were `actual` and
+    `expected`, which read backwards);
+  - `WorkflowAgent` and `ScriptWorkflowAgent` deliver events with
+    back-pressure: the run continues only after the consumer has handled an
+    event and asked for the next one, as with any ADK agent. A consumer that
+    stops reading pauses the run.
+
+- **Drivers that cannot check tool paths refuse `allowedPaths`.**
+  `ClaudeCliDriver`, `CodexSdkDriver`, `CodexCliDriver` and `GeminiCliDriver`
+  run file tools without asking the bridge, so `allowedPaths` (and the
+  `pathBounds` a parent agent passes to a delegated child) were never
+  enforced on them. A run with either now ends with the new non-recoverable
+  error `EXTERNAL_AGENT_PATHS_UNENFORCEABLE`, exported from
+  `adk-llm-bridge/agents`. Use `ClaudeAgentSdkDriver`, drop `allowedPaths`,
+  or build the driver with the new option `allowUnenforcedPaths: true` to run
+  anyway. The `basic-agent-codex` and `codex-workflow` examples no longer set
+  `allowedPaths`; the Codex sub-agent of `external-agents` opts in, because it
+  inherits the Claude root's paths.
+- **The guard exempts only registered bridge tools from the MCP network
+  denial.** Without `allowNetwork: true`, `guardPermissionRequest` denied every
+  `mcp__*` tool except names starting with `mcp__adk_bridge__`, so a host
+  server named `adk_bridge__x` was exempt. It now exempts only the names in
+  the new `bridgeToolNames` option; `ExternalAgent` passes its run's bridged
+  tools. A direct caller that passes no names gets every MCP tool denied.
+- **New `interrupted` workflow step status and `step_interrupted` event.**
+  `WorkflowCheckpointStepStatus` and `WorkflowEvent` each gain a member, so an
+  exhaustive `switch` over either stops compiling until it handles the new
+  case. A checkpoint that holds an `interrupted` step is rejected by 0.6.0, so
+  rolling back to 0.6.0 cannot read it. A step stopped by an abort or by the
+  workflow execution timeout is stored as `interrupted`, and a re-run without
+  `retryFailedSteps` or `resumePolicy: "retry"` fails with
+  `WORKFLOW_INDETERMINATE_STEP`. Checkpoints written before keep an aborted
+  step as `failed` with `WORKFLOW_ABORTED` and still replay it as that failure.
+  The new `WorkflowStepInterruptedEvent` type is exported from
+  `adk-llm-bridge/workflows`.
 
 ### Security
 
+- **A prompt cannot set CLI flags or run a CLI subcommand.** `CodexCliDriver`
+  and `ClaudeCliDriver` passed the prompt as a bare argument, so a user
+  message such as `--dangerously-skip-permissions` (Claude) or
+  `--dangerously-bypass-approvals-and-sandbox` (Codex) was parsed as a flag.
+  `CodexCliDriver` now passes `--` before the prompt. `ClaudeCliDriver` writes
+  the prompt to `claude -p --input-format text` on stdin and passes no prompt
+  argument, because Claude Code runs a subcommand named by its first operand
+  even after `--` (a prompt of `update` ran `claude update`). `GeminiCliDriver`
+  passes `--prompt=<prompt>` instead of `-p <prompt>`, so `--yolo` stays text.
+- **Dangling symlinks no longer pass the path guard.** A link inside an
+  allowed root whose target does not exist yet was compared by its own path,
+  so a write through it could land outside the root. The guard now follows
+  such links (and denies a symlink loop).
+- **`ClaudeAgentSdkDriver` keeps `workspace-write` inside `allowedPaths`.**
+  `workspace-write` runs as `acceptEdits`, which approves edits inside the
+  working directory without asking, and the Bash sandbox let commands write
+  anywhere under the working directory. An agent with
+  `allowedPaths: ["<repo>/lib/data"]` in `<repo>` could write `<repo>/app/...`
+  with Write and `<repo>/components/...` with Bash. A `PreToolUse` hook now
+  runs the path guard on every tool call (Write, Edit, MultiEdit,
+  NotebookEdit and the rest), in every permission mode, and the sandbox may
+  write only to the allowed roots. Claude Code always lets the sandbox write
+  to the working directory, so with a shell tool on offer a run whose working
+  directory is outside `allowedPaths`, or whose shell runs unsandboxed
+  (`allowNetwork: true`, `allowUnsandboxedShell`), is refused with
+  `EXTERNAL_AGENT_PATHS_UNENFORCEABLE`. So is a run with `inheritHostConfig:
+  true` (host settings merge into the sandbox's writable paths) or whose
+  working directory or allowed roots lie in a temp directory the sandbox
+  always keeps writable (`/tmp`, the host temp directory, `TMPDIR`). `Glob`
+  and `Grep` without a search path, and any relative glob without one (such
+  as Gemini `read_many_files` `include`), are checked against the working
+  directory. The sandbox confines Bash writes, not reads.
+- **The workflow agent factory resolves symlinks before checking roots.**
+  `workingDirectory` and `allowedPaths` were checked against
+  `workingDirectoryRoots` by lexical path, so a symlink inside a root could
+  point outside it. Both sides are now compared as real paths.
+- **No polynomial-time regular expressions on caller input.** The
+  `errorPrefix` check and the trailing-whitespace trim of a flattened prompt
+  backtracked on long runs of `0` or spaces (CodeQL
+  `js/polynomial-redos`). They now run in linear time, with the same results.
 - **Read-only Claude agents cannot use host MCP tools.** With
   `inheritHostConfig: true`, a host MCP tool that host settings pre-approve
   ran without a prompt, so a `read-only` agent could write through it.
@@ -432,9 +534,70 @@ from the 0.6.0 tag.
   read once into a frozen copy, and `""`, `"ENV"`, a missing kind or a
   malformed `env` end the turn with `EXTERNAL_AGENT_CREDENTIAL_UNSUPPORTED`
   before the driver starts.
+- **Isolated Claude runs turn Claude Code auto-memory off.**
+  `ClaudeAgentSdkDriver` and `ClaudeCliDriver` pass `autoMemoryEnabled: false`
+  in the flag settings when they isolate, so the agent is no longer told to
+  read or write the host's `~/.claude/projects/.../memory/` directory.
+  `inheritHostConfig: true` keeps the host's setting. Known limit: Claude Code
+  still adds the signed-in account's email to isolated sessions; no SDK option
+  or documented setting removes it.
+- **The Claude SDK `PreToolUse` hooks deny a call with no tool name.** The
+  isolation hook and the read-only MCP hook used to allow it; under isolation
+  the run now stops with `EXTERNAL_AGENT_ISOLATION_VIOLATED`. The hook's
+  violation message quotes tool names, like the per-message check.
 
 ### Added
 
+- **`resumeReason` (`"interrupted" | "retry"`) on `step_started` events and
+  checkpoint step records**, so consumers can tell a resume after an interruption
+  from a retry after a failure. Unset on a first attempt and on the
+  `step_started` of a waiting step that continues with its answer (same attempt
+  number); the step record keeps the reason while it waits. A stored value
+  outside the union is rejected. New `WorkflowStepResumeReason` type.
+- **Persist Claude sessions (experimental).** `ClaudeAgentSdkDriver` (and
+  `ClaudeAgent` through `driverOptions`) takes `sessionStore`, passed to the
+  Claude Agent SDK's `query()` on every run, resumes included, so every
+  session is mirrored to durable storage and a resume loads it from there.
+  `SqliteSessionStore` from the new `adk-llm-bridge/agents/session-store/sqlite`
+  subpath keeps transcripts in a SQLite file through the built-in
+  `node:sqlite` (Node 22.13+, Bun; no new dependency): uuid-idempotent appends
+  in order, a `0600` file, WAL mode, safe across processes. The
+  `SessionStore`, `SessionKey` and `SessionStoreEntry` types are exported from
+  `adk-llm-bridge/agents`. A batch the SDK drops after its retries is reported
+  as a recoverable `CLAUDE_SESSION_STORE_MIRROR_ERROR` event, and
+  `ClaudeCliDriver` refuses a `sessionStore` with the new
+  `EXTERNAL_AGENT_OPTION_UNSUPPORTED` code. An entry with an empty `uuid` is
+  appended like one without a `uuid`. An entry JSON cannot represent, or whose
+  `toJSON()` gives something other than a JSON object, is refused with
+  `SESSION_STORE_INVALID_ENTRY`, and an out-of-range `busyTimeoutMs` with the
+  new `SESSION_STORE_INVALID_OPTION`. Follows the SDK's `@alpha` contract. See
+  `docs/claude-session-store.md`.
+- **Aggregate `usage` on workflow step results.** `step_completed` and
+  `step_replayed` results now carry `usage` (`WorkflowStepUsage`: tokens, tool
+  calls, and events that reported usage) summed over the successful attempt's
+  agent run, including nested workflow agents. Failed attempts that were
+  retried and failed steps are not counted. `llmCalls` is one per model
+  response for an `LlmAgent` and one per run for an `ExternalAgent` that ends
+  with a final response; `cachedTokens` is part of `promptTokens`. Cost is not
+  computed. `usage` is absent from checkpoints written before 0.7.0.
+  `AgentInvocationResult` gains `usage`, and `AgentInvocationUsage` and
+  `WorkflowStepUsage` are exported from `adk-llm-bridge/workflows`.
+- **`ExternalAgentConfig.beforeToolCallback` and `afterToolCallback`** for
+  bridged ADK tools, with the same types and order as on `LlmAgent` (after the
+  plugins' callbacks). New `AdkToolCallbacks` type and
+  `createAdkToolBridge` options `beforeToolCallbacks` / `afterToolCallbacks`.
+- **`AdkToolExecutionResult` status `"pending"`** (with `pending.functionCallId`
+  and `pending.toolName`) for a long-running tool that returned no result, and
+  error codes `CALLBACK_FAILED` and `CREDENTIAL_REQUIRED` in
+  `AdkToolErrorCode`, with `AdkToolActions.requestedAuthConfigs`. Code that
+  switches over `status` or `AdkToolErrorCode` exhaustively must handle them.
+- **Error codes `EXTERNAL_AGENT_CONFIRMATION_UNUSED`,
+  `EXTERNAL_AGENT_TOOL_CREDENTIAL_REQUIRED` and
+  `EXTERNAL_AGENT_TOOL_RESULT_TOO_LARGE`**, exported from
+  `adk-llm-bridge/agents`.
+- **`ClaudeCliDriver` options `model`, `maxTurns` and `systemPrompt`**
+  (`--model`, `--max-turns`, `--system-prompt`), as on `ClaudeAgentSdkDriver`.
+  `model` is reported as `gen_ai.request.model`.
 - **External agent usage and model:** `ExternalAgentStartedEvent.model` and
   `ExternalAgentCompletedEvent.{model, usage, numTurns, durationMs}` (new
   `ExternalAgentUsage` type), filled by the Claude SDK and CLI drivers and,
@@ -442,7 +605,16 @@ from the 0.6.0 tag.
   read and creation), cost and turns go on the agent's `invoke_agent` span
   (`gen_ai.usage.*`, `gcp.vertex.agent.external_agent.*`), and the run's final
   text event carries `usageMetadata` (`promptTokenCount` includes cache
-  tokens).
+  tokens). On a resumed Claude Agent SDK session the driver reports this
+  run's usage and cost: it subtracts the previous result of the same session
+  and marks the usage `scope: "run"`. The baseline is kept in memory (the last
+  256 sessions). When there is none, or a counter went down, the run reports
+  the session total, marked `scope: "session"`. That happens on the first run
+  of a session resumed from outside the driver instance (restart, another
+  replica, `resumeSessionId`, `runtimeSession.id`) and on a `forkSession` run.
+  `ExternalAgentUsage.scope` is the new field; the final ADK event carries it
+  as `customMetadata.externalAgentUsageScope`. The Claude CLI driver never
+  resumes, so its usage is `scope: "run"`.
 - **External agent tool calls:** the Claude SDK and Codex drivers emit
   `tool_call`/`tool_result` events for the runtime's own tools
   (`metadata.builtin: true`). They appear as function call and response
@@ -517,6 +689,11 @@ from the 0.6.0 tag.
   becomes `~` and its SHA-256 hex digest), and `WorkflowArtifactKey` names
   the two ids.
 - `CHANGELOG.md` is included in the published package.
+- `adk-llm-bridge/package.json` is exported, so tools can read the installed
+  version with `import pkg from "adk-llm-bridge/package.json" with { type: "json" }`.
+- `"sideEffects": false` in `package.json`: no module runs code on import
+  (registration is explicit), so a bundler can drop the modules a consumer
+  does not use. The bridge's own build output is the same with or without it.
 - A runnable Codex-only planner → implementer → reviewer workflow smoke example.
 - `ClaudeAgent`, `CodexAgent` and `GeminiCliAgent` accept `driverOptions`, the
   options of their default driver (for example Claude `tools`,
@@ -614,8 +791,8 @@ from the 0.6.0 tag.
   before 0.7.0 are still accepted when read, so existing checkpoints
   (including the file store), artifacts, change sets, agent revisions and
   worktrees keep resuming and verifying; only new digests use the canonical
-  form. `canonicalJson` from `adk-llm-bridge/workflows` sorts keys by code unit
-  as well, so integer-like keys are no longer listed first.
+  form. The internal canonical JSON form sorts keys by code unit as well, so
+  integer-like keys are no longer listed first.
 - OpenAI-compatible providers stop emitting responses as soon as the
   `AbortSignal` is aborted, even if the server keeps sending data.
 - **CI and release:** a Node 22/24/26 matrix, a non-blocking canary against
@@ -688,6 +865,175 @@ from the 0.6.0 tag.
 
 ### Fixed
 
+- **Aborting a workflow run records an explicit `interrupted` state.** The
+  execution is `cancelled` and each in-flight step is checkpointed as
+  `interrupted` with a `step_interrupted` event, instead of `failed`, including
+  a step whose `running` record was being saved when the abort landed. An
+  abort during the delay before an in-run retry records no new attempt: the
+  previous attempt keeps its `failed` record. A checkpoint whose `interrupted`
+  step lacks a `WORKFLOW_ABORTED` error, `completedAt`, or carries a result or
+  interrupt is rejected as corrupt. A resume re-runs the step when
+  `retryFailedSteps` or `resumePolicy: "retry"` is set; otherwise, and on a
+  turn that answers a waiting step, it fails with
+  `WORKFLOW_INDETERMINATE_STEP`. `docs/workflow-durability.md` documents the
+  supported way to stop a run (abort the signal, wait for the workflow to
+  record it, then exit) and how to recover an answer turn.
+- **A `read-only` agent with `allowNetwork: true` can use its web tools.**
+  The confirmation guard denied every call under `read-only`, so WebFetch and
+  WebSearch were refused even with the network on and a research agent could
+  not read documentation. They now run without a confirmation (no approver is
+  asked): the guard lets the exact runtime names through (`WebFetch`,
+  `WebSearch`, `web_fetch`, `web_search`, `google_web_search`), and the Claude
+  CLI driver adds a `permissions.allow` rule for them, since `dontAsk` denies
+  anything that would prompt. Every other read-only denial is unchanged, and
+  another spelling or an MCP tool with the same name is still denied, as is a
+  path outside `allowedPaths` in a web tool's input. Read-only does not stop
+  data leaving: such an agent can send what it reads to any host without an
+  approver, so turn the network on only for agents whose inputs you trust.
+  Codex and Gemini CLI web tools never went through the guard and are
+  unchanged.
+- **The Claude isolation stop message names what the bridge saw.** The
+  `EXTERNAL_AGENT_ISOLATION_VIOLATED` message of the Claude drivers no longer
+  always blames host settings: a tool the runtime offered at start points to a
+  host or managed setting; a built-in it did not offer is reported as the model
+  requesting a tool that was not offered; an MCP tool it did not offer may also
+  come from a server or connector that connected after start; a call seen
+  before `system/init` gets a neutral message. The code, recoverability and
+  event shape are unchanged, and the run still stops.
+- **Delegated runs count each function call once.** `AgentInvocationUsage.toolCalls`,
+  `AgentInvocationExecutionSummary.toolCalls` and `WorkflowStepUsage.toolCalls`
+  now count function calls on non-partial events only, the same events whose
+  `usageMetadata` is summed. A function call streamed on a partial event and
+  repeated on the final event was counted twice.
+- **A checkpoint with a malformed step `usage` is rejected as corrupt.** On
+  read, `WorkflowStepResult.usage` must hold every `WorkflowStepUsage` field as
+  a finite, non-negative number; otherwise the load fails with the existing
+  corrupt-checkpoint error (`WORKFLOW_EXECUTION_ERROR`, and
+  `checkpoint_file_corrupt` from `FileSystemWorkflowCheckpointStore`).
+  Checkpoints saved without `usage` still load.
+- A workflow error whose `details` hold `undefined` values (for example a
+  `WORKFLOW_STEP_MISMATCH` on a step saved without `agentRevision`) made the
+  failed checkpoint invalid, so the run failed with "Cannot persist an invalid
+  workflow checkpoint" and the real error was lost. `WorkflowError.toJSON()`
+  now returns `details` as a JSON projection (`undefined` and functions
+  dropped, non-finite numbers as `null`, a `bigint` as a string), and
+  `withWorkflowFailed` / `withWorkflowStepFailed` store a JSON-safe copy of
+  any error, with an empty message replaced by `Workflow error <code>`. The
+  original code and message are recorded.
+- **No false isolation stop on an offered tool.** The Claude isolation check
+  no longer stops a run with `EXTERNAL_AGENT_ISOLATION_VIOLATED` when the
+  model or SDK reports an offered built-in under another spelling (for
+  example `bash` for `Bash`). Tools added at start or later, built-ins that
+  were not offered, unknown names in any case, and MCP names (never
+  case-folded) are still caught.
+- **A `tool_use` with an empty or missing name stops an isolated Claude run.**
+  The check used to skip it. It now ends the run with
+  `EXTERNAL_AGENT_ISOLATION_VIOLATED`, and the error message quotes each name.
+- **One copy of each class across the entry points.** Each subpath was
+  bundled on its own, so 10 classes existed twice in `dist`. For example,
+  `WorkflowChangeAuthorityError`, `WorkflowChangeMismatchError` and
+  `WorkflowHostMutationConflictError` thrown from inside
+  `adk-llm-bridge/workflows/node` came from a second copy of the class, so
+  `instanceof` against the class exported by `adk-llm-bridge/workflows` was
+  false. The `.d.ts` files had the same problem: `ExternalAgent`,
+  `ExternalAgentDefinitionRegistry` and `ToolGateway` were declared in both
+  `adk-llm-bridge/agents` and `adk-llm-bridge/workflows`, and their `#private`
+  members made the copies unrelated types, so
+  `new ExternalAgentWorkflowFactory({ registry: new ExternalAgentDefinitionRegistry() })`
+  failed to compile (TS2322) with the registry from `/agents`. Shared modules
+  and their declarations are now emitted once under `dist/shared/`, and the
+  package is smaller unpacked. `bun run ci` fails if a class is defined in
+  more than one `dist` JavaScript file or declared in more than one `.d.ts`
+  file, and the NodeNext consumer check passes an `/agents` registry to the
+  `/workflows` factory.
+- **Plugin and agent tool callbacks run for ADK tools given to an
+  `ExternalAgent`.** Each bridged call runs the invocation's plugin
+  `beforeToolCallback`, `onToolErrorCallback` and `afterToolCallback`, and the
+  agent's own tool callbacks, in ADK's order; before, they never ran, so
+  plugin guardrails, redaction and audit were skipped silently. A before
+  callback's response replaces the call, an after callback's the result, and
+  a throwing callback fails the call with `CALLBACK_FAILED` (a throwing before
+  callback means the tool does not run).
+- **A bridged tool's credential request no longer looks like success.**
+  `toolContext.requestCredential()` returns a `CREDENTIAL_REQUIRED` error to
+  the runtime (the request is in `actions.requestedAuthConfigs`), and the
+  turn ends with an `EXTERNAL_AGENT_TOOL_CREDENTIAL_REQUIRED` error event.
+  ADK's `adk_request_credential` flow is not supported for bridged tools.
+- **Long-running bridged tools pause the turn.** A tool with `isLongRunning`
+  (such as `LongRunningFunctionTool`) that returns no result is no longer
+  reported as finished with `{ result: null }`: the agent emits the call with
+  its id in `longRunningToolIds` and ends the turn, as ADK pauses an
+  `LlmAgent`. A later `functionResponse` with that id resumes the agent. The
+  runtime gets the result as a tool result in its user message, never in its
+  instruction (a system prompt for the Claude SDK), and the instruction gets
+  only a fixed note. Each call id is used once per turn and once overall.
+  The runtime sees only the accepted answers: every other `functionResponse`
+  part of the user's messages (a duplicate id, an unknown or another agent's
+  id, a re-sent answer, a confirmation answer, earlier turns' results) is
+  removed from what the driver gets. A result over 64 KiB (UTF-8 bytes of
+  JSON), or more than 256 KiB in one turn, ends the turn with an
+  `EXTERNAL_AGENT_TOOL_RESULT_TOO_LARGE` error event before the runtime
+  starts; a smaller answer for the same call can follow.
+- **The current user turn is sent once in a flattened prompt.** The history
+  builder (Claude SDK prompt string, Codex input) added `userContent` again
+  after the session's copy of the same message, because it compared the two by
+  object identity while the history holds normalized copies; every flattened
+  prompt carried the user's message twice. It now skips `userContent` only when
+  the user's last message was written by the current invocation
+  (`invocationId`) and has the same parts, so a repeated message ("yes",
+  "continue") that the session does not hold yet is still sent as the current
+  turn.
+- **Array tool results are wrapped as `{ results: [...] }`**, as ADK does, for
+  bridged ADK tools, their callback responses and the runtime's own tool
+  results on the timeline (before: `{ result: [...] }`). Other non-object
+  values stay `{ result }`.
+- **An approved ADK confirmation that the runtime does not use fails the
+  turn.** When the human approved a call and the runtime did not make it
+  again on the answer turn, the call never ran but the turn looked
+  successful. It now ends with an `EXTERNAL_AGENT_CONFIRMATION_UNUSED` error
+  event naming the tool. An unused rejection is not an error.
+- **Claude CLI runs report why they stopped and get tool spans.** A failed
+  `result` line (for example `error_max_turns`) or an assistant `error` is now
+  one `error` event classified from its subtype (`MAX_TURNS_EXCEEDED`, ...),
+  not `CLAUDE_CLI_EXIT`. `tool_use` and `tool_result` blocks become
+  `tool_call` and `tool_result` events, so each tool use gets an
+  `execute_tool` span and each model call its own `call_llm`. Tool results are
+  no longer emitted as model output text.
+- **Claude SDK error subtypes are classified.** `model_not_found` is
+  `INVALID_REQUEST`; `account_on_hold`, `verification_required` and
+  `cloud_credential_error` are `AUTH_ERROR` (none recoverable), and
+  `overloaded` is a recoverable `SERVER_ERROR`. Before, they were recoverable
+  `CLAUDE_AGENT_SDK_ERROR`, so retries spent attempts on a bad model id. The
+  error message keeps the SDK's readable text after the subtype.
+- **`ClaudeAgentSdkDriver` releases the run's abort signal.** The listener on
+  the run's abort signal is removed when the run ends, and the driver aborts
+  its own controller after the SDK's teardown.
+- **OpenAI-compatible requests always end with a user turn.** Like Anthropic
+  and ADK's `GoogleLlm`, the OpenAI-compatible providers now apply ADK's
+  `maybeAppendUserContent`: empty contents, or a history that ends on a model
+  turn, get ADK's user turn. Both providers drop contents with no parts first.
+- **Streamed tool calls and reasoning from loose gateways.** A tool-call name
+  repeated on every fragment is no longer doubled. A fragment without `index`
+  continues the last call (or starts one when its `id` is new), and a
+  `reasoning_details` fragment without `index` continues the last entry of the
+  same type. A tool call with an empty `id` gets a generated one.
+- **A blank `apiKey` no longer hides a valid one.** For providers that require
+  a key, an empty or blank instance or global `apiKey` counts as unset, so the
+  global key or the environment applies. An instance option set to
+  `undefined` (for example `organization`) no longer erases the global value
+  in the provider headers.
+- **Thought-only events are not collected as history.** An event whose only
+  text is a thought no longer becomes an empty turn in the prompt an external
+  agent receives.
+- **A read-only denial names the path when the path is the reason.** A
+  `read-only` request for a path outside `allowedPaths` was denied with the
+  read-only message only; it now says the path is outside the allowed paths.
+  The request is still denied either way.
+- **A missing Codex SDK package is reported as such.** With the network off,
+  `CodexSdkDriver` listed Codex's MCP servers before loading
+  `@openai/codex-sdk`, so a host without the package and without a `codex`
+  binary got `MISSING_BINARY` instead of `EXTERNAL_AGENT_DEPENDENCY_MISSING`
+  with the install command. The package is now loaded first.
 - **Read-only Claude CLI agents run the configured model.** `ClaudeCliDriver`
   mapped `read-only` to `--permission-mode plan`, and the CLI's plan mode runs
   a different model: a `--model haiku` run answered with Sonnet at about 25
@@ -751,7 +1097,7 @@ from the 0.6.0 tag.
   - `readOnlyTools` matches tools by their original name.
 - Workflows:
   - nested `WorkflowAgent`s work on the default checkpoint store;
-  - steps left `running` after an abort or timeout are recorded as `failed`;
+  - steps left `running` after an abort or timeout are recorded as `interrupted`;
   - unbounded recursion in a script reports `WORKFLOW_LIMIT_EXCEEDED`;
   - `ownership.validate` accepts change entries with the optional `mode` field,
     which the Git worktree driver always sets.
@@ -767,6 +1113,29 @@ from the 0.6.0 tag.
   as an id-only marker, so the model never sees a call twice). An outer
   workflow or gateway delegation that re-enters a waiting inner workflow now
   waits on that request instead of completing.
+- Workflow HITL: a step that failed earlier in the run no longer runs again on
+  the answer turn. Re-running it changed the inputs of the later steps, so the
+  answer failed with `WORKFLOW_STEP_MISMATCH` and the approval was lost.
+- A failed workflow step's error `details` carry the agent's `causeCode` (the
+  `errorCode` of its error event, for example `MODEL_NOT_FOUND`) and the
+  gateway's `errorKind`.
+- `step_started` reaches the consumer before the step's agent starts; it came
+  after the agent's first event when the consumer awaited I/O per event.
+- `FileSystemWorkflowCheckpointStore`: a lock release whose rename or
+  directory sync fails after the checkpoint was written no longer fails the
+  save (which left the coordinator on a stale revision, so later saves failed
+  the CAS check); it logs `WORKFLOW_CHECKPOINT_LOCK_RELEASE_FAILED`. A lock
+  lost to another owner still fails the save with
+  `checkpoint_lock_ownership_lost`, and a lock with no valid owner with
+  `checkpoint_lock_corrupt`. A load opens the file once with
+  `O_NOFOLLOW` and reads through that handle, so a checkpoint swapped for a
+  symlink after the check is rejected (`checkpoint_file_unsafe`) instead of
+  read; a FIFO is rejected without blocking.
+- The file-system checkpoint store, workspace adapter and Git lock remove the
+  tombstone of a lock their owner released, so the state directories no
+  longer grow by one directory per save or lease. A recoverer re-reads the
+  owner after finding it dead and retires only a lock that still carries the
+  dead token; tombstones of recovered locks are kept and collected offline.
 - The canonical workflow hash throws on a boxed BigInt (`Object(1n)`), as
   `JSON.stringify` does, instead of hashing it as `{}`.
 - Delegation (`run_adk_subagent` / native `transfer_to_agent`) and transfer

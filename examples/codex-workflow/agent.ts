@@ -91,17 +91,19 @@ function logWorkflowEvent(event: WorkflowEvent): void {
   }
 }
 
-function createWorkflow(target: string): ScriptWorkflowAgent {
+export function createWorkflow(target: string): ScriptWorkflowAgent {
   const credentialProvider = new EnvCredentialProvider();
+  // No allowedPaths: Codex runs its file tools without asking the bridge, so
+  // the driver would refuse them (EXTERNAL_AGENT_PATHS_UNENFORCEABLE). Each
+  // step's working directory is the target, and Codex's own sandbox keeps
+  // writes inside it.
   const readOnly = {
     ...mapPermissionModeToPolicy("read-only"),
     allowNetwork: false,
-    allowedPaths: [target],
   };
   const workspaceWrite = {
     ...mapPermissionModeToPolicy("workspace-write"),
     allowNetwork: false,
-    allowedPaths: [target],
   };
 
   const planner = new CodexAgent({

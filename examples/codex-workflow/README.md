@@ -13,9 +13,12 @@ The QuickJS script controls the sequence. Agent work stays on the host side: the
 script yields `ctx.run(...)`, the workflow runtime invokes the corresponding ADK
 agent, and the result is passed back into the script before the next step.
 
-The implementer has `workspace-write`; the other two agents are read-only. For
-safety, point the example at a disposable Git worktree, never at your primary
-checkout.
+The implementer has `workspace-write`; the other two agents are read-only. Each
+agent's working directory is the target, and Codex's own sandbox keeps writes
+inside it. The agents set no `allowedPaths`: Codex runs its file tools without
+asking the bridge, so the Codex drivers refuse `allowedPaths` with
+`EXTERNAL_AGENT_PATHS_UNENFORCEABLE`. For safety, point the example at a
+disposable Git worktree, never at your primary checkout.
 
 ## Requirements
 

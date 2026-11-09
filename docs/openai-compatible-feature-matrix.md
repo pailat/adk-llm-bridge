@@ -247,6 +247,8 @@ fields in the request body and is merged after standard bridge fields, so a
 duplicate key can override a generated value.
 
 ```ts
+import { Custom } from "adk-llm-bridge";
+
 const model = Custom("local-model", {
   baseURL: "http://localhost:8000/v1",
   providerOptions: {

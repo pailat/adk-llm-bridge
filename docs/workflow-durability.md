@@ -36,6 +36,18 @@ occurs after that store commit and does not roll it back.
 
 The filesystem store writes and syncs a temporary file, verifies lock
 ownership, atomically renames the file, and syncs the containing directory.
+That rename is the commit. If the release then fails only on I/O (the rename
+of the lock or the directory sync), `save` still resolves and logs the warning
+`[adk-llm-bridge] [WORKFLOW_CHECKPOINT_LOCK_RELEASE_FAILED]` through ADK's
+logger. If the lock now belongs to another owner, `save` rejects with
+`checkpoint_lock_ownership_lost`: another process recovered the lock and may
+have written the same checkpoint, so the revision check no longer holds. A
+lock with no valid owner at that point rejects with `checkpoint_lock_corrupt`.
+A lock left behind by a live process makes the next save of that execution
+fail with `checkpoint_lock_timeout`. A load opens the checkpoint file
+once without following symlinks (`O_NOFOLLOW`, where the platform has it) and
+checks and reads it through that handle, so a path swapped for a symlink after
+the check is never read.
 Checkpoint contents and their deterministic revision are validated on load.
 New writes remove runtime-only step events and replay markers before hashing or
 persistence. Both bundled checkpoint stores reject malformed durable graphs
@@ -56,12 +68,87 @@ carry `details.causeCode` (the system error code) and, when available,
 | `checkpoint_revision_invalid` | The supplied revision does not match the checkpoint, or a stored file carries an invalid revision. |
 | `checkpoint_schema_invalid` | A save was given an invalid checkpoint. |
 | `checkpoint_file_corrupt` | A stored file is not valid JSON or not a valid checkpoint file. |
-| `checkpoint_file_unsafe` | The checkpoint path is a symlink or not a regular file. |
+| `checkpoint_file_unsafe` | The checkpoint path is a symlink or not a regular file (a directory, a FIFO). |
 | `checkpoint_directory_create_failed`, `checkpoint_read_failed`, `checkpoint_stat_failed`, `checkpoint_write_failed` | A file system call on the checkpoint failed. |
 | `checkpoint_lock_timeout` | The per-checkpoint lock was not acquired in time. |
 | `checkpoint_lock_corrupt` | The lock is not a safe directory or has no valid owner; it is never taken over automatically. |
-| `checkpoint_lock_ownership_lost` | Another writer took the lock before the commit. |
-| `checkpoint_lock_acquire_failed`, `checkpoint_lock_candidate_failed`, `checkpoint_lock_candidate_cleanup_failed`, `checkpoint_lock_read_failed`, `checkpoint_lock_recovery_failed`, `checkpoint_lock_release_failed`, `checkpoint_lock_cleanup_failed` | A file system call on the lock failed. |
+| `checkpoint_lock_ownership_lost` | Another writer took the lock, before the commit or before the release that follows it; the save fails. |
+| `checkpoint_lock_acquire_failed`, `checkpoint_lock_candidate_failed`, `checkpoint_lock_candidate_cleanup_failed`, `checkpoint_lock_read_failed`, `checkpoint_lock_recovery_failed`, `checkpoint_lock_release_failed`, `checkpoint_lock_cleanup_failed` | A file system call on the lock failed. A `checkpoint_lock_release_failed` after a committed write is only logged (see above). |
+
+## Stopping a run
+
+Abort the `AbortSignal` you passed to the run, wait for the workflow to record
+the abort, then exit. Do not call `process.exit` while a run is in flight: the
+execution is left `running` forever and its in-flight step is left `running`,
+which a resume reports as indeterminate.
+
+```ts
+const controller = new AbortController();
+const running = (async () => {
+  // Drain the runner; it ends normally once the signal aborts.
+  for await (const _ of runner.runAsync({
+    userId,
+    sessionId,
+    newMessage,
+    abortSignal: controller.signal,
+  })) {
+    // handle events
+  }
+})();
+// ...later, for example from a budget guard:
+controller.abort(new Error("budget exceeded"));
+// With a checkpoint store that writes outside the session (see below), the
+// iterator ends once the workflow has recorded the abort.
+await running.catch(() => undefined);
+process.exit(0); // safe now
+```
+
+`runner.runAsync` ends normally after an abort (no `WORKFLOW_ABORTED`
+rejection), and the runner stops forwarding events once the signal aborts, so
+`step_interrupted` and the terminal `error` event reach only a consumer of
+`agent.runAsync` directly. Through `Runner`, read the abort from a checkpoint
+store that writes outside the session, such as
+`FileSystemWorkflowCheckpointStore`: with the default ADK session store the
+final checkpoint travels on an event the runner no longer reads, so session
+state keeps the execution and the step `running`, and a later resume reports
+the step as indeterminate.
+
+The workflow execution timeout aborts the same way (`WORKFLOW_ABORTED`), so a
+step that was in flight at the timeout is also recorded `interrupted` and a
+resume needs `retryFailedSteps` or `resumePolicy: "retry"`. Unlike a caller
+abort, the timeout rejects `runAsync` with `WORKFLOW_ABORTED`.
+
+An ADK node `timeout` rejects `runAsync` with ADK's `NodeTimeoutError` before
+the workflow has recorded the abort. The `interrupted` record is written
+shortly after, so do not exit the process right after that error.
+
+Any abort reason is accepted, except a `WorkflowError` with another code,
+which is rethrown as is and ends the execution and step as `failed`. Once the
+workflow has settled:
+
+- The checkpoint is `cancelled` with `completedAt` and a `WORKFLOW_ABORTED`
+  error.
+- Each in-flight step is `interrupted` (not `failed` or `running`), and a
+  `step_interrupted` event precedes the terminal `error` event.
+- A later resume of the same execution id starts the workflow again, which
+  clears the `cancelled` state. When `retryFailedSteps` (or the step's
+  `resumePolicy: "retry"`) is set, an `interrupted` step is re-run as the next
+  attempt and its `interrupted` status is cleared. Without the opt-in, and on
+  a turn that answers a waiting step, the resume fails with
+  `WORKFLOW_INDETERMINATE_STEP`, because the aborted step may have had side
+  effects; it is not replayed as a failure.
+- A step whose `running` record was being saved when the abort landed is
+  `interrupted` too, even if its agent never started.
+- An abort during the delay before an in-run retry records no new attempt: the
+  step keeps the previous attempt's `failed` record and error, and a resume
+  without opt-in replays that failure.
+
+If the turn that fails with `WORKFLOW_INDETERMINATE_STEP` was answering a
+waiting step, do not send the same answer again: it fails the same way. First
+re-enter the execution with a turn that does not carry the answer, with
+`retryFailedSteps` (or `resumePolicy: "retry"`) set. That turn re-runs the
+`interrupted` step and, when it reaches the waiting step, emits its pending
+request again; the next answer turn then proceeds.
 
 ## Waiting steps
 
@@ -76,6 +163,26 @@ resuming reads from each stored event (`author`, `branch`, `longRunningToolIds`,
 `content.parts`, each part's `functionCall`, `actions` and
 `actions.stateDelta`) must have their ADK types; a
 checkpoint that fails this check is rejected as `checkpoint_file_corrupt`.
+
+## Re-entered steps
+
+When a step runs again, the `step_started` event and the step record in the
+checkpoint carry `resumeReason`:
+
+| Value | Meaning |
+| --- | --- |
+| `interrupted` | The checkpoint had the step as `running` (the process ended before the attempt settled) or as `interrupted` (an abort or timeout stopped it). |
+| `retry` | The previous attempt failed (an in-run retry, `retryFailedSteps`, or `resumePolicy: "retry"`). |
+
+A first attempt has no `resumeReason`, and neither do checkpoints written
+before this field existed. When a waiting step continues with its answer,
+`step_started` is emitted again with the **same** attempt number and no
+`resumeReason`: it is the same attempt, not a new one. The step record keeps
+the reason that attempt was entered with (for example `interrupted`) while it
+waits and after it completes. A stored `resumeReason` outside the two values
+is rejected as `checkpoint_file_corrupt`. A `running` step is re-entered only
+when its `resumePolicy` is `retry`; otherwise the resume fails with
+`WORKFLOW_INDETERMINATE_STEP`.
 
 ## Workspace leases and fencing
 
@@ -128,11 +235,17 @@ setting. Write paths follow the
 ## Retired lock tombstones
 
 Both filesystem adapters retire lock directories to deterministic, token-bound
-tombstones. Keeping those markers prevents a delayed release or recovery from
-removing a newer owner's lock (the ABA problem).
+tombstones. When a recoverer retires the lock of a dead owner, the tombstone is
+kept: it makes a delayed second recoverer of the same owner fail instead of
+moving a newer owner's lock away (the ABA problem). A recoverer reads the owner
+again after finding its process dead and retires only a lock that still
+carries that owner's token.
 
-Tombstones intentionally are not garbage-collected online. After stopping
-every writer, use the explicit offline collectors:
+A live owner that releases its lock removes its own tombstone, so normal
+saves and lease operations leave nothing behind. Only crashes (dead-owner
+recoveries) and a crash in the middle of a release add tombstones. Those are
+not garbage-collected online. After stopping every writer, use the explicit
+offline collectors:
 
 ```typescript
 import {

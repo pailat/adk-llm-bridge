@@ -68,6 +68,9 @@ The exact MCP SDK is intentionally left to the application. Its handler only
 needs to pass the validated arguments and the request cancellation signal:
 
 ```typescript
+import type { WorkflowActorContext } from "adk-llm-bridge/workflows";
+
+// `control` is the WorkflowControlPlane built above.
 async function workflowControlTool(
   args: {
     protocol: "adk-llm-bridge/workflow-control";

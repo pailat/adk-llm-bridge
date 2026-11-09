@@ -95,6 +95,16 @@ Things to know:
   `ctx.runNode` calls) shares the invocation id. Use `useSubBranch: true` with
   distinct `runId`s and include `ctx.branch` in `resolveExecutionId` so each run
   has its own checkpoint.
+- Events are delivered with back-pressure, as from any ADK agent: the workflow
+  goes on only after the consumer has handled an event and asked for the next
+  one. A `step_started` therefore reaches the consumer before the step's agent
+  starts, even when the consumer awaits I/O for each event. A consumer that
+  stops reading pauses the run; closing the stream aborts it.
+- `step_started` carries `resumeReason` (`"interrupted"` or `"retry"`) when a
+  step runs again after an attempt that did not complete. It is unset on a
+  first attempt and when a waiting step continues with its answer (same
+  attempt number); see
+  [Re-entered steps](./workflow-durability.md#re-entered-steps).
 
 ## Retries and timeouts of a node
 
@@ -103,14 +113,25 @@ closing the agent with the same invocation id, so the same execution id and
 checkpoint are used:
 
 - A closed run aborts its steps and waits for them to settle. A step that was
-  mid-flight is recorded as `failed` (never left `running`), and a re-entry
+  mid-flight is recorded as `interrupted` (never left `running`), and a re-entry
   waits for the previous run of the same agent instance to finish first.
+  Without `retryFailedSteps` or `resumePolicy: "retry"`, re-entering an
+  `interrupted` step fails with `WORKFLOW_INDETERMINATE_STEP` because it may
+  have had side effects; it is not replayed as `step_failed`.
 - On re-entry finished steps replay from the checkpoint. Steps whose last
-  attempt failed run again as the next attempt when `retryFailedSteps` is on.
-  It defaults to `true` when `retryConfig` is set and to `false` otherwise (a
-  failed step then requires `resumePolicy: "retry"`, as before).
+  attempt failed run again as the next attempt when `retryFailedSteps` is on
+  or the step declares `resumePolicy: "retry"`. `retryFailedSteps` defaults
+  to `true` when `retryConfig` is set and to `false` otherwise. Without
+  either, the recorded failure is replayed: a `step_failed` event with
+  `failure.replayed: true`, and the step throws the same error (code, message
+  and details) it threw when it failed, so `ctx.parallel` with
+  `failureMode: "all-settled"` returns the same outcome. A sibling stopped by
+  an abort is returned to the handler as a `WorkflowStepFailure` with
+  `status: "failed"` and code `WORKFLOW_ABORTED`, while the checkpoint stores
+  it as `interrupted`.
 - A step recorded `running` by a crash is still `WORKFLOW_INDETERMINATE_STEP`;
-  only recorded failures are retried automatically.
+  only recorded failures are retried automatically, and an `interrupted` step
+  runs again only on the same opt-in.
 - The node `timeout` and ADK's retry delay apply per attempt, so leave room for
   replaying the finished steps.
 
@@ -149,6 +170,11 @@ leaves no such branch, and its call still counts as long-running.
 3. The next turn answers with `functionResponse` parts whose ids match. The
    workflow restores its original input, replays finished steps and continues
    the waiting step with the answer; it may complete, fail or wait again.
+   Steps that failed on an earlier turn are replayed as the same failure (see
+   [Retries and timeouts of a node](#retries-and-timeouts-of-a-node)), even
+   with `retryFailedSteps` or `resumePolicy: "retry"`: re-running one would
+   change the inputs of the later steps, and the answer turn would fail with
+   `WORKFLOW_STEP_MISMATCH`.
    Every other turn goes to the same waiting run and runs no agent: a different
    message, or a `functionResponse` that answers nothing, is rejected with
    `WORKFLOW_INPUT_MISMATCH` (no `workflow_started`, the run keeps waiting); the
@@ -190,6 +216,37 @@ on resume.
 `ctx.run` rejects with `WorkflowInterruptedError`: handlers must not catch it.
 The resumed delegation is not retried automatically. Checkpoints with `waiting`
 steps are not readable by earlier versions.
+
+## Step usage in workflow events
+
+`step_completed.result.usage` and `step_replayed.result.usage`
+(`WorkflowStepUsage`) aggregate the agent run of the step's successful attempt,
+so consumers need not re-derive totals from child events:
+
+| Field | Meaning |
+|---|---|
+| `promptTokens`, `completionTokens`, `totalTokens` | Summed from `usageMetadata` of non-partial events; `totalTokens` falls back to prompt + completion |
+| `cachedTokens` | Summed `cachedContentTokenCount`; part of `promptTokens`, not added on top |
+| `toolCalls` | Function calls requested on non-partial events |
+| `llmCalls` | Events that reported usage: one per model response for an `LlmAgent`, one per run for an `ExternalAgent` that ends with a final response |
+
+- Only the successful attempt is counted. Failed attempts that were retried are
+  not, and a failed or interrupted step (`step_failed`, `step_interrupted`)
+  carries no `usage`, so summing step usage undercounts the cost of failures
+  and aborts.
+- When the step runs a nested workflow agent, its sub-steps' events are part of
+  the run, so the total includes them.
+- Values are summed as each runtime reports them; any double counting in a
+  runtime's report carries into the totals. A Claude `ExternalAgent` that
+  resumes a session without a baseline (a new driver given `resumeSessionId`,
+  a fork, or a restart) reports the session total, and its final event carries
+  `customMetadata.externalAgentUsageScope: "session"`; check that field before
+  summing such a step.
+- The value is stored in the checkpoint, so a replayed step reports the same
+  totals. Checkpoints written before 0.7 have no `usage`. A stored `usage` that
+  lacks a field, or holds a negative or non-finite number, makes the checkpoint
+  load as corrupt.
+- Cost is not computed: the gateway has no price source.
 
 ## Future work
 

@@ -72,6 +72,13 @@ other, with no warning. For fan-out, declare one sub-agent per concurrent
 branch, each with its own name:
 
 ```typescript
+import { LlmAgent } from "@google/adk";
+import { AIGateway } from "adk-llm-bridge";
+import { WorkflowAgent, defineWorkflow } from "adk-llm-bridge/workflows";
+
+const model = AIGateway("anthropic/claude-sonnet-5.5");
+const instruction = "Review the change and report problems in your area.";
+
 const reviewers = ["api", "ui", "db"].map(
   (area) => new LlmAgent({ name: `Reviewer-${area}`, model, instruction }),
 );

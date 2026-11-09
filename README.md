@@ -10,19 +10,12 @@ CLI) with [Google ADK for TypeScript](https://github.com/google/adk-js).
 
 ## Contents
 
-- [What it is](#what-it-is)
-- [Install](#install)
-- [Quick start](#quick-start)
-- [Providers](#providers)
-- [Models](#models)
-- [Features](#features)
-- [External agents](#external-agents)
-- [Workflows](#workflows)
-- [Upgrading from 0.5.x or 0.6.0](#upgrading-from-05x-or-060)
-- [Examples](#examples)
-- [Documentation](#documentation)
-- [Contributing](#contributing)
-- [License](#license)
+[What it is](#what-it-is) · [Install](#install) · [Quick start](#quick-start) ·
+[Providers](#providers) · [Models](#models) · [Features](#features) ·
+[External agents](#external-agents) · [Workflows](#workflows) ·
+[Upgrading from 0.5.x or 0.6.0](#upgrading-from-05x-or-060) ·
+[Examples](#examples) · [Documentation](#documentation) ·
+[Contributing](#contributing) · [License](#license)
 
 ## What it is
 
@@ -70,9 +63,22 @@ Optional peers, only for the features that use them:
 | `GeminiCliAgent` | the `gemini` CLI on `PATH` |
 | `ScriptWorkflowAgent` | `quickjs-emscripten-core@">=0.32.0 <0.33.0"` and `@jitl/quickjs-wasmfile-release-sync@">=0.32.0 <0.33.0"` |
 
-The package has three public entry points: `adk-llm-bridge` (providers),
-`adk-llm-bridge/agents` (external agents) and `adk-llm-bridge/workflows`
-(workflows; Node host adapters are in `adk-llm-bridge/workflows/node`).
+Import only the documented subpaths: `adk-llm-bridge` (providers),
+`adk-llm-bridge/agents` (external agents),
+`adk-llm-bridge/agents/session-store/sqlite` (Claude session store),
+`adk-llm-bridge/workflows`
+(workflows), `adk-llm-bridge/workflows/node` (Node host adapters) and
+`adk-llm-bridge/package.json`. Files under `dist/` are build output, and their
+names change between releases.
+
+**Licenses of the optional SDKs.** `ClaudeAgent` with its default driver
+(`ClaudeAgentSdkDriver`) loads `@anthropic-ai/claude-agent-sdk` at run time.
+That package is not open source: it is © Anthropic PBC, all rights reserved,
+and its use is governed by Anthropic's legal agreements (see the package's
+`LICENSE.md`). adk-llm-bridge does not bundle or redistribute it. Install it
+only if you accept its terms; `ClaudeCliDriver` does not need it.
+`@openai/codex-sdk` (Codex SDK driver) is Apache-2.0. Both are optional peers:
+the package imports and runs without them.
 
 ## Quick start
 
@@ -304,6 +310,10 @@ ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS=false                     # ADK's own spans
 Content capture is on by default. External agent tool spans then export raw
 tool inputs and results, for example full file contents from `Read`. These
 settings apply to spans, not to session events.
+`OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true` (or `1`) means
+`EVENT_ONLY`, as on ADK main: no content on spans. Use `SPAN_ONLY` or
+`SPAN_AND_EVENT` to keep it. ADK always exports the agent's `description` as
+`gen_ai.agent.description`, so do not put prompt text or secrets there.
 
 ## External agents
 
@@ -387,7 +397,18 @@ to its runtime's sandbox and flags.
   every prompt is denied. A confirmation never widens the policy, and
   `read-only` is never confirmable. A path guard checks file-tool paths
   against `allowedPaths` before any approver sees the request; it does not
-  check paths inside shell commands.
+  check paths inside shell commands. Under `workspace-write`, Bash also needs
+  an approver (`confirmation.approver` or ADK confirmation); without one,
+  every Bash call is denied.
+- **Path confinement.** With `allowedPaths`, `ClaudeAgentSdkDriver` checks
+  every tool call, including edits Claude Code approves without asking and
+  searches without a path, and lets Bash write only inside the allowed roots
+  (Bash can still read outside them). When a shell tool is on offer, the
+  working directory must be inside `allowedPaths` and outside temp
+  directories, the shell must be sandboxed, and `inheritHostConfig` must be
+  off; otherwise the run is refused with `EXTERNAL_AGENT_PATHS_UNENFORCEABLE`.
+  The Claude CLI, Codex and Gemini CLI drivers cannot check paths: they refuse
+  `allowedPaths` unless built with `allowUnenforcedPaths: true`.
 - **Credentials.** The three agents use `EnvCredentialProvider`: only the
   runtime's allow-listed variables reach it (for Codex, `CODEX_API_KEY`,
   `CODEX_ACCESS_TOKEN`, `CODEX_HOME` and a few others, not
@@ -409,9 +430,17 @@ none. The workflow agent factory (`ExternalAgentWorkflowFactory`) refuses
 
 | Driver | Enforcement |
 |---|---|
-| Claude (SDK and CLI) | Bash runs in the Claude Code sandbox with every host denied; web tools are removed. Where the sandbox cannot run (Windows, Linux without bubblewrap) the run fails, unless the driver has `allowUnsandboxedShell: true`. |
+| Claude (SDK and CLI) | Bash runs in the Claude Code sandbox with every host denied; web tools are removed from the default tool list, and naming them in `tools` refuses the run with `EXTERNAL_AGENT_NETWORK_UNENFORCEABLE`. Where the sandbox cannot run (Windows, Linux without bubblewrap) the run fails, unless the driver has `allowUnsandboxedShell: true`. |
 | Codex (SDK and CLI) | No-network sandbox, web search off and host MCP servers turned off for the run. Refused with `EXTERNAL_AGENT_NETWORK_UNENFORCEABLE` in `full-access` mode, when the MCP server listing fails, for a server name that cannot be overridden, and for a prebuilt `sdk` client, unless `allowUnenforcedNetwork: true`. |
 | Gemini CLI | Cannot be enforced: every run without `allowNetwork: true` is refused with `EXTERNAL_AGENT_NETWORK_UNENFORCEABLE` (set `allowNetwork: true`, or build the driver with `allowUnenforcedNetwork: true`). |
+
+A `read-only` agent with `allowNetwork: true` can read the web: its web tools
+run without a confirmation, while write, shell and foreign MCP tools stay
+denied. Use it for a research agent that must check documentation. Read-only
+does not stop data leaving: the agent can send what it reads to any host
+through the web tools, without an approver. Turn the network on only for
+agents whose inputs you trust, or keep `ask` mode so web calls go to an
+approver.
 
 ### Delegation
 
@@ -423,11 +452,67 @@ events. With the default `delegation: { finalAnswer: "subagent" }` the
 sub-agent's answer is final; `finalAnswer: "coordinator"` lets the
 coordinator write the final answer (fan-out, aggregation).
 
+### ADK tools
+
+ADK tools given to an external agent (`tools`; hosted by the Claude Agent SDK
+driver) go through the same tool callbacks as in an `LlmAgent`: your Runner
+plugins' `beforeToolCallback`, `afterToolCallback` and `onToolErrorCallback`,
+then the agent's own `beforeToolCallback` and `afterToolCallback`. Guardrail,
+redaction and audit plugins therefore cover these tools, and a callback that
+throws blocks the call.
+
+- **Long-running tools.** A `LongRunningFunctionTool` that returns no result
+  pauses the turn, as in ADK: the call is emitted with its id in
+  `longRunningToolIds`, and a `WorkflowAgent` step waits on it. A later
+  `functionResponse` with the same id resumes the agent; the runtime gets the
+  result as a tool result in its user message, never in its system prompt.
+  Only the results the agent accepted reach the runtime. A result over 64 KiB
+  (UTF-8 bytes of its JSON), or over 256 KiB in one turn, ends the turn with
+  `EXTERNAL_AGENT_TOOL_RESULT_TOO_LARGE` before the runtime starts.
+- **Approved calls.** With `confirmation: { adk: true }`, an approved call the
+  runtime does not make again on the answer turn ends the turn with an
+  `EXTERNAL_AGENT_CONFIRMATION_UNUSED` error, so an approved side effect never
+  goes missing silently.
+- **Credentials.** `toolContext.requestCredential()` is not supported: the
+  turn ends with `EXTERNAL_AGENT_TOOL_CREDENTIAL_REQUIRED`. Give such tools
+  their credentials up front.
+
+### Persisting Claude sessions (experimental)
+
+Pass `driverOptions: { sessionStore }` to `ClaudeAgent` to mirror every Claude
+Agent SDK session to durable storage and resume from it. `SqliteSessionStore`
+keeps transcripts in a SQLite file through the built-in `node:sqlite` (Node
+22.13+ or Bun; no extra dependency):
+
+```typescript
+import { ClaudeAgent } from "adk-llm-bridge/agents";
+import { SqliteSessionStore } from "adk-llm-bridge/agents/session-store/sqlite";
+
+const agent = new ClaudeAgent({
+  name: "coder",
+  workingDirectory: process.cwd(),
+  driverOptions: { sessionStore: new SqliteSessionStore({ path: "./data/claude-sessions.db" }) },
+});
+```
+
+A resume finds a session only from the same working directory.
+`ClaudeCliDriver` refuses the option with `EXTERNAL_AGENT_OPTION_UNSUPPORTED`.
+It follows the SDK's `@alpha` session store contract. See
+[Persisting Claude sessions](docs/claude-session-store.md).
+
 ### Events and spans
 
 - `ExternalAgentStartedEvent.model` and `ExternalAgentCompletedEvent`
   (`model`, `usage`, `numTurns`, `durationMs`) report the run. The run's final
-  text event carries `usageMetadata`.
+  text event carries `usageMetadata`. Claude reports session-cumulative usage
+  and cost on a resumed session. The Agent SDK driver subtracts the previous
+  result of a session it ran itself, so repeated runs on one driver report
+  per-run usage and cost, marked `usage.scope: "run"`. When the driver has no
+  baseline it reports the session total, marked `scope: "session"` (also in
+  the final event's `customMetadata.externalAgentUsageScope`). That happens on
+  the first run of a session resumed from outside that driver instance
+  (restart, another replica, `resumeSessionId`, `runtimeSession.id`) and on a
+  `forkSession` run. Do not add `"session"` values to earlier runs.
 - With the Claude Agent SDK and Codex drivers, the runtime's own tool calls
   (Read, Edit, Bash, Codex commands...) appear as function call and response
   events with `customMetadata.builtin: true`.
@@ -530,8 +615,9 @@ only. The main breaking changes:
 - External agents: Claude agents are isolated from the host setup, network
   is off unless the policy sets `allowNetwork: true` (an unset value means
   `false`, and a delegated agent keeps network only when parent and child
-  both set `true`), a child never runs wider than its parent, the sub-agent's answer is
-  final after a delegation, and error codes are provider neutral.
+  both set `true`), a child never runs wider than its parent, the
+  sub-agent's answer is final after a delegation, and error codes are
+  provider neutral.
 
 Step-by-step instructions are in the
 [migration guide](docs/migration-0.7.md), and every change is in the
@@ -566,13 +652,14 @@ directory). See [examples/README.md](examples/README.md).
 - [OpenAI-compatible feature matrix](docs/openai-compatible-feature-matrix.md)
 - [Runtime conformance](docs/runtime-conformance.md)
 - [External agent isolation](docs/external-agent-isolation.md)
+- [Persisting Claude sessions](docs/claude-session-store.md)
 - [Multi-agent workflow orchestration](docs/workflow-orchestration.md)
 - [Workflow control plane](docs/workflow-control-plane.md)
 - [Workflow durability](docs/workflow-durability.md)
 - [Workflows and ADK's `Workflow`](docs/workflow-adk-interop.md)
-- [Glossary](docs/glossary.md)
 
-All documents are listed in [docs/README.md](docs/README.md).
+All documents, including the [glossary](docs/glossary.md), are listed in
+[docs/README.md](docs/README.md).
 
 ## Contributing
 

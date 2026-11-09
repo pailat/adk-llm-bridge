@@ -131,7 +131,13 @@ const codexBillingSpecialist = new CodexAgent({
   workingDirectory,
   // Codex refuses to run outside a trusted git repository unless the check is
   // skipped; the read-only policy below still limits what it can touch.
-  driver: new CodexSdkDriver({ skipGitRepoCheck: true }),
+  // allowUnenforcedPaths: this sub-agent inherits the Claude root's
+  // allowedPaths as path bounds, which Codex cannot enforce; Codex's own
+  // read-only sandbox decides what it reaches.
+  driver: new CodexSdkDriver({
+    skipGitRepoCheck: true,
+    allowUnenforcedPaths: true,
+  }),
   permissions: {
     ...mapPermissionModeToPolicy("read-only"),
     allowedPaths,

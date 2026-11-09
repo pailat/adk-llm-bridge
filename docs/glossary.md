@@ -14,7 +14,7 @@ code reviews. If you need a new meaning, add a new term instead of reusing one.
 | **Workflow runtime** | The engine that executes a workflow: it runs steps, writes checkpoints and resumes executions. |
 | **Step** | One unit of work of a workflow execution, for example one `ctx.run(...)` call that invokes an agent. Steps have a status such as `running` or `waiting`. |
 | **Checkpoint** | A committed snapshot of workflow execution state in a `WorkflowCheckpointStore`, used to resume after a restart. |
-| **Interrupt** | A stop that needs a person or the host to answer before work can continue, for example an unanswered `adk_request_input` or a permission confirmation. An interrupted step is stored as `waiting`. |
+| **Interrupt** | A stop that needs a person or the host to answer before work can continue, for example an unanswered `adk_request_input` or a permission confirmation. A step that raised an interrupt is stored as `waiting`; this is not the `interrupted` step status, which marks a step stopped by an abort, nor `resumeReason: "interrupted"`, which names why an attempt was entered. |
 | **Control plane** | The host-owned API that starts, observes, answers and cancels workflow executions. |
 | **Error mode** | How a provider reports a failed model call: `"throw"` (default, a `ProviderLlmError`) or `"response"` (an error `LlmResponse`). |
 
