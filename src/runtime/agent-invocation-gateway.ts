@@ -1,9 +1,3 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import {
   type AppendEventRequest,
   type BaseAgent,
@@ -14,9 +8,13 @@ import {
   getFunctionCalls,
   getPendingUserInputRequests,
   InvocationContext,
+  isBaseAgent,
+  isBaseToolset,
   isFinalResponse,
   isLlmAgent,
   isLlmCallsLimitExceededError,
+  isWorkflow,
+  type LlmAgent,
   type Session,
   type UserInputKind,
   type UserInputRequest,
@@ -24,11 +22,17 @@ import {
 import type { Content } from "@google/genai";
 import { inheritSessionPermissions } from "../agents/permissions/inheritance.js";
 
+/** Counters describing one delegated agent run. */
 export interface AgentInvocationExecutionSummary {
+  /** Non-partial and partial events the child emitted. */
   events: number;
+  /** Non-partial events that carried visible text. */
   textEvents: number;
+  /** Function calls the child requested. */
   toolCalls: number;
+  /** Errors observed during the run. */
   errors: number;
+  /** Wall-clock duration in milliseconds. */
   durationMs: number;
 }
 
@@ -47,6 +51,7 @@ export type AgentInvocationErrorKind =
   | "agent-error"
   | "invalid-resume";
 
+/** Kind of input an interrupted delegation is waiting for. */
 export type AgentInvocationInterruptKind = UserInputKind | "long-running";
 
 /**
@@ -61,8 +66,8 @@ export type AgentInvocationInterruptKind = UserInputKind | "long-running";
  * only so a paused node can resume); when the wrapped node pauses, its own
  * interrupt events, which are part of the delegation, carry the ids to answer.
  *
- * To continue, call `run()` again with the same `agentName`, `resume: { events:
- * interrupt.events }` and `input` set to a `user` content whose
+ * To continue, call `run()` again with the same `agentName`,
+ * `resume: { events: interrupt.events }` and `input` set to a `user` content whose
  * `functionResponse` parts answer `functionCallIds` (same `id` and `name` as the
  * pending call, see `requests[].interruptId` / `functionCallName`).
  */
@@ -80,12 +85,15 @@ export interface AgentInvocationInterrupt {
   events: readonly Event[];
 }
 
+/** Continuation data for an interrupted delegation. */
 export interface AgentInvocationResume {
   /** `interrupt.events` of the interrupted result. */
   events: readonly Event[];
 }
 
+/** Result of one delegated agent run; failures are reported in `error`, not thrown. */
 export interface AgentInvocationResult {
+  /** Name of the agent that ran. */
   agentName: string;
   /**
    * Non-thought text of the last non-partial `isFinalResponse` event that has
@@ -94,24 +102,35 @@ export interface AgentInvocationResult {
    */
   output: string;
   /**
-   * Every visible non-partial text event joined by newlines (previous `output`
-   * behavior), including narration emitted before tool calls.
+   * Every visible non-partial text event joined by newlines, including
+   * narration emitted before tool calls.
    */
   transcript: string;
+  /** Persisted events the child emitted, in order. */
   events: readonly Event[];
+  /** Counters for the run. */
   summary: AgentInvocationExecutionSummary;
+  /** Merged state delta of the non-partial events; absent when empty. */
   stateDelta?: Record<string, unknown>;
+  /** Failure message; absent on success. */
   error?: string;
+  /** Classification of `error`. */
   errorKind?: AgentInvocationErrorKind;
   /** Present when the child stopped waiting for input; see the type docs. */
   interrupt?: AgentInvocationInterrupt;
 }
 
+/** Request to run a named agent in an isolated child session. */
 export interface AgentInvocationRequest {
+  /** Name passed to the {@link AgentResolver}. */
   agentName: string;
+  /** Content delivered to the child as the user input. */
   input: Content;
+  /** Context of the calling agent; supplies the abort signal, session and permissions. */
   parentContext: InvocationContext;
+  /** Event branch for the input event. */
   branch?: string;
+  /** Extra abort signal, combined with the parent context signal. */
   abortSignal?: AbortSignal;
   /** JSON-safe state projected into the isolated child session only. */
   sessionState?: Readonly<Record<string, unknown>>;
@@ -119,51 +138,74 @@ export interface AgentInvocationRequest {
    * `merge` (default) starts from a deep copy of the parent state (so the child
    * never shares mutable objects with it) plus `sessionState`; `replace` uses
    * only `sessionState` and freezes the child state.
+   *
+   * @defaultValue `"merge"`
    */
   sessionStateMode?: "merge" | "replace";
   /**
    * `replace` (default) starts the child with only the delegated input, like
    * ADK's `AgentTool`; `inherit` also exposes the parent history, like a native
    * `transfer_to_agent` (which shares the session).
+   *
+   * @defaultValue `"replace"`
    */
   sessionHistoryMode?: "inherit" | "replace";
+  /**
+   * Whether `input` is appended to the child session as a new user event.
+   * With `false` the child only gets it as its `userContent`, as an ADK
+   * transfer reuses the invocation's user message that is already in the
+   * inherited history. Use `false` only when `input` is in that history.
+   *
+   * @defaultValue `true`
+   */
+  appendInput?: boolean;
   /** Continues a previously interrupted delegation. */
   resume?: AgentInvocationResume;
+  /** Receives every persisted child event, after the gateway-level sink. */
   eventSink?: AgentInvocationEventSink;
   /**
    * Host authorization fence invoked around agent resolution. Rejections escape
    * as their original typed error rather than becoming agent output.
    */
   validateInvocation?: AgentInvocationValidator;
+  /** Hook to adjust the child context before the agent runs; a rejection yields `errorKind` `preparation`. */
   prepareContext?: AgentInvocationContextPreparer;
 }
 
+/** Looks up an agent by name; returns undefined for an unknown agent. */
 export type AgentResolver = (
   agentName: string,
   parentContext: InvocationContext,
 ) => BaseAgent | undefined | Promise<BaseAgent | undefined>;
 
+/** Receives each persisted child event as it is produced. */
 export type AgentInvocationEventSink = (
   event: Event,
   childContext: InvocationContext,
 ) => void | Promise<void>;
 
+/** Prepares the child invocation context before the agent runs. */
 export type AgentInvocationContextPreparer = (
   childContext: InvocationContext,
   agent: BaseAgent,
 ) => void | Promise<void>;
 
+/** Points in a delegation at which the host authorization fence runs. */
 export type AgentInvocationValidationPhase =
   | "before-resolve"
   | "before-prepare"
   | "before-execute";
 
+/** Host authorization fence; throw to deny the invocation at the given phase. */
 export type AgentInvocationValidator = (
   phase: AgentInvocationValidationPhase,
 ) => void | Promise<void>;
 
+/** Configuration for {@link AgentInvocationGateway}. */
 export interface AgentInvocationGatewayConfig {
+  /** Resolves agents by name. */
   resolveAgent: AgentResolver;
+  /** Sink that sees every child event of every run, before the per-request sink. */
   eventSink?: AgentInvocationEventSink;
 }
 
@@ -179,11 +221,28 @@ export class AgentInvocationGateway {
   readonly #resolveAgent: AgentResolver;
   readonly #eventSink?: AgentInvocationEventSink;
 
+  /**
+   * Creates a gateway that resolves and runs delegated agents.
+   *
+   * @param config - Agent resolver and optional event sink.
+   */
   constructor(config: AgentInvocationGatewayConfig) {
     this.#resolveAgent = config.resolveAgent;
     this.#eventSink = config.eventSink;
   }
 
+  /**
+   * Runs an agent to completion in a child session and aggregates the result.
+   *
+   * @remarks
+   * The child session inherits the caller's permission ceiling in every state
+   * and history mode. Resolution, preparation and agent failures, aborts and
+   * the LLM call limit are reported in the result, not thrown.
+   *
+   * @param request - Agent name, input, parent context and options.
+   * @returns The aggregated result, including `interrupt` when the child waits for input.
+   * @throws The original error of a rejecting `validateInvocation`, so authorization failures keep their type.
+   */
   async run(request: AgentInvocationRequest): Promise<AgentInvocationResult> {
     const startedAt = Date.now();
     let agent: BaseAgent | undefined;
@@ -229,12 +288,15 @@ export class AgentInvocationGateway {
       request.parentContext.abortSignal,
       request.abortSignal,
     ]);
-    const inputEvent = createEvent({
-      invocationId: request.parentContext.invocationId,
-      author: "user",
-      branch: request.branch,
-      content: request.input,
-    });
+    const inputEvent =
+      request.appendInput === false
+        ? undefined
+        : createEvent({
+            invocationId: request.parentContext.invocationId,
+            author: "user",
+            branch: request.branch,
+            content: request.input,
+          });
     const child = createChildSession({
       parentSession: request.parentContext.session,
       inputEvent,
@@ -341,7 +403,7 @@ export class AgentInvocationGateway {
         aborted?.dispose();
         if (!exhausted) {
           // Any abnormal exit (abort, sink/append failure, thrown event) must
-          // close the agent generator like `for await` did, so its `finally`
+          // close the agent generator, as `for await` does, so its `finally`
           // blocks (external drivers, workflow runtimes) run. After an abort the
           // generator may be parked on a pending await and return() would queue
           // behind it, so only wait when we were not aborted.
@@ -358,7 +420,7 @@ export class AgentInvocationGateway {
     const transcript =
       text.length > 0 ? text.join("\n") : fallbackOutput.join("\n");
     const interrupt = findInterrupt(
-      [...resumeEvents, inputEvent, ...events],
+      [...resumeEvents, ...(inputEvent ? [inputEvent] : []), ...events],
       agent,
     );
 
@@ -449,7 +511,7 @@ function createChildSession({
   sessionHistoryMode,
 }: {
   parentSession: Session;
-  inputEvent: Event;
+  inputEvent: Event | undefined;
   priorEvents: readonly Event[];
   sessionState: Readonly<Record<string, unknown>> | undefined;
   sessionStateMode: "merge" | "replace";
@@ -479,7 +541,7 @@ function createChildSession({
     events: [
       ...(sessionHistoryMode === "inherit" ? parentSession.events : []),
       ...priorEvents,
-      inputEvent,
+      ...(inputEvent ? [inputEvent] : []),
     ],
     lastUpdateTime: parentSession.lastUpdateTime,
   };
@@ -540,8 +602,8 @@ function isFinal(event: Event): boolean {
  * `LlmAgent` emits the call, the tool's pending response and then keeps going,
  * so the call is not necessarily on the last event. ADK's `Workflow` likewise
  * marks a node as interrupted by any event carrying `longRunningToolIds`.
- * `NodeTool` calls of `agent` (or of the sub-agent that authored the call) are
- * skipped: see {@link nodeToolCallIds}.
+ * `NodeTool` calls are skipped, wherever the calling `LlmAgent` sits in the
+ * delegated tree: see {@link nodeToolCallIds}.
  */
 function findInterrupt(
   allEvents: readonly Event[],
@@ -609,30 +671,39 @@ function isNodeTool(value: unknown): boolean {
  * interrupt events (with their own `longRunningToolIds`) surface in the stream
  * and are reported instead.
  *
- * The tool is looked up by call name on the `LlmAgent` that authored the call
- * event (`agent` or one of its sub-agents), in its `tools` list only. Tools
- * provided by a `BaseToolset` are not resolved (that could do I/O, such as an
- * MCP listing), so a `NodeTool` inside a toolset still counts as long-running.
+ * A call is resolved in two ways, neither of which does I/O:
+ * 1. By tool: the call name is looked up in the `tools` of every `LlmAgent`
+ *    named like the event's author, anywhere in the delegated tree (see
+ *    {@link llmAgentsByName}). A `NodeTool` there exempts the call; any other
+ *    tool with that name keeps it pending, whatever else applies.
+ * 2. By run marker, when no listed tool has that name (a tool from a
+ *    `BaseToolset`, whose `getTools` may do I/O such as an MCP listing, or an
+ *    author the walk cannot see, such as a dynamic or `ParallelWorker` node):
+ *    `NodeTool` runs its node on the branch segment `<tool name>@<call id>`, so
+ *    an event of this delegation on such a branch shows the call ran a node.
+ *    A node that emits no event at all leaves no marker, and the call stays
+ *    long-running (a spurious pause, never a missed request).
  */
 function nodeToolCallIds(
   events: readonly Event[],
   agent: BaseAgent,
 ): Set<string> {
   const ids = new Set<string>();
+  const owners = llmAgentsByName(agent);
+  const branches = events.flatMap((event) =>
+    event.branch ? [event.branch] : [],
+  );
   for (const event of events) {
     const longRunning = event.longRunningToolIds ?? [];
-    if (longRunning.length === 0 || !event.author) continue;
-    const owner =
-      event.author === agent.name ? agent : agent.findAgent(event.author);
-    if (!owner || !isLlmAgent(owner)) continue;
+    if (longRunning.length === 0) continue;
+    const candidates = (event.author && owners.get(event.author)) || [];
     for (const call of getFunctionCalls(event)) {
+      if (!call.id || !call.name || !longRunning.includes(call.id)) continue;
+      const tool = resolveCallTool(candidates, call.name);
       if (
-        call.id &&
-        longRunning.includes(call.id) &&
-        owner.tools.some(
-          (tool) =>
-            isNodeTool(tool) && (tool as { name?: unknown }).name === call.name,
-        )
+        tool === "node-tool" ||
+        (tool === "unlisted" &&
+          hasNodeToolRun(branches, `${call.name}@${call.id}`))
       ) {
         ids.add(call.id);
       }
@@ -642,7 +713,74 @@ function nodeToolCallIds(
 }
 
 /**
- * Combines the active signals with the platform `AbortSignal.any` (Node >=22),
+ * How a call name resolves on the candidate owners' listed tools. `other` (a
+ * listed tool that is not a `NodeTool`) wins over `node-tool`, so a name clash
+ * between agents keeps the call pending.
+ */
+function resolveCallTool(
+  candidates: readonly LlmAgent[],
+  name: string,
+): "node-tool" | "other" | "unlisted" {
+  let nodeTool = false;
+  for (const candidate of candidates) {
+    for (const tool of candidate.tools) {
+      if (isBaseToolset(tool)) continue;
+      if ((tool as { name?: unknown }).name !== name) continue;
+      if (!isNodeTool(tool)) return "other";
+      nodeTool = true;
+    }
+  }
+  return nodeTool ? "node-tool" : "unlisted";
+}
+
+/**
+ * Every `LlmAgent` reachable from `root` without I/O, by name: sub-agents, the
+ * node of each listed `NodeTool`, and the graph nodes of each ADK `Workflow`
+ * (which are not registered as `subAgents`). Names are only unique within one
+ * agent tree, so a name may map to several agents.
+ */
+function llmAgentsByName(root: BaseAgent): Map<string, LlmAgent[]> {
+  const byName = new Map<string, LlmAgent[]>();
+  const seen = new Set<unknown>();
+  const visit = (node: unknown): void => {
+    if (typeof node !== "object" || node === null || seen.has(node)) return;
+    seen.add(node);
+    if (isWorkflow(node)) {
+      for (const child of node.graph?.nodes ?? []) visit(child);
+      return;
+    }
+    if (!isBaseAgent(node)) return;
+    if (isLlmAgent(node)) {
+      const named = byName.get(node.name);
+      if (named) named.push(node);
+      else byName.set(node.name, [node]);
+      for (const tool of node.tools) {
+        if (isNodeTool(tool)) visit((tool as { node?: unknown }).node);
+      }
+    }
+    for (const child of node.subAgents) visit(child);
+  };
+  visit(root);
+  return byName;
+}
+
+/**
+ * Whether `marker` (`<tool name>@<call id>`) is one whole run segment of some
+ * event's branch. Tool names may contain `.`, the branch separator, so the
+ * marker is matched at segment boundaries instead of splitting the branch.
+ */
+function hasNodeToolRun(branches: readonly string[], marker: string): boolean {
+  return branches.some(
+    (branch) =>
+      branch === marker ||
+      branch.startsWith(`${marker}.`) ||
+      branch.endsWith(`.${marker}`) ||
+      branch.includes(`.${marker}.`),
+  );
+}
+
+/**
+ * Combines the active signals with the platform `AbortSignal.any` (Node 22 or later),
  * the same primitive ADK's LlmAgent uses; no listeners to dispose.
  */
 function combineAbortSignals(
