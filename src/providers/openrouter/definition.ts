@@ -1,10 +1,6 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
 import type { ProviderDefinition } from "../../core/provider-definition.js";
 
+/** Declarative definition of the OpenRouter provider (endpoint, env keys, model patterns). */
 export const OPENROUTER_DEFINITION: ProviderDefinition = {
   id: "openrouter",
   errorPrefix: "OPENROUTER",

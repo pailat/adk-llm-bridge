@@ -82,6 +82,7 @@ async function main(): Promise<void> {
           metadata: { tier: string };
         };
       }> = [];
+      // The SDK method returns an `APIPromise`; the fake resolves the same body.
       client.chat.completions.create = (async (params: {
         model: string;
         routing?: {
@@ -108,7 +109,7 @@ async function main(): Promise<void> {
             },
           ],
         } as OpenAI.ChatCompletion;
-      }) as typeof client.chat.completions.create;
+      }) as unknown as typeof client.chat.completions.create;
 
       const request = {
         contents: [{ role: "user", parts: [{ text: "Hi" }] }],
@@ -264,6 +265,7 @@ async function main(): Promise<void> {
     }
 
     case "unverifiable-registry": {
+      // @ts-expect-error A string pattern that is not a valid RegExp checks that registration rejects it.
       class InvalidPatternLlm extends CustomLlm {
         static readonly supportedModels = ["["];
 

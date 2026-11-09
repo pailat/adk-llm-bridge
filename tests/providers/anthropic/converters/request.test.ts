@@ -1,6 +1,6 @@
 import { describe, expect, it, spyOn } from "bun:test";
 import type Anthropic from "@anthropic-ai/sdk";
-import type { LlmRequest } from "@google/adk";
+import { InputValidationError, type LlmRequest } from "@google/adk";
 import { FunctionCallingConfigMode, type Schema } from "@google/genai";
 import {
   applyAnthropicPromptCaching,
@@ -193,9 +193,9 @@ describe("convertAnthropicRequest", () => {
     });
   });
 
-  describe("parametersJsonSchema (LLM-2b)", () => {
+  describe("parametersJsonSchema", () => {
     const jsonSchema = {
-      type: "object",
+      type: "object" as const,
       properties: { city: { type: "string" } },
       required: ["city"],
       additionalProperties: false,
@@ -251,9 +251,25 @@ describe("convertAnthropicRequest", () => {
       const tool = withDeclaration({ name: "ping" });
       expect(tool?.input_schema).toEqual({ type: "object", properties: {} });
     });
+
+    it("ignores an array parametersJsonSchema, as the OpenAI converter does", () => {
+      const tool = withDeclaration({
+        name: "ping",
+        parametersJsonSchema: [{ type: "string" }],
+        parameters: { type: "OBJECT", properties: { q: { type: "STRING" } } },
+      });
+      expect(tool?.input_schema).toMatchObject({
+        type: "object",
+        properties: { q: { type: "string" } },
+      });
+      expect(
+        withDeclaration({ name: "ping", parametersJsonSchema: [] })
+          ?.input_schema,
+      ).toEqual({ type: "object", properties: {} });
+    });
   });
 
-  describe("tool call id correlation (LLM-10b)", () => {
+  describe("tool call id correlation", () => {
     type Block = { type: string; id?: string; tool_use_id?: string };
 
     function convert(contents: LlmRequest["contents"]): Block[] {
@@ -373,7 +389,7 @@ describe("convertAnthropicRequest", () => {
     });
   });
 
-  describe("thinking signature namespace (LLM-3b)", () => {
+  describe("thinking signature namespace", () => {
     type Block = {
       type: string;
       thinking?: string;
@@ -1081,6 +1097,58 @@ describe("convertAnthropicRequest", () => {
       expect(result.toolChoice).toEqual({ type: "tool", name: "json_output" });
       expect(result.tools?.some((t) => t.name === "json_output")).toBe(true);
     });
+
+    it("reports whether the json_output tool was injected", () => {
+      const schema = {
+        type: "OBJECT",
+        properties: { answer: { type: "STRING" } },
+      } as Schema;
+      expect(
+        convertAnthropicRequest(
+          createLlmRequest({ config: { responseSchema: schema } }),
+        ).structuredOutput,
+      ).toBe(true);
+      expect(
+        convertAnthropicRequest(createLlmRequest({ config: {} }))
+          .structuredOutput,
+      ).toBe(false);
+      expect(
+        convertAnthropicRequest(
+          createLlmRequest({
+            config: {
+              responseSchema: schema,
+              toolConfig: {
+                functionCallingConfig: { mode: FunctionCallingConfigMode.NONE },
+              },
+            },
+          }),
+        ).structuredOutput,
+      ).toBe(false);
+    });
+
+    it("rejects a user tool named json_output when structured output is on", () => {
+      const tools = [
+        {
+          functionDeclarations: [{ name: "json_output", description: "mine" }],
+        },
+      ];
+      const convert = () =>
+        convertAnthropicRequest(
+          createLlmRequest({
+            config: {
+              tools,
+              responseSchema: { type: "OBJECT" } as Schema,
+            },
+          }),
+        );
+      expect(convert).toThrow(InputValidationError);
+      expect(convert).toThrow(/reserved for the output tool/);
+      // Without structured output the name is the user's.
+      const plain = convertAnthropicRequest(
+        createLlmRequest({ config: { tools } }),
+      );
+      expect(plain.tools?.map((t) => t.name)).toEqual(["json_output"]);
+    });
   });
 
   describe("extended-thinking round-trip (processContent re-emits thoughts)", () => {
@@ -1369,7 +1437,7 @@ describe("convertAnthropicRequest", () => {
     });
   });
 
-  describe("warnings go through the ADK logger (OBS-4)", () => {
+  describe("warnings go through the ADK logger", () => {
     it("tags missing-id warnings with stable codes and never touches console", () => {
       const consoleSpy = spyOn(console, "warn").mockImplementation(() => {});
       const spy = captureWarnings();

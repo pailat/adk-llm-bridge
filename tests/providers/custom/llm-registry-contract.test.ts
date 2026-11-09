@@ -16,6 +16,7 @@ import {
   Gemini,
   LLMRegistry,
 } from "@google/adk";
+import { adkModelNotFoundMessage } from "../../../src/providers/custom/registry.js";
 
 function makeClass(patterns: (string | RegExp)[]) {
   return class TestLlm extends BaseLlm {
@@ -98,6 +99,15 @@ describe("ADK LLMRegistry contract", () => {
     LLMRegistry.register(C);
     LLMRegistry.register(D);
     expect(LLMRegistry.resolve("zz-contract-key-equal-1")).toBe(C);
+  });
+
+  it("reports an unclaimed model with the exact message the bridge matches", () => {
+    expect(() => LLMRegistry.resolve("zz-contract-missing")).toThrow(
+      new Error(adkModelNotFoundMessage("zz-contract-missing")),
+    );
+    expect(adkModelNotFoundMessage("zz-contract-missing")).toBe(
+      "Model zz-contract-missing not found.",
+    );
   });
 
   it("exposes no way to unregister a class", () => {

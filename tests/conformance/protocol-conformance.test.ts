@@ -377,9 +377,11 @@ for (const profile of RUNTIME_FIXTURES) {
       );
 
       expect(responses.some(({ partial }) => partial)).toBe(true);
-      expect(() => terminalResponse(responses, "truncated stream")).toThrow(
-        "truncated stream ended without a terminal turnComplete",
-      );
+      // The cut stream ends with a terminal error, not with partials alone.
+      expect(terminalResponse(responses, "truncated stream")).toMatchObject({
+        errorCode: "INCOMPLETE_STREAM",
+        turnComplete: true,
+      });
     });
 
     it(`${label(profile, "optional-missing-api-key")}`, async () => {

@@ -1,13 +1,5 @@
 /**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
-/**
  * Factory functions for custom LLM providers.
- *
- * @module providers/custom/factory
  */
 
 import type { CustomLlmConfig } from "../../types.js";
@@ -37,8 +29,8 @@ import { CustomLlm, type CustomLlmProviderConfig } from "./custom-llm.js";
  * // Azure OpenAI
  * const llm = createCustomLlm({
  *   name: "azure",
- *   model: "gpt-4",
- *   baseURL: "https://my-resource.openai.azure.com/openai/deployments/gpt-4",
+ *   model: "gpt-6.1-sol",
+ *   baseURL: "https://my-resource.openai.azure.com/openai/deployments/gpt-6.1-sol",
  *   apiKey: process.env.AZURE_API_KEY,
  *   headers: { "api-key": process.env.AZURE_API_KEY },
  *   queryParams: { "api-version": "2024-02-01" }
@@ -124,9 +116,9 @@ type CustomOptions = Omit<CustomLlmConfig, "model"> & {
  * @example
  * ```typescript
  * // With full options
- * const llm = Custom("gpt-4", {
+ * const llm = Custom("gpt-6.1-sol", {
  *   name: "azure",
- *   baseURL: "https://my-resource.openai.azure.com/openai/deployments/gpt-4",
+ *   baseURL: "https://my-resource.openai.azure.com/openai/deployments/gpt-6.1-sol",
  *   apiKey: process.env.AZURE_API_KEY,
  *   headers: { "api-key": process.env.AZURE_API_KEY },
  *   queryParams: { "api-version": "2024-02-01" }

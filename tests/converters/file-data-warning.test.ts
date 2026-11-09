@@ -4,7 +4,7 @@ import type { LlmRequest } from "@google/adk";
 import { convertRequest } from "../../src/converters/request.js";
 import { captureWarnings } from "../helpers/fake-logger.js";
 
-// Issue #89: pins the non-http fileData warning text and keeps the
+// Pins the non-http fileData warning text and keeps the
 // degradation matrix row in docs/openai-compatible-feature-matrix.md in sync.
 
 function warningsFor(fileUri: string): string[] {
@@ -30,7 +30,7 @@ function warningsFor(fileUri: string): string[] {
   return spy.mock.calls.map((c) => String(c[0]));
 }
 
-describe("non-http fileData warning (#89)", () => {
+describe("non-http fileData warning", () => {
   it("emits the exact message with the scheme only", () => {
     const warns = warningsFor("gs://bucket/secret/img.png");
     const matches = warns.filter((w) =>

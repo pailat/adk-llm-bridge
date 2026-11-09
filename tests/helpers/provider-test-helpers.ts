@@ -6,6 +6,7 @@
  */
 
 import { beforeEach, describe, expect, it, spyOn } from "bun:test";
+import type { LlmRequest } from "@google/adk";
 import { getProviderConfig, resetAllConfigs } from "../../src/config.js";
 import { useCleanEnv } from "./env.js";
 import { captureWarnings } from "./fake-logger.js";
@@ -14,22 +15,24 @@ import { captureWarnings } from "./fake-logger.js";
 // Registration test suite
 // ---------------------------------------------------------------------------
 
-interface RegistrationTestConfig {
+interface RegistrationTestConfig<O extends object> {
   /** Provider display name, e.g. "OpenAI" */
   name: string;
   /** Provider config key, e.g. "openai" */
   configKey: string;
   /** Register function */
-  register: (options?: Record<string, unknown>) => void;
+  register: (options?: O) => void;
   /** Check if registered */
   isRegistered: () => boolean;
   /** Reset registration */
   reset: () => void;
   /** Config properties to test: [key, testValue] pairs */
-  configProps: [string, unknown][];
+  configProps: [keyof O & string, unknown][];
 }
 
-export function describeProviderRegistration(cfg: RegistrationTestConfig) {
+export function describeProviderRegistration<O extends object>(
+  cfg: RegistrationTestConfig<O>,
+) {
   describe(`register (${cfg.name})`, () => {
     beforeEach(() => cfg.reset());
 
@@ -55,9 +58,9 @@ export function describeProviderRegistration(cfg: RegistrationTestConfig) {
 
     for (const [key, value] of cfg.configProps) {
       it(`stores ${key} in provider config`, () => {
-        cfg.register({ [key]: value });
+        cfg.register({ [key]: value } as O);
         const config = getProviderConfig(cfg.configKey as "anthropic");
-        expect(config?.[key as keyof typeof config]).toBe(value);
+        expect<unknown>(config?.[key as keyof typeof config]).toBe(value);
       });
     }
 
@@ -84,7 +87,7 @@ export function describeProviderRegistration(cfg: RegistrationTestConfig) {
     beforeEach(() => cfg.reset());
 
     it("resets registration state and config", () => {
-      const opts = Object.fromEntries(cfg.configProps);
+      const opts = Object.fromEntries(cfg.configProps) as O;
       cfg.register(opts);
       expect(cfg.isRegistered()).toBe(true);
 
@@ -105,8 +108,8 @@ interface FactoryTestConfig {
   /** Factory function */
   factory: (model: string, options?: Record<string, unknown>) => unknown;
   /** Expected class constructor */
-  expectedClass: new (
-    ...args: unknown[]
+  expectedClass: abstract new (
+    ...args: never[]
   ) => unknown;
   /** Default model string for tests */
   defaultModel: string;
@@ -200,7 +203,7 @@ export function describeConnectError(
     model: string;
     apiKey?: string;
   }) => {
-    connect: (req: unknown) => Promise<unknown>;
+    connect: (req: LlmRequest) => Promise<unknown>;
   },
   testModel: string,
 ) {

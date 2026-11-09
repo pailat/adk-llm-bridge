@@ -1,16 +1,8 @@
 /**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
-/**
  * Type definitions for adk-llm-bridge.
  *
  * This module contains all TypeScript interfaces and types used throughout
  * the library for configuration, streaming, and provider-specific options.
- *
- * @module types
  */
 
 import type { LlmResponse } from "@google/adk";
@@ -33,7 +25,7 @@ export type ErrorMode = "throw" | "response";
  * @example
  * ```typescript
  * const config: BaseProviderConfig = {
- *   model: "anthropic/claude-sonnet-4",
+ *   model: "anthropic/claude-sonnet-5.5",
  *   apiKey: "your-api-key",
  *   timeout: 30000
  * };
@@ -43,8 +35,8 @@ export interface BaseProviderConfig {
   /**
    * The model identifier in provider/model format.
    *
-   * @example "anthropic/claude-sonnet-4"
-   * @example "openai/gpt-4o"
+   * @example "anthropic/claude-sonnet-5.5"
+   * @example "openai/gpt-6.1-sol"
    */
   model: string;
 
@@ -83,7 +75,8 @@ export interface BaseProviderConfig {
    *   with the same `errorCode` (for example `API_ERROR_429`), runs plugins'
    *   `onModelErrorCallback`, and lets `RoutedLlm` fail over to the next model.
    * - `"response"`: yields an `LlmResponse` carrying `errorCode`/`errorMessage`
-   *   instead of throwing (the behavior before 0.7).
+   *   instead of throwing; use it to keep the error-response contract of
+   *   earlier versions.
    *
    * Caller-initiated aborts never produce an error in either mode.
    *
@@ -105,7 +98,7 @@ export interface BaseProviderConfig {
  * @example
  * ```typescript
  * const config: AIGatewayConfig = {
- *   model: "anthropic/claude-sonnet-4",
+ *   model: "anthropic/claude-sonnet-5.5",
  *   apiKey: process.env.AI_GATEWAY_API_KEY
  * };
  * ```
@@ -113,6 +106,27 @@ export interface BaseProviderConfig {
  * @see {@link BaseProviderConfig} for inherited options
  */
 export interface AIGatewayConfig extends BaseProviderConfig {}
+
+/**
+ * Options every `register*()` function accepts. They are stored as the
+ * provider's global config and apply to every model created through the
+ * registry, unless the model's own config sets them.
+ */
+export interface BaseRegisterOptions {
+  /**
+   * Request timeout in milliseconds.
+   *
+   * @defaultValue 60000 (60 seconds)
+   */
+  timeout?: number;
+
+  /**
+   * Maximum number of retry attempts for failed requests.
+   *
+   * @defaultValue 2
+   */
+  maxRetries?: number;
+}
 
 /**
  * Options for registering AI Gateway with ADK's LLMRegistry.
@@ -127,7 +141,7 @@ export interface AIGatewayConfig extends BaseProviderConfig {}
  * });
  * ```
  */
-export interface RegisterOptions {
+export interface RegisterOptions extends BaseRegisterOptions {
   /**
    * How a failed provider call is reported to ADK.
    *
@@ -135,7 +149,8 @@ export interface RegisterOptions {
    *   with the same `errorCode` (for example `API_ERROR_429`), runs plugins'
    *   `onModelErrorCallback`, and lets `RoutedLlm` fail over to the next model.
    * - `"response"`: yields an `LlmResponse` carrying `errorCode`/`errorMessage`
-   *   instead of throwing (the behavior before 0.7).
+   *   instead of throwing; use it to keep the error-response contract of
+   *   earlier versions.
    *
    * Caller-initiated aborts never produce an error in either mode.
    *
@@ -246,7 +261,7 @@ export interface OpenRouterProviderPreferences {
  * @example
  * ```typescript
  * const config: OpenRouterConfig = {
- *   model: "anthropic/claude-sonnet-4",
+ *   model: "anthropic/claude-sonnet-5.5",
  *   apiKey: process.env.OPENROUTER_API_KEY,
  *   siteUrl: "https://myapp.com",
  *   appName: "My Application",
@@ -303,7 +318,7 @@ export interface OpenRouterConfig extends BaseProviderConfig {
  * });
  * ```
  */
-export interface OpenRouterRegisterOptions {
+export interface OpenRouterRegisterOptions extends BaseRegisterOptions {
   /**
    * How a failed provider call is reported to ADK.
    *
@@ -311,7 +326,8 @@ export interface OpenRouterRegisterOptions {
    *   with the same `errorCode` (for example `API_ERROR_429`), runs plugins'
    *   `onModelErrorCallback`, and lets `RoutedLlm` fail over to the next model.
    * - `"response"`: yields an `LlmResponse` carrying `errorCode`/`errorMessage`
-   *   instead of throwing (the behavior before 0.7).
+   *   instead of throwing; use it to keep the error-response contract of
+   *   earlier versions.
    *
    * Caller-initiated aborts never produce an error in either mode.
    *
@@ -373,8 +389,8 @@ export interface OpenRouterRegisterOptions {
  * // Azure OpenAI
  * const config: CustomLlmConfig = {
  *   name: "azure",
- *   model: "gpt-4",
- *   baseURL: "https://my-resource.openai.azure.com/openai/deployments/gpt-4",
+ *   model: "gpt-6.1-sol",
+ *   baseURL: "https://my-resource.openai.azure.com/openai/deployments/gpt-6.1-sol",
  *   headers: { "api-key": process.env.AZURE_API_KEY },
  *   queryParams: { "api-version": "2024-02-01" }
  * };
@@ -455,7 +471,7 @@ export interface CustomLlmConfig extends BaseProviderConfig {
  * @example
  * ```typescript
  * const config: OpenAIProviderConfig = {
- *   model: "gpt-4.1",
+ *   model: "gpt-6.1-sol",
  *   apiKey: process.env.OPENAI_API_KEY,
  *   organization: "org-xxx",
  *   project: "proj-xxx"
@@ -498,7 +514,7 @@ export interface OpenAIProviderConfig extends BaseProviderConfig {
  * });
  * ```
  */
-export interface OpenAIRegisterOptions {
+export interface OpenAIRegisterOptions extends BaseRegisterOptions {
   /**
    * How a failed provider call is reported to ADK.
    *
@@ -506,7 +522,8 @@ export interface OpenAIRegisterOptions {
    *   with the same `errorCode` (for example `API_ERROR_429`), runs plugins'
    *   `onModelErrorCallback`, and lets `RoutedLlm` fail over to the next model.
    * - `"response"`: yields an `LlmResponse` carrying `errorCode`/`errorMessage`
-   *   instead of throwing (the behavior before 0.7).
+   *   instead of throwing; use it to keep the error-response contract of
+   *   earlier versions.
    *
    * Caller-initiated aborts never produce an error in either mode.
    *
@@ -520,6 +537,13 @@ export interface OpenAIRegisterOptions {
    * @defaultValue process.env.OPENAI_API_KEY
    */
   apiKey?: string;
+
+  /**
+   * Base URL for the API endpoint.
+   *
+   * @defaultValue process.env.OPENAI_BASE_URL || "https://api.openai.com/v1"
+   */
+  baseURL?: string;
 
   /**
    * OpenAI organization ID.
@@ -549,7 +573,7 @@ export interface OpenAIRegisterOptions {
  * @example
  * ```typescript
  * const config: XAIProviderConfig = {
- *   model: "grok-4",
+ *   model: "grok-4.7",
  *   apiKey: process.env.XAI_API_KEY
  * };
  * ```
@@ -571,7 +595,7 @@ export interface XAIProviderConfig extends BaseProviderConfig {}
  * });
  * ```
  */
-export interface XAIRegisterOptions {
+export interface XAIRegisterOptions extends BaseRegisterOptions {
   /**
    * How a failed provider call is reported to ADK.
    *
@@ -579,7 +603,8 @@ export interface XAIRegisterOptions {
    *   with the same `errorCode` (for example `API_ERROR_429`), runs plugins'
    *   `onModelErrorCallback`, and lets `RoutedLlm` fail over to the next model.
    * - `"response"`: yields an `LlmResponse` carrying `errorCode`/`errorMessage`
-   *   instead of throwing (the behavior before 0.7).
+   *   instead of throwing; use it to keep the error-response contract of
+   *   earlier versions.
    *
    * Caller-initiated aborts never produce an error in either mode.
    *
@@ -593,6 +618,13 @@ export interface XAIRegisterOptions {
    * @defaultValue process.env.XAI_API_KEY
    */
   apiKey?: string;
+
+  /**
+   * Base URL for the API endpoint.
+   *
+   * @defaultValue "https://api.x.ai/v1"
+   */
+  baseURL?: string;
 }
 
 // =============================================================================
@@ -607,7 +639,7 @@ export interface XAIRegisterOptions {
  * @example
  * ```typescript
  * const config: AnthropicProviderConfig = {
- *   model: "claude-sonnet-4-5-20250929",
+ *   model: "claude-sonnet-5-5",
  *   apiKey: process.env.ANTHROPIC_API_KEY,
  *   maxTokens: 4096
  * };
@@ -657,7 +689,7 @@ export interface AnthropicProviderConfig extends BaseProviderConfig {
  * });
  * ```
  */
-export interface AnthropicRegisterOptions {
+export interface AnthropicRegisterOptions extends BaseRegisterOptions {
   /**
    * How a failed provider call is reported to ADK.
    *
@@ -665,7 +697,8 @@ export interface AnthropicRegisterOptions {
    *   with the same `errorCode` (for example `API_ERROR_429`), runs plugins'
    *   `onModelErrorCallback`, and lets `RoutedLlm` fail over to the next model.
    * - `"response"`: yields an `LlmResponse` carrying `errorCode`/`errorMessage`
-   *   instead of throwing (the behavior before 0.7).
+   *   instead of throwing; use it to keep the error-response contract of
+   *   earlier versions.
    *
    * Caller-initiated aborts never produce an error in either mode.
    *
@@ -681,27 +714,18 @@ export interface AnthropicRegisterOptions {
   apiKey?: string;
 
   /**
+   * Base URL for the API endpoint, for a proxy or gateway.
+   *
+   * @defaultValue process.env.ANTHROPIC_BASE_URL || "https://api.anthropic.com"
+   */
+  baseURL?: string;
+
+  /**
    * Maximum number of tokens to generate.
    *
    * @defaultValue 4096
    */
   maxTokens?: number;
-
-  /**
-   * Request timeout in milliseconds for all models created through the
-   * registry.
-   *
-   * @defaultValue 60000
-   */
-  timeout?: number;
-
-  /**
-   * Maximum number of retry attempts for all models created through the
-   * registry.
-   *
-   * @defaultValue 2
-   */
-  maxRetries?: number;
 
   /**
    * Opt-in Anthropic prompt caching for all models created through the
@@ -782,8 +806,8 @@ export interface StreamAccumulator {
    * Accumulated structured reasoning_details fragments (OpenRouter), indexed by
    * their `index` field so multi-block streamed reasoning reassembles in order.
    *
-   * Each value is the verbatim provider object (e.g. `{ type: "reasoning.text",
-   * text, signature, index }`). Assembled on finish into the thought part's
+   * Each value is the verbatim provider object (for example an object with `type`, `text`,
+   * `signature` and `index`). Assembled on finish into the thought part's
    * `thoughtSignature` so signed reasoning can round-trip across turns.
    */
   reasoningDetails: Map<number, Record<string, unknown>>;

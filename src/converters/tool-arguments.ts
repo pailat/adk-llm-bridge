@@ -1,10 +1,4 @@
 /**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
-/**
  * Tool-call argument parsing shared by every response converter.
  *
  * Models occasionally return tool-call arguments that are not valid JSON,
@@ -12,8 +6,6 @@
  * `{}` hides the problem; instead the converter reports the response with
  * `finishReason: MALFORMED_FUNCTION_CALL`, which ADK's
  * `ReflectAndRetryModelPlugin` treats as a model error to reflect on and retry.
- *
- * @module converters/tool-arguments
  */
 
 import type { LlmResponse } from "@google/adk";

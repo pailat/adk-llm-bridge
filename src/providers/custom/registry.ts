@@ -1,17 +1,9 @@
 /**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
-/**
  * Opt-in ADK registry integration for named custom providers.
  *
  * Each registration creates a dedicated class for a finite set of exact model
  * routes. The class closes over the endpoint configuration because ADK's
  * LLMRegistry constructs registered classes with only a model string.
- *
- * @module providers/custom/registry
  */
 
 import { InputValidationError, LLMRegistry } from "@google/adk";
@@ -98,6 +90,22 @@ function copyConfig<T>(config: T): T {
   }
 }
 
+/**
+ * The message ADK's `LLMRegistry.resolve` throws for a model no class claims
+ * (`models/registry.js` in ADK 2.4).
+ *
+ * @remarks
+ * ADK throws a plain `Error` here, with no code or error class, so this
+ * exact text is the only way to tell "unclaimed" from a registry failure.
+ * The LLMRegistry contract test pins it; a typed lookup (or error code) in
+ * ADK would remove the match.
+ *
+ * @internal
+ */
+export function adkModelNotFoundMessage(model: string): string {
+  return `Model ${model} not found.`;
+}
+
 function resolvesInAdk(model: string): boolean {
   try {
     LLMRegistry.resolve(model);
@@ -105,7 +113,7 @@ function resolvesInAdk(model: string): boolean {
   } catch (error) {
     if (
       error instanceof Error &&
-      error.message === `Model ${model} not found.`
+      error.message === adkModelNotFoundMessage(model)
     ) {
       return false;
     }
@@ -148,10 +156,10 @@ function resolvesInAdk(model: string): boolean {
  *
  * @param prefix - Unique routing prefix, for example `ollama` or `local/vllm`
  * @param config - Endpoint configuration captured for all models under prefix
- * @throws {InputValidationError} If the prefix, models, or endpoint configuration
+ * @throws {@link InputValidationError} If the prefix, models, or endpoint configuration
  *   are invalid, or a route is already claimed (ADK's `InputValidationError`,
  *   an `Error` subclass)
- * @throws {Error} If route safety cannot be proven because ADK resolution failed
+ * @throws {@link Error} If route safety cannot be proven because ADK resolution failed
  *
  * @example
  * ```typescript
@@ -201,7 +209,8 @@ export function registerCustomProvider(
 
   // Resolve before touching ADK's registry, then capture the result. Named
   // registrations therefore keep a stable endpoint/key even if process.env is
-  // changed later, while retaining the deep-copy guarantees from issue #84.
+  // changed later, and the copies keep later edits to the caller's objects
+  // out of the registration.
   const resolved = resolveCustomConfig({
     ...capturedConfig,
     model: remoteModels[0],

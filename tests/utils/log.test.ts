@@ -24,6 +24,25 @@ describe("log", () => {
     expect(spy.codes).toEqual(["TOOL_CALL_MISSING_ID"]);
   });
 
+  it("writes the code into the line ADK's default logger prints", () => {
+    const written: unknown[][] = [];
+    const original = console.warn;
+    console.warn = (...args: unknown[]) => {
+      written.push(args);
+    };
+    try {
+      warn(LogCode.TOOL_CALL_MISSING_ID, "functionCall missing id");
+    } finally {
+      console.warn = original;
+    }
+    expect(written).toHaveLength(1);
+    const line = String(written[0]?.[0]);
+    expect(line).toContain(
+      "[adk-llm-bridge] [TOOL_CALL_MISSING_ID] functionCall missing id",
+    );
+    expect(line).not.toContain("[object Object]");
+  });
+
   it("warnOnce logs a code once per process until reset", () => {
     const spy = captureWarnings();
     warnOnce("X", "first");

@@ -1,10 +1,4 @@
 /**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
-/**
  * Behavioral tests for OpenAICompatibleLlm that assert the actual request body
  * sent to the OpenAI SDK and the streaming-usage merge — the COMBINATIONS that
  * pure converter unit tests cannot observe.
@@ -144,7 +138,9 @@ describe("OpenAICompatibleLlm request body", () => {
     expect(body.stream).toBe(true);
     expect(body.stream_options).toEqual({ include_usage: true });
     expect(body.temperature).toBe(0.4);
-    expect(body.max_tokens).toBe(50);
+    // The OpenAI provider sends max_completion_tokens to chat models too.
+    expect(body.max_completion_tokens).toBe(50);
+    expect(body).not.toHaveProperty("max_tokens");
   });
 
   it("does NOT send tool_choice when no tools are present", async () => {
@@ -239,7 +235,8 @@ describe("OpenAICompatibleLlm request body", () => {
     );
 
     expect(calls[0]).not.toHaveProperty("reasoning_effort");
-    expect(calls[0].max_tokens).toBe(128);
+    expect(calls[0].max_completion_tokens).toBe(128);
+    expect(calls[0]).not.toHaveProperty("max_tokens");
   });
 
   it("sends a native reasoning object for an openrouter non-reasoning vendor id", async () => {
@@ -343,8 +340,10 @@ describe("OpenAICompatibleLlm cancellation", () => {
     const llm = makeLlm("gpt-4.1");
     const controller = new AbortController();
     controller.abort();
-    const { options } = spyCreate(llm, (_params, requestOptions) =>
-      abortableNever(requestOptions?.signal),
+    const { options } = spyCreate(
+      llm,
+      (_params: CreateParams, requestOptions?: CreateOptions) =>
+        abortableNever(requestOptions?.signal),
     );
 
     const responses = await drain(
@@ -362,10 +361,13 @@ describe("OpenAICompatibleLlm cancellation", () => {
     const started = new Promise<void>((resolve) => {
       markStarted = resolve;
     });
-    const { options } = spyCreate(llm, (_params, requestOptions) => {
-      markStarted();
-      return abortableNever(requestOptions?.signal);
-    });
+    const { options } = spyCreate(
+      llm,
+      (_params: CreateParams, requestOptions?: CreateOptions) => {
+        markStarted();
+        return abortableNever(requestOptions?.signal);
+      },
+    );
 
     const pending = drain(
       llm.generateContentAsync(userRequest(), false, controller.signal),
@@ -380,23 +382,25 @@ describe("OpenAICompatibleLlm cancellation", () => {
   it("cancels an active stream without turning the abort into a provider error", async () => {
     const llm = makeLlm("gpt-4.1");
     const controller = new AbortController();
-    const { options } = spyCreate(llm, (_params, requestOptions) =>
-      (async function* () {
-        yield {
-          id: "x",
-          object: "chat.completion.chunk",
-          created: 0,
-          model: "test",
-          choices: [
-            {
-              index: 0,
-              delta: { content: "Hello" },
-              finish_reason: null,
-            },
-          ],
-        } as OpenAI.ChatCompletionChunk;
-        await abortableNever(requestOptions?.signal);
-      })(),
+    const { options } = spyCreate(
+      llm,
+      (_params: CreateParams, requestOptions?: CreateOptions) =>
+        (async function* () {
+          yield {
+            id: "x",
+            object: "chat.completion.chunk",
+            created: 0,
+            model: "test",
+            choices: [
+              {
+                index: 0,
+                delta: { content: "Hello" },
+                finish_reason: null,
+              },
+            ],
+          } as OpenAI.ChatCompletionChunk;
+          await abortableNever(requestOptions?.signal);
+        })(),
     );
 
     const responses = llm.generateContentAsync(

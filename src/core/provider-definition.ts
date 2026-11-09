@@ -1,17 +1,9 @@
 /**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
-/**
  * Declarative provider definition interface.
  *
  * Providers that use OpenAI-compatible APIs differ only in configuration
  * (URLs, env vars, headers), not behavior. This interface captures those
  * differences as data instead of requiring class inheritance.
- *
- * @module core/provider-definition
  */
 
 /**
@@ -34,9 +26,10 @@ export interface ProviderEnvKeys {
  *
  * - `"openai-effort"` (strict, the default when `reasoning` is undefined):
  *   Emit `reasoning_effort` ONLY when the resolved model is reasoning-capable
- *   (the {@link supportsReasoningEffort} model-name gate). Direct OpenAI
- *   (gpt-5*, o-series) and xAI return a 400 if `reasoning_effort` is sent to a
- *   non-reasoning model, so the name gate MUST be preserved for them.
+ *   (the {@link supportsReasoningEffort} model-name gate). Direct OpenAI and
+ *   xAI return a 400 when `reasoning_effort` is sent to a non-reasoning model
+ *   (on OpenAI, anything but gpt-5 and later and the o-series), so the name
+ *   gate MUST be preserved for them.
  *
  * - `"openrouter"` (permissive / native object): ALWAYS emit the native
  *   OpenRouter `reasoning` object (no model-name gate). OpenRouter / AI Gateway
@@ -99,7 +92,7 @@ export interface ProviderDefinition {
    * Cloud providers (AI Gateway, OpenRouter, OpenAI, xAI) should set this
    * to true. Local/self-hosted providers that may not need auth can omit it.
    *
-   * @default false
+   * @defaultValue false
    */
   requireApiKey?: boolean;
 
@@ -115,4 +108,16 @@ export interface ProviderDefinition {
    * @see {@link ReasoningCapability}
    */
   reasoning?: ReasoningCapability;
+
+  /**
+   * Output-limit parameter for models that are not OpenAI reasoning models
+   * (those always get `max_completion_tokens`).
+   *
+   * OpenAI sets `"max_completion_tokens"`: its API deprecates `max_tokens`.
+   * Gateways and other OpenAI-compatible APIs keep `"max_tokens"`, the
+   * parameter OpenAI-compatible servers accept.
+   *
+   * @defaultValue `"max_tokens"`
+   */
+  maxTokensParam?: "max_tokens" | "max_completion_tokens";
 }

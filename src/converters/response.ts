@@ -1,21 +1,14 @@
 /**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
-/**
  * Response converter for OpenAI to ADK format.
  *
  * This module handles the conversion of OpenAI API responses to
  * ADK LlmResponse format, supporting both single responses and streaming.
- *
- * @module converters/response
  */
 
 import type { LlmResponse } from "@google/adk";
 import { FinishReason, type Part } from "@google/genai";
 import type OpenAI from "openai";
+import { PROVIDER_ERROR_NO_CHOICE } from "../core/provider-llm-error.js";
 import type { StreamAccumulator, StreamChunkResult } from "../types.js";
 import {
   type MalformedToolCall,
@@ -32,8 +25,9 @@ import {
  * @internal
  */
 function mapOpenAIFinishReason(
-  reason: string | null | undefined,
+  reason: OpenAI.ChatCompletion.Choice["finish_reason"] | null | undefined,
 ): FinishReason | undefined {
+  if (reason == null) return undefined;
   switch (reason) {
     case "stop":
     case "tool_calls":
@@ -43,8 +37,13 @@ function mapOpenAIFinishReason(
       return FinishReason.MAX_TOKENS;
     case "content_filter":
       return FinishReason.SAFETY;
-    default:
+    default: {
+      // Every SDK value has a case, so a new one is a compile error here.
+      // A gateway can still send other strings: they map to undefined.
+      const unknown: never = reason;
+      void unknown;
       return undefined;
+    }
   }
 }
 
@@ -57,7 +56,9 @@ function mapOpenAIFinishReason(
  * - Usage metadata mapping
  *
  * @param response - The OpenAI ChatCompletion response
- * @returns The converted ADK LlmResponse
+ * @returns The converted ADK LlmResponse; a `NO_CHOICE` error response when
+ *   `choices` is empty or missing (some gateways answer HTTP 200 with an
+ *   error object)
  *
  * @example
  * ```typescript
@@ -75,10 +76,11 @@ function mapOpenAIFinishReason(
  * ```
  */
 export function convertResponse(response: OpenAI.ChatCompletion): LlmResponse {
-  const choice = response.choices[0];
+  // Some gateways answer HTTP 200 with an error object and no `choices`.
+  const choice = response.choices?.[0];
   if (!choice) {
     return {
-      errorCode: "NO_CHOICE",
+      errorCode: PROVIDER_ERROR_NO_CHOICE,
       errorMessage: "No response choice",
       turnComplete: true,
     };

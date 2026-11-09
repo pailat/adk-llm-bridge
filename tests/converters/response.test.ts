@@ -131,7 +131,7 @@ describe("convertResponse", () => {
           logprobs,
         },
       ],
-    } as Partial<ChatCompletion>);
+    } as unknown as Partial<ChatCompletion>);
 
     const result = convertResponse(response);
     expect(result.customMetadata).toEqual({ logprobs });
@@ -147,7 +147,7 @@ describe("convertResponse", () => {
           logprobs: { content: [] },
         },
       ],
-    } as Partial<ChatCompletion>);
+    } as unknown as Partial<ChatCompletion>);
 
     expect(convertResponse(response).customMetadata).toBeUndefined();
   });
@@ -396,7 +396,7 @@ describe("reasoning passthrough", () => {
           logprobs: null,
         },
       ],
-    } as Partial<ChatCompletion>);
+    } as unknown as Partial<ChatCompletion>);
 
     const result = convertResponse(response);
     const parts = result.content?.parts ?? [];
@@ -419,7 +419,7 @@ describe("reasoning passthrough", () => {
           logprobs: null,
         },
       ],
-    } as Partial<ChatCompletion>);
+    } as unknown as Partial<ChatCompletion>);
 
     const parts = convertResponse(response).content?.parts ?? [];
     expect(parts[0]).toEqual({ text: "thinking hard", thought: true });
@@ -587,7 +587,7 @@ describe("reasoning passthrough", () => {
     } as ChatCompletionChunk;
     convertStreamChunk(usageChunk, acc);
 
-    // The accumulator now holds the usage (with reasoning tokens) for the LLM
+    // The accumulator holds the usage (with reasoning tokens) for the LLM
     // stream loop to merge into the held final response.
     expect(acc.usage).toEqual({
       promptTokenCount: 12,
@@ -736,7 +736,7 @@ describe("malformed tool-call arguments", () => {
 
   it("reports truncated arguments as MALFORMED_FUNCTION_CALL instead of calling with {}", () => {
     const response = convertResponse(toolCompletion('{"city":"Par'));
-    expect(response.finishReason).toBe("MALFORMED_FUNCTION_CALL");
+    expect(response.finishReason).toBe(FinishReason.MALFORMED_FUNCTION_CALL);
     expect(response.errorCode).toBe("MALFORMED_FUNCTION_CALL");
     expect(response.errorMessage).toContain("get_weather (invalid-json)");
     expect(response.content?.parts?.some((p) => p.functionCall)).toBe(false);
@@ -746,7 +746,7 @@ describe("malformed tool-call arguments", () => {
   it("still emits calls whose arguments are empty or valid", () => {
     for (const args of ["", "{}", '{"city":"Paris"}']) {
       const response = convertResponse(toolCompletion(args, "tool_calls"));
-      expect(response.finishReason).toBe("STOP");
+      expect(response.finishReason).toBe(FinishReason.STOP);
       expect(response.content?.parts?.some((p) => p.functionCall)).toBe(true);
     }
   });
@@ -760,7 +760,7 @@ describe("malformed tool-call arguments", () => {
       function: { name: "other", arguments: "{oops" },
     });
     const response = convertResponse(completion);
-    expect(response.finishReason).toBe("MALFORMED_FUNCTION_CALL");
+    expect(response.finishReason).toBe(FinishReason.MALFORMED_FUNCTION_CALL);
     expect(response.content?.parts?.some((p) => p.functionCall)).toBe(false);
   });
 
@@ -784,7 +784,7 @@ describe("malformed tool-call arguments", () => {
       acc,
     );
     expect(isComplete).toBe(true);
-    expect(response?.finishReason).toBe("MALFORMED_FUNCTION_CALL");
+    expect(response?.finishReason).toBe(FinishReason.MALFORMED_FUNCTION_CALL);
     expect(response?.errorCode).toBe("MALFORMED_FUNCTION_CALL");
     expect(response?.content).toBeUndefined();
   });
@@ -793,7 +793,7 @@ describe("malformed tool-call arguments", () => {
 describe("encrypted-only reasoning_details (no display text)", () => {
   // xAI Grok returns reasoning only as an encrypted blob. ADK drops any event
   // whose parts[0].text is "" from the history, which silently removes the
-  // function call that follows (P1 regression, E2E finding F1).
+  // function call that follows.
   const encrypted = [
     { type: "reasoning.encrypted", data: "gAAAA-opaque", index: 0 },
   ];

@@ -1,13 +1,17 @@
 import { beforeEach, describe, expect, it, spyOn } from "bun:test";
-import type { LlmRequest, LlmResponse } from "@google/adk";
+import {
+  InputValidationError,
+  type LlmRequest,
+  type LlmResponse,
+} from "@google/adk";
 import { SpanStatusCode, trace } from "@opentelemetry/api";
 import { resetAllConfigs, setProviderConfig } from "../../../src/config.js";
 import { ProviderLlmError } from "../../../src/core/provider-llm-error.js";
-import { _resetAnthropicWarningState } from "../../../src/providers/anthropic/anthropic-llm.js";
 import {
+  _resetAnthropicWarningState,
   ANTHROPIC_MODEL_PATTERNS,
   AnthropicLlm,
-} from "../../../src/providers/anthropic/index.js";
+} from "../../../src/providers/anthropic/anthropic-llm.js";
 import { useCleanEnv } from "../../helpers/env.js";
 import { captureWarnings } from "../../helpers/fake-logger.js";
 import {
@@ -32,20 +36,49 @@ function makeLlm(): AnthropicLlm {
   });
 }
 
+type CreateFn = (body: unknown, options?: AnthropicRequestOptions) => unknown;
+type StreamFn = (body: unknown, options?: AnthropicRequestOptions) => unknown;
+
+/**
+ * The SDK's `messages.create` returns an `APIPromise`; the provider reads its
+ * raw body through `asResponse()`. A mock `create` returns the message (or a
+ * promise of it), and this wraps it so `asResponse()` gives that message as
+ * a JSON `Response`, or rejects as the mock does.
+ */
+function sdkResult(value: unknown): { asResponse(): Promise<Response> } {
+  return {
+    asResponse: async () => {
+      const message = await value;
+      return new Response(
+        typeof message === "string" ? message : JSON.stringify(message),
+      );
+    },
+  };
+}
+
 function messagesClient(llm: AnthropicLlm): {
-  create: (body: unknown, options?: AnthropicRequestOptions) => unknown;
-  stream: (body: unknown, options?: AnthropicRequestOptions) => unknown;
+  create: CreateFn;
+  stream: StreamFn;
 } {
-  return (
+  const messages = (
     llm as unknown as {
-      client: {
-        messages: {
-          create: (body: unknown, options?: AnthropicRequestOptions) => unknown;
-          stream: (body: unknown, options?: AnthropicRequestOptions) => unknown;
-        };
-      };
+      client: { messages: { create: CreateFn; stream: StreamFn } };
     }
   ).client.messages;
+  return {
+    get create(): CreateFn {
+      return messages.create;
+    },
+    set create(fn: CreateFn) {
+      messages.create = (body, options) => sdkResult(fn(body, options));
+    },
+    get stream(): StreamFn {
+      return messages.stream;
+    },
+    set stream(fn: StreamFn) {
+      messages.stream = fn;
+    },
+  };
 }
 
 async function drain(
@@ -73,7 +106,7 @@ function abortableNever(signal?: AbortSignal | null): Promise<never> {
 }
 
 describe("AnthropicLlm", () => {
-  useCleanEnv(["ANTHROPIC_API_KEY"]);
+  useCleanEnv(["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"]);
   beforeEach(() => {
     resetAllConfigs();
   });
@@ -129,6 +162,40 @@ describe("AnthropicLlm", () => {
         maxTokens: 8192,
       });
       expect(llm.model).toBe("claude-sonnet-4-5-20250929");
+    });
+
+    it.each([
+      ["maxRetries", { maxRetries: 2.5 }],
+      ["timeout", { timeout: Number.NaN }],
+      ["maxTokens", { maxTokens: 1.5 }],
+      ["maxTokens", { maxTokens: Number.POSITIVE_INFINITY }],
+    ])("rejects a non-integer %s with InputValidationError", (name, config) => {
+      const create = () =>
+        new AnthropicLlm({
+          model: "claude-sonnet-4-5-20250929",
+          apiKey: "sk-ant-test",
+          ...config,
+        });
+      expect(create).toThrow(InputValidationError);
+      expect(create).toThrow(`[anthropic] ${name} must be an integer`);
+    });
+
+    it("treats a null maxTokens as unset, also in the global config", () => {
+      const maxTokensOf = (llm: AnthropicLlm) =>
+        (llm as unknown as { maxTokens: number }).maxTokens;
+      const defaultMaxTokens = maxTokensOf(makeLlm());
+      // @ts-expect-error null is not a valid option type; checks runtime handling
+      setProviderConfig("anthropic", { maxTokens: null });
+      expect(maxTokensOf(makeLlm())).toBe(defaultMaxTokens);
+    });
+
+    it("clamps maxTokens below 1 to 1, as documented", () => {
+      const llm = new AnthropicLlm({
+        model: "claude-sonnet-4-5-20250929",
+        apiKey: "sk-ant-test",
+        maxTokens: 0,
+      });
+      expect((llm as unknown as { maxTokens: number }).maxTokens).toBe(1);
     });
 
     it("accepts timeout option", () => {
@@ -404,7 +471,7 @@ describe("AnthropicLlm", () => {
     });
   });
 
-  describe("request fix-ups (LLM-4)", () => {
+  describe("request fix-ups", () => {
     function captureBody(llm: AnthropicLlm): { body?: unknown } {
       const captured: { body?: unknown } = {};
       messagesClient(llm).create = (body) => {
@@ -478,7 +545,7 @@ describe("AnthropicLlm", () => {
     });
   });
 
-  describe("global transport config (LLM-7)", () => {
+  describe("global transport config", () => {
     function clientOptions(llm: AnthropicLlm): {
       timeout: number;
       maxRetries: number;
@@ -549,7 +616,7 @@ describe("AnthropicLlm", () => {
     });
   });
 
-  describe("ADK Claude marker (LLM-9)", () => {
+  describe("ADK Claude marker", () => {
     it("marks instances so ADK keeps adk-* function call ids", () => {
       expect(
         (makeLlm() as unknown as Record<symbol, unknown>)[
@@ -559,7 +626,7 @@ describe("AnthropicLlm", () => {
     });
   });
 
-  describe("span annotations (OBS-3)", () => {
+  describe("span annotations", () => {
     type FakeSpan = {
       attributes: Record<string, unknown>;
       status?: { code: number };
@@ -695,7 +762,7 @@ describe("AnthropicLlm", () => {
     });
   });
 
-  describe("errorMode (LLM-1)", () => {
+  describe("errorMode", () => {
     function failing(
       config: { errorMode?: "throw" | "response" } = {},
     ): AnthropicLlm {
@@ -718,7 +785,7 @@ describe("AnthropicLlm", () => {
 
       expect(error).toBeInstanceOf(ProviderLlmError);
       expect(error.code).toBe("API_ERROR_429");
-      expect(error.provider).toBe("ANTHROPIC");
+      expect(error.provider).toBe("anthropic");
       expect(JSON.parse(error.message)).toEqual({
         error: { code: "API_ERROR_429", message: "rate limited" },
       });
@@ -771,6 +838,110 @@ describe("AnthropicLlm", () => {
       await expect(
         drain(llm.generateContentAsync(userRequest(), true)),
       ).rejects.toMatchObject({ code: "API_ERROR_529" });
+    });
+
+    function streamingText(
+      llm: AnthropicLlm,
+      options: { stop: boolean; onFirstDelta?: () => void },
+    ): void {
+      messagesClient(llm).stream = () =>
+        (async function* () {
+          yield {
+            type: "message_start",
+            message: {
+              id: "msg_cut",
+              model: "claude-sonnet-4-5-20250929",
+              usage: { input_tokens: 1, output_tokens: 0 },
+            },
+          };
+          yield {
+            type: "content_block_start",
+            index: 0,
+            content_block: { type: "text", text: "" },
+          };
+          yield {
+            type: "content_block_delta",
+            index: 0,
+            delta: { type: "text_delta", text: "Hel" },
+          };
+          options.onFirstDelta?.();
+          yield {
+            type: "content_block_delta",
+            index: 0,
+            delta: { type: "text_delta", text: "lo" },
+          };
+          if (options.stop) {
+            yield { type: "content_block_stop", index: 0 };
+            yield {
+              type: "message_delta",
+              delta: { stop_reason: "end_turn" },
+              usage: { output_tokens: 2 },
+            };
+            yield { type: "message_stop" };
+          }
+        })();
+    }
+
+    it("throws INCOMPLETE_STREAM when the stream ends before message_stop", async () => {
+      const llm = makeLlm();
+      streamingText(llm, { stop: false });
+
+      const error = (await drain(
+        llm.generateContentAsync(userRequest(), true),
+      ).catch((e) => e)) as ProviderLlmError;
+
+      expect(error).toBeInstanceOf(ProviderLlmError);
+      expect(error.code).toBe("INCOMPLETE_STREAM");
+      expect(error.provider).toBe("anthropic");
+    });
+
+    it('ends a cut stream with an INCOMPLETE_STREAM response with errorMode "response"', async () => {
+      const llm = new AnthropicLlm({
+        model: "claude-sonnet-4-5-20250929",
+        apiKey: "sk-ant-test",
+        errorMode: "response",
+      });
+      streamingText(llm, { stop: false });
+
+      const responses = await drain(
+        llm.generateContentAsync(userRequest(), true),
+      );
+
+      expect(responses.slice(0, -1).every((r) => r.partial === true)).toBe(
+        true,
+      );
+      expect(responses.at(-1)).toEqual({
+        errorCode: "INCOMPLETE_STREAM",
+        errorMessage: "Stream ended before message_stop",
+        turnComplete: true,
+      });
+    });
+
+    it("does not report a cut stream after a caller abort", async () => {
+      const llm = makeLlm();
+      const controller = new AbortController();
+      streamingText(llm, {
+        stop: false,
+        onFirstDelta: () => controller.abort(),
+      });
+
+      const responses = await drain(
+        llm.generateContentAsync(userRequest(), true, controller.signal),
+      );
+
+      expect(responses.some((r) => r.errorCode)).toBe(false);
+    });
+
+    it("does not report a stream that reaches message_stop", async () => {
+      const llm = makeLlm();
+      streamingText(llm, { stop: true });
+
+      const responses = await drain(
+        llm.generateContentAsync(userRequest(), true),
+      );
+
+      expect(responses.at(-1)?.turnComplete).toBe(true);
+      expect(responses.some((r) => r.errorCode)).toBe(false);
     });
   });
 
@@ -849,4 +1020,232 @@ describe("AnthropicLlm", () => {
   });
 
   describeConnectError(AnthropicLlm, "claude-sonnet-4-5-20250929");
+
+  describe("base URL", () => {
+    const baseURLOf = (llm: AnthropicLlm) =>
+      (llm as unknown as { client: { baseURL: string } }).client.baseURL;
+
+    it("defaults to api.anthropic.com", () => {
+      expect(baseURLOf(makeLlm())).toBe("https://api.anthropic.com");
+    });
+
+    it("uses the instance, then the global config, then ANTHROPIC_BASE_URL", () => {
+      process.env.ANTHROPIC_BASE_URL = "https://env.example.com";
+      expect(baseURLOf(makeLlm())).toBe("https://env.example.com");
+
+      setProviderConfig("anthropic", { baseURL: "https://global.example.com" });
+      expect(baseURLOf(makeLlm())).toBe("https://global.example.com");
+
+      const llm = new AnthropicLlm({
+        model: "claude-sonnet-4-5-20250929",
+        apiKey: "sk-ant-test",
+        baseURL: "https://proxy.example.com",
+      });
+      expect(baseURLOf(llm)).toBe("https://proxy.example.com");
+    });
+
+    it("trims ANTHROPIC_BASE_URL and treats a blank one as unset", () => {
+      process.env.ANTHROPIC_BASE_URL = "  http://localhost:4010  ";
+      expect(baseURLOf(makeLlm())).toBe("http://localhost:4010");
+      process.env.ANTHROPIC_BASE_URL = "   ";
+      expect(baseURLOf(makeLlm())).toBe("https://api.anthropic.com");
+    });
+
+    it("sends requests to the trimmed ANTHROPIC_BASE_URL", async () => {
+      process.env.ANTHROPIC_BASE_URL = "  http://localhost:4010  ";
+      const urls: string[] = [];
+      const spy = spyOn(globalThis, "fetch").mockImplementation((async (
+        input: unknown,
+      ) => {
+        urls.push(String(input instanceof Request ? input.url : input));
+        return new Response(
+          '{"id":"m","type":"message","role":"assistant","model":"m","content":[],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":1}}',
+          { headers: { "content-type": "application/json" } },
+        );
+      }) as unknown as typeof fetch);
+      try {
+        const llm = new AnthropicLlm({
+          model: "claude-sonnet-4-5-20250929",
+          apiKey: "sk-ant-test",
+          maxRetries: 0,
+        });
+        await drain(llm.generateContentAsync(userRequest()));
+      } finally {
+        spy.mockRestore();
+      }
+      expect(urls).toEqual(["http://localhost:4010/v1/messages"]);
+    });
+
+    it("rejects an invalid base URL without echoing it", () => {
+      const build = () =>
+        new AnthropicLlm({
+          model: "claude-sonnet-4-5-20250929",
+          apiKey: "sk-ant-test",
+          baseURL: "not a url secret-token",
+        });
+      expect(build).toThrow(InputValidationError);
+      expect(build).not.toThrow(/secret-token/);
+    });
+
+    it("takes timeout and maxRetries from the global config", () => {
+      setProviderConfig("anthropic", { timeout: 5000, maxRetries: 0 });
+      const client = (
+        makeLlm() as unknown as {
+          client: { timeout: number; maxRetries: number };
+        }
+      ).client;
+      expect(client.timeout).toBe(5000);
+      expect(client.maxRetries).toBe(0);
+    });
+  });
+
+  describe("non-streaming response body", () => {
+    function replying(body: string): AnthropicLlm {
+      const llm = makeLlm();
+      messagesClient(llm).create = () => Promise.resolve(body);
+      return llm;
+    }
+
+    it("keeps an integer beyond the safe range in tool input exact", async () => {
+      const llm = replying(
+        '{"id":"msg_1","type":"message","role":"assistant","model":"claude-sonnet-4-5-20250929","content":[{"type":"tool_use","id":"toolu_1","name":"get_ticket","input":{"ticket_id":12345678901234567890,"n":3}}],"stop_reason":"tool_use","stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":1}}',
+      );
+
+      const [response] = await drain(llm.generateContentAsync(userRequest()));
+
+      expect(response?.content?.parts?.[0]?.functionCall?.args).toEqual({
+        ticket_id: "12345678901234567890",
+        n: 3,
+      });
+    });
+
+    it("reports a body that is not a JSON object as a provider error", async () => {
+      const llm = replying("<html>bad gateway</html>");
+
+      const error = (await drain(llm.generateContentAsync(userRequest())).catch(
+        (e) => e,
+      )) as ProviderLlmError;
+
+      expect(error).toBeInstanceOf(ProviderLlmError);
+      expect(error.code).toBe("ANTHROPIC_ERROR");
+    });
+
+    for (const [label, body] of [
+      ["an empty body", ""],
+      ["a blank body", "   "],
+      ["an array", "[]"],
+      ["an object without content", '{"id":"msg_1","type":"message"}'],
+      ["an object whose content is not an array", '{"content":"hi"}'],
+    ] as const) {
+      it(`reports ${label} as a provider error, not a TypeError`, async () => {
+        const error = (await drain(
+          replying(body).generateContentAsync(userRequest()),
+        ).catch((e) => e)) as ProviderLlmError;
+
+        expect(error).toBeInstanceOf(ProviderLlmError);
+        expect(error.code).toBe("ANTHROPIC_ERROR");
+        expect(error.detail).toContain("not a JSON object");
+      });
+    }
+
+    it("a json_output tool with structured output throws InputValidationError, in both error modes", async () => {
+      const collision = {
+        ...userRequest(),
+        config: {
+          responseJsonSchema: { type: "object", properties: {} },
+          tools: [
+            {
+              functionDeclarations: [
+                {
+                  name: "json_output",
+                  parametersJsonSchema: { type: "object" },
+                },
+              ],
+            },
+          ],
+        },
+      } as LlmRequest;
+      for (const errorMode of ["throw", "response"] as const) {
+        const llm = new AnthropicLlm({
+          model: "claude-sonnet-4-5-20250929",
+          apiKey: "test-key",
+          errorMode,
+        });
+        let called = false;
+        messagesClient(llm).create = () => {
+          called = true;
+          return Promise.resolve("{}");
+        };
+
+        const error = await drain(llm.generateContentAsync(collision)).catch(
+          (e) => e,
+        );
+
+        expect(error).toBeInstanceOf(InputValidationError);
+        expect(String(error.message)).toContain("json_output");
+        expect(called).toBe(false);
+      }
+    });
+
+    it("a user tool named json_output stays a function call without structured output", async () => {
+      const llm = replying(
+        '{"id":"msg_1","type":"message","role":"assistant","model":"m","content":[{"type":"tool_use","id":"toolu_1","name":"json_output","input":{"a":1}}],"stop_reason":"tool_use","stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":1}}',
+      );
+
+      const [response] = await drain(llm.generateContentAsync(userRequest()));
+
+      expect(response?.content?.parts?.[0]?.functionCall?.name).toBe(
+        "json_output",
+      );
+    });
+  });
+
+  describe("through the SDK's HTTP layer", () => {
+    function withFetch(
+      respond: () => Response,
+      run: (llm: AnthropicLlm) => Promise<void>,
+    ): Promise<void> {
+      const spy = spyOn(globalThis, "fetch").mockImplementation((async () =>
+        respond()) as unknown as typeof fetch);
+      const llm = new AnthropicLlm({
+        model: "claude-sonnet-4-5-20250929",
+        apiKey: "sk-ant-test",
+        maxRetries: 0,
+      });
+      return run(llm).finally(() => spy.mockRestore());
+    }
+
+    it("parses a 200 body with exact large integers", () =>
+      withFetch(
+        () =>
+          new Response(
+            '{"id":"msg_1","type":"message","role":"assistant","model":"m","content":[{"type":"tool_use","id":"toolu_1","name":"t","input":{"id":98765432109876543210}}],"stop_reason":"tool_use","stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":1}}',
+            { status: 200, headers: { "content-type": "application/json" } },
+          ),
+        async (llm) => {
+          const [response] = await drain(
+            llm.generateContentAsync(userRequest()),
+          );
+          expect(response?.content?.parts?.[0]?.functionCall?.args).toEqual({
+            id: "98765432109876543210",
+          });
+        },
+      ));
+
+    it("still reports an HTTP error status as API_ERROR_<status>", () =>
+      withFetch(
+        () =>
+          new Response(
+            '{"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}',
+            { status: 429, headers: { "content-type": "application/json" } },
+          ),
+        async (llm) => {
+          const error = (await drain(
+            llm.generateContentAsync(userRequest()),
+          ).catch((e) => e)) as ProviderLlmError;
+          expect(error).toBeInstanceOf(ProviderLlmError);
+          expect(error.code).toBe("API_ERROR_429");
+        },
+      ));
+  });
 });

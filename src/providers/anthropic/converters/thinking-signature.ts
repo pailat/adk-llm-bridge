@@ -1,10 +1,4 @@
 /**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
-/**
  * Namespaced `thoughtSignature` values for Anthropic thinking blocks.
  *
  * Anthropic requires the signed thinking block of a prior assistant turn to be
@@ -17,8 +11,6 @@
  *
  * The signatures we produce therefore carry a versioned prefix: a part that
  * has it is recognizably ours, with or without `thought: true`.
- *
- * @module providers/anthropic/converters/thinking-signature
  */
 
 /** Prefix of every `thoughtSignature` produced by the Anthropic provider. */

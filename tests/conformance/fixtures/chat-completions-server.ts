@@ -456,14 +456,18 @@ export function startFixtureServer(): FixtureServer {
     if (body.stream) return textStream(body.model ?? "unknown");
     return completion(body.model ?? "unknown", "fixture text response");
   };
-  const fixtureFetch: typeof globalThis.fetch = async (input, init) => {
+  const fixtureFetch = async (
+    input: Parameters<typeof globalThis.fetch>[0],
+    init?: Parameters<typeof globalThis.fetch>[1],
+  ): Promise<Response> => {
     const request = new Request(input, init);
     if (runtimeFromPath(new URL(request.url).pathname)) {
       return handleFixtureRequest(request);
     }
     return originalFetch(input, init);
   };
-  globalThis.fetch = fixtureFetch;
+  // Only the call is faked; Bun's `fetch.preconnect` is never used by the clients under test.
+  globalThis.fetch = fixtureFetch as typeof globalThis.fetch;
 
   return {
     requests,

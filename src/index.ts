@@ -1,10 +1,4 @@
 /**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
-/**
  * adk-llm-bridge - Connect Google ADK to 100+ LLM models.
  *
  * This library bridges Google ADK (Agent Development Kit) to multiple LLM providers
@@ -31,7 +25,7 @@
  *
  * const agent = new LlmAgent({
  *   name: "assistant",
- *   model: AIGateway("anthropic/claude-sonnet-4")
+ *   model: AIGateway("anthropic/claude-sonnet-5.5")
  * });
  * ```
  *
@@ -45,7 +39,7 @@
  *
  * const agent = new LlmAgent({
  *   name: "assistant",
- *   model: "anthropic/claude-sonnet-4"
+ *   model: "anthropic/claude-sonnet-5.5"
  * });
  * ```
  *
@@ -56,8 +50,6 @@
  * 2. Global configuration (via `setProviderConfig`)
  * 3. Environment variables
  * 4. Default values
- *
- * @module adk-llm-bridge
  *
  * @see {@link https://github.com/pailat/adk-llm-bridge|GitHub Repository}
  * @see {@link https://google.github.io/adk-docs/|Google ADK Documentation}
@@ -78,8 +70,16 @@ export { BaseLlm } from "@google/adk";
 export { BaseProviderLlm } from "./core/base-provider-llm.js";
 export type { OpenAIClientConfig } from "./core/openai-compatible-llm.js";
 export { OpenAICompatibleLlm } from "./core/openai-compatible-llm.js";
-export type { ProviderLlmErrorInit } from "./core/provider-llm-error.js";
-export { ProviderLlmError } from "./core/provider-llm-error.js";
+export type {
+  ProviderErrorCode,
+  ProviderLlmErrorInit,
+} from "./core/provider-llm-error.js";
+export {
+  PROVIDER_ERROR_INCOMPLETE_STREAM,
+  PROVIDER_ERROR_MALFORMED_FUNCTION_CALL,
+  PROVIDER_ERROR_NO_CHOICE,
+  ProviderLlmError,
+} from "./core/provider-llm-error.js";
 
 // =============================================================================
 // AI Gateway Provider
@@ -161,6 +161,7 @@ export type {
   AnthropicRegisterOptions,
   // Base types
   BaseProviderConfig,
+  BaseRegisterOptions,
   // Custom LLM types
   CustomLlmConfig,
   ErrorMode,

@@ -1,23 +1,15 @@
 /**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
-/**
  * Centralized configuration resolution for OpenAI-compatible providers.
  *
- * Eliminates the duplicated config resolution logic that was previously
- * copy-pasted in every provider constructor.
- *
- * @module core/config-resolver
+ * Provider constructors share this resolution (instance config, global config,
+ * environment) instead of repeating it.
  */
 
 import { InputValidationError } from "@google/adk";
 import { getProviderConfig } from "../config.js";
 import { DEFAULT_MAX_RETRIES, DEFAULT_TIMEOUT } from "../constants.js";
 import type { BaseProviderConfig } from "../types.js";
-import { clampPositive } from "../utils/validate.js";
+import { MAX_TIMEOUT_MS, resolveIntegerOption } from "../utils/validate.js";
 import type { ProviderDefinition } from "./provider-definition.js";
 
 /**
@@ -32,17 +24,17 @@ export interface ResolvedConfig {
 }
 
 /**
- * Resolves the first defined environment variable from a list of keys.
+ * Resolves the first set environment variable from a list of keys.
+ *
+ * @remarks
+ * Values are trimmed, and a blank value counts as unset, as the provider SDKs
+ * read their own variables.
  *
  * @param keys - Environment variable names to check, in priority order
- * @returns The first found value, or undefined
+ * @returns The first non-blank value, trimmed, or undefined
  */
 export function resolveEnvVar(keys: string[]): string | undefined {
-  for (const key of keys) {
-    const value = process.env[key];
-    if (value) return value;
-  }
-  return undefined;
+  return resolveEnvVarWithKey(keys)?.value;
 }
 
 interface ResolvedEnvVar {
@@ -52,7 +44,7 @@ interface ResolvedEnvVar {
 
 function resolveEnvVarWithKey(keys: string[]): ResolvedEnvVar | undefined {
   for (const key of keys) {
-    const value = process.env[key];
+    const value = process.env[key]?.trim();
     if (value) return { key, value };
   }
   return undefined;
@@ -89,8 +81,11 @@ function resolveBaseURL(
     );
   }
 
+  // The SDKs join the base URL and the path as text, so surrounding spaces
+  // would end up inside every request URL.
+  const url = value.trim();
   try {
-    new URL(value);
+    new URL(url);
   } catch {
     throw new InputValidationError(
       `[${definition.id}] Invalid baseURL from ${source}. Provide a valid absolute URL ` +
@@ -98,7 +93,7 @@ function resolveBaseURL(
     );
   }
 
-  return value;
+  return url;
 }
 
 /**
@@ -109,13 +104,17 @@ function resolveBaseURL(
  * provider defaults. A defined value is authoritative: an invalid explicit or
  * global URL fails instead of falling through to a lower-precedence source.
  * URL errors identify the source but never include the configured value, which
- * may contain credentials or other secrets.
+ * may contain credentials or other secrets. The base URL is returned trimmed,
+ * and environment values are trimmed, a blank one counting as unset.
  *
  * @param definition - The provider definition with defaults and env var names
  * @param instanceConfig - Instance-level configuration
  * @returns Fully resolved configuration
- * @throws {InputValidationError} If a required API key is missing or the base
- *   URL is missing or invalid (ADK's `InputValidationError`, an `Error` subclass)
+ * @throws {@link InputValidationError} If a required API key is missing, the base
+ *   URL is missing or invalid, or `timeout` or `maxRetries` is set and is not an
+ *   integer, or `timeout` is above 2147483647 ms (ADK's `InputValidationError`,
+ *   an `Error` subclass). An integer below the minimum (1000 ms, 0 retries) is
+ *   clamped, not rejected; `null` counts as unset.
  */
 export function resolveConfig(
   definition: ProviderDefinition,
@@ -151,20 +150,21 @@ export function resolveConfig(
   return {
     apiKey,
     baseURL,
-    timeout: clampPositive(
-      instanceConfig.timeout ??
-        (globalConfig.timeout as number | undefined) ??
-        DEFAULT_TIMEOUT,
-      DEFAULT_TIMEOUT,
-      1000,
-    ),
-    maxRetries: clampPositive(
-      instanceConfig.maxRetries ??
-        (globalConfig.maxRetries as number | undefined) ??
-        DEFAULT_MAX_RETRIES,
-      DEFAULT_MAX_RETRIES,
-      0,
-    ),
+    timeout: resolveIntegerOption({
+      owner: definition.id,
+      name: "timeout",
+      value: instanceConfig.timeout ?? globalConfig.timeout,
+      fallback: DEFAULT_TIMEOUT,
+      min: 1000,
+      max: MAX_TIMEOUT_MS,
+    }),
+    maxRetries: resolveIntegerOption({
+      owner: definition.id,
+      name: "maxRetries",
+      value: instanceConfig.maxRetries ?? globalConfig.maxRetries,
+      fallback: DEFAULT_MAX_RETRIES,
+      min: 0,
+    }),
     headers,
   };
 }

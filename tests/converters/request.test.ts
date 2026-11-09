@@ -1,6 +1,11 @@
 import { describe, expect, it } from "bun:test";
 import type { LlmRequest } from "@google/adk";
-import { FunctionCallingConfigMode } from "@google/genai";
+import { FunctionCallingConfigMode, Type } from "@google/genai";
+import type {
+  ChatCompletionFunctionTool,
+  ChatCompletionMessageParam,
+  ChatCompletionTool,
+} from "openai/resources/chat/completions";
 import {
   convertGenerationConfig,
   convertLogprobsConfig,
@@ -10,6 +15,23 @@ import {
   convertToolChoice,
 } from "../../src/converters/request.js";
 import { captureWarnings } from "../helpers/fake-logger.js";
+
+/** Narrows a converted tool to the function variant; this converter emits no custom tools. */
+/** A converted message as plain fields, to read provider extensions such as `reasoning_details`. */
+function messageFields(
+  message: ChatCompletionMessageParam | undefined,
+): Record<string, unknown> {
+  return { ...message };
+}
+
+function functionTool(
+  tool: ChatCompletionTool | undefined,
+): ChatCompletionFunctionTool {
+  if (tool?.type !== "function") {
+    throw new Error(`expected a function tool, got ${tool?.type}`);
+  }
+  return tool;
+}
 
 function createLlmRequest(overrides: Partial<LlmRequest> = {}): LlmRequest {
   return {
@@ -625,7 +647,7 @@ describe("convertRequest", () => {
       const result = convertRequest(request);
 
       expect(result.tools).toHaveLength(1);
-      expect(result.tools?.[0].function.name).toBe("valid_tool");
+      expect(functionTool(result.tools?.[0]).function.name).toBe("valid_tool");
     });
 
     it("skips function declarations with undefined name", () => {
@@ -694,6 +716,7 @@ describe("convertRequest", () => {
         ["negative infinity", Number.NEGATIVE_INFINITY],
         ["more than one", 2],
       ])("rejects %s instead of treating it as one candidate", (_, value) => {
+        // @ts-expect-error The table includes null on purpose, to check runtime validation.
         const request = createLlmRequest({ config: { candidateCount: value } });
 
         expect(() => convertGenerationConfig(request, "gpt-4.1")).toThrow(
@@ -845,8 +868,8 @@ describe("convertRequest", () => {
       const request = createLlmRequest({
         config: {
           responseSchema: {
-            type: "OBJECT",
-            properties: { answer: { type: "STRING" } },
+            type: Type.OBJECT,
+            properties: { answer: { type: Type.STRING } },
           },
         },
       });
@@ -1487,7 +1510,7 @@ describe("convertRequest", () => {
           "anthropic/claude-sonnet-4.5",
           OR,
         );
-        const msg = result.messages[0] as Record<string, unknown>;
+        const msg = messageFields(result.messages[0]);
         expect(msg.role).toBe("assistant");
         expect(msg.content).toBe("The answer is 782.");
         expect(msg.reasoning_details).toEqual(details);
@@ -1510,8 +1533,10 @@ describe("convertRequest", () => {
             },
           ],
         });
-        const msg = convertRequest(request, "anthropic/claude-sonnet-4.5", OR)
-          .messages[0] as Record<string, unknown>;
+        const msg = messageFields(
+          convertRequest(request, "anthropic/claude-sonnet-4.5", OR)
+            .messages[0],
+        );
         expect(msg.content).toBe("The answer is 782.");
         expect(msg.reasoning_details).toEqual(details);
       });
@@ -1530,8 +1555,10 @@ describe("convertRequest", () => {
             },
           ],
         });
-        const msg = convertRequest(request, "anthropic/claude-sonnet-4.5", OR)
-          .messages[0] as Record<string, unknown>;
+        const msg = messageFields(
+          convertRequest(request, "anthropic/claude-sonnet-4.5", OR)
+            .messages[0],
+        );
         expect(msg.tool_calls).toEqual([
           {
             id: "c1",
@@ -1559,8 +1586,9 @@ describe("convertRequest", () => {
               },
             ],
           });
-          const msg = convertRequest(request, "google/gemini-3", OR)
-            .messages[0] as Record<string, unknown>;
+          const msg = messageFields(
+            convertRequest(request, "google/gemini-3", OR).messages[0],
+          );
           expect(msg.content).toBe("visible answer");
           expect(msg).not.toHaveProperty("reasoning_details");
         }
@@ -1577,9 +1605,11 @@ describe("convertRequest", () => {
             },
           ],
         });
-        const msg = convertRequest(request, "gpt-5", {
-          reasoning: { style: "openai-effort" },
-        }).messages[0] as Record<string, unknown>;
+        const msg = messageFields(
+          convertRequest(request, "gpt-5", {
+            reasoning: { style: "openai-effort" },
+          }).messages[0],
+        );
         expect(msg.content).toBe("answer");
       });
 
@@ -1598,8 +1628,9 @@ describe("convertRequest", () => {
             },
           ],
         });
-        const msg = convertRequest(request, "x-ai/grok-4.3", OR)
-          .messages[0] as Record<string, unknown>;
+        const msg = messageFields(
+          convertRequest(request, "x-ai/grok-4.3", OR).messages[0],
+        );
         expect(msg.reasoning_details).toEqual(encrypted);
         expect((msg.tool_calls as unknown[]).length).toBe(1);
         expect(msg.content).toBeNull();
@@ -1618,7 +1649,7 @@ describe("convertRequest", () => {
           ],
         });
         const result = convertRequest(request, "z-ai/glm-5.2", OR);
-        const msg = result.messages[0] as Record<string, unknown>;
+        const msg = messageFields(result.messages[0]);
         expect(msg.content).toBe("Final answer.");
         expect(msg).not.toHaveProperty("reasoning_details");
       });
@@ -1641,7 +1672,7 @@ describe("convertRequest", () => {
         });
         // No opts -> strict default: thought text stripped, no reasoning_details.
         const result = convertRequest(request, "gpt-5");
-        const msg = result.messages[0] as Record<string, unknown>;
+        const msg = messageFields(result.messages[0]);
         expect(msg.content).toBe("Answer.");
         expect(msg).not.toHaveProperty("reasoning_details");
       });
@@ -1652,9 +1683,9 @@ describe("convertRequest", () => {
         const request = createLlmRequest({
           config: {
             responseSchema: {
-              type: "OBJECT",
+              type: Type.OBJECT,
               properties: {
-                a: { type: "STRING" },
+                a: { type: Type.STRING },
                 b: { type: "NUMBER" },
               },
               // no required, no additionalProperties -> would 400 under strict
@@ -1854,7 +1885,7 @@ describe("convertRequest", () => {
       const { result, warns } = withConsoleWarn(() => convertRequest(request));
 
       expect(result.tools).toHaveLength(1);
-      expect(result.tools?.[0].function.name).toBe("get_weather");
+      expect(functionTool(result.tools?.[0]).function.name).toBe("get_weather");
       expect(warns).toHaveLength(1);
       expect(warns[0]).toContain("codeExecution");
     });
@@ -1990,7 +2021,7 @@ describe("convertRequest tool declarations", () => {
               functionDeclarations: [
                 {
                   name: "f",
-                  parameters: { type: "OBJECT", properties: {} },
+                  parameters: { type: Type.OBJECT, properties: {} },
                   parametersJsonSchema: schema,
                 },
               ],
@@ -1999,7 +2030,7 @@ describe("convertRequest tool declarations", () => {
         },
       }),
     );
-    expect(result.tools?.[0]?.function.parameters).toEqual(schema);
+    expect(functionTool(result.tools?.[0]).function.parameters).toEqual(schema);
   });
 
   it("still normalizes Gemini-style parameters and defaults to an empty object", () => {
@@ -2012,8 +2043,8 @@ describe("convertRequest tool declarations", () => {
                 {
                   name: "g",
                   parameters: {
-                    type: "OBJECT",
-                    properties: { x: { type: "STRING" } },
+                    type: Type.OBJECT,
+                    properties: { x: { type: Type.STRING } },
                   },
                 },
                 { name: "h" },
@@ -2023,11 +2054,11 @@ describe("convertRequest tool declarations", () => {
         },
       }),
     );
-    expect(result.tools?.[0]?.function.parameters).toEqual({
+    expect(functionTool(result.tools?.[0]).function.parameters).toEqual({
       type: "object",
       properties: { x: { type: "string" } },
     });
-    expect(result.tools?.[1]?.function.parameters).toEqual({
+    expect(functionTool(result.tools?.[1]).function.parameters).toEqual({
       type: "object",
       properties: {},
     });

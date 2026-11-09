@@ -1,10 +1,4 @@
 /**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
-/**
  * OpenTelemetry helpers shared by every LLM provider.
  *
  * ADK wraps each model call in a span (`call_llm` in ADK 2.4, renamed
@@ -22,11 +16,10 @@
  * they are attached through `recordException` only while message-content
  * capture is on (see {@link shouldCaptureMessageContent}); otherwise just the
  * error class is recorded.
- *
- * @module core/telemetry
  */
 
 import { type Span, SpanStatusCode, trace } from "@opentelemetry/api";
+import { httpStatusOf } from "./provider-llm-error.js";
 
 /**
  * Whether message content may be written to spans.
@@ -129,12 +122,9 @@ export function recordLlmError(
   span: Span | undefined = trace.getActiveSpan(),
 ): void {
   if (!span) return;
-  const status =
-    error !== null && typeof error === "object" && "status" in error
-      ? (error as { status: unknown }).status
-      : undefined;
+  const status = httpStatusOf(error);
   const errorType =
-    typeof status === "number"
+    status !== undefined
       ? String(status)
       : error instanceof Error
         ? error.name || "Error"

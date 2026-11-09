@@ -1,10 +1,4 @@
 /**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
-/**
  * Request converter for ADK to Anthropic Messages API format.
  *
  * This module handles the conversion of ADK LlmRequest objects to
@@ -14,20 +8,23 @@
  * - System instruction is a separate field, not a message
  * - Tools have a different schema format
  * - Content can be an array of content blocks
- *
- * @module providers/anthropic/converters/request
  */
 
 import type Anthropic from "@anthropic-ai/sdk";
-import type { LlmRequest } from "@google/adk";
+import { InputValidationError, type LlmRequest } from "@google/adk";
 import {
   type Content,
   FunctionCallingConfigMode,
-  type FunctionDeclaration,
   type Part,
 } from "@google/genai";
 import { normalizeSchema as normalizeSharedSchema } from "../../../converters/schema.js";
 import { ToolCallIdCorrelator } from "../../../converters/tool-call-ids.js";
+import {
+  extractSystemInstruction,
+  normalizeJsonSchemaValue,
+  readToolDeclarations,
+  serializeToolResponse,
+} from "../../../converters/tool-declarations.js";
 import { LogCode, WarningScope, warn } from "../../../utils/log.js";
 import { uriScheme } from "../../../utils/uri.js";
 import {
@@ -68,6 +65,13 @@ export interface ConvertedAnthropicRequest {
    * (or forced when structured output is requested). Only meaningful with tools.
    */
   toolChoice?: Anthropic.ToolChoice;
+
+  /**
+   * Whether the synthetic `json_output` tool was injected for structured
+   * output. Pass it to the response converters, so a user tool of that name
+   * is not read as structured output when it was not injected.
+   */
+  structuredOutput: boolean;
 }
 
 /**
@@ -132,7 +136,7 @@ export function applyAnthropicPromptCaching(
   return result;
 }
 
-/** Minimum thinking budget Anthropic accepts (must be >= 1024). */
+/** Minimum thinking budget Anthropic accepts (must be ≥ 1024). */
 const MIN_THINKING_BUDGET = 1024;
 
 /** Default thinking budget when thinkingConfig is set without a budget. */
@@ -161,6 +165,8 @@ export interface AnthropicGenerationParams {
  *
  * @param llmRequest - The ADK LlmRequest to convert
  * @returns The converted request with messages, system, and optional tools
+ * @throws {@link InputValidationError} When structured output is requested and
+ *   a declared tool is named `json_output`
  */
 export function convertAnthropicRequest(
   llmRequest: LlmRequest,
@@ -200,7 +206,13 @@ export function convertAnthropicRequest(
   // (tool_choice none) — forcing the json_output tool there would contradict an
   // explicit "do not call tools" instruction and 400. Respect NONE.
   const structured = convertAnthropicStructuredOutput(llmRequest);
-  if (structured && toolChoice?.type !== "none") {
+  const structuredOutput = Boolean(structured && toolChoice?.type !== "none");
+  if (structured && structuredOutput) {
+    if (tools?.some((tool) => tool.name === JSON_OUTPUT_TOOL_NAME)) {
+      throw new InputValidationError(
+        `[anthropic] A tool named "${JSON_OUTPUT_TOOL_NAME}" cannot be used with structured output (responseSchema or responseJsonSchema): that name is reserved for the output tool. Rename the tool.`,
+      );
+    }
     tools = [...(tools ?? []), structured.tool];
     toolChoice = structured.toolChoice;
   }
@@ -211,13 +223,14 @@ export function convertAnthropicRequest(
     tools,
     params: convertAnthropicGenerationConfig(llmRequest),
     toolChoice,
+    structuredOutput,
   };
 }
 
 /**
  * Maps ADK generation config to Anthropic message params (strict allowlist).
  *
- * Anthropic's temperature range is 0..1 (vs OpenAI's 0..2), so values >1 are
+ * Anthropic's temperature range is 0..1 (vs OpenAI's 0..2), so values above 1 are
  * clamped. `seed`, penalties, and `candidateCount` have no Anthropic
  * equivalent and are dropped cleanly.
  *
@@ -312,9 +325,9 @@ function reconcileAnthropicSamplingParams(
 /**
  * Maps ADK `functionCallingConfig` to an Anthropic `tool_choice`.
  *
- * - AUTO -> { type: "auto" }
- * - NONE -> { type: "none" }
- * - ANY / VALIDATED -> { type: "any" } (or { type: "tool", name } for a single
+ * - AUTO → `{ type: "auto" }`
+ * - NONE → `{ type: "none" }`
+ * - ANY / VALIDATED → `{ type: "any" }` (or `{ type: "tool", name }` for a single
  *   allowedFunctionName)
  *
  * @param req - The LLM request
@@ -350,8 +363,8 @@ export function convertAnthropicToolChoice(
  * When `responseSchema`/`responseJsonSchema` is set, a synthetic
  * `json_output` tool carrying the (normalized) schema is injected and forced
  * via `tool_choice: { type: "tool", name }`. The model's tool_use input is the
- * JSON object — surfaced downstream as a functionCall part by the response
- * converter (acceptable: ADK reads the forced tool args).
+ * JSON object; the response converters surface it as a TEXT part (the JSON),
+ * which ADK's outputSchema/outputKey path parses, not as a functionCall.
  *
  * @param req - The LLM request
  * @returns The injected tool + forced tool_choice, or undefined when N/A
@@ -364,7 +377,9 @@ export function convertAnthropicStructuredOutput(
 
   let schema: Anthropic.Tool.InputSchema | undefined;
   if (config.responseJsonSchema) {
-    schema = config.responseJsonSchema as Anthropic.Tool.InputSchema;
+    schema = normalizeJsonSchemaValue(
+      config.responseJsonSchema,
+    ) as Anthropic.Tool.InputSchema;
   } else if (config.responseSchema) {
     schema = normalizeSharedSchema(config.responseSchema) as
       | Anthropic.Tool.InputSchema
@@ -381,27 +396,6 @@ export function convertAnthropicStructuredOutput(
     },
     toolChoice: { type: "tool", name: JSON_OUTPUT_TOOL_NAME },
   };
-}
-
-/**
- * Extracts the system instruction from an LlmRequest.
- */
-function extractSystemInstruction(req: LlmRequest): string | null {
-  const sys = req.config?.systemInstruction;
-  if (!sys) return null;
-  if (typeof sys === "string") return sys;
-  if ("parts" in sys) return extractText(sys.parts ?? []);
-  return null;
-}
-
-/**
- * Extracts text from an array of Parts.
- */
-function extractText(parts: Part[]): string {
-  return parts
-    .map((p) => p.text)
-    .filter(Boolean)
-    .join("\n");
 }
 
 /**
@@ -484,7 +478,7 @@ function processContent(
                 part.functionResponse.id,
                 part.functionResponse.name,
               ),
-        content: JSON.stringify(part.functionResponse.response ?? {}),
+        content: serializeToolResponse(part.functionResponse.response),
       });
     }
   }
@@ -504,8 +498,8 @@ function processContent(
  * Re-emits an ADK thought Part as an Anthropic thinking content block.
  *
  * The response converter captures Anthropic thinking blocks as ADK parts:
- * - `thinking` block  -> { text, thought: true, thoughtSignature: signature }
- * - `redacted_thinking` block -> { thought: true, thoughtSignature: data } (no text)
+ * - `thinking` block  → `{ text, thought: true, thoughtSignature: signature }`
+ * - `redacted_thinking` block → `{ thought: true, thoughtSignature: data }` (no text)
  *
  * On the request side we reverse that so the assistant turn replays the SIGNED
  * thinking block Anthropic requires for multi-turn tool+thinking continuations.
@@ -556,10 +550,10 @@ const ANTHROPIC_IMAGE_MEDIA_TYPES = new Set([
 /**
  * Maps an ADK Part with image/document media to an Anthropic content block.
  *
- * - `inlineData` image/* (base64) -> image block (base64 source)
- * - `inlineData` application/pdf -> document block (base64 source)
- * - `fileData` http(s) image -> image block (url source)
- * - `fileData` http(s) pdf -> document block (url source)
+ * - `inlineData` image/* (base64) → image block (base64 source)
+ * - `inlineData` application/pdf → document block (base64 source)
+ * - `fileData` http(s) image → image block (url source)
+ * - `fileData` http(s) pdf → document block (url source)
  *
  * gs:// and unsupported media are dropped (with a warning). Returns undefined
  * when the part carries no usable media.
@@ -630,57 +624,6 @@ function partToAnthropicMedia(
 }
 
 /**
- * Gemini-only built-in tool group keys.
- *
- * These are server-side tools (grounding, code execution, retrieval, etc.) that
- * only Gemini/Vertex executes. Anthropic has no equivalent, so they are skipped
- * cleanly (never forwarded) and the user is warned once per request that the
- * named built-in(s) won't run.
- *
- * @internal
- */
-const GEMINI_ONLY_TOOL_KEYS = [
-  "googleSearch",
-  "googleSearchRetrieval",
-  "codeExecution",
-  "urlContext",
-  "retrieval",
-  "googleMaps",
-  "enterpriseWebSearch",
-  "computerUse",
-  "fileSearch",
-  "parallelAiSearch",
-  "mcpServers",
-] as const;
-
-/**
- * Collects the names of Gemini-only built-in tools present in a tool group.
- *
- * @internal
- */
-function collectGeminiOnlyToolNames(group: Record<string, unknown>): string[] {
-  return GEMINI_ONLY_TOOL_KEYS.filter(
-    (key) => group[key] !== undefined && group[key] !== null,
-  );
-}
-
-function resolveInputSchema(
-  fn: FunctionDeclaration,
-): Anthropic.Tool.InputSchema {
-  // ADK tools (and third-party toolsets) may declare a plain JSON Schema in
-  // `parametersJsonSchema` instead of the Gemini-style `parameters`. It is
-  // already JSON Schema, so it wins and is forwarded as-is.
-  if (fn.parametersJsonSchema && typeof fn.parametersJsonSchema === "object") {
-    return fn.parametersJsonSchema as Anthropic.Tool.InputSchema;
-  }
-  return (
-    (normalizeSharedSchema(fn.parameters) as
-      | Anthropic.Tool.InputSchema
-      | undefined) ?? { type: "object", properties: {} }
-  );
-}
-
-/**
  * Converts ADK tool declarations to Anthropic format.
  *
  * Only `functionDeclarations` are forwarded. Gemini-only built-in tool groups
@@ -692,49 +635,12 @@ function convertTools(
   req: LlmRequest,
   warnings: WarningScope,
 ): Anthropic.Tool[] | undefined {
-  const adkTools = req.config?.tools;
-  if (!adkTools?.length) return undefined;
-
-  const tools: Anthropic.Tool[] = [];
-  const droppedBuiltins = new Set<string>();
-
-  for (const group of adkTools) {
-    if (
-      "functionDeclarations" in group &&
-      Array.isArray(group.functionDeclarations)
-    ) {
-      for (const fn of group.functionDeclarations) {
-        if (!fn.name) {
-          warnings.warnOnce(
-            LogCode.TOOL_DECLARATION_MISSING_NAME,
-            "Tool function missing name, skipping",
-          );
-          continue;
-        }
-        tools.push({
-          name: fn.name,
-          description: fn.description ?? "",
-          input_schema: resolveInputSchema(fn),
-        });
-      }
-    }
-
-    // Skip (and record) any Gemini-only built-in tools on this group.
-    for (const name of collectGeminiOnlyToolNames(
-      group as Record<string, unknown>,
-    )) {
-      droppedBuiltins.add(name);
-    }
-  }
-
-  if (droppedBuiltins.size > 0) {
-    warn(
-      LogCode.BUILTIN_TOOLS_DROPPED,
-      `dropping Gemini-only built-in tool(s) not supported on this provider: ${[
-        ...droppedBuiltins,
-      ].join(", ")}`,
-    );
-  }
-
+  const tools: Anthropic.Tool[] = readToolDeclarations(req, warnings).map(
+    ({ name, description, parameters }) => ({
+      name,
+      description,
+      input_schema: parameters as Anthropic.Tool.InputSchema,
+    }),
+  );
   return tools.length ? tools : undefined;
 }

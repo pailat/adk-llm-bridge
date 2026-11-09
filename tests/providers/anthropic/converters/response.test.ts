@@ -32,6 +32,9 @@ function createMessage(overrides: {
     model: overrides.model ?? "claude-sonnet-4-5-20250929",
     stop_reason: overrides.stop_reason ?? "end_turn",
     stop_sequence: overrides.stop_sequence ?? null,
+    stop_details: null,
+    container: null,
+    diagnostics: null,
     content: overrides.content,
     usage: {
       input_tokens: overrides.usage.input_tokens,
@@ -42,6 +45,9 @@ function createMessage(overrides: {
       cache_read_input_tokens: overrides.usage.cache_read_input_tokens ?? null,
       server_tool_use: null,
       service_tier: null,
+      inference_geo: null,
+      output_tokens_details: null,
+      speed: null,
     },
   };
 }
@@ -84,6 +90,7 @@ describe("convertAnthropicResponse", () => {
         content: [
           {
             type: "tool_use",
+            caller: { type: "direct" },
             id: "call_456",
             name: "get_weather",
             input: { city: "Tokyo" },
@@ -110,6 +117,7 @@ describe("convertAnthropicResponse", () => {
           { type: "text", text: "Let me check the weather.", citations: null },
           {
             type: "tool_use",
+            caller: { type: "direct" },
             id: "call_456",
             name: "get_weather",
             input: { city: "Tokyo" },
@@ -166,6 +174,19 @@ describe("convertAnthropicResponse", () => {
 
     it("maps refusal to SAFETY", () => {
       expect(withStop("refusal").finishReason).toBe(FinishReason.SAFETY);
+    });
+
+    it("maps model_context_window_exceeded to MAX_TOKENS", () => {
+      expect(withStop("model_context_window_exceeded").finishReason).toBe(
+        FinishReason.MAX_TOKENS,
+      );
+    });
+
+    it("gives pause_turn and an unknown reason no finish reason", () => {
+      expect(withStop("pause_turn").finishReason).toBeUndefined();
+      expect(
+        withStop("brand_new_reason" as Anthropic.StopReason).finishReason,
+      ).toBeUndefined();
     });
   });
 });
@@ -236,6 +257,7 @@ describe("convertAnthropicStreamEvent", () => {
         index: 0,
         content_block: {
           type: "tool_use",
+          caller: { type: "direct" },
           id: "call_123",
           name: "get_weather",
           input: {},
@@ -260,6 +282,7 @@ describe("convertAnthropicStreamEvent", () => {
           index: 0,
           content_block: {
             type: "tool_use",
+            caller: { type: "direct" },
             id: "call_123",
             name: "get_weather",
             input: {},
@@ -364,6 +387,8 @@ describe("convertAnthropicStreamEvent", () => {
         delta: {
           stop_reason: "end_turn",
           stop_sequence: null,
+          container: null,
+          stop_details: null,
         },
         usage: {
           output_tokens: 50,
@@ -371,6 +396,7 @@ describe("convertAnthropicStreamEvent", () => {
           cache_creation_input_tokens: null,
           cache_read_input_tokens: null,
           server_tool_use: null,
+          output_tokens_details: null,
         },
       };
 
@@ -434,13 +460,19 @@ describe("convertAnthropicStreamEvent", () => {
       convertAnthropicStreamEvent(
         {
           type: "message_delta",
-          delta: { stop_reason: "max_tokens", stop_sequence: null },
+          delta: {
+            stop_reason: "max_tokens",
+            stop_sequence: null,
+            container: null,
+            stop_details: null,
+          },
           usage: {
             output_tokens: 5,
             input_tokens: null,
             cache_creation_input_tokens: null,
             cache_read_input_tokens: null,
             server_tool_use: null,
+            output_tokens_details: null,
           },
         },
         acc,
@@ -463,13 +495,19 @@ describe("convertAnthropicStreamEvent", () => {
       convertAnthropicStreamEvent(
         {
           type: "message_delta",
-          delta: { stop_reason: "tool_use", stop_sequence: null },
+          delta: {
+            stop_reason: "tool_use",
+            stop_sequence: null,
+            container: null,
+            stop_details: null,
+          },
           usage: {
             output_tokens: 5,
             input_tokens: null,
             cache_creation_input_tokens: null,
             cache_read_input_tokens: null,
             server_tool_use: null,
+            output_tokens_details: null,
           },
         },
         acc,
@@ -603,6 +641,7 @@ describe("structured output (json_output synthetic tool)", () => {
       content: [
         {
           type: "tool_use",
+          caller: { type: "direct" },
           id: "call_1",
           name: "json_output",
           input: { city: "Tokyo", temp: 21 },
@@ -630,6 +669,7 @@ describe("structured output (json_output synthetic tool)", () => {
       content: [
         {
           type: "tool_use",
+          caller: { type: "direct" },
           id: "call_1",
           name: "get_weather",
           input: { city: "Tokyo" },
@@ -682,6 +722,7 @@ describe("structured output (json_output synthetic tool)", () => {
       content: [
         {
           type: "tool_use",
+          caller: { type: "direct" },
           id: "call_1",
           name: "json_output",
           input: { a: 1, b: "two" },
@@ -703,7 +744,7 @@ describe("structured output (json_output synthetic tool)", () => {
   });
 });
 
-describe("cache read tokens (LLM-5a)", () => {
+describe("cache read tokens", () => {
   it("maps cache_read_input_tokens to cachedContentTokenCount (non-stream)", () => {
     const result = convertAnthropicResponse(
       createMessage({
@@ -717,7 +758,7 @@ describe("cache read tokens (LLM-5a)", () => {
     );
 
     expect(result.usageMetadata?.cachedContentTokenCount).toBe(1234);
-    // LLM-5b: promptTokenCount is the full prompt (input + cache read).
+    // promptTokenCount is the full prompt (input + cache read).
     expect(result.usageMetadata?.promptTokenCount).toBe(1244);
     expect(result.usageMetadata?.totalTokenCount).toBe(1249);
   });
@@ -799,7 +840,7 @@ describe("cache read tokens (LLM-5a)", () => {
   });
 });
 
-describe("prompt token count includes the cache (LLM-5b)", () => {
+describe("prompt token count includes the cache", () => {
   it("adds cache read and creation tokens to promptTokenCount (non-stream)", () => {
     const result = convertAnthropicResponse(
       createMessage({
@@ -873,7 +914,7 @@ describe("prompt token count includes the cache (LLM-5b)", () => {
   });
 });
 
-describe("malformed tool calls (LLM-6)", () => {
+describe("malformed tool calls", () => {
   function streamToolTurn(
     json: string,
     stopReason: string,
@@ -980,6 +1021,7 @@ describe("malformed tool calls (LLM-6)", () => {
         content: [
           {
             type: "tool_use",
+            caller: { type: "direct" },
             id: "toolu_1",
             name: "lookup",
             input: { city: "Tokyo" },
@@ -995,7 +1037,125 @@ describe("malformed tool calls (LLM-6)", () => {
   });
 });
 
-describe("no empty text parts (E2E F1)", () => {
+describe("tool calls cut by the context window, and non-object inputs", () => {
+  function toolUse(input: unknown, name = "lookup"): Anthropic.ToolUseBlock {
+    return {
+      type: "tool_use",
+      caller: { type: "direct" },
+      id: "toolu_1",
+      name,
+      input,
+    } as unknown as Anthropic.ToolUseBlock;
+  }
+
+  it("reports a non-stream tool_use cut by the context window as malformed", () => {
+    const result = convertAnthropicResponse(
+      createMessage({
+        content: [toolUse({ city: "To" })],
+        stop_reason: "model_context_window_exceeded",
+        usage: { input_tokens: 4, output_tokens: 9 },
+      }),
+    );
+    expect(result.finishReason).toBe(FinishReason.MALFORMED_FUNCTION_CALL);
+  });
+
+  it("reports a streamed tool call cut by the context window as malformed", () => {
+    const acc = createAnthropicStreamAccumulator();
+    const send = (event: unknown) =>
+      convertAnthropicStreamEvent(event as Anthropic.MessageStreamEvent, acc);
+    send({ type: "message_start", message: { usage: { input_tokens: 4 } } });
+    send({
+      type: "content_block_start",
+      index: 0,
+      content_block: { type: "tool_use", id: "toolu_1", name: "lookup" },
+    });
+    send({
+      type: "content_block_delta",
+      index: 0,
+      delta: { type: "input_json_delta", partial_json: '{"city": "Tokyo"}' },
+    });
+    send({
+      type: "message_delta",
+      delta: { stop_reason: "model_context_window_exceeded" },
+      usage: { output_tokens: 9 },
+    });
+    const response = send({ type: "message_stop" }).response;
+    expect(response?.finishReason).toBe(FinishReason.MALFORMED_FUNCTION_CALL);
+  });
+
+  it("reports a non-object non-stream tool input as malformed, not as {}", () => {
+    for (const input of ["oops", 42, [1, 2], null]) {
+      const result = convertAnthropicResponse(
+        createMessage({
+          content: [toolUse(input)],
+          stop_reason: "tool_use",
+          usage: { input_tokens: 4, output_tokens: 9 },
+        }),
+      );
+      expect(result.finishReason).toBe(FinishReason.MALFORMED_FUNCTION_CALL);
+      expect(result.errorMessage).toContain("lookup (not-an-object)");
+    }
+  });
+
+  it("keeps a missing non-stream tool input as a call without arguments", () => {
+    const result = convertAnthropicResponse(
+      createMessage({
+        content: [toolUse(undefined)],
+        stop_reason: "tool_use",
+        usage: { input_tokens: 4, output_tokens: 9 },
+      }),
+    );
+    expect(result.content?.parts?.[0]?.functionCall?.args).toEqual({});
+  });
+});
+
+describe("a user tool named json_output", () => {
+  const block = {
+    type: "tool_use",
+    caller: { type: "direct" },
+    id: "toolu_1",
+    name: "json_output",
+    input: { a: 1 },
+  } as unknown as Anthropic.ToolUseBlock;
+
+  it("is a function call when structured output was not requested (non-stream)", () => {
+    const result = convertAnthropicResponse(
+      createMessage({
+        content: [block],
+        stop_reason: "tool_use",
+        usage: { input_tokens: 1, output_tokens: 1 },
+      }),
+      { structuredOutput: false },
+    );
+    expect(result.content?.parts?.[0]?.functionCall).toMatchObject({
+      name: "json_output",
+      args: { a: 1 },
+    });
+  });
+
+  it("is a function call when structured output was not requested (stream)", () => {
+    const acc = createAnthropicStreamAccumulator({ structuredOutput: false });
+    const send = (event: unknown) =>
+      convertAnthropicStreamEvent(event as Anthropic.MessageStreamEvent, acc);
+    send({
+      type: "content_block_start",
+      index: 0,
+      content_block: { type: "tool_use", id: "toolu_1", name: "json_output" },
+    });
+    send({
+      type: "content_block_delta",
+      index: 0,
+      delta: { type: "input_json_delta", partial_json: '{"a":1}' },
+    });
+    send({ type: "message_delta", delta: { stop_reason: "tool_use" } });
+    const response = send({ type: "message_stop" }).response;
+    expect(response?.content?.parts?.[0]?.functionCall?.name).toBe(
+      "json_output",
+    );
+  });
+});
+
+describe("no empty text parts", () => {
   // ADK's shouldIncludeEventInContext drops any history event whose first part
   // has `text === ""`, which removes the turn and its tool calls from the next
   // request ("No function call event found for function responses ids").

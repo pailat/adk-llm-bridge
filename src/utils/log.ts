@@ -1,19 +1,14 @@
 /**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
-/**
  * Library logging through ADK's logger.
  *
  * Everything goes through `logger` from `@google/adk`, so applications control
  * it with `setLogLevel`, `setLogger` and `resetLogger` like any other ADK
  * output (and can silence or redirect warnings). Messages are prefixed with
- * `[adk-llm-bridge]`; every warning carries a stable `code` as a second
- * argument (`{ code }`) so custom loggers can filter or count by it.
- *
- * @module utils/log
+ * `[adk-llm-bridge]`; every warning then names its stable code in brackets
+ * (`[adk-llm-bridge] [BUILTIN_TOOLS_DROPPED] ...`), so a custom logger can
+ * filter or count by it. The line is a single string: ADK's default logger
+ * joins its arguments as text, which would print an object argument as
+ * `[object Object]`.
  */
 
 import { logger } from "@google/adk";
@@ -43,11 +38,14 @@ function format(message: string): string {
 }
 
 /**
- * Logs a warning through ADK's logger as `[adk-llm-bridge] <message>` with
- * `{ code }` as the second argument.
+ * Logs a warning through ADK's logger as
+ * `[adk-llm-bridge] [<code>] <message>`.
+ *
+ * @param code - The stable warning code.
+ * @param message - The warning text.
  */
 export function warn(code: LogCodeValue | string, message: string): void {
-  logger.warn(format(message), { code });
+  logger.warn(format(`[${code}] ${message}`));
 }
 
 /** Logs a debug message through ADK's logger. */

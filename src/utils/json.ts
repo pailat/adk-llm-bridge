@@ -1,13 +1,6 @@
 /**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
-/**
- * JSON utilities for parsing tool-call arguments without losing large integers.
- *
- * @module utils/json
+ * JSON utilities that parse model and provider payloads without losing large
+ * integers.
  */
 
 /** Result of {@link tryParseJson}. */
@@ -15,22 +8,10 @@ export type JsonParseResult =
   | { ok: true; value: Record<string, unknown> }
   | { ok: false; reason: "invalid-json" | "not-an-object"; error?: string };
 
-/**
- * Whether this runtime passes `context.source` (the raw token text) to
- * `JSON.parse` revivers (V8 >= 11.4, Node >= 22, Bun). Evaluated once.
- */
-const SUPPORTS_PARSE_SOURCE: boolean = (() => {
-  try {
-    let supported = false;
-    JSON.parse("1", (_key, value, context?: { source?: string }) => {
-      supported = context?.source === "1";
-      return value;
-    });
-    return supported;
-  } catch {
-    return false;
-  }
-})();
+/** Result of {@link parseJson}. */
+export type JsonValueResult =
+  | { ok: true; value: unknown }
+  | { ok: false; error: string };
 
 const INTEGER_SOURCE = /^-?\d+$/;
 
@@ -39,7 +20,8 @@ const INTEGER_SOURCE = /^-?\d+$/;
  * returning their source text as a string (IDs such as 19-digit Zoho Desk
  * ticket IDs would otherwise be silently rounded by IEEE 754). Decimals and
  * safe integers are untouched. Runs on parsed tokens, so a string value that
- * merely *contains* digits is never rewritten.
+ * merely *contains* digits is never rewritten. `context.source` is passed by
+ * every supported runtime (Node 22 and later, Bun).
  */
 function preserveUnsafeIntegers(
   _key: string,
@@ -58,15 +40,30 @@ function preserveUnsafeIntegers(
 }
 
 /**
- * Legacy fallback for runtimes without `context.source`: quotes integers of 17+
- * digits with a regex before parsing. Imperfect (it can touch digits inside a
- * string value) but it is the previous behavior.
+ * Parses any JSON value, keeping large integers exact.
+ *
+ * @remarks
+ * Integers beyond `Number.MAX_SAFE_INTEGER` become strings of their exact
+ * source text, at any depth and also at the top level. Unlike
+ * {@link tryParseJson}, arrays and scalars are returned as they are, and
+ * empty input is invalid JSON.
+ *
+ * @param str - The JSON text.
+ * @returns The value, or the parse error message.
+ * @internal
  */
-function quoteLargeIntegers(str: string): string {
-  return str.replace(
-    /([:[,])\s*(-?\d{17,})(?!\.\d)(?=\s*[,\]}])/g,
-    (_, delimiter, num) => `${delimiter} "${num}"`,
-  );
+export function parseJson(str: string): JsonValueResult {
+  try {
+    return {
+      ok: true,
+      value: JSON.parse(str, preserveUnsafeIntegers as never) as unknown,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
 }
 
 /**
@@ -86,56 +83,17 @@ function quoteLargeIntegers(str: string): string {
  * @internal
  */
 export function tryParseJson(str: string): JsonParseResult {
-  return parseJsonObject(str, SUPPORTS_PARSE_SOURCE);
-}
-
-/**
- * Implementation of {@link tryParseJson} with the `context.source` capability
- * injected, so the legacy fallback path stays testable on runtimes that have
- * the capability.
- *
- * @internal
- */
-export function parseJsonObject(
-  str: string,
-  supportsParseSource: boolean,
-): JsonParseResult {
   if (typeof str !== "string" || str.trim() === "") {
     return { ok: true, value: {} };
   }
 
-  let parsed: unknown;
-  try {
-    parsed = supportsParseSource
-      ? JSON.parse(str, preserveUnsafeIntegers as never)
-      : JSON.parse(quoteLargeIntegers(str));
-  } catch (error) {
-    return {
-      ok: false,
-      reason: "invalid-json",
-      error: error instanceof Error ? error.message : String(error),
-    };
+  const parsed = parseJson(str);
+  if (!parsed.ok) {
+    return { ok: false, reason: "invalid-json", error: parsed.error };
   }
-
-  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+  const value = parsed.value;
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
     return { ok: false, reason: "not-an-object" };
   }
-  return { ok: true, value: parsed as Record<string, unknown> };
-}
-
-/**
- * Parses tool-call arguments, returning `{}` on any failure.
- *
- * Same parsing as {@link tryParseJson}; prefer that when a broken payload must
- * not be mistaken for "no arguments".
- *
- * @param str - The JSON string to parse
- * @returns The parsed object, or an empty object if parsing fails or the
- *   result is not a plain object
- *
- * @internal
- */
-export function safeJsonParse(str: string): Record<string, unknown> {
-  const result = tryParseJson(str);
-  return result.ok ? result.value : {};
+  return { ok: true, value: value as Record<string, unknown> };
 }

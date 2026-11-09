@@ -1,10 +1,6 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
 import type { ProviderDefinition } from "../../core/provider-definition.js";
 
+/** Declarative definition of the xAI provider (endpoint, env keys, model patterns). */
 export const XAI_DEFINITION: ProviderDefinition = {
   id: "xai",
   errorPrefix: "XAI",

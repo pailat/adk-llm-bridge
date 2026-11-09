@@ -1,10 +1,4 @@
 /**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
-/**
  * Asserts the declarative reasoning capability wired onto each provider
  * definition. This is the provider-aware switch that lets OpenRouter / AI
  * Gateway honor thinkingConfig while OpenAI / xAI keep their strict,

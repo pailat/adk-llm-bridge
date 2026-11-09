@@ -1,16 +1,8 @@
 /**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
-/**
  * Request converter for ADK to OpenAI format.
  *
  * This module handles the conversion of ADK LlmRequest objects to
  * OpenAI-compatible chat completion request format.
- *
- * @module converters/request
  */
 
 import type { LlmRequest } from "@google/adk";
@@ -25,6 +17,12 @@ import { LogCode, WarningScope, warn } from "../utils/log.js";
 import { uriScheme } from "../utils/uri.js";
 import { normalizeSchema } from "./schema.js";
 import { ToolCallIdCorrelator } from "./tool-call-ids.js";
+import {
+  extractSystemInstruction,
+  normalizeJsonSchemaValue,
+  readToolDeclarations,
+  serializeToolResponse,
+} from "./tool-declarations.js";
 
 /**
  * Provider-aware options forwarded into {@link convertRequest}.
@@ -36,58 +34,67 @@ import { ToolCallIdCorrelator } from "./tool-call-ids.js";
 export interface ConvertRequestOptions {
   /** Reasoning capability from the provider definition (undefined = strict). */
   reasoning?: ReasoningCapability;
+  /**
+   * Output-limit parameter for models the name rules do not mark as reasoning
+   * models. Reasoning models always get `max_completion_tokens`.
+   *
+   * @defaultValue `"max_tokens"`
+   */
+  maxTokensParam?: "max_tokens" | "max_completion_tokens";
 }
 
 /**
  * Extracts the bare model name from a possibly provider-prefixed id.
  *
- * OpenAI-compatible providers accept ids like `gpt-5`, `openai/gpt-5`,
- * `o3-mini`, or `x-ai/grok-4`. For feature gating we only care about the final
+ * OpenAI-compatible providers accept ids like `gpt-6.1-sol`,
+ * `openai/gpt-6.1-sol`, `o3-mini`, or `x-ai/grok-4.7`. For feature gating we only care about the final
  * segment (the actual model name), lowercased for case-insensitive matching.
+ * An OpenAI fine-tune id (`ft:<base>:<org>:<suffix>:<id>`) yields its base
+ * model, so `ft:o4-mini-2025-04-16:org::abc` gives `o4-mini-2025-04-16`.
  *
  * @internal
  */
 function bareModelName(model: string | undefined): string {
   if (!model) return "";
   const slash = model.lastIndexOf("/");
-  const name = slash >= 0 ? model.slice(slash + 1) : model;
-  return name.toLowerCase();
+  let name = (slash >= 0 ? model.slice(slash + 1) : model).toLowerCase();
+  if (name.startsWith("ft:")) {
+    const end = name.indexOf(":", 3);
+    name = end >= 0 ? name.slice(3, end) : name.slice(3);
+  }
+  return name;
 }
 
 /**
- * Detects OpenAI reasoning-style models that reject `max_tokens` and require
- * `max_completion_tokens` instead.
+ * Detects OpenAI reasoning models, which reject `max_tokens` and sampling
+ * controls and require `max_completion_tokens`.
  *
- * These are the GPT-5 family and the o-series (o1/o3/o4...). Sending plain
- * `max_tokens` to these models returns a 400 ("Unsupported parameter:
- * 'max_tokens' ... Use 'max_completion_tokens' instead"). Non-OpenAI providers
- * (xAI Grok, OpenRouter, etc.) continue to use `max_tokens`.
+ * Matches by family and version, so new releases need no code change:
+ * `gpt-<N>` with N of 5 or more (`gpt-5`, `gpt-5.1-codex`, `gpt-6.1-sol`,
+ * `gpt-7`, ...) and the o-series `o<N>` (`o1`, `o3-mini`, `o4-mini`, ...).
+ * `gpt-4o` and other `gpt-4*` / `gpt-3.5*` chat models do not match. The
+ * provider prefix (`openai/`), an `ft:` fine-tune id and case are ignored.
  *
  * @internal
  */
 export function usesMaxCompletionTokens(model: string | undefined): boolean {
   const name = bareModelName(model);
   if (!name) return false;
-  // GPT-5 family (gpt-5, gpt-5-mini, gpt-5.1, gpt-5-codex, ...).
-  if (/^gpt-5/.test(name)) return true;
-  // o-series reasoning models: o1, o3, o4 (and -mini/-pro variants).
-  // Guard against false positives like "gpt-4o" by anchoring at the start.
-  if (/^o[134](?:-|$)/.test(name)) return true;
-  return false;
+  const gpt = /^gpt-(\d+)/.exec(name);
+  if (gpt) return Number(gpt[1]) >= 5;
+  return /^o\d+(?:-|$)/.test(name);
 }
 
 /**
  * Detects models that accept the `reasoning_effort` parameter.
  *
- * Reasoning-capable models only — sending `reasoning_effort` to a plain chat
- * model (gpt-4.1, gpt-4o, grok-4 non-reasoning, ...) returns a 400
- * ("Unsupported value: 'reasoning_effort' ..."). Covers:
- * - OpenAI GPT-5 family + o-series (same set as {@link usesMaxCompletionTokens})
- * - xAI Grok reasoning variants (e.g. `grok-4-fast-reasoning`,
- *   `grok-3-mini`/`grok-3-mini-fast`, which expose reasoning_effort)
- *
- * When in doubt this returns false, so reasoning_effort is dropped rather than
- * risking a 400 on a non-reasoning model.
+ * Sending `reasoning_effort` to a plain chat model (gpt-4.1, gpt-4o, grok-4)
+ * returns a 400 on the direct APIs, so this returns false when in doubt.
+ * Covers:
+ * - every OpenAI reasoning model ({@link usesMaxCompletionTokens});
+ * - xAI `grok-3-mini*` and the explicit `*-reasoning` Grok variants, but not
+ *   `*-non-reasoning`. Other Grok 4.x models reason on their own and showed
+ *   no response to `reasoning_effort`, so they do not get it.
  *
  * @internal
  */
@@ -95,11 +102,9 @@ export function supportsReasoningEffort(model: string | undefined): boolean {
   const name = bareModelName(model);
   if (!name) return false;
   if (usesMaxCompletionTokens(name)) return true;
-  // xAI Grok reasoning variants expose reasoning_effort. Grok-3 mini models and
-  // the explicit "*-reasoning" Grok variants reason; plain grok-4 does not.
-  if (/^grok-3-mini/.test(name)) return true;
-  if (/^grok-.*reasoning/.test(name)) return true;
-  return false;
+  if (!name.startsWith("grok-")) return false;
+  if (name.includes("non-reasoning")) return false;
+  return name.startsWith("grok-3-mini") || name.includes("reasoning");
 }
 
 /**
@@ -222,7 +227,7 @@ export function convertRequest(
   const resolvedModel = model ?? llmRequest.model;
 
   const params: Record<string, unknown> = {
-    ...convertGenerationConfig(llmRequest, resolvedModel),
+    ...convertGenerationConfig(llmRequest, resolvedModel, opts),
     ...convertStructuredOutput(llmRequest),
     ...convertReasoningConfig(llmRequest, resolvedModel, opts),
     ...convertLogprobsConfig(llmRequest, resolvedModel),
@@ -250,6 +255,7 @@ export function convertRequest(
 export function convertGenerationConfig(
   req: LlmRequest,
   model?: string,
+  opts?: ConvertRequestOptions,
 ): Record<string, unknown> {
   const config = req.config;
   if (!config) return {};
@@ -261,7 +267,7 @@ export function convertGenerationConfig(
 
   const params: Record<string, unknown> = {};
 
-  // OpenAI reasoning models (gpt-5*, o-series) reject sampling controls
+  // OpenAI reasoning models (gpt-5 and later, o-series) reject sampling controls
   // ENTIRELY: temperature and top_p both return a 400 ("Unsupported value")
   // even when set to their defaults. They only accept reasoning_effort/verbosity
   // for steering. Drop temperature/top_p for reasoning models; keep them for
@@ -270,10 +276,11 @@ export function convertGenerationConfig(
     params.temperature = config.temperature;
   if (config.topP !== undefined && !reasoningModel) params.top_p = config.topP;
   if (config.maxOutputTokens !== undefined) {
-    // OpenAI reasoning models (gpt-5*, o-series) REJECT max_tokens with a 400 —
-    // they require max_completion_tokens (which also covers reasoning tokens).
-    // Everything else (xAI, OpenRouter, plain OpenAI chat models) uses max_tokens.
-    if (reasoningModel) {
+    // OpenAI reasoning models reject max_tokens with a 400 and require
+    // max_completion_tokens (which also covers reasoning tokens). A provider
+    // can make max_completion_tokens its default (OpenAI: max_tokens is
+    // deprecated there); everything else uses max_tokens.
+    if (reasoningModel || opts?.maxTokensParam === "max_completion_tokens") {
       params.max_completion_tokens = config.maxOutputTokens;
     } else {
       params.max_tokens = config.maxOutputTokens;
@@ -307,7 +314,7 @@ export function convertGenerationConfig(
  * one choice.
  *
  * @param candidateCount - Requested number of ADK response candidates
- * @throws {Error} When a provided value is anything other than integer `1`
+ * @throws {@link Error} When a provided value is anything other than integer `1`
  * @internal
  */
 function assertSupportedCandidateCount(candidateCount: unknown): void {
@@ -327,12 +334,12 @@ function assertSupportedCandidateCount(candidateCount: unknown): void {
 /**
  * Buckets an ADK `thinkingBudget` into a coarse `reasoning_effort` level.
  *
- * - no budget set -> "medium" (sensible default)
- * - 0 < budget <= 2048 -> "low"
- * - 2048 < budget <= 8192 -> "medium"
- * - budget > 8192 -> "high"
+ * - no budget set → "medium" (sensible default)
+ * - `0 < budget ≤ 2048` → "low"
+ * - `2048 < budget ≤ 8192` → "medium"
+ * - `budget > 8192` → "high"
  *
- * Callers handle the budget <= 0 ("disable") case before calling this.
+ * Callers handle the budget ≤ 0 ("disable") case before calling this.
  *
  * @internal
  */
@@ -356,15 +363,15 @@ function budgetToEffort(
  * one of them — and the choice must match the lever the target model family
  * actually honors:
  *
- * - **effort-family**: OpenAI reasoning models (gpt-5*, o-series) and xAI Grok
+ * - **effort-family**: OpenAI reasoning models (gpt-5 and later, o-series) and xAI Grok
  *   reasoners IGNORE `max_tokens` through OpenRouter but respond cleanly to
- *   `effort` (verified: gpt-5-mini low->high ~10x reasoning tokens). Anthropic
+ *   `effort` (verified: gpt-5-mini low→high ~10x reasoning tokens). Anthropic
  *   thinking is also routed via `effort` here (OpenRouter maps it to a thinking
  *   budget under the hood and `effort` gives monotonic control). These reuse the
  *   existing {@link supportsReasoningEffort} model-name gate.
  * - **everything else** (gemini thinking, glm/deepseek, and unknown/default
  *   reasoners): honor `max_tokens` cleanly (verified: gemini-2.5-flash
- *   256->16384 budget scales reasoning tokens monotonically), so a budget maps
+ *   256→16384 budget scales reasoning tokens monotonically), so a budget maps
  *   to `max_tokens`.
  *
  * @returns `"effort"` for effort-family models, otherwise `"max_tokens"`
@@ -395,18 +402,18 @@ function openRouterBudgetLever(
  * **`"openrouter"` (permissive — OpenRouter, AI Gateway):**
  * NO model-name gate (these providers return HTTP 200 and ignore reasoning on
  * non-reasoning models). Build the native OpenRouter `reasoning` object:
- * - `includeThoughts === false` -> `{ exclude: true }` (reason but do not
+ * - `includeThoughts === false` → `{ exclude: true }` (reason but do not
  *   surface the thoughts) merged with the enable controls below.
- * - `thinkingBudget > 0` -> a SINGLE depth lever chosen by
+ * - `thinkingBudget > 0` → a SINGLE depth lever chosen by
  *   {@link openRouterBudgetLever}: `{ effort: <bucket> }` for effort-family
  *   models (OpenAI/xAI/Anthropic reasoners, which ignore `max_tokens` via
  *   OpenRouter) or `{ max_tokens: budget }` for everything else (gemini and
  *   default reasoners). Only one may be sent — OpenRouter 400s if both are
  *   present.
- * - `thinkingBudget === 0` (explicit) -> `{ enabled: false }` (leave reasoning
+ * - `thinkingBudget === 0` (explicit) → `{ enabled: false }` (leave reasoning
  *   off).
- * - `thinkingBudget` unset (but `thinkingConfig` present) -> `{ effort:
- *   "medium" }` (sensible enable default; no `max_tokens`).
+ * - `thinkingBudget` unset (but `thinkingConfig` present) → `{ effort: "medium" }`
+ *   (sensible enable default; no `max_tokens`).
  *
  * @param req - The LLM request
  * @param model - The resolved model id (for reasoning-capability gating)
@@ -489,7 +496,7 @@ function convertOpenRouterReasoning(
 /**
  * Maps ADK logprobs config to OpenAI-compatible `logprobs` / `top_logprobs`.
  *
- * ADK (@google/genai GenerateContentConfig) expresses logprobs intent via:
+ * ADK (`GenerateContentConfig` from `@google/genai`) expresses logprobs intent via:
  * - `responseLogprobs` (boolean) — request log probabilities of output tokens
  * - `logprobs` (number) — how many top alternatives to return per token
  *
@@ -499,8 +506,8 @@ function convertOpenRouterReasoning(
  *   `logprobs: true`
  *
  * Mapping rules (each field only emitted when set, never blind-spread):
- * - `responseLogprobs === true` -> `logprobs: true`
- * - `logprobs` (number) -> `top_logprobs: <n>`. Because OpenAI requires
+ * - `responseLogprobs === true` → `logprobs: true`
+ * - `logprobs` (number) → `top_logprobs: <n>`. Because OpenAI requires
  *   `logprobs: true` whenever `top_logprobs` is present, we also force
  *   `logprobs: true` so the count is never sent in isolation (which providers
  *   reject).
@@ -508,7 +515,7 @@ function convertOpenRouterReasoning(
  * CRITICAL: nothing is emitted unless one of these ADK fields is explicitly
  * set, so non-logprobs requests are completely unaffected.
  *
- * OpenAI reasoning models (gpt-5*, o-series) do NOT support logprobs at all —
+ * OpenAI reasoning models (gpt-5 and later, o-series) do NOT support logprobs at all —
  * sending `logprobs`/`top_logprobs` returns a 400. When the resolved model is a
  * reasoning model these fields are dropped (rather than risking the 400). They
  * are still emitted for every other model that requested them.
@@ -547,9 +554,9 @@ export function convertLogprobsConfig(
 /**
  * Maps ADK `functionCallingConfig` to an OpenAI `tool_choice`.
  *
- * - AUTO -> "auto"
- * - NONE -> "none"
- * - ANY / VALIDATED -> "required" (or a specific function when exactly one
+ * - AUTO → "auto"
+ * - NONE → "none"
+ * - ANY / VALIDATED → "required" (or a specific function when exactly one
  *   allowedFunctionName is given)
  *
  * @param req - The LLM request
@@ -582,9 +589,10 @@ export function convertToolChoice(
 /**
  * Maps ADK structured-output config to an OpenAI `response_format`.
  *
- * - `responseJsonSchema` -> json_schema (passthrough, already JSON Schema)
- * - `responseSchema` -> json_schema (normalized from Gemini types)
- * - `responseMimeType === "application/json"` only -> json_object
+ * - `responseJsonSchema` → json_schema (already JSON Schema; only string
+ *   int64 counts are converted to integers)
+ * - `responseSchema` → json_schema (normalized from Gemini types)
+ * - `responseMimeType === "application/json"` only → json_object
  *
  * `strict` is intentionally `false`. OpenAI strict mode imposes hard structural
  * requirements (every object must set `additionalProperties: false` and list
@@ -602,13 +610,14 @@ export function convertStructuredOutput(
   if (!config) return {};
 
   if (config.responseJsonSchema) {
+    const jsonSchema = config.responseJsonSchema;
     return {
       response_format: {
         type: "json_schema",
         json_schema: {
           name: "response",
           strict: false,
-          schema: config.responseJsonSchema,
+          schema: normalizeJsonSchemaValue(jsonSchema),
         },
       },
     };
@@ -632,39 +641,6 @@ export function convertStructuredOutput(
   }
 
   return {};
-}
-
-/**
- * Extracts the system instruction from an LlmRequest.
- *
- * Handles both string and Content object formats.
- *
- * @param req - The LLM request
- * @returns The system instruction text, or null if not present
- *
- * @internal
- */
-function extractSystemInstruction(req: LlmRequest): string | null {
-  const sys = req.config?.systemInstruction;
-  if (!sys) return null;
-  if (typeof sys === "string") return sys;
-  if ("parts" in sys) return extractText(sys.parts ?? []);
-  return null;
-}
-
-/**
- * Extracts text from an array of Parts.
- *
- * @param parts - Array of Part objects
- * @returns Concatenated text from all text parts
- *
- * @internal
- */
-function extractText(parts: Part[]): string {
-  return parts
-    .map((p) => p.text)
-    .filter(Boolean)
-    .join("\n");
 }
 
 /**
@@ -804,7 +780,7 @@ function processContent(
                 part.functionResponse.name,
               )
             : correlation.callId(part.functionResponse.id),
-        content: JSON.stringify(part.functionResponse.response ?? {}),
+        content: serializeToolResponse(part.functionResponse.response),
       });
     }
   }
@@ -864,8 +840,8 @@ function processContent(
 /**
  * Maps an ADK Part with image media to an OpenAI image content part.
  *
- * - `inlineData` (base64) -> `data:` URL
- * - `fileData` -> the http(s) URI (gs:// and other schemes are dropped)
+ * - `inlineData` (base64) → `data:` URL
+ * - `fileData` → the http(s) URI (gs:// and other schemes are dropped)
  *
  * Non-image media (audio/video) is dropped with a single warning. Returns
  * undefined when the part carries no usable image.
@@ -918,69 +894,6 @@ function partToOpenAIImage(
 }
 
 /**
- * Gemini-only built-in tool group keys.
- *
- * These are server-side tools (grounding, code execution, retrieval, etc.) that
- * only Gemini/Vertex executes. On OpenAI-compatible providers they have no
- * equivalent, so they are skipped cleanly (never forwarded) and the user is
- * warned once per request that the named built-in(s) won't run.
- *
- * @internal
- */
-const GEMINI_ONLY_TOOL_KEYS = [
-  "googleSearch",
-  "googleSearchRetrieval",
-  "codeExecution",
-  "urlContext",
-  "retrieval",
-  "googleMaps",
-  "enterpriseWebSearch",
-  "computerUse",
-  "fileSearch",
-  "parallelAiSearch",
-  "mcpServers",
-] as const;
-
-/**
- * Collects the names of Gemini-only built-in tools present in a tool group.
- *
- * @param group - A single ADK tool group object
- * @returns The Gemini-only keys present on the group (e.g. ["googleSearch"])
- *
- * @internal
- */
-function collectGeminiOnlyToolNames(group: Record<string, unknown>): string[] {
-  return GEMINI_ONLY_TOOL_KEYS.filter(
-    (key) => group[key] !== undefined && group[key] !== null,
-  );
-}
-
-/**
- * Resolves the JSON Schema for a function declaration's parameters.
- *
- * `parametersJsonSchema` (already standard JSON Schema, set by custom tools and
- * third-party toolsets) takes precedence and is forwarded as-is. Otherwise the
- * Gemini-style `parameters` are normalized to lowercase JSON Schema types.
- * ADK's own `FunctionTool`/`McpTool` emit `parameters`.
- *
- * @internal
- */
-function toolParameters(fn: {
-  parameters?: unknown;
-  parametersJsonSchema?: unknown;
-}): Record<string, unknown> {
-  const jsonSchema = fn.parametersJsonSchema;
-  if (
-    jsonSchema &&
-    typeof jsonSchema === "object" &&
-    !Array.isArray(jsonSchema)
-  ) {
-    return jsonSchema as Record<string, unknown>;
-  }
-  return normalizeSchema(fn.parameters) ?? { type: "object", properties: {} };
-}
-
-/**
  * Converts ADK tool declarations to OpenAI format.
  *
  * Only `functionDeclarations` are forwarded. Gemini-only built-in tool groups
@@ -998,52 +911,12 @@ function convertTools(
   req: LlmRequest,
   warnings: WarningScope,
 ): OpenAI.ChatCompletionTool[] | undefined {
-  const adkTools = req.config?.tools;
-  if (!adkTools?.length) return undefined;
-
-  const tools: OpenAI.ChatCompletionTool[] = [];
-  const droppedBuiltins = new Set<string>();
-
-  for (const group of adkTools) {
-    if (
-      "functionDeclarations" in group &&
-      Array.isArray(group.functionDeclarations)
-    ) {
-      for (const fn of group.functionDeclarations) {
-        if (!fn.name) {
-          warnings.warnOnce(
-            LogCode.TOOL_DECLARATION_MISSING_NAME,
-            "Tool function missing name, skipping",
-          );
-          continue;
-        }
-        tools.push({
-          type: "function",
-          function: {
-            name: fn.name,
-            description: fn.description ?? "",
-            parameters: toolParameters(fn),
-          },
-        });
-      }
-    }
-
-    // Skip (and record) any Gemini-only built-in tools on this group.
-    for (const name of collectGeminiOnlyToolNames(
-      group as Record<string, unknown>,
-    )) {
-      droppedBuiltins.add(name);
-    }
-  }
-
-  if (droppedBuiltins.size > 0) {
-    warn(
-      LogCode.BUILTIN_TOOLS_DROPPED,
-      `dropping Gemini-only built-in tool(s) not supported on this provider: ${[
-        ...droppedBuiltins,
-      ].join(", ")}`,
-    );
-  }
-
+  const tools: OpenAI.ChatCompletionTool[] = readToolDeclarations(
+    req,
+    warnings,
+  ).map((declaration) => ({
+    type: "function",
+    function: declaration,
+  }));
   return tools.length ? tools : undefined;
 }

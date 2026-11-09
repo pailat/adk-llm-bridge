@@ -129,7 +129,7 @@ describe("recordLlmError", () => {
   });
 });
 
-describe("message-content capture gating (E2E F4 pattern)", () => {
+describe("message-content capture gating", () => {
   useCleanEnv(CAPTURE_ENV);
 
   const secret = "user asked: summarize my diagnosis for Jane Roe";

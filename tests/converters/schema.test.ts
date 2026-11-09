@@ -1,5 +1,8 @@
 import { describe, expect, it } from "bun:test";
-import { normalizeSchema } from "../../src/converters/schema.js";
+import {
+  normalizeJsonSchemaCounts,
+  normalizeSchema,
+} from "../../src/converters/schema.js";
 
 describe("normalizeSchema", () => {
   it("normalizes nested OBJECT/STRING/ARRAY types to lowercase", () => {
@@ -49,7 +52,7 @@ describe("normalizeSchema", () => {
   });
 });
 
-describe("normalizeSchema int64 coercion (e2e-llm F2)", () => {
+describe("normalizeSchema int64 coercion", () => {
   it('coerces count keywords given as "2" to integers', () => {
     expect(
       normalizeSchema({
@@ -207,5 +210,180 @@ describe("normalizeSchema int64 coercion (e2e-llm F2)", () => {
     const copy = structuredClone(input);
     normalizeSchema(input);
     expect(input).toEqual(copy);
+  });
+});
+
+describe("normalizeJsonSchemaCounts", () => {
+  it("converts digit-string counts at the root", () => {
+    expect(
+      normalizeJsonSchemaCounts({
+        type: "string",
+        minLength: "1",
+        maxLength: "40",
+      }),
+    ).toEqual({ type: "string", minLength: 1, maxLength: 40 });
+  });
+
+  it("recurses into every sub-schema position", () => {
+    const input = {
+      type: "object",
+      minProperties: "1",
+      maxProperties: "9",
+      properties: {
+        tags: { type: "array", minItems: "2", items: { maxLength: "8" } },
+      },
+      patternProperties: { "^x-": { minLength: "3" } },
+      additionalProperties: { maxLength: "5" },
+      prefixItems: [{ minLength: "1" }],
+      anyOf: [{ minItems: "1" }],
+      oneOf: [{ maxItems: "2" }],
+      allOf: [{ minProperties: "0" }],
+      not: { maxLength: "0" },
+      $defs: { word: { type: "string", minLength: "4" } },
+      definitions: { legacy: { maxItems: "7" } },
+    };
+    expect(normalizeJsonSchemaCounts(input)).toEqual({
+      type: "object",
+      minProperties: 1,
+      maxProperties: 9,
+      properties: {
+        tags: { type: "array", minItems: 2, items: { maxLength: 8 } },
+      },
+      patternProperties: { "^x-": { minLength: 3 } },
+      additionalProperties: { maxLength: 5 },
+      prefixItems: [{ minLength: 1 }],
+      anyOf: [{ minItems: 1 }],
+      oneOf: [{ maxItems: 2 }],
+      allOf: [{ minProperties: 0 }],
+      not: { maxLength: 0 },
+      $defs: { word: { type: "string", minLength: 4 } },
+      definitions: { legacy: { maxItems: 7 } },
+    });
+  });
+
+  it("changes nothing but counts", () => {
+    const input = {
+      type: "OBJECT",
+      $schema: "https://json-schema.org/draft/2020-12/schema",
+      "x-vendor": { minItems: "keep-me?" },
+      minimum: "1",
+      properties: {
+        minItems: { type: "Integer", default: "3" },
+        mode: { enum: ["A"], const: "A", examples: [{ minItems: "2" }] },
+      },
+      required: ["minItems"],
+      additionalProperties: false,
+    };
+    expect(normalizeJsonSchemaCounts(input)).toEqual(input);
+  });
+
+  it("leaves counts that are not canonical digit strings alone", () => {
+    const input = {
+      minItems: "two",
+      maxItems: "-1",
+      minLength: "02",
+      maxLength: "1.5",
+      minProperties: "9007199254740993",
+      maxProperties: 3,
+    };
+    expect(normalizeJsonSchemaCounts(input)).toEqual(input);
+  });
+
+  it("does not mutate the input", () => {
+    const input = {
+      type: "object",
+      minProperties: "1",
+      properties: { tags: { type: "array", minItems: "2" } },
+      anyOf: [{ maxLength: "3" }],
+    };
+    const snapshot = structuredClone(input);
+    const out = normalizeJsonSchemaCounts(input);
+    expect(input).toEqual(snapshot);
+    expect(out).not.toBe(input);
+    expect(out.properties).not.toBe(input.properties);
+  });
+
+  it("is idempotent", () => {
+    const once = normalizeJsonSchemaCounts({
+      items: { minItems: "2" },
+      maxLength: "4",
+    });
+    expect(normalizeJsonSchemaCounts(once)).toEqual(once);
+  });
+});
+
+describe("__proto__ property names", () => {
+  const raw =
+    '{"type":"object","__proto__":{"description":"root"},"properties":{"__proto__":{"type":"string","minLength":"1"},"name":{"type":"string"}},"required":["__proto__"]}';
+
+  for (const [label, normalize] of [
+    ["normalizeJsonSchemaCounts", normalizeJsonSchemaCounts],
+    ["normalizeSchema", normalizeSchema],
+  ] as const) {
+    it(`${label} keeps __proto__ at the root and under properties`, () => {
+      const input = JSON.parse(raw) as Record<string, unknown>;
+      const out = normalize(input) as Record<string, unknown>;
+      const properties = out.properties as Record<string, unknown>;
+
+      expect(Object.hasOwn(out, "__proto__")).toBe(true);
+      expect(Object.hasOwn(properties, "__proto__")).toBe(true);
+      expect(Object.getOwnPropertyDescriptor(out, "__proto__")?.value).toEqual({
+        description: "root",
+      });
+      expect(
+        Object.getOwnPropertyDescriptor(properties, "__proto__")?.value,
+      ).toEqual({ type: "string", minLength: 1 });
+      expect(Object.getPrototypeOf(out)).toBe(Object.prototype);
+      expect(Object.getPrototypeOf(properties)).toBe(Object.prototype);
+      expect(JSON.stringify(properties)).toBe(
+        '{"__proto__":{"type":"string","minLength":1},"name":{"type":"string"}}',
+      );
+      expect(JSON.stringify(out)).toContain(
+        '"__proto__":{"description":"root"}',
+      );
+    });
+  }
+});
+
+describe("normalizeJsonSchemaCounts keyword positions", () => {
+  it("copies non-sub-schema keywords verbatim", () => {
+    const input = {
+      type: "object",
+      "x-vendor": { minItems: "3" },
+      discriminator: {
+        propertyName: "kind",
+        mapping: { a: "#/$defs/a", minLength: "1" },
+      },
+      xml: { name: "root", maxLength: "2" },
+      externalDocs: { url: "https://example.com", minItems: "1" },
+      "x-list": [{ minItems: "4" }],
+    };
+    const out = normalizeJsonSchemaCounts(input);
+    expect(out).toEqual(input);
+    expect(out["x-vendor"]).toEqual({ minItems: "3" });
+  });
+
+  it("normalizes the remaining sub-schema positions", () => {
+    // Built from JSON: a literal with a `then` key is a thenable.
+    const input = JSON.parse(
+      '{"contains":{"minLength":"1"},"propertyNames":{"maxLength":"16"},' +
+        '"unevaluatedProperties":{"minLength":"2"},"unevaluatedItems":{"maxItems":"3"},' +
+        '"additionalItems":{"minLength":"4"},"contentSchema":{"minProperties":"1"},' +
+        '"dependentSchemas":{"a":{"minProperties":"2"}},"if":{"minItems":"1"},' +
+        '"then":{"maxItems":"2"},"else":{"maxItems":"0"},"items":[{"minLength":"5"}]}',
+    ) as Record<string, unknown>;
+    expect(JSON.stringify(normalizeJsonSchemaCounts(input))).toBe(
+      '{"contains":{"minLength":1},"propertyNames":{"maxLength":16},' +
+        '"unevaluatedProperties":{"minLength":2},"unevaluatedItems":{"maxItems":3},' +
+        '"additionalItems":{"minLength":4},"contentSchema":{"minProperties":1},' +
+        '"dependentSchemas":{"a":{"minProperties":2}},"if":{"minItems":1},' +
+        '"then":{"maxItems":2},"else":{"maxItems":0},"items":[{"minLength":5}]}',
+    );
+  });
+
+  it("leaves normalizeSchema recursing into unknown keywords", () => {
+    expect(normalizeSchema({ "x-vendor": { minItems: "3" } })).toEqual({
+      "x-vendor": { minItems: 3 },
+    });
   });
 });

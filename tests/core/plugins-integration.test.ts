@@ -305,7 +305,7 @@ describe("OpenAICompatibleLlm with ADK plugins", () => {
     expect(events[0]?.content?.parts?.some((p) => p.functionCall)).toBeFalsy();
   });
 
-  it("keeps a function call that follows encrypted-only reasoning in the history (E2E F1)", async () => {
+  it("keeps a function call that follows encrypted-only reasoning in the history", async () => {
     // Grok-style reasoning: only an encrypted blob, no display text. ADK drops
     // events whose first part has text "", so a thought part with text "" used
     // to erase the call and fail the next request.

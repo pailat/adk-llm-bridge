@@ -1,10 +1,4 @@
 /**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
-/**
  * Tool call / tool response ID correlation shared by every request converter.
  *
  * ADK may hand a provider history whose `functionCall` / `functionResponse`
@@ -15,8 +9,6 @@
  *
  * Create one {@link ToolCallIdCorrelator} per converted request and route every
  * call and response through it, in history order.
- *
- * @module converters/tool-call-ids
  */
 
 /** Pattern accepted for tool call IDs by Anthropic (and by OpenAI in practice). */

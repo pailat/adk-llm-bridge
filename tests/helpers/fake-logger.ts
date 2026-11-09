@@ -6,12 +6,15 @@ import {
   setLogger,
 } from "@google/adk";
 
+/** `[adk-llm-bridge] [<code>] <message>`, as `warn` in src/utils/log.ts writes it. */
+const CODED_WARNING = /^(\[adk-llm-bridge\]) \[([^\]\s]+)\] ([\s\S]*)$/;
+
 /**
  * Installs a fake ADK logger and returns a spy over its `warn` calls.
  *
- * The spy receives only the first argument of each `logger.warn(...)`
- * (the formatted message); the stable warning `code` that adk-llm-bridge
- * attaches as the second argument is available in `codes`. Use it where tests
+ * The spy receives each warning without its `[<code>]` part
+ * (`[adk-llm-bridge] <message>`), and the stable warning code is collected in
+ * `codes`. A warning without a code is passed through as is. Use it where tests
  * used to spy on `console.warn`. Call `mockRestore()` (or `resetLogger()`) to
  * reinstate ADK's default logger.
  */
@@ -25,9 +28,11 @@ export function captureWarnings() {
     info: noop,
     error: noop,
     setLogLevel: (_level: LogLevel) => {},
-    warn: (message: unknown, meta?: unknown) => {
-      spy(message);
-      codes.push((meta as { code?: unknown } | undefined)?.code);
+    warn: (message: unknown) => {
+      const match =
+        typeof message === "string" ? CODED_WARNING.exec(message) : null;
+      spy(match ? `${match[1]} ${match[3]}` : message);
+      codes.push(match?.[2]);
     },
   };
   setLogger(fake);

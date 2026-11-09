@@ -1,10 +1,4 @@
 /**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
-/**
  * Global configuration management for LLM providers.
  *
  * This module provides functions to set, get, and reset global configuration
@@ -16,8 +10,6 @@
  * 2. Global configuration (set via this module)
  * 3. Environment variables
  * 4. Default values
- *
- * @module config
  *
  * @example
  * ```typescript
