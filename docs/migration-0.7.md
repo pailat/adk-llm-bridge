@@ -5,7 +5,7 @@ GitHub only, so npm users go straight from 0.5.3 to 0.7.0. This guide covers
 that whole step. If you installed the 0.6.0 GitHub tag, see
 [Coming from the 0.6.0 tag](#coming-from-the-060-tag) at the end.
 
-The full list of changes is in the [CHANGELOG](../CHANGELOG.md#070---unreleased).
+The full list of changes is in the [CHANGELOG](../CHANGELOG.md#070---2026-11-09).
 
 ## 1. Runtime and peers
 
