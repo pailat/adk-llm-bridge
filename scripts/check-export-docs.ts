@@ -7,16 +7,18 @@
  *
  * TypeScript 7 has no JavaScript compiler API, so this reads the bundled
  * declaration files directly: top-level declarations start at column 0, and
- * the bundle ends with one `export { ... }` list. A name in that list that
- * has no local declaration (a re-export from a dependency) is skipped, and an
- * `@internal` symbol does not need a summary.
+ * the bundle ends with one `export { ... }` list. A name that an entry
+ * imports from a shared chunk (`dist/shared/*.d.ts`) is checked at its
+ * declaration in that chunk. A name with no declaration in the package (a
+ * re-export from a dependency) is skipped, and an `@internal` symbol does not
+ * need a summary.
  *
  * Usage:
  * - `bun scripts/check-export-docs.ts`: exit 1 when a symbol has no summary.
  * - `bun scripts/check-export-docs.ts --report`: print the list, exit 0.
  */
 import { existsSync, readFileSync } from "node:fs";
-import { relative, resolve } from "node:path";
+import { dirname, relative, resolve } from "node:path";
 
 const ROOT = resolve(import.meta.dir, "..");
 const reportOnly = process.argv.includes("--report");
@@ -71,6 +73,61 @@ function hasSummary(lines: string[], index: number): "yes" | "no" | "internal" {
   return first && !first.startsWith("@") ? "yes" : "no";
 }
 
+interface DeclarationFile {
+  lines: string[];
+  /** Line index of the first top-level declaration of each name. */
+  declarations: Map<string, number>;
+  /** Local name -> [file, name in that file] for relative imports. */
+  imports: Map<string, [string, string]>;
+}
+
+const files = new Map<string, DeclarationFile>();
+function load(path: string): DeclarationFile {
+  const cached = files.get(path);
+  if (cached) return cached;
+  const source = readFileSync(path, "utf8");
+  const lines = source.split("\n");
+  const declarations = new Map<string, number>();
+  lines.forEach((line, index) => {
+    const name = DECLARATION.exec(line)?.[1];
+    if (name && !declarations.has(name)) declarations.set(name, index);
+  });
+  const imports = new Map<string, [string, string]>();
+  for (const match of source.matchAll(
+    /^import\s+(?:type\s+)?\{([^}]*)\}\s+from\s+"(\.{1,2}\/[^"]+)"/gm,
+  )) {
+    const target = resolve(
+      dirname(path),
+      (match[2] ?? "").replace(/\.js$/, ".d.ts"),
+    );
+    for (const item of (match[1] ?? "").split(",")) {
+      const [imported, local] = item
+        .trim()
+        .replace(/^type\s+/, "")
+        .split(/\s+as\s+/)
+        .map((part) => part.trim());
+      if (imported) imports.set(local ?? imported, [target, imported]);
+    }
+  }
+  const file = { lines, declarations, imports };
+  files.set(path, file);
+  return file;
+}
+
+/** Follows relative imports to the file and line that declare `name`. */
+function locate(
+  path: string,
+  name: string,
+  depth = 0,
+): { path: string; index: number } | undefined {
+  const file = load(path);
+  const index = file.declarations.get(name);
+  if (index !== undefined) return { path, index };
+  const imported = file.imports.get(name);
+  if (!imported || depth > 8 || !existsSync(imported[0])) return undefined;
+  return locate(imported[0], imported[1], depth + 1);
+}
+
 const missing: string[] = [];
 let checked = 0;
 for (const entry of entries) {
@@ -79,20 +136,15 @@ for (const entry of entries) {
     console.error(`check-export-docs: ${entry} not found; run bun run build`);
     process.exit(1);
   }
-  const source = readFileSync(path, "utf8");
-  const lines = source.split("\n");
-  const exported = exportedNames(source);
-  const seen = new Set<string>();
-  lines.forEach((line, index) => {
-    const match = DECLARATION.exec(line);
-    const name = match?.[1];
-    if (!name || !exported.has(name) || seen.has(name)) return;
-    seen.add(name);
+  for (const name of exportedNames(readFileSync(path, "utf8"))) {
+    const found = locate(path, name);
+    if (!found) continue;
     checked++;
-    if (hasSummary(lines, index) === "no") {
-      missing.push(`${relative(ROOT, path)}:${index + 1}: ${name}`);
+    const lines = load(found.path).lines;
+    if (hasSummary(lines, found.index) === "no") {
+      missing.push(`${relative(ROOT, found.path)}:${found.index + 1}: ${name}`);
     }
-  });
+  }
 }
 
 for (const item of missing) console.log(`${item}: no TSDoc summary`);

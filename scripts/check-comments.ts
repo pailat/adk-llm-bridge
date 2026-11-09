@@ -35,6 +35,11 @@ const TRACKING_ID_PATTERNS: ReadonlyArray<{ name: string; pattern: RegExp }> = [
     pattern:
       /\b(?:STREAM|AGENTS|RT|WF|LLM|OBS|ORCH|QUALITY|PACK|OLA|DOCS|PERM|SESSION)-\d+[a-z]?\b/,
   },
+  {
+    // Gate lanes such as `G-SEC` and wave lanes such as `4G-POST`.
+    name: "gate or wave lane id",
+    pattern: /(?<![\w-])\d*G-[A-Z]{2,}(?![\w-])/,
+  },
   { name: "wave label", pattern: /\b[Ww]aves? \d+[a-z]?\b|\bola ?\d+[a-z]?\b/ },
   { name: "request number", pattern: /\bREQUESTS ?#\s?\d+/ },
   {
@@ -51,6 +56,11 @@ const TRACKING_ID_PATTERNS: ReadonlyArray<{ name: string; pattern: RegExp }> = [
     name: "finding or review id",
     pattern:
       /(?<![\w.#/-])(?!V8\b)(?:F|N|E|B|C|V|M)\d{1,2}[a-z]?(?=$|[\s:,;)/.]|\/)(?![\w-])/,
+  },
+  {
+    // Doc-review, fix and security-pass finding groups: `DF3`, `FIX1`, `SECP1`.
+    name: "finding group id",
+    pattern: /(?<![\w.#/-])(?:DF|FIX|SECP)\d{1,2}[a-z]?(?![\w-])/,
   },
   {
     name: "review minor id",
@@ -276,6 +286,10 @@ const PATH_TRACKING_PATTERNS: ReadonlyArray<{ name: string; pattern: RegExp }> =
       name: "stream or lane id",
       pattern:
         /(?:^|[-_./])(?:stream|agents|rt|wf|llm|obs|perm|session)-\d+[a-z]?(?=$|[-_./])/i,
+    },
+    {
+      name: "finding group id",
+      pattern: /(?:^|[-_./])(?:df|secp)-?\d+[a-z]?(?=$|[-_./])/i,
     },
   ];
 

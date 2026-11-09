@@ -1,0 +1,185 @@
+/**
+ * Post-build check of the published entry points.
+ *
+ * 1. Every class is defined in exactly one `dist` JavaScript file and
+ *    declared in exactly one `dist` declaration file. The build splits shared
+ *    modules into `dist/shared/` chunks, so a class bundled into two entries
+ *    (two copies of its module state, and an `instanceof` that fails across
+ *    subpaths) means splitting regressed. A class declared twice in `.d.ts`
+ *    files is two unrelated types when it has `#private` members, so passing
+ *    an `/agents` object where `/workflows` expects it fails to compile.
+ * 2. Each entry, and `adk-llm-bridge/package.json`, imports under Node from a
+ *    consumer that has the required peers but none of the optional ones, by
+ *    package name, so the `exports` map is exercised too.
+ * 3. A name exported by more than one entry is the same value in each, so
+ *    singletons such as error classes and registries are shared.
+ *
+ * The consumer lives in a temporary directory: the package is copied in and
+ * every other installed package except the optional peers is symlinked from
+ * `node_modules`. No network is used.
+ *
+ * Usage: `bun run build && bun scripts/check-dist-entries.ts`
+ */
+import { spawnSync } from "node:child_process";
+import {
+  cpSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join, relative, resolve } from "node:path";
+
+const root = resolve(import.meta.dir, "..");
+const distDir = join(root, "dist");
+const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as {
+  name: string;
+  exports: Record<string, unknown>;
+  peerDependenciesMeta?: Record<string, { optional?: boolean }>;
+};
+const optionalPeers = new Set(
+  Object.entries(pkg.peerDependenciesMeta ?? {})
+    .filter(([, meta]) => meta.optional === true)
+    .map(([name]) => name),
+);
+const failures: string[] = [];
+
+function listFiles(directory: string): string[] {
+  return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+    const path = join(directory, entry.name);
+    return entry.isDirectory() ? listFiles(path) : [path];
+  });
+}
+
+// 1. No class is defined in two dist files.
+const classPattern =
+  /^(?:export )?class ([A-Za-z_$][\w$]*)|^var ([A-Za-z_$][\w$]*) = class\b/gm;
+const definedIn = new Map<string, string[]>();
+for (const file of listFiles(distDir).filter((f) => f.endsWith(".js"))) {
+  const text = readFileSync(file, "utf8");
+  for (const match of text.matchAll(classPattern)) {
+    // The bundler renames a clashing local copy `Name2`; strip the suffix.
+    const name = (match[1] ?? match[2] ?? "").replace(/\d+$/, "");
+    const files = definedIn.get(name) ?? [];
+    files.push(relative(root, file));
+    definedIn.set(name, files);
+  }
+}
+for (const [name, files] of definedIn) {
+  if (files.length > 1) {
+    failures.push(`class ${name} is defined in ${files.join(", ")}`);
+  }
+}
+
+const declarationPattern =
+  /^(?:export )?declare (?:abstract )?class ([A-Za-z_$][\w$]*)/gm;
+const declaredIn = new Map<string, string[]>();
+for (const file of listFiles(distDir).filter((f) => f.endsWith(".d.ts"))) {
+  const text = readFileSync(file, "utf8");
+  for (const match of text.matchAll(declarationPattern)) {
+    // Declaration bundles also rename a clashing local copy `Name2`.
+    const name = (match[1] ?? "").replace(/\d+$/, "");
+    const files = declaredIn.get(name) ?? [];
+    files.push(relative(root, file));
+    declaredIn.set(name, files);
+  }
+}
+for (const [name, files] of declaredIn) {
+  if (files.length > 1) {
+    failures.push(`class ${name} is declared in ${files.join(", ")}`);
+  }
+}
+if (declaredIn.size === 0) failures.push("no class declarations found in dist");
+
+// 2 and 3. Import every entry from a consumer without the optional peers.
+const consumer = mkdtempSync(join(tmpdir(), "adk-llm-bridge-entries-"));
+try {
+  const modules = join(consumer, "node_modules");
+  const installed = join(modules, pkg.name);
+  mkdirSync(installed, { recursive: true });
+  cpSync(join(root, "package.json"), join(installed, "package.json"));
+  cpSync(distDir, join(installed, "dist"), { recursive: true });
+  const linked: string[] = [];
+  for (const entry of readdirSync(join(root, "node_modules"))) {
+    if (entry.startsWith(".") || entry === pkg.name) continue;
+    const names = entry.startsWith("@")
+      ? readdirSync(join(root, "node_modules", entry)).map(
+          (child) => `${entry}/${child}`,
+        )
+      : [entry];
+    for (const name of names) {
+      if (optionalPeers.has(name)) continue;
+      mkdirSync(join(modules, name, ".."), { recursive: true });
+      symlinkSync(join(root, "node_modules", name), join(modules, name));
+      linked.push(name);
+    }
+  }
+
+  const specifiers = Object.keys(pkg.exports).map((key) =>
+    key === "." ? pkg.name : `${pkg.name}/${key.slice(2)}`,
+  );
+  const probe = `
+    const specifiers = ${JSON.stringify(specifiers)};
+    const optional = ${JSON.stringify([...optionalPeers])};
+    const failures = [];
+    for (const name of optional) {
+      try {
+        await import(name);
+        failures.push("optional peer " + name + " is installed in the consumer");
+      } catch {}
+    }
+    const owners = new Map();
+    for (const specifier of specifiers) {
+      let mod;
+      try {
+        mod = specifier.endsWith("/package.json")
+          ? await import(specifier, { with: { type: "json" } })
+          : await import(specifier);
+      } catch (error) {
+        failures.push(specifier + " failed to import: " + (error?.message ?? error));
+        continue;
+      }
+      if (specifier.endsWith("/package.json")) continue;
+      for (const [name, value] of Object.entries(mod)) {
+        const first = owners.get(name);
+        if (!first) owners.set(name, { specifier, value });
+        else if (first.value !== value)
+          failures.push(name + " differs between " + first.specifier + " and " + specifier);
+      }
+    }
+    if (failures.length > 0) {
+      console.error(failures.join("\\n"));
+      process.exit(1);
+    }
+    console.log("imported " + specifiers.join(", "));
+  `;
+  const probeFile = join(consumer, "probe.mjs");
+  writeFileSync(probeFile, probe);
+  const result = spawnSync("node", [probeFile], {
+    cwd: consumer,
+    encoding: "utf8",
+  });
+  if (result.status !== 0) {
+    failures.push(
+      `Node import without optional peers failed:\n${result.stderr || result.stdout || result.error}`,
+    );
+  } else {
+    console.log(`check-dist-entries: ${result.stdout.trim()}`);
+  }
+  if (linked.length === 0) failures.push("no packages were linked");
+} finally {
+  rmSync(consumer, { recursive: true, force: true });
+}
+
+if (failures.length > 0) {
+  console.error("check-dist-entries: FAIL");
+  for (const failure of failures) console.error(`- ${failure}`);
+  process.exit(1);
+}
+console.log(
+  `check-dist-entries: OK (${definedIn.size} classes defined once, ${declaredIn.size} declared once; optional peers absent: ${[...optionalPeers].join(", ")})`,
+);

@@ -33,6 +33,7 @@
     "examples/*"
   ],
   "type": "module",
+  "sideEffects": false,
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
@@ -44,6 +45,10 @@
       "types": "./dist/agents/index.d.ts",
       "import": "./dist/agents/index.js"
     },
+    "./agents/session-store/sqlite": {
+      "types": "./dist/agents/session-store/sqlite/index.d.ts",
+      "import": "./dist/agents/session-store/sqlite/index.js"
+    },
     "./workflows": {
       "types": "./dist/workflows/index.d.ts",
       "import": "./dist/workflows/index.js"
@@ -51,7 +56,8 @@
     "./workflows/node": {
       "types": "./dist/workflows/node/index.d.ts",
       "import": "./dist/workflows/node/index.js"
-    }
+    },
+    "./package.json": "./package.json"
   },
   "files": [
     "dist",
@@ -74,10 +80,11 @@
     "check:comments": "bun scripts/check-comments.ts",
     "check:links": "bun scripts/check-links.ts",
     "check:export-docs": "bun scripts/check-export-docs.ts",
+    "check:dist": "bun scripts/check-export-docs.ts && bun scripts/fix-dts-private.ts --check && bun scripts/check-dts-extensions.ts && bun scripts/check-dist-permissions.ts && bun scripts/check-dist-entries.ts",
     "check:fix": "biome check --write .",
     "lint:publish": "publint --strict && attw --pack --profile esm-only",
-    "ci": "bun run typecheck:all && bun run typecheck:conformance && bun run check && bun run check:comments && bun run check:links && bun test && bun run build && bun run check:export-docs && bun scripts/fix-dts-private.ts --check && bun scripts/check-dist-permissions.ts && bun run lint:publish",
-    "prepublishOnly": "bun run check:comments && bun run build && bun run check:export-docs && bun scripts/fix-dts-private.ts --check && bun scripts/check-dist-permissions.ts && bun run lint:publish",
+    "ci": "bun run typecheck:all && bun run typecheck:conformance && bun run check && bun run check:comments && bun run check:links && bun test && bun run build && bun run check:dist && bun run lint:publish",
+    "prepublishOnly": "bun run check:comments && bun run build && bun run check:dist && bun run lint:publish",
     "typecheck:compat:nodenext": "bun run build && bunx tsc -p tests/compat/nodenext-consumer/tsconfig.json"
   },
   "peerDependencies": {
