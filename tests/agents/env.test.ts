@@ -1,10 +1,8 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import { describe, expect, test } from "bun:test";
+import {
+  buildChildEnv,
+  credentialEnv,
+} from "../../src/agents/driver/shared.js";
 import {
   EnvCredentialProvider,
   readAllowedEnv,
@@ -52,5 +50,46 @@ describe("environment credential allowlist", () => {
         envAllowlist: ["OPENAI_API_KEY"],
       }),
     ).resolves.toBeUndefined();
+  });
+});
+
+describe("driver child environment", () => {
+  const provider = {
+    id: "p",
+    name: "P",
+    command: "p",
+    envAllowlist: ["API_KEY", "HOME"],
+  };
+
+  test("keeps only base keys and allowlisted credential values", () => {
+    const env = buildChildEnv(
+      { PATH: "/bin", HOME: "/h", SECRET: "host-secret", EMPTY: "" },
+      ["PATH", "HOME", "EMPTY", "MISSING"],
+      {
+        provider,
+        context: {} as never,
+        credential: {
+          kind: "env",
+          env: { API_KEY: "k", HOME: "/credential-home", OTHER: "x" },
+        },
+      },
+    );
+
+    expect(env).toEqual({
+      PATH: "/bin",
+      HOME: "/credential-home",
+      API_KEY: "k",
+    });
+  });
+
+  test("ignores credentials that are not of kind env", () => {
+    expect(
+      credentialEnv({
+        provider,
+        context: {} as never,
+        credential: { kind: "none" } as never,
+      }),
+    ).toEqual({});
+    expect(credentialEnv({ provider, context: {} as never })).toEqual({});
   });
 });

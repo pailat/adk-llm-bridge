@@ -10,6 +10,7 @@ import { z } from "zod";
 import {
   ADK_TOOL_PREFIX,
   createAdkToolBridge,
+  toResponseObject,
 } from "../../src/agents/tools/adk-tool-bridge.js";
 
 function invocation(
@@ -174,6 +175,36 @@ describe("createAdkToolBridge declarations", () => {
   });
 });
 
+describe("createAdkToolBridge filter", () => {
+  it("keeps only the accepted tools, toolsets' tools included, by their own name", async () => {
+    const tool = (name: string) =>
+      new FunctionTool({
+        name,
+        description: name,
+        parameters: z.object({}),
+        execute: () => name,
+      });
+    const seen: string[] = [];
+    const bridge = await createAdkToolBridge(
+      [tool("read"), new StaticToolset([tool("read"), tool("write")])],
+      invocation(),
+      {
+        filter: (candidate) => {
+          seen.push(candidate.name);
+          return candidate.name === "read";
+        },
+      },
+    );
+    expect(seen).toEqual(["read", "read", "write"]);
+    expect(bridge.declarations.map((d) => d.name)).toEqual([
+      "adk_tool__read",
+      "adk_tool__read_2",
+    ]);
+    // A rejected tool is not reported as skipped.
+    expect(bridge.skipped).toEqual([]);
+  });
+});
+
 describe("AdkToolBridge.execute", () => {
   it("runs the tool and returns its response", async () => {
     const bridge = await createAdkToolBridge([weather], invocation());
@@ -291,6 +322,7 @@ describe("AdkToolBridge confirmation handling", () => {
     expect(result.status).toBe("confirmationRequired");
     expect(result.confirmation?.functionCallId).toBe("call-9");
     expect(result.confirmation?.hint).toContain("delete_all");
+    expect(result.confirmation?.origin).toBe("requireConfirmation");
     expect(runs).toBe(0);
   });
 
@@ -348,5 +380,111 @@ describe("AdkToolBridge confirmation handling", () => {
     );
     expect(large.status).toBe("confirmationRequired");
     expect(runs).toBe(1);
+  });
+});
+
+describe("AdkToolBridge requestConfirmation() inside execute", () => {
+  const decisions: Array<boolean | undefined> = [];
+  const asking = () =>
+    new FunctionTool({
+      name: "deploy",
+      description: "asks inside execute",
+      parameters: z.object({}),
+      execute: async (_args, context) => {
+        const decision = context?.toolConfirmation;
+        decisions.push(decision?.confirmed);
+        await context?.saveArtifact("plan.txt", { text: "plan" });
+        if (!decision) {
+          context?.state.set("attempt", 1);
+          context?.requestConfirmation({ hint: "Ship it?", payload: { n: 1 } });
+          return { status: "waiting" };
+        }
+        return { deployed: decision.confirmed };
+      },
+    });
+  const withArtifacts = () =>
+    invocation({
+      artifactService: {
+        saveArtifact: async () => 3,
+      } as unknown as InvocationContext["artifactService"],
+    });
+
+  it("reports confirmationRequired with the tool's hint and payload", async () => {
+    decisions.length = 0;
+    const context = withArtifacts();
+    const bridge = await createAdkToolBridge([asking()], context);
+    const result = await bridge.execute("adk_tool__deploy", {}, context, {
+      functionCallId: "call-1",
+    });
+    expect(result.status).toBe("confirmationRequired");
+    expect(result.confirmation).toEqual({
+      functionCallId: "call-1",
+      hint: "Ship it?",
+      payload: { n: 1 },
+      origin: "requestConfirmation",
+    });
+    // The unconfirmed run's response and state are dropped, as in ADK; the
+    // artifact it saved stays reported.
+    expect(result.response).toEqual({
+      error: "This tool call requires confirmation.",
+    });
+    expect(result.actions.stateDelta).toEqual({});
+    expect(result.actions.artifactDelta).toEqual({ "plan.txt": 3 });
+    expect(result.actions.requestedToolConfirmations["call-1"]).toMatchObject({
+      hint: "Ship it?",
+      confirmed: false,
+    });
+    expect(decisions).toEqual([undefined]);
+  });
+
+  it("runs the tool with the decision on the next call", async () => {
+    decisions.length = 0;
+    const context = withArtifacts();
+    const bridge = await createAdkToolBridge([asking()], context);
+    const approved = await bridge.execute("adk_tool__deploy", {}, context, {
+      functionCallId: "call-1",
+      toolConfirmation: { confirmed: true },
+    });
+    const rejected = await bridge.execute("adk_tool__deploy", {}, context, {
+      functionCallId: "call-2",
+      toolConfirmation: { confirmed: false },
+    });
+    expect(approved).toMatchObject({
+      status: "ok",
+      response: { deployed: true },
+    });
+    // Without `requireConfirmation`, a rejection is the tool's to handle.
+    expect(rejected).toMatchObject({
+      status: "ok",
+      response: { deployed: false },
+    });
+    expect(decisions).toEqual([true, false]);
+  });
+});
+
+describe("toResponseObject", () => {
+  it("uses plain and null-prototype objects as they are", () => {
+    const plain = { a: 1 };
+    const bare = Object.assign(Object.create(null), { b: 2 });
+    expect(toResponseObject(plain)).toBe(plain);
+    expect(toResponseObject(bare)).toBe(bare);
+  });
+
+  it("wraps a Date, a Map and a class instance", () => {
+    class Point {
+      x = 1;
+    }
+    const date = new Date(0);
+    const map = new Map([["k", 1]]);
+    const point = new Point();
+    expect(toResponseObject(date)).toEqual({ result: date });
+    expect(toResponseObject(map)).toEqual({ result: map });
+    expect(toResponseObject(point).result).toBe(point);
+  });
+
+  it("wraps arrays and primitives, with undefined as null", () => {
+    expect(toResponseObject([1])).toEqual({ result: [1] });
+    expect(toResponseObject("x")).toEqual({ result: "x" });
+    expect(toResponseObject(undefined)).toEqual({ result: null });
   });
 });

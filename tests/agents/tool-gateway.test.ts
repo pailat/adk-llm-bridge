@@ -5,6 +5,7 @@ import {
   type BaseLlmConnection,
   createEvent,
   createEventActions,
+  type Event,
   FunctionTool,
   InMemoryRunner,
   InvocationContext,
@@ -17,8 +18,10 @@ import {
   REQUEST_CONFIRMATION_FUNCTION_CALL_NAME,
   SequentialAgent,
 } from "@google/adk";
+import { type Content, FinishReason } from "@google/genai";
 import { z } from "zod";
 import {
+  EXTERNAL_AGENT_TRANSFER_FAILED,
   ExternalAgent,
   type ExternalAgentDriver,
   type ExternalAgentEvent,
@@ -28,6 +31,7 @@ import {
 } from "../../src/agents/index.js";
 import type { ExternalAgentPermissionPolicy } from "../../src/agents/permissions/schema.js";
 import { CODEX_PROVIDER } from "../../src/agents/provider/schema.js";
+import { fromPartial } from "../helpers/partial.js";
 
 class CaptureDriver implements ExternalAgentDriver {
   readonly providerId = CODEX_PROVIDER.id;
@@ -138,7 +142,7 @@ class ToolCallingFakeLlm extends BaseLlm {
 }
 
 function parentContext(agent: BaseAgent): InvocationContext {
-  return {
+  return fromPartial<InvocationContext>({
     invocationId: "inv-1",
     agent,
     userContent: { role: "user", parts: [{ text: "parent" }] },
@@ -151,7 +155,7 @@ function parentContext(agent: BaseAgent): InvocationContext {
       lastUpdateTime: 1,
     },
     pluginManager: new PluginManager(),
-  } as InvocationContext;
+  });
 }
 
 describe("ToolGateway", () => {
@@ -186,7 +190,7 @@ describe("ToolGateway", () => {
   test("emits native transfer_to_agent delegation events by default", async () => {
     const worker = new TextAgent("worker");
     const root = new TextAgent("root");
-    const emitted = [];
+    const emitted: Event[] = [];
     const gateway = new ToolGateway({
       rootAgent: root,
       subAgents: [worker],
@@ -216,7 +220,7 @@ describe("ToolGateway", () => {
       emitted[0].content?.parts?.[0]?.functionCall?.args,
     ).not.toHaveProperty("task");
     expect(emitted[0].customMetadata).toBeUndefined();
-    expect(emitted[0].finishReason).toBe("STOP");
+    expect(emitted[0].finishReason).toBe(FinishReason.STOP);
     expect(emitted[0].turnComplete).toBe(true);
 
     // #1 native transfer_to_agent response carries the agent-switch signal and
@@ -243,7 +247,7 @@ describe("ToolGateway", () => {
   test("emits legacy run_adk_subagent shape when nativeDelegationShape is false", async () => {
     const worker = new TextAgent("worker");
     const root = new TextAgent("root");
-    const emitted = [];
+    const emitted: Event[] = [];
     const gateway = new ToolGateway({
       rootAgent: root,
       subAgents: [worker],
@@ -289,6 +293,46 @@ describe("ToolGateway", () => {
     });
   });
 
+  test("legacy sub-agent tool titles show the query, tool name or status", async () => {
+    const call = (id: string, name: string, args: Record<string, unknown>) =>
+      createEvent({
+        invocationId: "inv-1",
+        author: "worker",
+        content: {
+          role: "model",
+          parts: [{ functionCall: { id, name, args } }],
+        },
+      });
+    const worker = new FunctionResponseAgent([
+      call("c1", "search", { query: "adk docs" }),
+      call("c2", "mcp", { toolName: "lookup" }),
+      createEvent({
+        invocationId: "inv-1",
+        author: "worker",
+        errorMessage: "broke",
+      }),
+    ]);
+    const root = new TextAgent("root");
+    const emitted: ReturnType<typeof createEvent>[] = [];
+    const gateway = new ToolGateway({
+      rootAgent: root,
+      subAgents: [worker],
+      parentContext: parentContext(root),
+      nativeDelegationShape: false,
+      eventSink: (event) => emitted.push(event),
+    });
+
+    await gateway.runSubAgent({ agentName: "worker", task: "go" });
+
+    const titles = emitted.map(
+      (event) =>
+        (event.customMetadata as { title?: string } | undefined)?.title,
+    );
+    expect(titles).toContain("worker: search call: adk docs");
+    expect(titles).toContain("worker: mcp call: lookup");
+    expect(titles).toContain("worker: error EXTERNAL_AGENT_ERROR");
+  });
+
   test("strips customMetadata from surfaced sub-agent events in native mode", async () => {
     const worker = new FunctionResponseAgent([
       createEvent({
@@ -303,7 +347,7 @@ describe("ToolGateway", () => {
       }),
     ]);
     const root = new TextAgent("root");
-    const emitted = [];
+    const emitted: Event[] = [];
     const gateway = new ToolGateway({
       rootAgent: root,
       subAgents: [worker],
@@ -324,7 +368,7 @@ describe("ToolGateway", () => {
   test("can hide subagent events for quiet summaries", async () => {
     const worker = new TextAgent("worker");
     const root = new TextAgent("root");
-    const emitted = [];
+    const emitted: Event[] = [];
     const gateway = new ToolGateway({
       rootAgent: root,
       subAgents: [worker],
@@ -555,7 +599,7 @@ describe("ToolGateway", () => {
     }
 
     const root = new TextAgent("root");
-    const emitted = [];
+    const emitted: Event[] = [];
     const gateway = new ToolGateway({
       rootAgent: root,
       subAgents: [new StateAgent()],
@@ -599,8 +643,8 @@ describe("ToolGateway", () => {
         // Content-less state_delta event (e.g. the codex_thread marker emitted
         // the moment the thread starts). In native mode this must SURFACE as
         // its own event so the runner commits its stateDelta to session.state
-        // and codex resume keeps working — the transfer response no longer
-        // carries the delta.
+        // and codex resume keeps working: the transfer response carries no
+        // delta.
         yield createEvent({
           invocationId: context.invocationId,
           author: this.name,
@@ -619,7 +663,7 @@ describe("ToolGateway", () => {
     }
 
     const root = new TextAgent("root");
-    const emitted = [];
+    const emitted: Event[] = [];
     const gateway = new ToolGateway({
       rootAgent: root,
       subAgents: [new PreambleStateAgent()],
@@ -687,8 +731,208 @@ describe("ToolGateway", () => {
     });
 
     expect(result.error).toBe("Unknown ADK subagent: missing");
+    expect(result.errorKind).toBe("agent-error");
     expect(result.output).toBe("");
     expect(result.events).toBe(0);
+  });
+});
+
+describe("ToolGateway.transferToAgent", () => {
+  test("runs the target on the input with no synthetic transfer events", async () => {
+    const worker = new TextAgent("worker");
+    const coordinator = new TextAgent("coordinator");
+    const emitted: ReturnType<typeof createEvent>[] = [];
+    const gateway = new ToolGateway({
+      rootAgent: coordinator,
+      subAgents: [worker],
+      parentContext: parentContext(coordinator),
+      eventSink: (event) => emitted.push(event),
+    });
+
+    const result = await gateway.transferToAgent("worker", {
+      role: "user",
+      parts: [{ text: "the user request" }],
+    });
+
+    expect(result.output).toBe("OK: the user request");
+    expect(result.error).toBeUndefined();
+    const names = emitted.flatMap((event) =>
+      (event.content?.parts ?? []).flatMap((part) => [
+        part.functionCall?.name,
+        part.functionResponse?.name,
+      ]),
+    );
+    expect(names).not.toContain("transfer_to_agent");
+    expect(emitted[0]?.author).toBe("worker");
+  });
+
+  test("waits for the timeline before the target runs and appends only a foreign input", async () => {
+    const order: string[] = [];
+    class RecordingAgent extends BaseAgent {
+      constructor() {
+        super({ name: "worker" });
+      }
+      protected async *runAsyncImpl(context: InvocationContext) {
+        order.push(
+          `run:${context.session.events.length}:${context.userContent?.parts?.[0]?.text}`,
+        );
+        yield createEvent({
+          invocationId: context.invocationId,
+          author: "worker",
+        });
+      }
+      protected async *runLiveImpl() {}
+    }
+    const coordinator = new TextAgent("coordinator");
+    const context = parentContext(coordinator);
+    const gateway = new ToolGateway({
+      rootAgent: coordinator,
+      subAgents: [new RecordingAgent()],
+      parentContext: context,
+      eventSink: (event) =>
+        order.push(`emit:${event.content?.parts?.[0]?.functionCall?.name}`),
+      waitForTimeline: async () => {
+        order.push("wait");
+      },
+    });
+
+    // The invocation's own user message: reused, not appended again.
+    await gateway.transferToAgent("worker", context.userContent as Content);
+    // Any other input (no user message to reuse) is appended.
+    await gateway.transferToAgent("worker", {
+      role: "user",
+      parts: [{ text: "Transferred from coordinator." }],
+    });
+    await gateway.runSubAgent({ agentName: "worker", task: "task" });
+
+    expect(order).toEqual([
+      // Transfers: no synthetic events; only the second adds a user event.
+      "wait",
+      "run:0:parent",
+      "wait",
+      "run:1:Transferred from coordinator.",
+      // Delegation: its call and response first, then the wait. (The
+      // target's content-less events are not surfaced in native shape.)
+      "emit:transfer_to_agent",
+      "emit:undefined",
+      "wait",
+      "run:1:task",
+    ]);
+  });
+
+  test("caps an ExternalAgent target by the caller's policy", async () => {
+    const driver = new CaptureDriver();
+    const target = new ExternalAgent({
+      name: "target",
+      provider: CODEX_PROVIDER,
+      driver,
+      permissions: { mode: "full-access", allowNetwork: true },
+    });
+    const coordinator = new TextAgent("coordinator");
+    const gateway = new ToolGateway({
+      rootAgent: coordinator,
+      subAgents: [target],
+      parentContext: parentContext(coordinator),
+      parentPermissions: { mode: "ask" },
+    });
+
+    await gateway.transferToAgent("target", {
+      role: "user",
+      parts: [{ text: "go" }],
+    });
+
+    expect(driver.request?.permissions).toEqual({
+      mode: "ask",
+      allowNetwork: false,
+    });
+  });
+
+  test("accepts the root and other known agents, never the caller or unknown names", async () => {
+    const worker = new TextAgent("worker");
+    const sibling = new TextAgent("sibling");
+    const root = new SequentialAgent({
+      name: "root",
+      subAgents: [worker, sibling],
+    });
+    const gateway = new ToolGateway({
+      rootAgent: root,
+      subAgents: [],
+      parentContext: parentContext(worker),
+    });
+
+    expect(gateway.canTransferTo("root")).toBe(true);
+    expect(gateway.canTransferTo("sibling")).toBe(true);
+    expect(gateway.canTransferTo("worker")).toBe(false);
+    expect(gateway.canTransferTo("missing")).toBe(false);
+    const result = await gateway.transferToAgent("missing", {
+      role: "user",
+      parts: [{ text: "go" }],
+    });
+    expect(result.error).toBe("Unknown ADK agent: missing");
+    expect(result.errorKind).toBe("agent-error");
+  });
+
+  test("a target that throws is reported once with EXTERNAL_AGENT_TRANSFER_FAILED", async () => {
+    class ThrowingAgent extends BaseAgent {
+      constructor() {
+        super({ name: "thrower" });
+      }
+      // biome-ignore lint/correctness/useYield: fails before its first event.
+      protected async *runAsyncImpl() {
+        throw new Error("kaput");
+      }
+      protected async *runLiveImpl() {}
+    }
+    const coordinator = new TextAgent("coordinator");
+    const emitted: ReturnType<typeof createEvent>[] = [];
+    const gateway = new ToolGateway({
+      rootAgent: coordinator,
+      subAgents: [new ThrowingAgent()],
+      parentContext: parentContext(coordinator),
+      eventSink: (event) => emitted.push(event),
+    });
+
+    const result = await gateway.transferToAgent("thrower", {
+      role: "user",
+      parts: [{ text: "go" }],
+    });
+
+    expect(result.error).toContain("kaput");
+    expect(result.errorKind).toBe("agent-error");
+    const failures = emitted.filter((event) => event.errorCode);
+    expect(failures).toHaveLength(1);
+    expect(failures[0]?.errorCode).toBe(EXTERNAL_AGENT_TRANSFER_FAILED);
+    expect(failures[0]?.errorCode).toBe("EXTERNAL_AGENT_TRANSFER_FAILED");
+    expect(failures[0]?.author).toBe("coordinator");
+  });
+
+  test("an error event of the target is surfaced as is, not reported twice", async () => {
+    const failing = new FunctionResponseAgent(
+      [
+        createEvent({
+          invocationId: "inv-1",
+          author: "failing",
+          errorCode: "OWN_CODE",
+          errorMessage: "own failure",
+        }),
+      ],
+      "failing",
+    );
+    const coordinator = new TextAgent("coordinator");
+    const emitted: ReturnType<typeof createEvent>[] = [];
+    const gateway = new ToolGateway({
+      rootAgent: coordinator,
+      subAgents: [failing],
+      parentContext: parentContext(coordinator),
+      eventSink: (event) => emitted.push(event),
+    });
+
+    await gateway.transferToAgent("failing", {
+      role: "user",
+      parts: [{ text: "go" }],
+    });
+
+    expect(emitted.map((event) => event.errorCode)).toEqual(["OWN_CODE"]);
   });
 });
 
@@ -800,7 +1044,11 @@ describe("permission inheritance through intermediate ADK agents", () => {
     protected async *runLiveImpl() {}
   }
 
-  function worker(driver: CaptureDriver, permissions = FULL, name = "worker") {
+  function worker(
+    driver: CaptureDriver,
+    permissions: ExternalAgentPermissionPolicy = FULL,
+    name = "worker",
+  ) {
     return new ExternalAgent({
       name,
       provider: CODEX_PROVIDER,
@@ -1015,7 +1263,7 @@ function confirmingDeployer() {
   return { agent, executed };
 }
 
-describe("ToolGateway sub-agent interrupts (M2)", () => {
+describe("ToolGateway sub-agent interrupts", () => {
   test("a sub-agent waiting for confirmation is reported as an interrupt, never as success", async () => {
     const { agent: deployer, executed } = confirmingDeployer();
     const root = new TextAgent("root");

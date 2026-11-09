@@ -1,65 +1,69 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import type { Content, Part } from "@google/genai";
 
-/**
- * Anthropic ContentBlockParam variant subset we emit. The full union from
- * `@anthropic-ai/sdk/resources/messages` is much broader, but we only use a
- * handful of block kinds when translating ADK history into Claude messages.
- */
+// The block types below are the subset of Anthropic's `ContentBlockParam`
+// that this mapper emits. The full union from
+// `@anthropic-ai/sdk/resources/messages` is much broader.
+
+/** Media types Claude accepts for a base64 image. */
 export type ClaudeBase64ImageMediaType =
   | "image/jpeg"
   | "image/png"
   | "image/gif"
   | "image/webp";
 
+/** Inline base64 image source. */
 export type ClaudeBase64ImageSource = {
   type: "base64";
   media_type: ClaudeBase64ImageMediaType;
   data: string;
 };
 
+/** Image referenced by URL. */
 export type ClaudeURLImageSource = {
   type: "url";
   url: string;
 };
 
+/** Inline base64 PDF source. */
 export type ClaudeBase64PDFSource = {
   type: "base64";
   media_type: "application/pdf";
   data: string;
 };
 
+/** Document referenced by URL. */
 export type ClaudeURLDocumentSource = {
   type: "url";
   url: string;
 };
 
+/** Plain text block. */
 export type ClaudeTextBlockParam = { type: "text"; text: string };
+/** Image block. */
 export type ClaudeImageBlockParam = {
   type: "image";
   source: ClaudeBase64ImageSource | ClaudeURLImageSource;
 };
+/** Document (PDF) block. */
 export type ClaudeDocumentBlockParam = {
   type: "document";
   source: ClaudeBase64PDFSource | ClaudeURLDocumentSource;
 };
+/** Assistant `tool_use` block. */
 export type ClaudeToolUseBlockParam = {
   type: "tool_use";
   id: string;
   name: string;
   input: Record<string, unknown>;
 };
+/** User `tool_result` block. */
 export type ClaudeToolResultBlockParam = {
   type: "tool_result";
   tool_use_id: string;
   content: string;
 };
 
+/** Any content block this mapper can emit. */
 export type ClaudeContentBlockParam =
   | ClaudeTextBlockParam
   | ClaudeImageBlockParam
@@ -67,6 +71,7 @@ export type ClaudeContentBlockParam =
   | ClaudeToolUseBlockParam
   | ClaudeToolResultBlockParam;
 
+/** A user-role message made of content blocks. */
 export type ClaudeMessageParam = {
   role: "user";
   content: ClaudeContentBlockParam[];
@@ -79,9 +84,13 @@ export type ClaudeMessageParam = {
  */
 export type SDKUserMessage = {
   type: "user";
+  /** The user message. */
   message: ClaudeMessageParam;
+  /** Always `null`: these messages are not replies to a tool call. */
   parent_tool_use_id: string | null;
+  /** Marks a history message the SDK appends to the transcript as is. */
   isSynthetic?: boolean;
+  /** Whether the SDK should start an assistant turn after this message. */
   shouldQuery?: boolean;
 };
 
@@ -112,6 +121,10 @@ const IMAGE_MEDIA_TYPES: ReadonlySet<string> = new Set([
  * The final emitted message is marked `shouldQuery: true` so the SDK triggers
  * an assistant turn; preceding messages are appended as synthetic transcript
  * entries.
+ *
+ * @param contents - ADK conversation history.
+ * @returns User-role messages, in order, with empty contents skipped. Empty
+ * when no content has a mappable part.
  */
 export function contentsToSdkMessages(
   contents: ReadonlyArray<Content>,

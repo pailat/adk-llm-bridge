@@ -1,9 +1,3 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import type {
   ExternalAgentCompletedEvent,
   ExternalAgentUsage,

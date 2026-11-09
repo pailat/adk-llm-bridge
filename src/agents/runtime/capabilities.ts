@@ -1,9 +1,12 @@
 /**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
+ * Features an external runtime driver supports.
+ *
+ * @remarks
+ * A capability that is `false` or absent means the driver does not provide
+ * it. The flags describe the driver to callers through
+ * `driver.capabilities()`, the only place they are declared. Nothing is gated
+ * on them at runtime.
  */
-
 export interface AgentRuntimeCapabilities {
   /**
    * The driver hosts ADK tools (`ExternalAgentConfig.tools`) for the runtime.
@@ -21,7 +24,10 @@ export interface AgentRuntimeCapabilities {
    * runtime alone and the host's approver is never consulted.
    */
   approvals?: boolean;
+  /** The driver emits partial output (token or chunk deltas) while the run is in progress. */
   streaming?: boolean;
+  /** The driver can resume a runtime session across turns. */
   sessions?: boolean;
+  /** The driver maps the effective permission policy onto the runtime's own controls. */
   permissions?: boolean;
 }

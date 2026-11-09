@@ -1,15 +1,11 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
+/** Stable id of an external runtime provider. Known ids autocomplete; any other string is accepted. */
 export type ExternalAgentProviderId =
   | "codex"
   | "claude"
   | "gemini-cli"
   | (string & {});
 
+/** Static description of an external runtime provider. */
 export interface ExternalAgentProviderDefinition {
   /** Stable provider id used in events, registries, and configuration. */
   id: ExternalAgentProviderId;
@@ -21,22 +17,7 @@ export interface ExternalAgentProviderDefinition {
   envAllowlist?: readonly string[];
 }
 
+// The built-in definitions live in their own modules; re-exported here so
+// existing imports of this module keep working.
+export { CLAUDE_PROVIDER } from "./claude.js";
 export { CODEX_PROVIDER } from "./codex.js";
-
-export const CLAUDE_PROVIDER: ExternalAgentProviderDefinition = {
-  id: "claude",
-  name: "Claude Code",
-  command: "claude",
-  envAllowlist: [
-    "ANTHROPIC_API_KEY",
-    "ANTHROPIC_AUTH_TOKEN",
-    "CLAUDE_API_KEY",
-    "CLAUDE_CODE_OAUTH_TOKEN",
-    "CLAUDE_CODE_EXECUTABLE",
-    "CLAUDE_CODE_PATH",
-    "CLAUDE_CONFIG_DIR",
-    "CLAUDE_CODE_USE_BEDROCK",
-    "CLAUDE_CODE_USE_VERTEX",
-    "CLAUDE_CODE_USE_FOUNDRY",
-  ],
-};

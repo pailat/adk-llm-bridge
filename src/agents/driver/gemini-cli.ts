@@ -1,74 +1,218 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
+import { warn } from "../../utils/log.js";
 import type { ExternalAgentEvent } from "../events.js";
 import {
   type ExternalAgentRunRequest,
   resolveAbortSignal,
 } from "../external-agent-driver.js";
 import { mapPermissionPolicyToFlags } from "../permissions/mapper.js";
+import { networkAllowed } from "../permissions/network.js";
 import type { ExternalAgentPermissionPolicy } from "../permissions/schema.js";
 import { GEMINI_CLI_PROVIDER } from "../provider/gemini-cli.js";
+import type { AgentRuntimeCapabilities } from "../runtime/capabilities.js";
+import { collectTail, type LineSource, readLines } from "./lines.js";
+import {
+  dependencyMissing,
+  type ExternalAgentPolicyError,
+  isCommandNotFound,
+  networkUnenforceable,
+  policyErrorEvent,
+} from "./policy-errors.js";
+import {
+  bridgeEvent,
+  buildChildEnv,
+  exitErrorEvent,
+  isJsonObject,
+  isRecoverableMessage,
+  promptFromRequest,
+  stringValue,
+  validateDriverConfig,
+} from "./shared.js";
 import { spawnSubprocess, superviseSubprocess } from "./spawn.js";
 import { SubprocessJsonlDriver } from "./subprocess-jsonl.js";
 
+/** A running `gemini` process, as the driver sees it. */
 export interface GeminiCliSubprocess {
-  stdout?:
-    | AsyncIterable<Uint8Array | string>
-    | Iterable<Uint8Array | string>
-    | ReadableStream<Uint8Array | string>
-    | null;
-  stderr?:
-    | AsyncIterable<Uint8Array | string>
-    | Iterable<Uint8Array | string>
-    | ReadableStream<Uint8Array | string>
-    | null;
+  /** Output lines; the driver parses them as `--output-format stream-json` events. */
+  stdout?: LineSource | null;
+  /**
+   * Diagnostics; drained so the process cannot block. The last lines become
+   * the message of the error a non-zero exit reports.
+   */
+  stderr?: LineSource | null;
+  /** Resolves with the exit code; may reject with `ENOENT` when the binary is missing. */
   exited: Promise<number>;
   /**
    * Terminates the process. Called when the run is aborted or abandoned
    * before the process exited. Optional for custom spawns; the default spawn
-   * always provides it.
+   * always provides it. The driver sends SIGTERM first and, if the process
+   * has not exited after `killGraceMs`, SIGKILL.
    */
-  kill?: () => void;
+  kill?: (signal?: NodeJS.Signals) => void;
 }
 
+/** Options the driver passes to a {@link GeminiCliSpawn}. */
 export interface GeminiCliSpawnOptions {
+  /** Working directory of the process. */
   cwd?: string;
+  /**
+   * The complete environment of the process: an allowlisted copy (`PATH`,
+   * `HOME` and the credential keys the provider allows), never the whole of
+   * `process.env`.
+   */
   env?: Record<string, string>;
 }
 
+/**
+ * Starts the `gemini` process. Replace it in tests or to run Gemini elsewhere.
+ *
+ * @param command - The executable.
+ * @param args - Its arguments.
+ * @param options - Working directory and environment.
+ * @returns The running process.
+ */
 export type GeminiCliSpawn = (
   command: string,
   args: readonly string[],
   options: GeminiCliSpawnOptions,
 ) => GeminiCliSubprocess;
 
+/** Options for {@link GeminiCliDriver}. */
 export interface GeminiCliDriverConfig {
+  /**
+   * The Gemini executable.
+   *
+   * @defaultValue The command of the Gemini CLI provider (`gemini`).
+   */
   command?: string;
+  /**
+   * Starts the process.
+   *
+   * @defaultValue The built-in spawn, which works on Bun and Node.
+   */
   spawn?: GeminiCliSpawn;
+  /**
+   * Ambient environment to copy `PATH` and `HOME` from.
+   *
+   * @defaultValue `process.env`
+   */
   env?: Record<string, string | undefined>;
+  /**
+   * Milliseconds a cancelled process gets to exit after SIGTERM before it is
+   * killed with SIGKILL.
+   *
+   * @defaultValue 2000
+   */
+  killGraceMs?: number;
+  /**
+   * Opt-in: run without `allowNetwork: true` although the driver cannot
+   * enforce it. Without it every such run is refused with
+   * `EXTERNAL_AGENT_NETWORK_UNENFORCEABLE`, in every mode.
+   *
+   * @remarks
+   * Gemini CLI's own web tools (`google_web_search`, `web_fetch`) and the
+   * MCP servers in its settings run without the bridge's permission guard,
+   * and its sandbox profiles do not reliably block the network. In
+   * `full-access` there is no sandbox at all. With this opt-in the run
+   * starts anyway and the network stays reachable.
+   *
+   * @defaultValue false
+   */
+  allowUnenforcedNetwork?: boolean;
 }
 
+function geminiCliMissing(): ExternalAgentPolicyError {
+  return dependencyMissing(
+    "binary",
+    "The Gemini CLI (gemini)",
+    "npm install -g @google/gemini-cli",
+    "set command to the path of the gemini binary",
+  );
+}
+
+/**
+ * Gemini CLI cannot be kept off the network (see
+ * `GeminiCliDriverConfig.allowUnenforcedNetwork`), so a run whose policy
+ * forbids it is refused unless the driver opted in.
+ */
+function geminiNetworkRefusal(
+  policy: ExternalAgentPermissionPolicy | undefined,
+  allowUnenforcedNetwork: boolean,
+): ExternalAgentPolicyError | undefined {
+  if (networkAllowed(policy) || allowUnenforcedNetwork) {
+    return undefined;
+  }
+  return networkUnenforceable(
+    "Gemini CLI cannot keep the network off, and network is off unless the policy sets allowNetwork: true: its web tools and MCP servers run outside the bridge's permission guard, and its sandbox does not reliably block the network. Set allowNetwork: true in the agent's permissions, use another runtime, or build the driver with allowUnenforcedNetwork: true to run anyway.",
+  );
+}
+
+/**
+ * Runs an external agent through the `gemini` CLI in `stream-json` mode.
+ *
+ * @remarks
+ * Security and lifecycle invariants:
+ * - Fail closed: Gemini CLI cannot be kept off the network, so any run whose
+ *   policy does not set `allowNetwork: true` (including an unset value or no
+ *   policy) is refused with `EXTERNAL_AGENT_NETWORK_UNENFORCEABLE` (in every
+ *   mode) unless `allowUnenforcedNetwork` is set. A missing binary
+ *   ends the run with `MISSING_BINARY`. Refusals are events, not exceptions.
+ * - The permission policy becomes approval-mode and sandbox flags (see
+ *   {@link mapGeminiPermissionArgs}).
+ * - The process gets an allowlisted environment (`PATH`, `HOME` and the
+ *   credential keys the provider allows), never the whole of `process.env`.
+ * - Aborting the run sends SIGTERM, then SIGKILL after `killGraceMs`; the
+ *   process is also killed if the consumer stops reading.
+ */
 export class GeminiCliDriver extends SubprocessJsonlDriver {
   readonly #spawn: GeminiCliSpawn;
   readonly #env: Record<string, string | undefined>;
+  readonly #killGraceMs: number | undefined;
+  readonly #allowUnenforcedNetwork: boolean;
 
+  /**
+   * Creates a driver that runs the `gemini` CLI.
+   *
+   * @param config - Driver options; all optional.
+   * @throws InputValidationError (from `@google/adk`) when `command` is empty or
+   * `killGraceMs` is not a finite number of at least 0.
+   */
   constructor(config: GeminiCliDriverConfig = {}) {
+    validateDriverConfig("GeminiCliDriver", config);
     super({
       providerId: GEMINI_CLI_PROVIDER.id,
       command: config.command ?? GEMINI_CLI_PROVIDER.command ?? "gemini",
     });
     this.#spawn = config.spawn ?? spawnSubprocess;
     this.#env = config.env ?? process.env;
+    this.#killGraceMs = config.killGraceMs;
+    this.#allowUnenforcedNetwork = config.allowUnenforcedNetwork ?? false;
   }
 
+  /** Features this driver supports: streaming output and the permission policy mapped onto CLI flags. */
+  capabilities(): AgentRuntimeCapabilities {
+    return { streaming: true, permissions: true };
+  }
+
+  /**
+   * Spawns `gemini` for one turn and streams normalized events.
+   *
+   * @remarks
+   * The stream starts with `started`. A refused run yields one `error` event
+   * with the policy code and `completed` with `exitCode: 1`. A non-zero exit
+   * yields a `GEMINI_CLI_EXIT` error carrying the stderr tail before
+   * `completed`; it is recoverable unless the text reports an auth, billing,
+   * quota or missing-binary failure. If the
+   * abort signal fires, the stream ends without a `completed` event after the
+   * process is killed. Spawn errors other than a missing binary are thrown.
+   *
+   * @param request - The run; the prompt is its `instruction` followed by
+   *   the user turn's text.
+   * @returns Events in order.
+   */
   override async *run(
     request: ExternalAgentRunRequest,
   ): AsyncIterable<ExternalAgentEvent> {
-    const prompt = buildPrompt(request);
+    const prompt = promptFromRequest(request);
     const args = buildGeminiArgs(prompt, request.permissions);
     const env = buildGeminiEnv(this.#env, request);
 
@@ -82,17 +226,42 @@ export class GeminiCliDriver extends SubprocessJsonlDriver {
     if (signal?.aborted) {
       return;
     }
+    const refusal = geminiNetworkRefusal(
+      request.permissions,
+      this.#allowUnenforcedNetwork,
+    );
+    if (refusal) {
+      yield policyErrorEvent(refusal);
+      yield { type: "completed", exitCode: 1, timestamp: Date.now() };
+      return;
+    }
 
-    const child = this.#spawn(this.command, args, {
-      cwd: request.workingDirectory,
-      env,
+    let child: GeminiCliSubprocess;
+    try {
+      child = this.#spawn(this.command, args, {
+        cwd: request.workingDirectory,
+        env,
+      });
+    } catch (error) {
+      // Bun.spawn throws when the binary does not exist.
+      if (!isCommandNotFound(error)) {
+        throw error;
+      }
+      yield policyErrorEvent(geminiCliMissing());
+      yield { type: "completed", exitCode: 1, timestamp: Date.now() };
+      return;
+    }
+    const supervisor = superviseSubprocess(child, signal, {
+      killGraceMs: this.#killGraceMs,
     });
-    const supervisor = superviseSubprocess(child, signal);
 
     try {
-      if (child.stderr) {
-        drainStderr(child.stderr).catch(() => undefined);
-      }
+      // Drain stderr while stdout is read so the process cannot block; the
+      // tail explains a non-zero exit.
+      const stderrLines: string[] = [];
+      const stderrPromise = collectTail(child.stderr, stderrLines).catch(
+        () => undefined,
+      );
 
       const toolNames = new Map<string, string>();
       for await (const line of readLines(child.stdout)) {
@@ -108,8 +277,21 @@ export class GeminiCliDriver extends SubprocessJsonlDriver {
         return;
       }
 
-      const exitCode = await child.exited;
+      let exitCode: number;
+      try {
+        exitCode = await child.exited;
+      } catch (error) {
+        // Node reports a missing binary through `exited`.
+        supervisor.markExited();
+        if (!isCommandNotFound(error)) {
+          throw error;
+        }
+        yield policyErrorEvent(geminiCliMissing());
+        yield { type: "completed", exitCode: 1, timestamp: Date.now() };
+        return;
+      }
       supervisor.markExited();
+      await stderrPromise;
       if (signal?.aborted) {
         return;
       }
@@ -118,19 +300,27 @@ export class GeminiCliDriver extends SubprocessJsonlDriver {
         return;
       }
 
-      yield {
-        type: "error",
-        message: `Gemini CLI exited with code ${exitCode}`,
+      yield exitErrorEvent({
+        runtime: "Gemini CLI",
+        exitCode,
+        stderr: stderrLines,
         code: "GEMINI_CLI_EXIT",
-        recoverable: true,
-        timestamp: Date.now(),
-      };
+      });
       yield { type: "completed", exitCode, timestamp: Date.now() };
     } finally {
       supervisor.release();
     }
   }
 
+  /**
+   * Parses one `stream-json` line.
+   *
+   * @param line - One line of stdout.
+   * @param toolNames - Tool ids seen so far, to name later `tool_result`
+   * events; the driver passes one map per run.
+   * @returns The event, or `undefined` for blank lines, non-JSON lines (logged
+   * and skipped), echoed user messages and unknown event types.
+   */
   parseGeminiLine(
     line: string,
     toolNames: Map<string, string> = new Map(),
@@ -140,36 +330,53 @@ export class GeminiCliDriver extends SubprocessJsonlDriver {
       return undefined;
     }
 
-    const parsed = JSON.parse(trimmed) as GeminiStreamEvent;
-    return normalizeGeminiEvent(parsed, toolNames);
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      parsed = undefined;
+    }
+    // A non-JSON line (a banner, a sandbox notice) or a JSON value that is not
+    // an object (`null`, a number) must not end the run.
+    if (!isJsonObject(parsed)) {
+      warn(
+        "GEMINI_CLI_NON_JSON_LINE",
+        `Ignoring a non-JSON line from gemini --output-format stream-json: ${trimmed.slice(0, 200)}`,
+      );
+      return undefined;
+    }
+    return normalizeGeminiEvent(parsed as GeminiStreamEvent, toolNames);
   }
 }
 
-type GeminiStreamEvent =
-  | ExternalAgentEvent
-  | {
-      type?: string;
-      event?: string;
-      role?: string;
-      status?: string;
-      tool_name?: string;
-      tool_id?: string;
-      parameters?: unknown;
-      output?: string;
-      severity?: string;
-      text?: string;
-      content?: string;
-      message?: string;
-      name?: string;
-      input?: unknown;
-      toolCall?: { name?: string; input?: unknown };
-      error?: string | { message?: string; code?: string; type?: string };
-      code?: string;
-      exitCode?: number;
-      signal?: string;
-      providerId?: string;
-    };
+type GeminiStreamEvent = {
+  type?: string;
+  event?: string;
+  role?: string;
+  status?: string;
+  tool_name?: string;
+  tool_id?: string;
+  parameters?: unknown;
+  output?: string;
+  severity?: string;
+  text?: string;
+  content?: string;
+  message?: string;
+  name?: string;
+  input?: unknown;
+  toolCall?: { name?: string; input?: unknown };
+  error?: unknown;
+  code?: unknown;
+  providerId?: string;
+};
 
+/**
+ * Builds the `gemini` arguments for a prompt.
+ *
+ * @param prompt - The prompt text.
+ * @param permissions - The policy; see {@link mapGeminiPermissionArgs}.
+ * @returns `-p <prompt> --output-format stream-json` followed by the permission flags.
+ */
 export function buildGeminiArgs(
   prompt: string,
   permissions?: ExternalAgentPermissionPolicy,
@@ -183,6 +390,19 @@ export function buildGeminiArgs(
   ];
 }
 
+/**
+ * Maps a permission policy to Gemini CLI approval and sandbox flags.
+ *
+ * @remarks
+ * `read-only` uses plan mode, `ask` uses default approvals and
+ * `workspace-write` uses auto-edit, all with `--sandbox`. `full-access` uses
+ * `yolo` with no sandbox. Each allowed path adds `--include-directories`.
+ * The sandbox does not reliably block the network, which is why the driver
+ * refuses runs without `allowNetwork: true` instead of relying on it.
+ *
+ * @param permissions - The policy; when omitted the `ask` mode applies.
+ * @returns The permission arguments.
+ */
 export function mapGeminiPermissionArgs(
   permissions?: ExternalAgentPermissionPolicy,
 ): string[] {
@@ -209,35 +429,11 @@ export function mapGeminiPermissionArgs(
   return args;
 }
 
-function buildPrompt(request: ExternalAgentRunRequest): string {
-  return request.instruction ?? "";
-}
-
 function buildGeminiEnv(
   processEnv: Record<string, string | undefined>,
   request: ExternalAgentRunRequest,
 ): Record<string, string> {
-  const env: Record<string, string> = {};
-
-  if (processEnv.PATH) {
-    env.PATH = processEnv.PATH;
-  }
-  if (processEnv.HOME) {
-    env.HOME = processEnv.HOME;
-  }
-
-  const credentialEnv =
-    request.credential?.kind === "env" ? request.credential.env : undefined;
-  if (credentialEnv) {
-    for (const key of request.provider.envAllowlist ?? []) {
-      const value = credentialEnv[key];
-      if (typeof value === "string" && value.length > 0) {
-        env[key] = value;
-      }
-    }
-  }
-
-  return env;
+  return buildChildEnv(processEnv, ["PATH", "HOME"], request);
 }
 
 function normalizeGeminiEvent(
@@ -251,8 +447,9 @@ function normalizeGeminiEvent(
     return normalizeGeminiNativeEvent(event, toolNames);
   }
 
-  if (isNormalizedExternalEvent(event)) {
-    return event;
+  const bridged = bridgeEvent(event as Record<string, unknown>);
+  if (bridged !== undefined) {
+    return bridged === "drop" ? undefined : bridged;
   }
 
   const type = event.type ?? event.event;
@@ -277,30 +474,24 @@ function normalizeGeminiEvent(
   }
 
   if (type === "error") {
+    const detail = isJsonObject(event.error) ? event.error : undefined;
     const message =
-      typeof event.error === "string"
-        ? event.error
-        : (event.error?.message ?? event.message ?? "Gemini CLI error");
-    const code =
-      typeof event.error === "object" ? event.error.code : event.code;
+      (typeof event.error === "string" ? event.error : undefined) ??
+      stringValue(detail?.message) ??
+      stringValue(event.message) ??
+      "Gemini CLI error";
+    const code = detail ? stringValue(detail.code) : stringValue(event.code);
     return {
       type: "error",
       message,
       code,
-      recoverable: true,
+      recoverable: isRecoverableMessage(message),
       timestamp: Date.now(),
     };
   }
 
-  if (type === "result" || type === "completed" || type === "complete") {
-    return {
-      type: "completed",
-      exitCode: event.exitCode,
-      signal: event.signal,
-      timestamp: Date.now(),
-    };
-  }
-
+  // A terminal line (`result`, `complete`) from the child is ignored: the run
+  // ends when the process exits, and the driver emits `completed` then.
   return undefined;
 }
 
@@ -348,8 +539,9 @@ function normalizeGeminiNativeEvent(
       };
     }
     case "tool_result": {
-      const errorMessage =
-        typeof e.error === "object" ? e.error?.message : e.error;
+      const errorMessage = isJsonObject(e.error)
+        ? stringValue(e.error.message)
+        : stringValue(e.error);
       return {
         type: "tool_result",
         name:
@@ -373,112 +565,19 @@ function normalizeGeminiNativeEvent(
       };
     case "result": {
       if (e.status === "error") {
-        const err = typeof e.error === "object" ? e.error : undefined;
+        const err = isJsonObject(e.error) ? e.error : undefined;
         return {
           type: "error",
-          message: err?.message ?? "Gemini CLI run failed",
-          code: err?.type,
+          message: stringValue(err?.message) ?? "Gemini CLI run failed",
+          code: stringValue(err?.type),
           recoverable: false,
           timestamp: Date.now(),
         };
       }
-      return { type: "completed", timestamp: Date.now() };
+      // Success is reported by the driver once the process exits.
+      return undefined;
     }
     default:
       return undefined;
-  }
-}
-
-function isNormalizedExternalEvent(
-  event: GeminiStreamEvent,
-): event is ExternalAgentEvent {
-  switch (event.type) {
-    case "started":
-      return typeof event.providerId === "string";
-    case "output":
-      return typeof event.content === "string";
-    case "tool_call":
-      return typeof event.name === "string";
-    case "error":
-      return typeof event.message === "string";
-    case "completed":
-      return true;
-    default:
-      return false;
-  }
-}
-
-async function* readLines(
-  input?:
-    | AsyncIterable<Uint8Array | string>
-    | Iterable<Uint8Array | string>
-    | ReadableStream<Uint8Array | string>
-    | null,
-): AsyncIterable<string> {
-  if (!input) {
-    return;
-  }
-
-  const decoder = new TextDecoder();
-  let buffer = "";
-
-  for await (const chunk of toAsyncIterable(input)) {
-    buffer +=
-      typeof chunk === "string"
-        ? chunk
-        : decoder.decode(chunk, { stream: true });
-
-    let newlineIndex = buffer.indexOf("\n");
-    while (newlineIndex !== -1) {
-      yield buffer.slice(0, newlineIndex);
-      buffer = buffer.slice(newlineIndex + 1);
-      newlineIndex = buffer.indexOf("\n");
-    }
-  }
-
-  buffer += decoder.decode();
-  if (buffer.length > 0) {
-    yield buffer;
-  }
-}
-
-async function* toAsyncIterable<T>(
-  input: AsyncIterable<T> | Iterable<T> | ReadableStream<T>,
-): AsyncIterable<T> {
-  const asyncIterable = input as AsyncIterable<T>;
-  if (typeof asyncIterable[Symbol.asyncIterator] === "function") {
-    yield* asyncIterable;
-    return;
-  }
-
-  const iterable = input as Iterable<T>;
-  if (typeof iterable[Symbol.iterator] === "function") {
-    yield* iterable;
-    return;
-  }
-
-  const reader = (input as ReadableStream<T>).getReader();
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) {
-        return;
-      }
-      yield value;
-    }
-  } finally {
-    reader.releaseLock();
-  }
-}
-
-async function drainStderr(
-  input:
-    | AsyncIterable<Uint8Array | string>
-    | Iterable<Uint8Array | string>
-    | ReadableStream<Uint8Array | string>,
-): Promise<void> {
-  for await (const _line of readLines(input)) {
-    // Gemini stream-json events are read from stdout. Stderr is drained so the
-    // subprocess cannot block if it emits diagnostics.
   }
 }

@@ -3,10 +3,7 @@ import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Content } from "@google/genai";
-import {
-  CLAUDE_AGENT_DEFINITION,
-  ClaudeAgent,
-} from "../../../src/agents/claude-agent.js";
+import { ClaudeAgent } from "../../../src/agents/claude-agent.js";
 import {
   ClaudeAgentSdkDriver,
   mapPolicyToClaudeSdkPermission,
@@ -172,6 +169,8 @@ describe("ClaudeAgentSdkDriver", () => {
     let returned = false;
     const driver = new ClaudeAgentSdkDriver({
       requiredMcpServers: ["workflow"],
+      // Host MCP servers load only when the host config is inherited.
+      inheritHostConfig: true,
       sdk: {
         query: () =>
           (async function* () {
@@ -242,8 +241,9 @@ describe("ClaudeAgentSdkDriver", () => {
         message: expect.stringContaining(
           "Set CLAUDE_CODE_EXECUTABLE=/absolute/path/to/claude",
         ),
-        code: "CLAUDE_AGENT_SDK_ERROR",
-        recoverable: true,
+        // Same code and recoverability as the CLI drivers and the Codex SDK.
+        code: "MISSING_BINARY",
+        recoverable: false,
         timestamp: expect.any(Number),
       },
       { type: "completed", exitCode: 1, timestamp: expect.any(Number) },
@@ -251,7 +251,7 @@ describe("ClaudeAgentSdkDriver", () => {
   });
 
   test("maps bridge permissions to Claude SDK permission modes", () => {
-    // PERM-1: read-only must NOT map to interactive planning mode ("plan"),
+    // Read-only must NOT map to interactive planning mode ("plan"),
     // which refuses tool execution; it maps to "default" so Q&A/read-only tools
     // still run while write/edit stays gated.
     const readOnly = mapPolicyToClaudeSdkPermission({ mode: "read-only" });
@@ -604,7 +604,7 @@ describe("ClaudeAgentSdkDriver", () => {
     ]);
   });
 
-  // --- AUTH-1: SDK isolation via settingSources default ---
+  // --- SDK isolation via settingSources default ---
   test("defaults settingSources to [] (SDK isolation), not omitted", () => {
     const driver = new ClaudeAgentSdkDriver();
 
@@ -632,7 +632,7 @@ describe("ClaudeAgentSdkDriver", () => {
     expect(options.settingSources).toEqual(["project"]);
   });
 
-  // --- LIFECYCLE-1: abortController + interrupt()/return() teardown ---
+  // --- abortController + interrupt()/return() teardown ---
   test("sets an abortController on options wired to the run abort signal", () => {
     const driver = new ClaudeAgentSdkDriver();
     const controller = new AbortController();
@@ -790,7 +790,7 @@ describe("ClaudeAgentSdkDriver", () => {
     expect(returned).toBe(true);
   });
 
-  // --- ERR-2: typed error classification ---
+  // --- Typed error classification ---
   test("classifies assistant/result error subtypes as (non-)recoverable", () => {
     const driver = new ClaudeAgentSdkDriver();
 
@@ -802,22 +802,22 @@ describe("ClaudeAgentSdkDriver", () => {
       {
         message: { type: "assistant", error: "authentication_failed" },
         recoverable: false,
-        code: "CLAUDE_AUTH_ERROR",
+        code: "AUTH_ERROR",
       },
       {
         message: { type: "assistant", error: "billing_error" },
         recoverable: false,
-        code: "CLAUDE_BILLING_ERROR",
+        code: "BILLING_ERROR",
       },
       {
         message: { type: "assistant", error: "rate_limit" },
         recoverable: true,
-        code: "CLAUDE_RATE_LIMIT",
+        code: "RATE_LIMIT",
       },
       {
         message: { type: "assistant", error: "server_error" },
         recoverable: true,
-        code: "CLAUDE_SERVER_ERROR",
+        code: "SERVER_ERROR",
       },
       {
         message: {
@@ -826,7 +826,7 @@ describe("ClaudeAgentSdkDriver", () => {
           errors: ["max turns"],
         },
         recoverable: false,
-        code: "error_max_turns",
+        code: "MAX_TURNS_EXCEEDED",
       },
       {
         message: {
@@ -835,7 +835,7 @@ describe("ClaudeAgentSdkDriver", () => {
           errors: ["budget"],
         },
         recoverable: false,
-        code: "error_max_budget_usd",
+        code: "MAX_BUDGET_EXCEEDED",
       },
     ];
 
@@ -877,7 +877,7 @@ describe("ClaudeAgentSdkDriver", () => {
     }
   });
 
-  // --- ERR-2 / ERR-1-guard: permission-denied enrichment ---
+  // --- Permission-denied enrichment ---
   test("appends tool_name and decision_reason to permission-denied (keeps base message)", () => {
     const driver = new ClaudeAgentSdkDriver();
 
@@ -893,7 +893,7 @@ describe("ClaudeAgentSdkDriver", () => {
     const event = events[0];
     expect(event.type).toBe("error");
     if (event.type === "error") {
-      // Base message (ERR-1 refuted) MUST be preserved...
+      // The base message MUST be preserved...
       expect(event.message).toContain("Permission to run Bash was denied");
       // ...and enriched with tool_name + decision_reason.
       expect(event.message).toContain("Bash");
@@ -903,7 +903,7 @@ describe("ClaudeAgentSdkDriver", () => {
     }
   });
 
-  // --- ERR-3: result success fallback ---
+  // --- Result success fallback ---
   test("falls back to result.result when no assistant text was streamed", async () => {
     const driver = new ClaudeAgentSdkDriver({
       sdk: {
@@ -964,7 +964,7 @@ describe("ClaudeAgentSdkDriver", () => {
     expect(outputs).toEqual(["streamed answer"]);
   });
 
-  // --- AUTH-2: plain-string system prompt opt-in ---
+  // --- Plain-string system prompt opt-in ---
   test("uses preset+append system prompt by default", () => {
     const driver = new ClaudeAgentSdkDriver();
 
@@ -1007,7 +1007,7 @@ describe("ClaudeAgentSdkDriver", () => {
     expect(noInstruction.systemPrompt).toBe("You are a helpful Q&A assistant.");
   });
 
-  // --- SESSION-RESUME: capture SDK session_id and resume on next turn ---
+  // --- Session resume: capture SDK session_id and resume on next turn ---
   test("captures the SDK session_id from system/init and result messages", async () => {
     const capturedOptions: Array<{ resume?: string; sessionId?: unknown }> = [];
     const driver = new ClaudeAgentSdkDriver({
@@ -1231,9 +1231,9 @@ describe("ClaudeAgentSdkDriver", () => {
     );
   });
 
-  // --- STREAM-1: capability claim matches actual behavior ---
+  // --- capability claim matches actual behavior ---
   test("does not advertise token-level streaming", () => {
-    expect(CLAUDE_AGENT_DEFINITION.capabilities.streaming).toBe(false);
+    expect(new ClaudeAgentSdkDriver().capabilities().streaming).toBe(false);
   });
 });
 

@@ -107,7 +107,7 @@ function installTraceCapture(): CapturedSpan[] {
       const ours = version === "adk-llm-bridge";
       return {
         startSpan(name: string) {
-          const span = { name, attributes: {} };
+          const span: CapturedSpan = { name, attributes: {} };
           if (ours) spans.push(span);
           return {
             setAttributes(attributes: Record<string, unknown>) {
@@ -167,10 +167,10 @@ describe("ExternalAgent ADK event formatting", () => {
     expect(driver.request?.rootAgent).toBe(agent);
     expect(driver.request?.subAgents).toEqual([subAgent]);
     expect(driver.request?.toolGateway).toBeDefined();
-    expect(driver.request?.runtimeSession).toMatchObject({
-      id: "inv-1",
-      rootAgentName: "codex_agent",
-    });
+    // The agent cannot know the runtime's own thread id (each driver keeps
+    // it under its own state key), so it sends none rather than a made-up one.
+    expect(driver.request?.runtimeSession).toBeUndefined();
+    expect(driver.request).not.toHaveProperty("tools");
   });
 
   test("renders output as model text content with invocation metadata", async () => {
@@ -271,7 +271,7 @@ describe("ExternalAgent ADK event formatting", () => {
       "gcp.vertex.agent.provider_id": CODEX_PROVIDER.id,
       "gcp.vertex.agent.event_title": "codex_agent: final response",
     });
-    // F1: with no configured or reported model the provider id ("codex") is
+    // With no configured or reported model the provider id ("codex") is
     // never passed off as a model.
     expect(spans[0].attributes["gen_ai.request.model"]).toBeUndefined();
     expect(spans[0].attributes["gen_ai.response.model"]).toBeUndefined();
@@ -751,6 +751,67 @@ describe("ExternalAgent ADK 2.x integration", () => {
     expect(errors.length).toBeGreaterThan(0);
   });
 
+  test("outputSchema: an integer id beyond the safe range stays exact", async () => {
+    const agent = new ExternalAgent({
+      name: "worker",
+      provider: CODEX_PROVIDER,
+      driver: new StaticDriver([
+        { type: "output", content: '{"id":12345678901234567890,"n":2}' },
+      ]),
+      outputSchema: z.object({ id: z.string(), n: z.number() }),
+    });
+
+    const [final] = await collect(agent);
+    expect(final?.output).toEqual({ id: "12345678901234567890", n: 2 });
+  });
+
+  test("outputSchema: a JSON array answer is still parsed", async () => {
+    const agent = new ExternalAgent({
+      name: "worker",
+      provider: CODEX_PROVIDER,
+      driver: new StaticDriver([{ type: "output", content: "[1,2]" }]),
+      outputSchema: z.object({ x: z.number() }),
+    });
+
+    const [final] = await collect(agent);
+    expect(final?.output).toEqual([1, 2]);
+  });
+
+  test("outputSchema: unsafe integers stay exact in an array or scalar answer", async () => {
+    const run = async (content: string) => {
+      const agent = new ExternalAgent({
+        name: "worker",
+        provider: CODEX_PROVIDER,
+        driver: new StaticDriver([{ type: "output", content }]),
+        outputSchema: z.array(z.string()),
+      });
+      const [final] = await collect(agent);
+      return final?.output;
+    };
+
+    expect(await run("[12345678901234567890]")).toEqual([
+      "12345678901234567890",
+    ]);
+    expect(await run("12345678901234567890")).toBe("12345678901234567890");
+    expect(await run('"text"')).toBe("text");
+  });
+
+  test("an error with an empty code reports EXTERNAL_AGENT_ERROR in the code and the title", async () => {
+    const agent = new ExternalAgent({
+      name: "worker",
+      provider: CODEX_PROVIDER,
+      driver: new StaticDriver([
+        { type: "error", message: "boom", code: "", recoverable: true },
+      ]),
+    });
+    const events = await collect(agent);
+    const error = events.find((event) => event.errorMessage === "boom");
+    expect(error?.errorCode).toBe("EXTERNAL_AGENT_ERROR");
+    expect(error?.customMetadata?.title).toBe(
+      "worker: error EXTERNAL_AGENT_ERROR",
+    );
+  });
+
   test("without outputSchema the output stays raw text even if it is JSON", async () => {
     const agent = new ExternalAgent({
       name: "worker",
@@ -956,7 +1017,7 @@ describe("ExternalAgent telemetry", () => {
   });
 });
 
-describe("ExternalAgent delegation final answer (AGENTS-4)", () => {
+describe("ExternalAgent delegation final answer", () => {
   class FailingAgent extends BaseAgent {
     constructor() {
       super({ name: "failing_agent" });
@@ -1192,7 +1253,7 @@ describe("ExternalAgent telemetry privacy (no content in span names or titles)",
         },
         // Codex-style tool progress carrying the command in metadata, then
         // the builtin call/result pair the Codex driver emits on
-        // item.completed (wave 4d F5).
+        // item.completed.
         {
           type: "output",
           content: "running",
@@ -1306,4 +1367,38 @@ describe("ExternalAgent telemetry privacy (no content in span names or titles)",
       ).toBe(true);
     });
   }
+});
+
+describe("ExternalAgent tool result shapes", () => {
+  test("arrays and primitives are wrapped so the response is a record", async () => {
+    const agent = new ExternalAgent({
+      name: "codex_agent",
+      provider: CODEX_PROVIDER,
+      driver: new StaticDriver([
+        { type: "tool_result", name: "a", callId: "1", result: [1, 2] },
+        {
+          type: "tool_result",
+          name: "b",
+          callId: "2",
+          result: [1, 2],
+          error: "boom",
+        },
+        { type: "tool_result", name: "c", callId: "3", result: "text" },
+        { type: "tool_result", name: "d", callId: "4", result: undefined },
+      ]),
+    });
+
+    const events = await collect(agent);
+
+    expect(
+      events.map(
+        (event) => event.content?.parts?.[0]?.functionResponse?.response,
+      ),
+    ).toEqual([
+      { result: [1, 2] },
+      { result: [1, 2], error: "boom" },
+      { result: "text" },
+      { result: null },
+    ]);
+  });
 });

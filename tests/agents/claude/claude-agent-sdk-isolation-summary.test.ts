@@ -17,7 +17,7 @@ type Options = Record<string, unknown> & {
     name: string,
     input: Record<string, unknown>,
     options: Record<string, unknown>,
-  ) => Promise<{ behavior: string }>;
+  ) => Promise<{ behavior: string; [key: string]: unknown }>;
 };
 
 function request(
@@ -91,10 +91,15 @@ const RESULT = {
   },
 };
 
-describe("F2: host configuration isolation", () => {
+// Network is off by default, so the default run leaves out the web tools.
+const DEFAULT_OFFLINE_TOOLS = DEFAULT_CLAUDE_SDK_TOOLS.filter(
+  (name) => name !== "WebFetch" && name !== "WebSearch",
+);
+
+describe("host configuration isolation", () => {
   test("isolated by default: explicit tools, strict MCP, no skills, no claude.ai connectors", () => {
     const options = new ClaudeAgentSdkDriver().buildOptions(
-      request({ mode: "workspace-write" }),
+      request({ mode: "workspace-write", allowNetwork: true }),
     ) as Options;
 
     expect(options.tools).toEqual([...DEFAULT_CLAUDE_SDK_TOOLS]);
@@ -161,7 +166,7 @@ describe("F2: host configuration isolation", () => {
     const fake = fakeSdk([INIT, RESULT]);
     await collect(new ClaudeAgentSdkDriver({ sdk: fake.sdk }));
 
-    expect(fake.options()?.tools).toEqual([...DEFAULT_CLAUDE_SDK_TOOLS]);
+    expect(fake.options()?.tools).toEqual(DEFAULT_OFFLINE_TOOLS);
     expect(fake.options()?.strictMcpConfig).toBe(true);
   });
 
@@ -189,7 +194,7 @@ describe("F2: host configuration isolation", () => {
   });
 });
 
-describe("F7: read-only removes write, shell and web tools from the list", () => {
+describe("read-only removes write, shell and web tools from the list", () => {
   test("read-only drops write/exec/web tools from tools and disallows them", () => {
     const options = new ClaudeAgentSdkDriver().buildOptions(
       request({ mode: "read-only" }),
@@ -248,7 +253,7 @@ describe("F7: read-only removes write, shell and web tools from the list", () =>
   });
 });
 
-describe("F6: no CLAUDE_SDK_CAN_USE_TOOL_SHADOWED in the coordinator path", () => {
+describe("no CLAUDE_SDK_CAN_USE_TOOL_SHADOWED in the coordinator path", () => {
   const subAgentRequest = (withApprover: boolean) =>
     request(
       { mode: "workspace-write" },
@@ -308,7 +313,7 @@ describe("F6: no CLAUDE_SDK_CAN_USE_TOOL_SHADOWED in the coordinator path", () =
   });
 });
 
-describe("F1: model, usage, turns and duration", () => {
+describe("model, usage, turns and duration", () => {
   test("started carries init.model; completed carries modelUsage, cost, turns, duration", async () => {
     const fake = fakeSdk([INIT, RESULT]);
     const events = await collect(new ClaudeAgentSdkDriver({ sdk: fake.sdk }));
@@ -408,7 +413,7 @@ describe("F1: model, usage, turns and duration", () => {
   });
 });
 
-describe("F5: built-in tool calls become tool_call/tool_result events", () => {
+describe("built-in tool calls become tool_call/tool_result events", () => {
   const assistant = (content: unknown[]) => ({
     type: "assistant",
     message: { role: "assistant", content },

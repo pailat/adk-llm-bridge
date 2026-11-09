@@ -1,5 +1,17 @@
 import { describe, expect, test } from "bun:test";
 import { spawn as nodeSpawn, type SpawnOptions } from "node:child_process";
+import { delimiter } from "node:path";
+import {
+  collectTail,
+  readAll as readAllText,
+  readLines,
+  STDERR_LINE_CHARS,
+} from "../../../src/agents/driver/lines.js";
+import {
+  describeMissingExecutable,
+  executableCandidates,
+  findExecutable,
+} from "../../../src/agents/driver/shared.js";
 import {
   type BunSpawnLike,
   type NodeSpawnLike,
@@ -81,6 +93,8 @@ describe("spawnSubprocess: Bun branch", () => {
           stdin: "ignore",
           stdout: "pipe",
           stderr: "pipe",
+          // Its own process group, so a kill reaches its children too.
+          ...(process.platform === "win32" ? {} : { detached: true }),
         },
       },
     ]);
@@ -151,6 +165,7 @@ describe("spawnSubprocess: Node branch", () => {
       cwd: "/",
       env: { ONLY: "value" },
       stdio: ["ignore", "pipe", "pipe"],
+      ...(process.platform === "win32" ? {} : { detached: true }),
     });
   });
 
@@ -246,5 +261,114 @@ describe("superviseSubprocess", () => {
   test("tolerates custom subprocesses without kill()", () => {
     const supervisor = superviseSubprocess({}, AbortSignal.abort());
     expect(() => supervisor.release()).not.toThrow();
+  });
+});
+
+describe("driver line reading", () => {
+  async function lines(source: Parameters<typeof readLines>[0]) {
+    const out: string[] = [];
+    for await (const line of readLines(source)) out.push(line);
+    return out;
+  }
+
+  test("reads sync iterables, async iterables and streams the same way", async () => {
+    const chunks = ["a\r\nb", "\nc"];
+    expect(await lines(chunks)).toEqual(["a", "b", "c"]);
+    expect(
+      await lines(
+        (async function* () {
+          yield* chunks;
+        })(),
+      ),
+    ).toEqual(["a", "b", "c"]);
+    const stream = new ReadableStream<string>({
+      start(controller) {
+        for (const chunk of chunks) controller.enqueue(chunk);
+        controller.close();
+      },
+    });
+    expect(await lines(stream)).toEqual(["a", "b", "c"]);
+    expect(stream.locked).toBe(false);
+  });
+
+  test("releases a stream reader when reading stops early", async () => {
+    const stream = new ReadableStream<string>({
+      start(controller) {
+        controller.enqueue("one\ntwo\n");
+      },
+    });
+    for await (const _line of readLines(stream)) break;
+    expect(stream.locked).toBe(false);
+  });
+
+  test("collectTail keeps the last lines and cuts long ones", async () => {
+    const target: string[] = [];
+    const input = ["", ...Array.from({ length: 10 }, (_, i) => `line ${i}`)];
+    await collectTail(
+      input.map((line) => `${line}\n`),
+      target,
+      3,
+    );
+    expect(target).toEqual(["line 7", "line 8", "line 9"]);
+
+    const long: string[] = [];
+    await collectTail(["x".repeat(STDERR_LINE_CHARS + 10)], long);
+    expect(long[0]).toBe(`${"x".repeat(STDERR_LINE_CHARS)}...`);
+  });
+
+  test("readAll decodes bytes split inside a character", async () => {
+    const bytes = new TextEncoder().encode("h\u00e9");
+    expect(await readAllText([bytes.slice(0, 2), bytes.slice(2)])).toBe(
+      "h\u00e9",
+    );
+  });
+});
+
+describe("driver executable lookup", () => {
+  test("an explicit path wins without probing the candidates", () => {
+    expect(findExecutable([undefined, "", "/opt/x"], ["/bin/sh"])).toEqual({
+      path: "/opt/x",
+      checked: ["/opt/x"],
+    });
+  });
+
+  test("the first existing candidate is chosen and every probe recorded", () => {
+    const result = findExecutable([], ["/does/not/exist", "/bin/sh", "/z"]);
+    expect(result).toEqual({
+      path: "/bin/sh",
+      checked: ["/does/not/exist", "/bin/sh"],
+    });
+    expect(findExecutable([], ["/does/not/exist"])).toEqual({
+      checked: ["/does/not/exist"],
+    });
+  });
+
+  test("candidates follow PATH, extra dirs, then node_modules", () => {
+    const candidates = executableCandidates({
+      executable: "tool",
+      env: { PATH: ["/a", "", "/b", "/a"].join(delimiter) },
+      extraDirs: ["/extra", undefined],
+      packagePaths: (base) => [`${base}/pkg/tool`],
+      workingDirectory: "/work",
+    });
+    expect(candidates.slice(0, 3)).toEqual([
+      "/a/tool",
+      "/b/tool",
+      "/extra/tool",
+    ]);
+    expect(candidates[3]).toBe("/work/node_modules/.bin/tool");
+    expect(candidates[4]).toBe("/work/pkg/tool");
+    expect(new Set(candidates).size).toBe(candidates.length);
+  });
+
+  test("the missing-executable message lists the checked paths", () => {
+    expect(
+      describeMissingExecutable({
+        headline: "H",
+        hint: "fix",
+        original: "boom",
+        checked: [],
+      }),
+    ).toBe("H\nfix\nOriginal error: boom\nChecked paths:\n  - <no candidates>");
   });
 });

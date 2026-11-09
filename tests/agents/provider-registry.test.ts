@@ -1,10 +1,5 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import { describe, expect, test } from "bun:test";
+import { InputValidationError } from "@google/adk";
 import {
   CLAUDE_AGENT_DEFINITION,
   CLAUDE_PROVIDER,
@@ -63,5 +58,29 @@ describe("ExternalAgentDefinitionRegistry", () => {
     expect(agent).toBeInstanceOf(ExternalAgent);
     expect(agent.provider).toEqual(CODEX_PROVIDER);
     expect(agent.driver.providerId).toBe("codex");
+  });
+});
+
+describe("registry input errors", () => {
+  test("an empty provider id is an InputValidationError in both registries", () => {
+    expect(() =>
+      new ExternalAgentProviderRegistry().register({
+        ...CODEX_PROVIDER,
+        id: "",
+      }),
+    ).toThrow(InputValidationError);
+    expect(() =>
+      new ExternalAgentDefinitionRegistry().register({
+        ...CODEX_AGENT_DEFINITION,
+        provider: { ...CODEX_PROVIDER, id: "" },
+      }),
+    ).toThrow(InputValidationError);
+  });
+
+  test("creating an unknown provider is an InputValidationError", () => {
+    const registry = createDefaultExternalAgentDefinitionRegistry();
+    const create = () => registry.create("nope", { name: "x" });
+    expect(create).toThrow(InputValidationError);
+    expect(create).toThrow("Unknown external agent provider: nope");
   });
 });

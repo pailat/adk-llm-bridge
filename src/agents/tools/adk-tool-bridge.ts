@@ -1,10 +1,4 @@
 /**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
-/**
  * Bridge from ADK tools to external agent runtimes.
  *
  * Pure and driver-agnostic: it turns ADK tools (`BaseTool`, and every tool a
@@ -16,12 +10,14 @@
  * 2. an **executor** that runs a tool the CLI called, with a real ADK
  *    `Context` built on the current `InvocationContext`, so state and artifact
  *    deltas, confirmations and abort signals behave as they do in an
- *    `LlmAgent`.
+ *    `LlmAgent`. Both `requireConfirmation` and a
+ *    `toolContext.requestConfirmation()` call inside `execute` come back as
+ *    `confirmationRequired`. The executor only reports the other actions
+ *    (`escalate`, `transferToAgent`, `skipSummarization`); acting on them is
+ *    the caller's job (`ExternalAgent` does it).
  *
  * Nothing here throws on tool failures: every outcome is a structured
  * {@link AdkToolExecutionResult}.
- *
- * @module agents/tools/adk-tool-bridge
  *
  * @example
  * ```typescript
@@ -51,9 +47,42 @@ import {
   type ToolUnion,
 } from "@google/adk";
 import { normalizeSchema } from "../../converters/schema.js";
+import { isPlainRecord } from "../event-titles.js";
 
 /** Prefix added to every exposed tool name. */
 export const ADK_TOOL_PREFIX = "adk_tool__";
+
+/**
+ * Name of the in-process MCP server that hosts the bridged tools.
+ *
+ * @internal
+ */
+export const BRIDGE_MCP_SERVER = "adk_bridge";
+
+/**
+ * Prefix a runtime puts before a tool of the bridge's MCP server
+ * (`mcp__adk_bridge__<tool>`).
+ *
+ * @internal
+ */
+export const BRIDGE_TOOL_PREFIX = `mcp__${BRIDGE_MCP_SERVER}__`;
+
+/**
+ * Whether a runtime tool name is the bridged tool `exposed`.
+ *
+ * @remarks
+ * A runtime reports the exposed name itself or, when it hosts the bridge as
+ * an MCP server, {@link BRIDGE_TOOL_PREFIX} followed by it. A tool of any
+ * other MCP server with the same short name does not match.
+ *
+ * @param name - The name the runtime reported.
+ * @param exposed - The bridged tool's exposed name.
+ * @returns Whether they are the same tool.
+ * @internal
+ */
+export function isBridgedToolName(name: string, exposed: string): boolean {
+  return name === exposed || name === `${BRIDGE_TOOL_PREFIX}${exposed}`;
+}
 
 /** Longest tool name most external runtimes accept. */
 const MAX_NAME_LENGTH = 64;
@@ -125,7 +154,19 @@ export interface AdkToolExecutionResult {
   /** Set when `status` is `"error"`. */
   error?: { code: AdkToolErrorCode; message: string };
   /** Set when `status` is `"confirmationRequired"`. */
-  confirmation?: { functionCallId: string; hint: string; payload?: unknown };
+  confirmation?: {
+    functionCallId: string;
+    hint: string;
+    payload?: unknown;
+    /**
+     * What asked for the confirmation: the tool's `requireConfirmation`
+     * option (the tool did not run), or a `toolContext.requestConfirmation()`
+     * call inside `execute` (the tool ran up to that call). In both cases,
+     * call `execute` again with `toolConfirmation`; the tool then sees the
+     * decision in `toolContext.toolConfirmation`, as in ADK.
+     */
+    origin?: "requireConfirmation" | "requestConfirmation";
+  };
 }
 
 /** Per-call options of {@link AdkToolBridge.execute}. */
@@ -249,15 +290,26 @@ function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function toResponseObject(value: unknown): Record<string, unknown> {
-  if (value !== null && typeof value === "object" && !Array.isArray(value)) {
-    return value as Record<string, unknown>;
+/**
+ * Shapes a tool result as an ADK `functionResponse.response` object.
+ *
+ * @remarks
+ * A plain object (prototype `Object.prototype` or `null`) is used as is;
+ * anything else (an array, a primitive, `null`, a `Date`, a `Map`, a class
+ * instance) is wrapped as `{ result }`, with `undefined` as `null`.
+ *
+ * @param value - The tool's result.
+ * @returns A record usable as a function response.
+ * @internal
+ */
+export function toResponseObject(value: unknown): Record<string, unknown> {
+  if (isPlainRecord(value)) {
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype === Object.prototype || prototype === null) {
+      return value;
+    }
   }
   return { result: value === undefined ? null : value };
-}
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 /**
@@ -270,12 +322,17 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
  * a model-facing declaration (built-in or in-model tools) are reported in
  * {@link AdkToolBridge.skipped}.
  *
- * @param tools - The agent's tool list
- * @param invocationContext - Context used to list toolsets
+ * @param tools - The agent's tool list.
+ * @param invocationContext - Context used to list toolsets.
+ * @param options - `filter` keeps only the tools it accepts. It sees each
+ * tool, a toolset's tools included, by its own name before the bridge names
+ * it; a tool it rejects is left out without a `skipped` entry.
+ * @returns The bridge with the declarations to advertise and the executor.
  */
 export async function createAdkToolBridge(
   tools: readonly ToolUnion[],
   invocationContext: InvocationContext,
+  options: { filter?: (tool: BaseTool) => boolean } = {},
 ): Promise<AdkToolBridge> {
   const skipped: SkippedTool[] = [];
   const resolved: BaseTool[] = [];
@@ -307,6 +364,9 @@ export async function createAdkToolBridge(
   const taken = new Set<string>();
 
   for (const tool of resolved) {
+    if (options.filter && !options.filter(tool)) {
+      continue;
+    }
     const declaration = declarationFor(tool);
     if (!declaration) {
       skipped.push({ name: tool.name, reason: "no-declaration" });
@@ -329,7 +389,7 @@ export async function createAdkToolBridge(
       if (context.abortSignal?.aborted) {
         return errorResult("ABORTED", "The invocation was aborted.");
       }
-      if (args !== undefined && !isPlainObject(args)) {
+      if (args !== undefined && !isPlainRecord(args)) {
         return errorResult(
           "INVALID_ARGUMENTS",
           `Arguments for ${tool.name} must be a JSON object.`,
@@ -362,7 +422,11 @@ export async function createAdkToolBridge(
               status: "confirmationRequired",
               response: { error: "This tool call requires confirmation." },
               actions: actionsFrom(toolContext),
-              confirmation: { functionCallId, hint },
+              confirmation: {
+                functionCallId,
+                hint,
+                origin: "requireConfirmation",
+              },
             };
           }
           if (!decision.confirmed) {
@@ -379,6 +443,33 @@ export async function createAdkToolBridge(
 
       try {
         const output = await tool.runAsync({ args: callArgs, toolContext });
+        const requested =
+          toolContext.eventActions.requestedToolConfirmations?.[functionCallId];
+        if (requested && !decision) {
+          // ADK ends the turn on this request and drops the response and state
+          // changes of the call; the call runs again with the human decision.
+          // Saved artifacts cannot be unsaved, so their delta is kept.
+          const actions = actionsFrom(toolContext);
+          return {
+            status: "confirmationRequired",
+            response: { error: "This tool call requires confirmation." },
+            actions: {
+              ...emptyActions(),
+              artifactDelta: actions.artifactDelta,
+              requestedToolConfirmations: actions.requestedToolConfirmations,
+            },
+            confirmation: {
+              functionCallId,
+              hint:
+                requested.hint ||
+                `Please approve or reject the tool call ${tool.name}().`,
+              ...(requested.payload !== undefined
+                ? { payload: requested.payload }
+                : {}),
+              origin: "requestConfirmation",
+            },
+          };
+        }
         return {
           status: "ok",
           response: toResponseObject(output),

@@ -4,12 +4,14 @@ import {
   BaseAgent,
   BaseLlm,
   type BaseLlmConnection,
+  InMemorySessionService,
   type InvocationContext,
   LlmAgent,
   type LlmRequest,
   type LlmResponse,
   NodeTool,
   PluginManager,
+  Runner,
   Workflow,
 } from "@google/adk";
 import { z } from "zod";
@@ -21,6 +23,11 @@ import {
 } from "../../src/agents/index.js";
 import type { ExternalAgentPermissionPolicy } from "../../src/agents/permissions/schema.js";
 import { CODEX_PROVIDER } from "../../src/agents/provider/schema.js";
+import type { WorkflowCheckpointV1 } from "../../src/workflows/checkpoint/schema.js";
+import type {
+  SaveWorkflowCheckpointInput,
+  WorkflowCheckpointStore,
+} from "../../src/workflows/checkpoint/store.js";
 import {
   defineScriptWorkflow,
   defineWorkflow,
@@ -32,11 +39,13 @@ import {
 import { QUICKJS_SYNC_CAPABILITIES } from "../../src/workflows/sandbox/quickjs-generator-runtime.js";
 import type {
   WorkflowScriptGeneratorSession,
+  WorkflowScriptGeneratorTurn,
   WorkflowScriptRuntime,
   WorkflowScriptSessionOptions,
 } from "../../src/workflows/sandbox/types.js";
 import { ScriptWorkflowAgent } from "../../src/workflows/script-workflow-agent.js";
 import { WorkflowAgent } from "../../src/workflows/workflow-agent.js";
+import { fromPartial } from "../helpers/partial.js";
 
 /**
  * Regression tests for permission inheritance across the intermediates that
@@ -82,7 +91,7 @@ function worker(
 }
 
 function parentContext(agent: BaseAgent): InvocationContext {
-  return {
+  return fromPartial<InvocationContext>({
     invocationId: "inv-1",
     agent,
     userContent: { role: "user", parts: [{ text: "parent" }] },
@@ -95,7 +104,7 @@ function parentContext(agent: BaseAgent): InvocationContext {
       lastUpdateTime: 1,
     },
     pluginManager: new PluginManager(),
-  } as InvocationContext;
+  });
 }
 
 async function delegate(
@@ -134,7 +143,8 @@ class ScriptedRuntime implements WorkflowScriptRuntime {
       get disposed() {
         return disposed;
       },
-      next: (value) => generator.next(value),
+      // A generator always sets `done`; the lib type marks it optional on yields.
+      next: (value) => generator.next(value) as WorkflowScriptGeneratorTurn,
       dispose() {
         disposed = true;
         generator.return(undefined);
@@ -153,7 +163,11 @@ class MemoryCheckpointStore implements WorkflowCheckpointStore {
 
   async save(input: SaveWorkflowCheckpointInput) {
     this.checkpoint = input.checkpoint;
-    return { checkpointKey: `memory:${input.checkpoint.executionId}` };
+    return {
+      checkpointKey: `memory:${input.checkpoint.executionId}`,
+      // Kept out of session state so nested agents do not share it.
+      stateDelta: {},
+    };
   }
 }
 
@@ -195,6 +209,57 @@ function oneCallLlm(toolName: string, args: Record<string, unknown>) {
 }
 
 describe("permission inheritance through our workflow agents", () => {
+  // A root WorkflowAgent is not a security principal and applies no ceiling:
+  // each step runs with its own policy, and network is off unless that policy
+  // sets allowNetwork: true.
+  test("under a root WorkflowAgent an unset allowNetwork means false", async () => {
+    const open = new CaptureDriver();
+    const unset = new CaptureDriver();
+    const workflow = new WorkflowAgent({
+      name: "root_workflow",
+      subAgents: [
+        worker(open, "open", { mode: "workspace-write", allowNetwork: true }),
+        worker(unset, "unset", { mode: "workspace-write" }),
+      ],
+      definition: defineWorkflow({
+        id: "root",
+        version: "1",
+        handler: async (ctx) => {
+          await ctx.run({ id: "a", agentName: "open", input: ctx.input });
+          await ctx.run({ id: "b", agentName: "unset", input: ctx.input });
+          return "done";
+        },
+      }),
+    });
+    const sessions = new InMemorySessionService();
+    const runner = new Runner({
+      appName: "root-ceiling",
+      agent: workflow,
+      sessionService: sessions,
+    });
+    const session = await sessions.createSession({
+      appName: "root-ceiling",
+      userId: "user",
+    });
+    for await (const _ of runner.runAsync({
+      userId: "user",
+      sessionId: session.id,
+      newMessage: { role: "user", parts: [{ text: "go" }] },
+    })) {
+      // drain
+    }
+
+    // An explicit opt-in on the step still keeps the network.
+    expect(open.request?.permissions).toEqual({
+      mode: "workspace-write",
+      allowNetwork: true,
+    });
+    expect(unset.request?.permissions).toEqual({
+      mode: "workspace-write",
+      allowNetwork: false,
+    });
+  });
+
   test("WorkflowAgent step does not escalate", async () => {
     const driver = new CaptureDriver();
     const workflow = new WorkflowAgent({

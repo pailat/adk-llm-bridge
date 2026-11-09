@@ -7,7 +7,11 @@ import type { ExternalAgentRunRequest } from "../../../src/agents/external-agent
 import { CODEX_PROVIDER } from "../../../src/agents/provider/codex.js";
 import { GEMINI_CLI_PROVIDER } from "../../../src/agents/provider/gemini-cli.js";
 import { CLAUDE_PROVIDER } from "../../../src/agents/provider/schema.js";
-import { withDeadline } from "../helpers.js";
+import {
+  GEMINI_NETWORK_ON,
+  noHostMcpServers,
+  withDeadline,
+} from "../helpers.js";
 
 /**
  * A controllable fake CLI process: the test pushes stdout lines, and the
@@ -93,7 +97,12 @@ const CASES: DriverCase[] = [
   {
     name: "CodexCliDriver",
     provider: CODEX_PROVIDER,
-    create: (fake) => new CodexCliDriver({ spawn: fake.spawn, env: {} }),
+    create: (fake) =>
+      new CodexCliDriver({
+        listMcpServers: noHostMcpServers,
+        spawn: fake.spawn,
+        env: {},
+      }),
     outputLine: {
       type: "item.completed",
       item: { id: "m1", type: "agent_message", text: "working" },
@@ -115,6 +124,9 @@ function request(
     provider,
     context: { userContent: { parts: [{ text: "go" }] } } as never,
     instruction: "go",
+    ...(provider.id === GEMINI_CLI_PROVIDER.id
+      ? { permissions: GEMINI_NETWORK_ON }
+      : {}),
     ...extra,
   };
 }
@@ -179,6 +191,7 @@ describe.each(CASES)("$name subprocess lifecycle", (driverCase) => {
           abortSignal: controller.signal,
         } as never,
         instruction: "go",
+        permissions: request(driverCase.provider).permissions,
       })
       [Symbol.asyncIterator]();
 
@@ -205,7 +218,7 @@ describe.each(CASES)("$name subprocess lifecycle", (driverCase) => {
 
     fake.push(driverCase.outputLine);
     await untilOutput(iterator);
-    await withDeadline(
+    await withDeadline<unknown>(
       iterator.return?.() ?? Promise.resolve(),
       2000,
       "iterator.return() hung",

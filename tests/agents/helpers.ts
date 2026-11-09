@@ -11,7 +11,7 @@
 export async function withDeadline<T>(
   promise: Promise<T>,
   ms: number,
-  message: string,
+  message?: string,
 ): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<never>((_, reject) => {
@@ -23,3 +23,16 @@ export async function withDeadline<T>(
     clearTimeout(timer);
   }
 }
+
+/**
+ * A Codex MCP lister for a host with no MCP servers. Network is off by
+ * default, so a Codex CLI run lists the host servers to turn them off; tests
+ * that are not about that listing use this instead of spawning `mcp list`.
+ */
+export const noHostMcpServers = async (): Promise<readonly string[]> => [];
+
+/**
+ * Permissions for a Gemini CLI run. Gemini CLI cannot keep the network off,
+ * so it is refused unless the policy sets `allowNetwork: true`.
+ */
+export const GEMINI_NETWORK_ON = { mode: "ask", allowNetwork: true } as const;

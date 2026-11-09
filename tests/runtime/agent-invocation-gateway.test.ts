@@ -3,9 +3,12 @@ import {
   BaseAgent,
   BaseLlm,
   type BaseLlmConnection,
+  type BaseTool,
+  BaseToolset,
   createEvent,
   createEventActions,
   type Event,
+  FunctionNode,
   InvocationContext,
   LlmAgent,
   LlmCallsLimitExceededError,
@@ -17,6 +20,7 @@ import {
   REQUEST_CONFIRMATION_FUNCTION_CALL_NAME,
   REQUEST_CREDENTIAL_FUNCTION_CALL_NAME,
   REQUEST_INPUT_FUNCTION_CALL_NAME,
+  RequestInput,
   Workflow,
 } from "@google/adk";
 import { z } from "zod";
@@ -71,6 +75,48 @@ function parentContext(
     abortSignal,
   });
 }
+
+describe("AgentInvocationGateway appendInput", () => {
+  const input = { role: "user", parts: [{ text: "previous task" }] };
+
+  test("false keeps the input out of the child session and sets userContent", async () => {
+    const worker = new CaptureAgent();
+    const gateway = new AgentInvocationGateway({ resolveAgent: () => worker });
+
+    const result = await gateway.run({
+      agentName: "worker",
+      input,
+      parentContext: parentContext(worker),
+      sessionHistoryMode: "inherit",
+      appendInput: false,
+    });
+
+    expect(result.error).toBeUndefined();
+    expect(worker.context?.userContent).toEqual(input);
+    const texts = worker.context?.session.events.map(
+      (event) => event.content?.parts?.[0]?.text,
+    );
+    expect(texts).toEqual(["previous task"]);
+  });
+
+  test("by default the input is appended as a new user event", async () => {
+    const worker = new CaptureAgent();
+    const gateway = new AgentInvocationGateway({ resolveAgent: () => worker });
+
+    await gateway.run({
+      agentName: "worker",
+      input,
+      parentContext: parentContext(worker),
+      sessionHistoryMode: "inherit",
+    });
+
+    const texts = worker.context?.session.events.map(
+      (event) => event.content?.parts?.[0]?.text,
+    );
+    expect(texts).toEqual(["previous task", "previous task"]);
+    expect(worker.context?.session.events.at(-1)?.author).toBe("user");
+  });
+});
 
 describe("AgentInvocationGateway", () => {
   test("runs with a real child InvocationContext and isolated session history", async () => {
@@ -418,7 +464,7 @@ describe("AgentInvocationGateway", () => {
       parentContext: parentContext(root),
     });
 
-    // RT-9: the output is the last final response (ADK Runner/AgentTool
+    // The output is the last final response (ADK Runner/AgentTool
     // semantics); the previous concatenation lives in `transcript`.
     expect(result.output).toBe("second");
     expect(result.transcript).toBe("first\nsecond");
@@ -846,7 +892,7 @@ describe("AgentInvocationGateway", () => {
     });
   });
 
-  describe("final output and transcript (RT-9)", () => {
+  describe("final output and transcript", () => {
     test("output is the last final text, transcript keeps the narration", async () => {
       const worker = new CaptureAgent("worker", [
         createEvent({
@@ -920,7 +966,7 @@ describe("AgentInvocationGateway", () => {
     });
   });
 
-  describe("session isolation defaults (RT-8)", () => {
+  describe("session isolation defaults", () => {
     test("defaults to a deep copy of the parent state and no parent history", async () => {
       const worker = new CaptureAgent();
       const context = parentContext(new CaptureAgent("root"));
@@ -1210,7 +1256,7 @@ describe("AgentInvocationGateway", () => {
       });
 
       expect(resumed.interrupt?.functionCallIds).toEqual(["req-2"]);
-      // request 1 is answered now, so it is no longer reported
+      // request 1 is answered, so it is not reported again
       expect(resumed.interrupt?.requests.map((r) => r.interruptId)).toEqual([
         "req-2",
       ]);
@@ -1345,8 +1391,12 @@ describe("AgentInvocationGateway", () => {
   });
 
   describe("long-running tools of a real LlmAgent", () => {
-    /** Calls `toolName` once (id `c1`), then answers with text. */
-    const oneCallLlm = (toolName: string, args: Record<string, unknown>) => {
+    /** Calls `toolName` once (id `callId`), then answers with text. */
+    const oneCallLlm = (
+      toolName: string,
+      args: Record<string, unknown>,
+      callId = "c1",
+    ) => {
       let calls = 0;
       return new (class extends BaseLlm {
         constructor() {
@@ -1360,7 +1410,9 @@ describe("AgentInvocationGateway", () => {
             ? {
                 content: {
                   role: "model",
-                  parts: [{ functionCall: { id: "c1", name: toolName, args } }],
+                  parts: [
+                    { functionCall: { id: callId, name: toolName, args } },
+                  ],
                 },
               }
             : { content: { role: "model", parts: [{ text: "done" }] } };
@@ -1450,6 +1502,258 @@ describe("AgentInvocationGateway", () => {
       expect(result.interrupt?.kind).toBe("input");
       expect(result.interrupt?.functionCallIds).toContain("inner-1");
       expect(result.interrupt?.functionCallIds).not.toContain("c1");
+    });
+
+    /** A workflow whose only node asks for `inner-1`, then returns the answer. */
+    const askingWorkflow = () =>
+      new Workflow({
+        name: "wf",
+        inputSchema: z.object({ request: z.string() }),
+        edges: [
+          [
+            "START",
+            new FunctionNode("ask", async function* (context: {
+              resumeInputs?: Record<string, unknown>;
+            }) {
+              const answer = context.resumeInputs?.["inner-1"];
+              if (answer === undefined) {
+                yield new RequestInput({
+                  interruptId: "inner-1",
+                  message: "Name?",
+                });
+                return;
+              }
+              return { name: answer };
+            } as never),
+          ],
+        ],
+      } as never);
+
+    /** A workflow named `name` whose only node completes at once. */
+    const doneWorkflow = (name: string) =>
+      new Workflow({
+        name,
+        inputSchema: z.object({ request: z.string() }),
+        edges: [
+          ["START", new FunctionNode("finish", async () => ({ ok: true }))],
+        ],
+      } as never);
+
+    /** A toolset that lists fixed tools and counts the listings. */
+    class ListedToolset extends BaseToolset {
+      listed = 0;
+      constructor(private readonly listedTools: BaseTool[]) {
+        super([]);
+      }
+      async getTools(): Promise<BaseTool[]> {
+        this.listed++;
+        return this.listedTools;
+      }
+      async close(): Promise<void> {}
+    }
+
+    test("resuming a paused NodeTool: the answer to inner-1 finishes it with no interrupt", async () => {
+      const coordinator = new LlmAgent({
+        name: "coordinator",
+        model: oneCallLlm("wf", { request: "x" }),
+        tools: [new NodeTool(askingWorkflow(), "wf")],
+      });
+      const gateway = new AgentInvocationGateway({
+        resolveAgent: () => coordinator,
+      });
+      const paused = await gateway.run({
+        agentName: "coordinator",
+        input: { role: "user", parts: [{ text: "go" }] },
+        parentContext: parentContext(new CaptureAgent("root")),
+      });
+      expect(paused.interrupt).toMatchObject({
+        kind: "input",
+        functionCallIds: ["inner-1"],
+      });
+
+      const resumed = await gateway.run({
+        agentName: "coordinator",
+        resume: { events: paused.interrupt?.events ?? [] },
+        input: {
+          role: "user",
+          parts: [
+            {
+              functionResponse: {
+                id: "inner-1",
+                name: REQUEST_INPUT_FUNCTION_CALL_NAME,
+                response: { result: "Ada" },
+              },
+            },
+          ],
+        },
+        parentContext: parentContext(new CaptureAgent("root")),
+      });
+
+      expect(resumed.error).toBeUndefined();
+      expect(resumed.errorKind).toBeUndefined();
+      expect(resumed.interrupt).toBeUndefined();
+      expect(resumed.output).toBe("done");
+      // The node finished: the coordinator got the response for `c1`, and
+      // `c1` (still flagged long-running by ADK in the history) stays exempt.
+      expect(
+        resumed.events.some(
+          (event) =>
+            event.author === "coordinator" &&
+            event.content?.parts?.some(
+              (part) => part.functionResponse?.id === "c1",
+            ),
+        ),
+      ).toBe(true);
+      expect(
+        paused.interrupt?.events.some((event) =>
+          event.longRunningToolIds?.includes("c1"),
+        ),
+      ).toBe(true);
+    });
+
+    test("a NodeTool called by a graph-node LlmAgent of a NodeTool workflow is not an interrupt", async () => {
+      const inner = new LlmAgent({
+        name: "inner_llm",
+        model: oneCallLlm("wf2", { request: "y" }, "c2"),
+        tools: [new NodeTool(doneWorkflow("wf2"), "wf2")],
+      });
+      const outer = new Workflow({
+        name: "wf",
+        inputSchema: z.object({ request: z.string() }),
+        edges: [["START", inner]],
+      } as never);
+      const result = await run(
+        new LlmAgent({
+          name: "coordinator",
+          model: oneCallLlm("wf", { request: "x" }),
+          tools: [new NodeTool(outer, "wf")],
+        }),
+      );
+
+      expect(result.error).toBeUndefined();
+      expect(result.interrupt).toBeUndefined();
+      expect(result.output).toBe("done");
+      // ADK flags the inner call long-running, on the inner agent's event
+      // and again on the outer workflow node's event.
+      expect(
+        result.events.filter((event) =>
+          event.longRunningToolIds?.includes("c2"),
+        ).length,
+      ).toBeGreaterThanOrEqual(1);
+    });
+
+    test("a LongRunningFunctionTool of a graph-node LlmAgent is still an interrupt", async () => {
+      const inner = new LlmAgent({
+        name: "inner_llm",
+        model: oneCallLlm("ask_human", { question: "ok?" }, "c2"),
+        tools: [
+          new LongRunningFunctionTool({
+            name: "ask_human",
+            description: "Ask a human.",
+            parameters: z.object({ question: z.string() }),
+            execute: async () => ({ status: "pending" }),
+          }),
+        ],
+      });
+      const outer = new Workflow({
+        name: "wf",
+        inputSchema: z.object({ request: z.string() }),
+        edges: [["START", inner]],
+      } as never);
+      const result = await run(
+        new LlmAgent({
+          name: "coordinator",
+          model: oneCallLlm("wf", { request: "x" }),
+          tools: [new NodeTool(outer, "wf")],
+        }),
+      );
+
+      expect(result.error).toBeUndefined();
+      expect(result.interrupt?.functionCallIds).toContain("c2");
+      expect(result.interrupt?.functionCallIds).not.toContain("c1");
+    });
+
+    test("a completed NodeTool from a toolset is not an interrupt", async () => {
+      const toolset = new ListedToolset([
+        new NodeTool(doneWorkflow("wf"), "wf"),
+      ]);
+      const result = await run(
+        new LlmAgent({
+          name: "coordinator",
+          model: oneCallLlm("wf", { request: "x" }),
+          tools: [toolset],
+        }),
+      );
+
+      expect(result.error).toBeUndefined();
+      expect(result.interrupt).toBeUndefined();
+      expect(result.output).toBe("done");
+      // ADK's LlmAgent listed the toolset; the interrupt scan never calls
+      // `getTools` (it resolves the call by its run marker).
+      expect(toolset.listed).toBeGreaterThan(0);
+    });
+
+    test("a completed NodeTool from a toolset whose name contains a dot is not an interrupt", async () => {
+      const result = await run(
+        new LlmAgent({
+          name: "coordinator",
+          model: oneCallLlm("docs.search", { request: "x" }),
+          tools: [
+            new ListedToolset([
+              new NodeTool(doneWorkflow("search"), "docs.search"),
+            ]),
+          ],
+        }),
+      );
+
+      expect(result.error).toBeUndefined();
+      expect(result.interrupt).toBeUndefined();
+      expect(result.output).toBe("done");
+      // ADK ran the node on the `docs.search@c1` branch segment.
+      expect(
+        result.events.some((event) =>
+          event.branch?.split(".").includes("search@c1"),
+        ),
+      ).toBe(true);
+    });
+
+    test("a paused NodeTool from a toolset reports the node's id, not the wrapper call", async () => {
+      const result = await run(
+        new LlmAgent({
+          name: "coordinator",
+          model: oneCallLlm("wf", { request: "x" }),
+          tools: [new ListedToolset([new NodeTool(askingWorkflow(), "wf")])],
+        }),
+      );
+
+      expect(result.error).toBeUndefined();
+      expect(result.interrupt?.kind).toBe("input");
+      expect(result.interrupt?.functionCallIds).toEqual(["inner-1"]);
+    });
+
+    test("a LongRunningFunctionTool from a toolset is still an interrupt", async () => {
+      const result = await run(
+        new LlmAgent({
+          name: "asker",
+          model: oneCallLlm("ask_human", { question: "ok?" }),
+          tools: [
+            new ListedToolset([
+              new LongRunningFunctionTool({
+                name: "ask_human",
+                description: "Ask a human.",
+                parameters: z.object({ question: z.string() }),
+                execute: async () => ({ status: "pending" }),
+              }),
+            ]),
+          ],
+        }),
+      );
+
+      expect(result.error).toBeUndefined();
+      expect(result.interrupt).toMatchObject({
+        kind: "long-running",
+        functionCallIds: ["c1"],
+      });
     });
 
     test("a LongRunningFunctionTool with an interim response is an interrupt", async () => {

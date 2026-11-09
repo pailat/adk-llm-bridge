@@ -10,14 +10,20 @@ import { CLAUDE_AGENT_DEFINITION } from "../../../src/agents/claude-agent.js";
 import { CODEX_AGENT_DEFINITION } from "../../../src/agents/codex-agent.js";
 import {
   ClaudeAgentSdkDriver,
+  type ClaudeAgentSdkDriverConfig,
   claudeSdkSessionStateKey,
 } from "../../../src/agents/driver/claude-agent-sdk.js";
+import { CodexSdkDriver } from "../../../src/agents/driver/codex-sdk.js";
+import { GeminiCliDriver } from "../../../src/agents/driver/gemini-cli.js";
 import { ExternalAgent } from "../../../src/agents/external-agent.js";
 import { GEMINI_CLI_AGENT_DEFINITION } from "../../../src/agents/gemini-cli-agent.js";
 import { CLAUDE_PROVIDER } from "../../../src/agents/provider/schema.js";
 import { createAdkToolBridge } from "../../../src/agents/tools/adk-tool-bridge.js";
 
 type Handler = (args: Record<string, unknown>) => Promise<unknown>;
+type SdkToolHandler = Parameters<
+  NonNullable<NonNullable<ClaudeAgentSdkDriverConfig["sdk"]>["tool"]>
+>[3];
 
 function fakeSdk() {
   const handlers = new Map<string, Handler>();
@@ -31,9 +37,9 @@ function fakeSdk() {
         name: string,
         _description: string,
         schema: Record<string, unknown>,
-        handler: Handler,
+        handler: SdkToolHandler,
       ) => {
-        handlers.set(name, handler);
+        handlers.set(name, (args) => handler(args, undefined));
         schemas.set(name, schema);
         return { name };
       },
@@ -89,7 +95,7 @@ async function setup(
   return { options, handlers, schemas, stateDeltas, adkTools };
 }
 
-describe("Claude SDK driver hosts ADK tools (AGENTS-7)", () => {
+describe("Claude SDK driver hosts ADK tools", () => {
   test("registers ADK tools on the adk_bridge MCP server and pre-authorizes them", async () => {
     const { options, schemas } = await setup();
 
@@ -299,7 +305,7 @@ describe("ExternalAgent read-only exposure of ADK tools", () => {
     return { names, ran };
   }
 
-  test("an allow-listed name does not expose a tool literally named like its collision suffix (m1)", async () => {
+  test("an allow-listed name does not expose a tool literally named like its collision suffix", async () => {
     const executed: string[] = [];
     const get = new FunctionTool({
       name: "get",
@@ -339,7 +345,7 @@ describe("ExternalAgent read-only exposure of ADK tools", () => {
     expect(names).toEqual(["adk_tool__get_weather"]);
   });
 
-  test("a toolset that fails once is skipped in read-only, never listed again unfiltered (B2)", async () => {
+  test("a toolset that fails once is skipped in read-only, never listed again unfiltered", async () => {
     let deleted = 0;
     const deleteEverything = new FunctionTool({
       name: "delete_everything",
@@ -425,7 +431,7 @@ describe("ExternalAgent read-only exposure of ADK tools", () => {
   });
 });
 
-describe("Claude SDK canUseTool and persisted resume (AGENTS-6)", () => {
+describe("Claude SDK canUseTool and persisted resume", () => {
   test("canUseTool is absent without requestPermission and routes decisions otherwise", async () => {
     const driver = new ClaudeAgentSdkDriver({ sdk: fakeSdk().sdk });
     const base = { provider: CLAUDE_PROVIDER, context: invocation() };
@@ -517,17 +523,28 @@ describe("Claude SDK canUseTool and persisted resume (AGENTS-6)", () => {
   });
 });
 
-describe("runtime capabilities are honest (AGENTS-7)", () => {
+describe("runtime capabilities are honest", () => {
   test("only the Claude SDK driver hosts ADK tools, sub-agents and approvals", () => {
-    expect(CLAUDE_AGENT_DEFINITION.capabilities).toMatchObject({
+    expect(new ClaudeAgentSdkDriver().capabilities()).toMatchObject({
       tools: true,
       subagents: true,
       mcpServers: true,
       approvals: true,
     });
-    expect(CODEX_AGENT_DEFINITION.capabilities?.tools).toBeUndefined();
-    expect(CODEX_AGENT_DEFINITION.capabilities?.mcpServers).toBeUndefined();
-    expect(CODEX_AGENT_DEFINITION.capabilities?.approvals).toBeUndefined();
-    expect(GEMINI_CLI_AGENT_DEFINITION.capabilities?.tools).toBeUndefined();
+    const codex = new CodexSdkDriver().capabilities();
+    expect(codex.tools).toBeUndefined();
+    expect(codex.mcpServers).toBeUndefined();
+    expect(codex.approvals).toBeUndefined();
+    expect(new GeminiCliDriver().capabilities().tools).toBeUndefined();
+  });
+
+  test("definitions carry no capabilities: the driver is the only source", () => {
+    for (const definition of [
+      CLAUDE_AGENT_DEFINITION,
+      CODEX_AGENT_DEFINITION,
+      GEMINI_CLI_AGENT_DEFINITION,
+    ]) {
+      expect(definition).not.toHaveProperty("capabilities");
+    }
   });
 });

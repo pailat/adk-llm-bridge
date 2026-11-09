@@ -1,9 +1,3 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import { createEvent, type Event, type InvocationContext } from "@google/adk";
 import type {
   Content,
@@ -18,10 +12,17 @@ import {
 } from "@opentelemetry/api";
 // One copy of the capture rules (OTel GenAI variable, then the ADK 2.4 one).
 import { shouldCaptureMessageContent } from "../core/telemetry.js";
-import type {
-  ExternalAgentCompletedEvent,
-  ExternalAgentEvent,
-  ExternalAgentUsage,
+import {
+  itemTitle,
+  stringValue,
+  toolDetail,
+  truncate,
+} from "./event-titles.js";
+import {
+  EXTERNAL_AGENT_ERROR,
+  type ExternalAgentCompletedEvent,
+  type ExternalAgentEvent,
+  type ExternalAgentUsage,
 } from "./events.js";
 
 const tracerName = "gcp.vertex.agent";
@@ -46,11 +47,13 @@ const EXT = "gcp.vertex.agent.external_agent";
  *   same `callId` (or, with no id, the oldest open call of the same name). A
  *   result with no matching call is a zero-length span; calls still open when
  *   the run ends are ended then.
- * - `execute_tool transfer_to_agent` (`run_adk_subagent` in the legacy shape):
+ * - `execute_tool transfer_to_agent` (`run_adk_subagent` in the metadata-rich shape):
  *   the whole delegation. The sub-agent's `invoke_agent` span is its child.
  *
  * Times come from the driver's event `timestamp` (milliseconds), falling back
  * to the time the event is observed.
+ *
+ * @internal
  */
 export class ExternalAgentRunTracer {
   readonly #context: InvocationContext;
@@ -67,6 +70,12 @@ export class ExternalAgentRunTracer {
   readonly #progressStart = new Map<string, number>();
   #finished = false;
 
+  /**
+   * Creates the span recorder of one external-agent run.
+   *
+   * @param options - The invocation context, the provider id, and the model
+   * the driver was configured with (written to `gen_ai.request.model`).
+   */
   constructor({
     context,
     providerId,
@@ -90,6 +99,9 @@ export class ExternalAgentRunTracer {
   /**
    * Records one runtime event. `adkEvent` is the ADK event it was mapped to,
    * if any (it supplies ids, titles and the captured response).
+   *
+   * @param event - The runtime event.
+   * @param adkEvent - The ADK event `event` was mapped to.
    */
   onDriverEvent(event: ExternalAgentEvent, adkEvent?: Event): void {
     if (this.#finished) return;
@@ -174,6 +186,8 @@ export class ExternalAgentRunTracer {
    * Zero-length span for an event the bridge emits itself (a confirmation
    * request, consumed answers). Events with no tool call or tool response get
    * no span.
+   *
+   * @param event - The ADK event the bridge emitted.
    */
   traceMarker(event: Event): void {
     const capture = shouldCaptureMessageContent();
@@ -195,6 +209,11 @@ export class ExternalAgentRunTracer {
    * Runs a delegation inside its `execute_tool` span, so the sub-agent's
    * `invoke_agent` span nests under it. The delegation is model output: it
    * ends the open model call, and the next call starts when it returns.
+   *
+   * @param info - Call id, tool name, target agent and arguments.
+   * @param run - Performs the delegation.
+   * @returns The result of `run`.
+   * @throws Rethrows whatever `run` throws, after marking the span as failed.
    */
   async traceDelegation<T extends DelegationOutcome>(
     info: DelegationTraceInfo,
@@ -272,6 +291,8 @@ export class ExternalAgentRunTracer {
    * Ends the run: writes the model, usage, cost and turns the runtime
    * reported to the `invoke_agent` span and ends tool calls still open.
    * Idempotent.
+   *
+   * @param completed - The `completed` event, when the runtime sent one.
    */
   finish(completed?: ExternalAgentCompletedEvent): void {
     if (this.#finished) return;
@@ -412,20 +433,33 @@ export class ExternalAgentRunTracer {
   }
 }
 
-/** What the tracer needs to know about a delegation. */
+/**
+ * What the tracer needs to know about a delegation.
+ *
+ * @internal
+ */
 export interface DelegationTraceInfo {
+  /** Id of the delegation call on the timeline. */
   callId: string;
+  /** Name of the sub-agent that receives the task. */
   agentName: string;
-  /** `transfer_to_agent` (native shape) or `run_adk_subagent` (legacy). */
+  /** `transfer_to_agent` (native shape) or `run_adk_subagent` (metadata-rich shape). */
   toolName: string;
   /** The call arguments as emitted on the timeline (captured per the rules). */
   args: Record<string, unknown>;
 }
 
-/** The parts of a delegation result the tracer reads. */
+/**
+ * The parts of a delegation result the tracer reads.
+ *
+ * @internal
+ */
 export interface DelegationOutcome {
+  /** Error message when the sub-agent failed. */
   error?: string;
+  /** Set when the sub-agent paused on the user; `kind` names why. */
   interrupt?: { kind: string };
+  /** State changes of the sub-agent. Not recorded on the span. */
   stateDelta?: unknown;
 }
 
@@ -442,6 +476,10 @@ interface OpenTool {
  * `promptTokenCount` is the full prompt (input plus cache read and cache
  * creation), `cachedContentTokenCount` the cache-read part. `undefined` when
  * the runtime reported no token counts.
+ *
+ * @param usage - Usage the runtime reported for the run.
+ * @returns The ADK usage metadata, or `undefined` without token counts.
+ * @internal
  */
 export function usageMetadataFor(
   usage: ExternalAgentUsage | undefined,
@@ -618,19 +656,6 @@ function isToolProgressItemType(value: string): boolean {
   );
 }
 
-export function toolDetail(value: unknown): string {
-  if (!value || typeof value !== "object") {
-    return "";
-  }
-  const record = value as Record<string, unknown>;
-  const command = stringValue(record.command);
-  const status = stringValue(record.status);
-  const query = stringValue(record.query);
-  const toolName = stringValue(record.toolName);
-  const detail = command || query || toolName || status;
-  return detail ? `: ${truncate(detail, 72)}` : "";
-}
-
 function readableEventTitle(event: Event, capture: boolean): string {
   const metadata = readCustomMetadata(event);
   // Driver-provided titles embed tool arguments, and text titles embed the
@@ -666,14 +691,13 @@ function readableEventTitle(event: Event, capture: boolean): string {
   }
 
   const itemType = stringValue(metadata.itemType);
-  const status = stringValue(metadata.status);
   const subAgentName = stringValue(metadata.subAgentName) || event.author;
   if (itemType && subAgentName) {
-    return `${subAgentName}: ${itemType}${status ? ` ${status}` : ""}`;
+    return itemTitle(subAgentName, itemType, stringValue(metadata.status));
   }
 
   return event.errorMessage
-    ? `error:${event.errorCode ?? "EXTERNAL_AGENT_ERROR"}`
+    ? `error:${event.errorCode ?? EXTERNAL_AGENT_ERROR}`
     : (event.author ?? "external_agent");
 }
 
@@ -688,17 +712,7 @@ function readSessionId(context: InvocationContext): string {
   return typeof session?.id === "string" ? session.id : "";
 }
 
-function truncate(value: string, maxLength: number): string {
-  return value.length > maxLength
-    ? `${value.slice(0, maxLength - 3)}...`
-    : value;
-}
-
-function stringValue(value: unknown): string {
-  return typeof value === "string" ? value : "";
-}
-
-/** Sub-agent named by a delegation call: `agent_name` (native) or legacy `agentName`. */
+/** Sub-agent named by a delegation call: `agent_name` (native) or `agentName` (metadata-rich shape). */
 function delegationTarget(args: unknown): string {
   const record = (args ?? {}) as { agent_name?: unknown; agentName?: unknown };
   return stringValue(record.agent_name) || stringValue(record.agentName);

@@ -1,19 +1,15 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import { describe, expect, test } from "bun:test";
 import type { InvocationContext } from "@google/adk";
+import { mapPolicyToCodexArgs } from "../../../src/agents/driver/codex-cli.js";
 import {
   CODEX_PROVIDER,
   CodexAgent,
   CodexCliDriver,
   type CodexCliSpawn,
   type ExternalAgentRunRequest,
-  mapPolicyToCodexArgs,
 } from "../../../src/agents/index.js";
+import { captureWarnings } from "../../helpers/fake-logger.js";
+import { noHostMcpServers } from "../helpers.js";
 
 function context(input = "user request"): InvocationContext {
   return { input } as unknown as InvocationContext;
@@ -57,7 +53,10 @@ describe("Codex CLI driver", () => {
       return { stdout: chunks([]), exited: Promise.resolve(0) };
     };
 
-    const driver = new CodexCliDriver({ spawn });
+    const driver = new CodexCliDriver({
+      listMcpServers: noHostMcpServers,
+      spawn,
+    });
     await collect(driver.run(request()));
 
     expect(calls).toHaveLength(1);
@@ -70,6 +69,10 @@ describe("Codex CLI driver", () => {
       "--json",
       "--sandbox",
       "read-only",
+      "-c",
+      "sandbox_workspace_write.network_access=false",
+      "-c",
+      'web_search="disabled"',
       "system instruction\n\nuser request",
     ]);
   });
@@ -82,6 +85,7 @@ describe("Codex CLI driver", () => {
     };
 
     const driver = new CodexCliDriver({
+      listMcpServers: noHostMcpServers,
       spawn,
       env: {
         PATH: "/bin",
@@ -141,7 +145,10 @@ describe("Codex CLI driver", () => {
       ]),
       exited: Promise.resolve(1),
     });
-    const driver = new CodexCliDriver({ spawn });
+    const driver = new CodexCliDriver({
+      listMcpServers: noHostMcpServers,
+      spawn,
+    });
     const events = await collect(driver.run(request()));
     const errors = events.filter((event) => event.type === "error");
     expect(errors[0]).toMatchObject({
@@ -175,7 +182,11 @@ describe("Codex CLI driver", () => {
       exited: Promise.resolve(0),
     });
 
-    const events = await collect(new CodexCliDriver({ spawn }).run(request()));
+    const events = await collect(
+      new CodexCliDriver({ listMcpServers: noHostMcpServers, spawn }).run(
+        request(),
+      ),
+    );
 
     expect(events).toContainEqual({
       type: "started",
@@ -202,11 +213,9 @@ describe("Codex CLI driver", () => {
       metadata: { builtin: true },
       timestamp: undefined,
     });
-    expect(events).toContainEqual({
-      type: "completed",
-      exitCode: 0,
-      timestamp: undefined,
-    });
+    expect(events.filter((event) => event.type === "completed")).toEqual([
+      { type: "completed", exitCode: 0, timestamp: expect.any(Number) },
+    ]);
   });
 
   test("decodes multibyte UTF-8 characters split across stdout chunks", async () => {
@@ -224,7 +233,11 @@ describe("Codex CLI driver", () => {
       exited: Promise.resolve(0),
     });
 
-    const events = await collect(new CodexCliDriver({ spawn }).run(request()));
+    const events = await collect(
+      new CodexCliDriver({ listMcpServers: noHostMcpServers, spawn }).run(
+        request(),
+      ),
+    );
 
     expect(events).toContainEqual({
       type: "output",
@@ -267,10 +280,13 @@ describe("Codex CLI driver", () => {
       exited: Promise.resolve(0),
     });
 
-    const events = await collect(new CodexCliDriver({ spawn }).run(request()));
+    const events = await collect(
+      new CodexCliDriver({ listMcpServers: noHostMcpServers, spawn }).run(
+        request(),
+      ),
+    );
 
     expect(events.filter((event) => event.type === "completed")).toEqual([
-      { type: "completed", exitCode: 0, timestamp: undefined },
       { type: "completed", exitCode: 0, timestamp: expect.any(Number) },
     ]);
     expect(events).toContainEqual({
@@ -299,6 +315,7 @@ describe("Codex CLI driver", () => {
   });
 
   test("maps bridge permissions to current Codex global and exec flags", () => {
+    // Outside full-access the network is pinned off unless allowNetwork is true.
     expect(mapPolicyToCodexArgs()).toEqual([
       "--ask-for-approval",
       "never",
@@ -306,6 +323,10 @@ describe("Codex CLI driver", () => {
       "--json",
       "--sandbox",
       "read-only",
+      "-c",
+      "sandbox_workspace_write.network_access=false",
+      "-c",
+      'web_search="disabled"',
     ]);
     expect(mapPolicyToCodexArgs({ mode: "ask" })).toEqual([
       "--ask-for-approval",
@@ -314,6 +335,10 @@ describe("Codex CLI driver", () => {
       "--json",
       "--sandbox",
       "workspace-write",
+      "-c",
+      "sandbox_workspace_write.network_access=false",
+      "-c",
+      'web_search="disabled"',
     ]);
     expect(mapPolicyToCodexArgs({ mode: "workspace-write" })).toEqual([
       "--ask-for-approval",
@@ -322,6 +347,10 @@ describe("Codex CLI driver", () => {
       "--json",
       "--sandbox",
       "workspace-write",
+      "-c",
+      "sandbox_workspace_write.network_access=false",
+      "-c",
+      'web_search="disabled"',
     ]);
     expect(mapPolicyToCodexArgs({ mode: "full-access" })).toEqual([
       "--dangerously-bypass-approvals-and-sandbox",
@@ -338,8 +367,11 @@ describe("Codex CLI driver", () => {
     expect(agent.driver).toBe(driver);
   });
 
-  test("skipGitRepoCheck adds --skip-git-repo-check to codex exec (E2E F3)", () => {
-    const driver = new CodexCliDriver({ skipGitRepoCheck: true });
+  test("skipGitRepoCheck adds --skip-git-repo-check to codex exec", () => {
+    const driver = new CodexCliDriver({
+      listMcpServers: noHostMcpServers,
+      skipGitRepoCheck: true,
+    });
 
     expect(driver.buildArgs(request())).toEqual([
       "--ask-for-approval",
@@ -348,6 +380,10 @@ describe("Codex CLI driver", () => {
       "--json",
       "--sandbox",
       "read-only",
+      "-c",
+      "sandbox_workspace_write.network_access=false",
+      "-c",
+      'web_search="disabled"',
       "--skip-git-repo-check",
       "system instruction\n\nuser request",
     ]);
@@ -367,7 +403,10 @@ describe("Codex CLI driver", () => {
       "--skip-git-repo-check",
     );
     expect(
-      new CodexCliDriver({ skipGitRepoCheck: false }).buildArgs(request()),
+      new CodexCliDriver({
+        listMcpServers: noHostMcpServers,
+        skipGitRepoCheck: false,
+      }).buildArgs(request()),
     ).not.toContain("--skip-git-repo-check");
   });
 
@@ -393,17 +432,54 @@ describe("Codex CLI driver", () => {
       exited: Promise.resolve(0),
     });
 
-    const events = await collect(new CodexCliDriver({ spawn }).run(request()));
+    const warnings = captureWarnings();
+    try {
+      const events = await collect(
+        new CodexCliDriver({ listMcpServers: noHostMcpServers, spawn }).run(
+          request(),
+        ),
+      );
+
+      // Exit 0: the stderr line is a diagnostic, not an error event.
+      expect(events.map((event) => event.type)).toEqual([
+        "started",
+        "output",
+        "completed",
+      ]);
+      expect(warnings.codes).toEqual(["CODEX_CLI_STDERR"]);
+      expect(String(warnings.mock.calls[0]?.[0])).toContain(
+        "warning: something",
+      );
+    } finally {
+      warnings.mockRestore();
+    }
+  });
+
+  test("stderr lines become errors only when the process exits nonzero", async () => {
+    const spawn: CodexCliSpawn = () => ({
+      stdout: chunks([]),
+      stderr: chunks(["Error: model not available"]),
+      exited: Promise.resolve(2),
+    });
+
+    const events = await collect(
+      new CodexCliDriver({ listMcpServers: noHostMcpServers, spawn }).run(
+        request(),
+      ),
+    );
 
     expect(events.map((event) => event.type)).toEqual([
       "started",
-      "output",
       "error",
       "completed",
     ]);
-    expect(events[2]).toMatchObject({ message: "warning: something" });
+    expect(events[1]).toMatchObject({
+      message: "Error: model not available",
+      recoverable: false,
+    });
+    expect(events[2]).toMatchObject({ exitCode: 2 });
   });
-  describe("JSONL normalization (E2E N1/N2)", () => {
+  describe("JSONL normalization", () => {
     function spawnLines(
       lines: readonly unknown[],
       exitCode = 0,
@@ -414,9 +490,10 @@ describe("Codex CLI driver", () => {
       });
     }
 
-    test("lifecycle and unknown events produce no output (N1)", async () => {
+    test("lifecycle and unknown events produce no output", async () => {
       const events = await collect(
         new CodexCliDriver({
+          listMcpServers: noHostMcpServers,
           spawn: spawnLines([
             { type: "thread.started", thread_id: "t-1" },
             { type: "turn.started" },
@@ -460,6 +537,7 @@ describe("Codex CLI driver", () => {
     test("agent_message text is unchanged", async () => {
       const events = await collect(
         new CodexCliDriver({
+          listMcpServers: noHostMcpServers,
           spawn: spawnLines([
             { type: "turn.started" },
             {
@@ -480,11 +558,12 @@ describe("Codex CLI driver", () => {
       ]);
     });
 
-    test("a usage-limit failure yields one non-recoverable CODEX_QUOTA_EXHAUSTED error (N2)", async () => {
+    test("a usage-limit failure yields one non-recoverable QUOTA_EXHAUSTED error", async () => {
       const message =
         "You've hit your usage limit. Upgrade to Pro or try again at Nov 12th, 2026 9:00 AM.";
       const events = await collect(
         new CodexCliDriver({
+          listMcpServers: noHostMcpServers,
           spawn: spawnLines(
             [
               { type: "thread.started", thread_id: "t-1" },
@@ -501,7 +580,7 @@ describe("Codex CLI driver", () => {
         {
           type: "error",
           message,
-          code: "CODEX_QUOTA_EXHAUSTED",
+          code: "QUOTA_EXHAUSTED",
           recoverable: false,
           timestamp: undefined,
         },
@@ -514,6 +593,7 @@ describe("Codex CLI driver", () => {
       const message = "stream disconnected unexpectedly";
       const events = await collect(
         new CodexCliDriver({
+          listMcpServers: noHostMcpServers,
           spawn: spawnLines(
             [
               { type: "error", message },
@@ -537,6 +617,7 @@ describe("Codex CLI driver", () => {
     test("distinct error and turn.failed messages both surface", async () => {
       const events = await collect(
         new CodexCliDriver({
+          listMcpServers: noHostMcpServers,
           spawn: spawnLines(
             [
               { type: "error", message: "Reconnecting... 1/5" },
@@ -555,13 +636,14 @@ describe("Codex CLI driver", () => {
           .map((event) => [event.message, event.code]),
       ).toEqual([
         ["Reconnecting... 1/5", "EXTERNAL_AGENT_ERROR"],
-        ["You hit your usage limit", "CODEX_QUOTA_EXHAUSTED"],
+        ["You hit your usage limit", "QUOTA_EXHAUSTED"],
       ]);
     });
 
     test("a rate limit stays recoverable and an explicit code is kept", async () => {
       const events = await collect(
         new CodexCliDriver({
+          listMcpServers: noHostMcpServers,
           spawn: spawnLines([
             { type: "error", message: "429 Too Many Requests" },
             { type: "error", message: "boom", code: "CUSTOM_CODE" },
@@ -616,6 +698,7 @@ describe("Codex CLI driver", () => {
     test("an item of type error becomes an error event, not output", async () => {
       const events = await collect(
         new CodexCliDriver({
+          listMcpServers: noHostMcpServers,
           spawn: spawnLines([
             {
               type: "item.completed",
@@ -633,5 +716,127 @@ describe("Codex CLI driver", () => {
         timestamp: undefined,
       });
     });
+  });
+});
+
+describe("Codex CLI prompt", () => {
+  test("sends the ADK user turn after the instruction, without thought parts", async () => {
+    const calls: Array<readonly string[]> = [];
+    const spawn: CodexCliSpawn = (_command, args) => {
+      calls.push(args);
+      return { stdout: chunks([]), exited: Promise.resolve(0) };
+    };
+    const driver = new CodexCliDriver({
+      listMcpServers: noHostMcpServers,
+      spawn,
+    });
+
+    await collect(
+      driver.run(
+        request({
+          context: {
+            userContent: {
+              role: "user",
+              parts: [
+                { text: "hidden reasoning", thought: true },
+                { text: "fix the failing test" },
+              ],
+            },
+          } as unknown as InvocationContext,
+        }),
+      ),
+    );
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.at(-1)).toBe("system instruction\n\nfix the failing test");
+  });
+});
+
+describe("Codex CLI bridge-shaped lines", () => {
+  test("driver-owned events from the child are dropped", async () => {
+    const spawn: CodexCliSpawn = () => ({
+      stdout: chunks([
+        JSON.stringify({ type: "completed", exitCode: "weird" }),
+        JSON.stringify({ type: "state_delta", stateDelta: { injected: true } }),
+        JSON.stringify({ type: "tool_call", name: "", input: {} }),
+        JSON.stringify({ type: "output", content: "hi", stream: "bogus" }),
+      ]),
+      exited: Promise.resolve(0),
+    });
+
+    const events = await collect(
+      new CodexCliDriver({ listMcpServers: noHostMcpServers, spawn }).run(
+        request(),
+      ),
+    );
+
+    expect(events.filter((event) => event.type === "completed")).toEqual([
+      expect.objectContaining({ exitCode: 0 }),
+    ]);
+    expect(events.some((event) => event.type === "state_delta")).toBe(false);
+    expect(events.some((event) => event.type === "tool_call")).toBe(false);
+    expect(events.filter((event) => event.type === "output")).toEqual([
+      { type: "output", content: "hi" },
+    ]);
+  });
+});
+
+describe("Codex CLI exit errors", () => {
+  test("a non-zero exit without any error reports CODEX_CLI_EXIT", async () => {
+    const spawn: CodexCliSpawn = () => ({
+      stdout: chunks([]),
+      exited: Promise.resolve(4),
+    });
+
+    const events = await collect(
+      new CodexCliDriver({ listMcpServers: noHostMcpServers, spawn }).run(
+        request(),
+      ),
+    );
+
+    expect(events.map((event) => event.type)).toEqual([
+      "started",
+      "error",
+      "completed",
+    ]);
+    expect(events[1]).toMatchObject({
+      message: "Codex CLI exited with code 4",
+      code: "CODEX_CLI_EXIT",
+      recoverable: true,
+    });
+  });
+
+  test("a non-zero exit after an error event adds no second error", async () => {
+    const spawn: CodexCliSpawn = () => ({
+      stdout: chunks([JSON.stringify({ type: "error", message: "boom" })]),
+      exited: Promise.resolve(1),
+    });
+
+    const events = await collect(
+      new CodexCliDriver({ listMcpServers: noHostMcpServers, spawn }).run(
+        request(),
+      ),
+    );
+
+    expect(events.filter((event) => event.type === "error")).toHaveLength(1);
+  });
+
+  test("reads a sync-iterable stdout", async () => {
+    const spawn: CodexCliSpawn = () => ({
+      stdout: [
+        `${JSON.stringify({ type: "response.output_text.delta", delta: "hi" })}\n`,
+      ],
+      exited: Promise.resolve(0),
+    });
+
+    const events = await collect(
+      new CodexCliDriver({ listMcpServers: noHostMcpServers, spawn }).run(
+        request(),
+      ),
+    );
+
+    expect(events).toContainEqual(
+      expect.objectContaining({ type: "output", content: "hi" }),
+    );
   });
 });

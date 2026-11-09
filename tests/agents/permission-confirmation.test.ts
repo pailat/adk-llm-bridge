@@ -36,6 +36,8 @@ function request(
     requestId: "call-1",
     toolName: "Bash",
     input: { command: "ls" },
+    // Network is off by default; the driver ran Bash in its no-network sandbox.
+    networkSandbox: "enforced",
     ...overrides,
   };
 }
@@ -79,7 +81,7 @@ describe("guardPermissionRequest", () => {
     ).toBeUndefined();
   });
 
-  test("traversal out of an allowed root is denied (M1)", () => {
+  test("traversal out of an allowed root is denied", () => {
     const policy: ExternalAgentPermissionPolicy = {
       mode: "ask",
       allowedPaths: ["/repo"],
@@ -122,7 +124,7 @@ describe("guardPermissionRequest", () => {
     ).toBe("deny");
   });
 
-  test("file-tool path inputs are checked when the runtime sends no blockedPath (M1)", () => {
+  test("file-tool path inputs are checked when the runtime sends no blockedPath", () => {
     const policy: ExternalAgentPermissionPolicy = {
       mode: "ask",
       allowedPaths: ["/repo"],
@@ -225,21 +227,42 @@ describe("guardPermissionRequest", () => {
     }
   });
 
-  test("shell and MCP tools are not network-guarded (documented limit)", () => {
-    // allowNetwork:false cannot be enforced from a Bash command or an MCP
-    // tool's input; the guard leaves them to the approver and the runtime.
+  test("with allowNetwork: true shell and MCP tools are left to the approver", () => {
+    const open: ExternalAgentPermissionPolicy = {
+      mode: "ask",
+      allowNetwork: true,
+    };
+    expect(
+      guardPermissionRequest(
+        open,
+        request({
+          toolName: "Bash",
+          input: { command: "curl http://x" },
+          networkSandbox: undefined,
+        }),
+      ),
+    ).toBeUndefined();
+    expect(
+      guardPermissionRequest(
+        open,
+        request({ toolName: "mcp__fetch__fetch", input: { url: "http://x" } }),
+      ),
+    ).toBeUndefined();
+  });
+
+  test("an unset allowNetwork denies unsandboxed shell and non-bridge MCP tools", () => {
     expect(
       guardPermissionRequest(
         { mode: "ask" },
-        request({ toolName: "Bash", input: { command: "curl http://x" } }),
-      ),
-    ).toBeUndefined();
+        request({ toolName: "Bash", networkSandbox: undefined }),
+      )?.behavior,
+    ).toBe("deny");
     expect(
       guardPermissionRequest(
         { mode: "ask" },
         request({ toolName: "mcp__fetch__fetch", input: { url: "http://x" } }),
-      ),
-    ).toBeUndefined();
+      )?.behavior,
+    ).toBe("deny");
   });
 
   test("permissionSignature ignores key order", () => {
@@ -562,7 +585,7 @@ describe("ExternalAgent permission prompts: ADK confirmation protocol", () => {
     expect(second.decisions[1]?.behavior).toBe("deny");
   });
 
-  test("an answer re-sent on a later turn is not applied again (m2)", async () => {
+  test("an answer re-sent on a later turn is not applied again", async () => {
     const first = new AskingDriver([request()], true);
     const second = new AskingDriver([request()]);
     const third = new AskingDriver([request()]);
@@ -601,7 +624,7 @@ describe("ExternalAgent permission prompts: ADK confirmation protocol", () => {
     expect(third.requests[0]?.instruction ?? "").not.toContain("APPROVED");
   });
 
-  test("an answer used by a turn that emitted nothing is still not replayable (r2 m1)", async () => {
+  test("an answer used by a turn that emitted nothing is still not replayable", async () => {
     const first = new AskingDriver([request()], true);
     // Uses the approval, then fails before yielding a single event.
     const silent: ExternalAgentDriver = {

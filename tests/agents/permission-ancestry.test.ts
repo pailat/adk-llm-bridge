@@ -1,10 +1,4 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
-// B1 (ola3 r2): a nested ExternalAgent that ADK runs directly (a resumable app
+// A nested ExternalAgent that ADK runs directly (a resumable app
 // resuming its confirmation, or any direct routing) is never wider than the
 // ExternalAgents above it, even with no inherited policy on the session.
 
@@ -34,10 +28,14 @@ interface Seen {
   outside?: PermissionDecision;
 }
 
+// The derived policy sets allowNetwork: false, so the driver must report
+// that Bash runs in the no-network sandbox (as the Claude drivers do) for the
+// request to reach the confirmation at all.
 const BASH: PermissionRequest = {
   requestId: "t1",
   toolName: "Bash",
   input: { command: "make deploy" },
+  networkSandbox: "enforced",
 };
 const OUTSIDE: PermissionRequest = {
   requestId: "t2",
@@ -124,9 +122,21 @@ const answer = (id: string | undefined) => ({
   ],
 });
 
-const DERIVED = { mode: "ask", allowNetwork: false, allowedPaths: ["/repo"] };
+const DERIVED: ExternalAgentPermissionPolicy = {
+  mode: "ask",
+  allowNetwork: false,
+  allowedPaths: ["/repo"],
+};
 
-describe("ExternalAgent permissions follow its static ancestry (B1)", () => {
+// The delegated turn merges the session-inherited policy with the ancestry
+// one; both carry `/repo`, which stays as a (redundant) bound. A turn resumed
+// straight on the worker has only the ancestry policy. Same access either way.
+const DERIVED_WITH_BOUNDS: ExternalAgentPermissionPolicy = {
+  ...DERIVED,
+  pathBounds: [["/repo"], ["/repo"]],
+};
+
+describe("ExternalAgent permissions follow its static ancestry", () => {
   for (const childMode of ["full-access", "workspace-write"] as const) {
     test(`a ${childMode} worker resumed directly keeps the coordinator's ask + /repo`, async () => {
       const seen: Seen[] = [];
@@ -157,7 +167,7 @@ describe("ExternalAgent permissions follow its static ancestry (B1)", () => {
       ]);
 
       const [turn1, turn2] = seen;
-      expect(turn1?.permissions).toEqual(DERIVED);
+      expect(turn1?.permissions).toEqual(DERIVED_WITH_BOUNDS);
       expect(turn2?.turn).toBe(2);
       expect(turn2?.permissions).toEqual(DERIVED);
       expect(turn2?.bash).toEqual({ behavior: "allow" });
@@ -232,7 +242,11 @@ describe("ExternalAgent permissions follow its static ancestry (B1)", () => {
     const { run } = await resumableRunner(child);
     await run({ role: "user", parts: [{ text: "go" }] });
 
-    expect(seen[0]?.permissions).toEqual({ mode: "full-access" });
+    // Its own policy, with the unset allowNetwork read as false.
+    expect(seen[0]?.permissions).toEqual({
+      mode: "full-access",
+      allowNetwork: false,
+    });
   });
 
   test("a standalone clone keeps its own policy; a cloned coordinator still caps its workers", async () => {
@@ -252,7 +266,10 @@ describe("ExternalAgent permissions follow its static ancestry (B1)", () => {
       role: "user",
       parts: [{ text: "go" }],
     });
-    expect(seen.at(-1)?.permissions).toEqual({ mode: "full-access" });
+    expect(seen.at(-1)?.permissions).toEqual({
+      mode: "full-access",
+      allowNetwork: false,
+    });
 
     const copy = coordinator.clone({ name: "coordinator_copy" });
     const clonedWorker = copy.subAgents[0] as ExternalAgent;
@@ -265,7 +282,7 @@ describe("ExternalAgent permissions follow its static ancestry (B1)", () => {
   });
 });
 
-// Wave 4 (security): ancestors are detected by a `Symbol.for` brand, so a
+// Ancestors are detected by a `Symbol.for` brand, so a
 // second copy of the class (duplicated install, bundle split) still caps the
 // agent, and their policy is read only through a frozen, validated reader.
 describe("ExternalAgent ancestry brand check", () => {
@@ -398,6 +415,7 @@ describe("ExternalAgent ancestry brand check", () => {
     foreignAncestor(child, undefined);
     expect(await permissionsSeenBy(child, seen)).toEqual({
       mode: "full-access",
+      allowNetwork: false,
     });
   });
 
@@ -410,6 +428,7 @@ describe("ExternalAgent ancestry brand check", () => {
     Object.setPrototypeOf(parent, proto);
     expect(await permissionsSeenBy(child, seen)).toEqual({
       mode: "full-access",
+      allowNetwork: false,
     });
   });
 

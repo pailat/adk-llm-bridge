@@ -10,9 +10,9 @@ import { CODEX_PROVIDER } from "../../src/agents/provider/schema.js";
 import { withDeadline } from "./helpers.js";
 
 /**
- * WF-4b for ExternalAgent: the BaseNode options accepted by ExternalAgentConfig
- * (`timeout`, `retryConfig`, ...) are honored by ADK when the agent runs as a
- * Workflow node, and our driver contract (abort signal, clean re-run) holds.
+ * The BaseNode options accepted by ExternalAgentConfig (`timeout`,
+ * `retryConfig`, ...) are honored by ADK when the agent runs as a Workflow
+ * node, and the driver contract (abort signal, clean re-run) holds.
  */
 
 function scripted(
@@ -57,7 +57,7 @@ async function runNode(agent: ExternalAgent) {
   return { received, errors };
 }
 
-describe("ExternalAgent as an ADK Workflow node (WF-4b)", () => {
+describe("ExternalAgent as an ADK Workflow node", () => {
   test("timeout aborts the driver through request.abortSignal", async () => {
     let signal: AbortSignal | undefined;
     let driverCleanedUp = false;

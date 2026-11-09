@@ -1,9 +1,4 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
+import { warn } from "../../utils/log.js";
 import type { ExternalAgentEvent } from "../events.js";
 import {
   type ExternalAgentRunRequest,
@@ -11,55 +6,185 @@ import {
 } from "../external-agent-driver.js";
 import { mapPermissionPolicyToFlags } from "../permissions/mapper.js";
 import type { ExternalAgentPermissionPolicy } from "../permissions/schema.js";
-import { CLAUDE_PROVIDER } from "../provider/schema.js";
+import { CLAUDE_PROVIDER } from "../provider/claude.js";
+import type { AgentRuntimeCapabilities } from "../runtime/capabilities.js";
+import {
+  assertClaudeMessageIsolated,
+  type ClaudeIsolationPlan,
+  claudeCliIsolationArgs,
+  planClaudeIsolation,
+} from "./claude-isolation.js";
+import { collectTail, type LineSource, readLines } from "./lines.js";
+import {
+  dependencyMissing,
+  ExternalAgentPolicyError,
+  isCommandNotFound,
+  policyErrorEvent,
+} from "./policy-errors.js";
 import {
   claudeResultSummary,
   type ExternalAgentRunSummary,
 } from "./run-summary.js";
-import { asRecord, copyIfPresent, stringValue } from "./shared.js";
+import {
+  asRecord,
+  bridgeEvent,
+  buildChildEnv,
+  exitErrorEvent,
+  isJsonObject,
+  isRecoverableMessage,
+  promptFromRequest,
+  stringValue,
+  validateDriverConfig,
+} from "./shared.js";
 import { spawnSubprocess, superviseSubprocess } from "./spawn.js";
 import { SubprocessJsonlDriver } from "./subprocess-jsonl.js";
 
+/** The running `claude` process as the driver sees it. */
 export interface ClaudeCliSubprocess {
+  /** Standard output, read line by line as `stream-json`. */
   stdout?: LineSource | null;
+  /** Standard error, collected to report a non-zero exit. */
   stderr?: LineSource | null;
+  /**
+   * Resolves with the exit code. May reject with a missing-binary error, which
+   * the driver reports as a dependency error.
+   */
   exited: Promise<number>;
   /**
    * Terminates the process. Called when the run is aborted or abandoned
    * before the process exited. Optional for custom spawns; the default spawn
-   * always provides it.
+   * always provides it. The driver sends SIGTERM first and, if the process
+   * has not exited after `killGraceMs`, SIGKILL.
    */
-  kill?: () => void;
+  kill?: (signal?: NodeJS.Signals) => void;
 }
 
+/** Options the driver passes to a {@link ClaudeCliSpawn}. */
 export interface ClaudeCliSpawnOptions {
+  /** Working directory of the process. */
   cwd?: string;
+  /**
+   * Environment of the process. The driver builds it from an allowlist, so it
+   * never carries the whole parent environment.
+   */
   env?: Record<string, string>;
 }
 
-export type LineSource =
-  | ReadableStream<Uint8Array | string>
-  | AsyncIterable<Uint8Array | string>
-  | Iterable<Uint8Array | string>;
+/** Source of output lines accepted by the driver, re-exported from `lines.ts`. */
+export type { LineSource } from "./lines.js";
 
+/** Function that starts the `claude` process; replaceable for tests. */
 export type ClaudeCliSpawn = (
   command: string,
   args: readonly string[],
   options: ClaudeCliSpawnOptions,
 ) => ClaudeCliSubprocess;
 
+/** Configuration of {@link ClaudeCliDriver}. */
 export interface ClaudeCliDriverConfig {
+  /**
+   * Binary to run.
+   *
+   * @defaultValue `"claude"`
+   */
   command?: string;
+  /** Extra arguments appended after the ones the driver builds. */
   args?: readonly string[];
+  /**
+   * Custom process starter.
+   *
+   * @defaultValue a subprocess spawn that supports abort and kill
+   */
   spawn?: ClaudeCliSpawn;
+  /**
+   * Environment the allowlisted variables (`PATH`, `HOME`, `USER`, `SHELL`,
+   * Claude config dirs) are copied from.
+   *
+   * @defaultValue `process.env`
+   */
   env?: Record<string, string | undefined>;
+  /**
+   * Milliseconds a cancelled process gets to exit after SIGTERM before it is
+   * killed with SIGKILL.
+   *
+   * @defaultValue 2000 (applied by the process supervisor)
+   */
+  killGraceMs?: number;
+  /**
+   * Built-in Claude Code tools the agent gets (`--tools`). Defaults to
+   * `DEFAULT_CLAUDE_TOOLS`, minus what the policy removes (write and shell
+   * tools under `read-only`, web tools without network). Pass `[]` for none.
+   *
+   * @defaultValue `DEFAULT_CLAUDE_TOOLS`
+   */
+  tools?: readonly string[];
+  /**
+   * Opt-in: inherit the host's Claude Code configuration. When `true` the
+   * driver does not pin the tool set (unless `tools` is set) and does not pass
+   * `--strict-mcp-config`, `--setting-sources=`, `--disable-slash-commands` or
+   * `disableClaudeAiConnectors`, and the isolation checks (the `init`
+   * listing and each `tool_use`) are off.
+   * Isolated by default, like `ClaudeAgentSdkDriver`.
+   *
+   * @defaultValue false
+   */
+  inheritHostConfig?: boolean;
+  /**
+   * Opt-in: without `allowNetwork: true`, run Bash without the no-network
+   * sandbox. Without it the sandbox is on and the run fails at start where the
+   * sandbox cannot run. With it, shell commands can reach the network.
+   *
+   * @defaultValue false
+   */
+  allowUnsandboxedShell?: boolean;
 }
 
+function claudeCliMissing(): ExternalAgentPolicyError {
+  return dependencyMissing(
+    "binary",
+    "Claude Code (claude)",
+    "npm install -g @anthropic-ai/claude-code",
+    "set command to the path of the claude binary",
+  );
+}
+
+/**
+ * Runs Claude Code through its `claude -p --output-format stream-json` CLI and
+ * maps the stream to {@link ExternalAgentEvent}s.
+ *
+ * @remarks
+ * Security and lifecycle rules:
+ * - Isolated by default: an explicit tool list, no MCP servers, settings files,
+ *   skills or claude.ai connectors. Every stdout line is checked, and the run
+ *   stops with an `EXTERNAL_AGENT_ISOLATION_VIOLATED` error event when the CLI
+ *   reports, or the model is about to use, a tool outside the configured set.
+ * - Without `allowNetwork: true` Bash runs in a no-network sandbox that fails
+ *   the run at start where it cannot run, unless `allowUnsandboxedShell` is set.
+ * - The child environment is an allowlist, never the whole parent environment.
+ * - Abort stops the run: the process gets SIGTERM and, after `killGraceMs`,
+ *   SIGKILL; the supervisor is always released.
+ * - A missing binary becomes a policy error event with exit code 1.
+ * - A non-zero exit becomes an `error` event with code `CLAUDE_CLI_EXIT`,
+ *   carrying the stderr tail; auth, billing and quota failures are not
+ *   recoverable.
+ */
 export class ClaudeCliDriver extends SubprocessJsonlDriver {
   readonly #spawn: ClaudeCliSpawn;
   readonly #env: Record<string, string | undefined>;
+  readonly #killGraceMs: number | undefined;
+  readonly #tools: readonly string[] | undefined;
+  readonly #inheritHostConfig: boolean;
+  readonly #allowUnsandboxedShell: boolean;
 
+  /**
+   * Creates a driver that runs the `claude` CLI.
+   *
+   * @param config - Driver options; all optional.
+   * @throws InputValidationError (from `@google/adk`) when `command` is empty or
+   * `killGraceMs` is not a finite number of at least 0.
+   */
   constructor(config: ClaudeCliDriverConfig = {}) {
+    validateDriverConfig("ClaudeCliDriver", config);
     super({
       providerId: CLAUDE_PROVIDER.id,
       command: config.command ?? CLAUDE_PROVIDER.command ?? "claude",
@@ -67,11 +192,29 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
     });
     this.#spawn = config.spawn ?? spawnSubprocess;
     this.#env = config.env ?? process.env;
+    this.#killGraceMs = config.killGraceMs;
+    this.#tools = config.tools ? [...config.tools] : undefined;
+    this.#inheritHostConfig = config.inheritHostConfig ?? false;
+    this.#allowUnsandboxedShell = config.allowUnsandboxedShell ?? false;
   }
 
+  /** Features this driver supports: it maps the permission policy onto CLI flags. It emits whole messages, not token deltas. */
+  capabilities(): AgentRuntimeCapabilities {
+    return { streaming: false, permissions: true };
+  }
+
+  /**
+   * Starts `claude` for one request and streams its events.
+   *
+   * @param request - The run request (instruction, context, permissions,
+   * credential, working directory and abort signal).
+   * @returns Events starting with `started` and, unless aborted, ending with
+   * `completed`. An aborted run ends without a `completed` event.
+   */
   override async *run(
     request: ExternalAgentRunRequest,
   ): AsyncIterable<ExternalAgentEvent> {
+    const isolation = this.isolationPlan(request);
     const args = this.buildArgs(request);
     const env = this.buildEnv(request);
 
@@ -86,38 +229,78 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
       return;
     }
 
-    const child = this.#spawn(this.command, args, {
-      cwd: request.workingDirectory,
-      env,
+    let child: ClaudeCliSubprocess;
+    try {
+      child = this.#spawn(this.command, args, {
+        cwd: request.workingDirectory,
+        env,
+      });
+    } catch (error) {
+      // Bun.spawn throws when the binary does not exist.
+      if (!isCommandNotFound(error)) {
+        throw error;
+      }
+      yield policyErrorEvent(claudeCliMissing());
+      yield { type: "completed", exitCode: 1, timestamp: Date.now() };
+      return;
+    }
+    const supervisor = superviseSubprocess(child, signal, {
+      killGraceMs: this.#killGraceMs,
     });
-    const supervisor = superviseSubprocess(child, signal);
 
     try {
       const stderrLines: string[] = [];
       const stderrPromise = child.stderr
-        ? collectLines(child.stderr, stderrLines)
+        ? collectTail(child.stderr, stderrLines)
         : Promise.resolve();
 
       // Claude Code repeats the final assistant text in `result.result`.
       // Emit it only when no assistant text was streamed (as the SDK driver
       // does with `emittedOutput`), otherwise the answer appears twice.
       let emittedAssistantText = false;
-      // F1: the `result` line reports model, usage, cost, turns and duration;
+      // The `result` line reports model, usage, cost, turns and duration;
       // they go on the `completed` event.
       let summary: ExternalAgentRunSummary = {};
       for await (const line of readLines(child.stdout)) {
         if (signal?.aborted) {
           return;
         }
-        const parsed = this.parseClaudeStreamLine(line);
+        const raw = parseJsonLine(line);
+        if (raw === undefined) {
+          continue;
+        }
+        if (isolation.isolated) {
+          // Fail closed when the CLI reports, or the model is about to use,
+          // tools or MCP servers outside the configured set (a host or
+          // managed setting added them).
+          try {
+            assertClaudeMessageIsolated(
+              raw,
+              { tools: isolation.tools ?? [], mcpServers: [] },
+              "Claude CLI",
+            );
+          } catch (error) {
+            if (error instanceof ExternalAgentPolicyError) {
+              yield policyErrorEvent(error);
+              yield {
+                type: "completed",
+                exitCode: 1,
+                timestamp: Date.now(),
+              };
+              return;
+            }
+            throw error;
+          }
+        }
+        const parsed = this.parseClaudeStreamLine(raw);
         if (!parsed) {
           continue;
         }
         if (parsed.source === "result") {
           summary = parsed.summary;
-          if (parsed.event.type === "completed") {
-            parsed.event = { ...summary, ...parsed.event };
-          }
+        }
+        if (!parsed.event) {
+          continue;
         }
         if (parsed.source === "assistant" && parsed.event.type === "output") {
           emittedAssistantText = true;
@@ -134,7 +317,19 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
         return;
       }
 
-      const exitCode = await child.exited;
+      let exitCode: number;
+      try {
+        exitCode = await child.exited;
+      } catch (error) {
+        // Node reports a missing binary through `exited`.
+        supervisor.markExited();
+        if (!isCommandNotFound(error)) {
+          throw error;
+        }
+        yield policyErrorEvent(claudeCliMissing());
+        yield { type: "completed", exitCode: 1, timestamp: Date.now() };
+        return;
+      }
       supervisor.markExited();
       await stderrPromise;
       if (signal?.aborted) {
@@ -151,83 +346,113 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
         return;
       }
 
-      yield {
-        type: "error",
-        message:
-          stderrLines.join("\n").trim() ||
-          `Claude CLI exited with code ${exitCode}`,
+      yield exitErrorEvent({
+        runtime: "Claude CLI",
+        exitCode,
+        stderr: stderrLines,
         code: "CLAUDE_CLI_EXIT",
-        recoverable: true,
-        timestamp: Date.now(),
-      };
+      });
       yield { type: "completed", exitCode, ...summary, timestamp: Date.now() };
     } finally {
       supervisor.release();
     }
   }
 
+  /**
+   * CLI arguments for a request: prompt, output format, permission flags,
+   * isolation flags, then the configured extra `args`.
+   *
+   * @param request - The run request.
+   * @returns The argument list passed to the process.
+   */
   buildArgs(request: ExternalAgentRunRequest): readonly string[] {
     return [
       "-p",
-      buildPrompt(request),
+      promptFromRequest(request),
       "--output-format",
       "stream-json",
       "--verbose",
       ...mapClaudePermissionArgs(request.permissions),
+      ...claudeCliIsolationArgs(this.isolationPlan(request)),
       ...this.args,
     ];
   }
 
-  buildEnv(request: ExternalAgentRunRequest): Record<string, string> {
-    const env: Record<string, string> = {};
-
-    copyIfPresent(this.#env, env, "PATH");
-    copyIfPresent(this.#env, env, "HOME");
-    copyIfPresent(this.#env, env, "USER");
-    copyIfPresent(this.#env, env, "SHELL");
-
-    // These provider-native config variables allow Claude Code to use its
-    // existing local OAuth/native login cache without the bridge storing secrets.
-    copyIfPresent(this.#env, env, "CLAUDE_CONFIG_DIR");
-    copyIfPresent(this.#env, env, "XDG_CONFIG_HOME");
-
-    if (request.credential?.kind === "env") {
-      for (const key of request.provider.envAllowlist ?? []) {
-        const value = request.credential.env?.[key];
-        if (typeof value === "string" && value.length > 0) {
-          env[key] = value;
-        }
-      }
-    }
-
-    return env;
+  /**
+   * The same isolation as `ClaudeAgentSdkDriver`: an explicit tool list,
+   * no MCP servers, settings files, skills or claude.ai connectors, and the
+   * no-network sandbox for Bash without `allowNetwork: true`.
+   *
+   * @param request - The run request; its permissions drive the plan.
+   * @returns The plan for this run.
+   */
+  isolationPlan(request: ExternalAgentRunRequest): ClaudeIsolationPlan {
+    return planClaudeIsolation(request.permissions, {
+      tools: this.#tools,
+      inheritHostConfig: this.#inheritHostConfig,
+      allowUnsandboxedShell: this.#allowUnsandboxedShell,
+    });
   }
 
+  /**
+   * Environment of the child process: only `PATH`, `HOME`, `USER`, `SHELL` and
+   * the Claude config directories from the driver's environment, plus the
+   * credential variables the provider allowlists when the credential is an
+   * `env` one. Nothing else is inherited.
+   *
+   * @param request - The run request.
+   * @returns The environment to pass to the process.
+   */
+  buildEnv(request: ExternalAgentRunRequest): Record<string, string> {
+    // The config directories let Claude Code use its existing local
+    // OAuth/native login cache without the bridge storing secrets.
+    return buildChildEnv(
+      this.#env,
+      ["PATH", "HOME", "USER", "SHELL", "CLAUDE_CONFIG_DIR", "XDG_CONFIG_HOME"],
+      request,
+    );
+  }
+
+  /**
+   * Maps one `stream-json` line to an event.
+   *
+   * @param line - One stdout line.
+   * @returns The event, or `undefined` for a blank line, a JSON value that is
+   * not an object, or a diagnostic (`system`, `rate_limit_event`) that is not
+   * shown.
+   * @throws `SyntaxError` when the line is not valid JSON.
+   */
   parseClaudeLine(line: string): ExternalAgentEvent | undefined {
     const trimmed = line.trim();
     if (!trimmed) {
       return undefined;
     }
 
-    const parsed = JSON.parse(trimmed) as ClaudeStreamEvent;
-    return normalizeClaudeEvent(parsed);
+    const parsed: unknown = JSON.parse(trimmed);
+    if (!isJsonObject(parsed)) {
+      return undefined;
+    }
+    return normalizeClaudeEvent(parsed as ClaudeStreamEvent);
   }
 
-  private parseClaudeStreamLine(line: string):
+  private parseClaudeStreamLine(raw: unknown):
     | {
-        event: ExternalAgentEvent;
+        event: ExternalAgentEvent | undefined;
         source: ClaudeEventSource;
         summary: ExternalAgentRunSummary;
       }
     | undefined {
-    const trimmed = line.trim();
-    if (!trimmed) {
-      return undefined;
-    }
-    const parsed = JSON.parse(trimmed) as ClaudeStreamEvent;
+    const parsed = asRecord(raw) as ClaudeStreamEvent;
     const event = normalizeClaudeEvent(parsed);
     if (!event) {
-      return undefined;
+      // A `result` line without text still reports the run summary.
+      return parsed.type === "result"
+        ? {
+            event: undefined,
+            source: "result",
+            summary: claudeResultSummary(parsed),
+          }
+        : undefined;
     }
     const source: ClaudeEventSource =
       parsed.type === "assistant"
@@ -247,27 +472,60 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
 
 type ClaudeEventSource = "assistant" | "result" | "other";
 
-type ClaudeStreamEvent =
-  | ExternalAgentEvent
-  | {
-      type?: string;
-      subtype?: string;
-      message?: unknown;
-      result?: string;
-      text?: string;
-      content?: unknown;
-      name?: string;
-      input?: unknown;
-      tool_name?: string;
-      tool_input?: unknown;
-      error?: string | { message?: string; code?: string };
-      code?: string;
-      exitCode?: number;
-      signal?: string;
-      session_id?: string;
-      providerId?: string;
-    };
+/**
+ * Parses one stdout line. Blank lines give `undefined`; a non-JSON line (a
+ * banner or debug print) is logged and skipped instead of ending the run.
+ */
+function parseJsonLine(line: string): unknown {
+  const trimmed = line.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  try {
+    return JSON.parse(trimmed) as unknown;
+  } catch {
+    warn(
+      "CLAUDE_CLI_NON_JSON_LINE",
+      `Ignoring a non-JSON line from claude --output-format stream-json: ${trimmed.slice(0, 200)}`,
+    );
+    return undefined;
+  }
+}
 
+type ClaudeStreamEvent = {
+  type?: string;
+  subtype?: string;
+  message?: unknown;
+  result?: string;
+  text?: string;
+  content?: unknown;
+  name?: string;
+  input?: unknown;
+  tool_name?: string;
+  tool_input?: unknown;
+  error?: unknown;
+  code?: unknown;
+  session_id?: string;
+  providerId?: string;
+};
+
+/**
+ * Translates a permission policy into `claude` CLI flags.
+ *
+ * @remarks
+ * `read-only` maps to `--permission-mode dontAsk`, `ask` to `manual`,
+ * `workspace-write` to `acceptEdits` and `full-access` to `bypassPermissions`.
+ * `dontAsk` denies every tool that would need a prompt; a tool that settings
+ * pre-approve still runs. Read-only holds because the driver pins the read
+ * tools (unless `inheritHostConfig` is set without `tools`), always removes
+ * the write and shell tools, and denies `mcp__*`, so no write tool is left to
+ * approve. `plan` is not
+ * used: the CLI's plan mode runs a different model than `--model`.
+ * Each allowed path becomes `--add-dir`.
+ *
+ * @param permissions - Policy of the run. Defaults to mode `ask`.
+ * @returns The flag list.
+ */
 export function mapClaudePermissionArgs(
   permissions?: ExternalAgentPermissionPolicy,
 ): string[] {
@@ -276,7 +534,7 @@ export function mapClaudePermissionArgs(
   const args: string[] = [];
 
   if (flags.readOnly) {
-    args.push("--permission-mode", "plan");
+    args.push("--permission-mode", "dontAsk");
   } else if (flags.requireApproval) {
     args.push("--permission-mode", "manual");
   } else if (flags.workspaceWrite) {
@@ -297,8 +555,9 @@ export function mapClaudePermissionArgs(
 function normalizeClaudeEvent(
   event: ClaudeStreamEvent,
 ): ExternalAgentEvent | undefined {
-  if (isNormalizedExternalEvent(event)) {
-    return event;
+  const bridged = bridgeEvent(event as Record<string, unknown>);
+  if (bridged !== undefined) {
+    return bridged === "drop" ? undefined : bridged;
   }
 
   const type = event.type;
@@ -317,16 +576,12 @@ function normalizeClaudeEvent(
   }
 
   if (type === "result" || type === "completed" || type === "complete") {
+    // The run ends when the process exits, so a terminal line from the child
+    // never becomes `completed`; only its final text is kept.
     const resultText = stringValue(event.result);
-    if (resultText) {
-      return { type: "output", content: resultText, timestamp: Date.now() };
-    }
-    return {
-      type: "completed",
-      exitCode: event.exitCode,
-      signal: event.signal,
-      timestamp: Date.now(),
-    };
+    return resultText
+      ? { type: "output", content: resultText, timestamp: Date.now() }
+      : undefined;
   }
 
   const toolName = stringValue(event.name) ?? stringValue(event.tool_name);
@@ -340,19 +595,18 @@ function normalizeClaudeEvent(
   }
 
   if (type === "error") {
+    const detail = isJsonObject(event.error) ? event.error : undefined;
     const message =
-      typeof event.error === "string"
-        ? event.error
-        : (event.error?.message ??
-          stringValue(event.message) ??
-          "Claude CLI error");
-    const code =
-      typeof event.error === "object" ? event.error.code : event.code;
+      (typeof event.error === "string" ? event.error : undefined) ??
+      stringValue(detail?.message) ??
+      stringValue(event.message) ??
+      "Claude CLI error";
+    const code = detail ? stringValue(detail.code) : stringValue(event.code);
     return {
       type: "error",
       message,
       code,
-      recoverable: true,
+      recoverable: isRecoverableMessage(message),
       timestamp: Date.now(),
     };
   }
@@ -361,25 +615,6 @@ function normalizeClaudeEvent(
   return fallbackText
     ? { type: "output", content: fallbackText, timestamp: Date.now() }
     : undefined;
-}
-
-function buildPrompt(request: ExternalAgentRunRequest): string {
-  const parts = [
-    request.instruction,
-    extractContextText(request.context),
-  ].filter(
-    (part): part is string => typeof part === "string" && part.length > 0,
-  );
-  return parts.join("\n\n");
-}
-
-function extractContextText(context: unknown): string | undefined {
-  const record = asRecord(context);
-  return (
-    extractText(record.userContent ?? record.user_content) ??
-    stringValue(record.input) ??
-    stringValue(record.prompt)
-  );
 }
 
 function extractText(value: unknown): string | undefined {
@@ -421,91 +656,4 @@ function extractText(value: unknown): string | undefined {
   }
 
   return undefined;
-}
-
-function isNormalizedExternalEvent(
-  event: ClaudeStreamEvent,
-): event is ExternalAgentEvent {
-  switch (event.type) {
-    case "started":
-      return typeof event.providerId === "string";
-    case "output":
-      return typeof event.content === "string";
-    case "tool_call":
-      return typeof event.name === "string";
-    case "error":
-      return typeof event.message === "string";
-    case "completed":
-      return true;
-    default:
-      return false;
-  }
-}
-
-async function collectLines(
-  input: LineSource,
-  target: string[],
-): Promise<void> {
-  for await (const line of readLines(input)) {
-    if (line.trim().length > 0) {
-      target.push(line);
-    }
-  }
-}
-
-async function* readLines(input?: LineSource | null): AsyncIterable<string> {
-  if (!input) {
-    return;
-  }
-
-  const decoder = new TextDecoder();
-  let buffer = "";
-
-  for await (const chunk of toAsyncIterable(input)) {
-    buffer +=
-      typeof chunk === "string"
-        ? chunk
-        : decoder.decode(chunk, { stream: true });
-
-    let newlineIndex = buffer.indexOf("\n");
-    while (newlineIndex !== -1) {
-      yield buffer.slice(0, newlineIndex).replace(/\r$/, "");
-      buffer = buffer.slice(newlineIndex + 1);
-      newlineIndex = buffer.indexOf("\n");
-    }
-  }
-
-  buffer += decoder.decode();
-  if (buffer.length > 0) {
-    yield buffer.replace(/\r$/, "");
-  }
-}
-
-async function* toAsyncIterable<T>(
-  input: AsyncIterable<T> | Iterable<T> | ReadableStream<T>,
-): AsyncIterable<T> {
-  const asyncIterable = input as AsyncIterable<T>;
-  if (typeof asyncIterable[Symbol.asyncIterator] === "function") {
-    yield* asyncIterable;
-    return;
-  }
-
-  const iterable = input as Iterable<T>;
-  if (typeof iterable[Symbol.iterator] === "function") {
-    yield* iterable;
-    return;
-  }
-
-  const reader = (input as ReadableStream<T>).getReader();
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) {
-        return;
-      }
-      yield value;
-    }
-  } finally {
-    reader.releaseLock();
-  }
 }

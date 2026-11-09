@@ -12,6 +12,7 @@ import {
   CLAUDE_PROVIDER,
   CODEX_PROVIDER,
 } from "../../../src/agents/provider/schema.js";
+import { noHostMcpServers } from "../helpers.js";
 
 async function collect<T>(iterable: AsyncIterable<T>): Promise<T[]> {
   const result: T[] = [];
@@ -124,7 +125,7 @@ describe("codexTurnUsage", () => {
   });
 });
 
-describe("Codex SDK driver (wave 4d)", () => {
+describe("Codex SDK driver", () => {
   test("model getter exposes the configured model", () => {
     expect(new CodexSdkDriver({ model: "gpt-5.5" }).model).toBe("gpt-5.5");
     expect(new CodexSdkDriver().model).toBeUndefined();
@@ -222,9 +223,10 @@ describe("Codex SDK driver (wave 4d)", () => {
   });
 });
 
-describe("Codex CLI driver (wave 4d)", () => {
-  test("turn.completed carries usage on the completed event", async () => {
+describe("Codex CLI driver", () => {
+  test("turn.completed usage goes on the one completed event, sent after the exit", async () => {
     const driver = new CodexCliDriver({
+      listMcpServers: noHostMcpServers,
       spawn: () => ({
         stdout: (async function* () {
           yield `${JSON.stringify({
@@ -247,16 +249,18 @@ describe("Codex CLI driver (wave 4d)", () => {
       }),
     );
 
-    expect(events.find((event) => event.type === "completed")).toEqual({
-      type: "completed",
-      exitCode: undefined,
-      usage: { inputTokens: 30, outputTokens: 5, cacheReadInputTokens: 20 },
-      timestamp: undefined,
-    });
+    expect(events.filter((event) => event.type === "completed")).toEqual([
+      {
+        type: "completed",
+        exitCode: 0,
+        usage: { inputTokens: 30, outputTokens: 5, cacheReadInputTokens: 20 },
+        timestamp: expect.any(Number),
+      },
+    ]);
   });
 });
 
-describe("Claude CLI driver (wave 4d)", () => {
+describe("Claude CLI driver", () => {
   test("the result line's model and usage go on completed", async () => {
     const lines = [
       { type: "system", subtype: "init", model: "claude-haiku-5-5" },
@@ -307,7 +311,7 @@ describe("Claude CLI driver (wave 4d)", () => {
     });
   });
 
-  test("a result line without text yields a completed event with the summary", async () => {
+  test("a result line without text gives its summary to the one completed event", async () => {
     const driver = new ClaudeCliDriver({
       spawn: () => ({
         stdout: [
@@ -322,17 +326,18 @@ describe("Claude CLI driver (wave 4d)", () => {
       driver.run({ provider: CLAUDE_PROVIDER, context: {} as never }),
     );
 
-    expect(events.filter((event) => event.type === "completed")[0]).toEqual({
-      type: "completed",
-      numTurns: 2,
-      exitCode: undefined,
-      signal: undefined,
-      timestamp: expect.any(Number),
-    });
+    expect(events.filter((event) => event.type === "completed")).toEqual([
+      {
+        type: "completed",
+        exitCode: 0,
+        numTurns: 2,
+        timestamp: expect.any(Number),
+      },
+    ]);
   });
 });
 
-describe("Codex SDK progress itemId (REQUESTS #8)", () => {
+describe("Codex SDK progress itemId", () => {
   test("progress outputs carry itemId equal to the builtin callId", () => {
     const driver = new CodexSdkDriver();
     for (const item of [
@@ -372,10 +377,11 @@ describe("Codex SDK progress itemId (REQUESTS #8)", () => {
   });
 });
 
-describe("Codex CLI tool calls (fix1 m3/m4)", () => {
+describe("Codex CLI tool calls", () => {
   const run = async (lines: unknown[]) =>
     collect(
       new CodexCliDriver({
+        listMcpServers: noHostMcpServers,
         spawn: () => ({
           stdout: (async function* () {
             for (const line of lines) yield `${JSON.stringify(line)}\n`;

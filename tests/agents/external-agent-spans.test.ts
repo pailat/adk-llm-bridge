@@ -1,12 +1,6 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
-// Span-tree tests for ExternalAgent (haiku-flow F1, F3, F4, F5): one call_llm
-// per model call, real durations, nesting, usage attributes, and content
-// capture rules on the runtime's built-in tool spans.
+// Span-tree tests for ExternalAgent: one call_llm per model call, real
+// durations, nesting, usage attributes, and content capture rules on the
+// runtime's built-in tool spans.
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -419,7 +413,8 @@ describe("ExternalAgent spans: one agent with a built-in tool", () => {
       event?.content?.parts?.[0]?.text;
 
     test("a state_delta between the final text and completed keeps the usage on the text", async () => {
-      // Review probe m1: output A, state_delta, completed(usage).
+      // Event order: output A, state_delta, completed(usage). The state-only
+      // event must not release the held final text before `completed`.
       const events = await run([
         { type: "output", content: "A" },
         { type: "state_delta", stateDelta: { k: 1 } },

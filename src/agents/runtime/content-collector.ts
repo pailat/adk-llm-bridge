@@ -1,28 +1,28 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import type { InvocationContext } from "@google/adk";
 import type { Content, Part } from "@google/genai";
 
 /**
- * Reimplementation of ADK's `getContents` (see
- * node_modules/@google/adk/dist/esm/agents/processors/content_processor_utils.js)
- * that is not exposed via the package's public `exports` map. Walks the session
- * event history for the current invocation, filters events by branch and
- * visibility, rewrites foreign-agent turns into user-role context markers, and
- * reorders async function-call/response pairs so each response sits adjacent to
- * its call.
+ * Builds the conversation history of the current invocation from the session
+ * events.
+ *
+ * @remarks
+ * Reimplements ADK's `getContents` (in `content_processor_utils.js` of the
+ * `@google/adk` package), which the package does not export. It filters
+ * events by branch and visibility, rewrites foreign-agent turns into user-role
+ * context markers, and reorders async function-call/response pairs so each
+ * response sits adjacent to its call.
+ *
+ * @param context - The ADK invocation context. A context without a session
+ * yields an empty list.
+ * @returns The history as `Content` turns, ending with the user's message.
  */
 export function collectContents(context: InvocationContext): Content[] {
   const ctxRecord = (context ?? {}) as unknown as Record<string, unknown>;
   const session = ctxRecord.session as
     | { events?: ReadonlyArray<AdkEventLike> }
     | undefined;
-  // If no session is present we treat this as a synthetic context and bail out;
-  // the driver fallback path will reconstruct the prompt via extractContextText.
+  // A context without a session is synthetic; the driver falls back to
+  // rebuilding the prompt from the context text.
   if (!session || !Array.isArray(session.events)) {
     return [];
   }
@@ -89,8 +89,12 @@ export function collectContents(context: InvocationContext): Content[] {
 }
 
 /**
- * Render `Content[]` into a deterministic prompt string suitable for external
- * runtimes that consume a single text turn.
+ * Renders `Content[]` into a deterministic prompt string for external runtimes
+ * that consume a single text turn.
+ *
+ * @param contents - The conversation turns.
+ * @returns One block per turn, headed `assistant:` or `user:`. Thought parts
+ * are omitted and non-text parts are rendered as short bracketed markers.
  */
 export function flattenContentsToPrompt(
   contents: ReadonlyArray<Content>,
@@ -175,7 +179,8 @@ function rewriteForeignEvent(event: AdkEventLike): AdkEventLike {
         text: `[${author} called tool ${part.functionCall.name ?? "<unknown>"} with parameters ${safeJsonStringify(args)}]`,
       });
     }
-    // functionResponse, inlineData, fileData from foreign agents are intentionally dropped.
+    // functionResponse, inlineData and fileData from foreign agents are
+    // dropped: only what the other agent said and asked for is relevant context.
   }
 
   return {
@@ -215,7 +220,7 @@ function rearrangeAsyncFunctionResponses(
       (part) => part.functionResponse,
     );
     if (isResponseEvent && hasMatchingEarlierCall(events, event, i)) {
-      // Skip — will be (or has been) appended after its call.
+      // Appended right after its call, so it is skipped at its own position.
       continue;
     }
     result.push(event);
@@ -332,9 +337,13 @@ function safeJsonStringify(value: unknown): string {
 }
 
 /**
- * Internal: like `collectContents` but never throws. A malformed or synthetic
- * invocation context yields an empty list so callers fall back to their legacy
- * text extractor. Not re-exported from the public barrel.
+ * Like {@link collectContents} but never throws. A malformed or synthetic
+ * invocation context yields an empty list so callers fall back to their text
+ * extractor.
+ *
+ * @param context - The ADK invocation context.
+ * @returns The history, or an empty list on any failure.
+ * @internal
  */
 export function safeCollectContents(context: InvocationContext): Content[] {
   try {
