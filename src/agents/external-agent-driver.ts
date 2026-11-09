@@ -86,6 +86,12 @@ export function resolveAbortSignal(
 
 export interface ExternalAgentDriver {
   readonly providerId: string;
+  /**
+   * Model id the driver was configured with, if any. `ExternalAgent` writes it
+   * to `gen_ai.request.model` on its spans; the model the runtime actually used
+   * comes from the `started`/`completed` events (`gen_ai.response.model`).
+   */
+  readonly model?: string;
   capabilities?(): AgentRuntimeCapabilities;
   run(request: ExternalAgentRunRequest): AsyncIterable<ExternalAgentEvent>;
 }

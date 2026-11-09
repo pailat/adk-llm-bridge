@@ -199,6 +199,7 @@ describe("Codex CLI driver", () => {
       type: "tool_call",
       name: "shell",
       input: { cmd: "ls" },
+      metadata: { builtin: true },
       timestamp: undefined,
     });
     expect(events).toContainEqual({
@@ -277,6 +278,7 @@ describe("Codex CLI driver", () => {
       name: "workflow_get",
       input: {},
       callId: "call-1",
+      metadata: { itemType: "mcp_tool_call", builtin: true },
       timestamp: undefined,
     });
     expect(events).toContainEqual({
@@ -285,6 +287,7 @@ describe("Codex CLI driver", () => {
       result: { ok: true },
       callId: "call-1",
       error: undefined,
+      metadata: { itemType: "mcp_tool_call", builtin: true },
       timestamp: undefined,
     });
     expect(events).toContainEqual({

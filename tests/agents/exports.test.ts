@@ -25,6 +25,12 @@ describe("agents public exports", () => {
     expect("EnvCredentialProvider" in root).toBe(false);
   });
 
+  test("./agents exposes the default Claude SDK tool list", () => {
+    expect(Array.isArray(agents.DEFAULT_CLAUDE_SDK_TOOLS)).toBe(true);
+    expect(agents.DEFAULT_CLAUDE_SDK_TOOLS.length).toBeGreaterThan(0);
+    expect(Object.isFrozen(agents.DEFAULT_CLAUDE_SDK_TOOLS)).toBe(true);
+  });
+
   test("./agents exposes external agent symbols", () => {
     expect(agents.BaseAgent).toBe(BaseAgent);
     expect(agents.ExternalAgent).toBeFunction();

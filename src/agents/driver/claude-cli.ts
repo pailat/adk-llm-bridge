@@ -12,6 +12,10 @@ import {
 import { mapPermissionPolicyToFlags } from "../permissions/mapper.js";
 import type { ExternalAgentPermissionPolicy } from "../permissions/schema.js";
 import { CLAUDE_PROVIDER } from "../provider/schema.js";
+import {
+  claudeResultSummary,
+  type ExternalAgentRunSummary,
+} from "./run-summary.js";
 import { asRecord, copyIfPresent, stringValue } from "./shared.js";
 import { spawnSubprocess, superviseSubprocess } from "./spawn.js";
 import { SubprocessJsonlDriver } from "./subprocess-jsonl.js";
@@ -98,6 +102,9 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
       // Emit it only when no assistant text was streamed (as the SDK driver
       // does with `emittedOutput`), otherwise the answer appears twice.
       let emittedAssistantText = false;
+      // F1: the `result` line reports model, usage, cost, turns and duration;
+      // they go on the `completed` event.
+      let summary: ExternalAgentRunSummary = {};
       for await (const line of readLines(child.stdout)) {
         if (signal?.aborted) {
           return;
@@ -105,6 +112,12 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
         const parsed = this.parseClaudeStreamLine(line);
         if (!parsed) {
           continue;
+        }
+        if (parsed.source === "result") {
+          summary = parsed.summary;
+          if (parsed.event.type === "completed") {
+            parsed.event = { ...summary, ...parsed.event };
+          }
         }
         if (parsed.source === "assistant" && parsed.event.type === "output") {
           emittedAssistantText = true;
@@ -129,7 +142,12 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
       }
 
       if (exitCode === 0) {
-        yield { type: "completed", exitCode, timestamp: Date.now() };
+        yield {
+          type: "completed",
+          exitCode,
+          ...summary,
+          timestamp: Date.now(),
+        };
         return;
       }
 
@@ -142,7 +160,7 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
         recoverable: true,
         timestamp: Date.now(),
       };
-      yield { type: "completed", exitCode, timestamp: Date.now() };
+      yield { type: "completed", exitCode, ...summary, timestamp: Date.now() };
     } finally {
       supervisor.release();
     }
@@ -195,9 +213,13 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
     return normalizeClaudeEvent(parsed);
   }
 
-  private parseClaudeStreamLine(
-    line: string,
-  ): { event: ExternalAgentEvent; source: ClaudeEventSource } | undefined {
+  private parseClaudeStreamLine(line: string):
+    | {
+        event: ExternalAgentEvent;
+        source: ClaudeEventSource;
+        summary: ExternalAgentRunSummary;
+      }
+    | undefined {
     const trimmed = line.trim();
     if (!trimmed) {
       return undefined;
@@ -215,7 +237,11 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
             parsed.type === "complete"
           ? "result"
           : "other";
-    return { event, source };
+    return {
+      event,
+      source,
+      summary: parsed.type === "result" ? claudeResultSummary(parsed) : {},
+    };
   }
 }
 

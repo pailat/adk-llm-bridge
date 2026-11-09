@@ -18,6 +18,11 @@ export interface ExternalAgentStartedEvent {
   type: "started";
   runId?: string;
   providerId: string;
+  /**
+   * Resolved model id when the runtime reports it (for example the Claude
+   * SDK `init.model` or the Codex thread model).
+   */
+  model?: string;
   timestamp?: number;
 }
 
@@ -64,10 +69,41 @@ export interface ExternalAgentStateDeltaEvent {
   timestamp?: number;
 }
 
+/**
+ * Token usage and cost reported by an external runtime for one run. Drivers
+ * leave out what the runtime does not report; they never send zeros for
+ * unknown values.
+ */
+export interface ExternalAgentUsage {
+  /**
+   * Input tokens NOT served from or written to the prompt cache (Anthropic
+   * semantics). A runtime that reports cached tokens inside its input count
+   * (OpenAI/Codex `input_tokens` includes `cached_input_tokens`) subtracts
+   * them here. The prompt size is `inputTokens + cacheReadInputTokens +
+   * cacheCreationInputTokens`.
+   */
+  inputTokens?: number;
+  outputTokens?: number;
+  /** Input tokens read from the prompt cache. */
+  cacheReadInputTokens?: number;
+  /** Input tokens written to the prompt cache. */
+  cacheCreationInputTokens?: number;
+  totalCostUsd?: number;
+  /** Per-model breakdown when the runtime reports several models. */
+  byModel?: Record<string, Omit<ExternalAgentUsage, "byModel">>;
+}
+
 export interface ExternalAgentCompletedEvent {
   type: "completed";
   exitCode?: number;
   signal?: string;
+  /** Resolved model id when the runtime reports it. */
+  model?: string;
+  usage?: ExternalAgentUsage;
+  /** Number of model turns the runtime reports for the run. */
+  numTurns?: number;
+  /** Run duration the runtime reports, in milliseconds. */
+  durationMs?: number;
   timestamp?: number;
 }
 

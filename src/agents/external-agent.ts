@@ -42,7 +42,11 @@ import {
 } from "./permissions/inheritance.js";
 import type { ExternalAgentPermissionPolicy } from "./permissions/schema.js";
 import type { ExternalAgentProviderDefinition } from "./provider/schema.js";
-import { toolDetail, traceAdkEvent } from "./telemetry.js";
+import {
+  ExternalAgentRunTracer,
+  toolDetail,
+  usageMetadataFor,
+} from "./telemetry.js";
 import {
   type AdkToolBridge,
   createAdkToolBridge,
@@ -332,6 +336,28 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
     let subAgentInterrupted = false;
 
     const queue = new AsyncQueue<Event>();
+    const tracer = new ExternalAgentRunTracer({
+      context,
+      providerId: this.provider.id,
+      requestModel: this.driver.model,
+    });
+    // The last non-partial text is held until the next event with content,
+    // so the run's usage (reported by `completed`) can ride on the final ADK
+    // event. A state-only event (e.g. the session id the Claude SDK reports
+    // right before `completed`) passes ahead of it without releasing it. An
+    // event is never changed after it is pushed: the Runner may already have
+    // stored it.
+    let heldFinal: Event | undefined;
+    const flushHeld = () => {
+      if (heldFinal) {
+        queue.push(heldFinal);
+        heldFinal = undefined;
+      }
+    };
+    const push = (event: Event) => {
+      if (!isStateOnlyEvent(event)) flushHeld();
+      queue.push(event);
+    };
     const rootAgent = this.rootAgent;
     const subAgents = this.subAgents;
     const toolGateway =
@@ -347,10 +373,10 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
               context.endInvocation = true;
               controller.abort();
             },
-            eventSink: (event) => {
-              traceAdkEvent({ event, context, providerId: this.provider.id });
-              queue.push(event);
-            },
+            // Sub-agents trace their own model calls (one span per call);
+            // the delegation itself is traced by `traceDelegation`.
+            eventSink: (event) => push(event),
+            traceDelegation: (info, run) => tracer.traceDelegation(info, run),
           })
         : undefined;
 
@@ -366,8 +392,8 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
         agentName: this.name,
         answers,
       });
-      traceAdkEvent({ event: consumed, context, providerId: this.provider.id });
-      queue.push(consumed);
+      tracer.traceMarker(consumed);
+      push(consumed);
     }
     let confirmationRequested = false;
     const instruction = answers.length
@@ -410,8 +436,8 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
           agentName: this.name,
           request,
         });
-        traceAdkEvent({ event, context, providerId: this.provider.id });
-        queue.push(event);
+        tracer.traceMarker(event);
+        push(event);
         context.endInvocation = true;
         controller.abort();
         return {
@@ -452,12 +478,7 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
                     branch: context.branch,
                     actions: createEventActions({ stateDelta }),
                   });
-                  traceAdkEvent({
-                    event,
-                    context,
-                    providerId: this.provider.id,
-                  });
-                  queue.push(event);
+                  push(event);
                 },
               }
             : {}),
@@ -478,11 +499,15 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
           // it waits for EOF. Waiting for that EOF strands ADK's Runner even though the turn is
           // already complete. Breaking here calls return() on the driver iterator, which lets the
           // provider release its transport in finally.
-          if (
-            event.type === "completed" ||
-            confirmationRequested ||
-            subAgentInterrupted
-          ) {
+          if (event.type === "completed") {
+            tracer.onDriverEvent(event);
+            const usageMetadata = usageMetadataFor(event.usage);
+            if (heldFinal && usageMetadata) {
+              heldFinal.usageMetadata = usageMetadata;
+            }
+            break;
+          }
+          if (confirmationRequested || subAgentInterrupted) {
             break;
           }
           if (toolGateway) {
@@ -494,29 +519,41 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
             // working.
             if (event.type === "output" && !event.partial) {
               if (toolGateway.consumeFinalAnswer()) {
+                // Dropped from the timeline, but it was a model call.
+                tracer.onDriverEvent(event);
                 continue;
               }
-            } else if (event.type === "tool_call") {
+            } else if (
+              event.type === "tool_call" &&
+              event.metadata?.builtin !== true
+            ) {
+              // The runtime's own tools (Read, Bash...) do not count as new
+              // activity: before they were surfaced they were invisible here,
+              // and a coordinator reading a file is not a new delegation.
               toolGateway.resetFinalAnswer();
             }
           }
           const adkEvent = this.toAdkEvent(event, context);
+          tracer.onDriverEvent(event, adkEvent);
           if (adkEvent) {
-            traceAdkEvent({
-              event: adkEvent,
-              context,
-              providerId: this.provider.id,
-            });
-            queue.push(adkEvent);
+            if (event.type === "output" && !event.partial) {
+              flushHeld();
+              heldFinal = adkEvent;
+            } else {
+              push(adkEvent);
+            }
           }
         }
       } catch (error) {
         // After a confirmation request (ours or a sub-agent's) we aborted the
         // driver on purpose; its abort error is not a failure of the turn.
         if (!confirmationRequested && !subAgentInterrupted) {
+          flushHeld();
           queue.fail(error);
         }
       } finally {
+        tracer.finish();
+        flushHeld();
         driverDone = true;
         // Closing in finally covers normal EOF, an explicit terminal event, cancellation, and an
         // iterator return. No consumer is left waiting on the queue.
@@ -718,6 +755,29 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
       ],
     };
   }
+}
+
+/**
+ * An event that only carries a `stateDelta`: no content, no error, and no
+ * control action (escalate, transfer, skip summarization, long-running ids),
+ * so its position relative to the held final text does not matter.
+ */
+function isStateOnlyEvent(event: Event): boolean {
+  if ((event.content?.parts?.length ?? 0) > 0) return false;
+  if (event.errorCode || event.errorMessage) return false;
+  if ((event.longRunningToolIds?.length ?? 0) > 0) return false;
+  const actions = event.actions;
+  if (!actions) return false;
+  if (
+    actions.escalate ||
+    actions.transferToAgent ||
+    actions.skipSummarization ||
+    Object.keys(actions.requestedAuthConfigs ?? {}).length > 0 ||
+    Object.keys(actions.requestedToolConfirmations ?? {}).length > 0
+  ) {
+    return false;
+  }
+  return Object.keys(actions.stateDelta ?? {}).length > 0;
 }
 
 function metadataForExternalEvent(

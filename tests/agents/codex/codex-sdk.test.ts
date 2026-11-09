@@ -254,6 +254,7 @@ describe("CodexSdkDriver", () => {
         callId: "item-2",
         metadata: {
           itemType: "command_execution",
+          builtin: true,
           status: "completed",
           command: "pwd",
           title: "Codex: command_execution call",
@@ -267,6 +268,7 @@ describe("CodexSdkDriver", () => {
         callId: "item-2",
         metadata: {
           itemType: "command_execution",
+          builtin: true,
           status: "completed",
           command: "pwd",
           exitCode: 0,
@@ -274,7 +276,12 @@ describe("CodexSdkDriver", () => {
         },
         timestamp: expect.any(Number),
       },
-      { type: "completed", exitCode: 0, timestamp: expect.any(Number) },
+      {
+        type: "completed",
+        exitCode: 0,
+        usage: { inputTokens: 1 },
+        timestamp: expect.any(Number),
+      },
     ]);
   });
 
@@ -401,6 +408,7 @@ describe("CodexSdkDriver", () => {
         turnComplete: false,
         metadata: {
           itemType: "mcp_tool_call",
+          itemId: "mcp-1",
           toolName: "search_docs",
           status: "in_progress",
           title: "Codex: search_docs in_progress",
@@ -434,6 +442,7 @@ describe("CodexSdkDriver", () => {
         callId: "mcp-1",
         metadata: {
           itemType: "mcp_tool_call",
+          builtin: true,
           status: "completed",
           title: "Codex: search_docs call",
         },
@@ -452,6 +461,7 @@ describe("CodexSdkDriver", () => {
         error: undefined,
         metadata: {
           itemType: "mcp_tool_call",
+          builtin: true,
           status: "completed",
           title: "Codex: search_docs completed",
         },

@@ -21,6 +21,7 @@ import {
   summarizeHistoryForColdStart,
   userContentToCodexInput,
 } from "./codex-input-mapper.js";
+import { codexTurnUsage } from "./run-summary.js";
 import {
   asRecord,
   candidateBaseDirectories,
@@ -182,6 +183,11 @@ export class CodexSdkDriver {
     this.#outputSchema = config.outputSchema;
     this.#threadStateKey =
       config.threadStateKey ?? ((agentName) => `codex_thread:${agentName}`);
+  }
+
+  /** The configured model id (`gen_ai.request.model`), if any. */
+  get model(): string | undefined {
+    return this.#model;
   }
 
   capabilities() {
@@ -442,7 +448,16 @@ export class CodexSdkDriver {
     const timestamp = Date.now();
 
     if (type === "turn.completed") {
-      return [{ type: "completed", exitCode: 0, timestamp }];
+      // F1: Codex reports token usage per turn; it does not report the model.
+      const usage = codexTurnUsage(event.usage);
+      return [
+        {
+          type: "completed",
+          exitCode: 0,
+          ...(usage ? { usage } : {}),
+          timestamp,
+        },
+      ];
     }
 
     if (type === "turn.failed") {
@@ -586,6 +601,10 @@ function normalizeProgressItem(
   timestamp: number,
 ): ExternalAgentEvent[] {
   const itemType = stringValue(item.type);
+  // Same value as the builtin tool_call `callId`, so the first progress event
+  // can set the start time of the tool span.
+  const itemId = stringValue(item.id);
+  const idMetadata = itemId ? { itemId } : {};
 
   if (itemType === "command_execution") {
     const command = stringValue(item.command);
@@ -599,6 +618,7 @@ function normalizeProgressItem(
             turnComplete: false,
             metadata: {
               itemType,
+              ...idMetadata,
               status,
               command,
               exitCode: item.exit_code,
@@ -621,6 +641,7 @@ function normalizeProgressItem(
         turnComplete: false,
         metadata: {
           itemType,
+          ...idMetadata,
           toolName,
           status: item.status,
           title: `Codex: ${toolName} ${status}`,
@@ -639,7 +660,12 @@ function normalizeProgressItem(
             content: `Codex web search: ${query}`,
             partial: true,
             turnComplete: false,
-            metadata: { itemType, query, title: "Codex: web_search" },
+            metadata: {
+              itemType,
+              ...idMetadata,
+              query,
+              title: "Codex: web_search",
+            },
             timestamp,
           },
         ]
@@ -694,6 +720,7 @@ function normalizeCompletedItem(
         callId: stringValue(item.id),
         metadata: {
           itemType,
+          builtin: true,
           status: item.status,
           title: `Codex: ${toolName} call`,
         },
@@ -712,6 +739,7 @@ function normalizeCompletedItem(
         error: stringValue(item.error),
         metadata: {
           itemType,
+          builtin: true,
           status: item.status,
           title: `Codex: ${toolName} ${status}`,
         },
@@ -735,6 +763,7 @@ function normalizeCompletedItem(
         callId: stringValue(item.id),
         metadata: {
           itemType,
+          builtin: true,
           status: item.status,
           command,
           title: "Codex: command_execution call",
@@ -748,15 +777,68 @@ function normalizeCompletedItem(
           command: item.command,
           status: item.status,
           exitCode: item.exit_code,
+          ...(typeof item.aggregated_output === "string"
+            ? { output: item.aggregated_output }
+            : {}),
         },
         callId: stringValue(item.id),
         metadata: {
           itemType,
+          builtin: true,
           status: item.status,
           command,
           exitCode: item.exit_code,
           title: `Codex: command_execution ${status}`,
         },
+        timestamp,
+      },
+    ];
+  }
+
+  if (itemType === "file_change") {
+    // F5: a patch the agent applied with its own tools.
+    const status = stringValue(item.status) ?? "completed";
+    const callId = stringValue(item.id);
+    const metadata = { itemType, builtin: true, status: item.status };
+    return [
+      {
+        type: "tool_call",
+        name: "file_change",
+        input: { changes: item.changes },
+        callId,
+        metadata: { ...metadata, title: "Codex: file_change call" },
+        timestamp,
+      },
+      {
+        type: "tool_result",
+        name: "file_change",
+        result: { changes: item.changes, status: item.status },
+        callId,
+        ...(status === "failed" ? { error: "Codex patch failed" } : {}),
+        metadata: { ...metadata, title: `Codex: file_change ${status}` },
+        timestamp,
+      },
+    ];
+  }
+
+  if (itemType === "web_search") {
+    const callId = stringValue(item.id);
+    const metadata = { itemType, builtin: true };
+    return [
+      {
+        type: "tool_call",
+        name: "web_search",
+        input: { query: item.query },
+        callId,
+        metadata: { ...metadata, title: "Codex: web_search call" },
+        timestamp,
+      },
+      {
+        type: "tool_result",
+        name: "web_search",
+        result: { query: item.query },
+        callId,
+        metadata: { ...metadata, title: "Codex: web_search completed" },
         timestamp,
       },
     ];

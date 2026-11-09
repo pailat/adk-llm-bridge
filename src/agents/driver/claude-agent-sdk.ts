@@ -23,6 +23,7 @@ import {
   contentsToSdkMessages,
   type SDKUserMessage,
 } from "./claude-message-mapper.js";
+import { claudeInitModel, claudeResultSummary } from "./run-summary.js";
 import {
   asRecord,
   candidateBaseDirectories,
@@ -59,6 +60,11 @@ type ClaudeAgentSdkOptions = {
   allowDangerouslySkipPermissions?: true;
   mcpServers?: Record<string, unknown>;
   allowedTools?: string[];
+  disallowedTools?: string[];
+  tools?: string[] | { type: "preset"; preset: "claude_code" };
+  strictMcpConfig?: boolean;
+  skills?: string[] | "all";
+  managedSettings?: Record<string, unknown>;
   resume?: string;
   forkSession?: boolean;
   canUseTool?: ClaudeAgentSdkCanUseTool;
@@ -151,6 +157,23 @@ export interface ClaudeAgentSdkDriverConfig {
    */
   systemPrompt?: string;
   /**
+   * Built-in Claude Code tools the agent gets (the SDK `tools` option).
+   * Defaults to {@link DEFAULT_CLAUDE_SDK_TOOLS}. Under a `read-only` policy
+   * the write and shell tools are removed from it, and under a policy without
+   * `allowNetwork: true` the web tools are removed in `read-only` mode or when
+   * `allowNetwork` is `false`. Pass `[]` for no built-in tools.
+   */
+  tools?: readonly string[];
+  /**
+   * Opt-in: let the agent inherit the host's Claude Code configuration. When
+   * `true` the driver does not pin the tool set (the SDK default `claude_code`
+   * preset applies unless `tools` is set), does not pass `strictMcpConfig`,
+   * and does not hide bundled skills or claude.ai connectors. Use it only when
+   * the host's tools, MCP servers and connectors are trusted for this agent.
+   * `settingSources` stays a separate opt-in. Defaults to `false` (isolated).
+   */
+  inheritHostConfig?: boolean;
+  /**
    * If set, the driver passes this session id to the Claude SDK
    * `options.resume` field and sends only the current user turn (not the full
    * ADK history) so the SDK appends to the resumed session instead of
@@ -163,6 +186,45 @@ export interface ClaudeAgentSdkDriverConfig {
    */
   forkSession?: boolean;
 }
+
+/**
+ * Built-in Claude Code tools an isolated agent gets by default: file reading
+ * and editing, search, shell, notebooks, web and the to-do list. Host-level
+ * tools of the `claude_code` preset (sub-agents, cron, worktrees, workflows,
+ * tool search, messaging, plan mode...) are left out, so the agent only sees
+ * what the bridge configures.
+ */
+export const DEFAULT_CLAUDE_SDK_TOOLS: readonly string[] = Object.freeze([
+  "Read",
+  "Glob",
+  "Grep",
+  "Edit",
+  "Write",
+  "NotebookEdit",
+  "Bash",
+  "WebFetch",
+  "WebSearch",
+  "TodoWrite",
+]);
+
+/** Tools that write files or run commands; removed under `read-only`. */
+const CLAUDE_WRITE_TOOLS: readonly string[] = [
+  "Edit",
+  "Write",
+  "MultiEdit",
+  "NotebookEdit",
+  "Bash",
+  "PowerShell",
+];
+
+/** Tools that reach the network on their own. */
+const CLAUDE_NETWORK_TOOLS: readonly string[] = ["WebFetch", "WebSearch"];
+
+/** Prefix of the tools the bridge's in-process MCP server exposes. */
+const BRIDGE_TOOL_PREFIX = "mcp__adk_bridge__";
+
+/** The bridge's delegation tool; it maps to transfer events, not tool events. */
+const BRIDGE_SUBAGENT_TOOL = `${BRIDGE_TOOL_PREFIX}run_adk_subagent`;
 
 export class ClaudeAgentSdkDriver {
   readonly providerId = CLAUDE_PROVIDER.id;
@@ -179,6 +241,8 @@ export class ClaudeAgentSdkDriver {
   readonly #resumeSessionId?: string;
   readonly #forkSession?: boolean;
   readonly #systemPrompt?: string;
+  readonly #tools?: readonly string[];
+  readonly #inheritHostConfig: boolean;
   // RESUME-1: maps an ADK session id -> the SDK session id captured from the
   // first turn's system/init (or result) message. Subsequent turns of the same
   // ADK session pass it as `options.resume` and send only the newest user turn,
@@ -211,6 +275,13 @@ export class ClaudeAgentSdkDriver {
     this.#resumeSessionId = config.resumeSessionId;
     this.#forkSession = config.forkSession;
     this.#systemPrompt = config.systemPrompt;
+    this.#tools = config.tools ? [...config.tools] : undefined;
+    this.#inheritHostConfig = config.inheritHostConfig ?? false;
+  }
+
+  /** The configured model id (`gen_ai.request.model`), if any. */
+  get model(): string | undefined {
+    return this.#model;
   }
 
   #sdkSessionsFor(request: ExternalAgentRunRequest): Map<string, string> {
@@ -247,11 +318,22 @@ export class ClaudeAgentSdkDriver {
     const prompt = this.buildPromptInput(request, resolvedResume);
     const options = await this.buildOptionsForRun(request, sdk, resolvedResume);
 
-    yield {
-      type: "started",
-      providerId: this.providerId,
-      timestamp: Date.now(),
+    // F1: `started` waits for the first SDK message so it can carry the
+    // resolved model from `system/init`; its timestamp is still the run start.
+    const startedAt = Date.now();
+    let startedEmitted = false;
+    const startedEvent = (model?: string): ExternalAgentEvent => {
+      startedEmitted = true;
+      return {
+        type: "started",
+        providerId: this.providerId,
+        ...(model ? { model } : {}),
+        timestamp: startedAt,
+      };
     };
+    let initModel: string | undefined;
+    // F5: tool_use id -> tool name, to name the matching tool_result.
+    const toolNames = new Map<string, string>();
 
     const persistedIds = new Set<string>();
     let completed = false;
@@ -274,6 +356,10 @@ export class ClaudeAgentSdkDriver {
           break;
         }
         const message = next.value;
+        initModel ??= claudeInitModel(message);
+        if (!startedEmitted) {
+          yield startedEvent(initModel);
+        }
         this.assertRequiredMcpServersConnected(message);
         // RESUME-1: capture the SDK session id (system/init or result) so the
         // next turn of this ADK session can resume it.
@@ -305,10 +391,13 @@ export class ClaudeAgentSdkDriver {
             yield { type: "output", content: text, timestamp: Date.now() };
           }
         }
-        const events = this.normalizeMessage(message);
-        for (const event of events) {
+        const events = this.normalizeMessage(message, toolNames);
+        for (let event of events) {
           if (event.type === "completed") {
             completed = true;
+            if (!event.model && initModel) {
+              event = { ...event, model: initModel };
+            }
           }
           if (event.type === "output") {
             emittedOutput = true;
@@ -323,6 +412,9 @@ export class ClaudeAgentSdkDriver {
       }
     } catch (error) {
       failed = true;
+      if (!startedEmitted) {
+        yield startedEvent();
+      }
       const message = this.describeError(error, request);
       const classification = classifyRecoverable({
         message,
@@ -341,10 +433,14 @@ export class ClaudeAgentSdkDriver {
       }
     }
 
+    if (!startedEmitted) {
+      yield startedEvent();
+    }
     if (!completed) {
       yield {
         type: "completed",
         exitCode: failed ? 1 : 0,
+        ...(initModel ? { model: initModel } : {}),
         timestamp: Date.now(),
       };
     }
@@ -373,9 +469,54 @@ export class ClaudeAgentSdkDriver {
       resume,
       forkSession: this.#forkSession,
       canUseTool: this.buildCanUseTool(request),
+      ...this.buildToolIsolation(request.permissions),
     };
 
     return removeUndefined(options) as ClaudeAgentSdkOptions;
+  }
+
+  /**
+   * F2: pin what the agent can reach. `settingSources: []` only stops the SDK
+   * from reading settings files; without `tools` the CLI still loads the full
+   * `claude_code` tool preset (cron, worktrees, workflows, tool search,
+   * messaging...), its bundled skills, and the MCP servers and claude.ai
+   * connectors of the logged-in host. Isolated mode passes an explicit tool
+   * list, `strictMcpConfig` (only the bridge's own MCP server), no skills, and
+   * turns claude.ai connectors off.
+   *
+   * F7: under `read-only` the write and shell tools are also removed from the
+   * model's tool list (`disallowedTools`, and from `tools` when isolated), so
+   * the model does not spend a turn on a call that is denied. The call-time
+   * denial stays as defense in depth.
+   */
+  private buildToolIsolation(
+    permissions: ExternalAgentPermissionPolicy | undefined,
+  ): Partial<ClaudeAgentSdkOptions> {
+    const removed = new Set<string>();
+    if (permissions?.mode === "read-only") {
+      for (const name of CLAUDE_WRITE_TOOLS) removed.add(name);
+    }
+    if (
+      permissions?.allowNetwork === false ||
+      (permissions?.mode === "read-only" && permissions.allowNetwork !== true)
+    ) {
+      for (const name of CLAUDE_NETWORK_TOOLS) removed.add(name);
+    }
+    const disallowedTools = removed.size > 0 ? [...removed] : undefined;
+    const base =
+      this.#tools ??
+      (this.#inheritHostConfig ? undefined : DEFAULT_CLAUDE_SDK_TOOLS);
+    const tools = base?.filter((name) => !removed.has(name));
+    if (this.#inheritHostConfig) {
+      return { tools, disallowedTools };
+    }
+    return {
+      tools,
+      disallowedTools,
+      strictMcpConfig: true,
+      skills: [],
+      managedSettings: { disableClaudeAiConnectors: true },
+    };
   }
 
   /**
@@ -630,7 +771,15 @@ export class ClaudeAgentSdkDriver {
     }
   }
 
-  normalizeMessage(message: ClaudeAgentSdkMessage): ExternalAgentEvent[] {
+  /**
+   * Maps one SDK message to bridge events. Pass the same `toolNames` map for
+   * every message of a run so a `tool_result` gets the name of its
+   * `tool_use`; without it results of earlier messages are not named.
+   */
+  normalizeMessage(
+    message: ClaudeAgentSdkMessage,
+    toolNames: Map<string, string> = new Map(),
+  ): ExternalAgentEvent[] {
     const record = asRecord(message);
     const type = stringValue(record.type);
 
@@ -655,16 +804,38 @@ export class ClaudeAgentSdkDriver {
         ];
       }
 
-      const text = extractText(asRecord(record.message).content);
-      return text
-        ? [{ type: "output", content: text, timestamp: Date.now() }]
-        : [];
+      const content = asRecord(record.message).content;
+      const text = extractText(
+        Array.isArray(content)
+          ? content.filter((block) => asRecord(block).type !== "tool_use")
+          : content,
+      );
+      return [
+        ...(text
+          ? [{ type: "output" as const, content: text, timestamp: Date.now() }]
+          : []),
+        ...toolUseEvents(content, toolNames, record.parent_tool_use_id),
+      ];
+    }
+
+    if (type === "user") {
+      return toolResultEvents(
+        asRecord(record.message).content,
+        toolNames,
+        record.parent_tool_use_id,
+      );
     }
 
     if (type === "result") {
+      const summary = claudeResultSummary(record);
       if (record.subtype === "success") {
         return [
-          { type: "completed" as const, exitCode: 0, timestamp: Date.now() },
+          {
+            type: "completed" as const,
+            exitCode: 0,
+            ...summary,
+            timestamp: Date.now(),
+          },
         ];
       }
 
@@ -692,7 +863,7 @@ export class ClaudeAgentSdkDriver {
           recoverable: classification.recoverable,
           timestamp: Date.now(),
         },
-        { type: "completed", exitCode: 1, timestamp: Date.now() },
+        { type: "completed", exitCode: 1, ...summary, timestamp: Date.now() },
       ];
     }
 
@@ -774,19 +945,32 @@ export class ClaudeAgentSdkDriver {
       sdk,
       exposeSubAgents,
     );
+    // The bridge's own tools are pre-authorized on purpose: their confirmation
+    // (`requireConfirmation`) and the read-only exposure filter are enforced by
+    // the bridge before the call reaches the tool.
+    const bridgeTools = new Set(
+      toolNames.map((name) => `${BRIDGE_TOOL_PREFIX}${name}`),
+    );
+    const hostCanUseTool = options.canUseTool;
+    if (hostCanUseTool) {
+      // F6: with a `canUseTool` callback, a bare `allowedTools` entry makes the
+      // SDK warn `CLAUDE_SDK_CAN_USE_TOOL_SHADOWED` on every run. Approve the
+      // bridge tools inside the callback instead; every other tool still goes
+      // to the host.
+      const canUseTool: ClaudeAgentSdkCanUseTool = (toolName, input, extra) =>
+        bridgeTools.has(toolName)
+          ? Promise.resolve({ behavior: "allow", updatedInput: input })
+          : hostCanUseTool(toolName, input, extra);
+      return removeUndefined({
+        ...options,
+        mcpServers: { ...(options.mcpServers ?? {}), adk_bridge: server },
+        canUseTool,
+      }) as ClaudeAgentSdkOptions;
+    }
     return removeUndefined({
       ...options,
-      mcpServers: {
-        ...(options.mcpServers ?? {}),
-        adk_bridge: server,
-      },
-      // ADK tools are pre-authorized here on purpose: their confirmation
-      // (`requireConfirmation`) and the read-only exposure filter are enforced by
-      // the bridge before the call reaches the tool.
-      allowedTools: [
-        ...(options.allowedTools ?? []),
-        ...toolNames.map((name) => `mcp__adk_bridge__${name}`),
-      ],
+      mcpServers: { ...(options.mcpServers ?? {}), adk_bridge: server },
+      allowedTools: [...(options.allowedTools ?? []), ...bridgeTools],
     }) as ClaudeAgentSdkOptions;
   }
 
@@ -1211,6 +1395,84 @@ function extractText(value: unknown): string | undefined {
       ? record.parts
       : undefined;
   return arrayContent ? extractText(arrayContent) : undefined;
+}
+
+/**
+ * F5: `tool_call` events for the `tool_use` blocks of an assistant message.
+ * The bridge's delegation tool is skipped (it maps to transfer events).
+ * Built-in tools carry `metadata.builtin: true`; the bridge's ADK tools carry
+ * `metadata.adkTool: true`.
+ */
+function toolUseEvents(
+  content: unknown,
+  toolNames: Map<string, string>,
+  parentToolUseId: unknown,
+): ExternalAgentEvent[] {
+  if (!Array.isArray(content)) return [];
+  const events: ExternalAgentEvent[] = [];
+  for (const item of content) {
+    const block = asRecord(item);
+    if (block.type !== "tool_use") continue;
+    const name = stringValue(block.name);
+    const callId = stringValue(block.id);
+    if (!name) continue;
+    if (callId) toolNames.set(callId, name);
+    if (name === BRIDGE_SUBAGENT_TOOL) continue;
+    events.push({
+      type: "tool_call",
+      name,
+      input: block.input,
+      ...(callId ? { callId } : {}),
+      metadata: toolEventMetadata(name, parentToolUseId),
+      timestamp: Date.now(),
+    });
+  }
+  return events;
+}
+
+/** F5: `tool_result` events for the `tool_result` blocks of a user message. */
+function toolResultEvents(
+  content: unknown,
+  toolNames: Map<string, string>,
+  parentToolUseId: unknown,
+): ExternalAgentEvent[] {
+  if (!Array.isArray(content)) return [];
+  const events: ExternalAgentEvent[] = [];
+  for (const item of content) {
+    const block = asRecord(item);
+    if (block.type !== "tool_result") continue;
+    const callId = stringValue(block.tool_use_id);
+    const name = callId ? toolNames.get(callId) : undefined;
+    // A result without a known `tool_use` cannot be named or paired.
+    if (!name || name === BRIDGE_SUBAGENT_TOOL) continue;
+    const error =
+      block.is_error === true
+        ? (extractText(block.content) ?? "Tool call failed")
+        : undefined;
+    events.push({
+      type: "tool_result",
+      name,
+      result: block.content,
+      callId,
+      ...(error ? { error } : {}),
+      metadata: toolEventMetadata(name, parentToolUseId),
+      timestamp: Date.now(),
+    });
+  }
+  return events;
+}
+
+function toolEventMetadata(
+  name: string,
+  parentToolUseId: unknown,
+): Record<string, unknown> {
+  const parent = stringValue(parentToolUseId);
+  return {
+    ...(name.startsWith(BRIDGE_TOOL_PREFIX)
+      ? { builtin: false, adkTool: true }
+      : { builtin: true }),
+    ...(parent ? { parentToolUseId: parent } : {}),
+  };
 }
 
 function isSuccessResultWithText(message: ClaudeAgentSdkMessage): boolean {

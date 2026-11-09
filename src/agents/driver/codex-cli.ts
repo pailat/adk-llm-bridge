@@ -12,6 +12,7 @@ import {
 import type { ExternalAgentPermissionPolicy } from "../permissions/schema.js";
 import { CODEX_PROVIDER } from "../provider/codex.js";
 import { classifyRecoverable } from "../runtime/error-classification.js";
+import { codexTurnUsage } from "./run-summary.js";
 import { asRecord, copyIfPresent, stringValue } from "./shared.js";
 import { spawnSubprocess, superviseSubprocess } from "./spawn.js";
 import { SubprocessJsonlDriver } from "./subprocess-jsonl.js";
@@ -345,14 +346,24 @@ function normalizeCodexEvent(value: unknown): ExternalAgentEvent | undefined {
         result: item.result ?? item.aggregated_output ?? item,
         callId: stringValue(item.id),
         error: extractErrorMessage(item.error),
+        metadata: { ...(itemType ? { itemType } : {}), builtin: true },
         timestamp,
       };
+    }
+    // One tool_call per callId: `item.started` opens it; `item.updated` is
+    // progress of the same call and must not emit a second call.
+    if (type === "item.updated") {
+      return undefined;
     }
     return {
       type: "tool_call",
       name: toolName,
-      input: record.input ?? record.arguments ?? item.input ?? item.arguments,
+      input:
+        itemType === "command_execution" && item.command !== undefined
+          ? { command: item.command }
+          : (record.input ?? record.arguments ?? item.input ?? item.arguments),
       callId: stringValue(item.id),
+      metadata: { ...(itemType ? { itemType } : {}), builtin: true },
       timestamp,
     };
   }
@@ -370,9 +381,12 @@ function normalizeCodexEvent(value: unknown): ExternalAgentEvent | undefined {
   }
 
   if (type === "turn.completed" || type === "response.completed") {
+    // F1: `turn.completed` carries the turn's token usage.
+    const usage = codexTurnUsage(record.usage);
     return {
       type: "completed",
       exitCode: numberValue(record.exit_code),
+      ...(usage ? { usage } : {}),
       timestamp,
     };
   }

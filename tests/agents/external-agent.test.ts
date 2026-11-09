@@ -267,16 +267,49 @@ describe("ExternalAgent ADK event formatting", () => {
     expect(spans).toHaveLength(1);
     expect(spans[0].attributes).toMatchObject({
       "gen_ai.system": "gcp.vertex.agent",
-      "gen_ai.request.model": CODEX_PROVIDER.id,
+      "gen_ai.operation.name": "call_llm",
       "gcp.vertex.agent.provider_id": CODEX_PROVIDER.id,
       "gcp.vertex.agent.event_title": "codex_agent: final response",
     });
+    // F1: with no configured or reported model the provider id ("codex") is
+    // never passed off as a model.
+    expect(spans[0].attributes["gen_ai.request.model"]).toBeUndefined();
+    expect(spans[0].attributes["gen_ai.response.model"]).toBeUndefined();
     expect(
       JSON.parse(spans[0].attributes["gcp.vertex.agent.llm_request"] as string),
     ).toEqual({
-      model: CODEX_PROVIDER.id,
       contents: [{ role: "user", parts: [{ text: "Review this diff" }] }],
     });
+  });
+
+  test("uses the configured and reported model ids, never the provider id", async () => {
+    const spans = installTraceCapture();
+    const driver = Object.assign(
+      new StaticDriver([
+        { type: "started", providerId: CODEX_PROVIDER.id, model: "gpt-x-1" },
+        { type: "output", content: "Hello" },
+      ]),
+      { model: "gpt-x" },
+    );
+    const agent = new ExternalAgent({
+      name: "codex_agent",
+      provider: CODEX_PROVIDER,
+      driver,
+    });
+
+    await collect(agent, {
+      userContent: { role: "user", parts: [{ text: "Review this diff" }] },
+    });
+
+    expect(spans).toHaveLength(1);
+    expect(spans[0].attributes).toMatchObject({
+      "gen_ai.request.model": "gpt-x",
+      "gen_ai.response.model": "gpt-x-1",
+    });
+    expect(
+      JSON.parse(spans[0].attributes["gcp.vertex.agent.llm_request"] as string)
+        .model,
+    ).toBe("gpt-x");
   });
 
   test("renders errors using ADK errorCode and errorMessage fields", async () => {
@@ -1157,23 +1190,54 @@ describe("ExternalAgent telemetry privacy (no content in span names or titles)",
           name: "Bash",
           result: { command: SECRET_COMMAND, stdout: SECRET_OUTPUT },
         },
-        // Codex-style tool progress carrying the command in metadata.
+        // Codex-style tool progress carrying the command in metadata, then
+        // the builtin call/result pair the Codex driver emits on
+        // item.completed (wave 4d F5).
         {
           type: "output",
           content: "running",
           partial: true,
           metadata: {
             itemType: "command_execution",
+            itemId: "cmd_1",
             status: "in_progress",
             command: SECRET_COMMAND,
             title: `claude_agent: Bash call: ${SECRET_COMMAND}`,
           },
         },
         {
+          type: "tool_call",
+          callId: "cmd_1",
+          name: "command_execution",
+          input: { command: SECRET_COMMAND },
+          metadata: { itemType: "command_execution", builtin: true },
+        },
+        {
+          type: "tool_result",
+          callId: "cmd_1",
+          name: "command_execution",
+          result: { command: SECRET_COMMAND, output: SECRET_OUTPUT },
+          metadata: { itemType: "command_execution", builtin: true },
+        },
+        {
           type: "output",
           content: "searching",
           partial: true,
           metadata: { itemType: "web_search", query: "web-query-secret" },
+        },
+        {
+          type: "tool_call",
+          callId: "ws_1",
+          name: "web_search",
+          input: { query: "web-query-secret" },
+          metadata: { itemType: "web_search", builtin: true },
+        },
+        {
+          type: "tool_result",
+          callId: "ws_1",
+          name: "web_search",
+          result: { query: "web-query-secret" },
+          metadata: { itemType: "web_search", builtin: true },
         },
         { type: "output", content: SECRET_OUTPUT },
       ]),

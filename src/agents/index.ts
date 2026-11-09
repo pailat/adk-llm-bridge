@@ -35,6 +35,7 @@ export type { ClaudeAgentSdkDriverConfig } from "./driver/claude-agent-sdk.js";
 export {
   ClaudeAgentSdkDriver,
   claudeSdkSessionStateKey,
+  DEFAULT_CLAUDE_SDK_TOOLS,
   mapPolicyToClaudeSdkPermission,
 } from "./driver/claude-agent-sdk.js";
 export type {
@@ -100,6 +101,7 @@ export type {
   ExternalAgentStateDeltaEvent,
   ExternalAgentToolCallEvent,
   ExternalAgentToolResultEvent,
+  ExternalAgentUsage,
 } from "./events.js";
 export { isExternalAgentEvent } from "./events.js";
 export type { ExternalAgentConfig } from "./external-agent.js";

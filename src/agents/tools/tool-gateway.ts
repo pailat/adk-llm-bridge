@@ -68,6 +68,26 @@ export interface RunSubAgentResult {
 
 export type ToolGatewayEventSink = (event: Event) => void;
 
+/** What a {@link ToolGatewayDelegationTracer} learns about a delegation. */
+export interface ToolGatewayDelegationInfo {
+  callId: string;
+  agentName: string;
+  /** `transfer_to_agent` (native shape) or `run_adk_subagent` (legacy). */
+  toolName: string;
+  /** The call arguments as emitted on the timeline. */
+  args: Record<string, unknown>;
+}
+
+/**
+ * Wraps one delegation, from its call event to its result. `ExternalAgent`
+ * uses it to run the sub-agent inside the delegation's `execute_tool` span.
+ * It must call `run` once and return (or throw) what `run` does.
+ */
+export type ToolGatewayDelegationTracer = (
+  info: ToolGatewayDelegationInfo,
+  run: () => Promise<RunSubAgentResult>,
+) => Promise<RunSubAgentResult>;
+
 /**
  * Who owns the final answer after a delegation succeeds with a terminal text.
  *
@@ -90,6 +110,8 @@ export interface ToolGatewayConfig {
   parentContext: InvocationContext;
   parentPermissions?: ExternalAgentPermissionPolicy;
   eventSink?: ToolGatewayEventSink;
+  /** Optional wrapper around each delegation (tracing). */
+  traceDelegation?: ToolGatewayDelegationTracer;
   exposeSubAgentEvents?: boolean;
   /**
    * When true (default) the gateway emits events shaped like native ADK
@@ -117,6 +139,7 @@ export class ToolGateway {
   readonly #parentContext: InvocationContext;
   readonly #parentPermissions?: ExternalAgentPermissionPolicy;
   readonly #eventSink?: ToolGatewayEventSink;
+  readonly #traceDelegation?: ToolGatewayDelegationTracer;
   readonly #exposeSubAgentEvents: boolean;
   readonly #nativeDelegationShape: boolean;
   readonly #invocationGateway: AgentInvocationGateway;
@@ -137,6 +160,7 @@ export class ToolGateway {
     this.#parentContext = config.parentContext;
     this.#parentPermissions = config.parentPermissions;
     this.#eventSink = config.eventSink;
+    this.#traceDelegation = config.traceDelegation;
     this.#exposeSubAgentEvents = config.exposeSubAgentEvents ?? true;
     this.#nativeDelegationShape = config.nativeDelegationShape ?? true;
     this.#finalAnswer = config.delegation?.finalAnswer ?? "subagent";
@@ -186,6 +210,27 @@ export class ToolGateway {
     const callId = createBridgeCallId();
     // A new delegation starts: whatever the previous one decided is stale.
     this.#finalAnswerPending = false;
+    const run = () => this.delegate(input, agent, callId);
+    if (!this.#traceDelegation) {
+      return run();
+    }
+    return this.#traceDelegation(
+      {
+        callId,
+        agentName: agent.name,
+        ...(this.#nativeDelegationShape
+          ? { toolName: "transfer_to_agent", args: { agent_name: agent.name } }
+          : { toolName: "run_adk_subagent", args: { ...input } }),
+      },
+      run,
+    );
+  }
+
+  private async delegate(
+    input: RunSubAgentInput,
+    agent: BaseAgent,
+    callId: string,
+  ): Promise<RunSubAgentResult> {
     this.emit(this.createFunctionCallEvent(input, callId));
 
     // In native mode the transfer signal must fire BEFORE the sub-agent runs
