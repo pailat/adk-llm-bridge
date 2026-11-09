@@ -198,6 +198,38 @@ export const rootAgent = new LlmAgent({
 - **No default secret persistence** — the default credential provider stores nothing. Use `EnvCredentialProvider` to pass only provider-allowlisted environment variables, or provide your own `ExternalAgentCredentialProvider` for a secret manager.
 - **Optional runtime dependencies** — importing `adk-llm-bridge/agents` does not install or execute provider CLIs. Wire a driver/runtime explicitly in applications that need one.
 - **Permission presets** — use `read-only`, `ask`, `workspace-write`, or `full-access` policies, plus optional `allowNetwork` and `allowedPaths`, so provider drivers can map ADK intent to provider-specific sandbox flags.
+- **Isolated Claude agents** — `ClaudeAgent` with its default Claude Agent SDK driver does not inherit the host's Claude Code setup. The agent gets only the built-in tools in `DEFAULT_CLAUDE_SDK_TOOLS` (Read, Glob, Grep, Edit, Write, NotebookEdit, Bash, WebFetch, WebSearch, TodoWrite) plus the bridge's own tools. Host tools (Task, Skill, cron, worktrees, Workflow, ToolSearch, messaging), MCP servers from other config and claude.ai connectors are off, and bundled skills are hidden from the model. To change this, pass `driver: new ClaudeAgentSdkDriver({ tools: [...DEFAULT_CLAUDE_SDK_TOOLS, "Task"] })` or `driver: new ClaudeAgentSdkDriver({ inheritHostConfig: true })`. `ClaudeCliDriver` is not isolated this way: it still loads the host's tool set.
+- **Read-only tool list** — under `read-only`, the Claude Agent SDK driver also removes write and shell tools (Edit, Write, MultiEdit, NotebookEdit, Bash, PowerShell) from the model's tool list. It removes WebFetch and WebSearch unless `allowNetwork: true`; with `allowNetwork: false` they are removed in every mode. Calls to removed tools are still denied if the model tries them.
+
+### Delegation from an external coordinator
+
+An external agent can itself coordinate ADK sub-agents (`subAgents: [...]` on a
+`ClaudeAgent`). This works differently from `LlmAgent` transfer, because the
+bridge cannot make the external runtime's model call ADK's `transfer_to_agent`
+directly:
+
+1. The bridge gives the coordinator an MCP tool,
+   `mcp__adk_bridge__run_adk_subagent` (`agentName`, `task`). Among the
+   built-in drivers, only the Claude Agent SDK driver exposes it.
+2. When the model calls it, the bridge runs the sub-agent through ADK in the
+   same session: the sub-agent sees the session state and history, its state
+   changes merge back, and its permissions are at most the coordinator's.
+3. On the ADK timeline, the call appears as a native `transfer_to_agent`
+   function call and response, followed by the sub-agent's own events. In
+   traces, each delegation is one `execute_tool transfer_to_agent` span that
+   contains the sub-agent's `invoke_agent` span. With
+   `nativeDelegationShape: false`, the events are `run_adk_subagent` calls and
+   responses instead, and the span is `execute_tool run_adk_subagent → <agent>`.
+4. The coordinator's turn keeps running while the sub-agent works, and it gets
+   the sub-agent's answer as the tool result. With the default
+   `delegation: { finalAnswer: "subagent" }`, the sub-agent's answer is final
+   and the coordinator's re-narration is dropped. With
+   `finalAnswer: "coordinator"`, the coordinator writes the final answer.
+
+Each tool call runs one sub-agent. Use the events and spans, not the
+coordinator's own summary, to see what ran and in what order: a model may
+describe sub-agent runs as "in parallel" when the events show they ran one
+after another.
 
 ### Runnable examples
 
@@ -605,6 +637,32 @@ Message content in spans is controlled by two variables:
   `OTEL_...` variable is not set, the bridge's spans follow this variable too.
 
 To keep all content out of traces on ADK 2.4, set both.
+
+External agents (Claude Code, Codex, Gemini CLI) get their own spans:
+
+- `call_llm` covers one model step, from the start of the step (the run start
+  or the last tool result) to the model's first output in it.
+- `execute_tool <name>` covers one of the runtime's own tool calls (Read,
+  Edit, Bash, Codex commands...), from the call to its result. A delegation is
+  one `execute_tool transfer_to_agent` span around the sub-agent's run.
+- `gen_ai.request.model` is the configured model (it is left out when none is
+  configured) and `gen_ai.response.model` is the model the runtime reports.
+- The runtimes report usage per run, not per model call, so the run's tokens,
+  cost and turns go on the agent's `invoke_agent` span, and the run's final
+  text event carries `usageMetadata`. When the coordinator's own final text is
+  dropped after a delegation (`finalAnswer: "subagent"`), its usage is only on
+  the span.
+
+The runtime's tool calls also appear as function call and response events
+(`customMetadata.builtin: true`). Their results are stored in the session as
+they are, for example a `Read` result holds the file content. The capture
+variables above apply to spans, not to session events.
+
+With content capture on (the default), the `execute_tool` spans of these
+tools export the raw tool inputs and results, including absolute file paths
+and full file contents from `Read`. To keep them out of traces, set
+`OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=NO_CONTENT` and
+`ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS=false`.
 
 ### Usage metadata
 

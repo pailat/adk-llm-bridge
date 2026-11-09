@@ -130,6 +130,20 @@ new in 0.7.0. If you already use them, these changes apply:
   `CODEX_QUOTA_EXHAUSTED`.
 - **Capabilities.** The Codex and Gemini CLI definitions no longer declare
   `tools` / `mcpServers` support.
+- **Isolated Claude agents.** `ClaudeAgent` no longer inherits the host's
+  Claude Code setup. If your agent relied on host tools (Task sub-agents,
+  Skill, cron, worktrees...), on MCP servers from your user or project
+  config, or on claude.ai connectors, pass a driver:
+  `driver: new ClaudeAgentSdkDriver({ inheritHostConfig: true })`, or list the
+  built-in tools you need with
+  `driver: new ClaudeAgentSdkDriver({ tools: [...DEFAULT_CLAUDE_SDK_TOOLS, "Task"] })`.
+  `settingSources` still defaults to `[]`. Under `read-only`, write, shell and
+  web tools are no longer offered to the model (calls to them were already
+  denied).
+- **Spans.** External agent spans carry the real model and run usage, and a
+  delegation is one `execute_tool transfer_to_agent` span around the
+  sub-agent's run. If you query traces for the previous 0 ms span pairs or for
+  `gen_ai.request.model = "claude"`, update those queries.
 
 ## 7. Agent invocation gateway
 

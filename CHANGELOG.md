@@ -51,6 +51,26 @@ from the 0.6.0 tag.
     coordinator write the final answer (fan-out, aggregation);
   - the Codex and Gemini CLI definitions no longer declare `tools` or
     `mcpServers` support.
+  - `ClaudeAgent` with its default Claude Agent SDK driver no longer inherits
+    the host's Claude Code setup. The agent gets the built-in tools in
+    `DEFAULT_CLAUDE_SDK_TOOLS` (Read, Glob, Grep, Edit, Write, NotebookEdit,
+    Bash, WebFetch, WebSearch, TodoWrite) plus the bridge's own tools. Host
+    tools (Task, Skill, cron, worktrees, Workflow, ToolSearch, messaging), MCP
+    servers from other config and claude.ai connectors are off, and bundled
+    skills are hidden from the model. Pass
+    `driver: new ClaudeAgentSdkDriver({ tools: [...] })` to choose the built-in
+    tools, or `driver: new ClaudeAgentSdkDriver({ inheritHostConfig: true })`
+    to restore the host setup;
+  - under a `read-only` policy, the Claude Agent SDK driver removes write and
+    shell tools (Edit, Write, MultiEdit, NotebookEdit, Bash, PowerShell) from
+    the model's tool list, and WebFetch/WebSearch unless `allowNetwork: true`.
+    With `allowNetwork: false`, WebFetch/WebSearch are removed in every mode.
+    Calls to removed tools are still denied;
+  - external agent spans changed shape: a delegation is one
+    `execute_tool transfer_to_agent` span instead of a call/response pair of
+    0 ms spans, Codex item progress no longer has its own
+    `execute_tool <itemType>` span, and bridge tool spans set
+    `llm_request`/`llm_response` to `"{}"`, as ADK's tool spans do.
 - **Agent invocation gateway:**
   - `AgentInvocationResult.output` is the text of the last final response, as
     with ADK's Runner and `AgentTool`. The previous concatenation of all text is
@@ -106,6 +126,13 @@ from the 0.6.0 tag.
   - an answer is bound to its exact call and cannot be replayed.
 - In `read-only` mode, a toolset that fails to list its tools is skipped
   instead of being exposed unfiltered.
+- `settingSources: []` did not isolate `ClaudeAgent`: the Claude Code CLI still
+  loaded its full default tool set, and on a subscription login claude.ai
+  connectors could reach the agent through ToolSearch, which put unrelated
+  instructions in the agent's context. The Claude Agent SDK driver now passes
+  an explicit `tools` list, `strictMcpConfig: true`, `skills: []` and
+  `disableClaudeAiConnectors` (see Breaking). `ClaudeCliDriver` is not
+  isolated this way yet and still loads the host's tool set.
 - `ExternalAgent` ancestors are detected by a `Symbol.for` brand instead of
   `instanceof`, so a duplicated install or a bundle split can no longer skip an
   ancestor's policy. An ancestor's policy is read through a frozen, validated
@@ -120,6 +147,25 @@ from the 0.6.0 tag.
 
 ### Added
 
+- **External agent usage and model:** `ExternalAgentStartedEvent.model` and
+  `ExternalAgentCompletedEvent.{model, usage, numTurns, durationMs}` (new
+  `ExternalAgentUsage` type), filled by the Claude SDK and CLI drivers and,
+  for usage only, the Codex SDK and CLI drivers. Run tokens (including cache
+  read and creation), cost and turns go on the agent's `invoke_agent` span
+  (`gen_ai.usage.*`, `gcp.vertex.agent.external_agent.*`), and the run's final
+  text event carries `usageMetadata` (`promptTokenCount` includes cache
+  tokens).
+- **External agent tool calls:** the Claude SDK and Codex drivers emit
+  `tool_call`/`tool_result` events for the runtime's own tools
+  (`metadata.builtin: true`). They appear as function call and response
+  events (`customMetadata.builtin: true`) and as `execute_tool <name>` spans;
+  the content capture rules apply to the spans. The results are stored in the
+  session as they are (a `Read` result holds the file content). Codex
+  `file_change` and `web_search` items are now reported, and the Codex command
+  result includes its output.
+- `ClaudeAgentSdkDriverConfig.tools` and `.inheritHostConfig`,
+  `DEFAULT_CLAUDE_SDK_TOOLS`, and `model` getters on `ClaudeAgentSdkDriver` and
+  `CodexSdkDriver`.
 - **First-class workflows** (`adk-llm-bridge/workflows`) as native ADK
   `BaseAgent` implementations:
   - `WorkflowAgent` for trusted TypeScript handlers.
@@ -225,6 +271,16 @@ from the 0.6.0 tag.
 
 ### Fixed
 
+- External agent spans carry the real model: `gen_ai.request.model` is the
+  configured model (never the provider id, such as `"claude"`), and
+  `gen_ai.response.model` is the model the runtime reports.
+- Coordinator mode no longer emits each sub-agent model call twice, and
+  state-only events no longer produce `call_llm` spans.
+- External agent `call_llm` and `execute_tool` spans have real durations (one
+  model step; a tool call to its result), and the delegated sub-agent's
+  `invoke_agent` span nests under the `execute_tool transfer_to_agent` span.
+- No more `CLAUDE_SDK_CAN_USE_TOOL_SHADOWED` warning on every coordinator run
+  with sub-agents.
 - Workflow HITL: with the default execution id, every turn while a run waits
   for input now goes to that run instead of starting a fresh one. A turn that
   answers nothing is rejected with `WORKFLOW_INPUT_MISMATCH`, or, if it repeats
