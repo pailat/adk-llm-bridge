@@ -6,7 +6,9 @@
  * except `DEFAULT_CLAUDE_TOOLS` through the SDK driver.
  */
 
+import { tmpdir } from "node:os";
 import { networkAllowed } from "../permissions/network.js";
+import { canonicalPath, isUnderAny } from "../permissions/paths.js";
 import type { ExternalAgentPermissionPolicy } from "../permissions/schema.js";
 import { BRIDGE_TOOL_PREFIX } from "../tools/adk-tool-bridge.js";
 import {
@@ -91,7 +93,18 @@ export interface ClaudeIsolationOptions {
    * no-network sandbox. Network access of shell commands is then NOT enforced.
    */
   allowUnsandboxedShell: boolean;
+  /**
+   * The run's working directory, the base of relative `allowedPaths`.
+   *
+   * @defaultValue `process.cwd()`
+   */
+  workingDirectory?: string;
 }
+
+/** {@link CLAUDE_NO_NETWORK_SANDBOX} with its writable roots pinned. */
+export type ClaudeConfinedSandbox = ClaudeNoNetworkSandbox & {
+  readonly filesystem: { readonly allowWrite: readonly string[] };
+};
 
 /** What a Claude driver passes to the runtime; see {@link planClaudeIsolation}. */
 export interface ClaudeIsolationPlan {
@@ -107,14 +120,38 @@ export interface ClaudeIsolationPlan {
   tools: string[] | undefined;
   /** Tools removed by the policy (read-only, no network). */
   disallowedTools: string[] | undefined;
-  /** The no-network sandbox, when the policy needs it. */
-  sandbox: ClaudeNoNetworkSandbox | undefined;
+  /**
+   * The no-network sandbox, when the policy needs it. With `allowedPaths` or
+   * `pathBounds` its writable roots are the allowed roots (plus the working
+   * directory, which Claude Code always keeps writable and which then lies
+   * inside them).
+   */
+  sandbox: ClaudeNoNetworkSandbox | ClaudeConfinedSandbox | undefined;
+  /**
+   * Why shell commands cannot be kept inside `allowedPaths` or `pathBounds`,
+   * when they cannot; the driver then refuses the run with
+   * `EXTERNAL_AGENT_PATHS_UNENFORCEABLE`.
+   */
+  shellPathsUnenforceable: string | undefined;
   /**
    * How shell commands are kept off the network, reported to the permission
    * guard: `enforced` (sandbox on), `waived` (the opt-in), or `undefined`
    * (the policy does not restrict the network, or no shell tool is offered).
    */
   networkSandbox: "enforced" | "waived" | undefined;
+  /**
+   * Web tools that run without a prompt, by canonical name: the offered
+   * `WebFetch` and `WebSearch` under `read-only` with `allowNetwork: true`.
+   * `undefined` when there are none.
+   */
+  readOnlyWebTools: string[] | undefined;
+  /**
+   * Web tools named in the configured `tools` while the policy keeps the
+   * network off, by canonical name. The driver then refuses the run with
+   * `EXTERNAL_AGENT_NETWORK_UNENFORCEABLE` instead of dropping them; the
+   * default tool list is trimmed without a refusal.
+   */
+  unenforceableWebTools: string[] | undefined;
 }
 
 /**
@@ -124,9 +161,20 @@ export interface ClaudeIsolationPlan {
  *   settings files or claude.ai connectors.
  * - `read-only` removes the write and shell tools; web tools are removed
  *   unless the policy sets `allowNetwork: true` (an unset value, or no
- *   policy, counts as `false`).
+ *   policy, counts as `false`). With it, the offered web tools run without a
+ *   prompt (`readOnlyWebTools`).
+ * - Web tools named in the configured `tools` while the network is off are
+ *   reported in `unenforceableWebTools`, so the driver refuses the run.
+ *   Removals match tool names case-insensitively.
  * - Without `allowNetwork: true`, a shell tool on offer turns on the
  *   no-network sandbox, unless `allowUnsandboxedShell` is set.
+ * - With `allowedPaths` or `pathBounds` and a shell tool on offer, the
+ *   sandbox may write only to the allowed roots (it does not limit reads).
+ *   A working directory outside the allowed roots (Claude Code keeps it
+ *   writable), a shell without the sandbox (`allowNetwork: true` or
+ *   `allowUnsandboxedShell`), `inheritHostConfig` (host settings widen the
+ *   writable paths) and a working directory or allowed root in the
+ *   always-writable temp area are reported in `shellPathsUnenforceable`.
  *
  * @remarks Network is off unless the policy sets `allowNetwork: true`: an
  * unset value, or no policy, removes the web tools and runs Bash in the
@@ -149,7 +197,23 @@ export function planClaudeIsolation(
   const base =
     options.tools ??
     (options.inheritHostConfig ? undefined : DEFAULT_CLAUDE_TOOLS);
-  const tools = base?.filter((name) => !removed.has(name));
+  const tools = base?.filter(
+    (name) => !removed.has(canonicalClaudeToolName(name) ?? name),
+  );
+  const webTools = (list: readonly string[] | undefined): string[] =>
+    CLAUDE_NETWORK_TOOLS.filter(
+      (tool) =>
+        list === undefined ||
+        list.some((name) => canonicalClaudeToolName(name) === tool),
+    );
+  const readOnlyWebTools =
+    policy?.mode === "read-only" && networkAllowed(policy)
+      ? webTools(tools)
+      : [];
+  const unenforceableWebTools =
+    options.tools !== undefined && !networkAllowed(policy)
+      ? webTools(options.tools)
+      : [];
   // Without a pinned list the runtime default applies, which has a shell.
   const shellOffered =
     tools === undefined
@@ -167,15 +231,115 @@ export function planClaudeIsolation(
     }
   }
 
+  let shellPathsUnenforceable: string | undefined;
+  let confined: ClaudeConfinedSandbox | undefined;
+  if (
+    shellOffered &&
+    (policy?.allowedPaths !== undefined || policy?.pathBounds !== undefined)
+  ) {
+    const confinement = confineShellWrites(
+      policy,
+      sandbox,
+      options.workingDirectory ?? process.cwd(),
+      options.inheritHostConfig,
+    );
+    if (typeof confinement === "string") {
+      shellPathsUnenforceable = confinement;
+    } else {
+      confined = confinement;
+    }
+  }
+
   return {
     isolated: !options.inheritHostConfig,
     denyForeignMcpTools:
       !options.inheritHostConfig || policy?.mode === "read-only",
     tools,
     disallowedTools: removed.size > 0 ? [...removed] : undefined,
-    sandbox,
+    sandbox: confined ?? sandbox,
+    shellPathsUnenforceable,
     networkSandbox,
+    readOnlyWebTools:
+      readOnlyWebTools.length > 0 ? readOnlyWebTools : undefined,
+    unenforceableWebTools:
+      unenforceableWebTools.length > 0 ? unenforceableWebTools : undefined,
   };
+}
+
+/**
+ * Directories the Claude Code sandbox keeps writable whatever `allowWrite`
+ * says: its temp area (`/tmp`, where it puts `/tmp/claude-<uid>`, the host
+ * temp directory and `TMPDIR`/`CLAUDE_CODE_TMPDIR`), as real paths.
+ */
+function alwaysWritableRoots(): string[] {
+  const candidates = [
+    "/tmp",
+    tmpdir(),
+    process.env.TMPDIR,
+    process.env.CLAUDE_CODE_TMPDIR,
+  ];
+  return [
+    ...new Set(
+      candidates
+        .filter((path): path is string => Boolean(path))
+        .map((path) => canonicalPath(path, "/"))
+        .filter((path): path is string => path !== undefined),
+    ),
+  ];
+}
+
+/**
+ * The sandbox with its writable roots set to the policy's allowed roots, or
+ * why shell writes cannot be kept inside them.
+ *
+ * @remarks Fails closed when the shell is unsandboxed, when host settings
+ * merge into the sandbox (`inheritHostConfig`: `Edit(...)` allow rules and a
+ * host `sandbox.filesystem.allowWrite` widen it), when the working directory
+ * is outside the allowed roots (always writable), and when the working
+ * directory or an allowed root lies in the always-writable temp area, where
+ * the paths around the allowed roots would stay writable.
+ */
+function confineShellWrites(
+  policy: ExternalAgentPermissionPolicy,
+  sandbox: ClaudeNoNetworkSandbox | undefined,
+  workingDirectory: string,
+  inheritHostConfig: boolean,
+): ClaudeConfinedSandbox | string {
+  if (!sandbox) {
+    return "shell commands run without the Claude Code sandbox (allowNetwork: true or allowUnsandboxedShell), so nothing keeps their writes inside allowedPaths";
+  }
+  if (inheritHostConfig) {
+    return "with inheritHostConfig, host settings (Edit allow rules, sandbox.filesystem.allowWrite) are merged into the sandbox's writable paths";
+  }
+  const lists = [
+    ...(policy.allowedPaths ? [policy.allowedPaths] : []),
+    ...(policy.pathBounds ?? []),
+  ].map((list) =>
+    list
+      .map((root) => canonicalPath(root, workingDirectory))
+      .filter((root): root is string => root !== undefined),
+  );
+  const cwd = canonicalPath(workingDirectory, workingDirectory);
+  if (cwd === undefined || !lists.every((roots) => isUnderAny(cwd, roots))) {
+    return `the working directory ${workingDirectory} is outside allowedPaths, and the Claude Code sandbox always lets shell commands write there`;
+  }
+  // A root is writable only when it is inside every list.
+  const allowWrite = [
+    ...new Set(
+      (lists[0] ?? []).filter((root) =>
+        lists.every((roots) => isUnderAny(root, roots)),
+      ),
+    ),
+  ];
+  const temp = alwaysWritableRoots();
+  const inTemp = [cwd, ...allowWrite].find((path) => isUnderAny(path, temp));
+  if (inTemp !== undefined) {
+    return `${inTemp} is inside a temp directory that the Claude Code sandbox always keeps writable, so the paths around allowedPaths there stay writable`;
+  }
+  return Object.freeze({
+    ...sandbox,
+    filesystem: Object.freeze({ allowWrite: Object.freeze(allowWrite) }),
+  });
 }
 
 /** What an isolated run may report in `system/init`. */
@@ -216,12 +380,9 @@ export function findIsolationViolations(
     return undefined;
   }
   const allowedServers = new Set(expected.mcpServers);
-  const tools = Array.isArray(record.tools)
-    ? record.tools
-        .map((tool) => stringValue(tool) ?? stringValue(asRecord(tool).name))
-        .filter((name): name is string => typeof name === "string")
-        .filter((name) => !isExpectedClaudeTool(name, expected))
-    : [];
+  const tools = (claudeInitTools(message) ?? []).filter(
+    (name) => !isExpectedClaudeTool(name, expected),
+  );
   const mcpServers = Array.isArray(record.mcp_servers)
     ? record.mcp_servers
         .map(
@@ -234,10 +395,52 @@ export function findIsolationViolations(
 }
 
 /**
+ * The tool names a `system/init` message reports, as the runtime spells them.
+ *
+ * @param message - One runtime message, any type.
+ * @returns The names (empty when the message lists none), or `undefined`
+ * when `message` is not `system/init`.
+ */
+export function claudeInitTools(message: unknown): string[] | undefined {
+  const record = asRecord(message);
+  if (record.type !== "system" || record.subtype !== "init") {
+    return undefined;
+  }
+  return Array.isArray(record.tools)
+    ? record.tools
+        .map((tool) => stringValue(tool) ?? stringValue(asRecord(tool).name))
+        .filter((name): name is string => typeof name === "string")
+    : [];
+}
+
+/**
+ * The canonical spelling of a built-in tool the bridge can offer, matched
+ * ASCII case-insensitively (the model or SDK may report `bash` for `Bash`).
+ *
+ * @param name - The tool name as the runtime reports it.
+ * @returns The canonical name, or `undefined` when `name` is not one of the
+ * built-ins the bridge knows. Only built-in names are returned and none starts
+ * with `mcp__`, so MCP tool names are never folded.
+ * @internal
+ */
+export function canonicalClaudeToolName(name: string): string | undefined {
+  const lower = name.toLowerCase();
+  return [
+    ...DEFAULT_CLAUDE_TOOLS,
+    ...CLAUDE_WRITE_TOOLS,
+    ...CLAUDE_NETWORK_TOOLS,
+  ].find((tool) => tool.toLowerCase() === lower);
+}
+
+/**
  * Whether an isolated run may use the tool `name`: a configured built-in
  * tool, or a tool of an expected MCP server (`mcp__<server>__<tool>`).
  *
- * @remarks Claude Code writes a server name into tool names with every
+ * @remarks
+ * Built-in names are compared by canonical name, so an offered tool reported
+ * as `bash` is accepted; a built-in that was not offered is not.
+ *
+ * Claude Code writes a server name into tool names with every
  * character outside `[A-Za-z0-9_-]` replaced by `_`, so both spellings match.
  * The bridge's own tools are matched by exact name when
  * {@link ClaudeIsolationExpectation.bridgeTools} is set.
@@ -250,6 +453,10 @@ export function isExpectedClaudeTool(
   expected: ClaudeIsolationExpectation,
 ): boolean {
   if (expected.tools.includes(name)) {
+    return true;
+  }
+  const canonical = canonicalClaudeToolName(name);
+  if (canonical !== undefined && expected.tools.includes(canonical)) {
     return true;
   }
   if (!name.startsWith("mcp__")) {
@@ -272,7 +479,8 @@ export function isExpectedClaudeTool(
  *
  * @param message - One runtime message, any type.
  * @param expected - The tools and MCP servers the driver configured.
- * @returns The unexpected tool names; empty for any other message.
+ * @returns The unexpected tool names (an empty, missing or non-string name
+ * counts as unexpected and is reported as `""`); empty for any other message.
  */
 export function findToolUseViolations(
   message: unknown,
@@ -289,8 +497,7 @@ export function findToolUseViolations(
   return content
     .map(asRecord)
     .filter((block) => block.type === "tool_use")
-    .map((block) => stringValue(block.name))
-    .filter((name): name is string => typeof name === "string")
+    .map((block) => (typeof block.name === "string" ? block.name : ""))
     .filter((name) => !isExpectedClaudeTool(name, expected));
 }
 
@@ -301,10 +508,16 @@ export function findToolUseViolations(
  *
  * @remarks claude.ai connectors and some MCP servers connect after `init`,
  * so the init listing alone can miss them. Checking each tool the model is
- * about to use closes that gap.
+ * about to use closes that gap. The error message states what the bridge
+ * saw: a tool the runtime offered at start points to a host or managed
+ * setting, a built-in it did not offer to the model inventing a call, an
+ * MCP tool it did not offer to the model or to a server that connected
+ * later. The code and recoverability are the same in every case.
  * @param message - One runtime message, any type.
  * @param expected - The tools and MCP servers the driver configured.
  * @param runtime - Runtime name used in the error message.
+ * @param offered - The tools the session's `system/init` reported (see
+ * {@link claudeInitTools}); `undefined` when no `init` was seen yet.
  * @throws {@link ExternalAgentPolicyError} with code
  * `EXTERNAL_AGENT_ISOLATION_VIOLATED` when something outside `expected`
  * appears.
@@ -313,15 +526,44 @@ export function assertClaudeMessageIsolated(
   message: unknown,
   expected: ClaudeIsolationExpectation,
   runtime: string,
+  offered?: readonly string[],
 ): void {
   assertClaudeInitIsolated(message, expected, runtime);
   const tools = findToolUseViolations(message, expected);
   if (tools.length > 0) {
     throw new ExternalAgentPolicyError(
       EXTERNAL_AGENT_ISOLATION_VIOLATED,
-      `${runtime} tried to use ${tools.join(", ")}, outside the isolated set, so the run was stopped. A host or managed setting may be adding tools after start. Pass inheritHostConfig: true to allow the host configuration.`,
+      toolUseStopMessage(tools, runtime, offered),
     );
   }
+}
+
+/** The stop message for `tool_use` names outside the isolated set. */
+function toolUseStopMessage(
+  tools: readonly string[],
+  runtime: string,
+  offered: readonly string[] | undefined,
+): string {
+  const names = tools.map((tool) => JSON.stringify(tool)).join(", ");
+  const optIn = "Pass inheritHostConfig: true to allow the host configuration.";
+  if (offered === undefined) {
+    return `${runtime} tried to use ${names}, outside the isolated set, so the isolation policy stopped the run. The runtime had not reported the tools it offers yet. ${optIn}`;
+  }
+  const wasOffered = (tool: string) => {
+    const canonical = canonicalClaudeToolName(tool);
+    return (
+      offered.includes(tool) ||
+      (canonical !== undefined && offered.includes(canonical))
+    );
+  };
+  if (tools.some(wasOffered)) {
+    return `${runtime} tried to use ${names}, outside the isolated set, so the run was stopped. The runtime offered it, so a host or managed setting may be adding tools. ${optIn}`;
+  }
+  const notOffered = `${runtime}: the model requested ${names}, a tool that was not offered (it is not in the session's system/init tools), so the isolation policy stopped the run.`;
+  if (tools.some((tool) => tool.startsWith("mcp__"))) {
+    return `${notOffered} An MCP server or claude.ai connector that connects after start may have added it; check host and managed settings, or ${optIn.charAt(0).toLowerCase()}${optIn.slice(1)}`;
+  }
+  return `${notOffered} This points to the model asking for a tool it was not given, not to a host setting.`;
 }
 
 /**
@@ -393,6 +635,9 @@ export function claudeCliIsolationArgs(plan: ClaudeIsolationPlan): string[] {
       "--disable-slash-commands",
     );
     settings.disableClaudeAiConnectors = true;
+    // Keeps Claude Code from pointing the agent at the host's auto-memory
+    // directory, outside the run's isolation.
+    settings.autoMemoryEnabled = false;
   }
   if (plan.denyForeignMcpTools) {
     // The CLI has no MCP server of its own, so every MCP tool is foreign: a
@@ -401,6 +646,14 @@ export function claudeCliIsolationArgs(plan: ClaudeIsolationPlan): string[] {
     // mode. `mcp__*` is the CLI's rule for "all MCP servers' tools" (checked
     // on 2.1.319, bypassPermissions included: the tools leave the init list).
     settings.permissions = { deny: ["mcp__*"] };
+  }
+  if (plan.readOnlyWebTools) {
+    // `dontAsk` (read-only) denies every tool that would prompt; an allow
+    // rule lets the web tools through when the policy turns the network on.
+    settings.permissions = {
+      allow: plan.readOnlyWebTools,
+      ...(settings.permissions as Record<string, unknown> | undefined),
+    };
   }
   if (plan.sandbox) {
     settings.sandbox = plan.sandbox;

@@ -26,6 +26,14 @@ export const EXTERNAL_AGENT_NETWORK_UNENFORCEABLE =
   "EXTERNAL_AGENT_NETWORK_UNENFORCEABLE";
 
 /**
+ * The policy sets `allowedPaths` (or inherited `pathBounds`), and the driver
+ * cannot check the paths of the runtime's tool calls against them: the
+ * runtime never asks the bridge before a file tool runs.
+ */
+export const EXTERNAL_AGENT_PATHS_UNENFORCEABLE =
+  "EXTERNAL_AGENT_PATHS_UNENFORCEABLE";
+
+/**
  * An optional SDK package the driver needs is not installed. The message
  * names it and the install command.
  */
@@ -47,13 +55,24 @@ export const EXTERNAL_AGENT_MISSING_BINARY = "MISSING_BINARY";
 export const EXTERNAL_AGENT_CREDENTIAL_UNSUPPORTED =
   "EXTERNAL_AGENT_CREDENTIAL_UNSUPPORTED";
 
+/**
+ * The driver was configured with an option its runtime cannot honor, for
+ * example a `sessionStore` on the Claude CLI driver (only the Claude Agent
+ * SDK mirrors transcripts to a store). Thrown when the driver is built, so the
+ * option is never silently ignored.
+ */
+export const EXTERNAL_AGENT_OPTION_UNSUPPORTED =
+  "EXTERNAL_AGENT_OPTION_UNSUPPORTED";
+
 /** Codes of {@link ExternalAgentPolicyError}. */
 export type ExternalAgentPolicyErrorCode =
   | typeof EXTERNAL_AGENT_ISOLATION_VIOLATED
   | typeof EXTERNAL_AGENT_NETWORK_UNENFORCEABLE
+  | typeof EXTERNAL_AGENT_PATHS_UNENFORCEABLE
   | typeof EXTERNAL_AGENT_DEPENDENCY_MISSING
   | typeof EXTERNAL_AGENT_MISSING_BINARY
-  | typeof EXTERNAL_AGENT_CREDENTIAL_UNSUPPORTED;
+  | typeof EXTERNAL_AGENT_CREDENTIAL_UNSUPPORTED
+  | typeof EXTERNAL_AGENT_OPTION_UNSUPPORTED;
 
 /**
  * A run the driver refuses to start or continue. Never recoverable: retrying
@@ -121,6 +140,46 @@ export function unsandboxedShellRefusal(
   return networkUnenforceable(
     `${options.runtime} runs shell commands without a sandbox in full-access mode, so the network cannot be kept off (it is off unless allowNetwork is true). Use the workspace-write or ask mode, set allowNetwork: true, or build the driver with allowUnenforcedNetwork: true to run anyway.`,
   );
+}
+
+/**
+ * A driver whose runtime runs file tools without asking the bridge cannot keep
+ * a run inside `allowedPaths` or `pathBounds`. Such a run is refused unless the
+ * driver was built with `allowUnenforcedPaths: true`.
+ *
+ * @param policy - The effective permission policy of the run.
+ * @param options - Runtime name for the message, and the driver opt-in.
+ * @returns An `EXTERNAL_AGENT_PATHS_UNENFORCEABLE` error to report, or
+ * `undefined` when the policy sets no paths or the driver opted in.
+ */
+export function unenforceablePathsRefusal(
+  policy: ExternalAgentPermissionPolicy | undefined,
+  options: { runtime: string; allowUnenforcedPaths: boolean },
+): ExternalAgentPolicyError | undefined {
+  if (
+    (policy?.allowedPaths === undefined && policy?.pathBounds === undefined) ||
+    options.allowUnenforcedPaths
+  ) {
+    return undefined;
+  }
+  return new ExternalAgentPolicyError(
+    EXTERNAL_AGENT_PATHS_UNENFORCEABLE,
+    `${options.runtime} runs file tools without asking the bridge, so allowedPaths (or the path bounds inherited from a parent agent) cannot be enforced. Use ClaudeAgentSdkDriver, remove allowedPaths, or build the driver with allowUnenforcedPaths: true to run anyway (the runtime's own sandbox then decides which paths it reaches).`,
+  );
+}
+
+/**
+ * Why a Claude run that offers web tools with the network off is refused.
+ *
+ * @param runtime - Runtime name for the message.
+ * @param tools - The web tools named in the configured `tools`.
+ * @returns The message for {@link networkUnenforceable}.
+ */
+export function webToolsRefusal(
+  runtime: string,
+  tools: readonly string[],
+): string {
+  return `${runtime} was configured with web tools (${tools.join(", ")}), but the network is off (it is off unless allowNetwork is true). Set allowNetwork: true, or remove the web tools from tools.`;
 }
 
 /**

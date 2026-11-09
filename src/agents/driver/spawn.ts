@@ -28,6 +28,11 @@ export interface DriverSpawnOptions {
    * allowlisted copy; nothing is inherited implicitly when it is set.
    */
   env?: Record<string, string>;
+  /**
+   * Text written to the process's stdin, which is then closed. Without it
+   * stdin is ignored.
+   */
+  input?: string;
 }
 
 /** A spawned CLI process, identical on Bun and Node. */
@@ -75,7 +80,7 @@ export interface BunSpawnLike {
     options: {
       cwd?: string;
       env?: Record<string, string>;
-      stdin: "ignore";
+      stdin: "ignore" | Uint8Array;
       stdout: "pipe";
       stderr: "pipe";
       detached?: boolean;
@@ -189,7 +194,11 @@ function onHostSignal(signal: NodeJS.Signals): void {
   process.kill(process.pid, signal);
 }
 
-/** Live CLI process groups and installed host hooks, for tests. */
+/**
+ * Live CLI process groups and installed host hooks, for tests.
+ *
+ * @internal
+ */
 export function processGroupHooksForTesting(): {
   liveGroups: number;
   signalListeners: number;
@@ -221,9 +230,9 @@ function detectBun(): BunSpawnLike | undefined {
 }
 
 /**
- * Spawns `command` with piped stdout/stderr and an ignored stdin (the CLIs
- * receive the prompt as an argument; an open stdin makes some of them wait
- * for more input).
+ * Spawns `command` with piped stdout/stderr. Stdin carries `options.input`
+ * and is then closed, or is ignored when there is no input (an open stdin
+ * makes some CLIs wait for more input).
  *
  * @remarks
  * On POSIX the process starts in its own process group so a kill also reaches
@@ -234,7 +243,7 @@ function detectBun(): BunSpawnLike | undefined {
  *
  * @param command - The executable.
  * @param args - Its arguments.
- * @param options - Working directory and environment.
+ * @param options - Working directory, environment and stdin input.
  * @param runtime - Runtime hooks, for tests.
  * @returns The process, identical on Bun and Node.
  */
@@ -260,7 +269,10 @@ function spawnWithBun(
   const child = bun.spawn([command, ...args], {
     cwd: options.cwd,
     env: options.env,
-    stdin: "ignore",
+    stdin:
+      options.input !== undefined
+        ? new TextEncoder().encode(options.input)
+        : "ignore",
     stdout: "pipe",
     stderr: "pipe",
     ...(USE_PROCESS_GROUPS ? { detached: true } : {}),
@@ -303,9 +315,15 @@ function spawnWithNode(
   const child = spawnFn(command, args, {
     cwd: options.cwd,
     env: options.env,
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: [options.input !== undefined ? "pipe" : "ignore", "pipe", "pipe"],
     ...(USE_PROCESS_GROUPS ? { detached: true } : {}),
   });
+  if (options.input !== undefined && child.stdin) {
+    // A process that exits without reading its input closes the pipe; the
+    // exit code reports that, not an EPIPE on the host.
+    child.stdin.on("error", () => undefined);
+    child.stdin.end(options.input);
+  }
 
   const exited = new Promise<number>((resolve, reject) => {
     // `exit`, not `close`: `close` waits for every holder of the pipes, and a

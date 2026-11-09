@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import type { SDKAssistantMessageError } from "@anthropic-ai/claude-agent-sdk";
 import type { RecoverableErrorCode } from "../../src/agents/index.js";
 import * as agents from "../../src/agents/index.js";
 import {
@@ -299,5 +300,40 @@ describe("old codes", () => {
     expect(classifyRecoverable({ subtype: "rate_limit" }).recoverable).toBe(
       true,
     );
+  });
+});
+
+describe("Claude SDKAssistantMessageError subtypes", () => {
+  // Typed against the SDK's union: a new SDK subtype fails the typecheck
+  // until it gets a row here (and, unless it is `unknown`, in the table).
+  const EXPECTED: Record<
+    SDKAssistantMessageError,
+    { code: string; recoverable: boolean }
+  > = {
+    authentication_failed: { code: "AUTH_ERROR", recoverable: false },
+    oauth_org_not_allowed: { code: "AUTH_ERROR", recoverable: false },
+    account_on_hold: { code: "AUTH_ERROR", recoverable: false },
+    verification_required: { code: "AUTH_ERROR", recoverable: false },
+    cloud_credential_error: { code: "AUTH_ERROR", recoverable: false },
+    billing_error: { code: "BILLING_ERROR", recoverable: false },
+    rate_limit: { code: "RATE_LIMIT", recoverable: true },
+    overloaded: { code: "SERVER_ERROR", recoverable: true },
+    server_error: { code: "SERVER_ERROR", recoverable: true },
+    invalid_request: { code: "INVALID_REQUEST", recoverable: false },
+    model_not_found: { code: "INVALID_REQUEST", recoverable: false },
+    max_output_tokens: { code: "MAX_OUTPUT_TOKENS", recoverable: false },
+    // Nothing is known about it: the caller's fallback decides.
+    unknown: { code: "CLAUDE_AGENT_SDK_ERROR", recoverable: true },
+  };
+
+  test.each(Object.entries(EXPECTED))("%s", (subtype, expected) => {
+    expect(
+      classifyRecoverable({
+        subtype,
+        message: subtype,
+        fallbackCode: "CLAUDE_AGENT_SDK_ERROR",
+      }),
+    ).toEqual(expected);
+    expect(isKnownSubtype(subtype)).toBe(subtype !== "unknown");
   });
 });

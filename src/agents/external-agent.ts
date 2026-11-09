@@ -1,12 +1,16 @@
 import {
+  type AfterToolCallback,
   AsyncQueue,
   BaseAgent,
   type BaseAgentConfig,
+  type BeforeToolCallback,
   createEvent,
   createEventActions,
   type Event,
   type InvocationContext,
   isBaseTool,
+  type SingleAfterToolCallback,
+  type SingleBeforeToolCallback,
   type ToolUnion,
 } from "@google/adk";
 import type { Content } from "@google/genai";
@@ -28,7 +32,13 @@ import {
   toolCallTitle,
   toolResponseTitle,
 } from "./event-titles.js";
-import { EXTERNAL_AGENT_ERROR, type ExternalAgentEvent } from "./events.js";
+import {
+  EXTERNAL_AGENT_CONFIRMATION_UNUSED,
+  EXTERNAL_AGENT_ERROR,
+  EXTERNAL_AGENT_TOOL_CREDENTIAL_REQUIRED,
+  EXTERNAL_AGENT_TOOL_RESULT_TOO_LARGE,
+  type ExternalAgentEvent,
+} from "./events.js";
 import type { ExternalAgentDriver } from "./external-agent-driver.js";
 import { PlaceholderExternalAgentDriver } from "./external-agent-driver.js";
 import {
@@ -42,6 +52,7 @@ import {
   type PermissionRequest,
   permissionSignature,
   readConfirmationAnswers,
+  readOnlyWebToolAllowed,
 } from "./permissions/confirmation.js";
 import {
   deriveSubAgentPermissionPolicy,
@@ -55,12 +66,22 @@ import type { ExternalAgentPermissionPolicy } from "./permissions/schema.js";
 import type { ExternalAgentProviderDefinition } from "./provider/schema.js";
 import { ExternalAgentRunTracer, usageMetadataFor } from "./telemetry.js";
 import {
+  ADK_TOOL_PREFIX,
   type AdkToolBridge,
   type AdkToolExecutionResult,
+  BRIDGE_TOOL_PREFIX,
   createAdkToolBridge,
   isBridgedToolName,
   toResponseObject,
 } from "./tools/adk-tool-bridge.js";
+import {
+  createLongRunningCallEvent,
+  createResultsConsumedEvent,
+  driverContextFor,
+  findOversizedResults,
+  LONG_RUNNING_RESULTS_NOTE,
+  readLongRunningResults,
+} from "./tools/long-running.js";
 import { type DelegationOptions, ToolGateway } from "./tools/tool-gateway.js";
 
 function normalizeToolCallArgs(input: unknown): Record<string, unknown> {
@@ -233,10 +254,14 @@ export interface ExternalAgentConfig extends BaseAgentConfig {
    * intercept prompts (Claude Agent SDK); the Codex SDK exposes no approval hook.
    *
    * `allowedPaths` is checked on the runtime's blocked path and on the path
-   * inputs of file tools, after normalization and symlink resolution.
+   * inputs of file tools, after normalization and symlink resolution
+   * (dangling links included). The Claude Agent SDK driver also checks every
+   * tool call, not only prompts; the Claude CLI, Codex and Gemini CLI drivers
+   * refuse a run with `allowedPaths` with `EXTERNAL_AGENT_PATHS_UNENFORCEABLE`
+   * unless built with `allowUnenforcedPaths: true`.
    * Unless the policy sets `allowNetwork: true`, web tools (`WebFetch`,
    * `WebSearch` and their Codex and Gemini CLI names) are denied, MCP tools
-   * of servers other than the bridge's own are denied too, and a shell call is approved only when the driver runs it
+   * other than this run's registered bridge tools are denied too, and a shell call is approved only when the driver runs it
    * in a no-network sandbox (or the Claude driver was built with
    * `allowUnsandboxedShell: true`). An unset `allowNetwork`, or no policy,
    * counts as `false`. Drivers that cannot keep the network off refuse the
@@ -244,7 +269,11 @@ export interface ExternalAgentConfig extends BaseAgentConfig {
    * `allowUnenforcedNetwork: true`: Codex in `full-access`, Codex when its
    * host MCP servers cannot be listed, a Codex driver given a prebuilt `sdk`
    * client (its MCP servers cannot be turned off), and Gemini CLI in every
-   * mode.
+   * mode. The Claude drivers refuse a run whose configured `tools` name a web
+   * tool while the network is off.
+   * Under `read-only` with `allowNetwork: true`, web tools run without a
+   * confirmation (no approver is asked), so the agent can send what it reads
+   * to the network; every other tool stays denied.
    */
   confirmation?: ExternalAgentConfirmationOptions;
   /**
@@ -281,7 +310,34 @@ export interface ExternalAgentConfig extends BaseAgentConfig {
    *   example an edited amount) and the answer's `hint`. The response
    *   and state changes of the first, unconfirmed run are dropped. With the
    *   ADK protocol the turn pauses once; when the runtime retries the call
-   *   on the next turn, the tool runs once, with the human's decision.
+   *   on the next turn, the tool runs once, with the human's decision. When
+   *   the human approved and the runtime does not make the call again on
+   *   that turn, the approved call never ran: the turn ends with an
+   *   `EXTERNAL_AGENT_CONFIRMATION_UNUSED` error event.
+   * - A long-running tool (`isLongRunning`, such as `LongRunningFunctionTool`)
+   *   that returns no result pauses the turn, as ADK pauses an `LlmAgent`:
+   *   the agent emits the call with its id in `longRunningToolIds` and ends
+   *   the turn. A later user message answers it with a `functionResponse` of
+   *   the same id; that turn hands the result to the runtime as a tool
+   *   result in its user message (never in the instruction). The runtime
+   *   sees only accepted answers: other `functionResponse` parts of the
+   *   user's messages (duplicates, unknown or foreign ids, re-sends,
+   *   confirmation answers, earlier turns' results) are removed from what
+   *   the driver gets. A result over 64 KiB (UTF-8 bytes of JSON), or
+   *   results over 256 KiB in one turn, end the turn with
+   *   an `EXTERNAL_AGENT_TOOL_RESULT_TOO_LARGE` error event before the
+   *   runtime starts; a smaller answer for the same call can follow. A
+   *   long-running tool that returns a result is a normal call.
+   * - `toolContext.requestCredential()` is not supported (an external runtime
+   *   cannot run ADK's credential flow): the call returns a
+   *   `CREDENTIAL_REQUIRED` error to the runtime, and the turn ends with an
+   *   `EXTERNAL_AGENT_TOOL_CREDENTIAL_REQUIRED` error event. Give such tools
+   *   their credentials up front.
+   * - The invocation's plugins (`beforeToolCallback`, `afterToolCallback`,
+   *   `onToolErrorCallback`) and this agent's
+   *   {@link ExternalAgentConfig.beforeToolCallback} and
+   *   {@link ExternalAgentConfig.afterToolCallback} run around every call,
+   *   in ADK's order.
    */
   tools?: ToolUnion[];
   /**
@@ -292,6 +348,23 @@ export interface ExternalAgentConfig extends BaseAgentConfig {
    * @defaultValue `[]`
    */
   readOnlyTools?: readonly string[];
+  /**
+   * Callbacks run before each call of a bridged ADK tool (see
+   * {@link ExternalAgentConfig.tools}), after the plugins' `beforeToolCallback`,
+   * as in `LlmAgent`. The first one that returns a response replaces the
+   * call: the tool does not run and the runtime gets that response. A
+   * callback that throws fails the call with `CALLBACK_FAILED`, and the tool
+   * does not run. The runtime's own tools (Read, Bash...) do not go through
+   * them.
+   */
+  beforeToolCallback?: BeforeToolCallback;
+  /**
+   * Callbacks run after each call of a bridged ADK tool, after the plugins'
+   * `afterToolCallback`, as in `LlmAgent`. The first one that returns a
+   * response replaces the result the runtime gets. A callback that throws
+   * fails the call with `CALLBACK_FAILED`.
+   */
+  afterToolCallback?: AfterToolCallback;
 }
 
 /**
@@ -326,6 +399,10 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
   readonly tools: ToolUnion[];
   /** Names of the tools that stay available under `read-only`. */
   readonly readOnlyTools: readonly string[];
+  /** Agent callbacks run before each bridged ADK tool call, in order. */
+  readonly beforeToolCallbacks: readonly SingleBeforeToolCallback[];
+  /** Agent callbacks run after each bridged ADK tool call, in order. */
+  readonly afterToolCallbacks: readonly SingleAfterToolCallback[];
 
   /**
    * Creates an external agent.
@@ -354,6 +431,8 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
     this.confirmation = config.confirmation;
     this.tools = config.tools ?? [];
     this.readOnlyTools = config.readOnlyTools ?? [];
+    this.beforeToolCallbacks = asCallbackList(config.beforeToolCallback);
+    this.afterToolCallbacks = asCallbackList(config.afterToolCallback);
     brandExternalAgent(this);
   }
 
@@ -368,8 +447,8 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
    * `EXTERNAL_AGENT_CREDENTIAL_UNSUPPORTED` error event, before the driver
    * starts.
    * Abandoning the generator cancels the driver. The run ends early, without
-   * an error, when a permission confirmation or a sub-agent interrupt pauses
-   * the turn on the user.
+   * an error, when a permission confirmation, a sub-agent interrupt or a
+   * pending long-running tool call pauses the turn on the user.
    *
    * @param context - The ADK invocation context.
    * @returns The ADK events of the turn.
@@ -401,6 +480,26 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
       return;
     }
     const credential = snapshot.credential;
+    // Results the user sent on this turn for long-running calls this agent
+    // paused on earlier. They reach the runtime only as the user message's
+    // tool results (data); the instruction gets a fixed note. Fail closed on
+    // oversized results, before the driver starts and without marking them
+    // used, so a smaller answer for the same call can follow.
+    const longRunningResults = readLongRunningResults(context, this.name);
+    const oversized = findOversizedResults(longRunningResults);
+    if (oversized) {
+      const refusal = this.toAdkEvent(
+        {
+          type: "error",
+          code: EXTERNAL_AGENT_TOOL_RESULT_TOO_LARGE,
+          message: oversized,
+          recoverable: false,
+        },
+        context,
+      );
+      if (refusal) yield refusal;
+      return;
+    }
     // Never more permissive than the delegating parent, whatever agents ADK put
     // in between (see permissions/inheritance.ts), and never more permissive
     // than the ExternalAgents above it in the tree, even when ADK routes a turn
@@ -509,20 +608,58 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
       push(consumed);
     }
     let confirmationRequested = false;
-    const instruction = answers.length
-      ? [this.instruction, describeAnswers(answers)]
+    // The driver sees only the accepted results among the user's
+    // `functionResponse` parts (see driverContextFor).
+    const driverContext = driverContextFor(context, longRunningResults);
+    if (longRunningResults.length > 0) {
+      const consumed = createResultsConsumedEvent({
+        context,
+        agentName: this.name,
+        results: longRunningResults,
+      });
+      tracer.traceMarker(consumed);
+      push(consumed);
+    }
+    // A bridged long-running tool returned no result: the turn pauses on it.
+    let toolPending = false;
+    // Tools that asked for credentials the runtime cannot provide.
+    const credentialRequests: string[] = [];
+    const notes = [
+      answers.length ? describeAnswers(answers) : undefined,
+      longRunningResults.length ? LONG_RUNNING_RESULTS_NOTE : undefined,
+    ].filter((part): part is string => Boolean(part));
+    const instruction = notes.length
+      ? [this.instruction, ...notes]
           .filter((part): part is string => Boolean(part))
           .join("\n\n")
       : this.instruction;
 
+    // Runtime names of this run's bridged tools, exactly as the MCP bridge
+    // exposes them. Read on the first request, when the tools are resolved.
+    let bridgedNames: ReadonlySet<string> | undefined;
+    const bridgeToolNames = (): ReadonlySet<string> => {
+      bridgedNames ??= new Set([
+        ...(adkTools?.declarations ?? []).map(
+          (declaration) => `${BRIDGE_TOOL_PREFIX}${declaration.name}`,
+        ),
+        ...(toolGateway ? [`${BRIDGE_TOOL_PREFIX}run_adk_subagent`] : []),
+      ]);
+      return bridgedNames;
+    };
     const requestPermission = async (
       request: PermissionRequest,
     ): Promise<PermissionDecision> => {
       const guarded = guardPermissionRequest(permissions, request, {
         workingDirectory: this.workingDirectory,
+        bridgeToolNames: bridgeToolNames(),
       });
       if (guarded) {
         return guarded;
+      }
+      // Read-only takes no confirmations: what the guard lets through there
+      // (a web tool with the network on) runs without asking anyone.
+      if (readOnlyWebToolAllowed(permissions, request.toolName)) {
+        return { behavior: "allow" };
       }
       const signature = permissionSignature(request.toolName, request.input);
       const answer = answered.get(signature);
@@ -615,6 +752,7 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
           paused: () =>
             confirmationRequested ||
             subAgentInterrupted ||
+            toolPending ||
             controller.signal.aborted,
           answerHint: (requestId) => answerHints.get(requestId),
           hasAnswer: (name, args) =>
@@ -624,6 +762,24 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
           canTransferTo: (agentName) =>
             transferGateway().canTransferTo(agentName),
           emitActions: emitToolActions,
+          onPending: (call) => {
+            // As ADK pauses an LlmAgent on a long-running call without a
+            // result: the call goes on the timeline with its id in
+            // `longRunningToolIds`, and the invocation ends.
+            const event = createLongRunningCallEvent({
+              context,
+              agentName: this.name,
+              ...call,
+            });
+            tracer.traceMarker(event);
+            push(event);
+            toolPending = true;
+            context.endInvocation = true;
+            controller.abort();
+          },
+          onCredentialRequired: (toolName) => {
+            credentialRequests.push(toolName);
+          },
           onControlActions: (name, actions) => {
             const entry: TerminalToolActions = {
               name,
@@ -637,6 +793,20 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
           },
         })
       : undefined;
+
+    const pushTurnError = (
+      code: string,
+      message: string,
+      metadata: Record<string, unknown>,
+    ) => {
+      const event = this.toAdkEvent(
+        { type: "error", code, message, recoverable: false },
+        context,
+      );
+      if (!event) return;
+      event.customMetadata = { ...event.customMetadata, ...metadata };
+      push(event);
+    };
 
     const pushActionsEvent = (entry: TerminalToolActions, base?: Event) => {
       const event =
@@ -655,7 +825,7 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
       try {
         for await (const event of this.driver.run({
           provider: this.provider,
-          context,
+          context: driverContext,
           abortSignal,
           instruction,
           requestPermission,
@@ -685,9 +855,17 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
             if (heldFinal && usageMetadata) {
               heldFinal.usageMetadata = usageMetadata;
             }
+            // genai usage metadata has no scope field: a session total is
+            // labeled here so consumers do not add it to earlier runs.
+            if (heldFinal && event.usage?.scope) {
+              heldFinal.customMetadata = {
+                ...heldFinal.customMetadata,
+                externalAgentUsageScope: event.usage.scope,
+              };
+            }
             break;
           }
-          if (confirmationRequested || subAgentInterrupted) {
+          if (confirmationRequested || subAgentInterrupted || toolPending) {
             break;
           }
           const pairedIndex =
@@ -752,16 +930,54 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
         // After a confirmation request (ours or a sub-agent's) or a terminal
         // tool action we aborted the driver on purpose; its abort error is not
         // a failure of the turn.
-        if (!confirmationRequested && !subAgentInterrupted && !terminalEnded) {
+        if (
+          !confirmationRequested &&
+          !subAgentInterrupted &&
+          !toolPending &&
+          !terminalEnded
+        ) {
           failed = true;
           flushHeld();
           queue.fail(error);
         }
       }
       try {
-        if (!failed && !confirmationRequested && !subAgentInterrupted) {
+        if (
+          !failed &&
+          !confirmationRequested &&
+          !subAgentInterrupted &&
+          !toolPending
+        ) {
           for (const entry of pendingActions.splice(0)) {
             pushActionsEvent(entry);
+          }
+          // Fail closed: the turn must not look successful when an approved
+          // call never ran, or a tool could not get its credentials.
+          const unused = [...answered.values()].filter(
+            (answer) => answer.confirmed,
+          );
+          if (unused.length > 0) {
+            pushTurnError(
+              EXTERNAL_AGENT_CONFIRMATION_UNUSED,
+              `An approved call was not made again, so it did not run: ${unused
+                .map((answer) => answer.toolName)
+                .join(", ")}.`,
+              {
+                unusedConfirmations: unused.map((answer) => ({
+                  toolName: answer.toolName,
+                  requestCallId: answer.requestCallId,
+                })),
+              },
+            );
+          }
+          if (credentialRequests.length > 0) {
+            pushTurnError(
+              EXTERNAL_AGENT_TOOL_CREDENTIAL_REQUIRED,
+              `A tool asked for credentials, which this runtime cannot request, so the call had no result: ${[
+                ...new Set(credentialRequests),
+              ].join(", ")}.`,
+              { tools: [...new Set(credentialRequests)] },
+            );
           }
           terminalEnded = terminal !== undefined;
           const target = terminal?.actions.transferToAgent;
@@ -812,14 +1028,19 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
     context: InvocationContext,
     permissions: ExternalAgentPermissionPolicy | undefined,
   ): Promise<AdkToolBridge> {
+    const callbacks = {
+      beforeToolCallbacks: this.beforeToolCallbacks,
+      afterToolCallbacks: this.afterToolCallbacks,
+    };
     if (permissions?.mode !== "read-only") {
-      return createAdkToolBridge(this.tools, context);
+      return createAdkToolBridge(this.tools, context, callbacks);
     }
     // Filter on the tool objects by their original name BEFORE the bridge
     // names them: matching generated names (`adk_tool__get_2`) would let an
     // unrelated tool literally named `get_2` through `readOnlyTools: ["get"]`.
     const allowed = new Set(this.readOnlyTools);
     return createAdkToolBridge(this.tools, context, {
+      ...callbacks,
       filter: (tool) => isBaseTool(tool) && allowed.has(tool.name),
     });
   }
@@ -999,6 +1220,14 @@ interface AdkToolActionHooks {
   }): void;
   /** Records control actions to put on the call's result. */
   onControlActions(name: string, actions: TerminalToolActions["actions"]): void;
+  /** Pauses the turn on a long-running call that has no result yet. */
+  onPending(call: {
+    callId: string;
+    toolName: string;
+    args: Record<string, unknown>;
+  }): void;
+  /** Records a tool that asked for credentials (`CREDENTIAL_REQUIRED`). */
+  onCredentialRequired(toolName: string): void;
 }
 
 /**
@@ -1035,6 +1264,9 @@ function toolConfirmationFrom(
  *   call are recorded for the call's result (see
  *   {@link AdkToolActionHooks.onControlActions}). A transfer to an unknown
  *   agent, or to the agent itself, fails the call instead.
+ * - A `pending` long-running call pauses the turn
+ *   ({@link AdkToolActionHooks.onPending}), and a `CREDENTIAL_REQUIRED`
+ *   error is recorded for the end of the turn.
  */
 function routeAdkToolActions(
   bridge: AdkToolBridge,
@@ -1117,6 +1349,23 @@ function routeAdkToolActions(
         ...result,
         actions: { ...result.actions, stateDelta: {} },
       };
+      if (result.status === "pending" && result.pending) {
+        hooks.onPending({
+          callId: result.pending.functionCallId,
+          toolName: result.pending.toolName,
+          args: normalizeToolCallArgs(args),
+        });
+        const message =
+          "The call was started and runs in the background. Stop now; the task resumes when its result arrives.";
+        return { ...routed, response: { status: "pending", message } };
+      }
+      if (result.error?.code === "CREDENTIAL_REQUIRED") {
+        hooks.onCredentialRequired(
+          name.startsWith(ADK_TOOL_PREFIX)
+            ? name.slice(ADK_TOOL_PREFIX.length)
+            : name,
+        );
+      }
       if (result.status !== "ok") return routed;
       const { escalate, transferToAgent, skipSummarization } = result.actions;
       if (transferToAgent && !hooks.canTransferTo(transferToAgent)) {
@@ -1138,6 +1387,12 @@ function routeAdkToolActions(
       return routed;
     },
   };
+}
+
+/** Normalizes an ADK single-or-list callback option to a list. */
+function asCallbackList<T>(value: T | readonly T[] | undefined): readonly T[] {
+  if (value === undefined) return [];
+  return Array.isArray(value) ? [...(value as readonly T[])] : [value as T];
 }
 
 /**

@@ -7,8 +7,11 @@ import {
 } from "../../../src/agents/driver/claude-cli.js";
 import {
   assertClaudeInitIsolated,
+  assertClaudeMessageIsolated,
   CLAUDE_NO_NETWORK_SANDBOX,
+  canonicalClaudeToolName,
   claudeCliIsolationArgs,
+  claudeInitTools,
   DEFAULT_CLAUDE_TOOLS,
   findIsolationViolations,
   findToolUseViolations,
@@ -173,16 +176,18 @@ describe("ClaudeCliDriver isolation flags", () => {
     expect(settings).toBeDefined();
     expect(JSON.parse(settings?.slice("--settings=".length) ?? "{}")).toEqual({
       disableClaudeAiConnectors: true,
+      autoMemoryEnabled: false,
       permissions: { deny: ["mcp__*"] },
       sandbox: CLAUDE_NO_NETWORK_SANDBOX,
     });
   });
 
-  test("user args still come last", () => {
+  test("user args are the last arguments (the prompt goes on stdin)", () => {
     const args = new ClaudeCliDriver({ args: ["--model", "x"] }).buildArgs(
       request({ mode: "ask" }),
     );
     expect(args.slice(-2)).toEqual(["--model", "x"]);
+    expect(args).not.toContain("--");
   });
 
   test("claudeCliIsolationArgs uses the --flag=value form only", () => {
@@ -909,5 +914,392 @@ describe("read-only holds with inheritHostConfig", () => {
     }
     expect(await decide("mcp__adk_bridge__lookup")).toEqual({});
     expect(await decide("Read")).toEqual({});
+  });
+});
+
+describe("tool_use name spelling", () => {
+  function assistantToolUse(name: string, parentToolUseId: string | null) {
+    return {
+      type: "assistant",
+      uuid: "00000000-0000-4000-8000-000000000001",
+      session_id: "session-1",
+      parent_tool_use_id: parentToolUseId,
+      message: {
+        role: "assistant",
+        content: [{ type: "tool_use", id: "toolu_1", name, input: {} }],
+      },
+    };
+  }
+  const full = {
+    tools: ["Bash", "Edit", "Glob", "Grep", "NotebookEdit", "Read", "Write"],
+    mcpServers: ["adk_bridge"],
+  };
+  const readOnly = { tools: ["Read"], mcpServers: ["adk_bridge"] };
+  const violationsOf = (
+    name: string,
+    expected: { tools: string[]; mcpServers: string[] } = full,
+  ) => findToolUseViolations(assistantToolUse(name, null), expected);
+
+  for (const parent of [null, "toolu_parent"]) {
+    test(`lowercase 'bash' is accepted when Bash was offered (parent ${parent})`, () => {
+      const message = assistantToolUse("bash", parent);
+      expect(findToolUseViolations(message, full)).toEqual([]);
+      expect(() =>
+        assertClaudeMessageIsolated(message, full, "Claude"),
+      ).not.toThrow();
+    });
+  }
+
+  test("'bash' and 'Bash' stay violations when Bash was not offered", () => {
+    expect(violationsOf("bash", readOnly)).toEqual(["bash"]);
+    expect(violationsOf("Bash", readOnly)).toEqual(["Bash"]);
+  });
+
+  test("not-offered built-ins and foreign mcp tools stay violations", () => {
+    expect(violationsOf("WebFetch")).toEqual(["WebFetch"]);
+    expect(violationsOf("mcp__claude_ai_X__y")).toEqual([
+      "mcp__claude_ai_X__y",
+    ]);
+    expect(violationsOf("CronCreate")).toEqual(["CronCreate"]);
+  });
+
+  test("an unknown name is a violation, whatever its case (fail closed)", () => {
+    for (const name of ["frobnicate", "skill", "task", "croncreate"]) {
+      expect(violationsOf(name)).toEqual([name]);
+    }
+  });
+
+  test("near-miss spellings of an offered tool stay violations", () => {
+    for (const name of [
+      " Bash",
+      "Bash ",
+      "bash\u0000",
+      "\uff42\uff41\uff53\uff48",
+      "_Bash",
+      "1Bash",
+      "",
+    ]) {
+      expect(violationsOf(name)).toEqual([name]);
+    }
+    expect(() =>
+      assertClaudeMessageIsolated(
+        assistantToolUse(" Bash", null),
+        full,
+        "Claude",
+      ),
+    ).toThrow('tried to use " Bash", outside');
+  });
+
+  test("a tool_use with no name or a non-string name is a violation", () => {
+    const blocks: Record<string, unknown>[] = [
+      { type: "tool_use", id: "toolu_1", input: {} },
+      { type: "tool_use", id: "toolu_1", name: 5, input: {} },
+      { type: "tool_use", id: "toolu_1", name: null, input: {} },
+    ];
+    for (const block of blocks) {
+      const message = {
+        type: "assistant",
+        uuid: "00000000-0000-4000-8000-000000000001",
+        session_id: "session-1",
+        parent_tool_use_id: null,
+        message: { role: "assistant", content: [block] },
+      };
+      expect(findToolUseViolations(message, full)).toEqual([""]);
+      expect(() =>
+        assertClaudeMessageIsolated(message, full, "Claude"),
+      ).toThrow('tried to use "", outside');
+    }
+  });
+
+  test("mcp tool names are never case-folded", () => {
+    for (const name of [
+      "mcp__ADK_BRIDGE__x",
+      "MCP__adk_bridge__x",
+      "mCP__claude_ai_X__y",
+    ]) {
+      expect(canonicalClaudeToolName(name)).toBeUndefined();
+      expect(violationsOf(name)).toEqual([name]);
+    }
+    const exact = {
+      tools: [...full.tools, "mcp__adk_bridge__x"],
+      mcpServers: [],
+      bridgeTools: ["mcp__adk_bridge__x"],
+    };
+    expect(
+      findToolUseViolations(
+        assistantToolUse("mcp__ADK_BRIDGE__x", null),
+        exact,
+      ),
+    ).toEqual(["mcp__ADK_BRIDGE__x"]);
+    expect(
+      findToolUseViolations(
+        assistantToolUse("mcp__adk_bridge__x", null),
+        exact,
+      ),
+    ).toEqual([]);
+  });
+
+  test("the fold only returns built-in names, none of which is an mcp name", () => {
+    for (const tool of DEFAULT_CLAUDE_TOOLS) {
+      expect(tool.startsWith("mcp__")).toBe(false);
+      expect(canonicalClaudeToolName(tool.toUpperCase())).toBe(tool);
+    }
+    expect(canonicalClaudeToolName("multiedit")).toBe("MultiEdit");
+    expect(canonicalClaudeToolName("frobnicate")).toBeUndefined();
+  });
+});
+
+describe("isolation hooks deny a call without a tool name", () => {
+  const nameless: Array<Record<string, unknown>> = [
+    { hook_event_name: "PreToolUse" },
+    { hook_event_name: "PreToolUse", tool_name: "" },
+    { hook_event_name: "PreToolUse", tool_name: 5 },
+    { hook_event_name: "PreToolUse", tool_name: null },
+  ];
+
+  async function hookFor(
+    config: Record<string, unknown>,
+    mode: "full-access" | "read-only",
+  ): Promise<HookFn> {
+    const { sdk, state } = hookSdk();
+    await collect(
+      new ClaudeAgentSdkDriver({ sdk: sdk as never, ...config }).run(
+        request({ mode }, LOOKUP_TOOL),
+      ),
+    );
+    return preToolUse(state.options);
+  }
+
+  test("the isolation hook denies it", async () => {
+    const hook = await hookFor({}, "full-access");
+    for (const input of nameless) {
+      expect(
+        await hook(input, "tu", { signal: new AbortController().signal }),
+      ).toEqual({
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse",
+          permissionDecision: "deny",
+          permissionDecisionReason: expect.stringContaining("no tool name"),
+        },
+      });
+    }
+  });
+
+  test("a nameless call the hook blocked stops the run with a quoted empty name", async () => {
+    const { sdk, state } = hookSdk([""]);
+    const events = await collect(
+      new ClaudeAgentSdkDriver({ sdk: sdk as never }).run(
+        request({ mode: "full-access" }, LOOKUP_TOOL),
+      ),
+    );
+    expect(state.decisions[0]).toMatchObject({
+      hookSpecificOutput: { permissionDecision: "deny" },
+    });
+    expect(events.map((event) => event.type)).toEqual([
+      "started",
+      "error",
+      "completed",
+    ]);
+    expect(events[1]).toMatchObject({
+      code: EXTERNAL_AGENT_ISOLATION_VIOLATED,
+      recoverable: false,
+      message: expect.stringContaining(
+        'tried to use "", outside the isolated set; the call was blocked',
+      ),
+    });
+  });
+
+  test("the read-only foreign-MCP hook (inheritHostConfig) denies it", async () => {
+    const hook = await hookFor({ inheritHostConfig: true }, "read-only");
+    for (const input of nameless) {
+      expect(
+        await hook(input, "tu", { signal: new AbortController().signal }),
+      ).toMatchObject({
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse",
+          permissionDecision: "deny",
+        },
+      });
+    }
+  });
+});
+
+describe("isolated runs turn Claude Code auto-memory off", () => {
+  test("the SDK driver passes settings.autoMemoryEnabled false when isolated, nothing with inheritHostConfig", () => {
+    for (const mode of [
+      "read-only",
+      "workspace-write",
+      "full-access",
+    ] as const) {
+      const isolated = new ClaudeAgentSdkDriver().buildOptions(
+        request({ mode }),
+      ) as Record<string, unknown>;
+      expect(isolated.settings).toEqual({ autoMemoryEnabled: false });
+      const inherited = new ClaudeAgentSdkDriver({
+        inheritHostConfig: true,
+      }).buildOptions(request({ mode })) as Record<string, unknown>;
+      expect("settings" in inherited).toBe(false);
+    }
+  });
+
+  test("the CLI driver puts autoMemoryEnabled false in --settings when isolated, not with inheritHostConfig", () => {
+    const settingsOf = (args: readonly string[]) => {
+      const arg = args.find((value) => value.startsWith("--settings="));
+      return arg ? JSON.parse(arg.slice("--settings=".length)) : undefined;
+    };
+    for (const mode of [
+      "read-only",
+      "workspace-write",
+      "full-access",
+    ] as const) {
+      expect(
+        settingsOf(new ClaudeCliDriver().buildArgs(request({ mode }))),
+      ).toMatchObject({ autoMemoryEnabled: false });
+      const inherited = settingsOf(
+        new ClaudeCliDriver({ inheritHostConfig: true }).buildArgs(
+          request({ mode }),
+        ),
+      );
+      expect(inherited?.autoMemoryEnabled).toBeUndefined();
+    }
+  });
+});
+
+describe("the tool_use stop message names what the bridge observed", () => {
+  const expected = { tools: ["Read"], mcpServers: ["adk_bridge"] };
+
+  function stopMessage(
+    name: string | string[],
+    offered: readonly string[] | undefined,
+  ): string {
+    const names = Array.isArray(name) ? name : [name];
+    const message = {
+      type: "assistant",
+      message: {
+        content: names.map((tool, index) => ({
+          type: "tool_use",
+          id: `tu-${index}`,
+          name: tool,
+          input: {},
+        })),
+      },
+    };
+    try {
+      assertClaudeMessageIsolated(message, expected, "Claude", offered);
+    } catch (error) {
+      expect(error).toBeInstanceOf(ExternalAgentPolicyError);
+      expect((error as ExternalAgentPolicyError).code).toBe(
+        EXTERNAL_AGENT_ISOLATION_VIOLATED,
+      );
+      expect((error as ExternalAgentPolicyError).recoverable).toBe(false);
+      return (error as Error).message;
+    }
+    throw new Error("expected a stop");
+  }
+
+  test("a built-in the runtime did not offer: the model requested a tool that was not offered", () => {
+    const message = stopMessage("Bash", ["Read"]);
+    expect(message).toContain('the model requested "Bash"');
+    expect(message).toContain("was not offered");
+    expect(message).toContain("isolation policy stopped the run");
+    expect(message).not.toContain("host or managed setting");
+  });
+
+  test("an MCP tool the runtime did not offer at start: not offered, and a late server may have added it", () => {
+    const message = stopMessage("mcp__claude_ai_X__y", ["Read"]);
+    expect(message).toContain('the model requested "mcp__claude_ai_X__y"');
+    expect(message).toContain("was not offered");
+    expect(message).toContain("connects after start");
+  });
+
+  test("a tool the runtime offered but outside the isolated set keeps the host or managed setting hint", () => {
+    for (const [name, offered] of [
+      ["Bash", ["Read", "Bash"]],
+      ["bash", ["Read", "Bash"]],
+      ["mcp__host__x", ["Read", "mcp__host__x"]],
+    ] as const) {
+      const message = stopMessage(name, offered);
+      expect(message).toContain(`tried to use ${JSON.stringify(name)}`);
+      expect(message).toContain("host or managed setting");
+      expect(message).not.toContain("was not offered");
+    }
+  });
+
+  test("several tools: an offered one wins the hint, and every name is listed", () => {
+    const message = stopMessage(["Invented", "Bash"], ["Read", "Bash"]);
+    expect(message).toContain('"Invented", "Bash"');
+    expect(message).toContain("host or managed setting");
+  });
+
+  test("object-form system/init tools ({ name }) are read: the init check flags them and they count as offered", () => {
+    const objectInit = {
+      type: "system",
+      subtype: "init",
+      tools: [{ name: "Read" }, { name: "Skill" }],
+    };
+    expect(claudeInitTools(objectInit)).toEqual(["Read", "Skill"]);
+    expect(findIsolationViolations(objectInit, expected)).toEqual({
+      tools: ["Skill"],
+      mcpServers: [],
+    });
+    expect(() =>
+      assertClaudeInitIsolated(objectInit, expected, "Claude"),
+    ).toThrow(ExternalAgentPolicyError);
+    const message = stopMessage("Skill", claudeInitTools(objectInit));
+    expect(message).toContain('tried to use "Skill"');
+    expect(message).toContain("host or managed setting");
+    expect(message).not.toContain("was not offered");
+  });
+
+  test("before system/init the wording is neutral", () => {
+    const message = stopMessage("Bash", undefined);
+    expect(message).toContain('tried to use "Bash", outside the isolated set');
+    expect(message).toContain("had not reported");
+    expect(message).not.toContain("was not offered");
+    expect(message).not.toContain("host or managed setting");
+  });
+
+  test("Claude Agent SDK: an invented tool after init is reported as not offered", async () => {
+    const { sdk } = fakeSdk([init(["Read"]), toolUse("CronCreate"), RESULT]);
+    const events = await collect(
+      new ClaudeAgentSdkDriver({ sdk }).run(request({ mode: "ask" })),
+    );
+    expect(events[1]).toMatchObject({
+      type: "error",
+      code: EXTERNAL_AGENT_ISOLATION_VIOLATED,
+      recoverable: false,
+      message: expect.stringContaining(
+        'the model requested "CronCreate", a tool that was not offered',
+      ),
+    });
+  });
+
+  test("Claude Agent SDK: a tool_use before init gets the neutral wording", async () => {
+    const { sdk } = fakeSdk([toolUse("CronCreate"), init(["Read"]), RESULT]);
+    const events = await collect(
+      new ClaudeAgentSdkDriver({ sdk }).run(request({ mode: "ask" })),
+    );
+    expect(events[1]).toMatchObject({
+      code: EXTERNAL_AGENT_ISOLATION_VIOLATED,
+      message: expect.stringContaining("had not reported"),
+    });
+  });
+
+  test("Claude CLI: an invented tool after init is reported as not offered", async () => {
+    const { spawn } = cliSpawn(
+      [init(["Read"]), toolUse("CronCreate"), RESULT],
+      false,
+    );
+    const events = await collect(
+      new ClaudeCliDriver({ spawn, killGraceMs: 0 }).run(
+        request({ mode: "ask" }),
+      ),
+    );
+    expect(events[1]).toMatchObject({
+      code: EXTERNAL_AGENT_ISOLATION_VIOLATED,
+      message: expect.stringContaining(
+        'the model requested "CronCreate", a tool that was not offered',
+      ),
+    });
   });
 });

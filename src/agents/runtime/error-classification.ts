@@ -162,9 +162,11 @@ export function normalizeRecoverableErrorCode(code: string): string {
  * Subtypes that map to a fixed classification: the runtimes' own subtypes,
  * the codes themselves, and the old codes.
  *
- * Runtime subtypes come from Claude's `SDKAssistantMessageError`
- * (`authentication_failed`, `oauth_org_not_allowed`, `billing_error`,
- * `rate_limit`, `invalid_request`, `server_error`, `max_output_tokens`) and
+ * Runtime subtypes come from Claude's `SDKAssistantMessageError`: every
+ * member except `unknown`. Account problems (`account_on_hold`,
+ * `verification_required`, `cloud_credential_error`) are `AUTH_ERROR`, a bad
+ * model id (`model_not_found`) is `INVALID_REQUEST`, and `overloaded` is a
+ * recoverable `SERVER_ERROR`. They also come from
  * `SDKResultError` (`error_max_turns`, `error_max_budget_usd`,
  * `error_max_structured_output_retries`), and from the `code` of a Codex
  * error line (`quota_exhausted`, `usage_limit_reached`,
@@ -174,6 +176,11 @@ const SUBTYPE_TABLE: Readonly<Record<string, RecoverableClassification>> =
   Object.freeze({
     authentication_failed: CODES.AUTH_ERROR,
     oauth_org_not_allowed: CODES.AUTH_ERROR,
+    account_on_hold: CODES.AUTH_ERROR,
+    verification_required: CODES.AUTH_ERROR,
+    cloud_credential_error: CODES.AUTH_ERROR,
+    model_not_found: CODES.INVALID_REQUEST,
+    overloaded: CODES.SERVER_ERROR,
     billing_error: CODES.BILLING_ERROR,
     quota_exhausted: CODES.QUOTA_EXHAUSTED,
     usage_limit_reached: CODES.QUOTA_EXHAUSTED,

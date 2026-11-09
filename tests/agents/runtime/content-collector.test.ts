@@ -8,6 +8,7 @@ import {
 
 type EventLike = {
   author?: string;
+  invocationId?: string;
   branch?: string;
   partial?: boolean;
   content?: Content;
@@ -15,11 +16,13 @@ type EventLike = {
 
 function makeContext(opts: {
   agentName?: string;
+  invocationId?: string;
   branch?: string;
   events?: EventLike[];
   userContent?: Content;
 }): InvocationContext {
   return {
+    invocationId: opts.invocationId,
     agent: opts.agentName ? { name: opts.agentName } : undefined,
     branch: opts.branch,
     session: { events: opts.events ?? [] },
@@ -226,5 +229,238 @@ describe("collectContents / flattenContentsToPrompt", () => {
     const first = flattenContentsToPrompt(collectContents(ctx));
     const second = flattenContentsToPrompt(collectContents(ctx));
     expect(first).toBe(second);
+  });
+});
+
+describe("thought-only events", () => {
+  test("an event with only thought text is not collected", () => {
+    const ctx = makeContext({
+      agentName: "alice",
+      events: [
+        { author: "user", content: { role: "user", parts: [{ text: "hi" }] } },
+        {
+          author: "alice",
+          content: {
+            role: "model",
+            parts: [{ text: "Let me think.", thought: true }],
+          },
+        },
+      ],
+    });
+    expect(collectContents(ctx)).toEqual([
+      { role: "user", parts: [{ text: "hi" }] },
+    ]);
+  });
+
+  test("an event with thought text and an answer is still collected", () => {
+    const ctx = makeContext({
+      agentName: "alice",
+      events: [
+        { author: "user", content: { role: "user", parts: [{ text: "hi" }] } },
+        {
+          author: "alice",
+          content: {
+            role: "model",
+            parts: [{ text: "Hmm.", thought: true }, { text: "hello" }],
+          },
+        },
+      ],
+    });
+    expect(collectContents(ctx)).toHaveLength(2);
+    expect(flattenContentsToPrompt(collectContents(ctx))).toBe(
+      "user:\nhi\n\nassistant:\nhello",
+    );
+  });
+});
+
+describe("the current user turn is collected once", () => {
+  const go = (): Content => ({ role: "user", parts: [{ text: "go" }] });
+
+  test("a userContent equal to the session's last user event (another object) is not added again", () => {
+    const ctx = makeContext({
+      agentName: "alice",
+      invocationId: "inv-1",
+      events: [{ author: "user", invocationId: "inv-1", content: go() }],
+      userContent: go(),
+    });
+    const prompt = flattenContentsToPrompt(collectContents(ctx));
+    expect(prompt).toBe("user:\ngo");
+  });
+
+  test("other agents' turns after the user event do not make it count twice", () => {
+    const ctx = makeContext({
+      agentName: "bob",
+      invocationId: "inv-1",
+      events: [
+        { author: "user", invocationId: "inv-1", content: go() },
+        {
+          author: "alice",
+          content: { role: "model", parts: [{ text: "done" }] },
+        },
+      ],
+      userContent: go(),
+    });
+    const prompt = flattenContentsToPrompt(collectContents(ctx));
+    expect(prompt.match(/\ngo(\n|$)/g)).toHaveLength(1);
+  });
+
+  test("a repeated message is kept: an earlier equal turn is history, the last one is the current turn", () => {
+    const ctx = makeContext({
+      agentName: "alice",
+      invocationId: "inv-2",
+      events: [
+        { author: "user", invocationId: "inv-1", content: go() },
+        {
+          author: "alice",
+          invocationId: "inv-1",
+          content: { role: "model", parts: [{ text: "ok" }] },
+        },
+        { author: "user", invocationId: "inv-2", content: go() },
+      ],
+      userContent: go(),
+    });
+    expect(flattenContentsToPrompt(collectContents(ctx))).toBe(
+      "user:\ngo\n\nassistant:\nok\n\nuser:\ngo",
+    );
+  });
+
+  test("a userContent that is not in the session is still added", () => {
+    const ctx = makeContext({
+      agentName: "alice",
+      events: [
+        { author: "user", content: go() },
+        {
+          author: "alice",
+          content: { role: "model", parts: [{ text: "ok" }] },
+        },
+      ],
+      userContent: { role: "user", parts: [{ text: "next" }] },
+    });
+    expect(flattenContentsToPrompt(collectContents(ctx))).toBe(
+      "user:\ngo\n\nassistant:\nok\n\nuser:\nnext",
+    );
+  });
+
+  test("a userContent that differs from the last user event only in a later part is added", () => {
+    const ctx = makeContext({
+      agentName: "alice",
+      invocationId: "inv-1",
+      events: [{ author: "user", invocationId: "inv-1", content: go() }],
+      userContent: { role: "user", parts: [{ text: "go" }, { text: "now" }] },
+    });
+    expect(flattenContentsToPrompt(collectContents(ctx))).toBe(
+      "user:\ngo\n\nuser:\ngo\nnow",
+    );
+  });
+
+  test("this agent's tool call and result after the user's message do not make the current turn count again", () => {
+    const ctx = makeContext({
+      agentName: "alice",
+      invocationId: "inv-2",
+      events: [
+        { author: "user", invocationId: "inv-1", content: go() },
+        {
+          author: "alice",
+          invocationId: "inv-1",
+          content: { role: "model", parts: [{ text: "ok" }] },
+        },
+        { author: "user", invocationId: "inv-2", content: go() },
+        {
+          author: "alice",
+          invocationId: "inv-2",
+          content: {
+            role: "model",
+            parts: [{ functionCall: { id: "call-1", name: "t", args: {} } }],
+          },
+        },
+        {
+          author: "alice",
+          invocationId: "inv-2",
+          content: {
+            role: "user",
+            parts: [
+              {
+                functionResponse: {
+                  id: "call-1",
+                  name: "t",
+                  response: { r: 1 },
+                },
+              },
+            ],
+          },
+        },
+      ],
+      userContent: go(),
+    });
+    const prompt = flattenContentsToPrompt(collectContents(ctx));
+    expect(prompt).toBe(
+      'user:\ngo\n\nassistant:\nok\n\nuser:\ngo\n\nassistant:\n[tool_call t({})]\n\nuser:\n[tool_result t: {"r":1}]',
+    );
+    expect(prompt.match(/\ngo(\n|$)/g)).toHaveLength(2);
+  });
+
+  test("a repeated message that is not in the session is still the current turn", () => {
+    const ctx = makeContext({
+      agentName: "alice",
+      invocationId: "inv-2",
+      events: [
+        { author: "user", invocationId: "inv-1", content: go() },
+        {
+          author: "alice",
+          invocationId: "inv-1",
+          content: { role: "model", parts: [{ text: "ok" }] },
+        },
+      ],
+      userContent: go(),
+    });
+    expect(flattenContentsToPrompt(collectContents(ctx))).toBe(
+      "user:\ngo\n\nassistant:\nok\n\nuser:\ngo",
+    );
+  });
+
+  test("without an invocation id on both sides the session event is not taken as the current turn", () => {
+    const ctx = makeContext({
+      agentName: "alice",
+      events: [{ author: "user", content: go() }],
+      userContent: go(),
+    });
+    expect(flattenContentsToPrompt(collectContents(ctx))).toBe(
+      "user:\ngo\n\nuser:\ngo",
+    );
+  });
+
+  test("an empty invocation id on both sides is not a match", () => {
+    const ctx = makeContext({
+      agentName: "alice",
+      invocationId: "",
+      events: [{ author: "user", invocationId: "", content: go() }],
+      userContent: go(),
+    });
+    expect(flattenContentsToPrompt(collectContents(ctx))).toBe(
+      "user:\ngo\n\nuser:\ngo",
+    );
+  });
+
+  test("a current turn whose parts cannot be serialized is still collected", () => {
+    const cyclicTurn = (): Content => {
+      const response: Record<string, unknown> = { result: "x" };
+      response.self = response;
+      return {
+        role: "user",
+        parts: [{ text: "go" }, { functionResponse: { name: "f", response } }],
+      };
+    };
+    const userContent = cyclicTurn();
+    const ctx = makeContext({
+      agentName: "alice",
+      invocationId: "inv-1",
+      events: [
+        { author: "user", invocationId: "inv-1", content: cyclicTurn() },
+      ],
+      userContent,
+    });
+    const contents = collectContents(ctx);
+    expect(contents).toHaveLength(2);
+    expect(contents.at(-1)).toBe(userContent);
   });
 });

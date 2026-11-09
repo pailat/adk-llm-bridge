@@ -100,9 +100,13 @@ export interface ExternalAgentStateDeltaEvent {
 }
 
 /**
- * Token usage and cost reported by an external runtime for one run. Drivers
- * leave out what the runtime does not report; they never send zeros for
- * unknown values.
+ * Token usage and cost reported by an external runtime.
+ *
+ * @remarks
+ * Drivers leave out what the runtime does not report; they never send zeros
+ * for unknown values. The counters cover one run (`scope: "run"`) unless
+ * `scope` says they are a session total: do not add `"session"` usage to the
+ * usage of earlier runs.
  */
 export interface ExternalAgentUsage {
   /**
@@ -119,8 +123,26 @@ export interface ExternalAgentUsage {
   cacheReadInputTokens?: number;
   /** Input tokens written to the prompt cache. */
   cacheCreationInputTokens?: number;
-  /** Total cost of the run in US dollars, when the runtime reports it. */
+  /** Cost in US dollars, when the runtime reports it; see `scope`. */
   totalCostUsd?: number;
+  /**
+   * What the counters and cost cover. `"run"`: this run only. `"session"`: the
+   * runtime session's total so far, earlier runs included, so do not add it to
+   * the usage of earlier runs.
+   *
+   * Claude reports session-cumulative values on a resumed session. The Agent
+   * SDK driver subtracts the previous result of the same session that it ran
+   * itself and reports `"run"`. That baseline is in memory only (the last 256
+   * sessions), so these runs report `"session"`:
+   * - the first run of a session resumed from outside this driver instance
+   *   (restart, another replica, `resumeSessionId`, `runtimeSession.id`);
+   * - a `forkSession` run;
+   * - a run whose baseline was dropped;
+   * - a run where a counter went down.
+   *
+   * Absent when the driver does not report it.
+   */
+  scope?: "run" | "session";
   /** Per-model breakdown when the runtime reports several models. */
   byModel?: Record<string, Omit<ExternalAgentUsage, "byModel">>;
 }
@@ -161,6 +183,35 @@ export const EXTERNAL_AGENT_TRANSFER_FAILED = "EXTERNAL_AGENT_TRANSFER_FAILED";
  * driver configured, so it cannot run.
  */
 export const EXTERNAL_AGENT_NOT_CONFIGURED = "EXTERNAL_AGENT_NOT_CONFIGURED";
+
+/**
+ * Error code of the event `ExternalAgent` ends a turn with when the human
+ * approved a call through the ADK confirmation protocol and the runtime did
+ * not make that call again on the answer turn, so the approved call never
+ * ran. A rejected answer left unused is not an error.
+ */
+export const EXTERNAL_AGENT_CONFIRMATION_UNUSED =
+  "EXTERNAL_AGENT_CONFIRMATION_UNUSED";
+
+/**
+ * Error code of the event `ExternalAgent` ends a turn with when a bridged ADK
+ * tool asked for credentials (`toolContext.requestCredential()`). An external
+ * runtime cannot run ADK's credential flow, so the call returned a
+ * `CREDENTIAL_REQUIRED` error to the runtime instead of a result.
+ */
+export const EXTERNAL_AGENT_TOOL_CREDENTIAL_REQUIRED =
+  "EXTERNAL_AGENT_TOOL_CREDENTIAL_REQUIRED";
+
+/**
+ * Error code of the event `ExternalAgent` ends a turn with, before the
+ * runtime starts, when the user's results for its long-running calls are too
+ * large: one result over 64 KiB (UTF-8 bytes of JSON), or more than 256 KiB
+ * in one turn.
+ * The results are not marked used, so a smaller answer for the same call id
+ * can follow.
+ */
+export const EXTERNAL_AGENT_TOOL_RESULT_TOO_LARGE =
+  "EXTERNAL_AGENT_TOOL_RESULT_TOO_LARGE";
 
 /**
  * Narrows an unknown value to an {@link ExternalAgentEvent}.

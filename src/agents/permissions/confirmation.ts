@@ -23,7 +23,6 @@ import {
   REQUEST_CONFIRMATION_FUNCTION_CALL_NAME,
 } from "@google/adk";
 import { isPlainRecord } from "../event-titles.js";
-import { BRIDGE_TOOL_PREFIX } from "../tools/adk-tool-bridge.js";
 import { networkAllowed } from "./network.js";
 import { canonicalPath, expandHome, isUnderAny } from "./paths.js";
 import type { ExternalAgentPermissionPolicy } from "./schema.js";
@@ -186,6 +185,20 @@ const MAX_BRACE_ALTERNATIVES = 64;
  */
 const SEARCH_ROOT_KEYS = ["path", "dir_path", "directory", "cwd"] as const;
 
+/**
+ * File-search tools (Claude Code `Glob`/`Grep`, Gemini CLI `glob`,
+ * `grep_search`, `search_file_content`). Without a search-root argument they
+ * search the working directory, so it is checked as their path.
+ */
+const SEARCH_TOOLS = new Set([
+  "Glob",
+  "Grep",
+  "glob",
+  "grep",
+  "grep_search",
+  "search_file_content",
+]);
+
 /** Container keys whose entries are scanned for {@link PATH_KEYS}. */
 const NESTED_KEYS = new Set(["changes", "edits", "files"]);
 
@@ -198,6 +211,30 @@ const PATCH_FILE_HEADER =
 const DENY_READ_ONLY =
   "Denied: this agent runs with a read-only policy, which cannot be overridden by a confirmation.";
 
+/**
+ * Whether a `read-only` policy lets `toolName` run without a confirmation: a
+ * web tool (exact runtime spelling, see {@link NETWORK_TOOLS}) when the policy
+ * sets `allowNetwork: true`. Reading the web changes nothing, so the agent
+ * allows it as it allows reading files; every other tool stays denied.
+ *
+ * @remarks Not part of the public API: do not re-export from any barrel.
+ * @param policy - Effective policy of the agent.
+ * @param toolName - The tool name as the runtime reports it. Matched exactly,
+ * so another case or an MCP tool with the same suffix is not a web tool.
+ * @returns `true` only under `read-only` with `allowNetwork: true`.
+ * @internal
+ */
+export function readOnlyWebToolAllowed(
+  policy: ExternalAgentPermissionPolicy | undefined,
+  toolName: string,
+): boolean {
+  return (
+    policy?.mode === "read-only" &&
+    networkAllowed(policy) &&
+    NETWORK_TOOLS.has(toolName)
+  );
+}
+
 /** Options of {@link guardPermissionRequest}. */
 export interface GuardPermissionOptions {
   /**
@@ -206,6 +243,16 @@ export interface GuardPermissionOptions {
    * @defaultValue `process.cwd()`
    */
   workingDirectory?: string;
+  /**
+   * Full runtime names of the bridge's own MCP tools
+   * (`mcp__adk_bridge__<tool>`) registered for this run. Without
+   * `allowNetwork: true` they are the only MCP tools the guard lets through;
+   * a name merely starting with the bridge prefix (a host server called
+   * `adk_bridge__x`) is denied.
+   *
+   * @defaultValue none: every MCP tool is denied without `allowNetwork: true`
+   */
+  bridgeToolNames?: ReadonlySet<string>;
 }
 
 /**
@@ -213,11 +260,14 @@ export interface GuardPermissionOptions {
  * when the request would exceed the effective policy, `undefined` otherwise.
  *
  * @remarks
- * Fail-closed rules, in order: `read-only` denies every request; network tools
- * are denied unless `allowNetwork` is `true`; without `allowNetwork: true`,
- * non-bridge MCP tools and shell tools without a network sandbox are denied;
- * under `allowedPaths`, any path outside the roots is denied, and so is any
- * path outside one of the `pathBounds` lists.
+ * Fail-closed rules: `read-only` denies every request (with the path reason
+ * when a path is outside `allowedPaths`, so the model is told why) except a
+ * web tool when the policy sets `allowNetwork: true`; network
+ * tools are denied unless `allowNetwork` is `true`; without
+ * `allowNetwork: true`, MCP tools other than the registered bridge tools
+ * ({@link GuardPermissionOptions.bridgeToolNames}) and shell tools without a
+ * network sandbox are denied; under `allowedPaths`, any path outside the
+ * roots is denied, and so is any path outside one of the `pathBounds` lists.
  *
  * The guard runs before the host approver and the ADK confirmation, and its
  * denial is final: no approval can override it. It checks the path arguments
@@ -229,14 +279,15 @@ export interface GuardPermissionOptions {
  * or on the `read-only` mode, which denies every request.
  *
  * Paths are compared after `path.resolve` and symlink resolution (of the
- * deepest existing ancestor), on both the request and `allowedPaths`, so `..`
- * segments and symlinks cannot escape a root, and `/repo2` is not under
- * `/repo`.
+ * deepest existing ancestor, following dangling links), on both the request
+ * and `allowedPaths`, so `..` segments and symlinks cannot escape a root, and
+ * `/repo2` is not under `/repo`. A path whose symlinks loop is denied.
  *
  * @param policy - Effective policy of the agent. `undefined` means no policy,
  * so nothing is denied here.
  * @param request - The permission prompt to check.
- * @param options - Base directory for relative paths.
+ * @param options - Base directory for relative paths and the registered
+ * bridge tools.
  * @returns A `deny` decision, or `undefined` when the policy does not forbid
  * the request (an approval may still be required).
  */
@@ -245,7 +296,11 @@ export function guardPermissionRequest(
   request: PermissionRequest,
   options: GuardPermissionOptions = {},
 ): PermissionDecision | undefined {
+  const pathDenial = guardRequestPaths(policy, request, options);
   if (policy?.mode === "read-only") {
+    if (pathDenial || readOnlyWebToolAllowed(policy, request.toolName)) {
+      return pathDenial;
+    }
     return { behavior: "deny", message: DENY_READ_ONLY };
   }
   if (!networkAllowed(policy) && NETWORK_TOOLS.has(request.toolName)) {
@@ -255,42 +310,77 @@ export function guardPermissionRequest(
     };
   }
   if (!networkAllowed(policy)) {
-    const denial = denyWithoutNetwork(request);
+    const denial = denyWithoutNetwork(request, options.bridgeToolNames);
     if (denial) {
       return denial;
     }
   }
-  if (policy?.allowedPaths || policy?.pathBounds) {
-    const base = options.workingDirectory ?? process.cwd();
-    // Every root list is resolved now, when the request arrives, so a symlink
-    // changed after the policy was set is followed to where it points today.
-    const lists = [
-      ...(policy.allowedPaths ? [policy.allowedPaths] : []),
-      ...(policy.pathBounds ?? []),
-    ].map((list) => list.map((root) => canonicalPath(root, base)));
-    for (const candidate of requestPaths(request)) {
-      const path = canonicalPath(candidate, base);
-      if (!lists.every((roots) => isUnderAny(path, roots))) {
-        return {
-          behavior: "deny",
-          message: `Denied: ${candidate} is outside the paths allowed by this agent's policy.`,
-        };
-      }
+  return pathDenial;
+}
+
+/**
+ * The path rule of {@link guardPermissionRequest} alone: denies a request
+ * whose path arguments leave `allowedPaths` or a `pathBounds` list.
+ *
+ * @remarks
+ * A driver whose runtime auto-approves some file tools (so they never become
+ * a permission request) runs this on every tool call, for example from a
+ * `PreToolUse` hook.
+ *
+ * @param policy - Effective policy of the agent.
+ * @param request - The tool call to check; only `toolName`, `input` and
+ * `blockedPath` are read.
+ * @param options - Base directory for relative paths.
+ * @returns A `deny` decision, or `undefined` when the policy sets no paths or
+ * every path is inside them.
+ * @internal
+ */
+export function guardRequestPaths(
+  policy: ExternalAgentPermissionPolicy | undefined,
+  request: Pick<PermissionRequest, "toolName" | "input" | "blockedPath">,
+  options: Pick<GuardPermissionOptions, "workingDirectory"> = {},
+): PermissionDecision | undefined {
+  if (!policy?.allowedPaths && !policy?.pathBounds) {
+    return undefined;
+  }
+  const base = options.workingDirectory ?? process.cwd();
+  // Every root list is resolved now, when the request arrives, so a symlink
+  // changed after the policy was set is followed to where it points today.
+  const lists = [
+    ...(policy.allowedPaths ? [policy.allowedPaths] : []),
+    ...(policy.pathBounds ?? []),
+  ].map((list) =>
+    list
+      .map((root) => canonicalPath(root, base))
+      .filter((root): root is string => root !== undefined),
+  );
+  for (const candidate of requestPaths(request)) {
+    const path = canonicalPath(candidate, base);
+    if (
+      path === undefined ||
+      !lists.every((roots) => isUnderAny(path, roots))
+    ) {
+      return {
+        behavior: "deny",
+        message: `Denied: ${candidate === "." ? `${request.toolName} without a search path searches the working directory, which` : candidate} is outside the paths allowed by this agent's policy.`,
+      };
     }
   }
   return undefined;
 }
 
 /**
- * Without `allowNetwork: true`, MCP tools other than the bridge's own are
- * denied (the guard cannot see where a remote server sends data), and shell
- * tools are denied unless the runtime sandbox keeps them off the network.
+ * Without `allowNetwork: true`, MCP tools other than the registered bridge
+ * tools are denied (the guard cannot see where a remote server sends data),
+ * and shell tools are denied unless the runtime sandbox keeps them off the
+ * network.
  */
 function denyWithoutNetwork(
   request: PermissionRequest,
+  bridgeToolNames: ReadonlySet<string> | undefined,
 ): PermissionDecision | undefined {
   const name = request.toolName;
-  if (name.startsWith("mcp__") && !name.startsWith(BRIDGE_TOOL_PREFIX)) {
+  if (name.startsWith("mcp__") && !bridgeToolNames?.has(name)) {
     return {
       behavior: "deny",
       message: `Denied: MCP tool ${name} may reach the network, which this agent's policy does not allow.`,
@@ -311,14 +401,24 @@ function denyWithoutNetwork(
 
 /**
  * Every path a request targets: the runtime's `blockedPath` plus every
- * path-like input (see {@link PATH_KEYS}), whatever the tool is called.
+ * path-like input (see {@link PATH_KEYS}), whatever the tool is called, and
+ * `.` (the working directory) for a search tool without a search root.
  */
-function requestPaths(request: PermissionRequest): string[] {
+function requestPaths(
+  request: Pick<PermissionRequest, "toolName" | "input" | "blockedPath">,
+): string[] {
   const paths: string[] = [];
   if (request.blockedPath !== undefined) {
     paths.push(request.blockedPath);
   }
   collectInputPaths(request.input, paths, 0, request.toolName);
+  if (
+    SEARCH_TOOLS.has(request.toolName) &&
+    searchRoot(request.input) === undefined
+  ) {
+    // No search root: the tool searches the working directory.
+    paths.push(".");
+  }
   return paths;
 }
 
@@ -386,17 +486,18 @@ function searchRoot(input: Record<string, unknown>): string | undefined {
 
 /**
  * The directories a glob cannot match outside of, one per brace
- * alternative, for the alternatives that can leave the search root.
+ * alternative.
  *
  * Brace groups are expanded first (`{/etc,src}/*` is `/etc/*` and `src/*`,
  * `{..,x}` holds a `..`), because matchers expand them before matching. Each
  * alternative is then reduced by {@link globBase}. A relative base is
- * resolved against the call's own search root when it has one.
+ * resolved against the call's own search root when it has one. An
+ * alternative that stays under its root yields that root, or `.` (the
+ * working directory) when the call has none.
  *
  * @param pattern - The glob as the tool received it.
  * @param root - The call's search-root argument, if any.
- * @returns Paths to check against `allowedPaths`; empty when every
- * alternative stays under the search root.
+ * @returns Paths to check against `allowedPaths`, one per alternative.
  */
 function globBases(pattern: string, root: string | undefined): string[] {
   const alternatives = expandBraces(pattern, MAX_BRACE_ALTERNATIVES);
@@ -406,7 +507,13 @@ function globBases(pattern: string, root: string | undefined): string[] {
   const bases: string[] = [];
   for (const alternative of alternatives) {
     const base = globBase(alternative);
-    if (base === undefined) continue;
+    if (base === undefined) {
+      // A relative glob matches under its search root, or under the working
+      // directory when there is none (Gemini `read_many_files` `include`, or
+      // any tool whose only path input is a glob).
+      bases.push(root !== undefined ? expandHome(root) : ".");
+      continue;
+    }
     bases.push(
       root !== undefined && !isAbsolute(base)
         ? join(expandHome(root), base)

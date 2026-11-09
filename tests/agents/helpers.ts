@@ -25,6 +25,24 @@ export async function withDeadline<T>(
 }
 
 /**
+ * Polls `condition` until it holds or `ms` passes, then returns its last
+ * value. Use it for state the test cannot await, such as a process that the
+ * OS reaps after it exits.
+ */
+export async function waitUntil(
+  condition: () => boolean,
+  ms = 5000,
+  intervalMs = 10,
+): Promise<boolean> {
+  const deadline = Date.now() + ms;
+  while (!condition()) {
+    if (Date.now() >= deadline) return condition();
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+  return true;
+}
+
+/**
  * A Codex MCP lister for a host with no MCP servers. Network is off by
  * default, so a Codex CLI run lists the host servers to turn them off; tests
  * that are not about that listing use this instead of spawning `mcp list`.

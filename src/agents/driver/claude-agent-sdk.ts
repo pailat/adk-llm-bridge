@@ -6,6 +6,7 @@ import {
   type ExternalAgentRunRequest,
   resolveAbortSignal,
 } from "../external-agent-driver.js";
+import { guardRequestPaths } from "../permissions/confirmation.js";
 import { mapPermissionPolicyToFlags } from "../permissions/mapper.js";
 import type { ExternalAgentPermissionPolicy } from "../permissions/schema.js";
 import { CLAUDE_PROVIDER } from "../provider/claude.js";
@@ -15,12 +16,14 @@ import {
   safeCollectContents,
 } from "../runtime/content-collector.js";
 import { classifyRecoverable } from "../runtime/error-classification.js";
+import type { SessionStore } from "../session-store/types.js";
 import {
   assertClaudeMessageIsolated,
   BRIDGE_MCP_SERVER,
   BRIDGE_TOOL_PREFIX,
   type ClaudeIsolationExpectation,
   type ClaudeIsolationPlan,
+  claudeInitTools,
   DEFAULT_CLAUDE_TOOLS,
   isExpectedClaudeTool,
   planClaudeIsolation,
@@ -33,10 +36,17 @@ import {
   dependencyMissing,
   EXTERNAL_AGENT_ISOLATION_VIOLATED,
   EXTERNAL_AGENT_MISSING_BINARY,
+  EXTERNAL_AGENT_PATHS_UNENFORCEABLE,
   ExternalAgentPolicyError,
+  networkUnenforceable,
   policyErrorEvent,
+  webToolsRefusal,
 } from "./policy-errors.js";
-import { claudeInitModel, claudeResultSummary } from "./run-summary.js";
+import {
+  claudeInitModel,
+  claudeResultBaseline,
+  claudeResultSummary,
+} from "./run-summary.js";
 import {
   asRecord,
   contextText,
@@ -50,6 +60,12 @@ import {
   stringValue,
   validateDriverConfig,
 } from "./shared.js";
+
+/**
+ * Most SDK sessions for which the driver keeps the last usage counters; the
+ * least recently updated one is dropped first.
+ */
+const MAX_USAGE_BASELINES = 256;
 
 type ClaudeAgentSdkPermissionMode =
   | "default"
@@ -82,9 +98,11 @@ type ClaudeAgentSdkOptions = {
   strictMcpConfig?: boolean;
   skills?: string[] | "all";
   managedSettings?: Record<string, unknown>;
+  settings?: string | Record<string, unknown>;
   sandbox?: Record<string, unknown>;
   resume?: string;
   forkSession?: boolean;
+  sessionStore?: SessionStore;
   canUseTool?: ClaudeAgentSdkCanUseTool;
   hooks?: Partial<Record<string, ClaudeAgentSdkHookMatcher[]>>;
 };
@@ -284,6 +302,29 @@ export interface ClaudeAgentSdkDriverConfig {
    * `resumeSessionId` to fork rather than continue the previous session.
    */
   forkSession?: boolean;
+  /**
+   * Durable storage every Claude session of this driver is mirrored to (the
+   * SDK `sessionStore` option), and loaded from when a run resumes.
+   *
+   * @remarks
+   * Passed to `query()` on every run, first turns and resumes alike, so a
+   * resumed run reads its transcript from the store before Claude starts.
+   * The SDK still writes the local transcript under the Claude config
+   * directory. The SDK keys a transcript by a project key derived from the
+   * working directory, so a resume finds it only from the same path. When
+   * the SDK drops a batch it could not store (3 attempts in total, no retry
+   * after a timeout) the run reports a recoverable
+   * `CLAUDE_SESSION_STORE_MIRROR_ERROR` event and continues. `SqliteSessionStore` (from
+   * `adk-llm-bridge/agents/session-store/sqlite`) is a ready adapter.
+   *
+   * Transcripts can hold tool output and file contents, and the store
+   * receives them: protecting access to it is up to the host.
+   *
+   * @experimental Follows the Claude Agent SDK's `@alpha` `sessionStore`
+   * contract, which can change in a minor SDK release.
+   * @defaultValue `undefined` (no store: only the local transcript is written)
+   */
+  sessionStore?: SessionStore;
 }
 
 /**
@@ -291,6 +332,15 @@ export interface ClaudeAgentSdkDriverConfig {
  * the CLI driver's default; see `DEFAULT_CLAUDE_TOOLS`.
  */
 export const DEFAULT_CLAUDE_SDK_TOOLS: readonly string[] = DEFAULT_CLAUDE_TOOLS;
+
+/**
+ * Code of the recoverable `error` event a Claude Agent SDK run reports when
+ * the SDK dropped a transcript batch that its `sessionStore` rejected or timed
+ * out on (3 attempts in total).
+ * The run continues; the store is missing that batch.
+ */
+export const CLAUDE_SESSION_STORE_MIRROR_ERROR =
+  "CLAUDE_SESSION_STORE_MIRROR_ERROR";
 
 /** The bridge's delegation tool; it maps to transfer events, not tool events. */
 const BRIDGE_SUBAGENT_TOOL = `${BRIDGE_TOOL_PREFIX}run_adk_subagent`;
@@ -314,6 +364,19 @@ const BRIDGE_SUBAGENT_TOOL = `${BRIDGE_TOOL_PREFIX}run_adk_subagent`;
  *   the tool input.
  * - Without `allowNetwork: true`, Bash runs in a no-network sandbox, and the run
  *   fails at start where the sandbox cannot run, unless `allowUnsandboxedShell`.
+ * - With `allowedPaths` (or inherited path bounds), Bash runs in the sandbox
+ *   with only the allowed roots writable (reads are not limited). While a
+ *   shell tool is on offer, a run is refused with
+ *   `EXTERNAL_AGENT_PATHS_UNENFORCEABLE` when its working directory is
+ *   outside them, its shell runs unsandboxed (`allowNetwork: true`,
+ *   `allowUnsandboxedShell`), it inherits the host config, or its working
+ *   directory or an allowed root is in the sandbox's always-writable temp
+ *   area.
+ * - With `allowedPaths` (or inherited path bounds), a `PreToolUse` hook checks
+ *   the path arguments of every tool call, also the edits and reads Claude
+ *   Code approves without asking (inside its working directory and
+ *   `additionalDirectories`), and denies a path outside them. The bridge's own
+ *   tools are left to the bridge.
  * - The child environment is an allowlist, never the whole parent environment.
  * - Abort: the run's abort signal is bridged to the SDK's `AbortController`;
  *   when the consumer stops early or an error occurs, the driver interrupts the
@@ -328,6 +391,8 @@ export class ClaudeAgentSdkDriver {
   /** Provider id of this driver (`claude`). */
   readonly providerId = CLAUDE_PROVIDER.id;
   readonly #sdk?: ClaudeAgentSdkLike;
+  /** Removes the run-signal listener of each controller this driver built. */
+  readonly #abortDetach = new WeakMap<AbortController, () => void>();
   readonly #importSdk: () => Promise<ClaudeAgentSdkLike>;
   readonly #env: Record<string, string | undefined>;
   readonly #pathToClaudeCodeExecutable?: string;
@@ -339,6 +404,7 @@ export class ClaudeAgentSdkDriver {
   readonly #requiredMcpServers: readonly string[];
   readonly #resumeSessionId?: string;
   readonly #forkSession?: boolean;
+  readonly #sessionStore?: SessionStore;
   readonly #systemPrompt?: string;
   readonly #tools?: readonly string[];
   readonly #inheritHostConfig: boolean;
@@ -354,6 +420,14 @@ export class ClaudeAgentSdkDriver {
   // several agents (e.g. `ExternalAgent.clone()` reuses it), and two of them
   // running in the same ADK session must not resume each other's transcript.
   readonly #sdkSessionsByAgent = new WeakMap<object, Map<string, string>>();
+  // Cumulative counters of the last `result` per SDK session id (counters only;
+  // past `MAX_USAGE_BASELINES` the least recently updated is dropped, because
+  // each result moves its session to the end). A resumed session reports
+  // cumulative `modelUsage`/`total_cost_usd`; this is the baseline to subtract.
+  // In memory only: a session resumed from another process or replica, or from
+  // `resumeSessionId`, has no baseline on its first run and reports its total,
+  // marked `scope: "session"`.
+  readonly #lastResultBySdkSession = new Map<string, unknown>();
 
   /**
    * Creates a driver that runs Claude through `@anthropic-ai/claude-agent-sdk`.
@@ -391,6 +465,7 @@ export class ClaudeAgentSdkDriver {
     }
     this.#resumeSessionId = config.resumeSessionId;
     this.#forkSession = config.forkSession;
+    this.#sessionStore = config.sessionStore;
     this.#systemPrompt = config.systemPrompt;
     this.#tools = config.tools ? [...config.tools] : undefined;
     this.#inheritHostConfig = config.inheritHostConfig ?? false;
@@ -494,9 +569,27 @@ export class ClaudeAgentSdkDriver {
     // `query()` itself is invoked inside the try so a synchronous throw is
     // classified too. The `finally` runs on normal completion, break, AND throw.
     let query: ClaudeAgentSdkQuery | undefined;
+    let abortController: AbortController | undefined;
     // Tools the isolation hook blocked; the run ends on the next message.
     const blockedTools: string[] = [];
+    // The tools the session's system/init reported, for the stop message.
+    let offeredTools: string[] | undefined;
     try {
+      // Shell writes that the sandbox cannot keep inside allowedPaths: refuse
+      // before anything starts.
+      const webTools = this.isolationPlan(request).unenforceableWebTools;
+      if (webTools) {
+        throw networkUnenforceable(
+          webToolsRefusal("Claude Agent SDK", webTools),
+        );
+      }
+      const shellPaths = this.isolationPlan(request).shellPathsUnenforceable;
+      if (shellPaths) {
+        throw new ExternalAgentPolicyError(
+          EXTERNAL_AGENT_PATHS_UNENFORCEABLE,
+          `Claude Agent SDK cannot enforce allowedPaths: ${shellPaths}. Set the working directory inside allowedPaths, remove the shell tools (tools without Bash), or drop allowedPaths.`,
+        );
+      }
       // Inside the try: a missing SDK package becomes an error event, like
       // every other failure, instead of a throw out of the agent.
       const sdk = await this.loadSdk();
@@ -535,6 +628,20 @@ export class ClaudeAgentSdkDriver {
             : {}),
         };
       }
+      if (
+        request.permissions?.allowedPaths !== undefined ||
+        request.permissions?.pathBounds !== undefined
+      ) {
+        options = {
+          ...options,
+          hooks: withPathGuardHook(
+            options.hooks,
+            request.permissions,
+            request.workingDirectory,
+            built.bridgeTools,
+          ),
+        };
+      }
       if (!expectation && isolation.denyForeignMcpTools) {
         // read-only with inheritHostConfig: host settings may pre-approve an
         // MCP tool, which then skips canUseTool. The hook denies it anyway.
@@ -543,6 +650,7 @@ export class ClaudeAgentSdkDriver {
           hooks: withForeignMcpDenyHook(options.hooks, built.bridgeTools),
         };
       }
+      abortController = options.abortController;
       query = sdk.query({ prompt, options });
       const iterator = query[Symbol.asyncIterator]();
       stream: while (true) {
@@ -556,7 +664,13 @@ export class ClaudeAgentSdkDriver {
           yield startedEvent(initModel);
         }
         if (expectation) {
-          assertClaudeMessageIsolated(message, expectation, "Claude Agent SDK");
+          offeredTools = claudeInitTools(message) ?? offeredTools;
+          assertClaudeMessageIsolated(
+            message,
+            expectation,
+            "Claude Agent SDK",
+            offeredTools,
+          );
           if (blockedTools.length > 0) {
             throw isolationHookViolation(blockedTools);
           }
@@ -592,7 +706,11 @@ export class ClaudeAgentSdkDriver {
             yield { type: "output", content: text, timestamp: Date.now() };
           }
         }
-        const events = this.normalizeMessage(message, toolNames);
+        const events = this.normalizeMessage(
+          message,
+          toolNames,
+          resolvedResume !== undefined,
+        );
         for (let event of events) {
           if (event.type === "completed") {
             completed = true;
@@ -643,6 +761,12 @@ export class ClaudeAgentSdkDriver {
       if (query) {
         await this.disposeQuery(query, completed);
       }
+      if (abortController) {
+        // After the graceful teardown: stop anything the SDK still runs, and
+        // drop the listener so a long-lived run signal does not keep it.
+        this.#abortDetach.get(abortController)?.();
+        abortController.abort();
+      }
     }
 
     if (!startedEmitted) {
@@ -690,6 +814,7 @@ export class ClaudeAgentSdkDriver {
         permission.allowDangerouslySkipPermissions,
       resume,
       forkSession: this.#forkSession,
+      sessionStore: this.#sessionStore,
       canUseTool: this.buildCanUseTool(request),
       ...this.buildToolIsolation(request),
     };
@@ -708,6 +833,9 @@ export class ClaudeAgentSdkDriver {
       tools: this.#tools,
       inheritHostConfig: this.#inheritHostConfig,
       allowUnsandboxedShell: this.#allowUnsandboxedShell,
+      ...(request.workingDirectory
+        ? { workingDirectory: request.workingDirectory }
+        : {}),
     });
   }
 
@@ -718,19 +846,32 @@ export class ClaudeAgentSdkDriver {
     const sandbox = plan.sandbox
       ? (structuredClone(plan.sandbox) as Record<string, unknown>)
       : undefined;
+    // Read-only web tools with the network on run without a prompt. With a
+    // permission callback the host's guard allows them (an `allowedTools`
+    // entry next to `canUseTool` would make the SDK warn); without one, a
+    // rule does.
+    const allowedTools = request.requestPermission
+      ? undefined
+      : plan.readOnlyWebTools;
     if (!plan.isolated) {
       return {
         tools: plan.tools,
         disallowedTools: plan.disallowedTools,
+        allowedTools,
         sandbox,
       };
     }
     return {
       tools: plan.tools,
       disallowedTools: plan.disallowedTools,
+      allowedTools,
       strictMcpConfig: true,
       skills: [],
       managedSettings: { disableClaudeAiConnectors: true },
+      // Flag settings (`--settings`), the highest user-controlled layer:
+      // without it Claude Code tells the agent to read and write the host's
+      // auto-memory directory, outside the run's isolation.
+      settings: { autoMemoryEnabled: false },
       sandbox,
     };
   }
@@ -950,6 +1091,8 @@ export class ClaudeAgentSdkDriver {
    * this controller fires. We bridge the shared run cancellation signal
    * (`request.abortSignal` ?? `context.abortSignal`) onto a fresh controller so
    * the driver also owns a handle it can abort from its own `finally` cleanup.
+   * `run` removes the listener on the run signal and aborts the controller
+   * when the run ends.
    */
   private buildAbortController(
     request: ExternalAgentRunRequest,
@@ -960,10 +1103,10 @@ export class ClaudeAgentSdkDriver {
       if (signal.aborted) {
         controller.abort(signal.reason);
       } else {
-        signal.addEventListener(
-          "abort",
-          () => controller.abort(signal.reason),
-          { once: true },
+        const onAbort = () => controller.abort(signal.reason);
+        signal.addEventListener("abort", onAbort, { once: true });
+        this.#abortDetach.set(controller, () =>
+          signal.removeEventListener("abort", onAbort),
         );
       }
     }
@@ -1009,34 +1152,23 @@ export class ClaudeAgentSdkDriver {
    * @param message - One SDK message.
    * @param toolNames - Map of `tool_use` id to tool name, shared across the run;
    * a new empty map by default.
+   * @param resumed - Whether the run resumed or forked an existing SDK
+   * session; without a baseline its usage is then the session total, marked
+   * `scope: "session"`.
    * @returns Zero or more events.
    */
   normalizeMessage(
     message: ClaudeAgentSdkMessage,
     toolNames: Map<string, string> = new Map(),
+    resumed = false,
   ): ExternalAgentEvent[] {
     const record = asRecord(message);
     const type = stringValue(record.type);
 
     if (type === "assistant") {
-      const error = stringValue(record.error);
+      const error = claudeAssistantErrorEvent(record, "CLAUDE_AGENT_SDK_ERROR");
       if (error) {
-        // `record.error` is an SDKAssistantMessageError subtype
-        // (authentication_failed/billing_error/rate_limit/server_error/…).
-        const classification = classifyRecoverable({
-          subtype: error,
-          message: error,
-          fallbackCode: "CLAUDE_AGENT_SDK_ERROR",
-        });
-        return [
-          {
-            type: "error",
-            message: error,
-            code: classification.code,
-            recoverable: classification.recoverable,
-            timestamp: Date.now(),
-          },
-        ];
+        return [error];
       }
 
       const content = asRecord(record.message).content;
@@ -1062,7 +1194,23 @@ export class ClaudeAgentSdkDriver {
     }
 
     if (type === "result") {
-      const summary = claudeResultSummary(record);
+      const sdkSession = stringValue(record.session_id);
+      const summary = claudeResultSummary(
+        record,
+        sdkSession ? this.#lastResultBySdkSession.get(sdkSession) : undefined,
+        resumed,
+      );
+      if (sdkSession) {
+        this.#lastResultBySdkSession.delete(sdkSession);
+        this.#lastResultBySdkSession.set(
+          sdkSession,
+          claudeResultBaseline(record),
+        );
+        if (this.#lastResultBySdkSession.size > MAX_USAGE_BASELINES) {
+          const oldest = this.#lastResultBySdkSession.keys().next();
+          if (!oldest.done) this.#lastResultBySdkSession.delete(oldest.value);
+        }
+      }
       if (record.subtype === "success") {
         return [
           {
@@ -1144,6 +1292,21 @@ export class ClaudeAgentSdkDriver {
           message,
           code: "CLAUDE_PERMISSION_DENIED",
           recoverable: false,
+          timestamp: Date.now(),
+        },
+      ];
+    }
+
+    if (type === "system" && record.subtype === "mirror_error") {
+      // The local transcript is intact; only the store copy lost a batch, so
+      // the run goes on and a retry of the run can succeed.
+      const detail = stringValue(record.error) ?? "unknown error";
+      return [
+        {
+          type: "error",
+          message: `Claude session store dropped a transcript batch after its retries: ${detail}`,
+          code: CLAUDE_SESSION_STORE_MIRROR_ERROR,
+          recoverable: true,
           timestamp: Date.now(),
         },
       ];
@@ -1441,10 +1604,19 @@ function withIsolationHook(
     hooks: [
       async (input) => {
         const toolName = stringValue(input.tool_name);
-        if (
-          toolName === undefined ||
-          isExpectedClaudeTool(toolName, expectation)
-        ) {
+        if (toolName === undefined) {
+          // Fail closed: a call that names no tool cannot be checked.
+          onBlocked("");
+          return {
+            hookSpecificOutput: {
+              hookEventName: "PreToolUse",
+              permissionDecision: "deny",
+              permissionDecisionReason:
+                "A tool call with no tool name is outside this agent's isolated tool set.",
+            },
+          };
+        }
+        if (isExpectedClaudeTool(toolName, expectation)) {
           return {};
         }
         onBlocked(toolName);
@@ -1479,11 +1651,18 @@ function withForeignMcpDenyHook(
     hooks: [
       async (input) => {
         const toolName = stringValue(input.tool_name);
-        if (
-          toolName === undefined ||
-          !toolName.startsWith("mcp__") ||
-          allowed.has(toolName)
-        ) {
+        if (toolName === undefined) {
+          // Fail closed: a call that names no tool may be a foreign MCP tool.
+          return {
+            hookSpecificOutput: {
+              hookEventName: "PreToolUse",
+              permissionDecision: "deny",
+              permissionDecisionReason:
+                "A tool call with no tool name cannot be checked; a read-only agent cannot use it.",
+            },
+          };
+        }
+        if (!toolName.startsWith("mcp__") || allowed.has(toolName)) {
           return {};
         }
         return {
@@ -1502,12 +1681,71 @@ function withForeignMcpDenyHook(
   };
 }
 
+/**
+ * Adds a `PreToolUse` hook that denies a tool call whose path arguments leave
+ * `allowedPaths` or a `pathBounds` list.
+ *
+ * @remarks The permission callback sees only the calls Claude Code asks
+ * about. Edits inside the working directory or `additionalDirectories` in
+ * `acceptEdits` mode, reads there, and every call in `bypassPermissions` mode
+ * run without asking, so the guard must run here as well. The bridge's own
+ * tools take ADK tool arguments, not runtime paths, and are left to the
+ * bridge.
+ */
+function withPathGuardHook(
+  hooks: ClaudeAgentSdkOptions["hooks"],
+  policy: ExternalAgentPermissionPolicy,
+  workingDirectory: string | undefined,
+  bridgeTools: readonly string[] | undefined,
+): NonNullable<ClaudeAgentSdkOptions["hooks"]> {
+  const bridged = new Set(bridgeTools ?? []);
+  const matcher: ClaudeAgentSdkHookMatcher = {
+    hooks: [
+      async (input) => {
+        const toolName = stringValue(input.tool_name);
+        if (toolName === undefined) {
+          return {
+            hookSpecificOutput: {
+              hookEventName: "PreToolUse",
+              permissionDecision: "deny",
+              permissionDecisionReason: "Denied: tool call without a name.",
+            },
+          };
+        }
+        if (bridged.has(toolName)) {
+          return {};
+        }
+        const toolInput = asRecord(input.tool_input);
+        const denial = guardRequestPaths(
+          policy,
+          { toolName, input: toolInput },
+          workingDirectory ? { workingDirectory } : {},
+        );
+        if (denial?.behavior !== "deny") {
+          return {};
+        }
+        return {
+          hookSpecificOutput: {
+            hookEventName: "PreToolUse",
+            permissionDecision: "deny",
+            permissionDecisionReason: denial.message,
+          },
+        };
+      },
+    ],
+  };
+  return {
+    ...(hooks ?? {}),
+    PreToolUse: [matcher, ...(hooks?.PreToolUse ?? [])],
+  };
+}
+
 function isolationHookViolation(
   tools: readonly string[],
 ): ExternalAgentPolicyError {
   return new ExternalAgentPolicyError(
     EXTERNAL_AGENT_ISOLATION_VIOLATED,
-    `Claude Agent SDK tried to use ${[...new Set(tools)].join(", ")}, outside the isolated set; the call was blocked and the run was stopped. A host or managed setting may be adding tools after start. Pass inheritHostConfig: true to allow the host configuration.`,
+    `Claude Agent SDK tried to use ${[...new Set(tools)].map((tool) => JSON.stringify(tool)).join(", ")}, outside the isolated set; the call was blocked and the run was stopped. A host or managed setting may be adding tools after start. Pass inheritHostConfig: true to allow the host configuration.`,
   );
 }
 
@@ -1771,12 +2009,59 @@ function extractText(value: unknown): string | undefined {
 }
 
 /**
+ * The `error` event for an assistant message that carries an `error`, or
+ * undefined when it carries none.
+ *
+ * @remarks
+ * `error` is an `SDKAssistantMessageError` subtype
+ * (`authentication_failed`, `model_not_found`, `rate_limit`, ...), classified
+ * with `classifyRecoverable`. The message text says what to fix ("There's an
+ * issue with the selected model ..."), so it is kept after the subtype.
+ * Shared by the SDK and CLI drivers.
+ *
+ * @param record - The assistant message (SDK message or `stream-json` line).
+ * @param fallbackCode - Code for a subtype the classifier does not know.
+ * @returns The error event, or undefined.
+ */
+export function claudeAssistantErrorEvent(
+  record: Record<string, unknown>,
+  fallbackCode: string,
+): ExternalAgentEvent | undefined {
+  const error = stringValue(record.error);
+  if (!error) return undefined;
+  const content = asRecord(record.message).content;
+  const text = extractText(
+    Array.isArray(content)
+      ? content.filter((block) => asRecord(block).type !== "tool_use")
+      : content,
+  )?.trim();
+  const message = text ? `${error}: ${text}` : error;
+  const classification = classifyRecoverable({
+    subtype: error,
+    message,
+    fallbackCode,
+  });
+  return {
+    type: "error",
+    message,
+    code: classification.code,
+    recoverable: classification.recoverable,
+    timestamp: Date.now(),
+  };
+}
+
+/**
  * `tool_call` events for the `tool_use` blocks of an assistant message.
  * The bridge's delegation tool is skipped (it maps to transfer events).
  * Built-in tools carry `metadata.builtin: true`; the bridge's ADK tools carry
- * `metadata.adkTool: true`.
+ * `metadata.adkTool: true`. Shared by the SDK and CLI drivers.
+ *
+ * @param content - The message's `content` blocks.
+ * @param toolNames - Map of `tool_use` id to tool name, shared across the run.
+ * @param parentToolUseId - The message's `parent_tool_use_id`, if any.
+ * @returns One event per `tool_use` block.
  */
-function toolUseEvents(
+export function toolUseEvents(
   content: unknown,
   toolNames: Map<string, string>,
   parentToolUseId: unknown,
@@ -1803,8 +2088,16 @@ function toolUseEvents(
   return events;
 }
 
-/** `tool_result` events for the `tool_result` blocks of a user message. */
-function toolResultEvents(
+/**
+ * `tool_result` events for the `tool_result` blocks of a user message. Shared
+ * by the SDK and CLI drivers.
+ *
+ * @param content - The message's `content` blocks.
+ * @param toolNames - Map of `tool_use` id to tool name, shared across the run.
+ * @param parentToolUseId - The message's `parent_tool_use_id`, if any.
+ * @returns One event per `tool_result` block whose `tool_use` is known.
+ */
+export function toolResultEvents(
   content: unknown,
   toolNames: Map<string, string>,
   parentToolUseId: unknown,

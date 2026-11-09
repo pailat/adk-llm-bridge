@@ -482,8 +482,8 @@ describe("toResponseObject", () => {
     expect(toResponseObject(point).result).toBe(point);
   });
 
-  it("wraps arrays and primitives, with undefined as null", () => {
-    expect(toResponseObject([1])).toEqual({ result: [1] });
+  it("wraps arrays as results and primitives as result, with undefined as null", () => {
+    expect(toResponseObject([1])).toEqual({ results: [1] });
     expect(toResponseObject("x")).toEqual({ result: "x" });
     expect(toResponseObject(undefined)).toEqual({ result: null });
   });

@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { spawn as nodeSpawn, type SpawnOptions } from "node:child_process";
-import { delimiter } from "node:path";
+import {
+  spawn as nodeSpawn,
+  type SpawnOptions,
+  spawnSync,
+} from "node:child_process";
+import { delimiter, resolve } from "node:path";
 import {
   collectTail,
   readAll as readAllText,
@@ -372,3 +376,69 @@ describe("driver executable lookup", () => {
     ).toBe("H\nfix\nOriginal error: boom\nChecked paths:\n  - <no candidates>");
   });
 });
+
+describe.skipIf(process.platform === "win32")(
+  "spawnSubprocess stdin input",
+  () => {
+    for (const runtime of ["bun", "node"] as const) {
+      test(`${runtime}: writes the input to stdin and closes it`, async () => {
+        const child = spawnSubprocess(
+          "/bin/cat",
+          [],
+          { env: { PATH: "/usr/bin:/bin" }, input: "update\n--version" },
+          runtime === "node" ? { bun: null } : {},
+        );
+        const output = await withDeadline(readAll(child.stdout), 5_000);
+        expect(output).toBe("update\n--version");
+        expect(await child.exited).toBe(0);
+      });
+
+      test(`${runtime}: without input stdin is closed at once`, async () => {
+        const child = spawnSubprocess(
+          "/bin/cat",
+          [],
+          { env: { PATH: "/usr/bin:/bin" } },
+          runtime === "node" ? { bun: null } : {},
+        );
+        expect(await withDeadline(readAll(child.stdout), 5_000)).toBe("");
+        expect(await child.exited).toBe(0);
+      });
+    }
+  },
+);
+
+const SPAWN_MODULE = resolve(
+  import.meta.dir,
+  "../../../src/agents/driver/spawn.ts",
+);
+
+describe.skipIf(process.platform === "win32")(
+  "spawnSubprocess input to a child that exits without reading it",
+  () => {
+    // Run in a separate host process: without the EPIPE guard the write error
+    // is uncaught and kills the host, which this test must observe.
+    test("node: the host survives and the exit code is reported", () => {
+      const script = [
+        `import { spawnSubprocess } from ${JSON.stringify(SPAWN_MODULE)};`,
+        "const child = spawnSubprocess(",
+        '  "/bin/sh",',
+        '  ["-c", "exit 3"],',
+        '  { env: { PATH: "/usr/bin:/bin" }, input: "x".repeat(4 * 1024 * 1024) },',
+        "  { bun: null },",
+        ");",
+        "const code = await child.exited;",
+        // Give a late EPIPE time to surface before reporting success.
+        "await new Promise((done) => setTimeout(done, 200));",
+        'console.log("exited " + code);',
+      ].join("\n");
+      const host = spawnSync(process.execPath, ["-e", script], {
+        encoding: "utf8",
+        timeout: 20_000,
+      });
+
+      expect(`${host.stdout}${host.stderr}`).not.toContain("EPIPE");
+      expect(host.stdout.trim()).toBe("exited 3");
+      expect(host.status).toBe(0);
+    });
+  },
+);

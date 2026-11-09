@@ -54,6 +54,15 @@ describe("agents public exports", () => {
     expect(agents.EXTERNAL_AGENT_NOT_CONFIGURED).toBe(
       "EXTERNAL_AGENT_NOT_CONFIGURED",
     );
+    expect(agents.EXTERNAL_AGENT_CONFIRMATION_UNUSED).toBe(
+      "EXTERNAL_AGENT_CONFIRMATION_UNUSED",
+    );
+    expect(agents.EXTERNAL_AGENT_TOOL_CREDENTIAL_REQUIRED).toBe(
+      "EXTERNAL_AGENT_TOOL_CREDENTIAL_REQUIRED",
+    );
+    expect(agents.EXTERNAL_AGENT_TOOL_RESULT_TOO_LARGE).toBe(
+      "EXTERNAL_AGENT_TOOL_RESULT_TOO_LARGE",
+    );
   });
 
   test("./agents exports the types a custom driver's run request uses", async () => {
@@ -216,5 +225,18 @@ describe("agents public exports", () => {
       types: "./dist/agents/index.d.ts",
       import: "./dist/agents/index.js",
     });
+    expect(packageJson.exports["./agents/session-store/sqlite"]).toEqual({
+      types: "./dist/agents/session-store/sqlite/index.d.ts",
+      import: "./dist/agents/session-store/sqlite/index.js",
+    });
+  });
+
+  test("./agents exposes the session store codes", () => {
+    expect(agents.CLAUDE_SESSION_STORE_MIRROR_ERROR).toBe(
+      "CLAUDE_SESSION_STORE_MIRROR_ERROR",
+    );
+    expect(agents.EXTERNAL_AGENT_OPTION_UNSUPPORTED).toBe(
+      "EXTERNAL_AGENT_OPTION_UNSUPPORTED",
+    );
   });
 });

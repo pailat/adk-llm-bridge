@@ -429,6 +429,29 @@ describe("ExternalAgent spans: one agent with a built-in tool", () => {
       expect(delta?.usageMetadata).toBeUndefined();
     });
 
+    test("the final text carries the usage scope in customMetadata", async () => {
+      for (const scope of ["session", "run"] as const) {
+        const events = await run([
+          { type: "output", content: "A" },
+          { type: "completed", usage: { ...usage, scope } },
+        ]);
+        const final = events.find((event) => textOf(event) === "A");
+        expect(final?.usageMetadata).toEqual(expected);
+        expect(final?.customMetadata?.externalAgentUsageScope).toBe(scope);
+      }
+    });
+
+    test("usage without a scope adds no scope metadata", async () => {
+      const events = await run([
+        { type: "output", content: "A" },
+        { type: "completed", usage },
+      ]);
+      const final = events.find((event) => textOf(event) === "A");
+      expect(final?.customMetadata).not.toHaveProperty(
+        "externalAgentUsageScope",
+      );
+    });
+
     test("two texts: only the last one carries the usage", async () => {
       const events = await run([
         { type: "output", content: "A" },
@@ -858,5 +881,86 @@ describe("ExternalAgent spans: coordinator with a delegated sub-agent", () => {
       .map((e) => e.content?.parts?.[0]?.text)
       .filter((text): text is string => typeof text === "string");
     expect(texts.at(-1)).toBe("answer");
+  });
+});
+
+describe("ExternalAgent spans: ClaudeCliDriver", () => {
+  test("gets one execute_tool span per tool use and the request model", async () => {
+    const { ClaudeCliDriver } = await import(
+      "../../src/agents/driver/claude-cli.js"
+    );
+    const { CLAUDE_PROVIDER } = await import(
+      "../../src/agents/provider/schema.js"
+    );
+    const lines = [
+      { type: "system", subtype: "init", model: "haiku" },
+      {
+        type: "assistant",
+        message: {
+          content: [
+            {
+              type: "tool_use",
+              id: "t1",
+              name: "Read",
+              input: { file_path: "a" },
+            },
+          ],
+        },
+      },
+      {
+        type: "user",
+        message: {
+          content: [{ type: "tool_result", tool_use_id: "t1", content: "x" }],
+        },
+      },
+      {
+        type: "assistant",
+        message: {
+          content: [
+            {
+              type: "tool_use",
+              id: "t2",
+              name: "Grep",
+              input: { pattern: "y" },
+            },
+          ],
+        },
+      },
+      {
+        type: "user",
+        message: {
+          content: [{ type: "tool_result", tool_use_id: "t2", content: "z" }],
+        },
+      },
+      {
+        type: "assistant",
+        message: { content: [{ type: "text", text: "done" }] },
+      },
+      { type: "result", subtype: "success", result: "done", num_turns: 3 },
+    ];
+    const agent = new ExternalAgent({
+      name: "cli",
+      provider: CLAUDE_PROVIDER,
+      permissions: { mode: "read-only" },
+      driver: new ClaudeCliDriver({
+        model: "haiku",
+        env: {},
+        spawn: () => ({
+          stdout: lines.map((line) => `${JSON.stringify(line)}\n`),
+          stderr: [],
+          exited: Promise.resolve(0),
+        }),
+      }),
+    });
+
+    await runTurn(agent);
+
+    expect(named("execute_tool Read")).toHaveLength(1);
+    expect(named("execute_tool Grep")).toHaveLength(1);
+    // One model call before each tool and one for the final text.
+    expect(named("call_llm")).toHaveLength(3);
+    for (const span of named("call_llm")) {
+      expect(span.attributes["gen_ai.request.model"]).toBe("haiku");
+    }
   });
 });

@@ -33,8 +33,15 @@ export function collectContents(context: InvocationContext): Content[] {
       ? (ctxRecord.branch as string)
       : undefined;
   const userContent = ctxRecord.userContent as Content | undefined;
+  const invocationId =
+    typeof ctxRecord.invocationId === "string" && ctxRecord.invocationId
+      ? ctxRecord.invocationId
+      : undefined;
 
   const filtered: AdkEventLike[] = [];
+  // The user's own last visible message (not another agent's turn rewritten
+  // as user-role context) and the invocation that wrote it.
+  let lastUserEvent: AdkEventLike | undefined;
   for (const event of events) {
     if (!event || typeof event !== "object") {
       continue;
@@ -65,6 +72,7 @@ export function collectContents(context: InvocationContext): Content[] {
     if (isForeignEvent(agentName, event)) {
       filtered.push(rewriteForeignEvent(event));
     } else {
+      if (event.author === "user") lastUserEvent = event;
       filtered.push(event);
     }
   }
@@ -78,9 +86,20 @@ export function collectContents(context: InvocationContext): Content[] {
     }
   }
 
+  // The Runner (and the invocation gateway) stores the user's message as a
+  // session event with the context's invocation id before the agent runs, so
+  // the current turn is usually already in the history. Skip `userContent`
+  // only when the user's last message was written by this invocation and has
+  // the same parts; an older identical message ("yes", "continue") is history,
+  // not the current turn. The history holds normalized copies, so the parts
+  // are compared, not the objects.
   if (userContent) {
-    const last = contents[contents.length - 1];
-    if (!last || last !== userContent) {
+    const alreadyInHistory =
+      invocationId !== undefined &&
+      lastUserEvent?.invocationId === invocationId &&
+      lastUserEvent.content !== undefined &&
+      sameTurn(lastUserEvent.content, userContent);
+    if (!alreadyInHistory) {
       contents.push(userContent);
     }
   }
@@ -114,13 +133,15 @@ export function flattenContentsToPrompt(
     }
     blocks.push(`${header}\n${partStrings.join("\n")}`);
   }
-  return blocks.join("\n\n").replace(/\s+$/g, "");
+  // `trimEnd` removes the same characters as `\s`, in linear time.
+  return blocks.join("\n\n").trimEnd();
 }
 
 // --- internals ----------------------------------------------------------------
 
 type AdkEventLike = {
   author?: string;
+  invocationId?: string;
   branch?: string;
   partial?: boolean;
   content?: Content;
@@ -128,7 +149,12 @@ type AdkEventLike = {
 
 function hasVisibleContent(parts: ReadonlyArray<Part>): boolean {
   for (const part of parts) {
-    if (typeof part.text === "string" && part.text.length > 0) {
+    // Thought text is never rendered (see `renderPart`), so it is not visible.
+    if (
+      !part.thought &&
+      typeof part.text === "string" &&
+      part.text.length > 0
+    ) {
       return true;
     }
     if (
@@ -279,6 +305,19 @@ function hasMatchingEarlierCall(
     }
   }
   return false;
+}
+
+/**
+ * Whether `userContent` is the user's last message already in the history:
+ * the same parts (the role is always the user's on both sides).
+ */
+function sameTurn(a: Content, b: Content): boolean {
+  try {
+    return JSON.stringify(a.parts ?? []) === JSON.stringify(b.parts ?? []);
+  } catch {
+    // Not serializable: treat as different, so the turn is kept.
+    return false;
+  }
 }
 
 function normalizeContent(content: Content): Content {

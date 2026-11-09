@@ -97,7 +97,7 @@ const DEFAULT_OFFLINE_TOOLS = DEFAULT_CLAUDE_SDK_TOOLS.filter(
 );
 
 describe("host configuration isolation", () => {
-  test("isolated by default: explicit tools, strict MCP, no skills, no claude.ai connectors", () => {
+  test("isolated by default: explicit tools, strict MCP, no skills, no claude.ai connectors, no auto-memory", () => {
     const options = new ClaudeAgentSdkDriver().buildOptions(
       request({ mode: "workspace-write", allowNetwork: true }),
     ) as Options;
@@ -108,6 +108,7 @@ describe("host configuration isolation", () => {
     expect(options.managedSettings).toEqual({
       disableClaudeAiConnectors: true,
     });
+    expect(options.settings).toEqual({ autoMemoryEnabled: false });
     expect(options.settingSources).toEqual([]);
     expect(options.disallowedTools).toBeUndefined();
   });
@@ -148,6 +149,7 @@ describe("host configuration isolation", () => {
     expect("strictMcpConfig" in options).toBe(false);
     expect("skills" in options).toBe(false);
     expect("managedSettings" in options).toBe(false);
+    expect("settings" in options).toBe(false);
     // settingSources stays a separate opt-in.
     expect(options.settingSources).toEqual([]);
   });
@@ -334,6 +336,7 @@ describe("model, usage, turns and duration", () => {
         cacheReadInputTokens: 55464,
         cacheCreationInputTokens: 19817,
         totalCostUsd: 0.00508644,
+        scope: "run",
       },
       numTurns: 4,
       durationMs: 23975,
@@ -370,7 +373,12 @@ describe("model, usage, turns and duration", () => {
       type: "completed",
       exitCode: 1,
       model: "claude-haiku-5-5",
-      usage: { inputTokens: 3, outputTokens: 4, totalCostUsd: 0.01 },
+      usage: {
+        inputTokens: 3,
+        outputTokens: 4,
+        totalCostUsd: 0.01,
+        scope: "run",
+      },
       numTurns: 8,
       timestamp: expect.any(Number),
     });

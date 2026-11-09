@@ -73,6 +73,7 @@ describe("Codex CLI driver", () => {
       "sandbox_workspace_write.network_access=false",
       "-c",
       'web_search="disabled"',
+      "--",
       "system instruction\n\nuser request",
     ]);
   });
@@ -385,6 +386,7 @@ describe("Codex CLI driver", () => {
       "-c",
       'web_search="disabled"',
       "--skip-git-repo-check",
+      "--",
       "system instruction\n\nuser request",
     ]);
     expect(
@@ -394,8 +396,36 @@ describe("Codex CLI driver", () => {
       "exec",
       "--json",
       "--skip-git-repo-check",
+      "--",
       "system instruction\n\nuser request",
     ]);
+  });
+
+  test("a prompt that looks like a flag stays the prompt", () => {
+    const args = new CodexCliDriver({
+      listMcpServers: noHostMcpServers,
+    }).buildArgs({
+      provider: CODEX_PROVIDER,
+      context: { input: "--dangerously-bypass-approvals-and-sandbox" } as never,
+    });
+    expect(args.slice(-2)).toEqual([
+      "--",
+      "--dangerously-bypass-approvals-and-sandbox",
+    ]);
+    expect(args.indexOf("--dangerously-bypass-approvals-and-sandbox")).toBe(
+      args.length - 1,
+    );
+  });
+
+  test("user args stay flags: they come before -- and the prompt", () => {
+    const args = new CodexCliDriver({
+      args: ["--model", "gpt-x"],
+      listMcpServers: noHostMcpServers,
+    }).buildArgs({
+      provider: CODEX_PROVIDER,
+      context: { input: "hi" } as never,
+    });
+    expect(args.slice(-4)).toEqual(["--model", "gpt-x", "--", "hi"]);
   });
 
   test("skipGitRepoCheck is off by default", () => {

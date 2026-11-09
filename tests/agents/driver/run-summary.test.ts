@@ -4,6 +4,7 @@ import { CodexCliDriver } from "../../../src/agents/driver/codex-cli.js";
 import { CodexSdkDriver } from "../../../src/agents/driver/codex-sdk.js";
 import {
   claudeInitModel,
+  claudeResultBaseline,
   claudeResultSummary,
   codexTurnUsage,
 } from "../../../src/agents/driver/run-summary.js";
@@ -50,6 +51,7 @@ describe("claudeResultSummary", () => {
         cacheReadInputTokens: 100,
         cacheCreationInputTokens: 3,
         totalCostUsd: 0.03,
+        scope: "run",
         byModel: {
           "claude-haiku-5-5": {
             inputTokens: 10,
@@ -80,7 +82,12 @@ describe("claudeResultSummary", () => {
         },
       }),
     ).toEqual({
-      usage: { inputTokens: 4, outputTokens: 2, cacheReadInputTokens: 9 },
+      usage: {
+        inputTokens: 4,
+        outputTokens: 2,
+        cacheReadInputTokens: 9,
+        scope: "run",
+      },
     });
   });
 
@@ -304,7 +311,12 @@ describe("Claude CLI driver", () => {
       type: "completed",
       exitCode: 0,
       model: "claude-haiku-5-5",
-      usage: { inputTokens: 5, outputTokens: 2, totalCostUsd: 0.001 },
+      usage: {
+        inputTokens: 5,
+        outputTokens: 2,
+        totalCostUsd: 0.001,
+        scope: "run",
+      },
       numTurns: 1,
       durationMs: 900,
       timestamp: expect.any(Number),
@@ -457,6 +469,112 @@ describe("Codex CLI tool calls", () => {
       name: "lookup",
       input: { q: 1 },
       callId: "m-2",
+    });
+  });
+});
+
+describe("claudeResultSummary with a previous result", () => {
+  const usage = (cacheRead: number, cost: number) => ({
+    total_cost_usd: cost,
+    modelUsage: { m: { cacheReadInputTokens: cacheRead, costUSD: cost } },
+  });
+
+  test("subtracts the previous cumulative counters, scope run", () => {
+    expect(claudeResultSummary(usage(6768, 0.75), usage(3366, 0.25))).toEqual({
+      model: "m",
+      usage: { cacheReadInputTokens: 3402, totalCostUsd: 0.5, scope: "run" },
+    });
+  });
+
+  test("a counter that went down reports the session total, scope session", () => {
+    expect(claudeResultSummary(usage(10, 0.5), usage(50, 0.25))).toEqual({
+      model: "m",
+      usage: { cacheReadInputTokens: 10, totalCostUsd: 0.5, scope: "session" },
+    });
+    expect(claudeResultSummary(usage(60, 0.125), usage(50, 0.25))).toEqual({
+      model: "m",
+      usage: {
+        cacheReadInputTokens: 60,
+        totalCostUsd: 0.125,
+        scope: "session",
+      },
+    });
+  });
+
+  test("without previous, a resumed run is scope session and a fresh one scope run", () => {
+    expect(claudeResultSummary(usage(10, 0.5), undefined, true)).toEqual({
+      model: "m",
+      usage: { cacheReadInputTokens: 10, totalCostUsd: 0.5, scope: "session" },
+    });
+    expect(claudeResultSummary(usage(10, 0.5))).toEqual({
+      model: "m",
+      usage: { cacheReadInputTokens: 10, totalCostUsd: 0.5, scope: "run" },
+    });
+  });
+});
+
+describe("claudeResultSummary previous edge cases", () => {
+  test("a model new in this run counts from zero", () => {
+    expect(
+      claudeResultSummary(
+        {
+          modelUsage: {
+            a: { outputTokens: 9, costUSD: 0.75 },
+            b: { outputTokens: 7, costUSD: 0.5 },
+          },
+        },
+        { modelUsage: { a: { outputTokens: 4, costUSD: 0.25 } } },
+      ).usage,
+    ).toEqual({
+      outputTokens: 12,
+      totalCostUsd: 1,
+      scope: "run",
+      byModel: {
+        a: { outputTokens: 5, totalCostUsd: 0.5 },
+        b: { outputTokens: 7, totalCostUsd: 0.5 },
+      },
+    });
+  });
+
+  test("a model of previous missing now means no usable baseline", () => {
+    expect(
+      claudeResultSummary(
+        { modelUsage: { a: { outputTokens: 7, costUSD: 0.5 } } },
+        { modelUsage: { b: { outputTokens: 99, costUSD: 0.25 } } },
+      ).usage,
+    ).toEqual({ outputTokens: 7, totalCostUsd: 0.5, scope: "session" });
+  });
+
+  test("a counter missing in previous means no usable baseline", () => {
+    expect(
+      claudeResultSummary(
+        { modelUsage: { a: { outputTokens: 7, inputTokens: 3 } } },
+        { modelUsage: { a: { outputTokens: 2 } } },
+      ).usage,
+    ).toEqual({ outputTokens: 7, inputTokens: 3, scope: "session" });
+    expect(claudeResultSummary({ total_cost_usd: 0.5 }, {}).usage).toEqual({
+      totalCostUsd: 0.5,
+      scope: "session",
+    });
+  });
+
+  test("only total_cost_usd present is subtracted", () => {
+    expect(
+      claudeResultSummary({ total_cost_usd: 0.5 }, { total_cost_usd: 0.25 })
+        .usage,
+    ).toEqual({ totalCostUsd: 0.25, scope: "run" });
+  });
+
+  test("claudeResultBaseline keeps only the counters", () => {
+    expect(
+      claudeResultBaseline({
+        result: "long text",
+        total_cost_usd: 1,
+        modelUsage: { m: { inputTokens: 2, contextWindow: 9, costUSD: 1 } },
+      }),
+    ).toEqual({
+      total_cost_usd: 1,
+      modelUsage: { m: { inputTokens: 2, costUSD: 1 } },
     });
   });
 });

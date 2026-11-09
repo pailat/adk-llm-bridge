@@ -24,6 +24,7 @@ import {
   ExternalAgentPolicyError,
   networkUnenforceable,
   policyErrorEvent,
+  unenforceablePathsRefusal,
   unsandboxedShellRefusal,
 } from "./policy-errors.js";
 import { codexTurnUsage } from "./run-summary.js";
@@ -152,7 +153,10 @@ export interface CodexBinaryResolution {
  * @remarks
  * Everything is optional. Without `allowNetwork: true` the driver fails closed:
  * it refuses a run it cannot keep off the network unless
- * `allowUnenforcedNetwork` is set (see that option).
+ * `allowUnenforcedNetwork` is set (see that option). Codex runs file tools
+ * without asking the bridge, so a policy with `allowedPaths` (or inherited
+ * path bounds) is refused with `EXTERNAL_AGENT_PATHS_UNENFORCEABLE` unless
+ * `allowUnenforcedPaths` is set.
  */
 export interface CodexSdkDriverConfig {
   /**
@@ -223,6 +227,16 @@ export interface CodexSdkDriverConfig {
    */
   allowUnenforcedNetwork?: boolean;
   /**
+   * Opt-in: run a policy with `allowedPaths` (or path bounds inherited from a
+   * parent agent) although this driver cannot check tool paths against them.
+   * Without it such a run is refused with
+   * `EXTERNAL_AGENT_PATHS_UNENFORCEABLE`. With it, the runtime's own sandbox
+   * alone decides which paths the agent reaches.
+   *
+   * @defaultValue false
+   */
+  allowUnenforcedPaths?: boolean;
+  /**
    * Lists Codex's host MCP servers. Without `allowNetwork: true` each listed
    * server, and each key of `config.mcp_servers`, is turned off through the
    * client's `configOverrides` (`mcp_servers.<name>.enabled=false`), because
@@ -281,6 +295,7 @@ export class CodexSdkDriver {
   readonly #outputSchema?: Record<string, unknown>;
   readonly #threadStateKey: (agentName: string) => string;
   readonly #allowUnenforcedNetwork: boolean;
+  readonly #allowUnenforcedPaths: boolean;
   readonly #listMcpServers?: CodexMcpLister;
 
   /** @param config - Driver options; all optional. */
@@ -300,6 +315,7 @@ export class CodexSdkDriver {
     this.#webSearchEnabled = config.webSearchEnabled;
     this.#outputSchema = config.outputSchema;
     this.#allowUnenforcedNetwork = config.allowUnenforcedNetwork ?? false;
+    this.#allowUnenforcedPaths = config.allowUnenforcedPaths ?? false;
     this.#listMcpServers = config.listMcpServers;
     this.#threadStateKey =
       config.threadStateKey ?? ((agentName) => `codex_thread:${agentName}`);
@@ -345,10 +361,15 @@ export class CodexSdkDriver {
       timestamp: Date.now(),
     };
 
-    const refusal = unsandboxedShellRefusal(request.permissions, {
-      runtime: "Codex",
-      allowUnenforcedNetwork: this.#allowUnenforcedNetwork,
-    });
+    const refusal =
+      unenforceablePathsRefusal(request.permissions, {
+        runtime: "Codex",
+        allowUnenforcedPaths: this.#allowUnenforcedPaths,
+      }) ??
+      unsandboxedShellRefusal(request.permissions, {
+        runtime: "Codex",
+        allowUnenforcedNetwork: this.#allowUnenforcedNetwork,
+      });
     if (refusal) {
       yield policyErrorEvent(refusal);
       yield { type: "completed", exitCode: 1, timestamp: Date.now() };
@@ -371,7 +392,17 @@ export class CodexSdkDriver {
       yield { type: "completed", exitCode: 1, timestamp: Date.now() };
       return;
     }
+    let Codex: CodexSdkConstructor | undefined;
     if (!this.#sdk) {
+      // A missing SDK package is reported first: it is the setup error to
+      // fix, and the MCP listing below needs the binary the package ships.
+      try {
+        Codex = this.#Codex ?? (await this.loadConstructor());
+      } catch (error) {
+        yield this.errorEvent(error, request);
+        yield { type: "completed", exitCode: 1, timestamp: Date.now() };
+        return;
+      }
       const binary = this.resolveCodexBinary(request);
       const mcp = await codexMcpDisableOverrides(request.permissions, {
         command: binary.path ?? "codex",
@@ -402,7 +433,11 @@ export class CodexSdkDriver {
     let terminalEvent: ExternalAgentEvent | undefined;
     let cleanup: () => Promise<void> = async () => {};
     try {
-      const sdk = await this.loadSdk(request, configOverrides);
+      const sdk =
+        this.#sdk ??
+        new (Codex as CodexSdkConstructor)(
+          this.buildClientOptions(request, configOverrides),
+        );
       const threadOptions = this.buildThreadOptions(request);
       const agentName = request.agent?.name ?? request.context?.agent?.name;
       const stateKey = agentName ? this.#threadStateKey(agentName) : undefined;
@@ -765,18 +800,6 @@ export class CodexSdkDriver {
     }
 
     return normalizeCompletedItem(asRecord(event.item), timestamp);
-  }
-
-  private async loadSdk(
-    request: ExternalAgentRunRequest,
-    configOverrides: readonly string[],
-  ): Promise<CodexSdkClientLike> {
-    if (this.#sdk) {
-      return this.#sdk;
-    }
-
-    const Codex = this.#Codex ?? (await this.loadConstructor());
-    return new Codex(this.buildClientOptions(request, configOverrides));
   }
 
   private async loadConstructor(): Promise<CodexSdkConstructor> {

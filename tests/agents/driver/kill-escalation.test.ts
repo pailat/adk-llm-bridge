@@ -11,7 +11,7 @@ import {
 } from "../../../src/agents/driver/spawn.js";
 import type { ExternalAgentEvent } from "../../../src/agents/events.js";
 import { GEMINI_CLI_PROVIDER } from "../../../src/agents/provider/gemini-cli.js";
-import { GEMINI_NETWORK_ON, withDeadline } from "../helpers.js";
+import { GEMINI_NETWORK_ON, waitUntil, withDeadline } from "../helpers.js";
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -134,16 +134,12 @@ for (const [label, runtime] of [
       const startedAt = Date.now();
       controller.abort();
 
-      await sleep(50);
-      // Still running: SIGTERM was ignored.
-      expect(isAlive(pid as number)).toBe(true);
-
+      // Exit code 137 means SIGKILL ended it: SIGTERM was ignored.
       const code = await withDeadline(child.exited, 5000);
       expect(code).toBe(137);
       expect(Date.now() - startedAt).toBeGreaterThanOrEqual(90);
       // Reaped: no zombie keeps the pid.
-      await sleep(20);
-      expect(isAlive(pid as number)).toBe(false);
+      expect(await waitUntil(() => !isAlive(pid as number))).toBe(true);
     });
   });
 }
@@ -201,8 +197,7 @@ for (const [label, runtime] of [
           await withDeadline(child.exited, 5000);
           // The post-exit sweep is synchronous with the exit; give the OS a
           // moment to reap.
-          for (let i = 0; i < 20 && isAlive(grandchild); i++) await sleep(25);
-          expect(isAlive(grandchild)).toBe(false);
+          expect(await waitUntil(() => !isAlive(grandchild))).toBe(true);
           expect(isAlive(child.pid as number)).toBe(false);
         },
       );

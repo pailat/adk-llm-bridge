@@ -650,6 +650,78 @@ describe("ClaudeAgentSdkDriver", () => {
     expect(options.abortController?.signal.aborted).toBe(true);
   });
 
+  for (const [label, stopEarly] of [
+    ["after a normal completion", false],
+    ["after the consumer breaks early", true],
+  ] as const) {
+    test(`aborts its own controller and removes the run listener ${label}`, async () => {
+      const run = new AbortController();
+      const added: unknown[] = [];
+      const removed: unknown[] = [];
+      const add = run.signal.addEventListener.bind(run.signal);
+      const remove = run.signal.removeEventListener.bind(run.signal);
+      type Listen = (
+        type: string,
+        listener: EventListenerOrEventListenerObject,
+        options?: boolean | AddEventListenerOptions,
+      ) => void;
+      const addSpy: Listen = (type, listener, options) => {
+        if (type === "abort") added.push(listener);
+        add(type, listener, options);
+      };
+      const removeSpy: Listen = (type, listener, options) => {
+        if (type === "abort") removed.push(listener);
+        remove(type, listener, options);
+      };
+      run.signal.addEventListener = addSpy as AbortSignal["addEventListener"];
+      run.signal.removeEventListener =
+        removeSpy as AbortSignal["removeEventListener"];
+      let sdkController: AbortController | undefined;
+      let abortedBeforeReturn: boolean | undefined;
+      const driver = new ClaudeAgentSdkDriver({
+        sdk: {
+          query: ({ options }) => {
+            sdkController = options?.abortController;
+            const gen = (async function* () {
+              yield {
+                type: "assistant",
+                message: { content: [{ type: "text", text: "one" }] },
+              } as never;
+              yield {
+                type: "result",
+                subtype: "success",
+                result: "done",
+              } as never;
+            })();
+            return Object.assign(gen, {
+              interrupt: async () => {},
+              return: async (value?: unknown) => {
+                abortedBeforeReturn = sdkController?.signal.aborted;
+                return gen.return(value as never);
+              },
+            });
+          },
+        },
+      });
+
+      for await (const event of driver.run({
+        provider: CLAUDE_PROVIDER,
+        context: { userContent: { parts: [{ text: "hi" }] } } as never,
+        permissions: { mode: "ask" },
+        abortSignal: run.signal,
+      })) {
+        if (stopEarly && event.type === "output") break;
+      }
+
+      expect(sdkController).toBeInstanceOf(AbortController);
+      // The SDK gets its graceful teardown first, then the controller fires.
+      expect(abortedBeforeReturn).toBe(false);
+      expect(sdkController?.signal.aborted).toBe(true);
+      expect(added).toHaveLength(1);
+      expect(removed).toEqual(added);
+    });
+  }
+
   test("interrupts and returns the Query when the consumer breaks early", async () => {
     let interrupted = false;
     let returned = false;
@@ -850,6 +922,39 @@ describe("ClaudeAgentSdkDriver", () => {
         }
       }
     }
+  });
+
+  test("an assistant error keeps the SDK's readable text next to its subtype", () => {
+    const driver = new ClaudeAgentSdkDriver();
+    const [event] = driver.normalizeMessage({
+      type: "assistant",
+      error: "model_not_found",
+      message: {
+        content: [
+          { type: "text", text: "There's an issue with the selected model." },
+        ],
+      },
+    } as never);
+    expect(event).toMatchObject({
+      type: "error",
+      message: "model_not_found: There's an issue with the selected model.",
+      code: "INVALID_REQUEST",
+      recoverable: false,
+    });
+  });
+
+  test("an assistant error without text reports the subtype alone", () => {
+    const driver = new ClaudeAgentSdkDriver();
+    const [event] = driver.normalizeMessage({
+      type: "assistant",
+      error: "overloaded",
+    } as never);
+    expect(event).toMatchObject({
+      type: "error",
+      message: "overloaded",
+      code: "SERVER_ERROR",
+      recoverable: true,
+    });
   });
 
   test("run catch classifies auth errors as non-recoverable", async () => {

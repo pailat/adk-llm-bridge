@@ -41,7 +41,8 @@ describe("ClaudeCliDriver", () => {
 
     expect(args).toEqual([
       "-p",
-      "You are a reviewer.\n\nReview this diff",
+      "--input-format",
+      "text",
       "--output-format",
       "stream-json",
       "--verbose",
@@ -52,8 +53,38 @@ describe("ClaudeCliDriver", () => {
       "--strict-mcp-config",
       "--setting-sources=",
       "--disable-slash-commands",
-      '--settings={"disableClaudeAiConnectors":true,"permissions":{"deny":["mcp__*"]}}',
+      '--settings={"disableClaudeAiConnectors":true,"autoMemoryEnabled":false,"permissions":{"deny":["mcp__*"]}}',
     ]);
+  });
+
+  test("a prompt that looks like a flag is never an argument", () => {
+    const args = new ClaudeCliDriver({ args: ["--model", "haiku"] }).buildArgs({
+      provider: CLAUDE_PROVIDER,
+      context: { input: "--dangerously-skip-permissions" } as never,
+      permissions: { mode: "ask", allowNetwork: true },
+    });
+    expect(args.slice(-2)).toEqual(["--model", "haiku"]);
+    expect(args).not.toContain("--dangerously-skip-permissions");
+  });
+
+  test("the spawn receives the prompt as stdin input", async () => {
+    let input: string | undefined;
+    const driver = new ClaudeCliDriver({
+      env: {},
+      spawn: (_command, _args, options) => {
+        input = options.input;
+        return { stdout: null, stderr: null, exited: Promise.resolve(0) };
+      },
+    });
+    for await (const _event of driver.run({
+      provider: CLAUDE_PROVIDER,
+      context: { input: "update" } as never,
+      instruction: "Be brief.",
+      permissions: { mode: "ask", allowNetwork: true },
+    })) {
+      // drain
+    }
+    expect(input).toBe("Be brief.\n\nupdate");
   });
 
   test("passes native auth home/config and only allowlisted credential env vars", () => {

@@ -1,3 +1,4 @@
+import { InputValidationError } from "@google/adk";
 import { warn } from "../../utils/log.js";
 import type { ExternalAgentEvent } from "../events.js";
 import {
@@ -8,18 +9,29 @@ import { mapPermissionPolicyToFlags } from "../permissions/mapper.js";
 import type { ExternalAgentPermissionPolicy } from "../permissions/schema.js";
 import { CLAUDE_PROVIDER } from "../provider/claude.js";
 import type { AgentRuntimeCapabilities } from "../runtime/capabilities.js";
+import { classifyRecoverable } from "../runtime/error-classification.js";
+import {
+  claudeAssistantErrorEvent,
+  toolResultEvents,
+  toolUseEvents,
+} from "./claude-agent-sdk.js";
 import {
   assertClaudeMessageIsolated,
   type ClaudeIsolationPlan,
   claudeCliIsolationArgs,
+  claudeInitTools,
   planClaudeIsolation,
 } from "./claude-isolation.js";
 import { collectTail, type LineSource, readLines } from "./lines.js";
 import {
   dependencyMissing,
+  EXTERNAL_AGENT_OPTION_UNSUPPORTED,
   ExternalAgentPolicyError,
   isCommandNotFound,
+  networkUnenforceable,
   policyErrorEvent,
+  unenforceablePathsRefusal,
+  webToolsRefusal,
 } from "./policy-errors.js";
 import {
   claudeResultSummary,
@@ -68,6 +80,11 @@ export interface ClaudeCliSpawnOptions {
    * never carries the whole parent environment.
    */
   env?: Record<string, string>;
+  /**
+   * The prompt. A custom spawn must write it to the process's stdin and close
+   * it: the driver passes no prompt argument, so `claude -p` reads it there.
+   */
+  input?: string;
 }
 
 /** Source of output lines accepted by the driver, re-exported from `lines.ts`. */
@@ -90,6 +107,26 @@ export interface ClaudeCliDriverConfig {
   command?: string;
   /** Extra arguments appended after the ones the driver builds. */
   args?: readonly string[];
+  /**
+   * Model id (`--model`); also reported as `gen_ai.request.model`.
+   *
+   * @defaultValue the CLI's own default
+   */
+  model?: string;
+  /**
+   * Maximum agent turns per run (`--max-turns`), a positive integer. A run
+   * that reaches it ends with a `MAX_TURNS_EXCEEDED` error.
+   *
+   * @defaultValue no limit
+   */
+  maxTurns?: number;
+  /**
+   * System prompt that replaces Claude Code's default one
+   * (`--system-prompt`). The run's `instruction` still goes in the prompt.
+   *
+   * @defaultValue Claude Code's default system prompt
+   */
+  systemPrompt?: string;
   /**
    * Custom process starter.
    *
@@ -137,6 +174,23 @@ export interface ClaudeCliDriverConfig {
    * @defaultValue false
    */
   allowUnsandboxedShell?: boolean;
+  /**
+   * Opt-in: run a policy with `allowedPaths` (or path bounds inherited from a
+   * parent agent) although this driver cannot check tool paths against them.
+   * Without it such a run is refused with
+   * `EXTERNAL_AGENT_PATHS_UNENFORCEABLE`. With it, the runtime's own sandbox
+   * alone decides which paths the agent reaches.
+   *
+   * @defaultValue false
+   */
+  allowUnenforcedPaths?: boolean;
+  /**
+   * Not supported: the CLI cannot mirror transcripts to a session store. Use
+   * `ClaudeAgentSdkDriver` (the `ClaudeAgent` default) for `sessionStore`.
+   * Typed `never` so the compiler rejects it; given anyway (for example from
+   * JavaScript), the constructor throws.
+   */
+  sessionStore?: never;
 }
 
 function claudeCliMissing(): ExternalAgentPolicyError {
@@ -154,6 +208,8 @@ function claudeCliMissing(): ExternalAgentPolicyError {
  *
  * @remarks
  * Security and lifecycle rules:
+ * - The prompt goes on stdin, never in argv, so it cannot be read as a flag
+ *   or a subcommand name.
  * - Isolated by default: an explicit tool list, no MCP servers, settings files,
  *   skills or claude.ai connectors. Every stdout line is checked, and the run
  *   stops with an `EXTERNAL_AGENT_ISOLATION_VIOLATED` error event when the CLI
@@ -161,12 +217,19 @@ function claudeCliMissing(): ExternalAgentPolicyError {
  * - Without `allowNetwork: true` Bash runs in a no-network sandbox that fails
  *   the run at start where it cannot run, unless `allowUnsandboxedShell` is set.
  * - The child environment is an allowlist, never the whole parent environment.
+ * - A policy with `allowedPaths` (or inherited path bounds) is refused with
+ *   `EXTERNAL_AGENT_PATHS_UNENFORCEABLE`, since the CLI runs file tools without
+ *   asking the bridge, unless `allowUnenforcedPaths` is set.
  * - Abort stops the run: the process gets SIGTERM and, after `killGraceMs`,
  *   SIGKILL; the supervisor is always released.
  * - A missing binary becomes a policy error event with exit code 1.
- * - A non-zero exit becomes an `error` event with code `CLAUDE_CLI_EXIT`,
- *   carrying the stderr tail; auth, billing and quota failures are not
- *   recoverable.
+ * - A failed `result` line (for example `error_max_turns`) or an assistant
+ *   message with an `error` becomes one `error` event classified from its
+ *   subtype, as in `ClaudeAgentSdkDriver`. Any other non-zero exit becomes an
+ *   `error` event with code `CLAUDE_CLI_EXIT`, carrying the stderr tail; auth,
+ *   billing and quota failures are not recoverable.
+ * - `tool_use` and `tool_result` blocks become `tool_call` and `tool_result`
+ *   events, so each tool use gets an `execute_tool` span.
  */
 export class ClaudeCliDriver extends SubprocessJsonlDriver {
   readonly #spawn: ClaudeCliSpawn;
@@ -175,16 +238,37 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
   readonly #tools: readonly string[] | undefined;
   readonly #inheritHostConfig: boolean;
   readonly #allowUnsandboxedShell: boolean;
+  readonly #allowUnenforcedPaths: boolean;
+  readonly #model: string | undefined;
+  readonly #maxTurns: number | undefined;
+  readonly #systemPrompt: string | undefined;
 
   /**
    * Creates a driver that runs the `claude` CLI.
    *
    * @param config - Driver options; all optional.
-   * @throws InputValidationError (from `@google/adk`) when `command` is empty or
-   * `killGraceMs` is not a finite number of at least 0.
+   * @throws InputValidationError (from `@google/adk`) when `command` or `model`
+   * is empty, `killGraceMs` is not a finite number of at least 0, or
+   * `maxTurns` is not a positive integer.
+   * @throws {@link ExternalAgentPolicyError} with code
+   * `EXTERNAL_AGENT_OPTION_UNSUPPORTED` when `sessionStore` is given.
    */
   constructor(config: ClaudeCliDriverConfig = {}) {
+    if ((config as { sessionStore?: unknown }).sessionStore !== undefined) {
+      throw new ExternalAgentPolicyError(
+        EXTERNAL_AGENT_OPTION_UNSUPPORTED,
+        "ClaudeCliDriver does not support sessionStore: the Claude CLI cannot mirror session transcripts to a store. Use ClaudeAgentSdkDriver (the ClaudeAgent default) or remove sessionStore.",
+      );
+    }
     validateDriverConfig("ClaudeCliDriver", config);
+    if (
+      config.model !== undefined &&
+      (typeof config.model !== "string" || config.model.trim() === "")
+    ) {
+      throw new InputValidationError(
+        "ClaudeCliDriver: model must be a non-empty string.",
+      );
+    }
     super({
       providerId: CLAUDE_PROVIDER.id,
       command: config.command ?? CLAUDE_PROVIDER.command ?? "claude",
@@ -196,6 +280,15 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
     this.#tools = config.tools ? [...config.tools] : undefined;
     this.#inheritHostConfig = config.inheritHostConfig ?? false;
     this.#allowUnsandboxedShell = config.allowUnsandboxedShell ?? false;
+    this.#allowUnenforcedPaths = config.allowUnenforcedPaths ?? false;
+    this.#model = config.model;
+    this.#maxTurns = config.maxTurns;
+    this.#systemPrompt = config.systemPrompt;
+  }
+
+  /** The configured model id (`gen_ai.request.model`), if any. */
+  get model(): string | undefined {
+    return this.#model;
   }
 
   /** Features this driver supports: it maps the permission policy onto CLI flags. It emits whole messages, not token deltas. */
@@ -224,6 +317,26 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
       timestamp: Date.now(),
     };
 
+    if (isolation.unenforceableWebTools) {
+      yield policyErrorEvent(
+        networkUnenforceable(
+          webToolsRefusal("Claude CLI", isolation.unenforceableWebTools),
+        ),
+      );
+      yield { type: "completed", exitCode: 1, timestamp: Date.now() };
+      return;
+    }
+
+    const pathsRefusal = unenforceablePathsRefusal(request.permissions, {
+      runtime: "Claude CLI",
+      allowUnenforcedPaths: this.#allowUnenforcedPaths,
+    });
+    if (pathsRefusal) {
+      yield policyErrorEvent(pathsRefusal);
+      yield { type: "completed", exitCode: 1, timestamp: Date.now() };
+      return;
+    }
+
     const signal = resolveAbortSignal(request);
     if (signal?.aborted) {
       return;
@@ -234,6 +347,7 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
       child = this.#spawn(this.command, args, {
         cwd: request.workingDirectory,
         env,
+        input: promptFromRequest(request),
       });
     } catch (error) {
       // Bun.spawn throws when the binary does not exist.
@@ -261,6 +375,14 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
       // The `result` line reports model, usage, cost, turns and duration;
       // they go on the `completed` event.
       let summary: ExternalAgentRunSummary = {};
+      // Tool_use id -> tool name, to name the matching tool_result.
+      const toolNames = new Map<string, string>();
+      // A `result` line that reports a failure (`error_max_turns`, ...), and
+      // whether an error was already reported from the stream.
+      let resultError: Record<string, unknown> | undefined;
+      let reportedError = false;
+      // The tools the session's system/init reported, for the stop message.
+      let offeredTools: string[] | undefined;
       for await (const line of readLines(child.stdout)) {
         if (signal?.aborted) {
           return;
@@ -271,13 +393,14 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
         }
         if (isolation.isolated) {
           // Fail closed when the CLI reports, or the model is about to use,
-          // tools or MCP servers outside the configured set (a host or
-          // managed setting added them).
+          // tools or MCP servers outside the configured set.
+          offeredTools = claudeInitTools(raw) ?? offeredTools;
           try {
             assertClaudeMessageIsolated(
               raw,
               { tools: isolation.tools ?? [], mcpServers: [] },
               "Claude CLI",
+              offeredTools,
             );
           } catch (error) {
             if (error instanceof ExternalAgentPolicyError) {
@@ -292,14 +415,44 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
             throw error;
           }
         }
+        const record = asRecord(raw);
+        if (record.type === "assistant") {
+          const error = claudeAssistantErrorEvent(record, "CLAUDE_CLI_ERROR");
+          if (error) {
+            reportedError = true;
+            yield error;
+            continue;
+          }
+        }
+        if (record.type === "result" && isResultError(record)) {
+          resultError = record;
+          summary = claudeResultSummary(record);
+          continue;
+        }
+        const content = asRecord(record.message).content;
+        if (record.type === "user" && hasToolResults(content)) {
+          // Tool results are runtime data, not model output.
+          yield* toolResultEvents(
+            content,
+            toolNames,
+            record.parent_tool_use_id,
+          );
+          continue;
+        }
+        const toolCalls =
+          record.type === "assistant"
+            ? toolUseEvents(content, toolNames, record.parent_tool_use_id)
+            : [];
         const parsed = this.parseClaudeStreamLine(raw);
         if (!parsed) {
+          yield* toolCalls;
           continue;
         }
         if (parsed.source === "result") {
           summary = parsed.summary;
         }
         if (!parsed.event) {
+          yield* toolCalls;
           continue;
         }
         if (parsed.source === "assistant" && parsed.event.type === "output") {
@@ -312,6 +465,7 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
           emittedAssistantText = true;
         }
         yield parsed.event;
+        yield* toolCalls;
       }
       if (signal?.aborted) {
         return;
@@ -336,6 +490,21 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
         return;
       }
 
+      if (resultError) {
+        // The result line says why the run stopped (as the SDK driver reads
+        // it); the exit code alone does not.
+        if (!reportedError) {
+          yield resultErrorEvent(resultError);
+        }
+        yield {
+          type: "completed",
+          exitCode: exitCode === 0 ? 1 : exitCode,
+          ...summary,
+          timestamp: Date.now(),
+        };
+        return;
+      }
+
       if (exitCode === 0) {
         yield {
           type: "completed",
@@ -346,12 +515,14 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
         return;
       }
 
-      yield exitErrorEvent({
-        runtime: "Claude CLI",
-        exitCode,
-        stderr: stderrLines,
-        code: "CLAUDE_CLI_EXIT",
-      });
+      if (!reportedError) {
+        yield exitErrorEvent({
+          runtime: "Claude CLI",
+          exitCode,
+          stderr: stderrLines,
+          code: "CLAUDE_CLI_EXIT",
+        });
+      }
       yield { type: "completed", exitCode, ...summary, timestamp: Date.now() };
     } finally {
       supervisor.release();
@@ -359,8 +530,15 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
   }
 
   /**
-   * CLI arguments for a request: prompt, output format, permission flags,
-   * isolation flags, then the configured extra `args`.
+   * CLI arguments for a request: `-p` with text input, output format,
+   * permission flags, isolation flags, `model`, `maxTurns` and
+   * `systemPrompt`, then the configured extra `args`.
+   *
+   * @remarks
+   * The prompt is not an argument: {@link ClaudeCliDriver.run} writes it to
+   * stdin. As an operand it could be read as a flag (`--version`) or, even
+   * after `--`, as a subcommand name (`update`), which Claude Code would run
+   * instead of the prompt.
    *
    * @param request - The run request.
    * @returns The argument list passed to the process.
@@ -368,12 +546,21 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
   buildArgs(request: ExternalAgentRunRequest): readonly string[] {
     return [
       "-p",
-      promptFromRequest(request),
+      "--input-format",
+      "text",
       "--output-format",
       "stream-json",
       "--verbose",
       ...mapClaudePermissionArgs(request.permissions),
       ...claudeCliIsolationArgs(this.isolationPlan(request)),
+      // Joined to the flag, so a value that starts with `-` stays a value.
+      ...(this.#model ? [`--model=${this.#model}`] : []),
+      ...(this.#maxTurns !== undefined
+        ? [`--max-turns=${this.#maxTurns}`]
+        : []),
+      ...(this.#systemPrompt !== undefined
+        ? [`--system-prompt=${this.#systemPrompt}`]
+        : []),
       ...this.args,
     ];
   }
@@ -391,6 +578,9 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
       tools: this.#tools,
       inheritHostConfig: this.#inheritHostConfig,
       allowUnsandboxedShell: this.#allowUnsandboxedShell,
+      ...(request.workingDirectory
+        ? { workingDirectory: request.workingDirectory }
+        : {}),
     });
   }
 
@@ -471,6 +661,52 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
 }
 
 type ClaudeEventSource = "assistant" | "result" | "other";
+
+/** A `result` line that reports a failure: an error subtype or `is_error`. */
+function isResultError(record: Record<string, unknown>): boolean {
+  const subtype = stringValue(record.subtype);
+  return (
+    record.is_error === true || (subtype !== undefined && subtype !== "success")
+  );
+}
+
+/** Whether a user message carries `tool_result` blocks. */
+function hasToolResults(content: unknown): boolean {
+  return (
+    Array.isArray(content) &&
+    content.some((block) => asRecord(block).type === "tool_result")
+  );
+}
+
+/**
+ * The `error` event for a failed `result` line, classified from its subtype
+ * (`error_max_turns` is `MAX_TURNS_EXCEEDED`, ...), with its `errors` or
+ * `result` text as the message.
+ */
+function resultErrorEvent(record: Record<string, unknown>): ExternalAgentEvent {
+  const errors = Array.isArray(record.errors)
+    ? record.errors.filter((item): item is string => typeof item === "string")
+    : [];
+  const subtype = stringValue(record.subtype);
+  const message =
+    errors.join("\n") ||
+    (subtype && subtype !== "success"
+      ? undefined
+      : stringValue(record.result)) ||
+    `Claude CLI result: ${subtype ?? "error"}`;
+  const classification = classifyRecoverable({
+    subtype,
+    message,
+    fallbackCode: "CLAUDE_CLI_EXIT",
+  });
+  return {
+    type: "error",
+    message,
+    code: classification.code,
+    recoverable: classification.recoverable,
+    timestamp: Date.now(),
+  };
+}
 
 /**
  * Parses one stdout line. Blank lines give `undefined`; a non-JSON line (a

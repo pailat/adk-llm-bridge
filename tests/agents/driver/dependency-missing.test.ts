@@ -86,6 +86,25 @@ describe("a missing SDK package is an error event, not a throw", () => {
       "npm install @openai/codex-sdk",
     );
   });
+
+  test("Codex SDK reports the missing package before listing MCP servers", async () => {
+    let listed = 0;
+    const events = await collect(
+      new CodexSdkDriver({
+        importSdk: missingModule as never,
+        listMcpServers: async () => {
+          listed++;
+          throw new Error("codex mcp list failed");
+        },
+      }).run(request(CODEX_PROVIDER)),
+    );
+    expectRefused(
+      events,
+      EXTERNAL_AGENT_DEPENDENCY_MISSING,
+      "npm install @openai/codex-sdk",
+    );
+    expect(listed).toBe(0);
+  });
 });
 
 for (const [label, runtime] of [

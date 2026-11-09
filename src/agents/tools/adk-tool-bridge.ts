@@ -12,9 +12,18 @@
  *    deltas, confirmations and abort signals behave as they do in an
  *    `LlmAgent`. Both `requireConfirmation` and a
  *    `toolContext.requestConfirmation()` call inside `execute` come back as
- *    `confirmationRequired`. The executor only reports the other actions
+ *    `confirmationRequired`, a `toolContext.requestCredential()` call as a
+ *    `CREDENTIAL_REQUIRED` error, and a long-running tool that returns no
+ *    result as `pending`. The executor only reports the other actions
  *    (`escalate`, `transferToAgent`, `skipSummarization`); acting on them is
  *    the caller's job (`ExternalAgent` does it).
+ *
+ * Each call runs the invocation's plugin tool callbacks and the agent tool
+ * callbacks given to {@link createAdkToolBridge}, in ADK's order: plugin
+ * `beforeToolCallback`, then the agent's; the tool (plugin
+ * `onToolErrorCallback` when it throws); plugin `afterToolCallback`, then
+ * the agent's. A before callback that returns a response replaces the call,
+ * and an after callback that returns one replaces the result.
  *
  * Nothing here throws on tool failures: every outcome is a structured
  * {@link AdkToolExecutionResult}.
@@ -37,12 +46,15 @@
  */
 
 import {
+  type AuthConfig,
   type BaseTool,
   Context,
   type InvocationContext,
   isBaseTool,
   isBaseToolset,
   ReadonlyContext,
+  type SingleAfterToolCallback,
+  type SingleBeforeToolCallback,
   ToolConfirmation,
   type ToolUnion,
 } from "@google/adk";
@@ -125,15 +137,38 @@ export interface AdkToolActions {
   transferToAgent?: string;
   /** Set when the tool asked to escalate. */
   escalate?: boolean;
+  /**
+   * Credentials the tool asked for with `toolContext.requestCredential()`,
+   * keyed by function call id. Set only on a `CREDENTIAL_REQUIRED` error.
+   */
+  requestedAuthConfigs?: Record<string, AuthConfig>;
 }
 
-/** Machine-readable failure classes of {@link AdkToolExecutionResult}. */
+/**
+ * Machine-readable failure classes of {@link AdkToolExecutionResult}.
+ *
+ * - `UNKNOWN_TOOL`: no bridged tool has that name.
+ * - `INVALID_ARGUMENTS`: the arguments are not an object, or the tool's
+ *   confirmation predicate rejected them.
+ * - `EXECUTION_FAILED`: the tool threw and no `onToolErrorCallback` plugin
+ *   gave a response.
+ * - `CONFIRMATION_REJECTED`: a human or approver rejected the call.
+ * - `ABORTED`: the invocation was aborted, or the turn is pausing.
+ * - `CALLBACK_FAILED`: a plugin or agent tool callback threw. A failing
+ *   before callback means the tool did not run.
+ * - `CREDENTIAL_REQUIRED`: the tool asked for credentials with
+ *   `toolContext.requestCredential()`. The bridge cannot ask the user for
+ *   them, so the call has no result; the request is in
+ *   `actions.requestedAuthConfigs`.
+ */
 export type AdkToolErrorCode =
   | "UNKNOWN_TOOL"
   | "INVALID_ARGUMENTS"
   | "EXECUTION_FAILED"
   | "CONFIRMATION_REJECTED"
-  | "ABORTED";
+  | "ABORTED"
+  | "CALLBACK_FAILED"
+  | "CREDENTIAL_REQUIRED";
 
 /** Outcome of {@link AdkToolBridge.execute}. */
 export interface AdkToolExecutionResult {
@@ -142,8 +177,13 @@ export interface AdkToolExecutionResult {
    * - `confirmationRequired`: the tool gates on human approval and was NOT
    *   run; ask a human and call `execute` again with `toolConfirmation`.
    * - `error`: the tool did not run, or failed; see `error`.
+   * - `pending`: a long-running tool (`isLongRunning`, such as ADK's
+   *   `LongRunningFunctionTool`) started and returned no result yet; see
+   *   `pending`. Its result arrives later, as a `functionResponse` with the
+   *   same function call id. A long-running tool that returns a result is
+   *   `ok`.
    */
-  status: "ok" | "confirmationRequired" | "error";
+  status: "ok" | "confirmationRequired" | "error" | "pending";
   /**
    * Function-response payload (always an object; a non-object tool result is
    * wrapped as `{ result }`, like ADK does). For errors it is `{ error }`.
@@ -166,6 +206,13 @@ export interface AdkToolExecutionResult {
      * decision in `toolContext.toolConfirmation`, as in ADK.
      */
     origin?: "requireConfirmation" | "requestConfirmation";
+  };
+  /** Set when `status` is `"pending"`. */
+  pending?: {
+    /** Id of the call; the later `functionResponse` carries it. */
+    functionCallId: string;
+    /** The tool's own name (not the exposed one). */
+    toolName: string;
   };
 }
 
@@ -290,13 +337,109 @@ function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/** Agent tool callbacks, run after the plugins' (see {@link createAdkToolBridge}). */
+export interface AdkToolCallbacks {
+  /** Run before each call, in order; the first response returned wins. */
+  beforeToolCallbacks?: readonly SingleBeforeToolCallback[];
+  /** Run after each call, in order; the first response returned wins. */
+  afterToolCallbacks?: readonly SingleAfterToolCallback[];
+}
+
+/** A callback threw; the message names the tool and the callback kind. */
+class ToolCallbackError extends Error {}
+
+async function runBeforeCallbacks(
+  tool: BaseTool,
+  args: Record<string, unknown>,
+  toolContext: Context,
+  invocationContext: InvocationContext,
+  callbacks: readonly SingleBeforeToolCallback[],
+): Promise<Record<string, unknown> | undefined> {
+  try {
+    const fromPlugin =
+      await invocationContext.pluginManager?.runBeforeToolCallback({
+        tool,
+        toolArgs: args,
+        toolContext,
+      });
+    if (fromPlugin != null) return fromPlugin;
+    for (const callback of callbacks) {
+      const response = await callback({ tool, args, context: toolContext });
+      if (response != null) return response;
+    }
+    return undefined;
+  } catch (error) {
+    throw new ToolCallbackError(
+      `A beforeTool callback failed for ${tool.name}: ${messageOf(error)}`,
+    );
+  }
+}
+
+async function runAfterCallbacks(
+  tool: BaseTool,
+  args: Record<string, unknown>,
+  toolContext: Context,
+  invocationContext: InvocationContext,
+  callbacks: readonly SingleAfterToolCallback[],
+  result: Record<string, unknown>,
+): Promise<Record<string, unknown> | undefined> {
+  try {
+    const fromPlugin =
+      await invocationContext.pluginManager?.runAfterToolCallback({
+        tool,
+        toolArgs: args,
+        toolContext,
+        result,
+      });
+    if (fromPlugin != null) return fromPlugin;
+    for (const callback of callbacks) {
+      const response = await callback({
+        tool,
+        args,
+        context: toolContext,
+        response: result,
+      });
+      if (response != null) return response;
+    }
+    return undefined;
+  } catch (error) {
+    throw new ToolCallbackError(
+      `An afterTool callback failed for ${tool.name}: ${messageOf(error)}`,
+    );
+  }
+}
+
+async function runToolErrorCallbacks(
+  tool: BaseTool,
+  args: Record<string, unknown>,
+  toolContext: Context,
+  invocationContext: InvocationContext,
+  error: Error,
+): Promise<Record<string, unknown> | undefined> {
+  try {
+    return (
+      (await invocationContext.pluginManager?.runOnToolErrorCallback({
+        tool,
+        toolArgs: args,
+        toolContext,
+        error,
+      })) ?? undefined
+    );
+  } catch (callbackError) {
+    throw new ToolCallbackError(
+      `An onToolError callback failed for ${tool.name}: ${messageOf(callbackError)}`,
+    );
+  }
+}
+
 /**
  * Shapes a tool result as an ADK `functionResponse.response` object.
  *
  * @remarks
- * A plain object (prototype `Object.prototype` or `null`) is used as is;
- * anything else (an array, a primitive, `null`, a `Date`, a `Map`, a class
- * instance) is wrapped as `{ result }`, with `undefined` as `null`.
+ * A plain object (prototype `Object.prototype` or `null`) is used as is; an
+ * array is wrapped as `{ results }`, as ADK does; anything else (a primitive,
+ * `null`, a `Date`, a `Map`, a class instance) is wrapped as `{ result }`,
+ * with `undefined` as `null`.
  *
  * @param value - The tool's result.
  * @returns A record usable as a function response.
@@ -309,6 +452,7 @@ export function toResponseObject(value: unknown): Record<string, unknown> {
       return value;
     }
   }
+  if (Array.isArray(value)) return { results: value };
   return { result: value === undefined ? null : value };
 }
 
@@ -327,15 +471,24 @@ export function toResponseObject(value: unknown): Record<string, unknown> {
  * @param options - `filter` keeps only the tools it accepts. It sees each
  * tool, a toolset's tools included, by its own name before the bridge names
  * it; a tool it rejects is left out without a `skipped` entry.
+ * `beforeToolCallbacks` and `afterToolCallbacks` are the agent's tool
+ * callbacks (as in `LlmAgent`); they run after the plugins' callbacks of the
+ * invocation's `pluginManager`. After callbacks see the results the tool
+ * produced (`ok`, `EXECUTION_FAILED` as `{ error }`, and `{}` for a
+ * long-running tool without a result) and a before callback's response; they
+ * do not run for calls the bridge stops itself (unknown tool, bad arguments,
+ * abort, a pending or rejected confirmation, a credential request).
  * @returns The bridge with the declarations to advertise and the executor.
  */
 export async function createAdkToolBridge(
   tools: readonly ToolUnion[],
   invocationContext: InvocationContext,
-  options: { filter?: (tool: BaseTool) => boolean } = {},
+  options: { filter?: (tool: BaseTool) => boolean } & AdkToolCallbacks = {},
 ): Promise<AdkToolBridge> {
   const skipped: SkippedTool[] = [];
   const resolved: BaseTool[] = [];
+  const beforeCallbacks = options.beforeToolCallbacks ?? [];
+  const afterCallbacks = options.afterToolCallbacks ?? [];
 
   for (const entry of tools) {
     if (isBaseTool(entry)) {
@@ -415,67 +568,62 @@ export async function createAdkToolBridge(
       const callArgs = (args ?? {}) as Record<string, unknown>;
 
       try {
-        if (await tool.checkRequireConfirmation(callArgs, toolContext)) {
-          if (!decision) {
-            const hint = `Please approve or reject the tool call ${tool.name}().`;
-            return {
-              status: "confirmationRequired",
-              response: { error: "This tool call requires confirmation." },
-              actions: actionsFrom(toolContext),
-              confirmation: {
-                functionCallId,
-                hint,
-                origin: "requireConfirmation",
-              },
-            };
-          }
-          if (!decision.confirmed) {
-            return errorResult(
-              "CONFIRMATION_REJECTED",
-              `The call to ${tool.name} was rejected.`,
-            );
-          }
-        }
-      } catch (error) {
-        // Argument validation inside the confirmation predicate (Zod).
-        return errorResult("INVALID_ARGUMENTS", messageOf(error));
-      }
+        const ran = await runTool(tool, callArgs, toolContext, context, {
+          functionCallId,
+          decision,
+          beforeCallbacks,
+        });
+        if (ran.kind === "done") return ran.result;
 
-      try {
-        const output = await tool.runAsync({ args: callArgs, toolContext });
-        const requested =
-          toolContext.eventActions.requestedToolConfirmations?.[functionCallId];
-        if (requested && !decision) {
-          // ADK ends the turn on this request and drops the response and state
-          // changes of the call; the call runs again with the human decision.
-          // Saved artifacts cannot be unsaved, so their delta is kept.
-          const actions = actionsFrom(toolContext);
+        const altered = await runAfterCallbacks(
+          tool,
+          callArgs,
+          toolContext,
+          context,
+          afterCallbacks,
+          ran.response ?? {},
+        );
+        if (altered != null) {
+          // A callback's response replaces the result, a failure's too.
           return {
-            status: "confirmationRequired",
-            response: { error: "This tool call requires confirmation." },
-            actions: {
-              ...emptyActions(),
-              artifactDelta: actions.artifactDelta,
-              requestedToolConfirmations: actions.requestedToolConfirmations,
+            status: "ok",
+            response: toResponseObject(altered),
+            actions: actionsFrom(toolContext),
+          };
+        }
+        if (ran.kind === "failed") {
+          return errorResult(
+            "EXECUTION_FAILED",
+            ran.message,
+            actionsFrom(toolContext),
+          );
+        }
+        if (ran.response === undefined) {
+          // A long-running tool started and has no result yet. Never report
+          // it as a finished call with `{ result: null }`.
+          return {
+            status: "pending",
+            response: {
+              status: "pending",
+              message: `${tool.name} is running in the background; its result arrives later.`,
             },
-            confirmation: {
-              functionCallId,
-              hint:
-                requested.hint ||
-                `Please approve or reject the tool call ${tool.name}().`,
-              ...(requested.payload !== undefined
-                ? { payload: requested.payload }
-                : {}),
-              origin: "requestConfirmation",
-            },
+            actions: actionsFrom(toolContext),
+            pending: { functionCallId, toolName: tool.name },
           };
         }
         return {
           status: "ok",
-          response: toResponseObject(output),
+          response: ran.response,
           actions: actionsFrom(toolContext),
         };
       } catch (error) {
+        if (error instanceof ToolCallbackError) {
+          return errorResult(
+            "CALLBACK_FAILED",
+            error.message,
+            actionsFrom(toolContext),
+          );
+        }
         return errorResult(
           "EXECUTION_FAILED",
           messageOf(error),
@@ -484,4 +632,153 @@ export async function createAdkToolBridge(
       }
     },
   };
+}
+
+/**
+ * Outcome of the before callbacks and the tool, before the after callbacks.
+ *
+ * - `done`: the bridge stopped the call itself (confirmation, credentials,
+ *   bad arguments); no after callback runs.
+ * - `response`: a before callback's response or the tool's result.
+ *   `undefined` only for a long-running tool that returned nothing.
+ * - `failed`: the tool threw and no plugin gave a response.
+ */
+type ToolRun =
+  | { kind: "done"; result: AdkToolExecutionResult }
+  | { kind: "response"; response: Record<string, unknown> | undefined }
+  | { kind: "failed"; message: string; response: Record<string, unknown> };
+
+async function runTool(
+  tool: BaseTool,
+  callArgs: Record<string, unknown>,
+  toolContext: Context,
+  context: InvocationContext,
+  call: {
+    functionCallId: string;
+    decision: AdkToolExecuteOptions["toolConfirmation"];
+    beforeCallbacks: readonly SingleBeforeToolCallback[];
+  },
+): Promise<ToolRun> {
+  const { functionCallId, decision } = call;
+  const replaced = await runBeforeCallbacks(
+    tool,
+    callArgs,
+    toolContext,
+    context,
+    call.beforeCallbacks,
+  );
+  if (replaced != null) {
+    return { kind: "response", response: toResponseObject(replaced) };
+  }
+
+  try {
+    if (await tool.checkRequireConfirmation(callArgs, toolContext)) {
+      if (!decision) {
+        const hint = `Please approve or reject the tool call ${tool.name}().`;
+        return {
+          kind: "done",
+          result: {
+            status: "confirmationRequired",
+            response: { error: "This tool call requires confirmation." },
+            actions: actionsFrom(toolContext),
+            confirmation: {
+              functionCallId,
+              hint,
+              origin: "requireConfirmation",
+            },
+          },
+        };
+      }
+      if (!decision.confirmed) {
+        return {
+          kind: "done",
+          result: errorResult(
+            "CONFIRMATION_REJECTED",
+            `The call to ${tool.name} was rejected.`,
+          ),
+        };
+      }
+    }
+  } catch (error) {
+    // Argument validation inside the confirmation predicate (Zod).
+    return {
+      kind: "done",
+      result: errorResult("INVALID_ARGUMENTS", messageOf(error)),
+    };
+  }
+
+  let output: unknown;
+  try {
+    output = await tool.runAsync({ args: callArgs, toolContext });
+  } catch (error) {
+    if (!(error instanceof Error)) {
+      const message = messageOf(error);
+      return { kind: "failed", message, response: { error: message } };
+    }
+    const recovered = await runToolErrorCallbacks(
+      tool,
+      callArgs,
+      toolContext,
+      context,
+      error,
+    );
+    if (recovered != null) {
+      return { kind: "response", response: toResponseObject(recovered) };
+    }
+    return {
+      kind: "failed",
+      message: error.message,
+      response: { error: error.message },
+    };
+  }
+
+  const requested =
+    toolContext.eventActions.requestedToolConfirmations?.[functionCallId];
+  if (requested && !decision) {
+    // ADK ends the turn on this request and drops the response and state
+    // changes of the call; the call runs again with the human decision.
+    // Saved artifacts cannot be unsaved, so their delta is kept.
+    const actions = actionsFrom(toolContext);
+    return {
+      kind: "done",
+      result: {
+        status: "confirmationRequired",
+        response: { error: "This tool call requires confirmation." },
+        actions: {
+          ...emptyActions(),
+          artifactDelta: actions.artifactDelta,
+          requestedToolConfirmations: actions.requestedToolConfirmations,
+        },
+        confirmation: {
+          functionCallId,
+          hint:
+            requested.hint ||
+            `Please approve or reject the tool call ${tool.name}().`,
+          ...(requested.payload !== undefined
+            ? { payload: requested.payload }
+            : {}),
+          origin: "requestConfirmation",
+        },
+      },
+    };
+  }
+
+  const requestedAuth = toolContext.eventActions.requestedAuthConfigs ?? {};
+  if (Object.keys(requestedAuth).length > 0) {
+    // Fail closed: the bridge has no way to ask the user for credentials, so
+    // the call must not look like it worked.
+    const message = `${tool.name} needs credentials, which cannot be requested from this runtime; the call has no result.`;
+    return {
+      kind: "done",
+      result: errorResult("CREDENTIAL_REQUIRED", message, {
+        ...actionsFrom(toolContext),
+        requestedAuthConfigs: { ...requestedAuth },
+      }),
+    };
+  }
+
+  if (output == null && tool.isLongRunning) {
+    return { kind: "response", response: undefined };
+  }
+  return { kind: "response", response: toResponseObject(output) };
 }

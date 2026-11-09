@@ -3,7 +3,9 @@
  *
  * @remarks
  * Ordered from most to least restrictive: `read-only` (nothing is writable and
- * no confirmation can change that), `ask` (every sensitive call needs an
+ * no confirmation can change that; with `allowNetwork: true` its web tools
+ * run without an approver, so it can still send what it reads to the
+ * network), `ask` (every sensitive call needs an
  * approval), `workspace-write` (writes inside the workspace are allowed) and
  * `full-access` (no restriction from the bridge).
  */
@@ -32,12 +34,25 @@ export interface ExternalAgentPermissionPolicy {
    * calls are denied, and drivers that cannot keep the network off refuse
    * the run.
    *
+   * Under `read-only`, `true` lets the web tools run without an approver.
+   * Read-only does not stop data leaving: the agent can send what it reads
+   * (file contents, workspace secrets) to any host through them, for example
+   * after a prompt injection. Set it only for agents whose inputs you trust,
+   * or use `ask` mode so web calls go to an approver.
+   *
    * @defaultValue `false`
    */
   allowNetwork?: boolean;
   /**
    * Roots the agent may touch. When set, any path argument of a tool call
    * outside these roots is denied. When unset, paths are not restricted.
+   *
+   * @remarks
+   * `ClaudeAgentSdkDriver` checks every tool call against them. The Claude
+   * CLI, Codex and Gemini CLI drivers run file tools without asking the
+   * bridge, so they refuse a run with `allowedPaths` (or inherited
+   * `pathBounds`) with `EXTERNAL_AGENT_PATHS_UNENFORCEABLE` unless built with
+   * `allowUnenforcedPaths: true`.
    */
   allowedPaths?: readonly string[];
   /**

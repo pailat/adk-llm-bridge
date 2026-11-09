@@ -85,8 +85,7 @@ describe("GeminiCliDriver", () => {
     expect(calls).toHaveLength(1);
     expect(calls[0]?.[0]).toBe("gemini");
     expect(calls[0]?.[1]).toEqual([
-      "-p",
-      "say hello",
+      "--prompt=say hello",
       "--output-format",
       "stream-json",
       "--approval-mode=default",
@@ -172,10 +171,15 @@ describe("GeminiCliDriver", () => {
     ]);
   });
 
+  test("a prompt that looks like a flag stays the prompt's value", () => {
+    const args = buildGeminiArgs("--yolo");
+    expect(args[0]).toBe("--prompt=--yolo");
+    expect(args).not.toContain("--yolo");
+  });
+
   test("maps permission presets without defaulting to yolo", () => {
     expect(buildGeminiArgs("prompt")).toEqual([
-      "-p",
-      "prompt",
+      "--prompt=prompt",
       "--output-format",
       "stream-json",
       "--approval-mode=default",
@@ -296,10 +300,7 @@ describe("Gemini CLI prompt", () => {
       ),
     );
 
-    expect(calls[0]?.[1].slice(0, 2)).toEqual([
-      "-p",
-      "say hello\n\nlist the files",
-    ]);
+    expect(calls[0]?.[1][0]).toBe("--prompt=say hello\n\nlist the files");
   });
 });
 

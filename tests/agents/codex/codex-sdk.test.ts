@@ -861,6 +861,8 @@ describe("CodexSdkDriver", () => {
     "run() classifies thrown error %p as recoverable=%p (%s)",
     async (message, recoverable, code) => {
       const driver = new CodexSdkDriver({
+        // No real `codex mcp list`: the test must not depend on the host.
+        listMcpServers: async () => [],
         Codex: class {
           startThread(): never {
             throw new Error(message as string);

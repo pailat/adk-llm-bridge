@@ -27,6 +27,7 @@ import {
   type ExternalAgentPolicyError,
   isCommandNotFound,
   policyErrorEvent,
+  unenforceablePathsRefusal,
   unsandboxedShellRefusal,
 } from "./policy-errors.js";
 import { codexTurnUsage } from "./run-summary.js";
@@ -141,6 +142,16 @@ export interface CodexCliDriverConfig {
    */
   allowUnenforcedNetwork?: boolean;
   /**
+   * Opt-in: run a policy with `allowedPaths` (or path bounds inherited from a
+   * parent agent) although this driver cannot check tool paths against them.
+   * Without it such a run is refused with
+   * `EXTERNAL_AGENT_PATHS_UNENFORCEABLE`. With it, the runtime's own sandbox
+   * alone decides which paths the agent reaches.
+   *
+   * @defaultValue false
+   */
+  allowUnenforcedPaths?: boolean;
+  /**
    * Lists Codex's host MCP servers. Without `allowNetwork: true` each listed
    * server is turned off with `-c mcp_servers.<name>.enabled=false`, because
    * MCP servers run outside the Codex sandbox and can reach the network.
@@ -175,6 +186,9 @@ function codexCliMissing(): ExternalAgentPolicyError {
  *   network is refused with `EXTERNAL_AGENT_NETWORK_UNENFORCEABLE` unless
  *   `allowUnenforcedNetwork` is set; a missing binary ends the run with
  *   `MISSING_BINARY`. Refusals are events, not exceptions.
+ * - Codex runs file tools without asking the bridge, so a policy with
+ *   `allowedPaths` (or inherited path bounds) is refused with
+ *   `EXTERNAL_AGENT_PATHS_UNENFORCEABLE` unless `allowUnenforcedPaths` is set.
  * - The process gets an allowlisted environment, never the whole of
  *   `process.env`.
  * - Aborting the run sends SIGTERM, then SIGKILL after `killGraceMs`; the
@@ -186,6 +200,7 @@ export class CodexCliDriver extends SubprocessJsonlDriver {
   readonly #killGraceMs: number | undefined;
   readonly #skipGitRepoCheck: boolean;
   readonly #allowUnenforcedNetwork: boolean;
+  readonly #allowUnenforcedPaths: boolean;
   readonly #listMcpServers?: CodexMcpLister;
 
   /**
@@ -207,6 +222,7 @@ export class CodexCliDriver extends SubprocessJsonlDriver {
     this.#killGraceMs = config.killGraceMs;
     this.#skipGitRepoCheck = config.skipGitRepoCheck ?? false;
     this.#allowUnenforcedNetwork = config.allowUnenforcedNetwork ?? false;
+    this.#allowUnenforcedPaths = config.allowUnenforcedPaths ?? false;
     this.#listMcpServers = config.listMcpServers;
   }
 
@@ -243,6 +259,14 @@ export class CodexCliDriver extends SubprocessJsonlDriver {
     const refuse = (error: ExternalAgentPolicyError) =>
       refusedRun(this.providerId, error);
 
+    const pathsRefusal = unenforceablePathsRefusal(request.permissions, {
+      runtime: "Codex CLI",
+      allowUnenforcedPaths: this.#allowUnenforcedPaths,
+    });
+    if (pathsRefusal) {
+      yield* refuse(pathsRefusal);
+      return;
+    }
     const shellRefusal = unsandboxedShellRefusal(request.permissions, {
       runtime: "Codex CLI",
       allowUnenforcedNetwork: this.#allowUnenforcedNetwork,
@@ -402,7 +426,8 @@ export class CodexCliDriver extends SubprocessJsonlDriver {
    * @param request - The run.
    * @param configOverrides - Extra `-c` values (for example the MCP server
    * disables), placed before the user's own args.
-   * @returns The arguments, ending with the prompt.
+   * @returns The arguments, ending with `--` and the prompt, so a prompt that
+   * starts with `-` is never read as a flag.
    */
   buildArgs(
     request: ExternalAgentRunRequest,
@@ -414,6 +439,7 @@ export class CodexCliDriver extends SubprocessJsonlDriver {
       ...configOverrides.flatMap((override) => ["-c", override]),
       ...(this.#skipGitRepoCheck ? ["--skip-git-repo-check"] : []),
       ...this.args,
+      "--",
       prompt,
     ];
   }

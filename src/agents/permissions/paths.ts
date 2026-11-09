@@ -6,7 +6,7 @@
  * of agent runtime imports.
  */
 
-import { realpathSync } from "node:fs";
+import { lstatSync, readlinkSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import {
   basename,
@@ -18,33 +18,55 @@ import {
   sep,
 } from "node:path";
 
+/** Most symlinks {@link canonicalPath} follows by hand before it gives up. */
+const MAX_SYMLINK_HOPS = 40;
+
 /**
  * Absolute, normalized path with symlinks resolved.
  *
  * @remarks
  * A path that does not exist yet (a file about to be written) resolves its
  * deepest existing ancestor and appends the rest, so a symlinked parent is
- * still followed. A leading `~` is the home directory.
+ * still followed. A dangling symlink on the way (a link whose target does
+ * not exist yet) is followed too, so the result is where a write through it
+ * would land. A leading `~` is the home directory.
  *
  * @param value - The path, absolute or relative to `base`.
  * @param base - Directory a relative path is resolved against.
- * @returns The canonical path.
+ * @returns The canonical path, or `undefined` when its symlinks cannot be
+ * resolved (a loop, or more than 40 links), so a caller can fail closed.
  */
-export function canonicalPath(value: string, base: string): string {
-  const absolute = resolve(base, expandHome(value));
-  const missing: string[] = [];
-  let current = absolute;
-  for (;;) {
-    try {
-      return join(realpathSync.native(current), ...missing.reverse());
-    } catch {
-      const parent = dirname(current);
-      if (parent === current) {
-        return absolute;
+export function canonicalPath(value: string, base: string): string | undefined {
+  let absolute = resolve(base, expandHome(value));
+  for (let hops = 0; hops <= MAX_SYMLINK_HOPS; hops++) {
+    const missing: string[] = [];
+    let current = absolute;
+    let target: string | undefined;
+    for (;;) {
+      try {
+        return join(realpathSync.native(current), ...missing.reverse());
+      } catch {
+        target = danglingLinkTarget(current);
+        if (target !== undefined) break;
+        const parent = dirname(current);
+        if (parent === current) {
+          return absolute;
+        }
+        missing.push(basename(current));
+        current = parent;
       }
-      missing.push(basename(current));
-      current = parent;
     }
+    absolute = join(resolve(dirname(current), target), ...missing.reverse());
+  }
+  return undefined;
+}
+
+/** The target of `path` when it is a symlink (dangling or looping), else `undefined`. */
+function danglingLinkTarget(path: string): string | undefined {
+  try {
+    return lstatSync(path).isSymbolicLink() ? readlinkSync(path) : undefined;
+  } catch {
+    return undefined;
   }
 }
 

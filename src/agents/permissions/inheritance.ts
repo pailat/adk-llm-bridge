@@ -101,10 +101,12 @@ function deriveAllowedPaths(
   };
   // Anchored roots do not depend on the base; it only satisfies the signature.
   const base = process.cwd();
+  // A root whose symlinks cannot be resolved is dropped: it allows nothing.
   const anchored = (paths: readonly string[]) =>
-    paths
-      .filter(isAnchoredPath)
-      .map((path) => ({ path, canonical: canonicalPath(path, base) }));
+    paths.filter(isAnchoredPath).flatMap((path) => {
+      const canonical = canonicalPath(path, base);
+      return canonical === undefined ? [] : [{ path, canonical }];
+    });
   const parentRoots = anchored(parent);
   const childRoots = anchored(child);
   for (const root of childRoots) {

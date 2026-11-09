@@ -25,9 +25,11 @@ describe("guardPermissionRequest under allowNetwork: false", () => {
     ).toMatchObject({ behavior: "deny" });
   });
 
-  test("lets the bridge's own MCP tools through", () => {
+  test("lets the bridge's own registered MCP tools through", () => {
     expect(
-      guardPermissionRequest(NO_NETWORK, req("mcp__adk_bridge__lookup")),
+      guardPermissionRequest(NO_NETWORK, req("mcp__adk_bridge__lookup"), {
+        bridgeToolNames: new Set(["mcp__adk_bridge__lookup"]),
+      }),
     ).toBeUndefined();
   });
 

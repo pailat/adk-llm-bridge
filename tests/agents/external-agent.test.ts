@@ -1395,8 +1395,9 @@ describe("ExternalAgent tool result shapes", () => {
         (event) => event.content?.parts?.[0]?.functionResponse?.response,
       ),
     ).toEqual([
-      { result: [1, 2] },
-      { result: [1, 2], error: "boom" },
+      // Arrays are `{ results }`, as ADK wraps them.
+      { results: [1, 2] },
+      { results: [1, 2], error: "boom" },
       { result: "text" },
       { result: null },
     ]);

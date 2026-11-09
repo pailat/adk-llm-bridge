@@ -16,6 +16,7 @@ import {
   isCommandNotFound,
   networkUnenforceable,
   policyErrorEvent,
+  unenforceablePathsRefusal,
 } from "./policy-errors.js";
 import {
   bridgeEvent,
@@ -118,6 +119,16 @@ export interface GeminiCliDriverConfig {
    * @defaultValue false
    */
   allowUnenforcedNetwork?: boolean;
+  /**
+   * Opt-in: run a policy with `allowedPaths` (or path bounds inherited from a
+   * parent agent) although this driver cannot check tool paths against them.
+   * Without it such a run is refused with
+   * `EXTERNAL_AGENT_PATHS_UNENFORCEABLE`. With it, the runtime's own sandbox
+   * alone decides which paths the agent reaches.
+   *
+   * @defaultValue false
+   */
+  allowUnenforcedPaths?: boolean;
 }
 
 function geminiCliMissing(): ExternalAgentPolicyError {
@@ -156,6 +167,9 @@ function geminiNetworkRefusal(
  *   policy) is refused with `EXTERNAL_AGENT_NETWORK_UNENFORCEABLE` (in every
  *   mode) unless `allowUnenforcedNetwork` is set. A missing binary
  *   ends the run with `MISSING_BINARY`. Refusals are events, not exceptions.
+ * - Gemini CLI runs file tools without asking the bridge, so a policy with
+ *   `allowedPaths` (or inherited path bounds) is refused with
+ *   `EXTERNAL_AGENT_PATHS_UNENFORCEABLE` unless `allowUnenforcedPaths` is set.
  * - The permission policy becomes approval-mode and sandbox flags (see
  *   {@link mapGeminiPermissionArgs}).
  * - The process gets an allowlisted environment (`PATH`, `HOME` and the
@@ -168,6 +182,7 @@ export class GeminiCliDriver extends SubprocessJsonlDriver {
   readonly #env: Record<string, string | undefined>;
   readonly #killGraceMs: number | undefined;
   readonly #allowUnenforcedNetwork: boolean;
+  readonly #allowUnenforcedPaths: boolean;
 
   /**
    * Creates a driver that runs the `gemini` CLI.
@@ -186,6 +201,7 @@ export class GeminiCliDriver extends SubprocessJsonlDriver {
     this.#env = config.env ?? process.env;
     this.#killGraceMs = config.killGraceMs;
     this.#allowUnenforcedNetwork = config.allowUnenforcedNetwork ?? false;
+    this.#allowUnenforcedPaths = config.allowUnenforcedPaths ?? false;
   }
 
   /** Features this driver supports: streaming output and the permission policy mapped onto CLI flags. */
@@ -226,10 +242,12 @@ export class GeminiCliDriver extends SubprocessJsonlDriver {
     if (signal?.aborted) {
       return;
     }
-    const refusal = geminiNetworkRefusal(
-      request.permissions,
-      this.#allowUnenforcedNetwork,
-    );
+    const refusal =
+      unenforceablePathsRefusal(request.permissions, {
+        runtime: "Gemini CLI",
+        allowUnenforcedPaths: this.#allowUnenforcedPaths,
+      }) ??
+      geminiNetworkRefusal(request.permissions, this.#allowUnenforcedNetwork);
     if (refusal) {
       yield policyErrorEvent(refusal);
       yield { type: "completed", exitCode: 1, timestamp: Date.now() };
@@ -375,15 +393,16 @@ type GeminiStreamEvent = {
  *
  * @param prompt - The prompt text.
  * @param permissions - The policy; see {@link mapGeminiPermissionArgs}.
- * @returns `-p <prompt> --output-format stream-json` followed by the permission flags.
+ * @returns `--prompt=<prompt> --output-format stream-json` followed by the
+ * permission flags. The prompt is joined to its flag, so a prompt that starts
+ * with `-` (for example `--yolo`) is never read as a flag.
  */
 export function buildGeminiArgs(
   prompt: string,
   permissions?: ExternalAgentPermissionPolicy,
 ): string[] {
   return [
-    "-p",
-    prompt,
+    `--prompt=${prompt}`,
     "--output-format",
     "stream-json",
     ...mapGeminiPermissionArgs(permissions),

@@ -27,6 +27,7 @@ export type { CodexAgentConfig } from "./codex-agent.js";
 export { CODEX_AGENT_DEFINITION, CodexAgent } from "./codex-agent.js";
 export type { ClaudeAgentSdkDriverConfig } from "./driver/claude-agent-sdk.js";
 export {
+  CLAUDE_SESSION_STORE_MIRROR_ERROR,
   ClaudeAgentSdkDriver,
   claudeSdkSessionStateKey,
   DEFAULT_CLAUDE_SDK_TOOLS,
@@ -73,6 +74,8 @@ export {
   EXTERNAL_AGENT_ISOLATION_VIOLATED,
   EXTERNAL_AGENT_MISSING_BINARY,
   EXTERNAL_AGENT_NETWORK_UNENFORCEABLE,
+  EXTERNAL_AGENT_OPTION_UNSUPPORTED,
+  EXTERNAL_AGENT_PATHS_UNENFORCEABLE,
   ExternalAgentPolicyError,
 } from "./driver/policy-errors.js";
 export type {
@@ -87,8 +90,11 @@ export type {
   ExternalAgentUsage,
 } from "./events.js";
 export {
+  EXTERNAL_AGENT_CONFIRMATION_UNUSED,
   EXTERNAL_AGENT_ERROR,
   EXTERNAL_AGENT_NOT_CONFIGURED,
+  EXTERNAL_AGENT_TOOL_CREDENTIAL_REQUIRED,
+  EXTERNAL_AGENT_TOOL_RESULT_TOO_LARGE,
   EXTERNAL_AGENT_TRANSFER_FAILED,
   isExternalAgentEvent,
 } from "./events.js";
@@ -146,8 +152,14 @@ export {
 } from "./runtime/error-classification.js";
 export type { AgentRuntimeSession } from "./runtime/runtime-session.js";
 export type {
+  SessionKey,
+  SessionStore,
+  SessionStoreEntry,
+} from "./session-store/types.js";
+export type {
   AdkToolActions,
   AdkToolBridge,
+  AdkToolCallbacks,
   AdkToolErrorCode,
   AdkToolExecuteOptions,
   AdkToolExecutionResult,
