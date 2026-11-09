@@ -1,7 +1,7 @@
 {
   "name": "adk-llm-bridge",
   "version": "0.7.0",
-  "description": "Use any LLM with Google ADK TypeScript - supports AI Gateway, OpenRouter, and 100+ models",
+  "description": "Use OpenAI, Anthropic, xAI, OpenRouter and AI Gateway models (100+), external coding agents (Claude Code, Codex, Gemini CLI) and durable workflows with Google ADK for TypeScript",
   "keywords": [
     "adk",
     "google-adk",
@@ -10,10 +10,17 @@
     "vercel",
     "llm",
     "agents",
-    "multi-provider"
+    "multi-provider",
+    "anthropic",
+    "openai",
+    "xai",
+    "claude",
+    "codex",
+    "gemini",
+    "workflows"
   ],
   "license": "MIT",
-  "author": "PAI",
+  "author": "adk-llm-bridge contributors",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/pailat/adk-llm-bridge.git"
@@ -64,10 +71,13 @@
     "format": "biome format .",
     "format:fix": "biome format --write .",
     "check": "biome check .",
+    "check:comments": "bun scripts/check-comments.ts",
+    "check:links": "bun scripts/check-links.ts",
+    "check:export-docs": "bun scripts/check-export-docs.ts",
     "check:fix": "biome check --write .",
     "lint:publish": "publint --strict && attw --pack --profile esm-only",
-    "ci": "bun run typecheck:all && bun run typecheck:conformance && bun run check && bun test && bun run build && bun scripts/fix-dts-private.ts --check && bun scripts/check-dist-permissions.ts && bun run lint:publish",
-    "prepublishOnly": "bun run build && bun scripts/fix-dts-private.ts --check && bun scripts/check-dist-permissions.ts && bun run lint:publish",
+    "ci": "bun run typecheck:all && bun run typecheck:conformance && bun run check && bun run check:comments && bun run check:links && bun test && bun run build && bun run check:export-docs && bun scripts/fix-dts-private.ts --check && bun scripts/check-dist-permissions.ts && bun run lint:publish",
+    "prepublishOnly": "bun run check:comments && bun run build && bun run check:export-docs && bun scripts/fix-dts-private.ts --check && bun scripts/check-dist-permissions.ts && bun run lint:publish",
     "typecheck:compat:nodenext": "bun run build && bunx tsc -p tests/compat/nodenext-consumer/tsconfig.json"
   },
   "peerDependencies": {
@@ -107,9 +117,10 @@
     "@biomejs/biome": "^2.6.6",
     "@google/adk": "^2.4.0",
     "@google/genai": "^2.32.0",
-    "@openai/codex-sdk": "^0.167.0",
     "@jitl/quickjs-wasmfile-debug-sync": "^0.32.0",
     "@jitl/quickjs-wasmfile-release-sync": "^0.32.0",
+    "@microsoft/tsdoc": "0.17.1",
+    "@openai/codex-sdk": "^0.167.0",
     "@opentelemetry/api": "^1.10.0",
     "@types/bun": "^1.4.4",
     "bunup": "^0.16.32",
