@@ -359,6 +359,13 @@ from the 0.6.0 tag.
 
 ### Security
 
+- **The SDK drivers no longer run a `claude` or `codex` binary from the run's
+  working directory.** `ClaudeAgentSdkDriver` and `CodexSdkDriver` searched
+  `<workingDirectory>/node_modules` for the runtime binary before the bridge's
+  own install. The agent can write its working directory, so a binary left
+  there by one run would start the next run outside the runtime's sandbox.
+  The working directory is no longer searched; set `CLAUDE_CODE_EXECUTABLE` or
+  `CODEX_EXECUTABLE` if the only copy lives there.
 - **A prompt cannot set CLI flags or run a CLI subcommand.** `CodexCliDriver`
   and `ClaudeCliDriver` passed the prompt as a bare argument, so a user
   message such as `--dangerously-skip-permissions` (Claude) or

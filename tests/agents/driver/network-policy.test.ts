@@ -580,8 +580,11 @@ const PLATFORM = PLATFORM_PACKAGES[`${process.platform}:${process.arch}`];
 describe.if(PLATFORM !== undefined)(
   "Codex SDK finds the npm-installed binary like the SDK does",
   () => {
-    /** A project with `@openai/codex` and its platform package, `bin/` layout. */
-    function npmTree() {
+    /**
+     * A host project with `@openai/codex` and its platform package, `bin/`
+     * layout. Unless `asWorkspace`, the process runs from it until `cleanup`.
+     */
+    function npmTree({ asWorkspace = false } = {}) {
       const [platformPackage, triple] = PLATFORM as [string, string];
       const root = mkdtempSync(join(tmpdir(), "codex-npm-tree-"));
       const scope = join(root, "node_modules", "@openai");
@@ -602,11 +605,16 @@ describe.if(PLATFORM !== undefined)(
       const binary = join(vendor, "bin", "codex");
       writeFileSync(binary, "#!/bin/sh\nexit 0\n");
       chmodSync(binary, 0o755);
+      const previous = process.cwd();
+      if (!asWorkspace) process.chdir(root);
       return {
         root: realpathSync(root),
         binary: realpathSync(binary),
         pathDir: realpathSync(join(vendor, "codex-path")),
-        cleanup: () => rmSync(root, { recursive: true, force: true }),
+        cleanup: () => {
+          process.chdir(previous);
+          rmSync(root, { recursive: true, force: true });
+        },
       };
     }
 
@@ -614,14 +622,30 @@ describe.if(PLATFORM !== undefined)(
       const tree = npmTree();
       try {
         const driver = new CodexSdkDriver({ env: { PATH: "/nonexistent" } });
-        const resolution = driver.resolveCodexBinary({
-          ...request(NO_NETWORK),
-          workingDirectory: tree.root,
-        });
+        const resolution = driver.resolveCodexBinary(request(NO_NETWORK));
         expect(realpathSync(resolution.path ?? "")).toBe(tree.binary);
         expect(resolution.pathDirs?.map((dir) => realpathSync(dir))).toEqual([
           tree.pathDir,
         ]);
+      } finally {
+        tree.cleanup();
+      }
+    });
+
+    test("an npm tree in the run's working directory is not used", () => {
+      // The agent can write its working directory; a package it planted
+      // there must not become the next run's binary.
+      const tree = npmTree({ asWorkspace: true });
+      try {
+        const driver = new CodexSdkDriver({ env: { PATH: "/nonexistent" } });
+        const resolution = driver.resolveCodexBinary({
+          ...request(NO_NETWORK),
+          workingDirectory: tree.root,
+        });
+        expect(resolution.path).not.toBe(tree.binary);
+        expect(
+          resolution.checked.some((path) => path.startsWith(tree.root)),
+        ).toBe(false);
       } finally {
         tree.cleanup();
       }
@@ -658,7 +682,7 @@ describe.if(PLATFORM !== undefined)(
               listed.push(options);
               return [];
             },
-          }).run({ ...request(NO_NETWORK), workingDirectory: tree.root }),
+          }).run(request(NO_NETWORK)),
         );
         expect(realpathSync(listed[0]?.command ?? "")).toBe(tree.binary);
         const listingPath = (listed[0]?.env.PATH ?? "").split(":");

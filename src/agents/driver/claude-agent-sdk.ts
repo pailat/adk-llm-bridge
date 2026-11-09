@@ -998,10 +998,12 @@ export class ClaudeAgentSdkDriver {
    * Order: the configured `pathToClaudeCodeExecutable`, the
    * `CLAUDE_CODE_EXECUTABLE` and `CLAUDE_CODE_PATH` variables (driver
    * environment, then the run's credential), then the first existing candidate
-   * under `PATH`, the home directory, `executableSearchPaths` and
-   * `node_modules`.
+   * under `PATH`, the home directory, `executableSearchPaths` and the
+   * `node_modules` of the host process directory and of this package's
+   * install. The run's working directory is never searched, since the agent
+   * can write there.
    *
-   * @param request - The run request (credential and working directory).
+   * @param request - The run request, for its credential.
    * @returns The path, if any, and every candidate that was checked.
    */
   resolveClaudeExecutable(
@@ -1017,7 +1019,6 @@ export class ClaudeAgentSdkDriver {
       ],
       claudeExecutableCandidates({
         env: this.#env,
-        workingDirectory: request.workingDirectory,
         executableSearchPaths: this.#executableSearchPaths,
       }),
     );
@@ -1834,11 +1835,9 @@ export function mapPolicyToClaudeSdkPermission(
 
 function claudeExecutableCandidates({
   env,
-  workingDirectory,
   executableSearchPaths,
 }: {
   env: Record<string, string | undefined>;
-  workingDirectory?: string;
   executableSearchPaths?: string[];
 }): string[] {
   const executable = process.platform === "win32" ? "claude.exe" : "claude";
@@ -1862,7 +1861,6 @@ function claudeExecutableCandidates({
           executable,
         ),
       ),
-    workingDirectory,
   });
 }
 

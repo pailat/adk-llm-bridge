@@ -241,6 +241,14 @@ event with `EXTERNAL_AGENT_DEPENDENCY_MISSING`. A missing `claude`, `codex` or
 (`EXTERNAL_AGENT_MISSING_BINARY`). Both name the install command; neither
 throws out of the agent.
 
+The SDK drivers look for the `claude` or `codex` binary under `PATH`, the home
+directory, and the `node_modules` of the host process directory and of the
+bridge's own install. They never look in the run's `workingDirectory`: the
+agent can write there, so a binary it left behind would start the next run
+outside the runtime's sandbox. If the only copy is inside the workspace, set
+`CLAUDE_CODE_EXECUTABLE` or `CODEX_EXECUTABLE` to it. The CLI drivers start
+`command` as given, found on `PATH` without a shell.
+
 ## Error codes
 
 An error event's code lands on the ADK event's `errorCode`. The constants are

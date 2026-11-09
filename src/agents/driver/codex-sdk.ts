@@ -654,9 +654,12 @@ export class CodexSdkDriver {
    * @remarks
    * Order: `codexPathOverride`, `CODEX_EXECUTABLE`, `CODEX_CLI_PATH` (driver
    * env, then the run credential), `PATH` and `node_modules/.bin`, then the
-   * npm-installed `@openai/codex` package. It only checks that files exist.
+   * npm-installed `@openai/codex` package, both under the host process
+   * directory and this package's install. The run's working directory is
+   * never searched, since the agent can write there. It only checks that
+   * files exist.
    *
-   * @param request - The run, for its working directory and credential.
+   * @param request - The run, for its credential.
    * @returns The binary path (when found) and every location tried.
    */
   resolveCodexBinary(request: ExternalAgentRunRequest): CodexBinaryResolution {
@@ -668,10 +671,7 @@ export class CodexSdkDriver {
         readCredentialEnv(request, "CODEX_EXECUTABLE"),
         readCredentialEnv(request, "CODEX_CLI_PATH"),
       ],
-      codexBinaryCandidates({
-        env: this.#env,
-        workingDirectory: request.workingDirectory,
-      }),
+      codexBinaryCandidates({ env: this.#env }),
     );
     if (found.path) {
       return found;
@@ -679,7 +679,7 @@ export class CodexSdkDriver {
     const { checked } = found;
 
     // The npm-installed binary, found the way @openai/codex-sdk finds it.
-    for (const base of candidateBaseDirectories(request.workingDirectory)) {
+    for (const base of candidateBaseDirectories()) {
       const found = findNpmCodexBinary(base, checked);
       if (found) {
         return { ...found, checked };
@@ -1251,10 +1251,8 @@ function readSavedThreadId(
 
 function codexBinaryCandidates({
   env,
-  workingDirectory,
 }: {
   env: Record<string, string | undefined>;
-  workingDirectory?: string;
 }): string[] {
   const executable = process.platform === "win32" ? "codex.exe" : "codex";
   return executableCandidates({
@@ -1273,7 +1271,6 @@ function codexBinaryCandidates({
           executable,
         ),
       ),
-    workingDirectory,
   });
 }
 

@@ -1,7 +1,13 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { CodexAgent } from "../../../src/agents/codex-agent.js";
 import { CodexCliDriver } from "../../../src/agents/driver/codex-cli.js";
 import {
@@ -112,6 +118,31 @@ describe("CodexSdkDriver", () => {
 
     expect(resolution.path).toBe(executable);
     expect(options.codexPathOverride).toBe(executable);
+  });
+
+  test("never picks a Codex binary from the run's working directory", () => {
+    // The agent can write its working directory, so a binary planted there
+    // in one run would otherwise start, unsandboxed, the next run.
+    const workspace = mkdtempSync(join(tmpdir(), "codex-sdk-workspace-"));
+    const executable = process.platform === "win32" ? "codex.exe" : "codex";
+    const planted = join(workspace, "node_modules", ".bin", executable);
+    mkdirSync(dirname(planted), { recursive: true });
+    writeFileSync(planted, "#!/bin/sh\nexit 0\n");
+    chmodSync(planted, 0o755);
+    const driver = new CodexSdkDriver({ env: { PATH: "", HOME: workspace } });
+
+    const resolution = driver.resolveCodexBinary({
+      provider: CODEX_PROVIDER,
+      context: {} as never,
+      workingDirectory: workspace,
+    });
+
+    expect(resolution.path).not.toBe(planted);
+    expect(
+      resolution.checked.some((path) =>
+        path.startsWith(join(workspace, "node_modules")),
+      ),
+    ).toBe(false);
   });
 
   test("emits actionable Codex binary lookup errors", async () => {

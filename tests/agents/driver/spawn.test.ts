@@ -353,15 +353,16 @@ describe("driver executable lookup", () => {
       env: { PATH: ["/a", "", "/b", "/a"].join(delimiter) },
       extraDirs: ["/extra", undefined],
       packagePaths: (base) => [`${base}/pkg/tool`],
-      workingDirectory: "/work",
     });
     expect(candidates.slice(0, 3)).toEqual([
       "/a/tool",
       "/b/tool",
       "/extra/tool",
     ]);
-    expect(candidates[3]).toBe("/work/node_modules/.bin/tool");
-    expect(candidates[4]).toBe("/work/pkg/tool");
+    expect(candidates[3]).toBe(
+      resolve(process.cwd(), "node_modules", ".bin", "tool"),
+    );
+    expect(candidates[4]).toBe(resolve(process.cwd(), "pkg", "tool"));
     expect(new Set(candidates).size).toBe(candidates.length);
   });
 

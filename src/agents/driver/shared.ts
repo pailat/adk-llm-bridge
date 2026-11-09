@@ -4,7 +4,7 @@
  */
 
 import { existsSync } from "node:fs";
-import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
+import { delimiter, dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { InputValidationError } from "@google/adk";
 import { readAllowedEnv } from "../auth/env.js";
@@ -114,15 +114,16 @@ export function copyIfPresent(
 /**
  * Directories to search for locally installed CLI packages.
  *
- * @param workingDirectory - The run's working directory, searched first.
- * @returns Absolute, de-duplicated paths: the working directory, the process
- * directory, and up to eight parents of this module.
+ * @remarks
+ * The run's working directory is never searched: the agent can write there,
+ * so a binary planted in one run would start the next one outside the
+ * runtime's sandbox.
+ *
+ * @returns Absolute, de-duplicated paths: the process directory and up to
+ * eight parents of this module.
  */
-export function candidateBaseDirectories(workingDirectory?: string): string[] {
+export function candidateBaseDirectories(): string[] {
   const roots = new Set<string>();
-  if (workingDirectory) {
-    roots.add(resolve(workingDirectory));
-  }
   roots.add(process.cwd());
 
   let current = dirname(fileURLToPath(import.meta.url));
@@ -441,7 +442,7 @@ export function findExecutable(
  * paths `packagePaths` returns for it. Duplicates are dropped.
  *
  * @param options - The executable name, the parent environment, extra
- * directories, a per-base package path builder and the working directory.
+ * directories and a per-base package path builder.
  * @returns Absolute candidate paths.
  */
 export function executableCandidates(options: {
@@ -449,7 +450,6 @@ export function executableCandidates(options: {
   env: Record<string, string | undefined>;
   extraDirs?: ReadonlyArray<string | undefined>;
   packagePaths?: (base: string) => readonly string[];
-  workingDirectory?: string;
 }): string[] {
   const candidates = new Set<string>();
   const dirs = [
@@ -461,7 +461,7 @@ export function executableCandidates(options: {
       candidates.add(join(dir, options.executable));
     }
   }
-  for (const base of candidateBaseDirectories(options.workingDirectory)) {
+  for (const base of candidateBaseDirectories()) {
     candidates.add(join(base, "node_modules", ".bin", options.executable));
     for (const path of options.packagePaths?.(base) ?? []) {
       candidates.add(path);
