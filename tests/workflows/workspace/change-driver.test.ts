@@ -1,9 +1,3 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import { describe, expect, test } from "bun:test";
 import {
   createWorkflowChangeSet,
@@ -12,6 +6,7 @@ import {
   verifyWorkflowChangeSet,
   WORKFLOW_CHANGE_AUTHORITY_LEASE,
   type WorkflowAcceptedChangeReceipt,
+  type WorkflowAuthoritativeChangeReceipt,
   type WorkflowChangeInspector,
   WorkflowChangeMismatchError,
   type WorkflowChangeReceiptAuthority,
@@ -49,7 +44,7 @@ async function exampleChangeSet() {
 
 function receiptFor(
   changeSet: Awaited<ReturnType<typeof exampleChangeSet>>,
-): WorkflowAcceptedChangeReceipt {
+): WorkflowAuthoritativeChangeReceipt {
   return {
     receiptId: "receipt-1",
     verdict: "accepted",
@@ -286,7 +281,7 @@ describe("workspace change ports", () => {
         }),
         commit: async (_workspace, input) => {
           expect(input.changeSet).toEqual(changeSet);
-          expect(input.receipt).toEqual(
+          expect<WorkflowAcceptedChangeReceipt>(input.receipt).toEqual(
             normalizeAcceptedChangeReceipt(receipt),
           );
           return {

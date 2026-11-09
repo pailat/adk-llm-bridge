@@ -1,10 +1,4 @@
 /**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
-/**
  * The single canonical JSON form and `sha256:` digest used by workflows.
  *
  * Canonical form: `JSON.stringify` semantics (`toJSON`, boxed primitives,
@@ -30,17 +24,34 @@
  * (planned: the first release after 0.8.0).
  */
 
+/**
+ * Prefix of every canonical digest string.
+ *
+ * @internal
+ */
 export const CANONICAL_DIGEST_PREFIX = "sha256:";
 
-/** Pre-0.7.0 serializations that stored digests may still use. */
+/**
+ * Pre-0.7.0 serializations that stored digests may still use.
+ *
+ * @internal
+ */
 export type LegacyDigestForm = "locale" | "insertion";
 
-/** Serializes `value` in the canonical form described in this module. */
+/**
+ * Serializes `value` in the canonical form described in this module.
+ *
+ * @internal
+ */
 export function canonicalJson(value: unknown): string {
   return writeValue("", value, []) ?? "undefined";
 }
 
-/** Serializes `value` in a pre-0.7.0 form. Only for reading old digests. */
+/**
+ * Serializes `value` in a pre-0.7.0 form. Only for reading old digests.
+ *
+ * @internal
+ */
 export function legacyJson(value: unknown, form: LegacyDigestForm): string {
   if (form === "insertion") return JSON.stringify(value) ?? "undefined";
   return (
@@ -57,7 +68,11 @@ export function legacyJson(value: unknown, form: LegacyDigestForm): string {
   );
 }
 
-/** `sha256:<hex>` of the UTF-8 bytes of `text`. */
+/**
+ * `sha256:<hex>` of the UTF-8 bytes of `text`.
+ *
+ * @internal
+ */
 export async function sha256Digest(text: string): Promise<string> {
   const digest = await crypto.subtle.digest(
     "SHA-256",
@@ -66,12 +81,20 @@ export async function sha256Digest(text: string): Promise<string> {
   return `${CANONICAL_DIGEST_PREFIX}${toHex(new Uint8Array(digest))}`;
 }
 
-/** Canonical `sha256:` digest of `value`. */
+/**
+ * Canonical `sha256:` digest of `value`.
+ *
+ * @internal
+ */
 export function canonicalDigest(value: unknown): Promise<string> {
   return sha256Digest(canonicalJson(value));
 }
 
-/** Pre-0.7.0 `sha256:` digest of `value`. Only for reading old digests. */
+/**
+ * Pre-0.7.0 `sha256:` digest of `value`. Only for reading old digests.
+ *
+ * @internal
+ */
 export function legacyDigest(
   value: unknown,
   form: LegacyDigestForm,
@@ -85,6 +108,8 @@ export function legacyDigest(
  * Returns `stored` when it is the legacy digest of the same value (so stored
  * checkpoints and the idempotency keys derived from them stay stable), and
  * `current` otherwise. The legacy digest is only computed on a mismatch.
+ *
+ * @internal
  */
 export async function resolveStoredDigest(
   stored: string | undefined,
@@ -102,6 +127,8 @@ const legacyAliases = new Map<string, string>();
  * Records that `legacy` is the pre-0.7.0 digest of the value whose canonical
  * digest is `current`, for opaque digests (such as agent revisions) that are
  * compared later without access to the value. Process-local and bounded.
+ *
+ * @internal
  */
 export function rememberLegacyDigest(current: string, legacy: string): void {
   if (current === legacy) return;
@@ -113,7 +140,11 @@ export function rememberLegacyDigest(current: string, legacy: string): void {
   }
 }
 
-/** True when `stored` is the remembered legacy digest of `current`. */
+/**
+ * True when `stored` is the remembered legacy digest of `current`.
+ *
+ * @internal
+ */
 export function isRememberedLegacyDigest(
   stored: string,
   current: string,
@@ -138,6 +169,9 @@ function writeValue(
   if (value instanceof Number) value = Number(value);
   else if (value instanceof String) value = String(value);
   else if (value instanceof Boolean) value = value.valueOf();
+  // A boxed BigInt (`Object(1n)`) unwraps to a primitive and throws below,
+  // as JSON.stringify does.
+  else if (value instanceof BigInt) value = value.valueOf();
 
   if (value === null) return "null";
   switch (typeof value) {

@@ -1,9 +1,3 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import {
   type BaseAgentConfig,
   InvocationContext,
@@ -41,7 +35,11 @@ export type WorkflowNodeConfig = Pick<
   retryFailedSteps?: boolean;
 };
 
-/** Picks the node settings to forward to the `BaseAgent` constructor. */
+/**
+ * Picks the node settings to forward to the `BaseAgent` constructor.
+ *
+ * @internal
+ */
 export function pickWorkflowNodeConfig(
   config: WorkflowNodeConfig,
 ): Omit<WorkflowNodeConfig, "retryFailedSteps"> {
@@ -67,7 +65,11 @@ export function pickWorkflowNodeConfig(
   };
 }
 
-/** Whether re-entering an execution re-runs steps whose last attempt failed. */
+/**
+ * Whether re-entering an execution re-runs steps whose last attempt failed.
+ *
+ * @internal
+ */
 export function resolveRetryFailedSteps(
   config: Pick<WorkflowNodeConfig, "retryConfig" | "retryFailedSteps">,
 ): boolean {
@@ -81,6 +83,8 @@ export function resolveRetryFailedSteps(
  * `NodeContext.abortSignal`, which is not part of the agent's invocation
  * context. Without merging it in, the workflow runtime keeps running after the
  * node timed out, and an ADK retry would overlap with it.
+ *
+ * @internal
  */
 export function invocationContextForNode(ctx: NodeContext): InvocationContext {
   const base = ctx.getInvocationContext();

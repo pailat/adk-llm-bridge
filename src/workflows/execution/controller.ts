@@ -1,10 +1,5 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import { isWorkflowEvent, type WorkflowEvent } from "../events.js";
+import { normalizeHostError } from "../internal/error-support.js";
 import {
   WorkflowExecutionControlError,
   type WorkflowExecutionDriver,
@@ -26,11 +21,21 @@ import type {
 } from "./stores.js";
 import { validateExecutionId } from "./stores.js";
 
+/** Dependencies and options for {@link WorkflowExecutionController}. */
 export interface WorkflowExecutionControllerConfig {
+  /** Durable store for execution records. */
   store: WorkflowExecutionStore;
+  /** Ordered event log for execution events. */
   eventStore: WorkflowExecutionEventStore;
+  /** Executor that runs the workflow for each started or resumed execution. */
   driver: WorkflowExecutionDriver;
+  /**
+   * Clock returning epoch milliseconds; must return a finite, non-negative number.
+   *
+   * @defaultValue `Date.now`
+   */
   now?: () => number;
+  /** Observer for errors thrown by a background run; errors it throws are ignored. */
   onBackgroundError?: (error: unknown, executionId: string) => void;
 }
 
@@ -65,6 +70,15 @@ export class WorkflowExecutionController {
     this.#onBackgroundError = config.onBackgroundError;
   }
 
+  /**
+   * Creates an execution and starts it in the background.
+   *
+   * @param request - Execution to create.
+   * @returns The queued execution record.
+   * @throws {@link WorkflowExecutionControlError} with code `WORKFLOW_EXECUTION_INVALID_REQUEST`
+   * when the request is malformed, or `WORKFLOW_EXECUTION_DUPLICATE` when the
+   * execution id already exists.
+   */
   async start(
     request: WorkflowExecutionRequest,
   ): Promise<WorkflowExecutionRecord> {
@@ -84,6 +98,16 @@ export class WorkflowExecutionController {
     return record;
   }
 
+  /**
+   * Re-queues a failed or cancelled execution and starts it again.
+   *
+   * @param request - Execution id and the `checkpoint` strategy acknowledgement.
+   * @returns The re-queued execution record.
+   * @throws {@link WorkflowExecutionControlError} with code `WORKFLOW_EXECUTION_INVALID_REQUEST`
+   * when the request is malformed, `WORKFLOW_EXECUTION_INVALID_TRANSITION` when
+   * the execution is active locally or not `failed` or `cancelled`, and
+   * `WORKFLOW_EXECUTION_NOT_FOUND` when it does not exist.
+   */
   async resume(
     request: WorkflowExecutionResumeRequest,
   ): Promise<WorkflowExecutionRecord> {
@@ -136,10 +160,32 @@ export class WorkflowExecutionController {
     return queued;
   }
 
+  /**
+   * Reads the current record of an execution.
+   *
+   * @param executionId - Execution to read.
+   * @returns The stored execution record.
+   * @throws {@link WorkflowExecutionControlError} with code `WORKFLOW_EXECUTION_NOT_FOUND`
+   * when the execution does not exist.
+   */
   async status(executionId: string): Promise<WorkflowExecutionRecord> {
     return await this.#required(executionId);
   }
 
+  /**
+   * Cancels an execution.
+   *
+   * @remarks
+   * A terminal execution is returned unchanged. A running execution moves to
+   * `cancelling` and its driver is aborted; a queued one is cancelled directly.
+   *
+   * @param executionId - Execution to cancel.
+   * @returns The execution record after the cancellation request.
+   * @throws {@link WorkflowExecutionControlError} with code `WORKFLOW_EXECUTION_NOT_OWNED`
+   * when the record is `running` but no local run owns it, and
+   * `WORKFLOW_EXECUTION_CONFLICT` when concurrent writers keep winning the
+   * compare-and-set.
+   */
   async cancel(executionId: string): Promise<WorkflowExecutionRecord> {
     validateExecutionId(executionId);
     for (let retry = 0; retry < 8; retry++) {
@@ -182,12 +228,26 @@ export class WorkflowExecutionController {
     );
   }
 
+  /**
+   * Lists executions, one page at a time.
+   *
+   * @param request - Status filter and pagination.
+   * @returns One page of records and the next cursor.
+   */
   async list(
     request: WorkflowExecutionListRequest = {},
   ): Promise<WorkflowExecutionListResult> {
     return await this.#store.list(request);
   }
 
+  /**
+   * Reads stored events of an execution after a cursor.
+   *
+   * @param request - Execution id, cursor and page size.
+   * @returns The next page of events and the cursor to continue from.
+   * @throws {@link WorkflowExecutionControlError} with code `WORKFLOW_EXECUTION_NOT_FOUND`
+   * when the execution does not exist.
+   */
   async events(
     request: WorkflowExecutionEventReadRequest,
   ): Promise<WorkflowExecutionEventReadResult> {
@@ -444,28 +504,13 @@ function validateIdentity(value: string, field: string): void {
 }
 
 function normalizeError(error: unknown): WorkflowExecutionError {
-  let code = "WORKFLOW_EXECUTION_FAILED";
-  let message = "Workflow execution failed";
-  if (error && typeof error === "object") {
-    try {
-      if (
-        "code" in error &&
-        typeof error.code === "string" &&
-        /^[A-Z][A-Z0-9_]{0,127}$/u.test(error.code)
-      ) {
-        code = error.code;
-      }
-      if (
-        "message" in error &&
-        typeof error.message === "string" &&
-        error.message.length > 0
-      ) {
-        message = error.message.slice(0, 4_096);
-      }
-    } catch {
-      // Host error accessors are not trusted.
-    }
-  }
+  const { code, message } = normalizeHostError(error, {
+    fallbackCode: "WORKFLOW_EXECUTION_FAILED",
+    fallbackMessage: "Workflow execution failed",
+    maxCodeLength: 128,
+    maxMessageLength: 4_096,
+    codePattern: /^[A-Z][A-Z0-9_]*$/u,
+  });
   return Object.freeze({ code, message });
 }
 
@@ -481,10 +526,16 @@ function isTerminal(status: WorkflowExecutionStatus): boolean {
 }
 
 function isConflict(error: unknown): boolean {
-  return (
-    error instanceof WorkflowExecutionControlError &&
-    error.code === "WORKFLOW_EXECUTION_CONFLICT"
-  );
+  try {
+    return (
+      error instanceof WorkflowExecutionControlError &&
+      error.code === "WORKFLOW_EXECUTION_CONFLICT"
+    );
+  } catch {
+    // A host error whose prototype or code cannot be read is not a conflict;
+    // the caller rethrows the original error.
+    return false;
+  }
 }
 
 function notOwned(executionId: string): never {

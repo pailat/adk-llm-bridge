@@ -1,17 +1,14 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import {
   type BaseAgent,
   createEvent,
   createEventActions,
   type Event,
   type InvocationContext,
+  REQUEST_CONFIRMATION_FUNCTION_CALL_NAME,
+  REQUEST_CREDENTIAL_FUNCTION_CALL_NAME,
+  REQUEST_INPUT_FUNCTION_CALL_NAME,
 } from "@google/adk";
-import type { Content } from "@google/genai";
+import type { Content, Part } from "@google/genai";
 import type {
   AgentInvocationGateway,
   AgentInvocationResult,
@@ -39,6 +36,7 @@ import {
   WorkflowInterruptedError,
   type WorkflowOutput,
   type WorkflowParallelOptions,
+  type WorkflowRetryPolicy,
   type WorkflowStep,
   type WorkflowStepFailure,
   type WorkflowStepInterrupt,
@@ -74,25 +72,49 @@ import type {
 import { AsyncSemaphore } from "./async-semaphore.js";
 import { WorkflowCheckpointCoordinator } from "./workflow-checkpoint-coordinator.js";
 
+/**
+ * Resolves the durable execution id for an ADK invocation.
+ *
+ * @remarks
+ * Checkpoints are keyed by this id, so it must be stable across a resume.
+ */
 export type WorkflowExecutionIdResolver = (
   context: InvocationContext,
 ) => string | Promise<string>;
 
+/** Step identity passed to {@link WorkflowRuntimeHooks}. */
 export interface WorkflowStepHookContext {
+  /** Trusted definition of the running workflow. */
   definition: TrustedWorkflowDefinition;
+  /** Id of the execution the step belongs to. */
   executionId: string;
+  /** Step about to run or just finished. */
   step: WorkflowStep;
 }
 
-/** Internal extension point used by durable runtimes without coupling the gateway. */
+/**
+ * Extension point for durable runtimes: observe or replay steps and attempts
+ * without coupling the agent invocation gateway to a checkpoint store.
+ *
+ * @remarks
+ * Passed as `runtimeHooks` to {@link WorkflowAgent} and
+ * {@link ScriptWorkflowAgent}.
+ */
 export interface WorkflowRuntimeHooks {
+  /**
+   * Called before a step runs. Returning a result replays it instead of invoking
+   * the agent; returning `undefined` lets the step run. Not called on a resume
+   * of a waiting step.
+   */
   beforeStep?(
     context: WorkflowStepHookContext,
   ): WorkflowStepResult | undefined | Promise<WorkflowStepResult | undefined>;
+  /** Called after a step completes successfully. */
   afterStep?(
     context: WorkflowStepHookContext,
     result: WorkflowStepResult,
   ): void | Promise<void>;
+  /** Called after a step fails. */
   stepFailed?(
     context: WorkflowStepHookContext,
     failure: WorkflowStepFailure,
@@ -122,21 +144,36 @@ export interface WorkflowRuntimeHooks {
   ): void | Promise<void>;
 }
 
+/**
+ * Dependencies and options for {@link WorkflowRuntime}.
+ *
+ * @internal
+ */
 export interface WorkflowRuntimeConfig {
+  /** Trusted definition to execute. */
   definition: TrustedWorkflowDefinition;
   /**
    * Durable identity used by checkpoints. Defaults to the executable trusted
    * definition, but script adapters provide their original source definition.
    */
   checkpointDefinition?: WorkflowDefinition;
+  /** ADK invocation the workflow runs inside. */
   parentContext: InvocationContext;
+  /** Name of the workflow agent, used in telemetry and execution id resolution. */
   agentName: string;
+  /** Sub-agents a step may invoke, keyed by name; any other agent name is rejected. */
   declaredAgents: ReadonlyMap<string, BaseAgent>;
+  /** Gateway through which agent steps are invoked. */
   gateway: AgentInvocationGateway;
+  /** Receives each ADK event the runtime produces. */
   eventSink: (event: Event) => void | Promise<void>;
+  /** Optional hooks that observe or replay steps and attempts. */
   hooks?: WorkflowRuntimeHooks;
+  /** Store for workflow checkpoints. Defaults to the ADK session state store. */
   checkpointStore?: WorkflowCheckpointStore;
+  /** Resolves the durable execution id. Defaults to the id of the run waiting for an answer in the session, else the ADK invocation id. */
   resolveExecutionId?: WorkflowExecutionIdResolver;
+  /** Workspace coordination for steps that declare `writePaths`; such a step fails without it. */
   workspace?: WorkflowWorkspaceConfig;
   /** Host-owned cancellation signal scoped to this runtime invocation. */
   abortSignal?: AbortSignal;
@@ -154,7 +191,11 @@ export interface WorkflowRuntimeConfig {
   retryFailedSteps?: boolean;
 }
 
-/** Executes one trusted workflow definition inside an ADK invocation. */
+/**
+ * Executes one trusted workflow definition inside an ADK invocation.
+ *
+ * @internal
+ */
 export class WorkflowRuntime {
   readonly #definition: TrustedWorkflowDefinition;
   readonly #checkpointDefinition: WorkflowDefinition;
@@ -205,6 +246,13 @@ export class WorkflowRuntime {
     this.#globalSemaphore = new AsyncSemaphore(this.#limits.maxConcurrency);
   }
 
+  /**
+   * Runs the workflow once, checkpointing every step.
+   *
+   * @returns The execution summary; its status is `waiting` when steps await input.
+   * @throws {@link WorkflowError} when the workflow fails or is aborted; the
+   * failure is checkpointed and emitted as an `error` event first.
+   */
   execute(): Promise<WorkflowExecutionSummary> {
     return withWorkflowSpan(
       {
@@ -416,10 +464,14 @@ export class WorkflowRuntime {
     }
 
     // A waiting step continues with the answer carried by this turn; without
-    // one it keeps waiting.
+    // one it keeps waiting and re-emits its pending request.
     const resume =
       prepared.resolution.action === "resume"
-        ? this.resumeOf(step, prepared.resolution.interrupt)
+        ? await this.resumeOf(
+            step,
+            prepared.resolution.interrupt,
+            prepared.resolution.attempt,
+          )
         : undefined;
 
     // Attempt number of a step left `running` in the checkpoint; cleared once the
@@ -606,23 +658,109 @@ export class WorkflowRuntime {
     }
   }
 
-  /** The answer to a waiting step carried by this turn, or "still waiting". */
-  private resumeOf(
+  /**
+   * The answer to a waiting step carried by this turn. Without one the step
+   * keeps waiting: its pending request events and a `step_waiting` event are
+   * emitted again, so a caller that only sees this turn (an outer workflow or
+   * gateway re-entering a still-waiting run) still gets the interrupt.
+   */
+  private async resumeOf(
     step: WorkflowStep,
     interrupt: WorkflowStepInterrupt,
-  ): StepResume {
+    attempt: number,
+  ): Promise<StepResume> {
     const answer = this.#parentContext.userContent;
     const answered = functionResponseIds(answer);
     if (
       !answer ||
       !interrupt.functionCallIds.some((callId) => answered.has(callId))
     ) {
+      await this.reemitPendingInterrupt(step, interrupt, attempt);
       throw new WorkflowInterruptedError([{ stepId: step.id, interrupt }]);
     }
     return {
       answer,
-      events: interrupt.events as unknown as readonly Event[],
+      events: storedInterruptEvents(interrupt),
     };
+  }
+
+  /**
+   * Emits the step's pending requests again as new events of this turn, then
+   * its `step_waiting` event, so a caller that only sees this turn still finds
+   * the interrupt.
+   *
+   * Nothing the model would see twice is emitted. The session keeps these
+   * events, and a later run of the step with inherited history builds its
+   * model context from them, where a repeated function call id is rejected by
+   * providers that require unique ids:
+   * - an `adk_request_*` call is emitted as its call part alone (no text),
+   *   which ADK keeps out of model context and still reports as a request;
+   * - any other pending long-running id is emitted as an event with no
+   *   content and only `longRunningToolIds`, which ADK drops from model
+   *   context and the gateway still counts as pending.
+   *
+   * Answered and exempt calls (such as an ADK `NodeTool` wrapper call) are not
+   * pending, so they are not emitted.
+   */
+  private async reemitPendingInterrupt(
+    step: WorkflowStep,
+    interrupt: WorkflowStepInterrupt,
+    attempt: number,
+  ): Promise<void> {
+    const pending = new Set(interrupt.functionCallIds);
+    const stored = storedInterruptEvents(interrupt);
+    const requestIds = new Set(
+      stored.flatMap((event) =>
+        requestCallParts(event, pending).map(
+          (part) => part.functionCall?.id as string,
+        ),
+      ),
+    );
+    const emitted = new Set<string>();
+    for (const event of stored) {
+      const origin = {
+        invocationId: this.#parentContext.invocationId,
+        author: event.author,
+        ...(event.branch === undefined ? {} : { branch: event.branch }),
+      };
+      const parts = requestCallParts(event, pending).filter(
+        (part) => !emitted.has(part.functionCall?.id as string),
+      );
+      if (parts.length > 0) {
+        const ids = parts.map((part) => part.functionCall?.id as string);
+        for (const id of ids) emitted.add(id);
+        const longRunning = (event.longRunningToolIds ?? []).filter((id) =>
+          ids.includes(id),
+        );
+        await this.#eventSink(
+          createEvent({
+            ...origin,
+            content: { role: event.content?.role ?? "model", parts },
+            ...(longRunning.length > 0
+              ? { longRunningToolIds: longRunning }
+              : {}),
+          }),
+        );
+      }
+      const markers = (event.longRunningToolIds ?? []).filter(
+        (id) => pending.has(id) && !requestIds.has(id) && !emitted.has(id),
+      );
+      if (markers.length > 0) {
+        for (const id of markers) emitted.add(id);
+        await this.#eventSink(
+          createEvent({ ...origin, longRunningToolIds: markers }),
+        );
+      }
+    }
+    await this.emitWorkflowEvent({
+      ...this.envelope(),
+      type: "step_waiting",
+      stepId: step.id,
+      agentName: step.agentName,
+      attempt,
+      kind: interrupt.kind,
+      functionCallIds: interrupt.functionCallIds,
+    } satisfies WorkflowStepWaitingEvent);
   }
 
   private async recordStepFailure(
@@ -1070,8 +1208,15 @@ function throwIfAttemptAborted(
   throwIfAborted(signal);
 }
 
+/** Content with an optional string `role` and object `parts`, as ADK reads it. */
 function isWorkflowContent(value: unknown): value is Content {
-  return isRecord(value) && Array.isArray(value.parts) && isJsonSafe(value);
+  return (
+    isRecord(value) &&
+    (value.role === undefined || typeof value.role === "string") &&
+    Array.isArray(value.parts) &&
+    value.parts.every(isRecord) &&
+    isJsonSafe(value)
+  );
 }
 
 function isJsonSafe(value: unknown, seen = new Set<object>()): boolean {
@@ -1180,24 +1325,73 @@ function normalizedAgentRevision(revision: string | undefined): string {
   return revision ?? WORKFLOW_AGENT_REVISION_UNVERSIONED;
 }
 
+/** Largest delay `setTimeout` honors; longer delays fire after about 1 ms. */
+const MAX_RETRY_DELAY_MS = 2_147_483_647;
+const RETRY_POLICY_KEYS: Readonly<Record<keyof WorkflowRetryPolicy, true>> = {
+  maxAttempts: true,
+  delayMs: true,
+  backoffMultiplier: true,
+  maxDelayMs: true,
+};
+
 function validateRetry(step: WorkflowStep, limit: number): number {
-  const attempts = step.retry?.maxAttempts ?? 1;
-  if (!Number.isInteger(attempts) || attempts < 1 || attempts > limit) {
+  const retry: unknown = step.retry;
+  if (
+    retry !== undefined &&
+    (retry === null || typeof retry !== "object" || Array.isArray(retry))
+  ) {
+    throw invalidRetry(step, "retry must be an object");
+  }
+  const policy = (retry ?? {}) as Record<string, unknown>;
+  for (const name of Object.keys(policy)) {
+    if (!Object.hasOwn(RETRY_POLICY_KEYS, name)) {
+      throw invalidRetry(step, `retry has an unknown field ${name}`);
+    }
+  }
+  const attempts = policy.maxAttempts ?? 1;
+  if (
+    typeof attempts !== "number" ||
+    !Number.isInteger(attempts) ||
+    attempts < 1 ||
+    attempts > limit
+  ) {
     throw new WorkflowError(
       "WORKFLOW_LIMIT_EXCEEDED",
       `Step ${step.id} maxAttempts must be between 1 and ${limit}`,
-      { stepId: step.id, maxAttempts: attempts, limit },
+      {
+        stepId: step.id,
+        ...(typeof attempts === "number" && Number.isFinite(attempts)
+          ? { maxAttempts: attempts }
+          : {}),
+        limit,
+      },
     );
   }
-  for (const [name, value] of Object.entries(step.retry ?? {})) {
-    if (name !== "maxAttempts" && value !== undefined && value < 0) {
-      throw new WorkflowError(
-        "WORKFLOW_DEFINITION_INVALID",
-        `Step ${step.id} retry ${name} cannot be negative`,
+  for (const name of ["delayMs", "backoffMultiplier", "maxDelayMs"] as const) {
+    const value = policy[name];
+    if (value === undefined) continue;
+    if (typeof value !== "number" || !Number.isFinite(value)) {
+      throw invalidRetry(step, `retry ${name} must be a finite number`);
+    }
+    if (value < 0) {
+      throw invalidRetry(step, `retry ${name} cannot be negative`);
+    }
+    if (name !== "backoffMultiplier" && value > MAX_RETRY_DELAY_MS) {
+      throw invalidRetry(
+        step,
+        `retry ${name} cannot exceed ${MAX_RETRY_DELAY_MS} ms`,
       );
     }
   }
   return attempts;
+}
+
+function invalidRetry(step: WorkflowStep, message: string): WorkflowError {
+  return new WorkflowError(
+    "WORKFLOW_DEFINITION_INVALID",
+    `Step ${step.id} ${message}`,
+    { stepId: step.id },
+  );
 }
 
 function validateParallelOptions(
@@ -1308,7 +1502,11 @@ async function retryDelay(
   const base = step.retry?.delayMs ?? 0;
   const multiplier = step.retry?.backoffMultiplier ?? 1;
   const calculated = base * multiplier ** Math.max(0, failedAttempt - 1);
-  const delay = Math.min(calculated, step.retry?.maxDelayMs ?? calculated);
+  const delay = Math.min(
+    calculated,
+    step.retry?.maxDelayMs ?? calculated,
+    MAX_RETRY_DELAY_MS,
+  );
   if (delay > 0) await abortableDelay(delay, signal);
 }
 
@@ -1475,6 +1673,37 @@ function functionResponseIds(content: Content | undefined): Set<string> {
     if (typeof id === "string" && id !== "") ids.add(id);
   }
   return ids;
+}
+
+/** ADK's human-in-the-loop request calls, which ADK keeps out of model context. */
+const REQUEST_CALL_NAMES: ReadonlySet<string> = new Set([
+  REQUEST_INPUT_FUNCTION_CALL_NAME,
+  REQUEST_CONFIRMATION_FUNCTION_CALL_NAME,
+  REQUEST_CREDENTIAL_FUNCTION_CALL_NAME,
+]);
+
+/** The pending `adk_request_*` function-call parts of a stored event. */
+function requestCallParts(event: Event, pending: ReadonlySet<string>): Part[] {
+  return (event.content?.parts ?? []).filter((part) => {
+    const call = part.functionCall;
+    return (
+      typeof call?.id === "string" &&
+      pending.has(call.id) &&
+      typeof call.name === "string" &&
+      REQUEST_CALL_NAMES.has(call.name)
+    );
+  });
+}
+
+/**
+ * The stored events of an interrupt as ADK events. The checkpoint schema
+ * checks, at load, the event fields that resuming reads (`author`, `branch`,
+ * `longRunningToolIds`, `content.parts` and their `functionCall`).
+ */
+function storedInterruptEvents(
+  interrupt: WorkflowStepInterrupt,
+): readonly Event[] {
+  return interrupt.events as unknown as readonly Event[];
 }
 
 /** JSON form of a gateway interrupt, as persisted in the checkpoint. */

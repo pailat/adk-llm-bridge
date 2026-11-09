@@ -1,9 +1,3 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import { describe, expect, test } from "bun:test";
 import {
   WORKFLOW_CONTROL_PROTOCOL,
@@ -27,8 +21,30 @@ interface RecordedCall {
   args: unknown[];
 }
 
-/** Every service is a recording stub, so tests see exactly what was forwarded. */
-function harness() {
+/**
+ * What a stub returns. Results are revalidated, so the stub keeps each
+ * operation's result shape: plan and ownership lists are arrays, an artifact
+ * read carries the execution it was asked for, and an artifact page has an
+ * `artifacts` array.
+ */
+function stubResult(target: string, method: string): unknown {
+  const result = { forwarded: method };
+  if (target === "artifacts" && method === "get") {
+    return { ...result, executionId: "execution-1" };
+  }
+  if (target === "artifacts" && method === "list") {
+    return { ...result, artifacts: [] };
+  }
+  return method === "list" && (target === "plans" || target === "ownership")
+    ? [result]
+    : result;
+}
+
+/**
+ * Every service is a recording stub, so tests see exactly what was forwarded.
+ * The harness runs in trusted host mode unless `trustedHostMode` is false.
+ */
+function harness(trustedHostMode = true) {
   const calls: RecordedCall[] = [];
   const stub = <T>(target: string): T =>
     new Proxy(
@@ -38,7 +54,7 @@ function harness() {
           typeof method === "string"
             ? async (...args: unknown[]) => {
                 calls.push({ target, method, args });
-                return { forwarded: method };
+                return stubResult(target, method);
               }
             : undefined,
       },
@@ -52,7 +68,7 @@ function harness() {
     ownership: stub("ownership"),
     changeValidation: stub("changeValidation"),
     dispatcher: stub("dispatcher"),
-    trustedHostMode: true,
+    trustedHostMode,
   });
   // Trusted host mode serves task operations without an actor; plan and
   // ownership operations always need the host-authenticated actor.
@@ -68,7 +84,7 @@ function harness() {
       { ...envelope, operation, payload } as never,
       { actor },
     );
-  return { calls, dispatch };
+  return { calls, control, dispatch };
 }
 
 const ACTOR = new WorkflowActorContext({
@@ -371,10 +387,16 @@ describe("WorkflowControlPlane payload validation", () => {
     ],
     [
       "artifact.get",
-      { artifactId: "artifact-1" },
+      { executionId: "execution-1", artifactId: "artifact-1" },
       "artifacts",
       "get",
-      [{ artifactId: "artifact-1", signal: undefined }],
+      [
+        {
+          executionId: "execution-1",
+          artifactId: "artifact-1",
+          signal: undefined,
+        },
+      ],
     ],
     [
       "artifact.list",
@@ -497,9 +519,9 @@ describe("WorkflowControlPlane payload validation", () => {
     "forwards a valid %s payload unchanged",
     async (operation, payload, target, method, args) => {
       const { calls, dispatch } = harness();
-      await expect(dispatch(operation, payload)).resolves.toEqual({
-        forwarded: method,
-      });
+      await expect(dispatch(operation, payload)).resolves.toEqual(
+        stubResult(target, method),
+      );
       expect(calls).toHaveLength(1);
       expect(calls[0]?.target).toBe(target);
       expect(calls[0]?.method).toBe(method);
@@ -747,11 +769,22 @@ describe("WorkflowControlPlane payload validation", () => {
     ],
     [
       "artifact.get",
-      { artifactId: "" },
+      { executionId: "e", artifactId: "" },
       /artifact identity payload is invalid/,
     ],
-    ["artifact.list", { limit: 0 }, /artifact list limit/],
-    ["artifact.list", { taskId: 3 }, /artifact list taskId/],
+    [
+      "artifact.get",
+      { artifactId: "a" },
+      /artifact identity payload is invalid/,
+    ],
+    [
+      "artifact.get",
+      { executionId: "e", artifactId: "a", taskId: "t" },
+      /artifact identity payload is invalid/,
+    ],
+    ["artifact.list", {}, /artifact list executionId/],
+    ["artifact.list", { executionId: "e", limit: 0 }, /artifact list limit/],
+    ["artifact.list", { executionId: "e", taskId: 3 }, /artifact list taskId/],
     [
       "integration.validate",
       { gateId: "g", executionId: "e", taskId: "t" },
@@ -1029,6 +1062,23 @@ describe("WorkflowControlPlane payload validation", () => {
       expect(calls).toHaveLength(0);
     },
   );
+
+  test("rejects valid execution, artifact and integration payloads without an actor outside trusted host mode", async () => {
+    const { calls, control } = harness(false);
+    const scoped = forwarded.filter(([operation]) =>
+      /^(execution|artifact|integration)\./u.test(operation),
+    );
+    expect(scoped.length).toBeGreaterThan(0);
+    for (const [operation, payload] of scoped) {
+      await expect(
+        control.dispatch({ ...envelope, operation, payload } as never),
+      ).rejects.toMatchObject({
+        name: "WorkflowControlPlaneError",
+        code: "WORKFLOW_CONTROL_UNAUTHORIZED",
+      });
+    }
+    expect(calls).toHaveLength(0);
+  });
 
   test("derives the mailbox sender from the actor after validation", async () => {
     const { calls, dispatch } = harness();

@@ -1,20 +1,24 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import { describe, expect, test } from "bun:test";
 import {
   BaseAgent,
+  BaseLlm,
+  type BaseLlmConnection,
   createEvent,
   type Event,
+  getFunctionCalls,
   InMemorySessionService,
   InvocationContext,
+  LlmAgent,
+  type LlmRequest,
+  type LlmResponse,
+  LongRunningFunctionTool,
+  PluginManager,
   REQUEST_INPUT_FUNCTION_CALL_NAME,
   Runner,
 } from "@google/adk";
 import type { Content } from "@google/genai";
+import { z } from "zod";
+import { AgentInvocationGateway } from "../../src/runtime/agent-invocation-gateway.js";
 import { withWorkflowFailed } from "../../src/workflows/checkpoint/checkpoint.js";
 import type { WorkflowCheckpointV1 } from "../../src/workflows/checkpoint/schema.js";
 import type {
@@ -23,6 +27,7 @@ import type {
   WorkflowCheckpointStore,
 } from "../../src/workflows/checkpoint/store.js";
 import { defineWorkflow } from "../../src/workflows/definition.js";
+import type { WorkflowEvent } from "../../src/workflows/events.js";
 import { WorkflowAgent } from "../../src/workflows/workflow-agent.js";
 
 /** Checkpoints keyed by workflow and execution id, like a real store. */
@@ -176,6 +181,10 @@ class LongRunningLlmLikeAgent extends BaseAgent {
   protected async *runLiveImpl() {}
 }
 
+/** The workflow event an ADK event carries in its metadata, if any. */
+const workflowEventOf = (event: Event) =>
+  event.customMetadata?.workflowEvent as WorkflowEvent | undefined;
+
 const START: Content = { role: "user", parts: [{ text: "start" }] };
 
 const answer = (id: string, name = REQUEST_INPUT_FUNCTION_CALL_NAME) =>
@@ -186,10 +195,10 @@ const answer = (id: string, name = REQUEST_INPUT_FUNCTION_CALL_NAME) =>
 
 const workflowEvents = (events: readonly Event[]) =>
   events
-    .map((event) => event.customMetadata?.workflowEvent)
+    .map((event) => workflowEventOf(event))
     .filter(
-      (event): event is { type: string; executionId: string } =>
-        Boolean(event) && event.type !== "checkpoint_saved",
+      (event): event is WorkflowEvent =>
+        Boolean(event) && event?.type !== "checkpoint_saved",
     );
 
 const types = (events: readonly Event[]) =>
@@ -339,7 +348,7 @@ describe("turns while a run waits (default execution id)", () => {
       key,
       withWorkflowFailed(
         saved,
-        { name: "WorkflowError", code: "WORKFLOW_ABORTED", message: "x" },
+        { code: "WORKFLOW_ABORTED", message: "x" },
         "cancelled",
       ),
     );
@@ -367,6 +376,7 @@ describe("turns while a run waits (default execution id)", () => {
     });
 
     const context = new InvocationContext({
+      pluginManager: new PluginManager(),
       invocationId: "fresh-1",
       agent: renamed,
       userContent: { role: "user", parts: [{ text: "mine" }] },
@@ -401,6 +411,7 @@ describe("turns while a run waits (default execution id)", () => {
     });
 
     const context = new InvocationContext({
+      pluginManager: new PluginManager(),
       invocationId: "fresh-2",
       agent: renamed,
       userContent: answer("ask-ask"),
@@ -451,7 +462,7 @@ describe("long-running tool calls of an LlmAgent-shaped step", () => {
 
     expect(first.error).toBeUndefined();
     const waiting = first.events
-      .map((event) => event.customMetadata?.workflowEvent)
+      .map((event) => workflowEventOf(event))
       .find((event) => event?.type === "step_waiting");
     expect(waiting).toMatchObject({
       kind: "long-running",
@@ -469,5 +480,252 @@ describe("long-running tool calls of an LlmAgent-shaped step", () => {
       second.events.find((event) => event.output !== undefined)?.output,
     ).toBe("DONE");
     expect(real.calls).toBe(2);
+  });
+});
+
+/** Events of a turn that are not workflow lifecycle events. */
+const delegationEvents = (events: readonly Event[]) =>
+  events.filter((event) => !event.customMetadata?.workflowEvent);
+
+/** Asks with `adk_request_input` and explains itself in the same event. */
+class ChattyAskAgent extends BaseAgent {
+  calls = 0;
+
+  constructor() {
+    super({ name: "ask" });
+  }
+
+  protected async *runAsyncImpl(context: InvocationContext) {
+    this.calls += 1;
+    yield createEvent({
+      invocationId: context.invocationId,
+      author: this.name,
+      content: {
+        role: "model",
+        parts: [
+          { text: "I need your name." },
+          {
+            functionCall: {
+              id: "ask-ask",
+              name: REQUEST_INPUT_FUNCTION_CALL_NAME,
+              args: { message: "Name?" },
+            },
+          },
+        ],
+      },
+      longRunningToolIds: ["ask-ask"],
+    });
+  }
+
+  protected async *runLiveImpl() {}
+}
+
+function singleStep(agent: BaseAgent, stepId = "real") {
+  return new WorkflowAgent({
+    name: "wf",
+    subAgents: [agent],
+    definition: defineWorkflow({
+      id: "single",
+      version: "1",
+      handler: async (ctx) =>
+        (
+          await ctx.run({
+            id: stepId,
+            agentName: agent.name,
+            input: ctx.inputText,
+          })
+        ).output,
+    }),
+  });
+}
+
+describe("re-entering a waiting step emits nothing the model sees twice", () => {
+  test("a long-running call is re-emitted as an id-only marker with no content", async () => {
+    const real = new LongRunningLlmLikeAgent();
+    const turn = await session(singleStep(real));
+    await turn(START);
+
+    const again = await turn(START);
+
+    expect(again.error).toBeUndefined();
+    expect(real.calls).toBe(1);
+    const reemitted = delegationEvents(again.events);
+    expect(reemitted).toHaveLength(1);
+    expect(reemitted[0]?.author).toBe("real");
+    expect(reemitted[0]?.content).toBeUndefined();
+    expect(reemitted[0]?.longRunningToolIds).toEqual(["lro-1"]);
+    expect(types(again.events).slice(-2)).toEqual([
+      "step_waiting",
+      "workflow_waiting",
+    ]);
+  });
+
+  test("an adk_request_input call is re-emitted as its call part alone, without text", async () => {
+    const ask = new ChattyAskAgent();
+    const turn = await session(singleStep(ask, "ask"));
+    await turn(START);
+
+    const again = await turn(START);
+
+    expect(again.error).toBeUndefined();
+    expect(ask.calls).toBe(1);
+    const reemitted = delegationEvents(again.events);
+    expect(reemitted).toHaveLength(1);
+    expect(reemitted[0]?.content?.parts).toEqual([
+      {
+        functionCall: {
+          id: "ask-ask",
+          name: REQUEST_INPUT_FUNCTION_CALL_NAME,
+          args: { message: "Name?" },
+        },
+      },
+    ]);
+    expect(reemitted[0]?.longRunningToolIds).toEqual(["ask-ask"]);
+    expect(
+      reemitted.some((event) =>
+        event.content?.parts?.some((part) => part.text !== undefined),
+      ),
+    ).toBe(false);
+  });
+
+  test("a later run of the step sees the long-running call id once in model history", async () => {
+    const requests: LlmRequest[] = [];
+    const model = new (class extends BaseLlm {
+      constructor() {
+        super({ model: "fake-history" });
+      }
+      async *generateContentAsync(
+        request: LlmRequest,
+      ): AsyncGenerator<LlmResponse, void> {
+        requests.push(structuredClone(request.contents) as never);
+        yield requests.length === 1
+          ? {
+              content: {
+                role: "model",
+                parts: [
+                  {
+                    functionCall: {
+                      id: "lro-1",
+                      name: "ask_human",
+                      args: { question: "ok?" },
+                    },
+                  },
+                ],
+              },
+            }
+          : { content: { role: "model", parts: [{ text: "DONE" }] } };
+      }
+      async connect(): Promise<BaseLlmConnection> {
+        throw new Error("not implemented");
+      }
+    })();
+    const agent = new LlmAgent({
+      name: "real",
+      model,
+      tools: [
+        new LongRunningFunctionTool({
+          name: "ask_human",
+          description: "Ask a human.",
+          parameters: z.object({ question: z.string() }),
+          execute: async () => ({ status: "pending" }),
+        }),
+      ],
+    });
+    const turn = await session(singleStep(agent));
+
+    const first = await turn(START);
+    expect(types(first.events).at(-1)).toBe("workflow_waiting");
+    // Re-entered twice without an answer.
+    await turn(START);
+    await turn(START);
+    const answered = await turn(answer("lro-1", "ask_human"));
+    expect(types(answered.events)).toContain("workflow_completed");
+    // A new message starts a fresh run whose step inherits the history.
+    const fresh = await turn({ role: "user", parts: [{ text: "again" }] });
+    expect(fresh.error).toBeUndefined();
+
+    const last = requests.at(-1) as unknown as Content[];
+    const callIds = last.flatMap((content) =>
+      (content.parts ?? []).flatMap((part) =>
+        part.functionCall?.id ? [part.functionCall.id] : [],
+      ),
+    );
+    expect(requests.length).toBeGreaterThanOrEqual(3);
+    expect(callIds.filter((id) => id === "lro-1")).toHaveLength(1);
+    expect(
+      last.filter((content) =>
+        content.parts?.some((part) => part.text === "I asked a human."),
+      ),
+    ).toHaveLength(0);
+  });
+
+  test("an outer gateway still sees the interrupt after re-entry", async () => {
+    const parent = (agent: BaseAgent, invocationId: string) =>
+      new InvocationContext({
+        invocationId,
+        agent,
+        userContent: START,
+        session: {
+          id: "s",
+          appName: "a",
+          userId: "u",
+          state: {},
+          events: [],
+          lastUpdateTime: 1,
+        },
+        pluginManager: new PluginManager(),
+      });
+    const reenter = async (agent: BaseAgent) => {
+      const store = new KeyedStore();
+      const workflow = new WorkflowAgent({
+        name: "wf",
+        subAgents: [agent],
+        checkpointStore: store,
+        resolveExecutionId: () => "run-1",
+        definition: defineWorkflow({
+          id: "single",
+          version: "1",
+          handler: async (ctx) =>
+            (
+              await ctx.run({
+                id: "step",
+                agentName: agent.name,
+                input: ctx.inputText,
+              })
+            ).output,
+        }),
+      });
+      const gateway = new AgentInvocationGateway({
+        resolveAgent: () => workflow,
+      });
+      const delegate = (invocationId: string) =>
+        gateway.run({
+          agentName: "wf",
+          input: START,
+          parentContext: parent(workflow, invocationId),
+        });
+      await delegate("outer-1");
+      return delegate("outer-2");
+    };
+
+    const longRunning = await reenter(new LongRunningLlmLikeAgent());
+    expect(longRunning.error).toBeUndefined();
+    expect(longRunning.interrupt).toMatchObject({
+      kind: "long-running",
+      functionCallIds: ["lro-1"],
+    });
+
+    const input = await reenter(new ChattyAskAgent());
+    expect(input.error).toBeUndefined();
+    expect(input.interrupt?.kind).toBe("input");
+    expect(input.interrupt?.functionCallIds).toEqual(["ask-ask"]);
+    expect(input.interrupt?.requests).toEqual([
+      expect.objectContaining({ interruptId: "ask-ask" }),
+    ]);
+    expect(
+      input.events.some((event) =>
+        getFunctionCalls(event).some((call) => call.id === "ask-ask"),
+      ),
+    ).toBe(true);
   });
 });

@@ -1,12 +1,8 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
+import { isWorkflowIdentifier } from "../internal/identifiers.js";
 import {
   authorizeWorkflowActor,
   DENY_ALL_WORKFLOW_AUTHORIZER,
+  unauthorized,
   type WorkflowActorContext,
   type WorkflowAuthorizationOperation,
   type WorkflowAuthorizer,
@@ -33,71 +29,113 @@ import type {
   WorkflowPlanStore,
 } from "./stores.js";
 
+/** Dependencies and options for {@link WorkflowOwnershipController}. */
 export interface WorkflowOwnershipControllerConfig {
+  /** Store the active plan is read from. */
   plans: WorkflowPlanStore;
+  /** Store holding the orchestration state that is updated by compare-and-set. */
   state: WorkflowOrchestrationStateStore;
   /** Host policy. Omitting it intentionally denies every operation. */
   authorizer?: WorkflowAuthorizer;
+  /** Clock returning epoch milliseconds. Defaults to `Date.now`. */
   now?: () => number;
+  /** Generates grant and proposal ids. Defaults to a random identifier generator. */
   createId?: (kind: "grant" | "proposal") => string;
+  /** Maximum compare-and-set attempts per mutation before it fails as contended. Must be an integer from 1 to 1000. Defaults to 16. */
   maxCasRetries?: number;
 }
 
+/** Execution and plan revision an ownership request applies to. */
 export interface WorkflowOwnershipScope {
+  /** Execution the request applies to. */
   executionId: string;
+  /** Plan revision the request applies to; it must be the active revision. */
   planRevision: number;
 }
 
+/** Request to claim paths for the calling task. */
 export interface WorkflowOwnershipClaimRequest extends WorkflowOwnershipScope {
+  /** Paths to claim. */
   claims: readonly WorkflowPathClaim[];
 }
 
+/** Request to propose a claim, transfer or release for approval. */
 export interface WorkflowOwnershipProposalRequest
   extends WorkflowOwnershipScope {
+  /** Change being proposed. */
   kind: WorkflowOwnershipProposalKind;
+  /** Task that would receive the paths, for a transfer. */
   targetTaskId?: string;
+  /** Grant to transfer or release. */
   sourceGrantId?: string;
+  /** Paths to claim, for a claim proposal. */
   claims?: readonly WorkflowPathClaim[];
 }
 
+/** Request to approve or reject a pending proposal. */
 export interface WorkflowOwnershipDecisionRequest
   extends WorkflowOwnershipScope {
+  /** Proposal to decide. */
   proposalId: string;
+  /** Optional explanation recorded with the decision. */
   reason?: string;
 }
 
+/** Request to transfer a grant to another task. */
 export interface WorkflowOwnershipTransferRequest
   extends WorkflowOwnershipScope {
+  /** Grant to transfer. */
   sourceGrantId: string;
+  /** Task that receives the paths. */
   targetTaskId: string;
 }
 
+/** Request to release a grant. */
 export interface WorkflowOwnershipReleaseRequest
   extends WorkflowOwnershipScope {
+  /** Grant to release. */
   grantId: string;
 }
 
+/**
+ * Grant a task claims to hold, checked against the live ledger.
+ *
+ * @remarks
+ * The `fencingToken` must equal the live grant's token.
+ */
 export interface WorkflowOwnershipAuthorityRequest
   extends WorkflowOwnershipScope {
+  /** Grant the task claims to hold. */
   grantId: string;
+  /** Task that must hold the grant. */
   taskId: string;
+  /** Agent that must own the grant. */
   agentId: string;
+  /** Fencing token the holder presents; it must equal the live grant's token. */
   fencingToken: number;
+  /** Paths the grant must cover. */
   claims?: readonly WorkflowPathClaim[];
 }
 
+/** Request to validate several grants of one task in a single read. */
 export interface WorkflowOwnershipAuthoritySnapshotRequest
   extends WorkflowOwnershipScope {
+  /** Task that must hold every listed grant. */
   taskId: string;
+  /** Agent that must own every listed grant. */
   agentId: string;
+  /** Grants to validate, each with its presented fencing token and optional claims. */
   authorities: readonly Pick<
     WorkflowOwnershipAuthorityRequest,
     "grantId" | "fencingToken" | "claims"
   >[];
 }
 
+/** Validated grants and the orchestration revision they were read at. */
 export interface WorkflowOwnershipAuthoritySnapshot {
+  /** Orchestration state revision the grants were read at. */
   orchestrationRevision: number;
+  /** Live grants that passed validation. */
   grants: readonly WorkflowOwnershipGrant[];
 }
 
@@ -137,6 +175,19 @@ export class WorkflowOwnershipController {
     this.#maxCasRetries = config.maxCasRetries ?? 16;
   }
 
+  /**
+   * Grants the calling task exclusive ownership of paths its lane may own.
+   *
+   * @param request - Plan scope and paths to claim.
+   * @param actor - Host-authenticated actor bound to the claiming task.
+   * @returns The new grant, with the next fencing token.
+   * @throws {@link WorkflowOrchestrationControlError} with code `WORKFLOW_OWNERSHIP_CONFLICT`
+   * when a path overlaps a live grant, or `WORKFLOW_PATH_NOT_OWNED` and
+   * `WORKFLOW_RESERVED_PATH` when the lane may not claim it.
+   * @throws {@link WorkflowOrchestrationControlError} with code
+   * `WORKFLOW_ORCHESTRATION_UNAUTHORIZED` when the actor is not authorized,
+   * or `WORKFLOW_PLAN_STALE` when the plan revision is not the active one.
+   */
   async claim(
     request: WorkflowOwnershipClaimRequest,
     actor: WorkflowActorContext,
@@ -181,6 +232,13 @@ export class WorkflowOwnershipController {
     return ownershipContended(request.executionId, request.planRevision);
   }
 
+  /**
+   * Creates a pending proposal to claim, transfer or release ownership.
+   *
+   * @param request - Plan scope, proposal kind and its targets.
+   * @param actor - Host-authenticated actor.
+   * @returns The pending proposal.
+   */
   async propose(
     request: WorkflowOwnershipProposalRequest,
     actor: WorkflowActorContext,
@@ -235,6 +293,13 @@ export class WorkflowOwnershipController {
     return ownershipContended(request.executionId, request.planRevision);
   }
 
+  /**
+   * Approves a pending proposal and applies its ownership change.
+   *
+   * @param request - Plan scope and proposal id.
+   * @param actor - Host-authenticated manager actor.
+   * @returns The decided proposal.
+   */
   async approve(
     request: WorkflowOwnershipDecisionRequest,
     actor: WorkflowActorContext,
@@ -242,6 +307,13 @@ export class WorkflowOwnershipController {
     return await this.#decide(request, actor, "approved");
   }
 
+  /**
+   * Rejects a pending proposal without changing ownership.
+   *
+   * @param request - Plan scope, proposal id and optional reason.
+   * @param actor - Host-authenticated manager actor.
+   * @returns The decided proposal.
+   */
   async reject(
     request: WorkflowOwnershipDecisionRequest,
     actor: WorkflowActorContext,
@@ -249,6 +321,16 @@ export class WorkflowOwnershipController {
     return await this.#decide(request, actor, "rejected");
   }
 
+  /**
+   * Moves a grant to another task of the plan under a new fencing token.
+   *
+   * @remarks
+   * The old holder's token stops validating once the transfer is published.
+   *
+   * @param request - Plan scope, source grant and target task.
+   * @param actor - Host-authenticated manager actor.
+   * @returns The new grant held by the target task.
+   */
   async transfer(
     request: WorkflowOwnershipTransferRequest,
     actor: WorkflowActorContext,
@@ -298,6 +380,16 @@ export class WorkflowOwnershipController {
     return ownershipContended(request.executionId, request.planRevision);
   }
 
+  /**
+   * Releases a grant so its paths become available again.
+   *
+   * @remarks
+   * A grant covered by an active mutation reservation cannot be released.
+   *
+   * @param request - Plan scope and grant id.
+   * @param actor - Host-authenticated grant owner or manager.
+   * @returns The released grant.
+   */
   async release(
     request: WorkflowOwnershipReleaseRequest,
     actor: WorkflowActorContext,
@@ -334,6 +426,13 @@ export class WorkflowOwnershipController {
     return ownershipContended(request.executionId, request.planRevision);
   }
 
+  /**
+   * Reads the live orchestration state for the active plan.
+   *
+   * @param request - Plan scope.
+   * @param actor - Host-authenticated actor with plan read permission.
+   * @returns The current orchestration state.
+   */
   async getCurrent(
     request: WorkflowOwnershipScope,
     actor: WorkflowActorContext,
@@ -342,6 +441,13 @@ export class WorkflowOwnershipController {
       .state;
   }
 
+  /**
+   * Lists the live ownership grants.
+   *
+   * @param request - Plan scope.
+   * @param actor - Host-authenticated actor with plan read permission.
+   * @returns The current grants.
+   */
   async list(
     request: WorkflowOwnershipScope,
     actor: WorkflowActorContext,
@@ -370,7 +476,11 @@ export class WorkflowOwnershipController {
       },
       actor,
     );
-    return snapshot.grants[0] as WorkflowOwnershipGrant;
+    const [grant] = snapshot.grants;
+    if (grant === undefined || snapshot.grants.length !== 1) {
+      invalid("Workflow ownership authority snapshot must return one grant");
+    }
+    return grant;
   }
 
   /** Validates every fence against one immutable orchestration snapshot. */
@@ -546,12 +656,20 @@ export class WorkflowOwnershipController {
     operation: WorkflowAuthorizationOperation,
     permission: WorkflowActorPermission,
   ): Promise<{ state: WorkflowOrchestrationState; plan: WorkflowPlan }> {
-    await authorizeWorkflowActor(this.#authorizer, actor, {
-      operation,
-      permission,
-      executionId: request.executionId,
-      planRevision: request.planRevision,
-    });
+    validateScope(request);
+    const activePlanRevision = (await this.#state.get(request.executionId))
+      ?.activePlanRevision;
+    await authorizeWorkflowActor(
+      this.#authorizer,
+      actor,
+      {
+        operation,
+        permission,
+        executionId: request.executionId,
+        planRevision: request.planRevision,
+      },
+      activePlanRevision === undefined ? {} : { activePlanRevision },
+    );
     const context = await this.#active(request);
     assertPlanPermission(context.plan, actor, permission);
     return context;
@@ -948,16 +1066,13 @@ function validReason(reason: string): string {
 }
 
 function identifier(value: string, field: string): void {
-  if (
-    typeof value !== "string" ||
-    !/^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,255}$/u.test(value)
-  ) {
+  if (!isWorkflowIdentifier(value, "record")) {
     invalid(`Workflow ownership ${field} is invalid`);
   }
 }
 
 function defaultId(kind: "grant" | "proposal"): string {
-  return `${kind}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 14)}`;
+  return `${kind}-${crypto.randomUUID()}`;
 }
 
 function isCasConflict(error: unknown): boolean {
@@ -979,14 +1094,6 @@ function ownershipConflict(message: string): never {
   throw new WorkflowOrchestrationControlError(
     "WORKFLOW_OWNERSHIP_CONFLICT",
     message,
-  );
-}
-
-function unauthorized(message: string): never {
-  throw new WorkflowOrchestrationControlError(
-    "WORKFLOW_ORCHESTRATION_INVALID_REQUEST",
-    message,
-    { reason: "unauthorized" },
   );
 }
 

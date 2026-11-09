@@ -1,9 +1,3 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import { describe, expect, test } from "bun:test";
 import {
   WORKFLOW_CONTROL_PROTOCOL,
@@ -218,7 +212,7 @@ describe("WorkflowControlPlane", () => {
       payload: { executionId: "execution-1", taskId: "task-1" },
     } as const;
     await expect(control.dispatch(statusRequest)).rejects.toMatchObject({
-      code: "WORKFLOW_CONTROL_INVALID_REQUEST",
+      code: "WORKFLOW_CONTROL_UNAUTHORIZED",
     });
     await expect(
       control.dispatch(statusRequest, { actor: actor("codex", "task-1") }),
@@ -368,7 +362,7 @@ describe("WorkflowControlPlane", () => {
       },
     } as const;
     await expect(control.dispatch(spawnSender)).rejects.toMatchObject({
-      code: "WORKFLOW_CONTROL_INVALID_REQUEST",
+      code: "WORKFLOW_CONTROL_UNAUTHORIZED",
     });
     await expect(
       control.dispatch(spawnSender, {
@@ -379,10 +373,10 @@ describe("WorkflowControlPlane", () => {
           taskId: "sender",
         } as never,
       }),
-    ).rejects.toMatchObject({ code: "WORKFLOW_CONTROL_INVALID_REQUEST" });
+    ).rejects.toMatchObject({ code: "WORKFLOW_CONTROL_UNAUTHORIZED" });
     await expect(
       control.dispatch(spawnSender, { actor: targetActor }),
-    ).rejects.toMatchObject({ code: "WORKFLOW_CONTROL_INVALID_REQUEST" });
+    ).rejects.toMatchObject({ code: "WORKFLOW_CONTROL_UNAUTHORIZED" });
     await expect(tasks.status(spawnSender.payload)).rejects.toMatchObject({
       code: "WORKFLOW_TASK_NOT_FOUND",
     });
@@ -422,7 +416,7 @@ describe("WorkflowControlPlane", () => {
       },
     } as const;
     await expect(control.dispatch(send)).rejects.toMatchObject({
-      code: "WORKFLOW_CONTROL_INVALID_REQUEST",
+      code: "WORKFLOW_CONTROL_UNAUTHORIZED",
     });
     await expect(
       control.dispatch(send, {
@@ -433,7 +427,7 @@ describe("WorkflowControlPlane", () => {
           taskId: "sender",
         } as never,
       }),
-    ).rejects.toMatchObject({ code: "WORKFLOW_CONTROL_INVALID_REQUEST" });
+    ).rejects.toMatchObject({ code: "WORKFLOW_CONTROL_UNAUTHORIZED" });
     await expect(
       control.dispatch(send, {
         actor: new WorkflowActorContext({
@@ -443,7 +437,7 @@ describe("WorkflowControlPlane", () => {
           taskId: "sender",
         }),
       }),
-    ).rejects.toMatchObject({ code: "WORKFLOW_CONTROL_INVALID_REQUEST" });
+    ).rejects.toMatchObject({ code: "WORKFLOW_CONTROL_UNAUTHORIZED" });
     await expect(
       control.dispatch(
         { ...send, payload: { ...send.payload, operationId: "" } },

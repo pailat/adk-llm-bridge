@@ -1,9 +1,3 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import { describe, expect, test } from "bun:test";
 import {
   DEFAULT_WORKFLOW_EXECUTION_LIMITS,
@@ -48,6 +42,80 @@ describe("workflow contracts", () => {
     expect(() =>
       defineScriptWorkflow({ id: "script", version: "1", source: "  " }),
     ).toThrow("Script workflow source is required");
+    // Ids and versions use the opaque id grammar: no surrounding spaces.
+    expect(() =>
+      defineWorkflow({ id: " a ", version: "1", handler: () => undefined }),
+    ).toThrow('Workflow id is invalid: " a "');
+    expect(() =>
+      defineWorkflow({ id: "a", version: "1 0", handler: () => undefined }),
+    ).toThrow('Workflow version is invalid: "1 0"');
+    expect(
+      defineWorkflow({
+        id: "team/implementation",
+        version: "1.0.0+build.2",
+        handler: () => undefined,
+      }).version,
+    ).toBe("1.0.0+build.2");
+    expect(
+      isWorkflowDefinition({
+        id: " a ",
+        version: "1",
+        kind: "script",
+        source: "return;",
+      }),
+    ).toBe(false);
+  });
+
+  test("returns false for a definition whose fields cannot be read", () => {
+    const trap = () => {
+      throw new Error("trap");
+    };
+    const throwingId = {
+      get id(): string {
+        throw new Error("trap");
+      },
+      version: "1",
+      kind: "script",
+      source: "return;",
+    };
+    const throwingSource = {
+      id: "script",
+      version: "1",
+      kind: "script",
+      get source(): string {
+        throw new Error("trap");
+      },
+    };
+    const proxy = new Proxy({}, { get: trap, has: trap, ownKeys: trap });
+    for (const value of [throwingId, throwingSource, proxy]) {
+      expect(isWorkflowDefinition(value)).toBe(false);
+    }
+  });
+
+  test("returns false or a definition error for fields of the wrong type", () => {
+    const wrongTypes: unknown[] = [
+      { id: 1, version: "1", kind: "script", source: "return;" },
+      { id: "script", version: 2, kind: "script", source: "return;" },
+      { id: "script", version: "1", kind: "script", source: 42 },
+      { id: { trim: () => "x" }, version: "1", kind: "script", source: "x" },
+    ];
+    for (const value of wrongTypes) {
+      expect(isWorkflowDefinition(value)).toBe(false);
+    }
+
+    const invalidInputs: unknown[] = [
+      undefined,
+      null,
+      { id: 1, version: "1", source: "return;" },
+      { id: "script", version: ["1"], source: "return;" },
+      { id: "script", version: "1", source: 42 },
+    ];
+    for (const value of invalidInputs) {
+      expectDefinitionInvalid(() => defineScriptWorkflow(value as never));
+    }
+    expectDefinitionInvalid(() =>
+      defineWorkflow({ id: 7, version: "1", handler: () => "" } as never),
+    );
   });
 
   test("provides bounded defaults for every runtime", () => {
@@ -102,3 +170,14 @@ describe("workflow contracts", () => {
     });
   });
 });
+
+function expectDefinitionInvalid(action: () => unknown): void {
+  let caught: unknown;
+  try {
+    action();
+  } catch (error) {
+    caught = error;
+  }
+  expect(caught).toBeInstanceOf(WorkflowError);
+  expect((caught as WorkflowError).code).toBe("WORKFLOW_DEFINITION_INVALID");
+}

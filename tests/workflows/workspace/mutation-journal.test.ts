@@ -1,9 +1,3 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import { describe, expect, test } from "bun:test";
 import {
   InMemoryWorkflowHostMutationJournal,
@@ -78,6 +72,20 @@ describe("InMemoryWorkflowHostMutationJournal", () => {
         commitId: "commit-2",
       }),
     ).rejects.toThrow("different completed result");
+    await expect(
+      journal.begin({
+        ...intent(),
+        intentDigest: `sha256:${"d".repeat(64)}`,
+      }),
+    ).rejects.toMatchObject({ code: "WORKFLOW_HOST_MUTATION_CONFLICT" });
+    await expect(
+      journal.complete("operation-1", INTENT_DIGEST, {
+        commitId: "commit-2",
+      }),
+    ).rejects.toMatchObject({
+      name: "WorkflowHostMutationConflictError",
+      code: "WORKFLOW_HOST_MUTATION_CONFLICT",
+    });
   });
 
   test("records ambiguous mutations and permits verified reconciliation", async () => {

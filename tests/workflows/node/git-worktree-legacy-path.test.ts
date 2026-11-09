@@ -1,9 +1,3 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import { afterEach, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -69,7 +63,6 @@ test("attaches a worktree created under the pre-0.7.0 directory name", async () 
     basename(canonicalPath).replace(/[a-f0-9]{12}$/u, legacySuffix),
   );
   expect(legacyPath).not.toBe(canonicalPath);
-  await workspace.detach?.();
   git(repoRoot, "worktree", "move", canonicalPath, legacyPath);
 
   const restarted = await NodeGitWorktreeChangeDriver.create(options);

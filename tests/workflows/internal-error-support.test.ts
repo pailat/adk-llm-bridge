@@ -1,15 +1,10 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import { describe, expect, spyOn, test } from "bun:test";
 import { WorkflowError } from "../../src/workflows/contracts.js";
 import {
   attachCause,
   attachCleanupErrors,
   isProcessAlive,
+  normalizeHostError,
 } from "../../src/workflows/internal/error-support.js";
 
 describe("workflow internal error support", () => {
@@ -63,5 +58,35 @@ describe("workflow internal error support", () => {
     ).toEqual([cleanup]);
     expect(Object.keys(primary)).not.toContain("cleanupErrors");
     expect(() => attachCleanupErrors("not an error", [cleanup])).not.toThrow();
+  });
+
+  test("normalizeHostError never cuts a message or code inside a surrogate pair", () => {
+    const options = {
+      fallbackCode: "FALLBACK",
+      fallbackMessage: "fallback",
+      maxCodeLength: 4,
+      maxMessageLength: 4,
+      stringAsMessage: true,
+    };
+    const isWellFormed = (text: string) =>
+      !/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u.test(
+        text,
+      );
+
+    const split = normalizeHostError(
+      { code: "ABC\u{1F600}", message: "abc\u{1F600}" },
+      options,
+    );
+    expect(split).toEqual({ code: "ABC", message: "abc" });
+    expect(isWellFormed(split.code)).toBe(true);
+    expect(isWellFormed(split.message)).toBe(true);
+
+    const whole = normalizeHostError(
+      { code: "AB\u{1F600}", message: "ab\u{1F600}x" },
+      options,
+    );
+    expect(whole).toEqual({ code: "AB\u{1F600}", message: "ab\u{1F600}" });
+
+    expect(normalizeHostError("abc\u{1F600}", options).message).toBe("abc");
   });
 });

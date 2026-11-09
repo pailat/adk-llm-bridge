@@ -1,9 +1,3 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import type {
   QuickJSContext,
   QuickJSHandle,
@@ -33,6 +27,7 @@ import type {
 
 const encoder = new TextEncoder();
 
+/** Capabilities of {@link QuickJSSyncGeneratorRuntime}: bounded memory, stack and CPU time. */
 export const QUICKJS_SYNC_CAPABILITIES: WorkflowScriptRuntimeCapabilities =
   Object.freeze({
     engine: "quickjs",
@@ -44,8 +39,19 @@ export const QUICKJS_SYNC_CAPABILITIES: WorkflowScriptRuntimeCapabilities =
     interruptHandler: true,
   });
 
+/** Options for {@link QuickJSSyncGeneratorRuntime}. */
 export interface QuickJSSyncGeneratorRuntimeOptions {
+  /**
+   * Resolves the QuickJS module.
+   *
+   * @defaultValue Lazily loads the optional `quickjs-emscripten-core` release variant.
+   */
   loader?: QuickJSModuleLoader;
+  /**
+   * Runtime-wide execution limits; per-session limits override them.
+   *
+   * @defaultValue `DEFAULT_WORKFLOW_EXECUTION_LIMITS`
+   */
   limits?: WorkflowExecutionLimits;
   /** Test/diagnostic hook invoked after every created VM is disposed. */
   onDispose?: () => void;
@@ -267,19 +273,36 @@ class QuickJSSyncGeneratorSession implements WorkflowScriptGeneratorSession {
   }
 }
 
-/** Bounded QuickJS sync runtime for JSON-driven generator scripts. */
+/**
+ * Bounded QuickJS sync runtime for JSON-driven generator scripts.
+ *
+ * @remarks
+ * Each session owns one QuickJS runtime with memory, stack and CPU limits.
+ * The guest has no host bindings: it talks to the host only through
+ * JSON-serialized messages exchanged between generator turns.
+ */
 export class QuickJSSyncGeneratorRuntime implements WorkflowScriptRuntime {
   readonly capabilities = QUICKJS_SYNC_CAPABILITIES;
   readonly #loader: QuickJSModuleLoader;
   readonly #limits: WorkflowExecutionLimits | undefined;
   readonly #onDispose: (() => void) | undefined;
 
+  /**
+   * @param options - Loader, default limits and dispose hook.
+   */
   constructor(options: QuickJSSyncGeneratorRuntimeOptions = {}) {
     this.#loader = options.loader ?? loadReleaseQuickJS;
     this.#limits = options.limits;
     this.#onDispose = options.onDispose;
   }
 
+  /**
+   * Compiles a script and returns a session positioned before the first turn.
+   *
+   * @param options - Script source, input, abort signal and limits.
+   * @returns A generator session the caller must dispose.
+   * @throws {@link WorkflowError} with code `WORKFLOW_DEFINITION_INVALID` for a non-positive limit, `WORKFLOW_LIMIT_EXCEEDED` for oversized source or input, `WORKFLOW_SCRIPT_INVALID` for module syntax or an initialization failure, `WORKFLOW_ABORTED` when the signal is already aborted, and `WORKFLOW_SANDBOX_UNAVAILABLE` when QuickJS cannot be loaded.
+   */
   async createSession(
     options: WorkflowScriptSessionOptions,
   ): Promise<WorkflowScriptGeneratorSession> {
@@ -327,7 +350,20 @@ export class QuickJSSyncGeneratorRuntime implements WorkflowScriptRuntime {
       const program = `
         (() => {
           "use strict";
-          const __input = JSON.parse(${JSON.stringify(serializedInput)});
+          // Captured before any guest code runs. Guest code never sees these
+          // bindings, and replacing JSON, Reflect, Object or the generator
+          // methods later does not change how turns are driven or encoded.
+          const __parse = JSON.parse;
+          const __stringify = JSON.stringify;
+          const __apply = Reflect.apply;
+          const __getPrototypeOf = Object.getPrototypeOf;
+          const __GeneratorFunction = __getPrototypeOf(
+            function* () {},
+          ).constructor;
+          const __generatorNext = __getPrototypeOf(
+            __getPrototypeOf((function* () {})()),
+          ).next;
+          const __input = __parse(${JSON.stringify(serializedInput)});
           const __inputText = typeof __input === "string"
             ? __input
             : Array.isArray(__input?.parts)
@@ -354,14 +390,30 @@ export class QuickJSSyncGeneratorRuntime implements WorkflowScriptRuntime {
             listAgents: () => __operation("listAgents", {}),
             releaseAgent: (name) => __operation("releaseAgent", { name }),
           });
-          const __factory = function* (__workflowContext) {
-            const ctx = __workflowContext;
-            ${options.source}\n
-          };
+          // QuickJS builds the function from the joined source text, so a
+          // source that starts with "})," can close the wrapper and run an
+          // expression at construction time, in global scope and without
+          // these bindings. Such a source can only replace the factory. The
+          // factory must therefore be a generator function, and every turn
+          // is driven by the generator "next" captured above, which throws
+          // for any object that is not a real generator.
+          const __factory = __GeneratorFunction(
+            "__workflowContext",
+            ${JSON.stringify(`"use strict";
+const ctx = __workflowContext;
+${options.source}
+`)},
+          );
+          if (
+            typeof __factory !== "function" ||
+            __getPrototypeOf(__factory) !== __GeneratorFunction.prototype
+          ) {
+            throw new TypeError("Workflow script did not compile to a generator");
+          }
           const __iterator = __factory(__ctx);
           return function __workflowNext(serialized) {
-            const value = JSON.parse(serialized);
-            return JSON.stringify(__iterator.next(value));
+            const value = __parse(serialized);
+            return __stringify(__apply(__generatorNext, __iterator, [value]));
           };
         })()
       `;

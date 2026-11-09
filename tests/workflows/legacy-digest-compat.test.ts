@@ -1,9 +1,3 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 // Digests stored before 0.7.0 (localeCompare or insertion-order JSON) must
 // keep validating after the switch to the canonical code-unit form.
 
@@ -17,6 +11,7 @@ import {
   createEvent,
   type Event,
   InvocationContext,
+  PluginManager,
 } from "@google/adk";
 import type { Content } from "@google/genai";
 import { ExternalAgentDefinitionRegistry } from "../../src/agents/agent-registry.js";
@@ -105,6 +100,7 @@ function invocation(
   state: Record<string, unknown>,
 ): InvocationContext {
   return new InvocationContext({
+    pluginManager: new PluginManager(),
     invocationId: "inv-legacy",
     branch: "root",
     agent,

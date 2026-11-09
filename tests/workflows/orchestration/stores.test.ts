@@ -1,9 +1,3 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import { describe, expect, test } from "bun:test";
 import {
   WORKFLOW_ORCHESTRATION_STATE_PROTOCOL,
@@ -48,9 +42,50 @@ describe("InMemoryWorkflowPlanStore", () => {
     ).rejects.toMatchObject({ code: "WORKFLOW_PLAN_DUPLICATE" });
     expect(await store.get("execution-1", 1)).toBe(original);
   });
+
+  test("stores exactly the plan it validated, even behind a getter", async () => {
+    const store = new InMemoryWorkflowPlanStore();
+    let reads = 0;
+    const candidate = plan();
+    Object.defineProperty(candidate, "objective", {
+      enumerable: true,
+      get: () => (++reads === 1 ? "Validated objective" : ""),
+    });
+
+    let stored: WorkflowPlan | undefined;
+    try {
+      stored = await store.put(candidate);
+    } catch (error) {
+      expect(error).toMatchObject({
+        code: "WORKFLOW_ORCHESTRATION_INVALID_REQUEST",
+      });
+      expect(await store.get("execution-1", 1)).toBeUndefined();
+      return;
+    }
+    expect(stored.objective).toBe("Validated objective");
+  });
 });
 
 describe("InMemoryWorkflowOrchestrationStateStore", () => {
+  test("stores the state it validated when a getter changes its answer", async () => {
+    const store = new InMemoryWorkflowOrchestrationStateStore();
+    const created = await store.create(flipping(state(), "updatedAt", 1, -5));
+    expect(created.updatedAt).toBe(1);
+    expect((await store.get("execution-1"))?.updatedAt).toBe(1);
+
+    const replaced = await store.compareAndSet(
+      flipping(
+        { ...created, revision: 2, updatedAt: 2 },
+        "nextFencingToken",
+        3,
+        -1,
+      ),
+      1,
+    );
+    expect(replaced.nextFencingToken).toBe(3);
+    expect((await store.get("execution-1"))?.nextFencingToken).toBe(3);
+  });
+
   test("allows exactly one concurrent aggregate CAS", async () => {
     const store = new InMemoryWorkflowOrchestrationStateStore();
     const initial = await store.create(state());
@@ -111,6 +146,17 @@ describe("InMemoryWorkflowOrchestrationStateStore", () => {
         1,
       ),
     ).rejects.toMatchObject({ code: "WORKFLOW_ORCHESTRATION_INVALID_REQUEST" });
+  });
+
+  test("reports a compare-and-set on missing state as not found", async () => {
+    const store = new InMemoryWorkflowOrchestrationStateStore();
+
+    await expect(
+      store.compareAndSet(state({ revision: 2, updatedAt: 2 }), 1),
+    ).rejects.toMatchObject({
+      code: "WORKFLOW_ORCHESTRATION_STATE_NOT_FOUND",
+      details: { executionId: "execution-1" },
+    });
   });
 
   test("requires revision one on create and rejects duplicate aggregates", async () => {
@@ -227,4 +273,22 @@ function state(
     updatedAt: 1,
     ...overrides,
   };
+}
+
+/** Copy of `value` whose `key` answers `first` once, then `later`. */
+function flipping<T extends object>(
+  value: T,
+  key: string,
+  first: unknown,
+  later: unknown,
+): T {
+  const copy = { ...value } as Record<string, unknown>;
+  delete copy[key];
+  let reads = 0;
+  Object.defineProperty(copy, key, {
+    enumerable: true,
+    configurable: true,
+    get: () => (++reads === 1 ? first : later),
+  });
+  return copy as T;
 }

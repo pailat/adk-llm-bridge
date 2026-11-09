@@ -1,9 +1,3 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import { describe, expect, test } from "bun:test";
 import { WorkflowActorContext } from "../../../src/workflows/orchestration/authorization.js";
 import {
@@ -99,11 +93,35 @@ describe("WorkflowOwnershipChangeSetValidator", () => {
     ).rejects.toBeInstanceOf(WorkflowChangeValidationError);
     await expect(
       context.validator.validate(
+        { ...request(changeSet, [grant]), expectedBaseRevision: "base-0" },
+        context.validatorActor,
+      ),
+    ).rejects.toMatchObject({
+      code: "WORKFLOW_CHANGE_BASE_REVISION_MISMATCH",
+    });
+    await expect(
+      context.validator.validate(
         { ...request(changeSet, [grant]), expectedPlanRevision: 2 },
         context.validatorActor,
       ),
     ).rejects.toMatchObject({
       code: "WORKFLOW_CHANGE_PLAN_REVISION_MISMATCH",
+    });
+  });
+
+  test("rejects a change set whose task and agent are not a plan lane", async () => {
+    const context = await harness();
+    const grant = await context.claim("src/a/one.ts");
+    const changeSet = await changes([entry("modified", "src/a/one.ts")]);
+
+    await expect(
+      context.validator.validate(
+        { ...request(changeSet, [grant]), agentId: "coordinator" },
+        context.validatorActor,
+      ),
+    ).rejects.toMatchObject({
+      code: "WORKFLOW_CHANGE_TASK_IDENTITY_MISMATCH",
+      details: { taskId: "task-a", agentId: "coordinator" },
     });
   });
 

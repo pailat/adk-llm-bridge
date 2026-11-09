@@ -1,9 +1,3 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import type { ExternalAgentDefinitionRegistry } from "../../agents/agent-registry.js";
 import type { ExternalAgentDefinitionConfig } from "../../agents/agent-schema.js";
@@ -45,17 +39,39 @@ const PERMISSION_MODES = new Set([
   "full-access",
 ]);
 
+/**
+ * Dependencies and options for {@link ExternalAgentWorkflowFactory}.
+ *
+ * @remarks
+ * Omit `allowedProviderIds` to allow every provider in the registry. Omitted
+ * `limits` fall back to {@link DEFAULT_WORKFLOW_AGENT_FACTORY_LIMITS}.
+ */
 export interface ExternalAgentWorkflowFactoryOptions {
+  /** Registry that creates the external agents. */
   registry: ExternalAgentDefinitionRegistry;
+  /** Provider ids a workflow may use; omit to allow every provider in the registry. */
   allowedProviderIds?: readonly string[];
+  /** Overrides for the default size bounds; each must be a positive integer. */
   limits?: Partial<WorkflowAgentFactoryLimits>;
+  /** Host ceilings for capabilities a workflow may request. */
   policy?: WorkflowAgentPolicyCeilings;
 }
 
 /** Host-owned ceilings. Omitted capabilities are denied by default. */
 export interface WorkflowAgentPolicyCeilings {
+  /**
+   * Whether agents may request the `full-access` permission mode.
+   *
+   * @defaultValue false
+   */
   allowFullAccess?: boolean;
+  /**
+   * Whether agents may request network access.
+   *
+   * @defaultValue false
+   */
   allowNetwork?: boolean;
+  /** Absolute directories that agent working directories and allowed paths must lie within; when empty, working directories and allowed paths are rejected. */
   workingDirectoryRoots?: readonly string[];
 }
 
@@ -86,6 +102,18 @@ export class ExternalAgentWorkflowFactory implements WorkflowAgentFactory {
     );
   }
 
+  /**
+   * Creates an agent from the registry after validating the request against limits and policy.
+   *
+   * @param request - Provider, name and optional configuration.
+   * @returns A frozen handle for the new agent.
+   * @throws {@link WorkflowAgentFactoryError} with code `WORKFLOW_AGENT_INVALID_REQUEST`
+   * for a malformed request, `WORKFLOW_AGENT_POLICY_EXCEEDED` when the request
+   * exceeds the host ceilings, `WORKFLOW_AGENT_PROVIDER_NOT_ALLOWED` or
+   * `WORKFLOW_AGENT_UNKNOWN_PROVIDER` for the provider, `WORKFLOW_AGENT_DUPLICATE_NAME`
+   * when the name is active, and `WORKFLOW_AGENT_LIMIT_EXCEEDED` when `maxAgents`
+   * agents are active.
+   */
   create(request: WorkflowAgentFactoryRequest): WorkflowAgentHandle {
     const normalized = normalizeRequest(request, this.#limits, this.#policy);
     this.assertProviderAllowed(normalized.providerId);
@@ -125,16 +153,24 @@ export class ExternalAgentWorkflowFactory implements WorkflowAgentFactory {
     return handle;
   }
 
+  /** {@inheritDoc WorkflowAgentFactory.get} */
   get(name: string): WorkflowAgentHandle | undefined {
     return this.#handles.get(name);
   }
 
+  /** {@inheritDoc WorkflowAgentFactory.list} */
   list(): readonly WorkflowAgentDescriptor[] {
     return Object.freeze(
       [...this.#handles.values()].map((handle) => handle.descriptor),
     );
   }
 
+  /**
+   * Releases an active agent.
+   *
+   * @param handle - Handle returned by `create`.
+   * @returns `false` when the handle is not the one currently active under its name.
+   */
   release(handle: WorkflowAgentHandle): boolean {
     const active = this.#handles.get(handle.descriptor.name);
     if (active !== handle) return false;

@@ -1,9 +1,7 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
+import {
+  isWorkflowIdentifier,
+  type WorkflowIdentifierGrammar,
+} from "../internal/identifiers.js";
 import {
   normalizeAcceptedChangeReceipt,
   verifyWorkflowChangeSet,
@@ -27,14 +25,20 @@ import type {
   WorkflowPlanStore,
 } from "./stores.js";
 
+/** Error codes thrown by {@link WorkflowOwnershipChangeSetValidator}. */
 export type WorkflowChangeValidationErrorCode =
   | "WORKFLOW_CHANGE_BASE_REVISION_MISMATCH"
   | "WORKFLOW_CHANGE_PLAN_REVISION_MISMATCH"
   | "WORKFLOW_CHANGE_TASK_IDENTITY_MISMATCH"
   | "WORKFLOW_CHANGE_ENTRY_KIND_DENIED";
 
+/**
+ * Error thrown when a change set does not match its plan, base revision or task.
+ */
 export class WorkflowChangeValidationError extends Error {
+  /** Machine-readable error code to branch on. */
   readonly code: WorkflowChangeValidationErrorCode;
+  /** Frozen context for the failure, such as the expected and actual values. */
   readonly details?: Readonly<Record<string, string | number>>;
 
   constructor(
@@ -49,20 +53,35 @@ export class WorkflowChangeValidationError extends Error {
   }
 }
 
+/**
+ * Change set to validate with the base revision, plan revision and ownership it must match.
+ */
 export interface WorkflowOwnershipChangeSetValidationRequest {
+  /** Change set the host inspected. */
   changeSet: WorkflowChangeSet;
+  /** Base revision the change set must have been made against. */
   expectedBaseRevision: string;
+  /** Plan revision the change set must target. */
   expectedPlanRevision: number;
+  /** Agent that produced the change set. */
   agentId: string;
+  /** Ownership grants, with fencing tokens, that must cover every changed path. */
   ownership: readonly WorkflowOwnershipFence[];
+  /** Integration target and revision the receipt will be bound to. */
   expectedTarget: WorkflowExpectedTarget;
 }
 
+/** Dependencies and options for {@link WorkflowOwnershipChangeSetValidator}. */
 export interface WorkflowOwnershipChangeSetValidatorConfig {
+  /** Controller used to check grants against the live ledger. */
   ownership: WorkflowOwnershipController;
+  /** Store the plan is read from. */
   plans: WorkflowPlanStore;
+  /** Store issued receipts are persisted to. When omitted, receipts are issued but not stored. */
   receipts?: WorkflowChangeReceiptStore;
+  /** Generates receipt ids. Defaults to a random identifier generator. */
   createReceiptId?: () => string;
+  /** Clock returning epoch milliseconds. Defaults to `Date.now`. */
   now?: () => number;
   /** File and directory entries are allowed by default. */
   allowedEntryKinds?: readonly WorkflowChangeEntryKind[];
@@ -96,6 +115,23 @@ export class WorkflowOwnershipChangeSetValidator {
     );
   }
 
+  /**
+   * Verifies a change set against the plan, base revision and live ownership,
+   * and issues an authoritative receipt.
+   *
+   * @remarks
+   * The change set digest is verified before authorization so forged content
+   * never influences ownership checks or receipt construction.
+   *
+   * @param request - Change set and the revisions and ownership it must match.
+   * @param actor - Host-authenticated actor.
+   * @returns A receipt that later commit and integration steps consume.
+   * @throws {@link WorkflowChangeValidationError} when the plan or base revision,
+   * task identity or entry kinds do not match.
+   * @throws {@link WorkflowOrchestrationControlError} with code `WORKFLOW_PLAN_NOT_FOUND`
+   * when the plan revision does not exist.
+   * @throws {@link TypeError} when `request` is missing.
+   */
   async validate(
     request: WorkflowOwnershipChangeSetValidationRequest,
     actor: WorkflowActorContext,
@@ -133,7 +169,7 @@ export class WorkflowOwnershipChangeSetValidator {
         },
       );
     }
-    validateIdentity(request.agentId, "agentId");
+    validateIdentity(request.agentId, "agentId", "record");
     validateBaseRevision(request.expectedBaseRevision);
     if (
       changeSet.baseRevision !== request.expectedBaseRevision ||
@@ -309,7 +345,7 @@ function normalizeFences(
         "Workflow ownership evidence contains unknown fields",
       );
     }
-    validateIdentity(fence.grantId, "grantId");
+    validateIdentity(fence.grantId, "grantId", "record");
     if (!Number.isSafeInteger(fence.fencingToken) || fence.fencingToken <= 0) {
       throw new TypeError("fencingToken must be a positive safe integer");
     }
@@ -332,19 +368,17 @@ function validateExpectedRevision(value: number): void {
 }
 
 function validateBaseRevision(value: string): void {
-  if (
-    typeof value !== "string" ||
-    !/^[A-Za-z0-9][A-Za-z0-9._:+/-]{0,511}$/u.test(value)
-  ) {
+  if (!isWorkflowIdentifier(value, "revision")) {
     throw new TypeError("expectedBaseRevision must be an immutable revision");
   }
 }
 
-function validateIdentity(value: string, field: string): void {
-  if (
-    typeof value !== "string" ||
-    !/^[A-Za-z0-9][A-Za-z0-9._:+/-]{0,255}$/u.test(value)
-  ) {
+function validateIdentity(
+  value: string,
+  field: string,
+  grammar: WorkflowIdentifierGrammar = "opaque",
+): void {
+  if (!isWorkflowIdentifier(value, grammar)) {
     throw new TypeError(`${field} must be a safe identity`);
   }
 }

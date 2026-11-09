@@ -1,9 +1,3 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import { describe, expect, test } from "bun:test";
 import { WorkflowActorContext } from "../../../src/workflows/orchestration/authorization.js";
 import {
@@ -44,10 +38,16 @@ describe("WorkflowPlanController", () => {
           '{"actorId":"principal-coordinator","agentId":"coordinator","executionId":"execution-1"}',
         ),
       ),
-    ).rejects.toMatchObject({ details: { reason: "unauthorized" } });
+    ).rejects.toMatchObject({
+      code: "WORKFLOW_ORCHESTRATION_UNAUTHORIZED",
+      details: { reason: "unauthorized" },
+    });
     await expect(
       configured.controller.put(value, actor("builder", 1, "implementation")),
-    ).rejects.toMatchObject({ details: { reason: "unauthorized" } });
+    ).rejects.toMatchObject({
+      code: "WORKFLOW_ORCHESTRATION_UNAUTHORIZED",
+      details: { reason: "unauthorized" },
+    });
 
     const denied = new WorkflowPlanController({
       plans: new InMemoryWorkflowPlanStore(),
@@ -56,7 +56,38 @@ describe("WorkflowPlanController", () => {
     });
     await expect(
       denied.put(value, actor("coordinator", 1, "integration")),
-    ).rejects.toMatchObject({ details: { reason: "unauthorized" } });
+    ).rejects.toMatchObject({
+      code: "WORKFLOW_ORCHESTRATION_UNAUTHORIZED",
+      details: { reason: "unauthorized" },
+    });
+  });
+
+  test("persists exactly the plan it checked, even behind a getter", async () => {
+    const { controller, plans } = harness();
+    let reads = 0;
+    const candidate = plan();
+    Object.defineProperty(candidate, "status", {
+      enumerable: true,
+      // Answers "ready" to the reads a checker makes before it copies
+      // (the header check, the copy it discards, the "ready" check) and
+      // "draft" from the fifth read on, when a late copy is taken.
+      get: () => (++reads < 5 ? "ready" : "draft"),
+    });
+
+    let stored: WorkflowPlan | undefined;
+    try {
+      stored = await controller.put(
+        candidate,
+        actor("coordinator", 1, "integration"),
+      );
+    } catch (error) {
+      expect(error).toMatchObject({
+        code: "WORKFLOW_ORCHESTRATION_INVALID_REQUEST",
+      });
+      expect(await plans.get("execution-1", 1)).toBeUndefined();
+      return;
+    }
+    expect(stored.status).toBe("ready");
   });
 
   test("activates concurrently with CAS and makes the same revision idempotent", async () => {
@@ -123,7 +154,49 @@ describe("WorkflowPlanController", () => {
     });
     await expect(
       controller.activate("execution-1", 1, firstActor),
-    ).rejects.toMatchObject({ details: { reason: "unauthorized" } });
+    ).rejects.toMatchObject({ code: "WORKFLOW_PLAN_STALE" });
+  });
+
+  test("a plan revision binding is a scope; only an older binding than the active plan is stale", async () => {
+    let now = 1;
+    const { controller } = harness({ now: () => now++ });
+    const first = actor("coordinator", 1, "integration");
+    await controller.put(plan(), first);
+    await controller.activate("execution-1", 1, first);
+    await controller.put(plan({ planRevision: 2, createdAt: 2 }), first);
+    await controller.activate("execution-1", 2, first);
+    const second = actor("coordinator", 2, "integration");
+
+    // Bound to the active revision, reading an older one: out of scope.
+    await expect(
+      controller.get("execution-1", 1, second),
+    ).rejects.toMatchObject({
+      code: "WORKFLOW_ORCHESTRATION_UNAUTHORIZED",
+      details: { reason: "unauthorized" },
+    });
+    // Bound to a revision that is not active yet: out of scope too.
+    await expect(
+      controller.get("execution-1", 2, actor("coordinator", 3, "integration")),
+    ).rejects.toMatchObject({ code: "WORKFLOW_ORCHESTRATION_UNAUTHORIZED" });
+    await expect(
+      controller.put(
+        plan({ planRevision: 3, createdAt: 3 }),
+        actor("coordinator", 3, "integration"),
+      ),
+    ).rejects.toMatchObject({ code: "WORKFLOW_ORCHESTRATION_UNAUTHORIZED" });
+    // Bound to a revision older than the active one: stale.
+    await expect(controller.get("execution-1", 2, first)).rejects.toMatchObject(
+      {
+        code: "WORKFLOW_PLAN_STALE",
+        details: { actorPlanRevision: 1, activePlanRevision: 2 },
+      },
+    );
+    await expect(
+      controller.put(plan({ planRevision: 3, createdAt: 3 }), first),
+    ).rejects.toMatchObject({ code: "WORKFLOW_PLAN_STALE" });
+    expect(await controller.get("execution-1", 2, second)).toMatchObject({
+      planRevision: 2,
+    });
   });
 
   test("reports missing plans without creating orchestration state", async () => {
@@ -152,7 +225,10 @@ describe("WorkflowPlanController", () => {
     });
     await expect(
       controller.activate("execution-1", 1, builder),
-    ).rejects.toMatchObject({ details: { reason: "unauthorized" } });
+    ).rejects.toMatchObject({
+      code: "WORKFLOW_ORCHESTRATION_UNAUTHORIZED",
+      details: { reason: "unauthorized" },
+    });
   });
 
   test("requires explicit bootstrap authority for the first plan", async () => {
@@ -167,7 +243,10 @@ describe("WorkflowPlanController", () => {
 
     await expect(
       denied.put(plan(), actor("coordinator", 1, "integration")),
-    ).rejects.toMatchObject({ details: { reason: "unauthorized" } });
+    ).rejects.toMatchObject({
+      code: "WORKFLOW_ORCHESTRATION_UNAUTHORIZED",
+      details: { reason: "unauthorized" },
+    });
 
     const allowed = new WorkflowPlanController({
       plans,
@@ -220,7 +299,10 @@ describe("WorkflowPlanController", () => {
 
     await expect(
       controller.put(elevatedCandidate, actor("intruder", 1, "intruder-task")),
-    ).rejects.toMatchObject({ details: { reason: "unauthorized" } });
+    ).rejects.toMatchObject({
+      code: "WORKFLOW_ORCHESTRATION_UNAUTHORIZED",
+      details: { reason: "unauthorized" },
+    });
   });
 
   test("uses the active plan to authorize and activate the next revision", async () => {

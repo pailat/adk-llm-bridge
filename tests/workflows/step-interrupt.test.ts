@@ -1,22 +1,19 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import { describe, expect, test } from "bun:test";
 import {
   BaseAgent,
   createEvent,
   type Event,
   FunctionNode,
+  getFunctionCalls,
   InMemorySessionService,
   InvocationContext,
+  PluginManager,
   REQUEST_INPUT_FUNCTION_CALL_NAME,
   Runner,
   Workflow,
 } from "@google/adk";
 import type { Content } from "@google/genai";
+import { AgentInvocationGateway } from "../../src/runtime/agent-invocation-gateway.js";
 import type { WorkflowCheckpointV1 } from "../../src/workflows/checkpoint/schema.js";
 import type {
   SaveWorkflowCheckpointInput,
@@ -26,6 +23,7 @@ import {
   defineScriptWorkflow,
   defineWorkflow,
 } from "../../src/workflows/definition.js";
+import type { WorkflowEvent } from "../../src/workflows/events.js";
 import {
   WORKFLOW_SCRIPT_PROTOCOL,
   WORKFLOW_SCRIPT_PROTOCOL_VERSION,
@@ -117,6 +115,10 @@ class DoneAgent extends BaseAgent {
   protected async *runLiveImpl() {}
 }
 
+/** The workflow event an ADK event carries in its metadata, if any. */
+const workflowEventOf = (event: Event) =>
+  event.customMetadata?.workflowEvent as WorkflowEvent | undefined;
+
 function answerFor(agent: string, response: unknown): Content {
   return {
     role: "user",
@@ -138,6 +140,7 @@ function turn(
   invocationId: string,
 ): InvocationContext {
   return new InvocationContext({
+    pluginManager: new PluginManager(),
     invocationId,
     agent,
     userContent,
@@ -164,9 +167,7 @@ async function drain(agent: BaseAgent, context: InvocationContext) {
 }
 
 const types = (events: readonly Event[]) =>
-  events
-    .map((event) => event.customMetadata?.workflowEvent?.type)
-    .filter(Boolean);
+  events.map((event) => workflowEventOf(event)?.type).filter(Boolean);
 
 const START: Content = { role: "user", parts: [{ text: "start" }] };
 
@@ -256,6 +257,145 @@ describe("workflow step interrupts", () => {
     expect(ask.calls).toBe(1);
     expect(types(events)).toContain("workflow_waiting");
     expect(store.checkpoint?.steps.ask?.status).toBe("waiting");
+  });
+
+  test("re-entering without an answer re-emits the pending request and step_waiting", async () => {
+    const ask = new AskAgent("ask");
+    const store = new MemoryStore();
+    const workflow = sequential(ask, store);
+    await drain(workflow, turn(workflow, START, "i1"));
+
+    const { events, error } = await drain(
+      workflow,
+      turn(workflow, START, "i2"),
+    );
+
+    expect(error).toBeUndefined();
+    expect(ask.calls).toBe(1);
+    const request = events.find((event) =>
+      getFunctionCalls(event).some((call) => call.id === "ask-ask"),
+    );
+    expect(request?.author).toBe("ask");
+    expect(request?.invocationId).toBe("i2");
+    expect(request?.longRunningToolIds).toEqual(["ask-ask"]);
+    expect(getFunctionCalls(request as Event)[0]?.name).toBe(
+      REQUEST_INPUT_FUNCTION_CALL_NAME,
+    );
+    expect(types(events).slice(-2)).toEqual([
+      "step_waiting",
+      "workflow_waiting",
+    ]);
+    const waiting = events.find(
+      (event) => workflowEventOf(event)?.type === "step_waiting",
+    )?.customMetadata?.workflowEvent;
+    expect(waiting).toMatchObject({
+      executionId: "run-1",
+      stepId: "ask",
+      attempt: 1,
+      kind: "input",
+      functionCallIds: ["ask-ask"],
+    });
+  });
+
+  test("a gateway re-entering a still-waiting workflow sees its interrupt", async () => {
+    const ask = new AskAgent("ask");
+    const store = new MemoryStore();
+    const workflow = sequential(ask, store);
+    const gateway = new AgentInvocationGateway({
+      resolveAgent: () => workflow,
+    });
+    const parent = (invocationId: string) =>
+      new InvocationContext({
+        invocationId,
+        agent: workflow,
+        userContent: START,
+        session: {
+          id: "s",
+          appName: "a",
+          userId: "u",
+          state: {},
+          events: [],
+          lastUpdateTime: 1,
+        },
+        pluginManager: new PluginManager(),
+      });
+    const delegate = (invocationId: string) =>
+      gateway.run({
+        agentName: "workflow",
+        input: START,
+        parentContext: parent(invocationId),
+      });
+
+    const first = await delegate("outer-1");
+    expect(first.interrupt?.functionCallIds).toEqual(["ask-ask"]);
+
+    // A fresh delegation (no resume) re-enters the same waiting run.
+    const second = await delegate("outer-2");
+
+    expect(second.error).toBeUndefined();
+    expect(ask.calls).toBe(1);
+    expect(second.interrupt).toMatchObject({
+      kind: "input",
+      functionCallIds: ["ask-ask"],
+    });
+
+    // The re-emitted request is answerable: resuming with it completes.
+    const resumed = await gateway.run({
+      agentName: "workflow",
+      input: answerFor("ask", { value: "blue" }),
+      resume: { events: second.interrupt?.events ?? [] },
+      parentContext: parent("outer-3"),
+    });
+    expect(resumed.error).toBeUndefined();
+    expect(resumed.interrupt).toBeUndefined();
+    expect(resumed.output).toContain('ask got {"value":"blue"}');
+    expect(store.checkpoint?.status).toBe("completed");
+  });
+
+  test("an outer workflow re-entering a waiting inner workflow waits instead of completing", async () => {
+    const ask = new AskAgent("ask");
+    const innerStore = new MemoryStore();
+    const inner = sequential(ask, innerStore);
+    let outerRun = 0;
+    const outer = new WorkflowAgent({
+      name: "outer",
+      subAgents: [inner],
+      // Each turn is a fresh outer run (the default store keeps it in the
+      // turn's session state); the inner run id and store stay the same.
+      resolveExecutionId: () => `outer-${++outerRun}`,
+      definition: defineWorkflow({
+        id: "outer",
+        version: "1",
+        handler: async (ctx) =>
+          (
+            await ctx.run({
+              id: "inner",
+              agentName: "workflow",
+              input: ctx.inputText,
+            })
+          ).output,
+      }),
+    });
+
+    const first = await drain(outer, turn(outer, START, "o1"));
+    expect(types(first.events).at(-1)).toBe("workflow_waiting");
+
+    const second = await drain(outer, turn(outer, START, "o2"));
+
+    expect(second.error).toBeUndefined();
+    expect(ask.calls).toBe(1);
+    expect(types(second.events)).not.toContain("workflow_completed");
+    const outerWaiting = second.events
+      .map((event) => workflowEventOf(event))
+      .find(
+        (event) =>
+          event?.type === "step_waiting" && event.executionId === "outer-2",
+      );
+    expect(outerWaiting).toMatchObject({
+      stepId: "inner",
+      functionCallIds: ["ask-ask"],
+    });
+    expect(innerStore.checkpoint?.steps.ask?.status).toBe("waiting");
   });
 
   test("a stale or foreign response is rejected without touching the checkpoint", async () => {
@@ -384,7 +524,7 @@ describe("workflow step interrupts", () => {
     const runtime: WorkflowScriptRuntime = {
       capabilities: QUICKJS_SYNC_CAPABILITIES,
       async createSession() {
-        const generator = (function* () {
+        const generator = (function* (): Generator<unknown, unknown, unknown> {
           const result = (yield op("run", {
             step: { id: "ask", agentName: "ask", input: "start" },
           })) as { output: string };

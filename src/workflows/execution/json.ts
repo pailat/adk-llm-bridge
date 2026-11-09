@@ -1,20 +1,25 @@
+import { freezeJson } from "../internal/immutable-json.js";
+import { WorkflowExecutionControlError } from "./contracts.js";
+
 /**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
+ * Bounds enforced on JSON values stored in executions.
+ *
+ * @internal
  */
-
-import {
-  WorkflowExecutionControlError,
-  type WorkflowExecutionJsonValue,
-} from "./contracts.js";
-
 export interface WorkflowExecutionJsonLimits {
+  /** Maximum nesting depth. */
   maxDepth: number;
+  /** Maximum number of values, counting containers and leaves. */
   maxNodes: number;
+  /** Maximum length of any string value or object key. */
   maxStringLength: number;
 }
 
+/**
+ * Default {@link WorkflowExecutionJsonLimits}: depth 32, 10,000 nodes, 1 MiB strings.
+ *
+ * @internal
+ */
 export const DEFAULT_WORKFLOW_EXECUTION_JSON_LIMITS: Readonly<WorkflowExecutionJsonLimits> =
   Object.freeze({
     maxDepth: 32,
@@ -22,69 +27,23 @@ export const DEFAULT_WORKFLOW_EXECUTION_JSON_LIMITS: Readonly<WorkflowExecutionJ
     maxStringLength: 1_048_576,
   });
 
+/**
+ * Validates a JSON value and returns a deep-frozen copy.
+ *
+ * @param value - Value to validate and copy.
+ * @param limits - Size bounds to enforce.
+ * @returns A deep-frozen copy of `value`.
+ * @throws {@link WorkflowExecutionControlError} with code `WORKFLOW_EXECUTION_INVALID_REQUEST`
+ * when the value has a cycle, a non-finite number, a non-plain object, a
+ * symbol-keyed property, a sparse array, or
+ * exceeds `limits`.
+ * @internal
+ */
 export function immutableJson<T>(
   value: T,
   limits: WorkflowExecutionJsonLimits = DEFAULT_WORKFLOW_EXECUTION_JSON_LIMITS,
 ): T {
-  validateLimits(limits);
-  const seen = new Set<object>();
-  let nodes = 0;
-
-  const visit = (
-    candidate: unknown,
-    depth: number,
-  ): WorkflowExecutionJsonValue => {
-    nodes++;
-    if (nodes > limits.maxNodes) invalid("JSON value exceeds node limit");
-    if (depth > limits.maxDepth) invalid("JSON value exceeds depth limit");
-    if (candidate === null || typeof candidate === "boolean") return candidate;
-    if (typeof candidate === "string") {
-      if (candidate.length > limits.maxStringLength) {
-        invalid("JSON string exceeds length limit");
-      }
-      return candidate;
-    }
-    if (typeof candidate === "number") {
-      if (!Number.isFinite(candidate)) invalid("JSON numbers must be finite");
-      return candidate;
-    }
-    if (!candidate || typeof candidate !== "object") {
-      invalid("Value must be JSON-safe");
-    }
-    if (seen.has(candidate)) invalid("JSON value must not contain cycles");
-    seen.add(candidate);
-    try {
-      if (Array.isArray(candidate)) {
-        const values = candidate.map((item) => visit(item, depth + 1));
-        return Object.freeze(values);
-      }
-      const prototype = Object.getPrototypeOf(candidate);
-      if (prototype !== Object.prototype && prototype !== null) {
-        invalid("JSON objects must use a plain prototype");
-      }
-      const result: Record<string, WorkflowExecutionJsonValue> = {};
-      for (const [key, item] of Object.entries(candidate)) {
-        if (key.length > limits.maxStringLength) {
-          invalid("JSON object key exceeds length limit");
-        }
-        if (item === undefined) continue;
-        result[key] = visit(item, depth + 1);
-      }
-      return Object.freeze(result);
-    } finally {
-      seen.delete(candidate);
-    }
-  };
-
-  return visit(value, 0) as T;
-}
-
-function validateLimits(limits: WorkflowExecutionJsonLimits): void {
-  for (const [name, value] of Object.entries(limits)) {
-    if (!Number.isSafeInteger(value) || value <= 0) {
-      invalid(`JSON limit ${name} must be a positive safe integer`);
-    }
-  }
+  return freezeJson(value, limits, invalid);
 }
 
 function invalid(message: string): never {

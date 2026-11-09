@@ -1,9 +1,3 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import { describe, expect, test } from "bun:test";
 import type { InvocationContext } from "@google/adk";
 import {
@@ -22,6 +16,7 @@ import {
 } from "../../../src/workflows/checkpoint/store.js";
 import { defineWorkflow } from "../../../src/workflows/definition.js";
 import { WorkflowCheckpointCoordinator } from "../../../src/workflows/runtime/workflow-checkpoint-coordinator.js";
+import { fromPartial } from "../../helpers/partial.js";
 
 const definition = defineWorkflow({
   id: "checkpoint-cas",
@@ -162,7 +157,7 @@ function coordinator(
 function invocationContext(
   state: Record<string, unknown> = {},
 ): InvocationContext {
-  return {
+  return fromPartial<InvocationContext>({
     invocationId: "execution-1",
     session: {
       id: "session-1",
@@ -172,5 +167,5 @@ function invocationContext(
       events: [],
       lastUpdateTime: 1,
     },
-  } as InvocationContext;
+  });
 }

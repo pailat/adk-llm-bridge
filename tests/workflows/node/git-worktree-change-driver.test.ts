@@ -1,15 +1,11 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import { afterEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   chmod,
   mkdir,
   mkdtemp,
+  readdir,
   rename,
   rm,
   symlink,
@@ -17,12 +13,13 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import {
   FileSystemWorkflowRepositoryMutationLock,
   NodeGitWorktreeChangeDriver,
   type NodeGitWorktreeHost,
 } from "../../../src/workflows/node/git-worktree-change-driver.js";
+import type { WorkflowResourceJsonObject } from "../../../src/workflows/resources/json.js";
 import {
   WORKFLOW_CHANGE_AUTHORITY_LEASE,
   type WorkflowAcceptedChangeReceipt,
@@ -38,6 +35,8 @@ import {
 } from "../../../src/workflows/workspace/mutation-journal.js";
 
 const temporaryRoots = new Set<string>();
+/** Above the default `pid_max` of Linux and macOS, so no process has it. */
+const DEAD_PID = 2_147_483_646;
 
 afterEach(async () => {
   for (const root of temporaryRoots) {
@@ -167,7 +166,11 @@ function authority(
       };
     },
     completeCommit: async (lease, result) => {
-      await journal.complete(lease.operationId, lease.intentDigest, result);
+      await journal.complete(
+        lease.operationId,
+        lease.intentDigest,
+        flatJson(result),
+      );
     },
     acquireIntegration: async (request) => {
       await journal.begin({
@@ -188,7 +191,11 @@ function authority(
       };
     },
     completeIntegration: async (lease, result) => {
-      await journal.complete(lease.operationId, lease.intentDigest, result);
+      await journal.complete(
+        lease.operationId,
+        lease.intentDigest,
+        flatJson(result),
+      );
     },
     release: async () => {},
     reconcile: async (request) => {
@@ -830,6 +837,705 @@ describe("NodeGitWorktreeChangeDriver", () => {
   });
 });
 
+/** Commits extra files to the repository and returns a driver based on them. */
+async function withBaseFiles(
+  repository: TestRepository,
+  files: Record<string, string>,
+): Promise<TestRepository> {
+  for (const [path, content] of Object.entries(files)) {
+    await writeFile(join(repository.repoRoot, path), content);
+  }
+  git(repository.repoRoot, "add", "--all", "--");
+  git(
+    repository.repoRoot,
+    "commit",
+    "--no-gpg-sign",
+    "--no-verify",
+    "-m",
+    "extra base",
+  );
+  const worktreesRoot = await mkdtemp(join(repository.root, "worktrees-"));
+  const driver = await NodeGitWorktreeChangeDriver.create({
+    repoRoot: repository.repoRoot,
+    worktreesRoot,
+    baseRevision: "HEAD",
+    mutationJournal: repository.journal,
+  });
+  return {
+    ...repository,
+    worktreesRoot,
+    driver,
+    baseRevision: driver.baseRevision,
+  };
+}
+
+async function commitWorktree(
+  repository: TestRepository,
+  host: NodeGitWorktreeHost,
+  operationId: string,
+) {
+  const changeSet = await repository.driver.inspect(
+    host,
+    inspectionRequest(repository),
+  );
+  const receipt = receiptFor(changeSet, repository.baseRevision);
+  const commit = await new WorkflowValidatedCommitter(
+    repository.driver,
+    repository.driver,
+    authority(repository.journal),
+  ).commit(host, { receipt, message: operationId, operationId });
+  return { changeSet, receipt, commit };
+}
+
+async function integrateCommit(
+  repository: TestRepository,
+  accepted: Awaited<ReturnType<typeof commitWorktree>>,
+  operationId: string,
+) {
+  const { receipt, commit } = accepted;
+  return await new WorkflowValidatedIntegrator(
+    repository.driver,
+    authority(repository.journal),
+  ).integrate(repository.driver.repository, {
+    executionId: receipt.executionId,
+    taskId: receipt.taskId,
+    commitId: commit.commitId,
+    receiptId: receipt.receiptId,
+    changeSetDigest: receipt.changeSetDigest,
+    expectedTarget: receipt.expectedTarget,
+    operationId,
+    receipt,
+    commit,
+  });
+}
+
+describe("NodeGitWorktreeChangeDriver path and tree consistency", () => {
+  test("commits a moved and edited file as a deletion plus an addition", async () => {
+    const lines = Array.from({ length: 20 }, (_, index) => `line ${index}\n`);
+    const repository = await withBaseFiles(await createRepository(), {
+      "large.txt": lines.join(""),
+    });
+    const workspace = await provision(repository);
+    await unlink(join(workspace.host.worktreePath, "large.txt"));
+    await writeFile(
+      join(workspace.host.worktreePath, "moved.txt"),
+      `${lines.join("")}edited\n`,
+    );
+
+    const { changeSet, commit } = await commitWorktree(
+      repository,
+      workspace.host,
+      "commit-move-edit",
+    );
+
+    expect(
+      changeSet.entries.map((entry) =>
+        entry.kind === "renamed"
+          ? `renamed:${entry.toPath}`
+          : `${entry.kind}:${entry.path}`,
+      ),
+    ).toEqual(["deleted:large.txt", "added:moved.txt"]);
+    expect(
+      git(repository.repoRoot, "show", `${commit.commitId}:moved.txt`),
+    ).toEndWith("line 19\nedited");
+  });
+
+  test("commits an exact move as the same rename it inspected", async () => {
+    const repository = await createRepository();
+    const workspace = await provision(repository);
+    await rename(
+      join(workspace.host.worktreePath, "rename-from.txt"),
+      join(workspace.host.worktreePath, "rename-to.txt"),
+    );
+
+    const { changeSet, commit } = await commitWorktree(
+      repository,
+      workspace.host,
+      "commit-exact-move",
+    );
+
+    expect(changeSet.entries).toMatchObject([
+      { kind: "renamed", fromPath: "rename-from.txt", toPath: "rename-to.txt" },
+    ]);
+    expect(
+      git(repository.repoRoot, "ls-tree", "--name-only", commit.commitId),
+    ).toContain("rename-to.txt");
+  });
+
+  test("pairs an exact move with the first addition in code-unit order", async () => {
+    const repository = await createRepository();
+    const workspace = await provision(repository);
+    await unlink(join(workspace.host.worktreePath, "delete.txt"));
+    await writeFile(join(workspace.host.worktreePath, "a.txt"), "delete me\n");
+    await writeFile(join(workspace.host.worktreePath, "B.txt"), "delete me\n");
+
+    const { changeSet } = await commitWorktree(
+      repository,
+      workspace.host,
+      "commit-code-unit-order",
+    );
+
+    expect(
+      changeSet.entries.find((entry) => entry.kind === "renamed"),
+    ).toMatchObject({ fromPath: "delete.txt", toPath: "B.txt" });
+  });
+
+  test("records only the owner execute bit, as Git does", async () => {
+    const repository = await createRepository();
+    const workspace = await provision(repository);
+    const tracked = join(workspace.host.worktreePath, "tracked.txt");
+    await writeFile(tracked, "group executable\n");
+    await chmod(tracked, 0o654);
+
+    const { changeSet, commit } = await commitWorktree(
+      repository,
+      workspace.host,
+      "commit-group-exec",
+    );
+
+    expect(changeSet.entries[0]?.mode).toBe("100644");
+    expect(
+      git(repository.repoRoot, "ls-tree", commit.commitId, "--", "tracked.txt"),
+    ).toStartWith("100644 ");
+  });
+
+  test("treats paths that look like pathspec magic as literal paths", async () => {
+    const magic = await withBaseFiles(await createRepository(), {
+      ":magic.txt": "base\n",
+    });
+    const workspace = await provision(magic);
+    await writeFile(
+      join(workspace.host.worktreePath, ":magic.txt"),
+      "edited\n",
+    );
+
+    const { commit } = await commitWorktree(
+      magic,
+      workspace.host,
+      "commit-magic-path",
+    );
+    expect(git(magic.repoRoot, "show", `${commit.commitId}::magic.txt`)).toBe(
+      "edited",
+    );
+
+    const second = await provision(magic, "task-2");
+    await unlink(join(second.host.worktreePath, ":magic.txt"));
+    const deleted = await magic.driver.inspect(second.host, {
+      ...inspectionRequest(magic, "task-2"),
+    });
+    expect(deleted.entries).toMatchObject([
+      { kind: "deleted", path: ":magic.txt", entryKind: "file" },
+    ]);
+  });
+
+  test("accepts a dangling in-tree symlink on inspection and commit alike", async () => {
+    const repository = await createRepository();
+    const workspace = await provision(repository);
+    await symlink(
+      "missing/target.txt",
+      join(workspace.host.worktreePath, "dangling.txt"),
+    );
+
+    const { changeSet, commit } = await commitWorktree(
+      repository,
+      workspace.host,
+      "commit-dangling-symlink",
+    );
+
+    expect(changeSet.entries).toMatchObject([
+      { kind: "added", path: "dangling.txt", entryKind: "symlink" },
+    ]);
+    expect(
+      git(
+        repository.repoRoot,
+        "ls-tree",
+        commit.commitId,
+        "--",
+        "dangling.txt",
+      ),
+    ).toStartWith("120000 ");
+  });
+
+  test("rejects a relative symlink that leaves the worktree, even when dangling", async () => {
+    const repository = await createRepository();
+    const workspace = await provision(repository);
+    await symlink(
+      "../../outside-missing.txt",
+      join(workspace.host.worktreePath, "escape.txt"),
+    );
+
+    await expect(
+      repository.driver.inspect(workspace.host, inspectionRequest(repository)),
+    ).rejects.toMatchObject({ code: "GIT_SYMLINK_ESCAPE" });
+  });
+
+  test("reports a backslash in a worktree path as a path escape", async () => {
+    const repository = await createRepository();
+    const workspace = await provision(repository);
+    await writeFile(
+      join(workspace.host.worktreePath, "back\\slash.txt"),
+      "x\n",
+    );
+
+    await expect(
+      repository.driver.inspect(workspace.host, inspectionRequest(repository)),
+    ).rejects.toMatchObject({ code: "GIT_WORKTREE_PATH_ESCAPE" });
+  });
+
+  test("ignores GIT_* variables inherited from the host process", async () => {
+    const repository = await createRepository();
+    const other = await createRepository();
+    await writeFile(join(other.repoRoot, "other.txt"), "other\n");
+    git(other.repoRoot, "add", "--all", "--");
+    git(
+      other.repoRoot,
+      "commit",
+      "--no-gpg-sign",
+      "--no-verify",
+      "-m",
+      "other",
+    );
+    const saved = {
+      GIT_DIR: process.env.GIT_DIR,
+      GIT_INDEX_FILE: process.env.GIT_INDEX_FILE,
+    };
+    process.env.GIT_DIR = join(other.repoRoot, ".git");
+    process.env.GIT_INDEX_FILE = join(other.repoRoot, ".git", "index");
+    try {
+      const driver = await NodeGitWorktreeChangeDriver.create({
+        repoRoot: repository.repoRoot,
+        worktreesRoot: join(repository.root, "env-worktrees"),
+        baseRevision: "main",
+      });
+      expect(driver.baseRevision).toBe(repository.baseRevision);
+      const workspace = await driver.provision({
+        executionId: "execution-1",
+        taskId: "task-1",
+      });
+      await writeFile(
+        join(workspace.host.worktreePath, "tracked.txt"),
+        "env\n",
+      );
+      const changeSet = await driver.inspect(
+        workspace.host,
+        inspectionRequest(repository),
+      );
+      expect(changeSet.entries).toMatchObject([
+        { kind: "modified", path: "tracked.txt" },
+      ]);
+    } finally {
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  });
+});
+
+describe("NodeGitWorktreeChangeDriver inherited Git environment", () => {
+  for (const variable of [
+    "GIT_GLOB_PATHSPECS",
+    "GIT_NOGLOB_PATHSPECS",
+    "GIT_ICASE_PATHSPECS",
+  ]) {
+    test(`inspects and commits with ${variable} inherited from the host`, async () => {
+      const repository = await createRepository();
+      const workspace = await provision(repository);
+      await writeFile(
+        join(workspace.host.worktreePath, "tracked.txt"),
+        "pathspec\n",
+      );
+      const { changeSet } = await withEnvironment({ [variable]: "1" }, () =>
+        commitWorktree(repository, workspace.host, `commit-${variable}`),
+      );
+      expect(changeSet.entries).toMatchObject([
+        { kind: "modified", path: "tracked.txt" },
+      ]);
+    });
+  }
+
+  test("integrates with quarantine, replace and graft variables inherited from the host", async () => {
+    const repository = await createRepository();
+    const quarantine = join(repository.repoRoot, ".git", "objects", "incoming");
+    await mkdir(quarantine);
+    const workspace = await provision(repository);
+    await writeFile(
+      join(workspace.host.worktreePath, "tracked.txt"),
+      "quarantine\n",
+    );
+    const result = await withEnvironment(
+      {
+        GIT_QUARANTINE_PATH: quarantine,
+        GIT_REPLACE_REF_BASE: "refs/replace/",
+        GIT_GRAFT_FILE: join(repository.root, "grafts"),
+        GIT_SHALLOW_FILE: join(repository.root, "shallow"),
+      },
+      async () => {
+        const accepted = await commitWorktree(
+          repository,
+          workspace.host,
+          "commit-quarantine",
+        );
+        await integrateCommit(repository, accepted, "integrate-quarantine");
+        return accepted;
+      },
+    );
+    expect(git(repository.repoRoot, "rev-parse", repository.targetId)).toBe(
+      result.commit.commitId,
+    );
+  });
+
+  test("ignores replace refs in the repository", async () => {
+    const repository = await createRepository();
+    await writeFile(join(repository.root, "fake.txt"), "fake\n");
+    const blob = git(
+      repository.repoRoot,
+      "hash-object",
+      "-w",
+      "--",
+      join(repository.root, "fake.txt"),
+    );
+    const tree = execFileSync("git", ["mktree"], {
+      cwd: repository.repoRoot,
+      input: `100644 blob ${blob}\ttracked.txt\n`,
+    })
+      .toString("utf8")
+      .trim();
+    const fake = git(
+      repository.repoRoot,
+      "commit-tree",
+      "--no-gpg-sign",
+      "-m",
+      "fake",
+      tree,
+    );
+    git(repository.repoRoot, "replace", repository.baseRevision, fake);
+
+    const workspace = await provision(repository);
+    await writeFile(
+      join(workspace.host.worktreePath, "tracked.txt"),
+      "replaced\n",
+    );
+    const { changeSet, commit } = await commitWorktree(
+      repository,
+      workspace.host,
+      "commit-replace",
+    );
+
+    expect(changeSet.entries).toMatchObject([
+      { kind: "modified", path: "tracked.txt" },
+    ]);
+    expect(
+      git(
+        repository.repoRoot,
+        "--no-replace-objects",
+        "ls-tree",
+        "--name-only",
+        commit.commitId,
+      ).split("\n"),
+    ).toEqual(["delete.txt", "rename-from.txt", "tracked.txt"]);
+  });
+});
+
+describe("NodeGitWorktreeChangeDriver with core.fileMode disabled", () => {
+  test("keeps the base mode of a tracked file whose execute bit changed", async () => {
+    const repository = await createRepository();
+    git(repository.repoRoot, "config", "core.fileMode", "false");
+    const workspace = await provision(repository);
+    const tracked = join(workspace.host.worktreePath, "tracked.txt");
+    await writeFile(tracked, "now executable\n");
+    await chmod(tracked, 0o755);
+
+    const { changeSet, commit } = await commitWorktree(
+      repository,
+      workspace.host,
+      "commit-filemode-tracked",
+    );
+
+    expect(changeSet.entries).toMatchObject([
+      { kind: "modified", path: "tracked.txt", mode: "100644" },
+    ]);
+    expect(
+      git(repository.repoRoot, "ls-tree", commit.commitId, "--", "tracked.txt"),
+    ).toStartWith("100644 ");
+  });
+
+  test("keeps an executable base mode when the file lost its execute bit", async () => {
+    const base = await createRepository();
+    await writeFile(join(base.repoRoot, "run.sh"), "echo base\n");
+    await chmod(join(base.repoRoot, "run.sh"), 0o755);
+    const repository = await withBaseFiles(base, {});
+    git(repository.repoRoot, "config", "core.fileMode", "false");
+    const workspace = await provision(repository);
+    const script = join(workspace.host.worktreePath, "run.sh");
+    await writeFile(script, "echo edited\n");
+    await chmod(script, 0o644);
+
+    const { changeSet } = await commitWorktree(
+      repository,
+      workspace.host,
+      "commit-filemode-executable",
+    );
+
+    expect(changeSet.entries).toMatchObject([
+      { kind: "modified", path: "run.sh", mode: "100755" },
+    ]);
+  });
+
+  test("records a new executable file as 100644", async () => {
+    const repository = await createRepository();
+    git(repository.repoRoot, "config", "core.fileMode", "false");
+    const workspace = await provision(repository);
+    const created = join(workspace.host.worktreePath, "new.sh");
+    await writeFile(created, "echo new\n");
+    await chmod(created, 0o755);
+
+    const { changeSet, commit } = await commitWorktree(
+      repository,
+      workspace.host,
+      "commit-filemode-new",
+    );
+
+    expect(changeSet.entries).toMatchObject([
+      { kind: "added", path: "new.sh", mode: "100644" },
+    ]);
+    expect(
+      git(repository.repoRoot, "ls-tree", commit.commitId, "--", "new.sh"),
+    ).toStartWith("100644 ");
+  });
+});
+
+describe("NodeGitWorktreeChangeDriver integration targets", () => {
+  test("rejects a malformed target ref with a driver error", async () => {
+    const repository = await createRepository();
+    const workspace = await provision(repository);
+    await writeFile(join(workspace.host.worktreePath, "tracked.txt"), "x\n");
+    const accepted = await commitWorktree(
+      repository,
+      workspace.host,
+      "commit-bad-ref",
+    );
+    const expectedTarget = {
+      targetId: "refs/heads/bad..name",
+      revision: repository.baseRevision,
+    };
+
+    await expect(
+      integrateCommit(
+        repository,
+        {
+          ...accepted,
+          receipt: { ...accepted.receipt, expectedTarget },
+        },
+        "integration-bad-ref",
+      ),
+    ).rejects.toMatchObject({ code: "GIT_CONFIGURATION_INVALID" });
+  });
+
+  test("rejects integration when the target moved after acceptance", async () => {
+    const repository = await createRepository();
+    const workspace = await provision(repository);
+    await writeFile(join(workspace.host.worktreePath, "tracked.txt"), "x\n");
+    const accepted = await commitWorktree(
+      repository,
+      workspace.host,
+      "commit-stale-target",
+    );
+    const moved = git(
+      repository.repoRoot,
+      "commit-tree",
+      `${repository.baseRevision}^{tree}`,
+      "-p",
+      repository.baseRevision,
+      "-m",
+      "concurrent publication",
+    );
+    git(repository.repoRoot, "update-ref", repository.targetId, moved);
+
+    await expect(
+      integrateCommit(repository, accepted, "integration-stale-target"),
+    ).rejects.toMatchObject({ code: "GIT_TARGET_STALE" });
+    expect(git(repository.repoRoot, "rev-parse", repository.targetId)).toBe(
+      moved,
+    );
+  });
+
+  test("rejects a commit that is not a direct child of the expected target", async () => {
+    const repository = await createRepository();
+    const workspace = await provision(repository);
+    await writeFile(join(workspace.host.worktreePath, "tracked.txt"), "x\n");
+    const moved = git(
+      repository.repoRoot,
+      "commit-tree",
+      `${repository.baseRevision}^{tree}`,
+      "-p",
+      repository.baseRevision,
+      "-m",
+      "earlier publication",
+    );
+    git(repository.repoRoot, "update-ref", repository.targetId, moved);
+    const changeSet = await repository.driver.inspect(
+      workspace.host,
+      inspectionRequest(repository),
+    );
+    const receipt = receiptFor(changeSet, moved);
+    const commit = await new WorkflowValidatedCommitter(
+      repository.driver,
+      repository.driver,
+      authority(repository.journal),
+    ).commit(workspace.host, {
+      receipt,
+      message: "based on the old base",
+      operationId: "commit-not-fast-forward",
+    });
+
+    await expect(
+      integrateCommit(
+        repository,
+        { changeSet, receipt, commit },
+        "integration-not-fast-forward",
+      ),
+    ).rejects.toMatchObject({ code: "GIT_COMMIT_NOT_FAST_FORWARD" });
+    expect(git(repository.repoRoot, "rev-parse", repository.targetId)).toBe(
+      moved,
+    );
+  });
+});
+
+describe("FileSystemWorkflowRepositoryMutationLock", () => {
+  async function lockRoot(): Promise<string> {
+    const root = await mkdtemp(join(tmpdir(), "adk-repository-lock-"));
+    temporaryRoots.add(root);
+    return root;
+  }
+
+  function lockPath(root: string, repositoryId: string): string {
+    return join(
+      root,
+      `.repository-${createHash("sha256").update(repositoryId).digest("hex")}.lock`,
+    );
+  }
+
+  async function plantLock(root: string, owner: unknown): Promise<string> {
+    const path = lockPath(root, "repo");
+    await mkdir(path);
+    await writeFile(join(path, "owner.json"), JSON.stringify(owner));
+    return path;
+  }
+
+  test("never grants two concurrent holders after a dead owner's lock", async () => {
+    for (let round = 0; round < 30; round++) {
+      const root = await lockRoot();
+      await plantLock(root, {
+        token: "dead-owner",
+        pid: DEAD_PID,
+        acquiredAt: 1,
+      });
+      const lock = new FileSystemWorkflowRepositoryMutationLock({
+        lockRoot: root,
+        retryIntervalMs: 1,
+        acquireTimeoutMs: 10_000,
+      });
+      let holders = 0;
+      let maxHolders = 0;
+      await Promise.all(
+        Array.from({ length: 8 }, async () => {
+          const lease = await lock.acquire("repo");
+          holders++;
+          maxHolders = Math.max(maxHolders, holders);
+          await Bun.sleep(2);
+          holders--;
+          expect(await lease.release()).toBe(true);
+        }),
+      );
+      expect(maxHolders).toBe(1);
+    }
+  });
+
+  test("reclaims a lock whose owner process is dead", async () => {
+    const root = await lockRoot();
+    await plantLock(root, {
+      token: "dead-owner",
+      pid: DEAD_PID,
+      acquiredAt: 1,
+    });
+    const lease = await new FileSystemWorkflowRepositoryMutationLock({
+      lockRoot: root,
+      acquireTimeoutMs: 1_000,
+    }).acquire("repo");
+    expect(lease.repositoryId).toBe("repo");
+    expect(await lease.release()).toBe(true);
+    expect(await lease.release()).toBe(false);
+  });
+
+  test("never steals a lock whose owner cannot be read", async () => {
+    const root = await lockRoot();
+    const path = await plantLock(root, { token: "", pid: "not-a-pid" });
+    await expect(
+      new FileSystemWorkflowRepositoryMutationLock({
+        lockRoot: root,
+        acquireTimeoutMs: 50,
+        retryIntervalMs: 5,
+      }).acquire("repo"),
+    ).rejects.toMatchObject({ code: "GIT_MUTATION_AMBIGUOUS" });
+    expect(await readdir(path)).toEqual(["owner.json"]);
+  });
+
+  test("a lost lease cannot release the lock of its successor", async () => {
+    const root = await lockRoot();
+    const lock = new FileSystemWorkflowRepositoryMutationLock({
+      lockRoot: root,
+      acquireTimeoutMs: 1_000,
+    });
+    const lost = await lock.acquire("repo");
+    const path = lockPath(root, "repo");
+    // Simulate recovery by another process that judged the owner dead.
+    await rm(path, { recursive: true, force: true });
+    const successor = await lock.acquire("repo");
+
+    expect(await lost.release()).toBe(false);
+    expect(await readdir(root)).toContain(basename(path));
+    expect(await successor.release()).toBe(true);
+  });
+
+  test("stops waiting when the signal aborts", async () => {
+    const root = await lockRoot();
+    const lock = new FileSystemWorkflowRepositoryMutationLock({
+      lockRoot: root,
+      acquireTimeoutMs: 10_000,
+      retryIntervalMs: 5,
+    });
+    const held = await lock.acquire("repo");
+    const controller = new AbortController();
+    const pending = lock.acquire("repo", { signal: controller.signal });
+    controller.abort(new Error("stop waiting"));
+    await expect(pending).rejects.toThrow("stop waiting");
+    expect(await held.release()).toBe(true);
+  });
+});
+
+/**
+ * Runs `operation` with extra variables in the process environment, as a host
+ * (a Git hook or a CI wrapper) would pass them to the driver.
+ */
+async function withEnvironment<T>(
+  variables: Record<string, string>,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const saved = Object.fromEntries(
+    Object.keys(variables).map((key) => [key, process.env[key]]),
+  );
+  Object.assign(process.env, variables);
+  try {
+    return await operation();
+  } finally {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
 function git(cwd: string, ...args: string[]): string {
   return gitRaw(cwd, ...args)
     .toString("utf8")
@@ -842,4 +1548,216 @@ function gitRaw(cwd: string, ...args: string[]): Buffer {
     encoding: "buffer",
     maxBuffer: 8 * 1024 * 1024,
   });
+}
+
+/** Types a flat record of strings and numbers as a journal JSON object. */
+function flatJson<T extends { [Key in keyof T]: string | number }>(
+  value: T,
+): WorkflowResourceJsonObject {
+  return value as WorkflowResourceJsonObject;
+}
+
+describe("NodeGitWorktreeChangeDriver error codes", () => {
+  test("create reports a non-repository root and an unknown base as configuration errors", async () => {
+    const repository = await createRepository();
+    const plain = join(repository.root, "plain");
+    await mkdir(plain);
+    await expect(
+      NodeGitWorktreeChangeDriver.create({
+        repoRoot: plain,
+        worktreesRoot: join(repository.root, "plain-worktrees"),
+        baseRevision: repository.baseRevision,
+        mutationJournal: repository.journal,
+      }),
+    ).rejects.toMatchObject({
+      name: "NodeGitWorktreeError",
+      code: "GIT_CONFIGURATION_INVALID",
+    });
+    await expect(
+      NodeGitWorktreeChangeDriver.create({
+        repoRoot: repository.repoRoot,
+        worktreesRoot: repository.worktreesRoot,
+        baseRevision: "refs/heads/does-not-exist",
+        mutationJournal: repository.journal,
+      }),
+    ).rejects.toMatchObject({
+      name: "NodeGitWorktreeError",
+      code: "GIT_CONFIGURATION_INVALID",
+    });
+  });
+
+  test("a failed git command is GIT_COMMAND_FAILED with the process error as cause", async () => {
+    const repository = await createRepository();
+    const workspace = await provision(repository);
+    // A worktree's `.git` file points at its admin directory; a broken one
+    // makes every Git command in the worktree exit 128.
+    await writeFile(
+      join(workspace.host.worktreePath, ".git"),
+      "not a gitdir\n",
+    );
+
+    const error = await repository.driver
+      .inspect(workspace.host, inspectionRequest(repository))
+      .then(
+        () => undefined,
+        (caught: unknown) => caught,
+      );
+    expect(error).toMatchObject({
+      name: "NodeGitWorktreeError",
+      code: "GIT_COMMAND_FAILED",
+    });
+    expect((error as Error).message).toStartWith("git ");
+    expect((error as Error).cause).toBeInstanceOf(Error);
+  });
+
+  test("an untracked nested repository is GIT_ENTRY_UNSUPPORTED", async () => {
+    const repository = await createRepository();
+    const workspace = await provision(repository);
+    const inner = join(workspace.host.worktreePath, "inner");
+    await mkdir(inner);
+    git(inner, "init", "--initial-branch=main");
+    await writeFile(join(inner, "file.txt"), "nested\n");
+
+    await expect(
+      repository.driver.inspect(workspace.host, inspectionRequest(repository)),
+    ).rejects.toMatchObject({
+      name: "NodeGitWorktreeError",
+      code: "GIT_ENTRY_UNSUPPORTED",
+      message:
+        "Untracked nested Git repository is not supported: inner; remove it or add it as a submodule",
+    });
+  });
+
+  test("create reports an invalid timeout or base revision as configuration errors", async () => {
+    const repository = await createRepository();
+    for (const options of [
+      { commandTimeoutMs: 0 },
+      { commandTimeoutMs: 1.5 },
+      { baseRevision: "-c" },
+      { baseRevision: "" },
+    ]) {
+      await expect(
+        NodeGitWorktreeChangeDriver.create({
+          repoRoot: repository.repoRoot,
+          worktreesRoot: repository.worktreesRoot,
+          baseRevision: repository.baseRevision,
+          mutationJournal: repository.journal,
+          ...options,
+        }),
+      ).rejects.toMatchObject({
+        name: "NodeGitWorktreeError",
+        code: "GIT_CONFIGURATION_INVALID",
+      });
+    }
+  });
+
+  test("a malformed object id from Git is GIT_COMMAND_FAILED", async () => {
+    const expectCommandFailed = async (
+      root: string,
+      prelude: string,
+      message: string,
+      run: () => Promise<unknown>,
+    ) => {
+      const bin = await fakeGit(root, prelude);
+      const error = await withEnvironment({ PATH: bin }, run).then(
+        () => undefined,
+        (caught: unknown) => caught,
+      );
+      expect(error).toMatchObject({
+        name: "NodeGitWorktreeError",
+        code: "GIT_COMMAND_FAILED",
+        message,
+      });
+    };
+
+    const preparing = await createRepository();
+    const prepared = await provision(preparing);
+    await writeFile(join(prepared.host.worktreePath, "tracked.txt"), "x\n");
+    await expectCommandFailed(
+      preparing.root,
+      'if [ "$1" = write-tree ]; then echo not-an-object; exit 0; fi',
+      "git write-tree returned an invalid treeId",
+      () => commitWorktree(preparing, prepared.host, "commit"),
+    );
+
+    const integrating = await createRepository();
+    const committed = await provision(integrating);
+    await writeFile(join(committed.host.worktreePath, "tracked.txt"), "y\n");
+    const accepted = await commitWorktree(
+      integrating,
+      committed.host,
+      "commit",
+    );
+    await expectCommandFailed(
+      integrating.root,
+      'case "$1 $4" in "rev-parse "*"^{tree}") echo not-a-tree; exit 0;; esac',
+      "git rev-parse returned an invalid treeId",
+      () => integrateCommit(integrating, accepted, "integrate"),
+    );
+  });
+
+  test("a Git command that runs past its timeout says so", async () => {
+    const repository = await createRepository();
+    const driver = await NodeGitWorktreeChangeDriver.create({
+      repoRoot: repository.repoRoot,
+      worktreesRoot: repository.worktreesRoot,
+      baseRevision: repository.baseRevision,
+      mutationJournal: repository.journal,
+      commandTimeoutMs: 200,
+    });
+    const workspace = await driver.provision({
+      executionId: "execution-1",
+      taskId: "task-1",
+    });
+    const bin = await fakeGit(repository.root, "exec sleep 5");
+
+    const error = await withEnvironment({ PATH: bin }, () =>
+      driver.inspect(workspace.host, inspectionRequest(repository)),
+    ).then(
+      () => undefined,
+      (caught: unknown) => caught,
+    );
+    expect(error).toMatchObject({
+      name: "NodeGitWorktreeError",
+      code: "GIT_COMMAND_FAILED",
+    });
+    expect((error as Error).message).toContain("timed out after 200 ms");
+  });
+
+  test("an abort during a Git command rejects with the signal's reason", async () => {
+    const repository = await createRepository();
+    const workspace = await provision(repository);
+    const bin = await fakeGit(repository.root, "exec sleep 5");
+    const controller = new AbortController();
+    const reason = new Error("caller stopped");
+
+    const error = await withEnvironment({ PATH: bin }, async () => {
+      const pending = repository.driver.inspect(
+        workspace.host,
+        inspectionRequest(repository),
+        { signal: controller.signal },
+      );
+      setTimeout(() => controller.abort(reason), 100);
+      return await pending.then(
+        () => undefined,
+        (caught: unknown) => caught,
+      );
+    });
+    expect(error).toBe(reason);
+  });
+});
+
+/**
+ * Writes a `git` wrapper that runs `prelude` (a POSIX shell fragment) and
+ * then the real Git, and returns a PATH that finds the wrapper first.
+ */
+async function fakeGit(root: string, prelude: string): Promise<string> {
+  const realGit = execFileSync("sh", ["-c", "command -v git"], {
+    encoding: "utf8",
+  }).trim();
+  const bin = await mkdtemp(join(root, "fake-git-"));
+  const script = join(bin, "git");
+  await writeFile(script, `#!/bin/sh\n${prelude}\nexec "${realGit}" "$@"\n`);
+  await chmod(script, 0o755);
+  return `${bin}:${process.env.PATH ?? ""}`;
 }

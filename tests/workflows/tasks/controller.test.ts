@@ -1,9 +1,3 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import { describe, expect, test } from "bun:test";
 import type { WorkflowTaskAuthorityPort } from "../../../src/workflows/tasks/authority.js";
 import type {
@@ -11,6 +5,7 @@ import type {
   WorkflowTaskDriverRequest,
   WorkflowTaskDriverResult,
   WorkflowTaskHandle,
+  WorkflowTaskJsonValue,
   WorkflowTaskRecord,
 } from "../../../src/workflows/tasks/contracts.js";
 import { WorkflowTaskController } from "../../../src/workflows/tasks/controller.js";
@@ -96,7 +91,7 @@ describe("WorkflowTaskController", () => {
               taskId: "child",
               agentId: "reviewer",
             });
-            return { output: child };
+            return { output: handleJson(child) };
           }
           return { output: "child-done" };
         },
@@ -349,7 +344,7 @@ describe("WorkflowTaskController", () => {
             taskId: "child",
             payload: { need: "contract" },
           });
-          return { output: childHandle };
+          return { output: handleJson(childHandle) };
         }
         childRequest = request;
         return await childGate.promise;
@@ -593,6 +588,64 @@ describe("WorkflowTaskController", () => {
     ).rejects.toMatchObject({
       code: "WORKFLOW_TASK_INVALID_TRANSITION",
     });
+  });
+
+  test("finishes a task whose thrown error has hostile fields", async () => {
+    const throwingGetters = Object.defineProperties(new Error("kept"), {
+      code: {
+        get() {
+          throw new Error("code getter");
+        },
+      },
+      details: {
+        get() {
+          throw new Error("details getter");
+        },
+      },
+    });
+    const trap = () => {
+      throw new Error("proxy trap");
+    };
+    const hostileProxy = new Proxy({}, { get: trap, has: trap });
+    const cases: Array<[unknown, Record<string, unknown>]> = [
+      [
+        throwingGetters,
+        { code: "WORKFLOW_TASK_DRIVER_FAILED", message: "kept" },
+      ],
+      [
+        hostileProxy,
+        {
+          code: "WORKFLOW_TASK_DRIVER_FAILED",
+          message: "Workflow task driver failed",
+        },
+      ],
+      [
+        Object.assign(new Error("with details"), {
+          code: "AGENT_FAILED",
+          details: { attempt: 1 },
+        }),
+        {
+          code: "AGENT_FAILED",
+          message: "with details",
+          details: { attempt: 1 },
+        },
+      ],
+      [
+        "plain text",
+        { code: "WORKFLOW_TASK_DRIVER_FAILED", message: "plain text" },
+      ],
+    ];
+    for (const [index, [thrown, error]] of cases.entries()) {
+      const { controller } = harness({
+        async execute() {
+          throw thrown;
+        },
+      });
+      const handle = await controller.spawn(spawn(`hostile-${index}`));
+      const record = await controller.join(handle);
+      expect(record.status).toBe("failed");
+      expect(record.error).toEqual(error as never);
+    }
   });
 
   test("awaitAny deterministically selects input order after simultaneous completion", async () => {
@@ -842,4 +895,9 @@ async function eventually(
     }
   }
   throw lastError;
+}
+
+/** A task handle as a JSON task output. */
+function handleJson(handle: WorkflowTaskHandle): WorkflowTaskJsonValue {
+  return { executionId: handle.executionId, taskId: handle.taskId };
 }

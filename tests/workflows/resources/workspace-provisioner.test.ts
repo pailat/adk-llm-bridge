@@ -1,9 +1,3 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import { describe, expect, test } from "bun:test";
 import { InMemoryWorkspaceProvisioner } from "../../../src/workflows/resources/workspace-provisioner.js";
 
@@ -86,6 +80,14 @@ describe("InMemoryWorkspaceProvisioner", () => {
     await expect(
       provisioner.provision({ executionId: "bad id", taskId: "task" }),
     ).rejects.toThrow("executionId");
+    // Execution and task ids are record ids, as in every other store, so
+    // `+` and `/` (accepted by resource ids) are refused.
+    await expect(
+      provisioner.provision({ executionId: "a+b", taskId: "task" }),
+    ).rejects.toThrow("executionId must be a workflow record id");
+    await expect(
+      provisioner.provision({ executionId: "execution", taskId: "a/b" }),
+    ).rejects.toThrow("taskId must be a workflow record id");
     await expect(
       provisioner.provision({
         executionId: "execution",

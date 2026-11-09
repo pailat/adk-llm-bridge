@@ -1,18 +1,28 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
+import { throwIfAborted } from "../internal/abort.js";
 import { canonicalDigest, legacyDigest } from "../internal/canonical-hash.js";
+import {
+  isWorkflowIdentifier,
+  type WorkflowIdentifierGrammar,
+} from "../internal/identifiers.js";
+import { workflowIntegrationIntentDigest } from "../internal/integration-intent.js";
+import {
+  normalizePortablePath,
+  portablePathProblem,
+} from "../internal/portable-path.js";
 
+/** Kind of filesystem entry a change refers to. */
 export type WorkflowChangeEntryKind =
   | "file"
   | "directory"
   | "symlink"
   | "submodule";
 
-/** Optional for legacy adapters; Git inspectors must always provide one. */
+/**
+ * Portable Git-style entry mode.
+ *
+ * @remarks
+ * Optional for legacy adapters; Git inspectors must always provide one.
+ */
 export type WorkflowChangeEntryMode =
   | "040000"
   | "100644"
@@ -21,6 +31,7 @@ export type WorkflowChangeEntryMode =
   | "160000";
 
 interface WorkflowChangeEntryBase {
+  /** Kind of entry the change applies to. */
   entryKind: WorkflowChangeEntryKind;
   /** Exact portable entry mode when the host filesystem exposes one. */
   mode?: WorkflowChangeEntryMode;
@@ -28,54 +39,82 @@ interface WorkflowChangeEntryBase {
   contentDigest: string;
 }
 
+/** A path that exists in the proposed tree but not in the base. */
 export interface WorkflowAddedChange extends WorkflowChangeEntryBase {
+  /** Discriminant. */
   kind: "added";
+  /** Relative portable path of the entry. */
   path: string;
 }
 
+/** A path whose content or mode differs from the base. */
 export interface WorkflowModifiedChange extends WorkflowChangeEntryBase {
+  /** Discriminant. */
   kind: "modified";
+  /** Relative portable path of the entry. */
   path: string;
 }
 
+/** A path removed from the base. */
 export interface WorkflowDeletedChange extends WorkflowChangeEntryBase {
+  /** Discriminant. */
   kind: "deleted";
+  /** Relative portable path of the entry. */
   path: string;
 }
 
+/** A path moved from `fromPath` to `toPath`. */
 export interface WorkflowRenamedChange extends WorkflowChangeEntryBase {
+  /** Discriminant. */
   kind: "renamed";
+  /** Original relative path. */
   fromPath: string;
+  /** New relative path; must differ from `fromPath`. */
   toPath: string;
 }
 
+/** One entry of a change set. */
 export type WorkflowChangeEntry =
   | WorkflowAddedChange
   | WorkflowModifiedChange
   | WorkflowDeletedChange
   | WorkflowRenamedChange;
 
+/** Identity, revisions and entries of a change set, before it is digested. */
 export interface WorkflowChangeSetInput {
+  /** Workflow execution that produced the changes. */
   executionId: string;
+  /** Task that produced the changes. */
   taskId: string;
+  /** Orchestration plan revision the task ran under. */
   planRevision: number;
+  /** Immutable revision identity of the inspected workspace. */
   workspaceRevision: string;
+  /** Revision the changes are relative to. */
   baseRevision: string;
+  /** Changed entries; sorted and checked for ambiguous paths on creation. */
   entries: readonly WorkflowChangeEntry[];
 }
 
 /** JSON-only snapshot returned by a read-only workspace inspection. */
 export interface WorkflowChangeSet extends WorkflowChangeSetInput {
+  /** SHA-256 digest of the canonical contents, as `sha256:<hex>`. */
   changeSetDigest: string;
 }
 
+/** Fencing token of one ownership grant that covered the change. */
 export interface WorkflowOwnershipFence {
+  /** Identifier of the workspace grant. */
   grantId: string;
+  /** Positive fencing token issued with the grant. */
   fencingToken: number;
 }
 
+/** Publication target and the revision it must still be at. */
 export interface WorkflowExpectedTarget {
+  /** Identifier of the publication target, such as a branch. */
   targetId: string;
+  /** Immutable revision the target is expected to point at. */
   revision: string;
 }
 
@@ -84,16 +123,27 @@ export interface WorkflowExpectedTarget {
  * It is deliberately JSON-only; host workspace handles never belong here.
  */
 export interface WorkflowAcceptedChangeReceipt {
+  /** Unique receipt identifier. */
   receiptId: string;
+  /** Always `accepted`. */
   verdict: "accepted";
+  /** Workflow execution the receipt belongs to. */
   executionId: string;
+  /** Task the receipt belongs to. */
   taskId: string;
+  /** Orchestration plan revision at acceptance. */
   planRevision: number;
+  /** Workspace revision that was inspected. */
   workspaceRevision: string;
+  /** Base revision of the change set. */
   baseRevision: string;
+  /** Digest of the accepted change set. */
   changeSetDigest: string;
+  /** Ownership fencing evidence; at least one grant is required. */
   ownership: readonly WorkflowOwnershipFence[];
+  /** Issue time in epoch milliseconds. */
   issuedAt: number;
+  /** Target revision the change may be integrated onto. */
   expectedTarget: WorkflowExpectedTarget;
   /** @deprecated Required by authoritative publication APIs. */
   agentId?: string;
@@ -104,24 +154,42 @@ export interface WorkflowAcceptedChangeReceipt {
 /** Receipt shape required at every live mutation boundary. */
 export interface WorkflowAuthoritativeChangeReceipt
   extends WorkflowAcceptedChangeReceipt {
+  /** Agent that owned the task. */
   agentId: string;
+  /** Orchestration revision validated against live state. */
   orchestrationRevision: number;
 }
 
+/** What a host inspector must inspect: one task's workspace at a revision. */
 export interface WorkflowChangeInspectionRequest {
+  /** Workflow execution. */
   executionId: string;
+  /** Task whose workspace is inspected. */
   taskId: string;
+  /** Plan revision the change set must carry. */
   planRevision: number;
+  /** Workspace revision to inspect. */
   workspaceRevision: string;
+  /** Revision to diff against. */
   baseRevision: string;
 }
 
+/** Options shared by change inspection, commit and integration ports. */
 export interface WorkflowChangeOperationOptions {
+  /** Aborts the operation before the host mutation starts. */
   signal?: AbortSignal;
 }
 
 /** Read-only host port. Implementations must not mutate the workspace. */
 export interface WorkflowChangeInspector<HostWorkspace = unknown> {
+  /**
+   * Reads the workspace and returns its change set without mutating it.
+   *
+   * @param workspace - Host workspace handle.
+   * @param request - Revisions to inspect.
+   * @param options - Optional abort signal.
+   * @returns The change set with its digest.
+   */
   inspect(
     workspace: HostWorkspace,
     request: WorkflowChangeInspectionRequest,
@@ -129,8 +197,11 @@ export interface WorkflowChangeInspector<HostWorkspace = unknown> {
   ): Promise<WorkflowChangeSet>;
 }
 
+/** Request to commit an accepted change set. */
 export interface WorkflowCommitRequest {
+  /** Receipt proving the change set was accepted. */
   receipt: WorkflowAcceptedChangeReceipt;
+  /** Commit message; must be non-empty. */
   message: string;
   /** Required at runtime. Optional only while legacy callers migrate. */
   operationId?: string;
@@ -138,35 +209,53 @@ export interface WorkflowCommitRequest {
 
 /** Input visible to a host commit implementation after reinspection. */
 export interface WorkflowCommitPreparationInput {
+  /** Freshly inspected and verified change set. */
   changeSet: WorkflowChangeSet;
+  /** Normalized receipt that matches the change set. */
   receipt: WorkflowAuthoritativeChangeReceipt;
+  /** Commit message. */
   message: string;
+  /** Idempotency key of the commit operation. */
   operationId: string;
 }
 
 /** JSON evidence for a host-prepared tree; host temp handles stay internal. */
+/** Immutable tree the host built for a commit. */
 export interface WorkflowCommitPreparation {
+  /** Identifier of the host-side preparation, used to discard it. */
   preparationId: string;
+  /** Immutable identity of the prepared tree. */
   treeId: string;
 }
 
+/** Input passed to {@link WorkflowCommitDriver.commit}. */
 export interface WorkflowCommitDriverInput
   extends WorkflowCommitPreparationInput {
+  /** Digest of the reserved commit intent. */
   intentDigest: string;
+  /** Tree prepared for this commit. */
   preparation: WorkflowCommitPreparation;
 }
 
+/** Evidence returned by a host after it created a commit. */
 export interface WorkflowCommitResult {
+  /** Immutable commit identity. */
   commitId: string;
+  /** Receipt the commit was made under. */
   receiptId: string;
+  /** Digest of the committed change set. */
   changeSetDigest: string;
   /** Required at runtime. Optional only while legacy drivers migrate. */
   treeId?: string;
+  /** Workspace revision that was committed. */
   workspaceRevision: string;
+  /** Base revision of the commit. */
   baseRevision: string;
+  /** Commit time in epoch milliseconds. */
   committedAt: number;
 }
 
+/** Commit result whose tree identity is present. */
 export interface WorkflowAuthoritativeCommitResult
   extends WorkflowCommitResult {
   treeId: string;
@@ -180,11 +269,22 @@ export interface WorkflowCommitDriver<HostWorkspace = unknown> {
     input: WorkflowCommitPreparationInput,
     options?: WorkflowChangeOperationOptions,
   ): Promise<WorkflowCommitPreparation>;
+  /**
+   * Creates the commit from the prepared tree.
+   *
+   * @param workspace - Host workspace handle.
+   * @param input - Verified change set, receipt and preparation.
+   * @param options - Optional abort signal.
+   * @returns Commit evidence, validated by the caller.
+   */
   commit(
     workspace: HostWorkspace,
     input: WorkflowCommitDriverInput,
     options?: WorkflowChangeOperationOptions,
   ): Promise<WorkflowCommitResult>;
+  /**
+   * Releases host resources of a preparation, called after commit or failure.
+   */
   discardPreparation?(
     workspace: HostWorkspace,
     preparation: WorkflowCommitPreparation,
@@ -192,12 +292,19 @@ export interface WorkflowCommitDriver<HostWorkspace = unknown> {
   ): Promise<void>;
 }
 
+/** Request to integrate a commit into its publication target. */
 export interface WorkflowIntegrationRequest {
+  /** Workflow execution. */
   executionId: string;
+  /** Task that produced the commit. */
   taskId: string;
+  /** Commit to integrate. */
   commitId: string;
+  /** Receipt the commit was made under. */
   receiptId: string;
+  /** Digest of the committed change set. */
   changeSetDigest: string;
+  /** Target and revision the integration must start from. */
   expectedTarget: WorkflowExpectedTarget;
   /** Required by authoritative integration callers. */
   operationId?: string;
@@ -207,6 +314,7 @@ export interface WorkflowIntegrationRequest {
   commit?: WorkflowCommitResult;
 }
 
+/** Integration request carrying all evidence required at runtime. */
 export interface WorkflowAuthoritativeIntegrationRequest
   extends WorkflowIntegrationRequest {
   operationId: string;
@@ -214,12 +322,19 @@ export interface WorkflowAuthoritativeIntegrationRequest
   commit: WorkflowAuthoritativeCommitResult;
 }
 
+/** Evidence returned by a host after integrating a commit. */
 export interface WorkflowIntegrationResult {
+  /** Identifier of the integration. */
   integrationId: string;
+  /** Commit that was integrated. */
   commitId: string;
+  /** Target that moved. */
   targetId: string;
+  /** Target revision before the integration. */
   previousRevision: string;
+  /** Target revision after the integration. */
   integratedRevision: string;
+  /** Integration time in epoch milliseconds. */
   integratedAt: number;
 }
 
@@ -229,6 +344,14 @@ export interface WorkflowIntegrationResult {
  * name may be resolved after the comparison.
  */
 export interface WorkflowIntegrationDriver<HostRepository = unknown> {
+  /**
+   * Integrates the commit into the target.
+   *
+   * @param repository - Host repository handle.
+   * @param request - Commit and expected target.
+   * @param options - Optional abort signal.
+   * @returns Integration evidence, validated by the caller.
+   */
   integrate(
     repository: HostRepository,
     request: WorkflowIntegrationRequest,
@@ -241,6 +364,11 @@ export class WorkflowValidatedIntegrator<HostRepository = unknown> {
   readonly #driver: WorkflowIntegrationDriver<HostRepository>;
   readonly #authority: WorkflowChangeReceiptAuthority;
 
+  /**
+   * @param driver - Host integration port.
+   * @param authority - Authority that validates and records each integration.
+   * @throws {@link TypeError} when `authority` is missing.
+   */
   constructor(
     driver: WorkflowIntegrationDriver<HostRepository>,
     authority: WorkflowChangeReceiptAuthority,
@@ -252,20 +380,31 @@ export class WorkflowValidatedIntegrator<HostRepository = unknown> {
     this.#authority = authority;
   }
 
+  /**
+   * Validates the request, integrates under an authority lease and verifies the result.
+   *
+   * @remarks
+   * Completion and lease release run without the caller's signal: once the host
+   * mutation returned, the outcome must be recorded.
+   *
+   * @param repository - Host repository handle.
+   * @param request - Request with full receipt and commit evidence.
+   * @param options - Optional abort signal, honored until the host call starts.
+   * @returns The verified integration result.
+   * @throws {@link WorkflowChangeMismatchError} when evidence or the result do not
+   * link to one immutable publication.
+   * @throws {@link WorkflowChangeAuthorityError} when the authority returns an
+   * invalid lease.
+   * @throws {@link TypeError} when the request is malformed.
+   */
   async integrate(
     repository: HostRepository,
     request: WorkflowIntegrationRequest,
     options: WorkflowChangeOperationOptions = {},
   ): Promise<WorkflowIntegrationResult> {
-    throwIfAborted(options.signal);
+    throwIfAborted(options.signal, ABORTED_MESSAGE);
     const normalized = normalizeAuthoritativeIntegrationRequest(request);
-    const intentDigest = await canonicalDigest({
-      operationId: normalized.operationId,
-      receiptId: normalized.receipt.receiptId,
-      commitId: normalized.commit.commitId,
-      treeId: normalized.commit.treeId,
-      expectedTarget: normalized.expectedTarget,
-    });
+    const intentDigest = await workflowIntegrationIntentDigest(normalized);
     const lease = await this.#authority.acquireIntegration(
       Object.freeze({
         operationId: normalized.operationId,
@@ -278,7 +417,7 @@ export class WorkflowValidatedIntegrator<HostRepository = unknown> {
     );
     assertAuthorityLease(lease, normalized.operationId, intentDigest);
     try {
-      throwIfAborted(options.signal);
+      throwIfAborted(options.signal, ABORTED_MESSAGE);
       const result = await this.#driver.integrate(
         repository,
         normalized,
@@ -296,42 +435,66 @@ export class WorkflowValidatedIntegrator<HostRepository = unknown> {
   }
 }
 
+/** Brand symbol identifying a {@link WorkflowChangeAuthorityLease}. */
 export const WORKFLOW_CHANGE_AUTHORITY_LEASE = Symbol(
   "WorkflowChangeAuthorityLease",
 );
 
 /** Opaque host-only authority capability. Symbols are not JSON-serializable. */
 export interface WorkflowChangeAuthorityLease {
+  /** Brand marker. */
   readonly [WORKFLOW_CHANGE_AUTHORITY_LEASE]: true;
+  /** Identifier of the lease. */
   readonly leaseId: string;
+  /** Identifier of the durable reservation behind the lease. */
   readonly reservationId: string;
+  /** Operation the lease was granted for. */
   readonly operationId: string;
+  /** Digest of the intent the lease was granted for. */
   readonly intentDigest: string;
 }
 
+/** Request to reserve authority for one commit. */
 export interface WorkflowCommitAuthorityRequest {
+  /** Idempotency key of the commit. */
   operationId: string;
+  /** Digest of the commit intent. */
   intentDigest: string;
+  /** Receipt to validate against live orchestration state. */
   receipt: WorkflowAuthoritativeChangeReceipt;
+  /** Verified change set being committed. */
   changeSet: WorkflowChangeSet;
+  /** Identity of the prepared tree. */
   treeId: string;
 }
 
+/** Request to reserve authority for one integration. */
 export interface WorkflowIntegrationAuthorityRequest {
+  /** Idempotency key of the integration. */
   operationId: string;
+  /** Digest of the integration intent. */
   intentDigest: string;
+  /** Receipt to validate against live orchestration state. */
   receipt: WorkflowAuthoritativeChangeReceipt;
+  /** Commit being integrated. */
   commit: WorkflowAuthoritativeCommitResult;
+  /** Target revision the integration must start from. */
   expectedTarget: WorkflowExpectedTarget;
 }
 
+/** Asks the authority what happened to a journaled mutation. */
 export interface WorkflowMutationReconcileRequest {
+  /** Mutation kind. */
   kind: "commit" | "integration";
+  /** Operation to reconcile. */
   operationId: string;
+  /** Digest the operation was reserved with. */
   intentDigest: string;
 }
 
+/** Outcome of a reconcile request. */
 export interface WorkflowMutationReconcileResult {
+  /** State of the operation; `absent` means it was never reserved. */
   status: "pending" | "completed" | "ambiguous" | "absent";
 }
 
@@ -340,10 +503,16 @@ export interface WorkflowMutationReconcileResult {
  * live orchestration state while acquiring each mutation lease.
  */
 export interface WorkflowChangeReceiptAuthority {
+  /**
+   * Reserves authority for a commit after validating the receipt against live state.
+   *
+   * @returns A lease that must be completed or released.
+   */
   acquireCommit(
     request: WorkflowCommitAuthorityRequest,
     options?: WorkflowChangeOperationOptions,
   ): Promise<WorkflowChangeAuthorityLease>;
+  /** Records the verified commit result under the lease. */
   completeCommit(
     lease: WorkflowChangeAuthorityLease,
     result: WorkflowAuthoritativeCommitResult,
@@ -354,19 +523,27 @@ export interface WorkflowChangeReceiptAuthority {
     lease: WorkflowChangeAuthorityLease,
     options?: WorkflowChangeOperationOptions,
   ): Promise<void>;
+  /**
+   * Reserves authority for an integration after validating the receipt.
+   *
+   * @returns A lease that must be completed and released.
+   */
   acquireIntegration(
     request: WorkflowIntegrationAuthorityRequest,
     options?: WorkflowChangeOperationOptions,
   ): Promise<WorkflowChangeAuthorityLease>;
+  /** Records the verified integration result under the lease. */
   completeIntegration(
     lease: WorkflowChangeAuthorityLease,
     result: WorkflowIntegrationResult,
     options?: WorkflowChangeOperationOptions,
   ): Promise<void>;
+  /** Releases a lease; must be safe after completion. */
   release(
     lease: WorkflowChangeAuthorityLease,
     options?: WorkflowChangeOperationOptions,
   ): Promise<void>;
+  /** Reports the state of a journaled mutation, for crash recovery. */
   reconcile(
     request: WorkflowMutationReconcileRequest,
     options?: WorkflowChangeOperationOptions,
@@ -382,6 +559,11 @@ export class WorkflowValidatedCommitter<HostWorkspace = unknown> {
   readonly #driver: WorkflowCommitDriver<HostWorkspace>;
   readonly #authority?: WorkflowChangeReceiptAuthority;
 
+  /**
+   * @param inspector - Read-only port that re-inspects the workspace.
+   * @param driver - Host port that prepares and creates the commit.
+   * @param authority - Live authority; without it every commit fails closed.
+   */
   constructor(
     inspector: WorkflowChangeInspector<HostWorkspace>,
     driver: WorkflowCommitDriver<HostWorkspace>,
@@ -392,12 +574,31 @@ export class WorkflowValidatedCommitter<HostWorkspace = unknown> {
     this.#authority = authority;
   }
 
+  /**
+   * Re-inspects the workspace, reserves authority and creates the commit.
+   *
+   * @remarks
+   * Fails closed: no authority, no `prepareCommit`, a receipt that does not match
+   * the fresh inspection, or a result that does not match the receipt all abort
+   * the commit. Completion and cleanup run without the caller's signal so a
+   * commit that already happened is always recorded.
+   *
+   * @param workspace - Host workspace handle.
+   * @param request - Accepted receipt, message and operation id.
+   * @param options - Optional abort signal, honored until the host call starts.
+   * @returns The verified commit result.
+   * @throws {@link WorkflowChangeAuthorityError} when no authority is configured,
+   * the driver cannot prepare, or the authority returns an invalid lease.
+   * @throws {@link WorkflowChangeMismatchError} when the change set, receipt or
+   * commit result disagree.
+   * @throws {@link TypeError} when the request or any evidence is malformed.
+   */
   async commit(
     workspace: HostWorkspace,
     request: WorkflowCommitRequest,
     options: WorkflowChangeOperationOptions = {},
   ): Promise<WorkflowAuthoritativeCommitResult> {
-    throwIfAborted(options.signal);
+    throwIfAborted(options.signal, ABORTED_MESSAGE);
     if (!this.#authority) {
       throw new WorkflowChangeAuthorityError(
         "WORKFLOW_CHANGE_AUTHORITY_REQUIRED",
@@ -412,7 +613,7 @@ export class WorkflowValidatedCommitter<HostWorkspace = unknown> {
       inspectionRequestFromReceipt(receipt),
       options,
     );
-    throwIfAborted(options.signal);
+    throwIfAborted(options.signal, ABORTED_MESSAGE);
     const verified = await verifyWorkflowChangeSet(changeSet);
     assertChangeSetMatchesReceipt(verified, receipt);
     if (!this.#driver.prepareCommit) {
@@ -453,7 +654,7 @@ export class WorkflowValidatedCommitter<HostWorkspace = unknown> {
       );
       assertAuthorityLease(lease, operationId, intentDigest);
       try {
-        throwIfAborted(options.signal);
+        throwIfAborted(options.signal, ABORTED_MESSAGE);
         const result = await this.#driver.commit(
           workspace,
           Object.freeze({
@@ -524,6 +725,14 @@ export async function verifyWorkflowChangeSet(
   return Object.freeze({ ...normalized, changeSetDigest: declaredDigest });
 }
 
+/**
+ * Validates the exact shape of a receipt and returns a frozen copy.
+ *
+ * @param input - Receipt to validate.
+ * @returns The frozen receipt.
+ * @throws {@link TypeError} when keys, identities, digests or ownership fences
+ * are invalid.
+ */
 export function normalizeAcceptedChangeReceipt(
   input: WorkflowAcceptedChangeReceipt,
 ): WorkflowAcceptedChangeReceipt {
@@ -547,7 +756,7 @@ export function normalizeAcceptedChangeReceipt(
       OWNERSHIP_FENCE_KEYS,
       `accepted change receipt ownership[${index}]`,
     );
-    const grantId = requiredIdentity(fence.grantId, "grantId");
+    const grantId = requiredIdentity(fence.grantId, "grantId", "record");
     if (seen.has(grantId)) {
       throw new TypeError(`Duplicate ownership grant: ${grantId}`);
     }
@@ -561,8 +770,8 @@ export function normalizeAcceptedChangeReceipt(
   const normalized: WorkflowAcceptedChangeReceipt = {
     receiptId: requiredIdentity(input.receiptId, "receiptId"),
     verdict: "accepted",
-    executionId: requiredIdentity(input.executionId, "executionId"),
-    taskId: requiredIdentity(input.taskId, "taskId"),
+    executionId: requiredIdentity(input.executionId, "executionId", "record"),
+    taskId: requiredIdentity(input.taskId, "taskId", "record"),
     planRevision: requiredPositiveInteger(input.planRevision, "planRevision"),
     workspaceRevision: requiredRevision(
       input.workspaceRevision,
@@ -575,7 +784,7 @@ export function normalizeAcceptedChangeReceipt(
     expectedTarget,
   };
   if (hasAuthorityFields) {
-    normalized.agentId = requiredIdentity(input.agentId, "agentId");
+    normalized.agentId = requiredIdentity(input.agentId, "agentId", "record");
     normalized.orchestrationRevision = requiredPositiveInteger(
       input.orchestrationRevision,
       "orchestrationRevision",
@@ -584,6 +793,15 @@ export function normalizeAcceptedChangeReceipt(
   return Object.freeze(normalized);
 }
 
+/**
+ * Like {@link normalizeAcceptedChangeReceipt}, but requires `agentId` and `orchestrationRevision`.
+ *
+ * @param input - Receipt to validate.
+ * @returns The frozen receipt with authority fields.
+ * @throws {@link WorkflowChangeAuthorityError} with code
+ * `WORKFLOW_CHANGE_AUTHORITY_REQUIRED` when the authority fields are missing.
+ * @throws {@link TypeError} when the receipt is malformed.
+ */
 export function normalizeAuthoritativeChangeReceipt(
   input: WorkflowAcceptedChangeReceipt,
 ): WorkflowAuthoritativeChangeReceipt {
@@ -600,6 +818,13 @@ export function normalizeAuthoritativeChangeReceipt(
   return normalized as WorkflowAuthoritativeChangeReceipt;
 }
 
+/**
+ * Throws unless the change set and the receipt agree on identity, revisions and digest.
+ *
+ * @param changeSet - Verified change set.
+ * @param receipt - Accepted receipt.
+ * @throws {@link WorkflowChangeMismatchError} with code `CHANGE_RECEIPT_MISMATCH`.
+ */
 export function assertChangeSetMatchesReceipt(
   changeSet: WorkflowChangeSet,
   receipt: WorkflowAcceptedChangeReceipt,
@@ -624,40 +849,72 @@ export function assertChangeSetMatchesReceipt(
   }
 }
 
-export class WorkflowChangeMismatchError extends Error {
-  readonly code:
-    | "CHANGE_SET_DIGEST_MISMATCH"
-    | "CHANGE_RECEIPT_MISMATCH"
-    | "COMMIT_RESULT_MISMATCH"
-    | "INTEGRATION_REQUEST_MISMATCH"
-    | "INTEGRATION_RESULT_MISMATCH";
+/**
+ * Codes of {@link WorkflowChangeMismatchError}.
+ *
+ * @remarks
+ * - `CHANGE_SET_DIGEST_MISMATCH`: a change set's declared digest does not
+ *   match its entries.
+ * - `CHANGE_RECEIPT_MISMATCH`: the change set (inspected or prepared) differs
+ *   from the accepted receipt.
+ * - `COMMIT_RESULT_MISMATCH`: a commit result is not linked to its receipt or
+ *   preparation.
+ * - `INTEGRATION_REQUEST_MISMATCH`: an integration request's scalar fields
+ *   disagree with its receipt and commit evidence.
+ * - `INTEGRATION_RESULT_MISMATCH`: an integration result is not linked to its
+ *   request.
+ */
+export type WorkflowChangeMismatchErrorCode =
+  | "CHANGE_SET_DIGEST_MISMATCH"
+  | "CHANGE_RECEIPT_MISMATCH"
+  | "COMMIT_RESULT_MISMATCH"
+  | "INTEGRATION_REQUEST_MISMATCH"
+  | "INTEGRATION_RESULT_MISMATCH";
 
-  constructor(
-    code:
-      | "CHANGE_SET_DIGEST_MISMATCH"
-      | "CHANGE_RECEIPT_MISMATCH"
-      | "COMMIT_RESULT_MISMATCH"
-      | "INTEGRATION_REQUEST_MISMATCH"
-      | "INTEGRATION_RESULT_MISMATCH",
-    message: string,
-  ) {
+/**
+ * Codes of {@link WorkflowChangeAuthorityError}.
+ *
+ * @remarks
+ * - `WORKFLOW_CHANGE_AUTHORITY_REQUIRED`: authority evidence is absent.
+ * - `WORKFLOW_CHANGE_AUTHORITY_INVALID`: the authority returned a malformed
+ *   or foreign lease.
+ */
+export type WorkflowChangeAuthorityErrorCode =
+  | "WORKFLOW_CHANGE_AUTHORITY_REQUIRED"
+  | "WORKFLOW_CHANGE_AUTHORITY_INVALID";
+
+/**
+ * Thrown when change evidence (digest, receipt, commit or integration) disagrees.
+ */
+export class WorkflowChangeMismatchError extends Error {
+  /** Which comparison failed. */
+  readonly code: WorkflowChangeMismatchErrorCode;
+
+  /**
+   * @param code - Failed comparison.
+   * @param message - Description of the mismatch.
+   */
+  constructor(code: WorkflowChangeMismatchErrorCode, message: string) {
     super(message);
     this.name = "WorkflowChangeMismatchError";
     this.code = code;
   }
 }
 
+/**
+ * Thrown when the receipt authority is missing or returns an invalid lease.
+ */
 export class WorkflowChangeAuthorityError extends Error {
-  readonly code:
-    | "WORKFLOW_CHANGE_AUTHORITY_REQUIRED"
-    | "WORKFLOW_CHANGE_AUTHORITY_INVALID";
+  /**
+   * `REQUIRED` when authority evidence is absent, `INVALID` when it is malformed.
+   */
+  readonly code: WorkflowChangeAuthorityErrorCode;
 
-  constructor(
-    code:
-      | "WORKFLOW_CHANGE_AUTHORITY_REQUIRED"
-      | "WORKFLOW_CHANGE_AUTHORITY_INVALID",
-    message: string,
-  ) {
+  /**
+   * @param code - Failure code.
+   * @param message - Description of the failure.
+   */
+  constructor(code: WorkflowChangeAuthorityErrorCode, message: string) {
     super(message);
     this.name = "WorkflowChangeAuthorityError";
     this.code = code;
@@ -688,8 +945,8 @@ function normalizeChangeSetInput(
     compareCodeUnits(changeEntryKey(left), changeEntryKey(right)),
   );
   return Object.freeze({
-    executionId: requiredIdentity(input.executionId, "executionId"),
-    taskId: requiredIdentity(input.taskId, "taskId"),
+    executionId: requiredIdentity(input.executionId, "executionId", "record"),
+    taskId: requiredIdentity(input.taskId, "taskId", "record"),
     planRevision: requiredPositiveInteger(input.planRevision, "planRevision"),
     workspaceRevision: requiredRevision(
       input.workspaceRevision,
@@ -716,8 +973,8 @@ function normalizeChangeEntry(
       mode === undefined ? RENAMED_ENTRY_KEYS : RENAMED_ENTRY_MODE_KEYS,
       `change set entry[${index}]`,
     );
-    const fromPath = normalizePortablePath(input.fromPath);
-    const toPath = normalizePortablePath(input.toPath);
+    const fromPath = changePath(input.fromPath);
+    const toPath = changePath(input.toPath);
     if (fromPath === toPath) {
       throw new TypeError("Renamed change paths must be different");
     }
@@ -744,7 +1001,7 @@ function normalizeChangeEntry(
   );
   return Object.freeze({
     kind: input.kind,
-    path: normalizePortablePath(input.path),
+    path: changePath(input.path),
     entryKind,
     ...(mode === undefined ? {} : { mode }),
     contentDigest,
@@ -826,6 +1083,18 @@ function normalizeCommitEvidence(
   return normalized;
 }
 
+/**
+ * Validates an integration request and links its receipt, commit and target.
+ *
+ * @param input - Request with full receipt and commit evidence.
+ * @returns The frozen request.
+ * @throws {@link WorkflowChangeMismatchError} with code
+ * `INTEGRATION_REQUEST_MISMATCH` when the evidence does not describe one
+ * publication.
+ * @throws {@link WorkflowChangeAuthorityError} when the receipt lacks authority
+ * fields.
+ * @throws {@link TypeError} when the request is malformed.
+ */
 export function normalizeAuthoritativeIntegrationRequest(
   input: WorkflowIntegrationRequest,
 ): WorkflowAuthoritativeIntegrationRequest {
@@ -843,8 +1112,8 @@ export function normalizeAuthoritativeIntegrationRequest(
   );
   const expectedTarget = normalizeExpectedTarget(input.expectedTarget);
   const normalized = Object.freeze({
-    executionId: requiredIdentity(input.executionId, "executionId"),
-    taskId: requiredIdentity(input.taskId, "taskId"),
+    executionId: requiredIdentity(input.executionId, "executionId", "record"),
+    taskId: requiredIdentity(input.taskId, "taskId", "record"),
     commitId: requiredRevision(input.commitId, "commitId"),
     receiptId: requiredIdentity(input.receiptId, "receiptId"),
     changeSetDigest: requiredDigest(input.changeSetDigest, "changeSetDigest"),
@@ -943,7 +1212,7 @@ function assertAuthorityLease(
     typeof lease !== "object" ||
     lease[WORKFLOW_CHANGE_AUTHORITY_LEASE] !== true ||
     requiredIdentity(lease.leaseId, "authority leaseId") !== lease.leaseId ||
-    requiredIdentity(lease.reservationId, "reservationId") !==
+    requiredIdentity(lease.reservationId, "reservationId", "record") !==
       lease.reservationId ||
     lease.operationId !== operationId ||
     lease.intentDigest !== intentDigest
@@ -961,28 +1230,12 @@ function changeEntryKey(entry: WorkflowChangeEntry): string {
     : entry.path;
 }
 
-function normalizePortablePath(input: string): string {
-  if (typeof input !== "string" || !input.trim() || input.includes("\0")) {
-    throw new TypeError("Change paths must be non-empty portable strings");
+function changePath(input: string): string {
+  const problem = portablePathProblem(input);
+  if (problem !== undefined) {
+    throw new TypeError(`Change paths ${problem}: ${JSON.stringify(input)}`);
   }
-  if (input.includes("\\")) {
-    throw new TypeError("Change paths must use forward slashes");
-  }
-  const path = input;
-  if (path.startsWith("/") || /^[A-Za-z]:\//u.test(path)) {
-    throw new TypeError(`Change paths must be relative: ${input}`);
-  }
-  const segments = path.split("/");
-  if (segments.some((segment) => segment === "..")) {
-    throw new TypeError(`Change paths must not traverse parents: ${input}`);
-  }
-  const normalized = segments
-    .filter((segment) => segment !== "" && segment !== ".")
-    .join("/");
-  if (!normalized) {
-    throw new TypeError("Change paths must identify a workspace entry");
-  }
-  return normalized;
+  return normalizePortablePath(input);
 }
 
 function requiredEntryKind(value: unknown): WorkflowChangeEntryKind {
@@ -1017,19 +1270,21 @@ function normalizeEntryMode(
   return value as WorkflowChangeEntryMode;
 }
 
-const SAFE_IDENTITY = /^[A-Za-z0-9][A-Za-z0-9._:+/-]{0,255}$/u;
-const SAFE_REVISION = /^[A-Za-z0-9][A-Za-z0-9._:+/-]{0,511}$/u;
 const SHA256_DIGEST = /^sha256:[a-f0-9]{64}$/u;
 
-function requiredIdentity(value: unknown, field: string): string {
-  if (typeof value !== "string" || !SAFE_IDENTITY.test(value)) {
+function requiredIdentity(
+  value: unknown,
+  field: string,
+  grammar: WorkflowIdentifierGrammar = "opaque",
+): string {
+  if (!isWorkflowIdentifier(value, grammar)) {
     throw new TypeError(`${field} must be a safe identity`);
   }
   return value;
 }
 
 function requiredRevision(value: unknown, field: string): string {
-  if (typeof value !== "string" || !SAFE_REVISION.test(value)) {
+  if (!isWorkflowIdentifier(value, "revision")) {
     throw new TypeError(`${field} must be an immutable revision identity`);
   }
   return value;
@@ -1091,10 +1346,7 @@ function assertExactObject(
   }
 }
 
-function throwIfAborted(signal?: AbortSignal): void {
-  if (!signal?.aborted) return;
-  throw signal.reason ?? new Error("Workflow change operation aborted");
-}
+const ABORTED_MESSAGE = "Workflow change operation aborted";
 
 const CHANGE_SET_INPUT_KEYS = [
   "executionId",

@@ -1,26 +1,30 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import type { WorkflowExecutionLimits, WorkflowHandler } from "./contracts.js";
 import { WorkflowError } from "./contracts.js";
+import { isWorkflowIdentifier } from "./internal/identifiers.js";
 
+/** Fields shared by every workflow definition. */
 export interface WorkflowDefinitionBase {
   /** Stable workflow identity. Changing behavior requires changing version. */
   id: string;
+  /** Workflow version; checkpoints from another version are not replayed. */
   version: string;
+  /** Human-readable description. */
   description?: string;
+  /** Overrides for the default execution limits. */
   limits?: WorkflowExecutionLimits;
 }
 
+/** Workflow whose handler is host JavaScript running in-process. */
 export interface TrustedWorkflowDefinition extends WorkflowDefinitionBase {
+  /** Discriminator. */
   kind: "trusted";
+  /** Handler that drives the steps. */
   handler: WorkflowHandler;
 }
 
+/** Workflow whose source runs inside the sandboxed script runtime. */
 export interface ScriptWorkflowDefinition extends WorkflowDefinitionBase {
+  /** Discriminator. */
   kind: "script";
   /**
    * Synchronous generator-function body evaluated by the script runtime.
@@ -30,20 +34,33 @@ export interface ScriptWorkflowDefinition extends WorkflowDefinitionBase {
   source: string;
 }
 
+/** Any workflow definition: trusted or script. */
 export type WorkflowDefinition =
   | TrustedWorkflowDefinition
   | ScriptWorkflowDefinition;
 
+/** Input of {@link defineWorkflow}. */
 export type TrustedWorkflowDefinitionInput = Omit<
   TrustedWorkflowDefinition,
   "kind"
 >;
 
+/** Input of {@link defineScriptWorkflow}. */
 export type ScriptWorkflowDefinitionInput = Omit<
   ScriptWorkflowDefinition,
   "kind"
 >;
 
+/**
+ * Creates a frozen trusted workflow definition.
+ *
+ * @param definition - Identity, optional limits and the handler.
+ * @returns The frozen definition with `kind: "trusted"`.
+ * @throws {@link WorkflowError} with code `WORKFLOW_DEFINITION_INVALID` when
+ * the definition is not an object, the id or version is not an opaque id
+ * (1-256 characters of `A-Z a-z 0-9 . _ : + / -`, starting with a letter or
+ * digit), or the handler is not a function.
+ */
 export function defineWorkflow(
   definition: TrustedWorkflowDefinitionInput,
 ): TrustedWorkflowDefinition {
@@ -54,16 +71,34 @@ export function defineWorkflow(
   return Object.freeze({ ...definition, kind: "trusted" });
 }
 
+/**
+ * Creates a frozen script workflow definition.
+ *
+ * @param definition - Identity, optional limits and the script source.
+ * @returns The frozen definition with `kind: "script"`.
+ * @throws {@link WorkflowError} with code `WORKFLOW_DEFINITION_INVALID` when
+ * the definition is not an object, the id or version is not an opaque id
+ * (1-256 characters of `A-Z a-z 0-9 . _ : + / -`, starting with a letter or
+ * digit), or the source is not a non-blank string.
+ */
 export function defineScriptWorkflow(
   definition: ScriptWorkflowDefinitionInput,
 ): ScriptWorkflowDefinition {
   validateWorkflowIdentity(definition);
-  if (!definition.source.trim()) {
+  if (!isNonBlankString(definition.source)) {
     throw invalidDefinition("Script workflow source is required");
   }
   return Object.freeze({ ...definition, kind: "script" });
 }
 
+/**
+ * Type guard for {@link WorkflowDefinition}.
+ *
+ * @param value - Value to test.
+ * @returns True when `value` has an opaque id and version and a handler or
+ * source matching its `kind`; false otherwise, including when a field cannot
+ * be read (a throwing getter or Proxy trap).
+ */
 export function isWorkflowDefinition(
   value: unknown,
 ): value is WorkflowDefinition {
@@ -71,24 +106,43 @@ export function isWorkflowDefinition(
     return false;
   }
   const candidate = value as Partial<WorkflowDefinition>;
-  if (!candidate.id?.trim() || !candidate.version?.trim()) {
+  try {
+    if (
+      !isWorkflowIdentifier(candidate.id, "opaque") ||
+      !isWorkflowIdentifier(candidate.version, "opaque")
+    ) {
+      return false;
+    }
+    return (
+      (candidate.kind === "trusted" &&
+        typeof candidate.handler === "function") ||
+      (candidate.kind === "script" && isNonBlankString(candidate.source))
+    );
+  } catch {
+    // A type guard answers false for a value whose fields cannot be read.
     return false;
   }
-  return (
-    (candidate.kind === "trusted" && typeof candidate.handler === "function") ||
-    (candidate.kind === "script" &&
-      typeof candidate.source === "string" &&
-      candidate.source.trim().length > 0)
-  );
 }
 
 function validateWorkflowIdentity(definition: WorkflowDefinitionBase): void {
-  if (!definition.id?.trim()) {
-    throw invalidDefinition("Workflow id is required");
+  if (!definition || typeof definition !== "object") {
+    throw invalidDefinition("Workflow definition must be an object");
   }
-  if (!definition.version?.trim()) {
-    throw invalidDefinition("Workflow version is required");
+  for (const field of ["id", "version"] as const) {
+    const value = definition[field];
+    if (!isNonBlankString(value)) {
+      throw invalidDefinition(`Workflow ${field} is required`);
+    }
+    if (!isWorkflowIdentifier(value, "opaque")) {
+      throw invalidDefinition(
+        `Workflow ${field} is invalid: ${JSON.stringify(value)}`,
+      );
+    }
   }
+}
+
+function isNonBlankString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
 }
 
 function invalidDefinition(message: string): WorkflowError {

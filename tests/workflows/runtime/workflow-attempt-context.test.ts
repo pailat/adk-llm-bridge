@@ -1,15 +1,10 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import { describe, expect, test } from "bun:test";
 import {
   BaseAgent,
   createEvent,
   type Event,
   InvocationContext,
+  PluginManager,
 } from "@google/adk";
 import type { WorkflowCheckpointV1 } from "../../../src/workflows/checkpoint/schema.js";
 import type {
@@ -94,13 +89,15 @@ describe("workflow attempt durability context", () => {
       executionId: "execution-1",
       agent,
       hooks: { beforeAttempt: (context) => void attempts.push(context) },
-      handler: (ctx) =>
-        ctx.run({
-          id: "build",
-          agentName: agent.name,
-          input: "same input",
-          retry: { maxAttempts: 2 },
-        }),
+      handler: async (ctx) =>
+        (
+          await ctx.run({
+            id: "build",
+            agentName: agent.name,
+            input: "same input",
+            retry: { maxAttempts: 2 },
+          })
+        ).output,
       limits: { maxAttemptsPerStep: 2 },
     });
 
@@ -146,13 +143,15 @@ describe("workflow attempt durability context", () => {
           };
         },
       },
-      handler: (ctx) =>
-        ctx.run({
-          id: "publish",
-          agentName: agent.name,
-          agentRevision: "sha256:agent-v2",
-          input: "payload",
-        }),
+      handler: async (ctx) =>
+        (
+          await ctx.run({
+            id: "publish",
+            agentName: agent.name,
+            agentRevision: "sha256:agent-v2",
+            input: "payload",
+          })
+        ).output,
     });
 
     await expect(
@@ -243,14 +242,54 @@ describe("workflow attempt durability context", () => {
           result: completedResult(context),
         }),
       },
-      handler: (ctx) =>
-        ctx.run({ id: "publish", agentName: agent.name, input: "payload" }),
+      handler: async (ctx) =>
+        (
+          await ctx.run({
+            id: "publish",
+            agentName: agent.name,
+            input: "payload",
+          })
+        ).output,
     });
 
     await expect(
       collect(workflow, invocation(workflow, "inv-bad-replay")),
     ).rejects.toMatchObject({ code: "WORKFLOW_ATTEMPT_MISMATCH" });
     expect(agent.calls).toBe(0);
+  });
+
+  test("rejects a journaled replay whose content has malformed parts or role", async () => {
+    for (const [index, content] of [
+      { parts: [null] },
+      { parts: [5] },
+      { role: 5, parts: [{ text: "done" }] },
+    ].entries()) {
+      const agent = new RecordingAgent();
+      const workflow = workflowAgent({
+        id: `content-replay-${index}`,
+        executionId: "execution-1",
+        agent,
+        hooks: {
+          beforeAttempt: (context) => ({
+            idempotencyKey: context.idempotencyKey,
+            result: { ...completedResult(context), content: content as never },
+          }),
+        },
+        handler: async (ctx) =>
+          (
+            await ctx.run({
+              id: "publish",
+              agentName: agent.name,
+              input: "payload",
+            })
+          ).output,
+      });
+
+      await expect(
+        collect(workflow, invocation(workflow, `inv-content-${index}`)),
+      ).rejects.toMatchObject({ code: "WORKFLOW_ATTEMPT_MISMATCH" });
+      expect(agent.calls).toBe(0);
+    }
   });
 
   test("rejects runtime events in a journaled replay", async () => {
@@ -273,8 +312,14 @@ describe("workflow attempt durability context", () => {
           },
         }),
       },
-      handler: (ctx) =>
-        ctx.run({ id: "publish", agentName: agent.name, input: "payload" }),
+      handler: async (ctx) =>
+        (
+          await ctx.run({
+            id: "publish",
+            agentName: agent.name,
+            input: "payload",
+          })
+        ).output,
     });
 
     await expect(
@@ -300,8 +345,14 @@ describe("workflow attempt durability context", () => {
       agent,
       checkpointStore: store,
       hooks: { afterAttempt: () => void ordering.push("outbox") },
-      handler: (ctx) =>
-        ctx.run({ id: "publish", agentName: agent.name, input: "payload" }),
+      handler: async (ctx) =>
+        (
+          await ctx.run({
+            id: "publish",
+            agentName: agent.name,
+            input: "payload",
+          })
+        ).output,
     });
 
     await collect(workflow, invocation(workflow, "inv-order"));
@@ -323,13 +374,15 @@ describe("workflow attempt durability context", () => {
         },
       },
       workspace,
-      handler: (ctx) =>
-        ctx.run({
-          id: "write",
-          agentName: agent.name,
-          input: "edit",
-          writePaths: ["src"],
-        }),
+      handler: async (ctx) =>
+        (
+          await ctx.run({
+            id: "write",
+            agentName: agent.name,
+            input: "edit",
+            writePaths: ["src"],
+          })
+        ).output,
     });
     const parent = invocation(workflow, "inv-fencing");
 
@@ -366,18 +419,20 @@ describe("workflow attempt durability context", () => {
       agent,
       checkpointStore: store,
       workspace,
-      handler: (ctx) =>
-        ctx.run({
-          id: "write",
-          agentName: agent.name,
-          input: "edit",
-          writePaths: ["src"],
-        }),
+      handler: async (ctx) =>
+        (
+          await ctx.run({
+            id: "write",
+            agentName: agent.name,
+            input: "edit",
+            writePaths: ["src"],
+          })
+        ).output,
     });
     const execution = collect(workflow, invocation(workflow, "inv-loss"));
     await agent.started.promise;
     const reason = {
-      code: "workspace_lease_lost",
+      code: "WORKSPACE_LEASE_LOST",
       message: "lease expired during attempt",
       workspaceId: "repository",
       leaseId: "lease-1",
@@ -400,7 +455,7 @@ describe("workflow attempt durability context", () => {
     const workspace = new TestWorkspaceAdapter();
     const store = new MemoryCheckpointStore();
     const reason = {
-      code: "workspace_lease_lost",
+      code: "WORKSPACE_LEASE_LOST",
       message: "fence superseded before checkpoint",
       workspaceId: "repository",
       leaseId: "lease-1",
@@ -413,13 +468,15 @@ describe("workflow attempt durability context", () => {
       checkpointStore: store,
       workspace,
       hooks: { afterAttempt: () => workspace.loss.abort(reason) },
-      handler: (ctx) =>
-        ctx.run({
-          id: "write",
-          agentName: agent.name,
-          input: "edit",
-          writePaths: ["src"],
-        }),
+      handler: async (ctx) =>
+        (
+          await ctx.run({
+            id: "write",
+            agentName: agent.name,
+            input: "edit",
+            writePaths: ["src"],
+          })
+        ).output,
     });
 
     await expect(
@@ -508,13 +565,15 @@ async function captureKey(
         captured = context;
       },
     },
-    handler: (ctx) =>
-      ctx.run({
-        id: stepId,
-        agentName: agent.name,
-        ...(agentRevision ? { agentRevision } : {}),
-        input,
-      }),
+    handler: async (ctx) =>
+      (
+        await ctx.run({
+          id: stepId,
+          agentName: agent.name,
+          ...(agentRevision ? { agentRevision } : {}),
+          input,
+        })
+      ).output,
   });
   await collect(workflow, invocation(workflow, `inv-${executionId}-${stepId}`));
   if (!captured) throw new Error("attempt context was not captured");
@@ -567,6 +626,7 @@ function completedResult(context: WorkflowAttemptContext): WorkflowStepResult {
 
 function invocation(agent: BaseAgent, invocationId: string): InvocationContext {
   return new InvocationContext({
+    pluginManager: new PluginManager(),
     invocationId,
     branch: "root",
     agent,

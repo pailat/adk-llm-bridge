@@ -1,9 +1,3 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import { describe, expect, test } from "bun:test";
 import type {
   WorkflowTaskClaim,
@@ -16,6 +10,104 @@ import {
 } from "../../../src/workflows/tasks/stores.js";
 
 describe("InMemoryWorkflowTaskStore", () => {
+  test("stores the record it validated when a getter changes its answer", async () => {
+    const store = new InMemoryWorkflowTaskStore();
+    const created = await store.create(
+      flipping(
+        flipping(record("task-1"), "taskId", "task-1", "../evil id"),
+        "status",
+        "queued",
+        "bogus",
+      ),
+    );
+    expect(created).toMatchObject({ taskId: "task-1", status: "queued" });
+    expect((await store.get("execution-1", "task-1"))?.status).toBe("queued");
+    expect(
+      await store.get("execution-1", "../evil id").catch(() => "invalid"),
+    ).toBe("invalid");
+
+    const cancelled = await store.compareAndSet(
+      flipping(
+        {
+          ...created,
+          revision: 2,
+          updatedAt: 2,
+          completedAt: 2,
+          cancelRequestedAt: 2,
+          error: { code: "WORKFLOW_TASK_CANCELLED", message: "cancelled" },
+        },
+        "status",
+        "cancelled",
+        "bogus",
+      ),
+      1,
+    );
+    expect(cancelled.status).toBe("cancelled");
+    expect((await store.get("execution-1", "task-1"))?.status).toBe(
+      "cancelled",
+    );
+  });
+
+  test("stores the claimed transition it validated when a getter changes its answer", async () => {
+    let now = 10;
+    const store = new InMemoryWorkflowTaskStore({ now: () => now });
+    await store.create(record("task-1", { createdAt: 10, updatedAt: 10 }));
+    const claimed = await store.claim({
+      executionId: "execution-1",
+      taskId: "task-1",
+      workerId: "worker-1",
+      leaseId: "lease-1",
+      leaseDurationMs: 20,
+    });
+    now = 11;
+    const { claim: _claim, ...unclaimed } = claimed;
+    const completed = await store.compareAndSetClaimed({
+      claim: guardOf(claimed),
+      expectedRevision: claimed.revision,
+      record: flipping(
+        {
+          ...unclaimed,
+          revision: claimed.revision + 1,
+          updatedAt: 11,
+          completedAt: 11,
+          output: { ok: true },
+        },
+        "status",
+        "completed",
+        "bogus",
+      ),
+    });
+    expect(completed.status).toBe("completed");
+    expect((await store.get("execution-1", "task-1"))?.status).toBe(
+      "completed",
+    );
+  });
+
+  test("keeps an own __proto__ input key as plain data across transitions", async () => {
+    const store = new InMemoryWorkflowTaskStore();
+    const input = JSON.parse('{"__proto__":{"x":1}}');
+    const created = await store.create(record("task-1", { input }));
+    const stored = created.input as Record<string, unknown>;
+    expect(Object.getPrototypeOf(stored)).toBe(Object.prototype);
+    expect(Object.hasOwn(stored, "__proto__")).toBe(true);
+    expect(stored.x).toBeUndefined();
+
+    const cancelled = await store.compareAndSet(
+      {
+        ...created,
+        status: "cancelled",
+        revision: 2,
+        updatedAt: 2,
+        completedAt: 2,
+        cancelRequestedAt: 2,
+        error: { code: "WORKFLOW_TASK_CANCELLED", message: "cancelled" },
+      },
+      1,
+    );
+    expect(cancelled.status).toBe("cancelled");
+    expect(JSON.stringify(cancelled.input)).toBe('{"__proto__":{"x":1}}');
+  });
+
   test("creates immutable snapshots and enforces CAS", async () => {
     const store = new InMemoryWorkflowTaskStore();
     const input = { nested: { value: 1 } };
@@ -1024,6 +1116,32 @@ describe("InMemoryWorkflowTaskCommandStore", () => {
 });
 
 describe("InMemoryWorkflowTaskMessageStore", () => {
+  test("stores the message it validated when a getter changes its answer", async () => {
+    const store = new InMemoryWorkflowTaskMessageStore();
+    const appended = await store.append(
+      flipping(
+        {
+          executionId: "execution-1",
+          taskId: "task-1",
+          senderTaskId: "parent",
+          payload: { value: 1 },
+          sentAt: 1,
+        },
+        "senderTaskId",
+        "parent",
+        "../evil id",
+      ),
+    );
+    expect(appended.senderTaskId).toBe("parent");
+    const read = await store.read({
+      executionId: "execution-1",
+      taskId: "task-1",
+    });
+    expect(read.messages.map((message) => message.senderTaskId)).toEqual([
+      "parent",
+    ]);
+  });
+
   test("assigns monotonic sequences and reads with a scoped cursor", async () => {
     const store = new InMemoryWorkflowTaskMessageStore();
     const payload = { request: { value: 1 } };
@@ -1231,4 +1349,22 @@ function binding(
 function orchestrationOf(record: WorkflowTaskRecord) {
   if (!record.orchestration) throw new Error("Expected orchestration binding");
   return record.orchestration;
+}
+
+/** Copy of `value` whose `key` answers `first` once, then `later`. */
+function flipping<T extends object>(
+  value: T,
+  key: string,
+  first: unknown,
+  later: unknown,
+): T {
+  const copy = { ...value } as Record<string, unknown>;
+  delete copy[key];
+  let reads = 0;
+  Object.defineProperty(copy, key, {
+    enumerable: true,
+    configurable: true,
+    get: () => (++reads === 1 ? first : later),
+  });
+  return copy as T;
 }

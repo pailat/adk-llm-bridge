@@ -1,11 +1,10 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import { describe, expect, test } from "bun:test";
-import { BaseAgent, createEvent, InvocationContext } from "@google/adk";
+import {
+  BaseAgent,
+  createEvent,
+  InvocationContext,
+  PluginManager,
+} from "@google/adk";
 import type { WorkflowCheckpointV1 } from "../../src/workflows/checkpoint/schema.js";
 import type {
   SaveWorkflowCheckpointInput,
@@ -75,6 +74,7 @@ function agentFor(
 
 function invocation(agent: BaseAgent, signal?: AbortSignal) {
   return new InvocationContext({
+    pluginManager: new PluginManager(),
     invocationId: "inv",
     agent,
     abortSignal: signal,

@@ -1,9 +1,6 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
+import { isWorkflowIdentifier } from "../internal/identifiers.js";
+import { freezeJson } from "../internal/immutable-json.js";
+import { portablePathProblem } from "../internal/portable-path.js";
 import {
   WORKFLOW_ORCHESTRATION_STATE_PROTOCOL,
   WORKFLOW_ORCHESTRATION_STATE_VERSION,
@@ -13,7 +10,6 @@ import {
   type WorkflowActorRole,
   type WorkflowMutationReservation,
   WorkflowOrchestrationControlError,
-  type WorkflowOrchestrationJsonValue,
   type WorkflowOrchestrationState,
   type WorkflowOwnershipGrant,
   type WorkflowOwnershipProposal,
@@ -25,12 +21,25 @@ import {
   type WorkflowPlanWave,
 } from "./contracts.js";
 
+/**
+ * Bounds enforced on JSON values stored in plans and orchestration state.
+ *
+ * @internal
+ */
 export interface WorkflowOrchestrationJsonLimits {
+  /** Maximum nesting depth. */
   maxDepth: number;
+  /** Maximum number of values, counting containers and leaves. */
   maxNodes: number;
+  /** Maximum length of any string value or object key. */
   maxStringLength: number;
 }
 
+/**
+ * Default {@link WorkflowOrchestrationJsonLimits}: depth 32, 20,000 nodes, 1 MiB strings.
+ *
+ * @internal
+ */
 export const DEFAULT_WORKFLOW_ORCHESTRATION_JSON_LIMITS: Readonly<WorkflowOrchestrationJsonLimits> =
   Object.freeze({
     maxDepth: 32,
@@ -61,63 +70,56 @@ const ACTOR_PERMISSIONS = new Set<WorkflowActorPermission>([
   "integration:publish",
 ]);
 
+/**
+ * Validates a JSON value and returns a deep-frozen copy.
+ *
+ * @param value - Value to validate and copy.
+ * @param limits - Size bounds to enforce.
+ * @returns A deep-frozen copy of `value`.
+ * @throws {@link WorkflowOrchestrationControlError} with code `WORKFLOW_ORCHESTRATION_INVALID_REQUEST`
+ * when the value has a cycle, a non-finite number, a non-plain object, a
+ * symbol-keyed property, a sparse array, or
+ * exceeds `limits`.
+ * @internal
+ */
 export function immutableWorkflowOrchestrationJson<T>(
   value: T,
   limits: WorkflowOrchestrationJsonLimits = DEFAULT_WORKFLOW_ORCHESTRATION_JSON_LIMITS,
 ): T {
-  validateLimits(limits);
-  const seen = new Set<object>();
-  let nodes = 0;
-
-  const visit = (
-    candidate: unknown,
-    depth: number,
-  ): WorkflowOrchestrationJsonValue => {
-    nodes++;
-    if (nodes > limits.maxNodes) invalid("JSON value exceeds node limit");
-    if (depth > limits.maxDepth) invalid("JSON value exceeds depth limit");
-    if (candidate === null || typeof candidate === "boolean") return candidate;
-    if (typeof candidate === "string") {
-      if (candidate.length > limits.maxStringLength) {
-        invalid("JSON string exceeds length limit");
-      }
-      return candidate;
-    }
-    if (typeof candidate === "number") {
-      if (!Number.isFinite(candidate)) invalid("JSON numbers must be finite");
-      return candidate;
-    }
-    if (!candidate || typeof candidate !== "object") {
-      invalid("Value must be JSON-safe");
-    }
-    if (seen.has(candidate)) invalid("JSON value must not contain cycles");
-    seen.add(candidate);
-    try {
-      if (Array.isArray(candidate)) {
-        return Object.freeze(candidate.map((item) => visit(item, depth + 1)));
-      }
-      const prototype = Object.getPrototypeOf(candidate);
-      if (prototype !== Object.prototype && prototype !== null) {
-        invalid("JSON objects must use a plain prototype");
-      }
-      const result: Record<string, WorkflowOrchestrationJsonValue> = {};
-      for (const [key, item] of Object.entries(candidate)) {
-        if (key.length > limits.maxStringLength) {
-          invalid("JSON object key exceeds length limit");
-        }
-        if (item === undefined) continue;
-        result[key] = visit(item, depth + 1);
-      }
-      return Object.freeze(result);
-    } finally {
-      seen.delete(candidate);
-    }
-  };
-
-  return visit(value, 0) as T;
+  return freezeJson(value, limits, invalid);
 }
 
+/**
+ * Validates the structure of a {@link WorkflowPlan}.
+ *
+ * @remarks
+ * Checks protocol and version, identifiers, role and permission values, lane
+ * and wave references, normalized claim paths, that no two lanes own
+ * overlapping paths, and that only `integration` lanes touch `reservedPaths`.
+ *
+ * @param plan - Plan to validate.
+ * @throws {@link WorkflowOrchestrationControlError} with code `WORKFLOW_ORCHESTRATION_INVALID_REQUEST`
+ * when any rule fails.
+ */
 export function validateWorkflowPlan(plan: WorkflowPlan): void {
+  snapshotWorkflowPlan(plan);
+}
+
+/**
+ * Copies a plan into a deep-frozen JSON snapshot and validates the snapshot.
+ *
+ * @remarks
+ * The checks run on the copy, so the returned plan is exactly the one that
+ * was validated even when the input has getters or is a proxy.
+ *
+ * @param value - Untrusted plan.
+ * @returns The validated, frozen plan.
+ * @throws {@link WorkflowOrchestrationControlError} with code `WORKFLOW_ORCHESTRATION_INVALID_REQUEST`
+ * under the same conditions as {@link validateWorkflowPlan}.
+ * @internal
+ */
+export function snapshotWorkflowPlan(value: WorkflowPlan): WorkflowPlan {
+  const plan = immutableWorkflowOrchestrationJson(value);
   objectWithFields(
     plan,
     [
@@ -147,7 +149,10 @@ export function validateWorkflowPlan(plan: WorkflowPlan): void {
     invalid("Workflow plan header is invalid");
   }
   identifier(plan.executionId, "executionId");
-  nonEmptyText(plan.baseRevision, "baseRevision", 512);
+  // The same grammar as change sets, which must name this base revision.
+  if (!isWorkflowIdentifier(plan.baseRevision, "revision")) {
+    invalid("Workflow baseRevision is invalid");
+  }
   nonEmptyText(plan.objective, "objective", 16_384);
   array(plan.agents, "agents");
   array(plan.lanes, "lanes");
@@ -172,12 +177,40 @@ export function validateWorkflowPlan(plan: WorkflowPlan): void {
   for (const invariant of plan.invariants) validateInvariant(invariant);
   validateClaimSet(plan.reservedPaths, "reservedPaths");
   validateOwnershipLayout(plan);
-  immutableWorkflowOrchestrationJson(plan);
+  return plan;
 }
 
+/**
+ * Validates the structure of a {@link WorkflowOrchestrationState}.
+ *
+ * @param state - State aggregate to validate.
+ * @throws {@link WorkflowOrchestrationControlError} with code `WORKFLOW_ORCHESTRATION_INVALID_REQUEST`
+ * when any field, grant, proposal or reservation is malformed.
+ */
 export function validateWorkflowOrchestrationState(
   state: WorkflowOrchestrationState,
 ): void {
+  snapshotWorkflowOrchestrationState(state);
+}
+
+/**
+ * Copies orchestration state into a deep-frozen JSON snapshot and validates
+ * the snapshot.
+ *
+ * @remarks
+ * The checks run on the copy, so the returned state is exactly the one that
+ * was validated even when the input has getters or is a proxy.
+ *
+ * @param value - Untrusted state aggregate.
+ * @returns The validated, frozen state.
+ * @throws {@link WorkflowOrchestrationControlError} with code `WORKFLOW_ORCHESTRATION_INVALID_REQUEST`
+ * under the same conditions as {@link validateWorkflowOrchestrationState}.
+ * @internal
+ */
+export function snapshotWorkflowOrchestrationState(
+  value: WorkflowOrchestrationState,
+): WorkflowOrchestrationState {
+  const state = immutableWorkflowOrchestrationJson(value);
   objectWithFields(
     state,
     [
@@ -232,34 +265,53 @@ export function validateWorkflowOrchestrationState(
   uniqueBy(reservations, (reservation) => reservation.receiptId, "receiptId");
   for (const reservation of reservations)
     validateReservation(reservation, state);
-  immutableWorkflowOrchestrationJson(state);
+  return state;
 }
 
-/** Backward-compatible projection for state records created before v1 reservations. */
+/**
+ * Backward-compatible projection for state records created before v1 reservations.
+ *
+ * @internal
+ */
 export function workflowMutationReservations(
   state: WorkflowOrchestrationState,
 ): readonly WorkflowMutationReservation[] {
   return state.reservations ?? Object.freeze([]);
 }
 
+/**
+ * Validates a repository-relative path used in ownership claims.
+ *
+ * @remarks
+ * Uses the package's portable path rules, shared with workspace leases and
+ * change sets, and accepts only their canonical spelling: rejects blank paths,
+ * absolute paths, drive prefixes such as `C:`, backslashes, NUL, empty, `.`
+ * and `..` segments, trailing slashes and paths longer than 4096 characters.
+ * This keeps claims normalized so overlap checks cannot be bypassed by
+ * alternate spellings.
+ *
+ * @param path - Path to validate.
+ * @param field - Field name used in the error message.
+ * @throws {@link WorkflowOrchestrationControlError} with code `WORKFLOW_ORCHESTRATION_INVALID_REQUEST`
+ * when the path is not normalized and repository-relative.
+ * @internal
+ */
 export function validateWorkflowPath(path: string, field = "path"): void {
-  if (
-    typeof path !== "string" ||
-    path.length === 0 ||
-    path.length > 4_096 ||
-    path.startsWith("/") ||
-    path.endsWith("/") ||
-    path.includes("\\") ||
-    path.includes("\0") ||
-    /^[A-Za-z]:/u.test(path) ||
-    path
-      .split("/")
-      .some((segment) => !segment || segment === "." || segment === "..")
-  ) {
+  if (portablePathProblem(path, { canonical: true }) !== undefined) {
     invalid(`Workflow ${field} must be a normalized repository-relative path`);
   }
 }
 
+/**
+ * Tells whether two path claims cover any common path.
+ *
+ * @remarks
+ * Equal paths overlap; a `subtree` claim also overlaps every descendant path.
+ *
+ * @param left - First claim.
+ * @param right - Second claim.
+ * @returns `true` when the claims overlap.
+ */
 export function workflowPathClaimsOverlap(
   left: WorkflowPathClaim,
   right: WorkflowPathClaim,
@@ -827,10 +879,7 @@ function uniqueStrings(values: readonly string[], field: string): void {
 }
 
 function identifier(value: string, field: string): void {
-  if (
-    typeof value !== "string" ||
-    !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u.test(value)
-  ) {
+  if (!isWorkflowIdentifier(value, "record")) {
     invalid(`Workflow ${field} is invalid`);
   }
 }
@@ -869,13 +918,6 @@ function validTimestamp(value: number): boolean {
 
 function isDescendant(path: string, ancestor: string): boolean {
   return path.startsWith(`${ancestor}/`);
-}
-
-function validateLimits(limits: WorkflowOrchestrationJsonLimits): void {
-  for (const [name, value] of Object.entries(limits)) {
-    if (!positiveSafeInteger(value))
-      invalid(`JSON limit ${name} must be positive`);
-  }
 }
 
 function invalid(message: string): never {

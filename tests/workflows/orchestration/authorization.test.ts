@@ -1,9 +1,3 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import { describe, expect, test } from "bun:test";
 import {
   authorizeWorkflowActor,
@@ -65,7 +59,7 @@ describe("workflow host authorization", () => {
         },
       ),
     ).rejects.toMatchObject({
-      code: "WORKFLOW_ORCHESTRATION_INVALID_REQUEST",
+      code: "WORKFLOW_ORCHESTRATION_UNAUTHORIZED",
       details: { reason: "unauthorized" },
     });
     expect(calls).toBe(0);
@@ -81,7 +75,10 @@ describe("workflow host authorization", () => {
         executionId: "execution-1",
         planRevision: 1,
       }),
-    ).rejects.toMatchObject({ details: { reason: "unauthorized" } });
+    ).rejects.toMatchObject({
+      code: "WORKFLOW_ORCHESTRATION_UNAUTHORIZED",
+      details: { reason: "unauthorized" },
+    });
     await expect(
       authorizeWorkflowActor({ authorize: () => true }, actor, {
         operation: "plan.get",
@@ -89,7 +86,10 @@ describe("workflow host authorization", () => {
         executionId: "execution-2",
         planRevision: 1,
       }),
-    ).rejects.toMatchObject({ details: { reason: "unauthorized" } });
+    ).rejects.toMatchObject({
+      code: "WORKFLOW_ORCHESTRATION_UNAUTHORIZED",
+      details: { reason: "unauthorized" },
+    });
     await expect(
       authorizeWorkflowActor({ authorize: () => true }, actor, {
         operation: "plan.get",
@@ -97,7 +97,40 @@ describe("workflow host authorization", () => {
         executionId: "execution-1",
         planRevision: 2,
       }),
-    ).rejects.toMatchObject({ details: { reason: "unauthorized" } });
+    ).rejects.toMatchObject({
+      code: "WORKFLOW_ORCHESTRATION_UNAUTHORIZED",
+      message: "Workflow actor is bound to a different plan revision",
+    });
+    // Stale only when the caller says the actor's revision was superseded.
+    await expect(
+      authorizeWorkflowActor(
+        { authorize: () => true },
+        actor,
+        {
+          operation: "plan.get",
+          permission: "plan:read",
+          executionId: "execution-1",
+          planRevision: 2,
+        },
+        { activePlanRevision: 2 },
+      ),
+    ).rejects.toMatchObject({
+      code: "WORKFLOW_PLAN_STALE",
+      details: { actorPlanRevision: 1, activePlanRevision: 2 },
+    });
+    await expect(
+      authorizeWorkflowActor(
+        { authorize: () => true },
+        actor,
+        {
+          operation: "plan.get",
+          permission: "plan:read",
+          executionId: "execution-1",
+          planRevision: 2,
+        },
+        { activePlanRevision: 1 },
+      ),
+    ).rejects.toMatchObject({ code: "WORKFLOW_ORCHESTRATION_UNAUTHORIZED" });
     await expect(
       authorizeWorkflowActor({ authorize: () => true }, actor, {
         operation: "ownership.claim",
@@ -106,7 +139,10 @@ describe("workflow host authorization", () => {
         taskId: "implementation",
         planRevision: 1,
       }),
-    ).rejects.toMatchObject({ details: { reason: "unauthorized" } });
+    ).rejects.toMatchObject({
+      code: "WORKFLOW_ORCHESTRATION_UNAUTHORIZED",
+      details: { reason: "unauthorized" },
+    });
   });
 
   test.each(OWNERSHIP_OPERATIONS)(

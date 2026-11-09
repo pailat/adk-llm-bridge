@@ -1,9 +1,3 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import { describe, expect, test } from "bun:test";
 import type { WorkflowEvent } from "../../../src/workflows/events.js";
 import type { WorkflowExecutionRecord } from "../../../src/workflows/execution/contracts.js";
@@ -15,6 +9,59 @@ import {
 } from "../../../src/workflows/execution/stores.js";
 
 describe("InMemoryWorkflowExecutionStore", () => {
+  test("stores the record it validated when a getter changes its answer", async () => {
+    const store = new InMemoryWorkflowExecutionStore();
+    const created = await store.create(
+      flipping(
+        flipping(record("execution-1"), "status", "queued", "bogus"),
+        "revision",
+        1,
+        999,
+      ),
+    );
+    expect(created).toMatchObject({ status: "queued", revision: 1 });
+    expect(await store.get("execution-1")).toMatchObject({
+      status: "queued",
+      revision: 1,
+    });
+
+    const running = await store.compareAndSet(
+      flipping(
+        { ...created, revision: 2, updatedAt: 2, startedAt: 2 },
+        "status",
+        "running",
+        "bogus",
+      ),
+      1,
+    );
+    expect(running.status).toBe("running");
+    expect((await store.get("execution-1"))?.status).toBe("running");
+  });
+
+  test("keeps an own __proto__ input key as plain data across transitions", async () => {
+    const store = new InMemoryWorkflowExecutionStore();
+    const input = JSON.parse('{"__proto__":{"x":1}}');
+    const created = await store.create(record("execution-1", { input }));
+    const stored = created.input as Record<string, unknown>;
+    expect(Object.getPrototypeOf(stored)).toBe(Object.prototype);
+    expect(Object.hasOwn(stored, "__proto__")).toBe(true);
+    expect(stored.x).toBeUndefined();
+    expect(JSON.stringify(stored)).toBe('{"__proto__":{"x":1}}');
+
+    const running = await store.compareAndSet(
+      {
+        ...created,
+        status: "running",
+        revision: 2,
+        updatedAt: 2,
+        startedAt: 2,
+      },
+      1,
+    );
+    expect(running.status).toBe("running");
+    expect(JSON.stringify(running.input)).toBe('{"__proto__":{"x":1}}');
+  });
+
   test("applies exactly one concurrent CAS transition", async () => {
     const store = new InMemoryWorkflowExecutionStore();
     const initial = await store.create(record("execution-1"));
@@ -259,6 +306,24 @@ describe("InMemoryWorkflowExecutionStore", () => {
 });
 
 describe("InMemoryWorkflowExecutionEventStore", () => {
+  test("stores the event it validated when a getter changes its answer", async () => {
+    const store = new InMemoryWorkflowExecutionEventStore();
+    const appended = await store.append(
+      "execution-1",
+      flipping(
+        event("execution-1", 1),
+        "executionId",
+        "execution-1",
+        "execution-2",
+      ),
+    );
+    expect(appended.event.executionId).toBe("execution-1");
+    const read = await store.read({ executionId: "execution-1" });
+    expect(read.events.map((item) => item.event.executionId)).toEqual([
+      "execution-1",
+    ]);
+  });
+
   test("validates bounded capacity configuration", () => {
     expect(
       () =>
@@ -390,4 +455,22 @@ function event(executionId: string, timestamp: number): WorkflowEvent {
     timestamp,
     name: `event-${timestamp}`,
   };
+}
+
+/** Copy of `value` whose `key` answers `first` once, then `later`. */
+function flipping<T extends object>(
+  value: T,
+  key: string,
+  first: unknown,
+  later: unknown,
+): T {
+  const copy = { ...value } as Record<string, unknown>;
+  delete copy[key];
+  let reads = 0;
+  Object.defineProperty(copy, key, {
+    enumerable: true,
+    configurable: true,
+    get: () => (++reads === 1 ? first : later),
+  });
+  return copy as T;
 }

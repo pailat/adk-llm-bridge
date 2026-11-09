@@ -1,10 +1,4 @@
 /**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
-/**
  * OpenTelemetry spans for workflow runs, following ADK 2.4's conventions.
  *
  * ADK's own `Workflow` emits `invoke_workflow <name>` and `execute_node <name>`
@@ -32,12 +26,10 @@
  * have nothing to gate here. Callers must pass identifiers (workflow and step
  * ids), never user text; as a safety net every identifier is bounded to
  * {@link MAX_IDENTIFIER_LENGTH} characters so free-form text cannot ride along
- * in a span name. Failures
- * set `error.type` (the error class name, or `status` of an API error) and the
- * span status `ERROR` without a message. Everything is a no-op without an
+ * in a span name. Failures set `error.type` (the error class name, or `status`
+ * of an API error) and the span status `ERROR`, whose message is only that
+ * type, never the error message. Everything is a no-op without an
  * OpenTelemetry SDK.
- *
- * @module workflows/telemetry
  */
 
 import { context, type Span, SpanStatusCode, trace } from "@opentelemetry/api";
@@ -45,10 +37,18 @@ import { context, type Span, SpanStatusCode, trace } from "@opentelemetry/api";
 const TRACER_NAME = "gcp.vertex.agent";
 const TRACER_VERSION = "adk-llm-bridge";
 
-/** Outcome of one workflow step, as ADK reports it in `adk.node.status`. */
+/**
+ * Outcome of one workflow step, as ADK reports it in `adk.node.status`.
+ *
+ * @internal
+ */
 export type WorkflowStepStatus = "completed" | "waiting" | "failed";
 
-/** Identifies a workflow run for {@link withWorkflowSpan}. */
+/**
+ * Identifies a workflow run for {@link withWorkflowSpan}.
+ *
+ * @internal
+ */
 export interface WorkflowSpanMeta {
   /** Workflow name; used in the span name and `adk.workflow.name`. */
   workflowName: string;
@@ -58,7 +58,11 @@ export interface WorkflowSpanMeta {
   sessionId?: string;
 }
 
-/** Identifies a workflow step for {@link withStepSpan}. */
+/**
+ * Identifies a workflow step for {@link withStepSpan}.
+ *
+ * @internal
+ */
 export interface WorkflowStepSpanMeta {
   /** Step/node name; used in the span name, like ADK's `execute_node <name>`. */
   name: string;
@@ -70,7 +74,11 @@ export interface WorkflowStepSpanMeta {
   attempt?: number;
 }
 
-/** Lets the wrapped work refine what is recorded on its step span. */
+/**
+ * Lets the wrapped work refine what is recorded on its step span.
+ *
+ * @internal
+ */
 export interface WorkflowStepSpanHandle {
   /** The underlying span, for extra attributes. */
   readonly span: Span;
@@ -82,7 +90,11 @@ export interface WorkflowStepSpanHandle {
   setInterruptCount(count: number): void;
 }
 
-/** Longest identifier written to a span name or attribute. */
+/**
+ * Longest identifier written to a span name or attribute.
+ *
+ * @internal
+ */
 export const MAX_IDENTIFIER_LENGTH = 128;
 
 function ident(value: string): string {
@@ -125,6 +137,12 @@ function isAbort(error: unknown): boolean {
  * The span starts synchronously, so its parent is the span active when this is
  * called. A thrown error marks the span failed (`error.type`, status `ERROR`)
  * and is rethrown unchanged; an `AbortError` is rethrown without marking.
+ *
+ * @param meta - Workflow identity recorded on the span.
+ * @param fn - Work to run inside the span; receives the span.
+ * @returns The value `fn` resolves to.
+ *
+ * @internal
  */
 export function withWorkflowSpan<T>(
   meta: WorkflowSpanMeta,
@@ -207,6 +225,12 @@ function startStep(meta: WorkflowStepSpanMeta): StepState {
  * called `handle.waiting()`), or `failed` plus `error.type` and status `ERROR`
  * when `fn` throws. An `AbortError` is rethrown and recorded as `failed`
  * without an error status.
+ *
+ * @param meta - Step identity recorded on the span.
+ * @param fn - Work to run inside the span; receives a handle to refine the span.
+ * @returns The value `fn` resolves to.
+ *
+ * @internal
  */
 export function withStepSpan<T>(
   meta: WorkflowStepSpanMeta,
@@ -234,6 +258,12 @@ export function withStepSpan<T>(
  * iteration finishes, fails or is abandoned (`return()`), and every `next()`
  * runs in the span's context (the pattern of ADK's
  * `runAsyncGeneratorWithOtelContext`).
+ *
+ * @param meta - Step identity recorded on the span.
+ * @param factory - Creates the event stream; receives a handle to refine the span.
+ * @returns An async generator yielding the events of the wrapped stream.
+ *
+ * @internal
  */
 export async function* withStepSpanStream<T>(
   meta: WorkflowStepSpanMeta,

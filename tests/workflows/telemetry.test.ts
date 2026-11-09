@@ -379,7 +379,7 @@ describe("withStepSpanStream", () => {
   });
 });
 
-describe("content never reaches spans (E2E F4)", () => {
+describe("content never reaches spans", () => {
   const SECRET_INPUT = "SECRET-INPUT cat /etc/passwd";
   const SECRET_OUTPUT = "SECRET-OUTPUT api-key=abc123";
   const SECRET_ERROR = "SECRET-ERROR token=xyz";
@@ -466,7 +466,9 @@ describe("content never reaches spans (E2E F4)", () => {
         }
         // The only status text is the error class name.
         if (span.status?.message !== undefined) {
-          expect(span.status.message).toBe(span.attributes["error.type"]);
+          expect<unknown>(span.status.message).toBe(
+            span.attributes["error.type"],
+          );
         }
       }
     });

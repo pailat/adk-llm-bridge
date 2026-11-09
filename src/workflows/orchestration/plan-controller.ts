@@ -1,12 +1,7 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import {
   authorizeWorkflowActor,
   DENY_ALL_WORKFLOW_AUTHORIZER,
+  unauthorized,
   type WorkflowActorContext,
   type WorkflowAuthorizationOperation,
   type WorkflowAuthorizer,
@@ -22,7 +17,7 @@ import {
 } from "./contracts.js";
 import {
   immutableWorkflowOrchestrationJson,
-  validateWorkflowPlan,
+  snapshotWorkflowPlan,
   workflowMutationReservations,
 } from "./json.js";
 import type {
@@ -30,8 +25,11 @@ import type {
   WorkflowPlanStore,
 } from "./stores.js";
 
+/** Dependencies and options for {@link WorkflowPlanController}. */
 export interface WorkflowPlanControllerConfig {
+  /** Store plan revisions are written to and read from. */
   plans: WorkflowPlanStore;
+  /** Store holding the orchestration state that activation updates by compare-and-set. */
   state: WorkflowOrchestrationStateStore;
   /** Mandatory host authentication/authorization boundary for every call. */
   authorizer: WorkflowAuthorizer;
@@ -41,7 +39,9 @@ export interface WorkflowPlanControllerConfig {
    * authority to the principal submitting that same plan.
    */
   bootstrapAuthorizer?: WorkflowAuthorizer;
+  /** Clock returning epoch milliseconds. Defaults to `Date.now`. */
   now?: () => number;
+  /** Maximum compare-and-set attempts per mutation before it fails as contended. Must be an integer from 1 to 1000. Defaults to 16. */
   maxCasRetries?: number;
 }
 
@@ -82,15 +82,34 @@ export class WorkflowPlanController {
     this.#maxCasRetries = config.maxCasRetries ?? 16;
   }
 
+  /**
+   * Persists a ready plan revision.
+   *
+   * @remarks
+   * Revision 1 needs the bootstrap authorizer. Later revisions must be exactly
+   * one above the latest, keep its base revision, and be authorized by the
+   * latest plan, which must already be the active one. A candidate plan thus
+   * never grants authority to the principal that submits it.
+   *
+   * @param planValue - Plan to store; its status must be `ready`.
+   * @param actor - Host-authenticated actor.
+   * @returns The stored, frozen plan.
+   * @throws {@link WorkflowOrchestrationControlError} with code `WORKFLOW_ORCHESTRATION_INVALID_REQUEST`
+   * when the plan is invalid or not `ready`, or
+   * `WORKFLOW_ORCHESTRATION_UNAUTHORIZED` when the actor is not authorized.
+   * @throws {@link WorkflowOrchestrationControlError} with code `WORKFLOW_PLAN_REVISION_CONFLICT`
+   * when the revision is not contiguous, the base revision changed, or the
+   * latest plan is not active, and `WORKFLOW_PLAN_STALE` when the revision is
+   * not above the latest.
+   */
   async put(
     planValue: WorkflowPlan,
     actor: WorkflowActorContext,
   ): Promise<WorkflowPlan> {
-    validateWorkflowPlan(planValue);
-    if (planValue.status !== "ready") {
+    const plan = snapshotWorkflowPlan(planValue);
+    if (plan.status !== "ready") {
       invalid("Only ready workflow plans can be persisted");
     }
-    const plan = immutableWorkflowOrchestrationJson(planValue);
     const revisions = await this.#plans.list(plan.executionId);
     const latest = revisions.at(-1);
     if (!latest) {
@@ -166,23 +185,47 @@ export class WorkflowPlanController {
     return await this.#plans.put(plan);
   }
 
+  /**
+   * Reads one plan revision.
+   *
+   * @param executionId - Execution the plan belongs to.
+   * @param planRevision - Revision to read.
+   * @param actor - Host-authenticated actor.
+   * @returns The stored plan.
+   * @throws {@link WorkflowOrchestrationControlError} with code `WORKFLOW_PLAN_NOT_FOUND`
+   * when the revision does not exist, `WORKFLOW_ORCHESTRATION_UNAUTHORIZED`
+   * when the actor may not read it, or `WORKFLOW_PLAN_STALE` when the actor
+   * is bound to a revision older than the active plan.
+   */
   async get(
     executionId: string,
     planRevision: number,
     actor: WorkflowActorContext,
   ): Promise<WorkflowPlan> {
+    const state = await this.#state.get(executionId);
     await this.#authorizeHost(
       actor,
       "plan.get",
       "plan:read",
       executionId,
       planRevision,
+      state?.activePlanRevision,
     );
     const plan = await this.#requiredPlan(executionId, planRevision);
     this.#assertPlanPolicy(actor, plan, "plan:read");
     return plan;
   }
 
+  /**
+   * Lists the plan revisions the actor is allowed to read.
+   *
+   * @remarks
+   * An actor bound to a plan revision sees only that revision.
+   *
+   * @param executionId - Execution to list plans for.
+   * @param actor - Host-authenticated actor.
+   * @returns Readable plan revisions in ascending order.
+   */
   async list(
     executionId: string,
     actor: WorkflowActorContext,
@@ -205,6 +248,24 @@ export class WorkflowPlanController {
     );
   }
 
+  /**
+   * Makes a plan revision the active one, creating the orchestration state on
+   * first use.
+   *
+   * @remarks
+   * The state update is a compare-and-set retried up to `maxCasRetries` times.
+   * The first activation must be revision 1 and needs the bootstrap authorizer.
+   *
+   * @param executionId - Execution to activate the plan for.
+   * @param planRevision - Revision to activate; its status must be `ready`.
+   * @param actor - Host-authenticated actor.
+   * @returns The updated orchestration state.
+   * @throws {@link WorkflowOrchestrationControlError} with code `WORKFLOW_PLAN_NOT_FOUND`
+   * when the revision does not exist.
+   * @throws {@link WorkflowOrchestrationControlError} with code `WORKFLOW_ORCHESTRATION_INVALID_REQUEST`
+   * when the plan is not `ready`, or `WORKFLOW_ORCHESTRATION_UNAUTHORIZED`
+   * when the actor is not authorized.
+   */
   async activate(
     executionId: string,
     planRevision: number,
@@ -366,13 +427,19 @@ export class WorkflowPlanController {
     permission: WorkflowActorPermission,
     executionId: string,
     planRevision?: number,
+    activePlanRevision?: number,
   ): Promise<WorkflowActorContext> {
-    return await authorizeWorkflowActor(this.#authorizer, actor, {
-      operation,
-      permission,
-      executionId,
-      ...(planRevision === undefined ? {} : { planRevision }),
-    });
+    return await authorizeWorkflowActor(
+      this.#authorizer,
+      actor,
+      {
+        operation,
+        permission,
+        executionId,
+        ...(planRevision === undefined ? {} : { planRevision }),
+      },
+      activePlanRevision === undefined ? {} : { activePlanRevision },
+    );
   }
 
   async #authorizeAgainstPlan(
@@ -387,6 +454,8 @@ export class WorkflowPlanController {
       operation,
       permission,
       authorityPlan.executionId,
+      authorityPlan.planRevision,
+      // Every authority plan is the active plan of its execution.
       authorityPlan.planRevision,
     );
     this.#assertPlanPolicy(actor, authorityPlan, permission, roles);
@@ -458,13 +527,5 @@ function invalid(message: string): never {
   throw new WorkflowOrchestrationControlError(
     "WORKFLOW_ORCHESTRATION_INVALID_REQUEST",
     message,
-  );
-}
-
-function unauthorized(message: string): never {
-  throw new WorkflowOrchestrationControlError(
-    "WORKFLOW_ORCHESTRATION_INVALID_REQUEST",
-    message,
-    { reason: "unauthorized" },
   );
 }

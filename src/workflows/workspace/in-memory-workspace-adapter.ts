@@ -1,10 +1,5 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import { randomUUID } from "node:crypto";
+import { throwIfAborted } from "../internal/abort.js";
 import {
   findWorkspacePathOverlaps,
   normalizeWorkspaceLeaseRequest,
@@ -15,9 +10,36 @@ import {
   type WorkspaceLeaseRequest,
 } from "./workspace-adapter.js";
 
+const ABORTED = "Workspace lease acquisition aborted";
+
+/** Options for {@link InMemoryWorkspaceAdapter}. */
 export interface InMemoryWorkspaceAdapterOptions {
+  /**
+   * Produces lease ids; duplicates and blank values are rejected at grant time.
+   *
+   * @defaultValue `crypto.randomUUID`
+   */
   createLeaseId?: () => string;
+  /**
+   * Clock for `acquiredAt` in epoch milliseconds.
+   *
+   * @defaultValue `Date.now`
+   */
   now?: () => number;
+  /**
+   * Compare write paths without regard to letter case, for workspaces on a
+   * case-insensitive filesystem (the macOS and Windows defaults), where
+   * `Src/a` and `src/a` are the same file.
+   *
+   * @remarks
+   * Paths are compared after Unicode NFC normalization and a full case fold
+   * (so `ß` meets `ss` and `ς` meets `σ`). The fold is conservative: it may
+   * report an overlap the filesystem would not, never miss one. Lease paths
+   * keep the caller's spelling.
+   *
+   * @defaultValue false
+   */
+  caseInsensitivePaths?: boolean;
 }
 
 interface ActiveLease extends WorkspaceLeaseRequest {
@@ -34,25 +56,48 @@ interface PendingAcquisition {
   reject: (reason: unknown) => void;
 }
 
-/** In-process coordinator for host-owned workspace write leases. */
+/**
+ * In-process coordinator for host-owned workspace write leases.
+ *
+ * @remarks
+ * Conflicting requests wait in FIFO order and are granted as leases are
+ * released. Leases do not expire and are lost with the process; use
+ * {@link FileSystemWorkspaceAdapter} for durable ownership.
+ */
 export class InMemoryWorkspaceAdapter implements WorkspaceAdapter {
   readonly #active = new Map<string, ActiveLease>();
   readonly #pending: PendingAcquisition[] = [];
   readonly #issuedLeaseIds = new Set<string>();
   readonly #createLeaseId: () => string;
   readonly #now: () => number;
+  readonly #caseInsensitive: boolean;
 
+  /**
+   * @param options - Optional lease id and clock overrides and path case
+   * handling.
+   */
   constructor(options: InMemoryWorkspaceAdapterOptions = {}) {
     this.#createLeaseId = options.createLeaseId ?? randomUUID;
     this.#now = options.now ?? Date.now;
+    this.#caseInsensitive = options.caseInsensitivePaths === true;
   }
 
+  /**
+   * Acquires a lease, waiting while any active lease overlaps the paths.
+   *
+   * @param request - Workspace, owner and relative write paths to own.
+   * @param options - Optional abort signal for the wait.
+   * @returns The granted lease.
+   * @throws {@link TypeError} when the request is invalid.
+   * @throws The signal's reason (or an `Error`) when aborted before the grant.
+   * @throws `Error` when the lease id factory returns a blank or duplicate id.
+   */
   async acquire(
     request: WorkspaceLeaseRequest,
     options: WorkspaceAcquireOptions = {},
   ): Promise<WorkspaceLease> {
     const normalized = normalizeWorkspaceLeaseRequest(request);
-    throwIfAborted(options.signal);
+    throwIfAborted(options.signal, ABORTED);
 
     return new Promise<WorkspaceLease>((resolve, reject) => {
       const pending: PendingAcquisition = {
@@ -77,6 +122,13 @@ export class InMemoryWorkspaceAdapter implements WorkspaceAdapter {
     });
   }
 
+  /**
+   * Lists active leases that overlap the request without acquiring anything.
+   *
+   * @param request - Workspace, owner and relative write paths to check.
+   * @returns Conflicting leases, empty when the paths are free.
+   * @throws {@link TypeError} when the request is invalid.
+   */
   conflicts(request: WorkspaceLeaseRequest): readonly WorkspaceLeaseConflict[] {
     return this.conflictsNormalized(normalizeWorkspaceLeaseRequest(request));
   }
@@ -90,6 +142,7 @@ export class InMemoryWorkspaceAdapter implements WorkspaceAdapter {
       const overlaps = findWorkspacePathOverlaps(
         request.writePaths,
         lease.writePaths,
+        { caseInsensitive: this.#caseInsensitive },
       );
       if (overlaps.length === 0) continue;
       conflicts.push(
@@ -174,9 +227,4 @@ export class InMemoryWorkspaceAdapter implements WorkspaceAdapter {
       pending.onAbort = undefined;
     }
   }
-}
-
-function throwIfAborted(signal?: AbortSignal): void {
-  if (!signal?.aborted) return;
-  throw signal.reason ?? new Error("Workspace lease acquisition aborted");
 }

@@ -1,9 +1,3 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import {
@@ -34,6 +28,7 @@ import {
   type LoadWorkflowCheckpointInput,
   type SaveWorkflowCheckpointInput,
   WorkflowCheckpointConflictError,
+  type WorkflowCheckpointFailureReason,
   type WorkflowCheckpointRevision,
   type WorkflowCheckpointStore,
   type WorkflowCheckpointWrite,
@@ -54,19 +49,33 @@ const SAFE_CHECKPOINT_CANDIDATE =
 const SAFE_CHECKPOINT_TOMBSTONE =
   /^[a-f0-9]{64}\.json\.lock\.retired\.([A-Za-z0-9_-]{1,128})$/u;
 
+/** Options for {@link FileSystemWorkflowCheckpointStore}. */
 export interface FileSystemWorkflowCheckpointStoreOptions {
   /** Absolute host-controlled directory for checkpoint data and locks. */
   root: string;
-  /** Maximum time spent waiting for a live lock. Defaults to 10 seconds. */
+  /**
+   * Maximum time spent waiting for a live lock, in milliseconds.
+   *
+   * @defaultValue `10_000`
+   */
   lockTimeoutMs?: number;
-  /** Delay between lock acquisition attempts. Defaults to 25 milliseconds. */
+  /**
+   * Delay between lock acquisition attempts, in milliseconds.
+   *
+   * @defaultValue `25`
+   */
   lockRetryMs?: number;
   /** Optional lifetime signal for pending lock acquisition. */
   signal?: AbortSignal;
-  /** Maximum UTF-8 JSON size of one durable checkpoint. Defaults to 4 MiB. */
+  /**
+   * Maximum UTF-8 JSON size of one durable checkpoint.
+   *
+   * @defaultValue {@link DEFAULT_WORKFLOW_CHECKPOINT_MAX_BYTES}
+   */
   maxCheckpointBytes?: number;
 }
 
+/** Options for {@link collectFileSystemCheckpointTombstonesOffline}. */
 export interface OfflineCheckpointTombstoneCollectionOptions {
   /** Absolute host-controlled checkpoint root. */
   root: string;
@@ -74,7 +83,9 @@ export interface OfflineCheckpointTombstoneCollectionOptions {
   confirmNoActiveWriters: true;
 }
 
+/** Result of {@link collectFileSystemCheckpointTombstonesOffline}. */
 export interface OfflineCheckpointTombstoneCollectionResult {
+  /** Number of retired lock tombstones removed. */
   removedTombstones: number;
 }
 
@@ -105,9 +116,16 @@ interface OfflineCheckpointTombstone {
 
 /**
  * OFFLINE ONLY: removes retired checkpoint-lock tombstones after proving that
- * the host-controlled tree has no lock or candidate. This is not safe to run
- * concurrently with stores or writers, and intentionally has no age-based
- * mode.
+ * the host-controlled tree has no lock or candidate.
+ *
+ * @remarks
+ * This is not safe to run concurrently with stores or writers, and
+ * intentionally has no age-based mode.
+ *
+ * @param options - Checkpoint root and the `confirmNoActiveWriters` acknowledgement.
+ * @returns The number of tombstones removed.
+ * @throws `TypeError` or `Error` (not {@link WorkflowError}) when the root or acknowledgement is invalid, or when the
+ * tree contains a symlink, an active lock or candidate, or an unsafe entry; nothing is removed in those cases.
  */
 export async function collectFileSystemCheckpointTombstonesOffline(
   options: OfflineCheckpointTombstoneCollectionOptions,
@@ -124,6 +142,7 @@ export async function collectFileSystemCheckpointTombstonesOffline(
 /**
  * Durable single-host checkpoint adapter with cross-process file locking.
  *
+ * @remarks
  * The lock protects compare-and-swap plus rename as one critical section.
  * Readers need no lock because checkpoint replacement is atomic on one local
  * filesystem. The configured root must not span filesystems via symlinks.
@@ -137,6 +156,11 @@ export class FileSystemWorkflowCheckpointStore
   readonly #signal: AbortSignal | undefined;
   readonly #maxCheckpointBytes: number;
 
+  /**
+   * @param options - Root directory, lock timing, abort signal and size limit.
+   * @throws {@link WorkflowError} with code `WORKFLOW_DEFINITION_INVALID` when `root` is not absolute
+   * or a numeric option is not a positive integer.
+   */
   constructor(options: FileSystemWorkflowCheckpointStoreOptions) {
     if (!isAbsolute(options.root)) {
       throw new WorkflowError(
@@ -161,6 +185,14 @@ export class FileSystemWorkflowCheckpointStore
     );
   }
 
+  /**
+   * Reads a checkpoint file without taking the lock.
+   *
+   * @param input - Workflow id and execution id.
+   * @returns The checkpoint, or `undefined` when no file exists.
+   * @throws {@link WorkflowError} with code `WORKFLOW_EXECUTION_ERROR` when the file is unreadable, malformed,
+   * not a regular file, or larger than `maxCheckpointBytes`.
+   */
   async load(
     input: LoadWorkflowCheckpointInput,
   ): Promise<WorkflowCheckpointV1 | undefined> {
@@ -177,6 +209,15 @@ export class FileSystemWorkflowCheckpointStore
     return stored?.checkpoint;
   }
 
+  /**
+   * Writes a checkpoint atomically under a cross-process lock.
+   *
+   * @param input - Checkpoint plus optional revision preconditions.
+   * @returns The key and the `stateDelta` for the saved checkpoint.
+   * @throws {@link WorkflowCheckpointConflictError} when `expectedRevision` does not match the stored revision.
+   * @throws {@link WorkflowError} with code `WORKFLOW_EXECUTION_ERROR` for an invalid or oversized checkpoint,
+   * a mismatching supplied `revision`, a lock timeout or abort, or a file-system failure.
+   */
   async save(
     input: SaveWorkflowCheckpointInput,
   ): Promise<WorkflowCheckpointWrite> {
@@ -907,7 +948,7 @@ async function abortableDelay(
 }
 
 function checkpointFileError(
-  reason: string,
+  reason: WorkflowCheckpointFailureReason,
   checkpointKey: string,
   message: string,
   details: Record<string, unknown> = {},
@@ -920,7 +961,7 @@ function checkpointFileError(
 }
 
 function ioError(
-  reason: string,
+  reason: WorkflowCheckpointFailureReason,
   checkpointKey: string,
   error: unknown,
 ): WorkflowError {

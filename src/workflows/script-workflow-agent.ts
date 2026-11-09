@@ -1,9 +1,3 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import {
   BaseAgent,
   type Event,
@@ -50,10 +44,15 @@ import type { WorkflowScriptRuntime } from "./sandbox/types.js";
 import { runWorkflowScript } from "./sandbox/workflow-script-runner.js";
 import type { WorkflowWorkspaceConfig } from "./workspace/workspace-adapter.js";
 
+/** Configuration of a {@link ScriptWorkflowAgent}. */
 export interface ScriptWorkflowAgentConfig extends WorkflowNodeConfig {
+  /** ADK agent name. */
   name: string;
+  /** Agent description. Defaults to the definition's description. */
   description?: string;
+  /** Script workflow this agent runs. */
   definition: ScriptWorkflowDefinition;
+  /** Static sub-agents the script may invoke by name. */
   subAgents?: BaseAgent[];
   /** Optional isolated runtime injection for alternate sandboxes and tests. */
   runtime?: WorkflowScriptRuntime;
@@ -77,8 +76,15 @@ export interface ScriptWorkflowAgentConfig extends WorkflowNodeConfig {
   workspace?: WorkflowWorkspaceConfig;
 }
 
-/** A sandboxed, versioned script workflow that participates in ADK as an agent. */
+/**
+ * A sandboxed, versioned script workflow that participates in ADK as an agent.
+ *
+ * @remarks
+ * The script runs in an isolated runtime (QuickJS by default) and reaches the
+ * host only through yielded step, parallel, emit and dynamic-agent operations.
+ */
 export class ScriptWorkflowAgent extends BaseAgent {
+  /** The script workflow definition this agent runs. */
   readonly definition: ScriptWorkflowDefinition;
   readonly #scriptRuntime: WorkflowScriptRuntime;
   readonly #gateway: AgentInvocationGateway | undefined;
@@ -99,6 +105,13 @@ export class ScriptWorkflowAgent extends BaseAgent {
     | ((event: WorkflowEvent) => void | Promise<void>)
     | undefined;
 
+  /**
+   * @param config - Agent identity, definition, sub-agents and optional
+   * runtime, persistence and dynamic-agent adapters.
+   * @throws {@link WorkflowError} with code `WORKFLOW_DEFINITION_INVALID` when
+   * both `createAgentFactory` and `gateway` are set: a custom gateway cannot
+   * see agents created dynamically.
+   */
   constructor(config: ScriptWorkflowAgentConfig) {
     const subAgents = config.subAgents ?? [];
     super({

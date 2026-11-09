@@ -1,9 +1,3 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import { describe, expect, test } from "bun:test";
 import {
   isWorkflowOrchestrationMessage,
@@ -68,6 +62,50 @@ describe("workflow orchestration messages", () => {
         }),
       ),
     ).toThrow("must be unique");
+  });
+
+  test("never returns a path that differs from the one it validated", () => {
+    let reads = 0;
+    const payload = {
+      get path() {
+        reads++;
+        return reads === 1 ? "src/ok.ts" : "../../etc/passwd";
+      },
+    };
+    const input = message({ kind: "PathCreated", payload });
+
+    let parsed: unknown;
+    try {
+      parsed = parseWorkflowOrchestrationMessage(input);
+    } catch (error) {
+      expect(error).toMatchObject({
+        code: "WORKFLOW_ORCHESTRATION_INVALID_REQUEST",
+      });
+      return;
+    }
+    expect(parsed).toMatchObject({ payload: { path: "src/ok.ts" } });
+  });
+
+  test("reads a getter once and rejects symbol-keyed envelopes", () => {
+    let reads = 0;
+    const withGetter = message();
+    Object.defineProperty(withGetter, "senderTaskId", {
+      enumerable: true,
+      get: () => {
+        reads++;
+        return "task-a";
+      },
+    });
+    const parsed = parseWorkflowOrchestrationMessage(withGetter);
+    expect(parsed.senderTaskId).toBe("task-a");
+    expect(Object.getOwnPropertyDescriptor(parsed, "senderTaskId")).toEqual(
+      expect.objectContaining({ value: "task-a", writable: false }),
+    );
+    expect(reads).toBe(1);
+    const withSymbol = { ...message(), [Symbol("hidden")]: true };
+    expect(() => parseWorkflowOrchestrationMessage(withSymbol)).toThrow(
+      "symbol",
+    );
   });
 });
 

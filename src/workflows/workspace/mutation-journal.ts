@@ -1,9 +1,4 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
+import { isWorkflowIdentifier } from "../internal/identifiers.js";
 import {
   canonicalJson,
   snapshotJson,
@@ -12,52 +7,111 @@ import {
 import type { WorkspaceDescriptor } from "../resources/workspace-provisioner.js";
 import type { WorkflowChangeOperationOptions } from "./change-driver.js";
 
+/** Kind of host-side repository mutation that is journaled. */
 export type WorkflowHostMutationKind = "commit" | "integration";
+/** Lifecycle of a journaled mutation; `ambiguous` means the outcome is unknown. */
 export type WorkflowHostMutationStatus = "pending" | "completed" | "ambiguous";
 
+/** What the host is about to do, recorded before the mutation starts. */
 export interface WorkflowHostMutationIntent {
+  /** Safe identity of the operation; the idempotency key. */
   operationId: string;
+  /** Lowercase `sha256:` digest of the intended mutation. */
   intentDigest: string;
+  /** Kind of mutation. */
   kind: WorkflowHostMutationKind;
+  /** Workflow execution that issued the mutation. */
   executionId: string;
+  /** Task that issued the mutation. */
   taskId: string;
+  /** Start time in epoch milliseconds. */
   startedAt: number;
 }
 
+/** Stored state of one journaled mutation. */
 export interface WorkflowHostMutationRecord extends WorkflowHostMutationIntent {
+  /** Compare-and-set revision, starting at 1 and incremented on each change. */
   revision: number;
+  /** Current lifecycle status. */
   status: WorkflowHostMutationStatus;
+  /** Last update time in epoch milliseconds. */
   updatedAt: number;
+  /** JSON result recorded by `complete`. */
   result?: WorkflowResourceJsonValue;
+  /** Reason recorded by `markAmbiguous`. */
   ambiguity?: string;
   /** Set atomically when the host mutation driver first crosses its boundary. */
   hostStartedAt?: number;
 }
 
+/** Result of beginning a journaled mutation. */
 export interface WorkflowHostMutationBeginResult {
+  /** The current record for the operation. */
   record: WorkflowHostMutationRecord;
+  /** `true` when this call created the record or crossed the host boundary. */
   created: boolean;
 }
 
 /** Durable implementations provide idempotency by operationId + intentDigest. */
 export interface WorkflowHostMutationJournal {
+  /**
+   * Records an intent, or returns the existing record for the same operation.
+   *
+   * @param intent - Intent to record.
+   * @returns The record and whether it was created.
+   * @throws {@link WorkflowHostMutationConflictError} when `operationId` was
+   * reused with a different `intentDigest`.
+   */
   begin(
     intent: WorkflowHostMutationIntent,
   ): Promise<WorkflowHostMutationBeginResult>;
+  /**
+   * Marks that the host driver is about to cross its mutation boundary.
+   *
+   * @remarks
+   * Only the first call per operation returns `created: true`; a record with
+   * `hostStartedAt` set after a crash means the mutation may have happened.
+   *
+   * @param intent - Intent to record and mark started.
+   * @returns The record and whether this call set `hostStartedAt`.
+   * @throws {@link WorkflowHostMutationConflictError} on digest reuse.
+   */
   beginHostMutation(
     intent: WorkflowHostMutationIntent,
   ): Promise<WorkflowHostMutationBeginResult>;
+  /** Returns the record for an operation, or `undefined` when unknown. */
   get(operationId: string): Promise<WorkflowHostMutationRecord | undefined>;
+  /**
+   * Marks an operation completed with a JSON result.
+   *
+   * @param operationId - Operation to complete.
+   * @param intentDigest - Digest the operation was begun with.
+   * @param result - JSON-safe result to store.
+   * @returns The completed record; repeating with an equal result is a no-op.
+   * @throws {@link WorkflowHostMutationConflictError} when the operation is
+   * unknown, the digest differs or a different result is already stored.
+   */
   complete(
     operationId: string,
     intentDigest: string,
     result: WorkflowResourceJsonValue,
   ): Promise<WorkflowHostMutationRecord>;
+  /**
+   * Marks an operation whose outcome cannot be determined.
+   *
+   * @param operationId - Operation to mark.
+   * @param intentDigest - Digest the operation was begun with.
+   * @param reason - Non-empty explanation.
+   * @returns The ambiguous record.
+   * @throws {@link WorkflowHostMutationConflictError} when the operation is
+   * unknown, the digest differs or it is already completed.
+   */
   markAmbiguous(
     operationId: string,
     intentDigest: string,
     reason: string,
   ): Promise<WorkflowHostMutationRecord>;
+  /** Lists an execution's records ordered by start time, then operation id. */
   list(executionId: string): Promise<readonly WorkflowHostMutationRecord[]>;
 }
 
@@ -66,20 +120,33 @@ export interface WorkflowHostMutationJournal {
  * checkout or move a publication target must participate in the same lock.
  */
 export interface WorkflowRepositoryMutationLock {
+  /**
+   * Acquires the lock for one repository, waiting for other holders.
+   *
+   * @param repositoryId - Repository to lock.
+   * @param options - Optional abort signal.
+   * @returns A lease that must be released.
+   */
   acquire(
     repositoryId: string,
     options?: WorkflowChangeOperationOptions,
   ): Promise<WorkflowRepositoryMutationLease>;
 }
 
+/** Held repository lock. */
 export interface WorkflowRepositoryMutationLease {
+  /** Repository the lock covers. */
   readonly repositoryId: string;
+  /** Releases the lock; resolves `true` once and `false` afterwards. */
   release(): Promise<boolean>;
 }
 
+/** Thrown by a mutation journal on digest reuse or an invalid state change. */
 export class WorkflowHostMutationConflictError extends Error {
+  /** Stable error code. */
   readonly code = "WORKFLOW_HOST_MUTATION_CONFLICT" as const;
 
+  /** @param message - Description of the conflict. */
   constructor(message: string) {
     super(message);
     this.name = "WorkflowHostMutationConflictError";
@@ -92,6 +159,7 @@ export class InMemoryWorkflowHostMutationJournal
 {
   readonly #records = new Map<string, WorkflowHostMutationRecord>();
 
+  /** {@inheritDoc WorkflowHostMutationJournal.begin} */
   async begin(
     intent: WorkflowHostMutationIntent,
   ): Promise<WorkflowHostMutationBeginResult> {
@@ -115,6 +183,7 @@ export class InMemoryWorkflowHostMutationJournal
     return Object.freeze({ record, created: true });
   }
 
+  /** {@inheritDoc WorkflowHostMutationJournal.beginHostMutation} */
   async beginHostMutation(
     intent: WorkflowHostMutationIntent,
   ): Promise<WorkflowHostMutationBeginResult> {
@@ -132,12 +201,14 @@ export class InMemoryWorkflowHostMutationJournal
     return Object.freeze({ record, created: true });
   }
 
+  /** {@inheritDoc WorkflowHostMutationJournal.get} */
   async get(
     operationId: string,
   ): Promise<WorkflowHostMutationRecord | undefined> {
     return this.#records.get(requiredIdentity(operationId, "operationId"));
   }
 
+  /** {@inheritDoc WorkflowHostMutationJournal.complete} */
   async complete(
     operationId: string,
     intentDigest: string,
@@ -165,6 +236,7 @@ export class InMemoryWorkflowHostMutationJournal
     return record;
   }
 
+  /** {@inheritDoc WorkflowHostMutationJournal.markAmbiguous} */
   async markAmbiguous(
     operationId: string,
     intentDigest: string,
@@ -189,6 +261,7 @@ export class InMemoryWorkflowHostMutationJournal
     return record;
   }
 
+  /** {@inheritDoc WorkflowHostMutationJournal.list} */
   async list(
     executionId: string,
   ): Promise<readonly WorkflowHostMutationRecord[]> {
@@ -216,24 +289,31 @@ export class InMemoryWorkflowHostMutationJournal
   }
 }
 
+/** Brand symbol identifying a {@link WorkflowWorkspaceAttachment}. */
 export const WORKFLOW_WORKSPACE_ATTACHMENT = Symbol(
   "WorkflowWorkspaceAttachment",
 );
 
 /** Host-only attachment reconstructed from a durable JSON descriptor. */
 export interface WorkflowWorkspaceAttachment<HostWorkspace = unknown> {
+  /** Brand marker. */
   readonly [WORKFLOW_WORKSPACE_ATTACHMENT]: true;
+  /** Durable descriptor the attachment was rebuilt from. */
   readonly descriptor: WorkspaceDescriptor;
+  /** Host-specific workspace handle. */
   readonly host: HostWorkspace;
+  /** Detaches without deleting; resolves `true` once and `false` afterwards. */
   detach(): Promise<boolean>;
 }
 
 /** Host port used after restart to attach to or recover a durable workspace. */
 export interface WorkflowWorkspaceRecoveryPort<HostWorkspace = unknown> {
+  /** Attaches to an existing workspace, or resolves `undefined` when it is gone. */
   attach(
     descriptor: WorkspaceDescriptor,
     options?: WorkflowChangeOperationOptions,
   ): Promise<WorkflowWorkspaceAttachment<HostWorkspace> | undefined>;
+  /** Attaches after repairing an interrupted workspace; rejects if it cannot. */
   recover(
     descriptor: WorkspaceDescriptor,
     options?: WorkflowChangeOperationOptions,
@@ -285,10 +365,7 @@ function assertSameIntent(
 }
 
 function requiredIdentity(value: unknown, field: string): string {
-  if (
-    typeof value !== "string" ||
-    !/^[A-Za-z0-9][A-Za-z0-9._:+/-]{0,255}$/u.test(value)
-  ) {
+  if (!isWorkflowIdentifier(value, "opaque")) {
     throw new TypeError(`${field} must be a safe identity`);
   }
   return value;

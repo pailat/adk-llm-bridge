@@ -1,7 +1,12 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
-export * from "./git-worktree-change-driver.js";
+export type {
+  FileSystemWorkflowRepositoryMutationLockOptions,
+  NodeGitRepositoryHost,
+  NodeGitWorktreeChangeDriverOptions,
+  NodeGitWorktreeErrorCode,
+  NodeGitWorktreeHost,
+} from "./git-worktree-change-driver.js";
+export {
+  FileSystemWorkflowRepositoryMutationLock,
+  NodeGitWorktreeChangeDriver,
+  NodeGitWorktreeError,
+} from "./git-worktree-change-driver.js";

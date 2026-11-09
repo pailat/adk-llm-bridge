@@ -1,15 +1,10 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { AsyncLocalStorage } from "node:async_hooks";
 import {
   BaseAgent,
   createEvent,
   InvocationContext,
+  PluginManager,
   REQUEST_INPUT_FUNCTION_CALL_NAME,
 } from "@google/adk";
 import { type Context, context, type Span, trace } from "@opentelemetry/api";
@@ -139,6 +134,7 @@ class TracedAgent extends BaseAgent {
 
 function run(agent: BaseAgent) {
   const context = new InvocationContext({
+    pluginManager: new PluginManager(),
     invocationId: "inv",
     agent,
     userContent: { role: "user", parts: [{ text: "go" }] },

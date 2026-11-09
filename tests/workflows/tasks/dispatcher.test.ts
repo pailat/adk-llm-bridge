@@ -1,14 +1,9 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import { describe, expect, test } from "bun:test";
-import type {
-  WorkflowTaskDriver,
-  WorkflowTaskDriverResult,
-  WorkflowTaskRecord,
+import {
+  WorkflowTaskControlError,
+  type WorkflowTaskDriver,
+  type WorkflowTaskDriverResult,
+  type WorkflowTaskRecord,
 } from "../../../src/workflows/tasks/contracts.js";
 import {
   WorkflowTaskController,
@@ -51,6 +46,52 @@ describe("WorkflowTaskDispatcher", () => {
     await flushUntil(() => expect(gates.size).toBe(2));
     for (const gate of gates.values()) gate.resolve({});
     await controller.waitForIdle();
+  });
+
+  test("reports a hostile store error as a sweep failure instead of throwing", async () => {
+    const now = 10;
+    const trap = () => {
+      throw new Error("trap");
+    };
+    const hostile = [
+      new Proxy(
+        {},
+        { get: trap, has: trap, getPrototypeOf: trap, ownKeys: trap },
+      ),
+      Object.defineProperties(new Error("visible message"), {
+        code: { get: trap },
+      }),
+    ];
+    class HostileStore extends InMemoryWorkflowTaskStore {
+      override async claim(): Promise<WorkflowTaskRecord> {
+        throw hostile.shift();
+      }
+    }
+    const store = new HostileStore({ now: () => now });
+    await store.create(record("task-1", now));
+    await store.create(record("task-2", now));
+    const controller = controllerFor(store, () => now, "worker-1", {
+      execute: async () => ({}),
+    });
+    const dispatcher = new WorkflowTaskDispatcher({
+      controller,
+      now: () => now,
+    });
+
+    const result = await dispatcher.sweep({ executionId: "execution-1" });
+    expect(result.outcomes).toEqual([]);
+    expect(result.failures).toEqual([
+      {
+        ...handle("task-1"),
+        code: "WORKFLOW_TASK_DISPATCH_FAILED",
+        message: "Workflow task dispatch failed",
+      },
+      {
+        ...handle("task-2"),
+        code: "WORKFLOW_TASK_DISPATCH_FAILED",
+        message: "visible message",
+      },
+    ]);
   });
 
   test("recovers expired running work and finalizes expired cancellation", async () => {
@@ -245,9 +286,10 @@ describe("WorkflowTaskDispatcher", () => {
       now: () => now,
     });
 
-    await expect(
+    await expectInvalidRequest(
       dispatcher.sweep({ executionId: "execution-1", cursor: "malformed" }),
-    ).rejects.toBeInstanceOf(TypeError);
+      "Workflow task sweep cursor is invalid",
+    );
 
     const first = await dispatcher.sweep({
       executionId: "execution-1",
@@ -273,8 +315,108 @@ describe("WorkflowTaskDispatcher", () => {
         cursor: first.nextCursor,
       }),
     ).rejects.toThrow("belongs to another execution");
+    await expectInvalidRequest(
+      dispatcher.sweep({
+        executionId: "execution-2",
+        cursor: first.nextCursor,
+      }),
+      "Workflow task sweep cursor belongs to another execution",
+    );
+  });
+
+  test("rejects bad sweep requests with the task request code", async () => {
+    const store = new InMemoryWorkflowTaskStore({ now: () => 1 });
+    const dispatcher = new WorkflowTaskDispatcher({
+      controller: controllerFor(store, () => 1, "worker-1", {
+        async execute() {
+          return {};
+        },
+      }),
+      now: () => 1,
+      maxSweepTasks: 5,
+    });
+    const sweep = (request: unknown) =>
+      dispatcher.sweep(request as Parameters<typeof dispatcher.sweep>[0]);
+
+    await expectInvalidRequest(
+      sweep(null),
+      "Workflow task sweep request is invalid",
+    );
+    await expectInvalidRequest(
+      sweep({ executionId: "execution-1", extra: true }),
+      "Workflow task sweep request is invalid",
+    );
+    await expectInvalidRequest(
+      sweep({ executionId: "execution-1", cursor: 7 }),
+      "Workflow task sweep cursor is invalid",
+    );
+    await expectInvalidRequest(
+      sweep({ executionId: "execution-1", limit: 6 }),
+      "Workflow task dispatcher limit must be between 1 and 5",
+    );
+    await expectInvalidRequest(
+      sweep({ executionId: "execution-1", limit: 1.5 }),
+      "Workflow task dispatcher limit must be between 1 and 5",
+    );
+    await expectInvalidRequest(
+      sweep({ executionId: "bad id" }),
+      "Workflow task executionId is invalid",
+    );
+  });
+
+  test("a sweep without a limit uses the smaller of the default and maxSweepTasks", async () => {
+    const now = 10;
+    const store = new InMemoryWorkflowTaskStore({ now: () => now });
+    for (let index = 0; index < 7; index++) {
+      await store.create(record(`task-${index}`, now));
+    }
+    const dispatcher = new WorkflowTaskDispatcher({
+      controller: controllerFor(store, () => now, "worker-1", {
+        execute: async () => await new Promise<never>(() => {}),
+      }),
+      now: () => now,
+      maxSweepTasks: 5,
+    });
+
+    const result = await dispatcher.sweep({ executionId: "execution-1" });
+    expect(result.inspected).toBe(5);
+    expect(result.failures).toEqual([]);
+  });
+
+  test("keeps TypeError for an invalid dispatcher config", () => {
+    const store = new InMemoryWorkflowTaskStore({ now: () => 1 });
+    const controller = controllerFor(store, () => 1, "worker-1", {
+      async execute() {
+        return {};
+      },
+    });
+
+    expect(
+      () => new WorkflowTaskDispatcher({ controller, maxSweepTasks: 0 }),
+    ).toThrow(TypeError);
+    expect(
+      () =>
+        new WorkflowTaskDispatcher({
+          controller: {} as WorkflowTaskController,
+        }),
+    ).toThrow(TypeError);
   });
 });
+
+async function expectInvalidRequest(
+  promise: Promise<unknown>,
+  message: string,
+): Promise<void> {
+  const error = await promise.then(
+    () => undefined,
+    (caught: unknown) => caught,
+  );
+  expect(error).toBeInstanceOf(WorkflowTaskControlError);
+  expect(error).toMatchObject({
+    code: "WORKFLOW_TASK_INVALID_REQUEST",
+    message,
+  });
+}
 
 function controllerFor(
   store: InMemoryWorkflowTaskStore,

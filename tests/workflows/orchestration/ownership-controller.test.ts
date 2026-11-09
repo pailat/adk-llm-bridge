@@ -1,9 +1,3 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import { describe, expect, test } from "bun:test";
 import { WorkflowActorContext } from "../../../src/workflows/orchestration/authorization.js";
 import {
@@ -63,13 +57,24 @@ describe("WorkflowOwnershipController", () => {
         agentId: "builder",
         executionId: "execution-1",
       } as never),
-    ).rejects.toMatchObject({ details: { reason: "unauthorized" } });
+    ).rejects.toMatchObject({
+      code: "WORKFLOW_ORCHESTRATION_UNAUTHORIZED",
+      details: { reason: "unauthorized" },
+    });
     await expect(
       controller.claim(request, actor("builder", "task-b")),
-    ).rejects.toMatchObject({ details: { reason: "unauthorized" } });
+    ).rejects.toMatchObject({
+      code: "WORKFLOW_ORCHESTRATION_UNAUTHORIZED",
+      details: { reason: "unauthorized" },
+    });
+    // Bound to revision 2 while revision 1 is active: a different scope, not
+    // a stale one.
     await expect(
       controller.claim(request, actor("builder", "task-a", 2)),
-    ).rejects.toMatchObject({ details: { reason: "unauthorized" } });
+    ).rejects.toMatchObject({
+      code: "WORKFLOW_ORCHESTRATION_UNAUTHORIZED",
+      message: "Workflow actor is bound to a different plan revision",
+    });
     await expect(
       controller.list(
         { executionId: "execution-1", planRevision: 2 },
@@ -149,7 +154,10 @@ describe("WorkflowOwnershipController", () => {
         scope({ proposalId: rejected.proposalId }),
         actor("builder", "task-a"),
       ),
-    ).rejects.toMatchObject({ details: { reason: "unauthorized" } });
+    ).rejects.toMatchObject({
+      code: "WORKFLOW_ORCHESTRATION_UNAUTHORIZED",
+      details: { reason: "unauthorized" },
+    });
     expect(
       await controller.reject(
         scope({ proposalId: rejected.proposalId, reason: "Not in this wave" }),
@@ -207,6 +215,65 @@ describe("WorkflowOwnershipController", () => {
     expect((await state.get("execution-1"))?.grants).toEqual([]);
   });
 
+  test("reports an unknown grant as not found", async () => {
+    const { controller } = await harness();
+
+    await expect(
+      controller.validateAuthority(
+        scope({
+          grantId: "grant-missing",
+          taskId: "task-a",
+          agentId: "builder",
+          fencingToken: 1,
+        }),
+        actor("coordinator", "integration"),
+      ),
+    ).rejects.toMatchObject({
+      code: "WORKFLOW_OWNERSHIP_NOT_FOUND",
+      details: { grantId: "grant-missing" },
+    });
+  });
+
+  test("rejects an authority snapshot that does not return exactly one grant", async () => {
+    const { plans, state, nextId, now } = await harness();
+    const controller = ownershipController(plans, state, nextId, now);
+    controller.validateAuthoritySnapshot = async () =>
+      Object.freeze({ grants: Object.freeze([]) }) as never;
+
+    await expect(
+      controller.validateAuthority(
+        scope({
+          grantId: "grant-1",
+          taskId: "task-a",
+          agentId: "builder",
+          fencingToken: 1,
+        }),
+        actor("coordinator", "integration"),
+      ),
+    ).rejects.toMatchObject({ code: "WORKFLOW_ORCHESTRATION_INVALID_REQUEST" });
+  });
+
+  test("reports missing orchestration state as not found", async () => {
+    const plans = new InMemoryWorkflowPlanStore();
+    await plans.put(plan());
+    let id = 0;
+    const controller = ownershipController(
+      plans,
+      new InMemoryWorkflowOrchestrationStateStore(),
+      (kind) => `${kind}-${++id}`,
+      () => 1,
+    );
+
+    await expect(
+      controller.claim(
+        scope({ claims: [{ path: "src/a/file.ts", scope: "exact" }] }),
+        actor("builder", "task-a"),
+      ),
+    ).rejects.toMatchObject({
+      code: "WORKFLOW_ORCHESTRATION_STATE_NOT_FOUND",
+    });
+  });
+
   test("proposal transfer and release are limited to the current owner", async () => {
     const { controller, state } = await harness();
     const original = await controller.claim(
@@ -222,7 +289,10 @@ describe("WorkflowOwnershipController", () => {
         }),
         actor("reviewer", "task-b"),
       ),
-    ).rejects.toMatchObject({ details: { reason: "unauthorized" } });
+    ).rejects.toMatchObject({
+      code: "WORKFLOW_ORCHESTRATION_UNAUTHORIZED",
+      details: { reason: "unauthorized" },
+    });
 
     const transfer = await controller.propose(
       scope({
@@ -310,7 +380,7 @@ function actor(
   });
 }
 
-function scope<T extends Record<string, unknown>>(value: T) {
+function scope<const T extends Record<string, unknown>>(value: T) {
   return { executionId: "execution-1", planRevision: 1, ...value };
 }
 

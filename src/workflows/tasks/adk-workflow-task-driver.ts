@@ -1,9 +1,3 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import { type BaseAgent, InvocationContext } from "@google/adk";
 import type { Content } from "@google/genai";
 import {
@@ -23,12 +17,23 @@ import type {
 } from "./contracts.js";
 import { immutableTaskJson } from "./json.js";
 
+/**
+ * Error codes thrown by {@link AdkWorkflowTaskDriver}.
+ *
+ * @remarks
+ * `ADK_WORKFLOW_TASK_INVALID_CONFIG` is a bad driver config,
+ * `ADK_WORKFLOW_TASK_UNBOUND` is a task without the orchestration binding the
+ * driver requires, and `ADK_WORKFLOW_TASK_INVOCATION_FAILED` wraps a failed
+ * agent invocation.
+ */
 export type AdkWorkflowTaskDriverErrorCode =
   | "ADK_WORKFLOW_TASK_INVALID_CONFIG"
   | "ADK_WORKFLOW_TASK_UNBOUND"
   | "ADK_WORKFLOW_TASK_INVOCATION_FAILED";
 
+/** Error thrown by {@link AdkWorkflowTaskDriver}; branch on `code`. */
 export class AdkWorkflowTaskDriverError extends Error {
+  /** Machine-readable error code. */
   readonly code: AdkWorkflowTaskDriverErrorCode;
 
   constructor(code: AdkWorkflowTaskDriverErrorCode, message: string) {
@@ -40,11 +45,17 @@ export class AdkWorkflowTaskDriverError extends Error {
 
 /** A host-only parent ADK context. It must never be persisted in a task. */
 export interface AdkWorkflowInvocationContextLease {
+  /** Parent ADK context for the attempt. */
   context: InvocationContext;
+  /** Called once after the attempt to free the context. */
   release?(): void | Promise<void>;
 }
 
+/** Supplies the host-only parent ADK context for one task attempt. */
 export interface AdkWorkflowInvocationContextProvider {
+  /**
+   * Returns the parent context for the attempt; the driver calls `release` afterwards.
+   */
   acquire(
     task: WorkflowTaskRecord,
     signal: AbortSignal,
@@ -68,21 +79,40 @@ export type AdkWorkflowTaskCapabilities = Pick<
   | "cancel"
 >;
 
+/**
+ * Handle returned by a binder so the driver can release the binding after the attempt.
+ */
 export interface AdkWorkflowTaskCapabilityBindingLease {
+  /** Called once after the attempt to remove the binding. */
   release?(): void | Promise<void>;
 }
 
+/**
+ * Input to {@link AdkWorkflowTaskCapabilityBinder.bind} for one task attempt.
+ */
 export interface AdkWorkflowTaskCapabilityBinderRequest {
+  /** Child ADK invocation context for the attempt. */
   context: InvocationContext;
+  /** Agent that will run the task. */
   agent: BaseAgent;
+  /** Task record of the attempt. */
   task: WorkflowTaskRecord;
+  /** Durable task capabilities to expose to the agent. */
   capabilities: AdkWorkflowTaskCapabilities;
+  /** Aborts when the attempt is cancelled or loses its claim. */
   signal: AbortSignal;
   /** Undefined only when allowUnboundLegacyTask was explicitly enabled. */
   binding: WorkflowTaskOrchestrationBinding | undefined;
 }
 
+/**
+ * Exposes durable task capabilities to an arbitrary ADK agent, for example
+ * through an MCP or tool adapter.
+ */
 export interface AdkWorkflowTaskCapabilityBinder {
+  /**
+   * Makes the capabilities reachable by the agent for the duration of the attempt.
+   */
   bind(
     request: AdkWorkflowTaskCapabilityBinderRequest,
   ):
@@ -91,6 +121,12 @@ export interface AdkWorkflowTaskCapabilityBinder {
     | Promise<undefined | AdkWorkflowTaskCapabilityBindingLease>;
 }
 
+/**
+ * Converts an agent invocation result into the JSON output stored on the task.
+ *
+ * @remarks
+ * Returning `undefined` stores no output.
+ */
 export type AdkWorkflowTaskOutputProjector = (
   result: AgentInvocationResult,
   task: WorkflowTaskRecord,
@@ -215,6 +251,7 @@ export class AdkWorkflowTaskDriver implements WorkflowTaskDriver {
     this.#outputProjector = config.outputProjector ?? defaultOutputProjector;
   }
 
+  /** Runs the task through its ADK agent and returns the projected output. */
   async execute(
     request: WorkflowTaskDriverRequest,
   ): Promise<WorkflowTaskDriverResult> {

@@ -1,9 +1,3 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import { describe, expect, test } from "bun:test";
 import type { InvocationContext } from "@google/adk";
 import type { WorkflowCheckpointV1 } from "../../../src/workflows/checkpoint/schema.js";
@@ -23,6 +17,7 @@ import type {
 } from "../../../src/workflows/contracts.js";
 import { defineWorkflow } from "../../../src/workflows/definition.js";
 import { WorkflowCheckpointCoordinator } from "../../../src/workflows/runtime/workflow-checkpoint-coordinator.js";
+import { fromPartial } from "../../helpers/partial.js";
 
 const definition = defineWorkflow({
   id: "checkpoint-commit-atomicity",
@@ -217,7 +212,9 @@ describe("workflow checkpoint coordinator commit atomicity", () => {
     const result: WorkflowStepResult = {
       ...completedStep(1),
       replayed: false,
-      events: [{ id: "runtime-only" }] as WorkflowStepResult["events"],
+      events: fromPartial<WorkflowStepResult["events"]>([
+        { id: "runtime-only" },
+      ]),
     };
 
     await subject.completeStep(result);
@@ -336,7 +333,7 @@ function requiredSave(store: ControlledCheckpointStore, index: number) {
 }
 
 function invocationContext(): InvocationContext {
-  return {
+  return fromPartial<InvocationContext>({
     invocationId: "execution-1",
     session: {
       id: "session-1",
@@ -346,5 +343,5 @@ function invocationContext(): InvocationContext {
       events: [],
       lastUpdateTime: 1,
     },
-  } as InvocationContext;
+  });
 }

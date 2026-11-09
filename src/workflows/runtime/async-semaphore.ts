@@ -1,10 +1,4 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
-/** FIFO semaphore whose queued acquisitions can be cancelled. */
+/** A queued acquisition waiting for a permit, cancellable through its abort signal. */
 interface SemaphoreWaiter {
   resolve: (release: () => void) => void;
   reject: (reason: unknown) => void;
@@ -12,6 +6,15 @@ interface SemaphoreWaiter {
   abort?: () => void;
 }
 
+/**
+ * Counting semaphore that bounds concurrent async operations.
+ *
+ * @remarks
+ * Waiters are served in FIFO order and a queued acquisition is removed when its
+ * abort signal fires.
+ *
+ * @internal
+ */
 export class AsyncSemaphore {
   readonly #waiters: SemaphoreWaiter[] = [];
   #available: number;
@@ -20,6 +23,13 @@ export class AsyncSemaphore {
     this.#available = capacity;
   }
 
+  /**
+   * Runs `operation` while holding one permit, released when it settles.
+   *
+   * @param signal - Aborts a queued acquisition, rejecting with the signal's reason.
+   * @param operation - Work to run once a permit is available.
+   * @returns The result of `operation`.
+   */
   async use<T>(signal: AbortSignal, operation: () => Promise<T>): Promise<T> {
     const release = await this.acquire(signal);
     try {

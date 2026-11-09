@@ -1,9 +1,3 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import { describe, expect, test } from "bun:test";
 import {
   hashWorkflowSource,
@@ -136,6 +130,12 @@ describe("canonical hash", () => {
     const cyclic: Record<string, unknown> = {};
     cyclic.self = cyclic;
     expect(() => canonicalJson({ n: 1n })).toThrow(TypeError);
+    // A boxed BigInt throws too, as JSON.stringify does (not `{}`).
+    const boxed = Object(1n);
+    expect(() => JSON.stringify({ n: boxed })).toThrow(TypeError);
+    expect(() => canonicalJson({ n: boxed })).toThrow(TypeError);
+    expect(() => canonicalJson([boxed])).toThrow(TypeError);
+    expect(() => canonicalJson(boxed)).toThrow(TypeError);
     expect(() => canonicalJson(cyclic)).toThrow(TypeError);
     // A repeated (non-cyclic) reference is fine.
     const shared = { a: 1 };

@@ -1,9 +1,3 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import { describe, expect, test } from "bun:test";
 import { WorkflowActorContext } from "../../../src/workflows/orchestration/authorization.js";
 import {
@@ -68,19 +62,47 @@ describe("WorkflowOrchestrationTaskAuthorityPort", () => {
         ),
         request,
       }),
-    ).rejects.toMatchObject({ details: { reason: "unauthorized" } });
+    ).rejects.toMatchObject({
+      code: "WORKFLOW_ORCHESTRATION_UNAUTHORIZED",
+      details: { reason: "unauthorized" },
+    });
+    // Bound to a revision that is not active yet: a scope denial, not stale.
     await expect(
       authority.resolveRoot({
         capability: actor("architect", "root", 2),
         request,
       }),
-    ).rejects.toMatchObject({ details: { reason: "unauthorized" } });
+    ).rejects.toMatchObject({
+      code: "WORKFLOW_ORCHESTRATION_UNAUTHORIZED",
+      details: { reason: "unauthorized" },
+    });
+    // Bound to no plan revision at all, through the control path.
+    await expect(
+      authority.authorizeControl({
+        actor: new WorkflowActorContext({
+          actorId: "principal-architect",
+          agentId: "architect",
+          executionId: "execution-1",
+          taskId: "root",
+        }),
+        operation: "task.list",
+        access: "manager",
+        executionId: "execution-1",
+        taskIds: [],
+      }),
+    ).rejects.toMatchObject({
+      code: "WORKFLOW_ORCHESTRATION_UNAUTHORIZED",
+      message: "Workflow control actor is not bound to a plan revision",
+    });
     await expect(
       authority.resolveRoot({
         capability: actor("worker", "child"),
         request,
       }),
-    ).rejects.toMatchObject({ details: { reason: "unauthorized" } });
+    ).rejects.toMatchObject({
+      code: "WORKFLOW_ORCHESTRATION_UNAUTHORIZED",
+      details: { reason: "unauthorized" },
+    });
   });
 
   test("derives a dependent child's own grants without inheritance", async () => {
@@ -124,7 +146,10 @@ describe("WorkflowOrchestrationTaskAuthorityPort", () => {
           },
         }),
       ),
-    ).rejects.toMatchObject({ details: { reason: "unauthorized" } });
+    ).rejects.toMatchObject({
+      code: "WORKFLOW_ORCHESTRATION_UNAUTHORIZED",
+      details: { reason: "unauthorized" },
+    });
 
     const wrongRole = await harness({
       mutatePlan(value) {
@@ -136,7 +161,10 @@ describe("WorkflowOrchestrationTaskAuthorityPort", () => {
     });
     await expect(
       derive(wrongRole.authority, parentRecord()),
-    ).rejects.toMatchObject({ details: { reason: "unauthorized" } });
+    ).rejects.toMatchObject({
+      code: "WORKFLOW_ORCHESTRATION_UNAUTHORIZED",
+      details: { reason: "unauthorized" },
+    });
 
     const noDependency = await harness({
       mutatePlan(value) {
@@ -150,7 +178,10 @@ describe("WorkflowOrchestrationTaskAuthorityPort", () => {
     });
     await expect(
       derive(noDependency.authority, parentRecord()),
-    ).rejects.toMatchObject({ details: { reason: "unauthorized" } });
+    ).rejects.toMatchObject({
+      code: "WORKFLOW_ORCHESTRATION_UNAUTHORIZED",
+      details: { reason: "unauthorized" },
+    });
 
     const expired = parentRecord({
       claim: { ...parentRecord().claim, expiresAt: 10 },
@@ -205,7 +236,10 @@ describe("WorkflowOrchestrationTaskAuthorityPort", () => {
         actor: actor("architect", "root"),
         sender,
       }),
-    ).rejects.toMatchObject({ details: { reason: "unauthorized" } });
+    ).rejects.toMatchObject({
+      code: "WORKFLOW_ORCHESTRATION_UNAUTHORIZED",
+      details: { reason: "unauthorized" },
+    });
     await expect(
       authority.validateAuthenticatedSender({
         actor: {
@@ -215,7 +249,10 @@ describe("WorkflowOrchestrationTaskAuthorityPort", () => {
         } as never,
         sender,
       }),
-    ).rejects.toMatchObject({ details: { reason: "unauthorized" } });
+    ).rejects.toMatchObject({
+      code: "WORKFLOW_ORCHESTRATION_UNAUTHORIZED",
+      details: { reason: "unauthorized" },
+    });
   });
 
   test("authorizes exact self task operations and manager-only operations", async () => {
@@ -238,7 +275,10 @@ describe("WorkflowOrchestrationTaskAuthorityPort", () => {
         executionId: "execution-1",
         taskIds: ["root"],
       }),
-    ).rejects.toMatchObject({ details: { reason: "unauthorized" } });
+    ).rejects.toMatchObject({
+      code: "WORKFLOW_ORCHESTRATION_UNAUTHORIZED",
+      details: { reason: "unauthorized" },
+    });
     await expect(
       authority.authorizeControl({
         actor: actor("architect", "root"),
@@ -256,7 +296,10 @@ describe("WorkflowOrchestrationTaskAuthorityPort", () => {
         executionId: "execution-1",
         taskIds: [],
       }),
-    ).rejects.toMatchObject({ details: { reason: "unauthorized" } });
+    ).rejects.toMatchObject({
+      code: "WORKFLOW_ORCHESTRATION_UNAUTHORIZED",
+      details: { reason: "unauthorized" },
+    });
   });
 
   test("rejects a task binding after the active plan changes", async () => {
@@ -286,7 +329,7 @@ describe("WorkflowOrchestrationTaskAuthorityPort", () => {
     const record = childRecord();
     await expect(
       authority.validateAttempt({ task: record, claim: claimGuard(record) }),
-    ).rejects.toMatchObject({ code: "WORKFLOW_OWNERSHIP_STALE" });
+    ).rejects.toMatchObject({ code: "WORKFLOW_PLAN_STALE" });
   });
 });
 

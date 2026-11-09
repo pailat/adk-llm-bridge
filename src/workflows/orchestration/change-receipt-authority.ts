@@ -1,9 +1,5 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
+import { throwIfAborted } from "../internal/abort.js";
+import { isWorkflowIdentifier } from "../internal/identifiers.js";
 import {
   assertChangeSetMatchesReceipt,
   normalizeAuthoritativeChangeReceipt,
@@ -36,12 +32,21 @@ import type {
   WorkflowOrchestrationStateStore,
 } from "./stores.js";
 
+const ABORTED = "Operation aborted";
+
+/** Dependencies and options for {@link WorkflowLiveChangeReceiptAuthority}. */
 export interface WorkflowLiveChangeReceiptAuthorityConfig {
+  /** Orchestration state store that holds the reservations. */
   state: WorkflowOrchestrationStateStore;
+  /** Store the issued receipts are read from. */
   receipts: WorkflowChangeReceiptStore;
+  /** Host mutation journal that records each operation and its outcome. */
   journal: WorkflowHostMutationJournal;
+  /** Clock returning epoch milliseconds. Defaults to `Date.now`. */
   now?: () => number;
+  /** Lifetime of a reservation in milliseconds. Must be a positive integer. Defaults to 60000. */
   reservationTtlMs?: number;
+  /** Maximum compare-and-set attempts per operation before it fails as contended. Must be a positive integer. Defaults to 16. */
   maxCasRetries?: number;
 }
 
@@ -53,6 +58,14 @@ interface LeaseBinding {
   intentDigest: string;
 }
 
+/**
+ * Change receipt authority that reserves each host mutation in the live
+ * orchestration state.
+ *
+ * @remarks
+ * A reservation is the right to consume a receipt once at a fenced state
+ * revision, and it expires after `reservationTtlMs` (default 60,000).
+ */
 export class WorkflowLiveChangeReceiptAuthority
   implements WorkflowChangeReceiptAuthority
 {
@@ -83,11 +96,12 @@ export class WorkflowLiveChangeReceiptAuthority
     );
   }
 
+  /** Reserves the right to commit an issued receipt and returns the lease. The `operationId` is idempotent. */
   async acquireCommit(
     request: WorkflowCommitAuthorityRequest,
     options: WorkflowChangeOperationOptions = {},
   ): Promise<WorkflowChangeAuthorityLease> {
-    throwIfAborted(options.signal);
+    throwIfAborted(options.signal, ABORTED);
     const receipt = await this.#issuedReceipt(request.receipt);
     const changeSet = await verifyWorkflowChangeSet(request.changeSet);
     assertChangeSetMatchesReceipt(changeSet, receipt);
@@ -108,6 +122,7 @@ export class WorkflowLiveChangeReceiptAuthority
     );
   }
 
+  /** Records the commit result against the lease's reservation; throws when the result does not match it. */
   async completeCommit(
     lease: WorkflowChangeAuthorityLease,
     result: WorkflowAuthoritativeCommitResult,
@@ -136,11 +151,12 @@ export class WorkflowLiveChangeReceiptAuthority
     );
   }
 
+  /** Reserves the right to integrate a commit linked to an issued receipt and returns the lease. */
   async acquireIntegration(
     request: WorkflowIntegrationAuthorityRequest,
     options: WorkflowChangeOperationOptions = {},
   ): Promise<WorkflowChangeAuthorityLease> {
-    throwIfAborted(options.signal);
+    throwIfAborted(options.signal, ABORTED);
     const receipt = await this.#issuedReceipt(request.receipt);
     const operationId = identity(request.operationId, "operationId");
     const intentDigest = digest(request.intentDigest, "intentDigest");
@@ -174,6 +190,7 @@ export class WorkflowLiveChangeReceiptAuthority
     );
   }
 
+  /** Records the integration result against the lease's reservation; throws when the result does not match it. */
   async completeIntegration(
     lease: WorkflowChangeAuthorityLease,
     result: WorkflowIntegrationResult,
@@ -200,11 +217,12 @@ export class WorkflowLiveChangeReceiptAuthority
     );
   }
 
+  /** Releases a reservation that is still reserved and marks its operation ambiguous. It is a no-op for a completed or already ended reservation. */
   async release(
     lease: WorkflowChangeAuthorityLease,
     options: WorkflowChangeOperationOptions = {},
   ): Promise<void> {
-    throwIfAborted(options.signal);
+    throwIfAborted(options.signal, ABORTED);
     const binding = await this.#binding(lease);
     for (let retry = 0; retry < this.#maxCasRetries; retry++) {
       const state = await this.#requiredState(binding.executionId);
@@ -250,7 +268,7 @@ export class WorkflowLiveChangeReceiptAuthority
     lease: WorkflowChangeAuthorityLease,
     options: WorkflowChangeOperationOptions = {},
   ): Promise<void> {
-    throwIfAborted(options.signal);
+    throwIfAborted(options.signal, ABORTED);
     const binding = await this.#binding(lease, "commit");
     for (let retry = 0; retry < this.#maxCasRetries; retry++) {
       const state = await this.#requiredState(binding.executionId);
@@ -276,11 +294,12 @@ export class WorkflowLiveChangeReceiptAuthority
     contended(binding.executionId);
   }
 
+  /** Reports the outcome of a journaled mutation operation for the matching intent digest. An unknown operation is `absent`; a reservation lost or ended before completion makes it `ambiguous`. */
   async reconcile(
     request: WorkflowMutationReconcileRequest,
     options: WorkflowChangeOperationOptions = {},
   ): Promise<WorkflowMutationReconcileResult> {
-    throwIfAborted(options.signal);
+    throwIfAborted(options.signal, ABORTED);
     const operationId = identity(request.operationId, "operationId");
     const intentDigest = digest(request.intentDigest, "intentDigest");
     if (request.kind !== "commit" && request.kind !== "integration") {
@@ -352,7 +371,7 @@ export class WorkflowLiveChangeReceiptAuthority
   ): Promise<WorkflowChangeAuthorityLease> {
     const reservationKey = reservationId(input.phase, input.intentDigest);
     for (let retry = 0; retry < this.#maxCasRetries; retry++) {
-      throwIfAborted(options.signal);
+      throwIfAborted(options.signal, ABORTED);
       const state = await this.#liveReceiptState(input.receipt);
       const now = this.#timestamp(state.updatedAt);
       const begun = await this.#journal.begin({
@@ -445,7 +464,7 @@ export class WorkflowLiveChangeReceiptAuthority
     result: object,
     options: WorkflowChangeOperationOptions,
   ): Promise<void> {
-    throwIfAborted(options.signal);
+    throwIfAborted(options.signal, ABORTED);
     for (let retry = 0; retry < this.#maxCasRetries; retry++) {
       const state = await this.#requiredState(binding.executionId);
       const reservation = findReservation(state, binding.reservationId);
@@ -817,20 +836,14 @@ function reservationId(
 }
 
 function identity(value: unknown, field: string): string {
-  if (
-    typeof value !== "string" ||
-    !/^[A-Za-z0-9][A-Za-z0-9._:+/-]{0,255}$/u.test(value)
-  ) {
+  if (!isWorkflowIdentifier(value, "opaque")) {
     invalid(`${field} must be a safe identity`);
   }
   return value;
 }
 
 function revision(value: unknown, field: string): string {
-  if (
-    typeof value !== "string" ||
-    !/^[A-Za-z0-9][A-Za-z0-9._:+/-]{0,511}$/u.test(value)
-  ) {
+  if (!isWorkflowIdentifier(value, "revision")) {
     invalid(`${field} must be an immutable revision`);
   }
   return value;
@@ -848,10 +861,6 @@ function positiveInteger(value: number, field: string): number {
     invalid(`${field} must be a positive safe integer`);
   }
   return value;
-}
-
-function throwIfAborted(signal?: AbortSignal): void {
-  if (signal?.aborted) throw signal.reason ?? new Error("Operation aborted");
 }
 
 function isCasConflict(error: unknown): boolean {

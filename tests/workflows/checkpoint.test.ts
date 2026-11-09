@@ -1,9 +1,3 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import { describe, expect, test } from "bun:test";
 import {
   checkpointExpectation,
@@ -14,6 +8,7 @@ import {
   withWorkflowStepCompleted,
   withWorkflowStepFailed,
   withWorkflowStepRunning,
+  withWorkflowStepWaiting,
 } from "../../src/workflows/checkpoint/checkpoint.js";
 import {
   hashWorkflowInput,
@@ -26,12 +21,14 @@ import {
   type WorkflowCheckpointV1,
 } from "../../src/workflows/checkpoint/schema.js";
 import type {
+  WorkflowErrorCode,
   WorkflowStep,
   WorkflowStepFailure,
   WorkflowStepResult,
 } from "../../src/workflows/contracts.js";
 import { WorkflowError } from "../../src/workflows/contracts.js";
 import { defineScriptWorkflow } from "../../src/workflows/definition.js";
+import { fromPartial } from "../helpers/partial.js";
 
 const definition = defineScriptWorkflow({
   id: "implementation",
@@ -245,7 +242,9 @@ describe("workflow checkpoints", () => {
     checkpoint = withWorkflowStepRunning(checkpoint, step, inputHash, 1, 10);
     const result: WorkflowStepResult = {
       ...completedResult(),
-      events: [{ id: "runtime-only" }] as WorkflowStepResult["events"],
+      events: fromPartial<WorkflowStepResult["events"]>([
+        { id: "runtime-only" },
+      ]),
       replayed: true,
     };
 
@@ -260,9 +259,9 @@ describe("workflow checkpoints", () => {
     const legacy = await completedCheckpoint();
     const legacyResult = legacy.steps.plan?.result;
     if (!legacyResult) throw new Error("missing completed result");
-    legacyResult.events = [
+    legacyResult.events = fromPartial<WorkflowStepResult["events"]>([
       { id: "legacy-runtime-event" },
-    ] as WorkflowStepResult["events"];
+    ]);
     legacyResult.replayed = false;
 
     expect(isWorkflowCheckpointV1(legacy)).toBe(true);
@@ -320,6 +319,7 @@ describe("workflow checkpoints", () => {
       },
       {
         ...valid,
+        // @ts-expect-error An undefined part checks that validation rejects it.
         output: { role: "model", parts: withUndefined },
       },
       {
@@ -339,7 +339,8 @@ describe("workflow checkpoints", () => {
           ...valid.steps,
           plan: {
             ...requiredPlan(valid),
-            result: inherited as WorkflowStepResult,
+            // @ts-expect-error An inherited field checks that validation rejects it.
+            result: inherited,
           },
         },
       },
@@ -371,6 +372,173 @@ describe("workflow checkpoints", () => {
     for (const checkpoint of invalid) {
       expect(isWorkflowCheckpointV1(checkpoint)).toBe(false);
     }
+  });
+
+  test("rejects stored interrupt events whose resume fields are malformed", async () => {
+    const inputHash = await hashWorkflowInput(step.input);
+    const running = withWorkflowStepRunning(
+      await createWorkflowCheckpoint({
+        definition,
+        executionId: "inv-interrupt",
+        input: "workflow input",
+        now: 10,
+      }),
+      step,
+      inputHash,
+      1,
+      10,
+    );
+    const waitingWith = (event: Record<string, unknown>) =>
+      withWorkflowStepWaiting(
+        running,
+        step,
+        inputHash,
+        1,
+        {
+          kind: "input",
+          functionCallIds: ["call-1"],
+          requests: [{ functionCallId: "call-1" }],
+          events: [event],
+        },
+        { role: "user", parts: [{ text: "workflow input" }] },
+        20,
+      );
+    const valid = {
+      author: "worker",
+      branch: "root.worker",
+      longRunningToolIds: ["call-1"],
+      content: {
+        role: "model",
+        parts: [{ functionCall: { id: "call-1", name: "adk_request_input" } }],
+      },
+    };
+    expect(isWorkflowCheckpointV1(waitingWith(valid))).toBe(true);
+    expect(isWorkflowCheckpointV1(waitingWith({ author: "worker" }))).toBe(
+      true,
+    );
+
+    const malformed: Record<string, unknown>[] = [
+      { ...valid, content: { parts: 5 } },
+      { ...valid, content: "text" },
+      { ...valid, content: { parts: ["text"] } },
+      { ...valid, content: { parts: [{ functionCall: "call" }] } },
+      { ...valid, content: { role: 1, parts: [] } },
+      { ...valid, author: 1 },
+      { ...valid, branch: ["root"] },
+      { ...valid, longRunningToolIds: "call-1" },
+      { ...valid, longRunningToolIds: [1] },
+    ];
+    for (const event of malformed) {
+      expect(isWorkflowCheckpointV1(waitingWith(event))).toBe(false);
+    }
+  });
+
+  test("rejects stored interrupt events whose actions or state delta are not objects", async () => {
+    const inputHash = await hashWorkflowInput(step.input);
+    const running = withWorkflowStepRunning(
+      await createWorkflowCheckpoint({
+        definition,
+        executionId: "inv-interrupt-actions",
+        input: "workflow input",
+        now: 10,
+      }),
+      step,
+      inputHash,
+      1,
+      10,
+    );
+    const waitingWith = (event: Record<string, unknown>) =>
+      withWorkflowStepWaiting(
+        running,
+        step,
+        inputHash,
+        1,
+        {
+          kind: "input",
+          functionCallIds: ["call-1"],
+          requests: [{ functionCallId: "call-1" }],
+          events: [event],
+        },
+        { role: "user", parts: [{ text: "workflow input" }] },
+        20,
+      );
+    const event = { author: "worker" };
+    expect(
+      isWorkflowCheckpointV1(
+        waitingWith({ ...event, actions: { stateDelta: { count: 1 } } }),
+      ),
+    ).toBe(true);
+    expect(isWorkflowCheckpointV1(waitingWith({ ...event, actions: {} }))).toBe(
+      true,
+    );
+
+    for (const actions of [
+      "actions",
+      ["stateDelta"],
+      { stateDelta: "abc" },
+      { stateDelta: ["a", "b"] },
+      { stateDelta: null },
+    ]) {
+      expect(isWorkflowCheckpointV1(waitingWith({ ...event, actions }))).toBe(
+        false,
+      );
+    }
+  });
+
+  test("accepts a failed step carrying any workflow error code", async () => {
+    const codes: Record<WorkflowErrorCode, true> = {
+      WORKFLOW_ABORTED: true,
+      WORKFLOW_ATTEMPT_MISMATCH: true,
+      WORKFLOW_DEFINITION_INVALID: true,
+      WORKFLOW_DEFINITION_NOT_FOUND: true,
+      WORKFLOW_EXECUTION_ERROR: true,
+      WORKFLOW_INDETERMINATE_STEP: true,
+      WORKFLOW_INPUT_MISMATCH: true,
+      WORKFLOW_LIMIT_EXCEEDED: true,
+      WORKFLOW_SANDBOX_UNAVAILABLE: true,
+      WORKFLOW_SCRIPT_INVALID: true,
+      WORKFLOW_SOURCE_MISMATCH: true,
+      WORKFLOW_STEP_INTERRUPTED: true,
+      WORKFLOW_STEP_MISMATCH: true,
+      WORKFLOW_UNKNOWN_AGENT: true,
+      WORKFLOW_VERSION_MISMATCH: true,
+      WORKFLOW_WORKSPACE_LEASE_LOST: true,
+      WORKFLOW_WORKSPACE_STATE_INCOMPATIBLE: true,
+    };
+    const inputHash = await hashWorkflowInput(step.input);
+    const running = withWorkflowStepRunning(
+      await createWorkflowCheckpoint({
+        definition,
+        executionId: "inv-codes",
+        input: "workflow input",
+        now: 10,
+      }),
+      step,
+      inputHash,
+      1,
+      10,
+    );
+    const failedWith = (code: string) =>
+      withWorkflowStepFailed(
+        running,
+        {
+          status: "failed",
+          id: step.id,
+          agentName: step.agentName,
+          error: { code: code as WorkflowErrorCode, message: "failed" },
+          attempts: 1,
+          startedAt: 10,
+          completedAt: 20,
+        },
+        20,
+      );
+
+    for (const code of Object.keys(codes)) {
+      expect(isWorkflowCheckpointV1(failedWith(code))).toBe(true);
+    }
+    expect(isWorkflowCheckpointV1(failedWith("WORKFLOW_NOT_A_CODE"))).toBe(
+      false,
+    );
   });
 });
 

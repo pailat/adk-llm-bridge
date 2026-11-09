@@ -1,9 +1,3 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import { describe, expect, test } from "bun:test";
 import {
   newQuickJSWASMModuleFromVariant,
@@ -12,15 +6,13 @@ import {
 import { WorkflowError } from "../../../src/workflows/contracts.js";
 import { QuickJSSyncGeneratorRuntime } from "../../../src/workflows/sandbox/quickjs-generator-runtime.js";
 
-const releaseLoader = async (): Promise<QuickJSWASMModule> => {
-  const variant = await import("@jitl/quickjs-wasmfile-release-sync");
-  return newQuickJSWASMModuleFromVariant(variant.default);
-};
+const releaseLoader = (): Promise<QuickJSWASMModule> =>
+  newQuickJSWASMModuleFromVariant(
+    import("@jitl/quickjs-wasmfile-release-sync"),
+  );
 
-const debugLoader = async (): Promise<QuickJSWASMModule> => {
-  const variant = await import("@jitl/quickjs-wasmfile-debug-sync");
-  return newQuickJSWASMModuleFromVariant(variant.default);
-};
+const debugLoader = (): Promise<QuickJSWASMModule> =>
+  newQuickJSWASMModuleFromVariant(import("@jitl/quickjs-wasmfile-debug-sync"));
 
 describe.each([
   ["release", releaseLoader],

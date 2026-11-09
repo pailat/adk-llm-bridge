@@ -1,9 +1,4 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
+import { normalizeHostError } from "../internal/error-support.js";
 import type { WorkflowTaskAuthorityPort } from "./authority.js";
 import {
   type WorkflowTaskAwaitAnyResult,
@@ -36,16 +31,28 @@ import {
   type WorkflowTaskStore,
 } from "./stores.js";
 
+/** Largest number of handles accepted by a single `awaitAny` call. */
 export const MAX_WORKFLOW_TASK_AWAIT_HANDLES = 1_000;
+/**
+ * Default polling interval, in milliseconds, for stores without revision waits.
+ */
 export const DEFAULT_WORKFLOW_TASK_POLL_INTERVAL_MS = 100;
 
+/** Handle to stop a scheduled lease heartbeat. */
 export interface WorkflowTaskHeartbeatHandle {
+  /** Stops the scheduled heartbeat. */
   cancel(): void;
 }
 
+/** Settings that make a controller claim tasks with fenced, renewable leases. */
 export interface WorkflowTaskDurableExecutionConfig {
+  /** Id of this worker, recorded in every claim. */
   workerId: string;
+  /** Lease length in milliseconds; must exceed `heartbeatIntervalMs`. */
   leaseDurationMs: number;
+  /**
+   * Interval in milliseconds between lease renewals; must be less than `leaseDurationMs`.
+   */
   heartbeatIntervalMs: number;
   /** Hosts should provide a globally unique ID when workers survive restarts. */
   createLeaseId?: (handle: WorkflowTaskHandle) => string;
@@ -60,9 +67,13 @@ export interface WorkflowTaskDurableExecutionConfig {
   waitForPoll?: (intervalMs: number, signal: AbortSignal) => Promise<void>;
 }
 
+/** Dependencies and options for {@link WorkflowTaskController}. */
 export interface WorkflowTaskControllerConfig {
+  /** Task record store; claim operations need a `WorkflowTaskClaimStore`. */
   store: WorkflowTaskStore;
+  /** Mailbox store. */
   messageStore: WorkflowTaskMessageStore;
+  /** Executor that runs each task. */
   driver: WorkflowTaskDriver;
   /** Opt-in durable execution. Omitting this preserves local legacy behavior. */
   durable?: WorkflowTaskDurableExecutionConfig;
@@ -73,10 +84,19 @@ export interface WorkflowTaskControllerConfig {
   authorityPort?: WorkflowTaskAuthorityPort;
   /** Atomic, fenced mutations used by orchestrated durable drivers. */
   commandStore?: WorkflowTaskCommandStore;
+  /**
+   * Clock returning epoch milliseconds.
+   *
+   * @defaultValue `Date.now`
+   */
   now?: () => number;
+  /**
+   * Called with failures of background runs that nothing awaits; errors it throws are ignored.
+   */
   onBackgroundError?: (error: unknown, handle: WorkflowTaskHandle) => void;
 }
 
+/** Host-authenticated options for spawning a root task. */
 export interface WorkflowTaskRootSpawnOptions {
   /** Opaque authenticated host capability. It is never persisted. */
   capability: unknown;
@@ -84,6 +104,9 @@ export interface WorkflowTaskRootSpawnOptions {
   operationId?: string;
 }
 
+/**
+ * Host-authenticated options for sending a mailbox message on behalf of a task.
+ */
 export interface WorkflowTaskAuthenticatedSendOptions {
   /** Authenticated host actor corresponding to request.senderTaskId. */
   actor: unknown;
@@ -174,6 +197,24 @@ export class WorkflowTaskController {
     }
   }
 
+  /**
+   * Creates a task and starts it in the background.
+   *
+   * @remarks
+   * With an orchestrated controller (`authorityPort` and `commandStore`) the
+   * binding comes from the authority port using `options.capability`, never from
+   * the request, and the spawn is idempotent by `operationId`.
+   *
+   * @param request - Task to create.
+   * @param options - Host capability and idempotency key for orchestrated roots.
+   * @returns The handle of the queued task.
+   * @throws {@link WorkflowTaskControlError} with code `WORKFLOW_TASK_INVALID_REQUEST`
+   * when the request is malformed, or an orchestrated root is missing its
+   * capability or has a `parentTaskId`.
+   * @throws {@link WorkflowTaskControlError} with code `WORKFLOW_TASK_DUPLICATE`
+   * when a task with the same ids already exists, or `WORKFLOW_TASK_NOT_FOUND`
+   * when `parentTaskId` does not exist.
+   */
   async spawn(
     request: WorkflowTaskSpawnRequest,
     options?: WorkflowTaskRootSpawnOptions,
@@ -231,6 +272,16 @@ export class WorkflowTaskController {
     return await this.spawn(request, options);
   }
 
+  /**
+   * Re-queues a failed or cancelled task and starts it again.
+   *
+   * @param request - Task handle and the `checkpoint` strategy acknowledgement.
+   * @returns The handle of the re-queued task.
+   * @throws {@link WorkflowTaskControlError} with code `WORKFLOW_TASK_INVALID_TRANSITION`
+   * when the task is active locally or is not `failed` or `cancelled`.
+   * @throws {@link WorkflowTaskControlError} with code `WORKFLOW_TASK_NOT_FOUND`
+   * when the task does not exist.
+   */
   async resume(
     request: WorkflowTaskResumeRequest,
   ): Promise<WorkflowTaskHandle> {
@@ -271,6 +322,14 @@ export class WorkflowTaskController {
     return taskHandle(queued);
   }
 
+  /**
+   * Reads the current record of a task.
+   *
+   * @param handle - Task to read.
+   * @returns The stored task record.
+   * @throws {@link WorkflowTaskControlError} with code `WORKFLOW_TASK_NOT_FOUND`
+   * when the task does not exist.
+   */
   async status(handle: WorkflowTaskHandle): Promise<WorkflowTaskRecord> {
     return await this.#required(handle);
   }
@@ -344,12 +403,31 @@ export class WorkflowTaskController {
     return taskHandle(recovered);
   }
 
+  /**
+   * Lists the tasks of an execution, one page at a time.
+   *
+   * @param request - Filters and pagination.
+   * @returns One page of records and the next cursor.
+   */
   async list(
     request: WorkflowTaskListRequest,
   ): Promise<WorkflowTaskListResult> {
     return await this.#store.list(request);
   }
 
+  /**
+   * Cancels a task.
+   *
+   * @remarks
+   * A terminal task is returned unchanged. A running task is aborted and ends
+   * as `cancelled`; with durable execution the cancellation is fenced by the
+   * worker claim.
+   *
+   * @param handle - Task to cancel.
+   * @returns The task record after the cancellation request.
+   * @throws {@link WorkflowTaskControlError} with code `WORKFLOW_TASK_NOT_FOUND`
+   * when the task does not exist.
+   */
   async cancel(handle: WorkflowTaskHandle): Promise<WorkflowTaskRecord> {
     validateExactHandle(handle);
     const key = taskKey(handle);
@@ -422,6 +500,24 @@ export class WorkflowTaskController {
     );
   }
 
+  /**
+   * Appends a message to a task mailbox.
+   *
+   * @remarks
+   * With an orchestrated controller the sender must be a running claimed task,
+   * the host actor is validated against it, and the append is fenced against the
+   * sender's live authority and idempotent by `options.operationId`.
+   *
+   * @param request - Recipient task, optional sender task and payload.
+   * @param options - Host actor and idempotency key for authenticated sends.
+   * @returns The stored message.
+   * @throws {@link WorkflowTaskControlError} with code `WORKFLOW_TASK_NOT_FOUND`
+   * when the recipient or sender does not exist.
+   * @throws {@link WorkflowTaskControlError} with code `WORKFLOW_TASK_MAILBOX_FULL`
+   * when the mailbox is at capacity.
+   * @throws {@link WorkflowTaskControlError} with code `WORKFLOW_TASK_NOT_OWNED`
+   * when an authenticated sender is not a running claimed task.
+   */
   async send(
     request: WorkflowTaskMessageAppendRequest,
     options?: WorkflowTaskAuthenticatedSendOptions,
@@ -470,6 +566,14 @@ export class WorkflowTaskController {
     );
   }
 
+  /**
+   * Reads mailbox messages without waiting.
+   *
+   * @param request - Task, cursor and page size.
+   * @returns The next page of messages and the cursor to continue from.
+   * @throws {@link WorkflowTaskControlError} with code `WORKFLOW_TASK_NOT_FOUND`
+   * when the task does not exist.
+   */
   async readMailbox(
     request: WorkflowTaskMessageReadRequest,
   ): Promise<WorkflowTaskMessageReadResult> {
@@ -477,6 +581,17 @@ export class WorkflowTaskController {
     return await this.#messageStore.read(request);
   }
 
+  /**
+   * Waits until the mailbox has a message after the cursor, then reads it.
+   *
+   * @param request - Task, cursor and page size.
+   * @param signal - Aborts the wait.
+   * @returns The next page of messages and the cursor to continue from.
+   * @throws {@link WorkflowTaskControlError} with code `WORKFLOW_TASK_WAIT_ABORTED`
+   * when `signal` aborts the wait.
+   * @throws {@link WorkflowTaskControlError} with code `WORKFLOW_TASK_NOT_FOUND`
+   * when the task does not exist.
+   */
   async waitForMessages(
     request: WorkflowTaskMessageReadRequest,
     signal?: AbortSignal,
@@ -537,6 +652,7 @@ export class WorkflowTaskController {
     notOwned(normalized[0] as WorkflowTaskHandle);
   }
 
+  /** Resolves once no task is running under this controller instance. */
   async waitForIdle(): Promise<void> {
     while (this.#active.size > 0) {
       await Promise.all(
@@ -1423,58 +1539,23 @@ function normalizeHandles(
 }
 
 function normalizeError(error: unknown): WorkflowTaskError {
-  if (error && typeof error === "object") {
-    const candidate = error as {
-      code?: unknown;
-      message?: unknown;
-      details?: unknown;
-    };
-    const code = safeErrorString(
-      candidate.code,
-      "WORKFLOW_TASK_DRIVER_FAILED",
-      256,
-    );
-    const message = safeErrorString(
-      candidate.message,
-      "Workflow task driver failed",
-      65_536,
-    );
-    let details: Readonly<Record<string, WorkflowTaskJsonValue>> | undefined;
-    if (candidate.details !== undefined) {
-      try {
-        const normalized = immutableTaskJson(candidate.details);
-        if (
-          normalized &&
+  return immutableTaskJson(
+    normalizeHostError(error, {
+      fallbackCode: "WORKFLOW_TASK_DRIVER_FAILED",
+      fallbackMessage: "Workflow task driver failed",
+      maxCodeLength: 256,
+      maxMessageLength: 65_536,
+      stringAsMessage: true,
+      details: (value) => {
+        const normalized = immutableTaskJson(value);
+        return normalized &&
           typeof normalized === "object" &&
           !Array.isArray(normalized)
-        ) {
-          details = normalized as Readonly<
-            Record<string, WorkflowTaskJsonValue>
-          >;
-        }
-      } catch {
-        // Invalid provider details are omitted from durable state.
-      }
-    }
-    return immutableTaskJson({
-      code,
-      message,
-      ...(details ? { details } : {}),
-    });
-  }
-  return immutableTaskJson({
-    code: "WORKFLOW_TASK_DRIVER_FAILED",
-    message: safeErrorString(error, "Workflow task driver failed", 65_536),
-  });
-}
-
-function safeErrorString(
-  value: unknown,
-  fallback: string,
-  maximumLength: number,
-): string {
-  if (typeof value !== "string" || !value.trim()) return fallback;
-  return value.slice(0, maximumLength);
+          ? (normalized as Readonly<Record<string, WorkflowTaskJsonValue>>)
+          : undefined;
+      },
+    }),
+  ) as WorkflowTaskError;
 }
 
 function cancellationError(): WorkflowTaskError {
@@ -1543,10 +1624,16 @@ function waitAborted(
 }
 
 function isConflict(error: unknown): boolean {
-  return (
-    error instanceof WorkflowTaskControlError &&
-    error.code === "WORKFLOW_TASK_CONFLICT"
-  );
+  try {
+    return (
+      error instanceof WorkflowTaskControlError &&
+      error.code === "WORKFLOW_TASK_CONFLICT"
+    );
+  } catch {
+    // A host error whose prototype or code cannot be read is not a conflict;
+    // the caller rethrows the original error.
+    return false;
+  }
 }
 
 function isWorkflowTaskClaimStore(

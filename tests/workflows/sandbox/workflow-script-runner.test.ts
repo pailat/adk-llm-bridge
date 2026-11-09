@@ -1,9 +1,3 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import { describe, expect, test } from "bun:test";
 import type {
   WorkflowStep,
@@ -12,8 +6,17 @@ import type {
 } from "../../../src/workflows/contracts.js";
 import type { WorkflowUserEvent } from "../../../src/workflows/events.js";
 import type { WorkflowScriptHost } from "../../../src/workflows/sandbox/protocol.js";
+import {
+  WORKFLOW_SCRIPT_PROTOCOL,
+  WORKFLOW_SCRIPT_PROTOCOL_VERSION,
+} from "../../../src/workflows/sandbox/protocol.js";
 import { QuickJSSyncGeneratorRuntime } from "../../../src/workflows/sandbox/quickjs-generator-runtime.js";
+import type {
+  WorkflowScriptGeneratorTurn,
+  WorkflowScriptRuntime,
+} from "../../../src/workflows/sandbox/types.js";
 import { runWorkflowScript } from "../../../src/workflows/sandbox/workflow-script-runner.js";
+import { fromPartial } from "../../helpers/partial.js";
 
 function result(step: WorkflowStep, output: string): WorkflowStepResult {
   return {
@@ -88,9 +91,9 @@ describe("runWorkflowScript", () => {
   });
 
   test("projects single-step results without mutating host event history", async () => {
-    const events = [
+    const events = fromPartial<WorkflowStepResult["events"]>([
       { author: "agent", content: { parts: [{ text: "internal" }] } },
-    ] as WorkflowStepResult["events"];
+    ]);
     const hostResult: WorkflowStepResult = {
       status: "completed",
       id: "single",
@@ -148,7 +151,9 @@ describe("runWorkflowScript", () => {
       return [
         {
           ...result(left, "left output"),
-          events: [{ author: "left" }] as WorkflowStepResult["events"],
+          events: fromPartial<WorkflowStepResult["events"]>([
+            { author: "left" },
+          ]),
         },
         {
           status: "failed",
@@ -207,10 +212,12 @@ describe("runWorkflowScript", () => {
   });
 
   test("keeps large host event histories outside the sandbox payload", async () => {
-    const history = Array.from({ length: 32 }, (_, index) => ({
-      author: `agent-${index}`,
-      content: { parts: [{ text: "x".repeat(128) }] },
-    })) as WorkflowStepResult["events"];
+    const history = fromPartial<WorkflowStepResult["events"]>(
+      Array.from({ length: 32 }, (_, index) => ({
+        author: `agent-${index}`,
+        content: { parts: [{ text: "x".repeat(128) }] },
+      })),
+    );
     const host = createHost([]);
     host.parallel = async (steps) =>
       steps.map((step) => ({
@@ -489,5 +496,267 @@ describe("runWorkflowScript", () => {
       code: "WORKFLOW_EXECUTION_ERROR",
       message: expect.stringContaining("sensitive object failed"),
     });
+  });
+
+  test("keeps the host messages intact when the guest replaces JSON or the generator", async () => {
+    const log: string[] = [];
+    const execution = await runWorkflowScript(
+      new QuickJSSyncGeneratorRuntime(),
+      {
+        source: `
+          JSON.stringify = () => "null";
+          JSON.parse = () => ({ done: true });
+          Reflect.apply = () => ({ done: true, value: "forged" });
+          Object.getPrototypeOf(function* () {}).prototype.next = () => ({
+            done: true,
+            value: "forged",
+          });
+          const step = yield ctx.run({ id: "plan", agentName: "planner", input: "go" });
+          return step.output;
+        `,
+        host: createHost(log),
+      },
+    );
+
+    expect(execution.output).toBe("output:plan");
+    expect(log).toEqual(["run:plan:go"]);
+  });
+
+  test("rejects malformed Content in a step input before the host sees it", async () => {
+    for (const input of [
+      "{ parts: [null] }",
+      "{ parts: [5] }",
+      "{ parts: [[]] }",
+      '{ role: 5, parts: [{ text: "x" }] }',
+    ]) {
+      const log: string[] = [];
+      await expect(
+        runWorkflowScript(new QuickJSSyncGeneratorRuntime(), {
+          source: `
+            yield ctx.run({ id: "plan", agentName: "planner", input: ${input} });
+            return "done";
+          `,
+          host: createHost(log),
+        }),
+      ).rejects.toMatchObject({ code: "WORKFLOW_SCRIPT_INVALID" });
+      expect(log).toEqual([]);
+    }
+  });
+
+  test("rejects malformed Content as final output", async () => {
+    for (const output of [
+      "{ parts: [null] }",
+      "{ parts: [5] }",
+      '{ role: [], parts: [{ text: "x" }] }',
+    ]) {
+      await expect(
+        runWorkflowScript(new QuickJSSyncGeneratorRuntime(), {
+          source: `return ${output};`,
+          host: createHost([]),
+        }),
+      ).rejects.toMatchObject({ code: "WORKFLOW_SCRIPT_INVALID" });
+    }
+  });
+
+  test("accepts well-formed Content with a role as input and output", async () => {
+    const log: string[] = [];
+    const execution = await runWorkflowScript(
+      new QuickJSSyncGeneratorRuntime(),
+      {
+        source: `
+          yield ctx.run({
+            id: "plan",
+            agentName: "planner",
+            input: { role: "user", parts: [{ text: "go" }] },
+          });
+          return { role: "model", parts: [{ text: "done" }] };
+        `,
+        host: createHost(log),
+      },
+    );
+
+    expect(execution.output).toEqual({
+      role: "model",
+      parts: [{ text: "done" }],
+    });
+    expect(log).toHaveLength(1);
+  });
+
+  test("keeps a source that closes the generator body early from running outside it", async () => {
+    const log: string[] = [];
+    await expect(
+      runWorkflowScript(new QuickJSSyncGeneratorRuntime(), {
+        source: `
+          return "inner";
+          };
+          return function () {
+            return '{"done":true,"value":"escaped"}';
+          };
+          function* unused() {
+        `,
+        host: createHost(log),
+      }),
+    ).rejects.toMatchObject({ code: "WORKFLOW_SCRIPT_INVALID" });
+    expect(log).toEqual([]);
+  });
+
+  // The engine joins the source into the wrapper text, so a source that
+  // starts with "})," closes the wrapper and the rest becomes an expression
+  // whose value replaces the generator factory.
+  const escapes = {
+    plainFactory: `}), (function (o) { return o.f })({ f: function () { return { next() { return { done: true, value: "forged" } } } }`,
+    proxyFactory: `}), (function (o) { return o.f })({ f: new Proxy(function () {}, { getPrototypeOf: () => Object.getPrototypeOf(function* () {}), apply: () => ({ next() { return { done: true, value: "forged" } } }) })`,
+  };
+
+  for (const [name, source] of Object.entries(escapes)) {
+    test(`rejects an escaping source that forges the generator (${name})`, async () => {
+      const log: string[] = [];
+      await expect(
+        runWorkflowScript(new QuickJSSyncGeneratorRuntime(), {
+          source,
+          host: createHost(log),
+        }),
+      ).rejects.toMatchObject({ code: "WORKFLOW_SCRIPT_INVALID" });
+      expect(log).toEqual([]);
+    });
+  }
+
+  test("drives the generator with the next function captured before guest code", async () => {
+    const log: string[] = [];
+    const result = await runWorkflowScript(new QuickJSSyncGeneratorRuntime(), {
+      source: `}), (Object.getPrototypeOf(Object.getPrototypeOf((function* () {})())).next = function () { return { done: true, value: "forged" } }), (function* () {`,
+      host: createHost(log),
+    }).then(
+      (value) => ({ output: value.output }),
+      (error: { code?: unknown }) => ({ code: error.code }),
+    );
+    // The real generator from the source runs; the patched next is ignored.
+    expect(result).toEqual({ output: undefined });
+    expect(log).toEqual([]);
+  });
+
+  test("an escaping source yields at most a real generator's own output", async () => {
+    const log: string[] = [];
+    const result = await runWorkflowScript(new QuickJSSyncGeneratorRuntime(), {
+      source: `}), globalThis.__escaped = 1, (function* () { return "real generator" }), (function* () {`,
+      host: createHost(log),
+    }).then(
+      (value) => ({ output: value.output }),
+      (error: { code?: unknown }) => ({ code: error.code }),
+    );
+    // The construction-time expression cannot be prevented while the engine
+    // joins the source text. Its value must still be a real generator
+    // function, and only that generator's own output comes back.
+    expect<unknown[]>([
+      { code: "WORKFLOW_SCRIPT_INVALID" },
+      { output: undefined },
+    ]).toContainEqual(result);
+    expect(log).toEqual([]);
+  });
+
+  test("still reports a syntax error in the source as an invalid script", async () => {
+    await expect(
+      runWorkflowScript(new QuickJSSyncGeneratorRuntime(), {
+        source: "yield ctx.run({ id: ",
+        host: createHost([]),
+      }),
+    ).rejects.toMatchObject({ code: "WORKFLOW_SCRIPT_INVALID" });
+  });
+
+  test("rejects a malformed generator turn as an invalid script", async () => {
+    const turns: unknown[] = [
+      null,
+      5,
+      "turn",
+      [],
+      {},
+      { done: "yes" },
+      { done: false, value: {}, extra: true },
+    ];
+    for (const turn of turns) {
+      const runtime: WorkflowScriptRuntime = {
+        capabilities: new QuickJSSyncGeneratorRuntime().capabilities,
+        createSession: async () => ({
+          disposed: false,
+          next: () => turn as WorkflowScriptGeneratorTurn,
+          dispose: () => undefined,
+        }),
+      };
+      await expect(
+        runWorkflowScript(runtime, { source: "", host: createHost([]) }),
+      ).rejects.toMatchObject({ code: "WORKFLOW_SCRIPT_INVALID" });
+    }
+  });
+
+  test("rejects operations, steps and retry policies with unknown or mistyped fields", async () => {
+    const operation = (fields: string) =>
+      `yield { protocol: ${JSON.stringify(WORKFLOW_SCRIPT_PROTOCOL)}, version: ${WORKFLOW_SCRIPT_PROTOCOL_VERSION}, ${fields} }; return "done";`;
+    const step = 'id: "a", agentName: "agent", input: "go"';
+    const sources = [
+      operation(`op: "run", step: { ${step} }, extra: 1`),
+      operation(`op: "parallel", steps: [{ ${step} }], extra: 1`),
+      operation(`op: "emit", event: { type: "custom", name: "e" }, extra: 1`),
+      operation(`op: "emit", event: { type: "custom", name: "e", extra: 1 }`),
+      operation(`op: "parallel", steps: [{ ${step} }], options: { extra: 1 }`),
+      `yield ctx.run({ ${step}, unknown: true }); return "done";`,
+      `yield ctx.run({ ${step}, retry: { maxAttempts: 2, jitter: 1 } }); return "done";`,
+      `yield ctx.run({ ${step}, retry: { maxAttempts: "2" } }); return "done";`,
+      `yield ctx.run({ ${step}, retry: 2 }); return "done";`,
+      `yield ctx.run({ ${step}, writePaths: [1] }); return "done";`,
+      `yield ctx.run({ ${step}, resumePolicy: "always" }); return "done";`,
+      `yield ctx.run({ ${step}, metadata: [] }); return "done";`,
+    ];
+    for (const source of sources) {
+      const log: string[] = [];
+      await expect(
+        runWorkflowScript(new QuickJSSyncGeneratorRuntime(), {
+          source,
+          host: createHost(log),
+        }),
+      ).rejects.toMatchObject({ code: "WORKFLOW_SCRIPT_INVALID" });
+      expect(log).toEqual([]);
+    }
+  });
+
+  test("forwards every documented step field", async () => {
+    const steps: WorkflowStep[] = [];
+    const host = createHost([]);
+    host.run = async (step) => {
+      steps.push(step);
+      return result(step, "ok");
+    };
+    await runWorkflowScript(new QuickJSSyncGeneratorRuntime(), {
+      source: `
+        yield ctx.run({
+          id: "a",
+          agentName: "agent",
+          agentRevision: "r1",
+          input: "go",
+          writePaths: ["src/a.ts"],
+          retry: { maxAttempts: 2, delayMs: 1, backoffMultiplier: 2, maxDelayMs: 4 },
+          resumePolicy: "retry",
+          metadata: { team: "core" },
+        });
+        return "done";
+      `,
+      host,
+    });
+    expect(steps).toEqual([
+      {
+        id: "a",
+        agentName: "agent",
+        agentRevision: "r1",
+        input: "go",
+        writePaths: ["src/a.ts"],
+        retry: {
+          maxAttempts: 2,
+          delayMs: 1,
+          backoffMultiplier: 2,
+          maxDelayMs: 4,
+        },
+        resumePolicy: "retry",
+        metadata: { team: "core" },
+      },
+    ]);
   });
 });

@@ -1,9 +1,4 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
+import { isWorkflowIdentifier } from "../internal/identifiers.js";
 import type {
   WorkflowTaskAttemptAuthorityRequest,
   WorkflowTaskAuthorityPort,
@@ -22,6 +17,7 @@ import { immutableTaskJson } from "../tasks/json.js";
 import {
   authorizeWorkflowActor,
   DENY_ALL_WORKFLOW_AUTHORIZER,
+  unauthorized,
   WorkflowActorContext,
   type WorkflowAuthorizer,
 } from "./authorization.js";
@@ -37,11 +33,17 @@ import type {
   WorkflowPlanStore,
 } from "./stores.js";
 
+/**
+ * Dependencies and options for {@link WorkflowOrchestrationTaskAuthorityPort}.
+ */
 export interface WorkflowOrchestrationTaskAuthorityConfig {
+  /** Store the active plan is read from. */
   plans: WorkflowPlanStore;
+  /** Store the live orchestration state is read from. */
   state: WorkflowOrchestrationStateStore;
   /** Host authentication/policy boundary. Omitting it denies root and sender calls. */
   authorizer?: WorkflowAuthorizer;
+  /** Clock returning epoch milliseconds. Defaults to `Date.now`. */
   now?: () => number;
 }
 
@@ -74,6 +76,7 @@ export class WorkflowOrchestrationTaskAuthorityPort
     this.#now = config.now ?? Date.now;
   }
 
+  /** Authorizes a root task against the active plan and returns its orchestration binding. Any client-supplied binding is ignored. */
   async resolveRoot(
     request: WorkflowTaskRootAuthorityRequest<WorkflowActorContext>,
   ): Promise<WorkflowTaskOrchestrationBinding> {
@@ -91,6 +94,7 @@ export class WorkflowOrchestrationTaskAuthorityPort
         taskId: target.taskId,
         planRevision: active.plan.planRevision,
       },
+      { activePlanRevision: active.plan.planRevision },
     );
     assertActorTargetsLane(actor, lane, active.plan.planRevision);
     assertAgentPermission(active.plan, lane.agentId, "task:spawn");
@@ -98,6 +102,7 @@ export class WorkflowOrchestrationTaskAuthorityPort
     return bindingFor(active, lane);
   }
 
+  /** Authorizes a child task spawned by a parent and returns the child's own binding. Parent grants are never inherited. */
   async deriveChild(
     request: WorkflowTaskChildAuthorityRequest,
   ): Promise<WorkflowTaskOrchestrationBinding> {
@@ -133,6 +138,7 @@ export class WorkflowOrchestrationTaskAuthorityPort
     return bindingFor(active, childLane);
   }
 
+  /** Checks that a task attempt still holds its claim and matches the active plan binding; throws when it does not. */
   async validateAttempt(
     request: WorkflowTaskAttemptAuthorityRequest,
   ): Promise<void> {
@@ -147,6 +153,7 @@ export class WorkflowOrchestrationTaskAuthorityPort
     assertRecordBinding(request.task, active, lane);
   }
 
+  /** Checks that the mailbox sender is bound to the active plan and that the authenticated actor may send for its lane; throws when it cannot. */
   async validateAuthenticatedSender(
     request: WorkflowTaskSenderAuthorityRequest<WorkflowActorContext>,
   ): Promise<void> {
@@ -165,11 +172,13 @@ export class WorkflowOrchestrationTaskAuthorityPort
         taskId: sender.taskId,
         planRevision: active.plan.planRevision,
       },
+      { activePlanRevision: active.plan.planRevision },
     );
     assertActorTargetsLane(actor, lane, active.plan.planRevision);
     assertAgentPermission(active.plan, lane.agentId, "task:mailbox:send");
   }
 
+  /** Checks that the actor may perform the requested control operation on the listed tasks; throws when it cannot. */
   async authorizeControl(
     request: WorkflowTaskControlAuthorityRequest<WorkflowActorContext>,
   ): Promise<void> {
@@ -205,18 +214,25 @@ export class WorkflowOrchestrationTaskAuthorityPort
             : request.access === "self-or-manager"
               ? "task:cancel"
               : "task:read";
-    await authorizeWorkflowActor(this.#authorizer, actor, {
-      operation: request.operation,
-      permission,
-      executionId: request.executionId,
-      planRevision: active.plan.planRevision,
-    });
+    await authorizeWorkflowActor(
+      this.#authorizer,
+      actor,
+      {
+        operation: request.operation,
+        permission,
+        executionId: request.executionId,
+        planRevision: active.plan.planRevision,
+      },
+      { activePlanRevision: active.plan.planRevision },
+    );
     const agent = requiredAgent(active.plan, identity.agentId);
     if (!agent.policy.permissions.includes(permission)) {
       unauthorized(`Workflow agent lacks ${permission} permission`);
     }
-    if (identity.planRevision !== active.plan.planRevision) {
-      unauthorized("Workflow control actor is bound to a stale plan revision");
+    // authorizeWorkflowActor already rejected an actor bound to another
+    // revision as stale; an actor bound to none cannot act on a plan.
+    if (identity.planRevision === undefined) {
+      unauthorized("Workflow control actor is not bound to a plan revision");
     }
     if (identity.taskId !== undefined) {
       requiredLane(active.plan, identity.taskId, identity.agentId);
@@ -293,9 +309,20 @@ function assertRecordBinding(
 ): void {
   const expected = bindingFor(active, lane);
   const actual = record.orchestration;
+  if (actual && actual.planRevision !== expected.planRevision) {
+    throw new WorkflowOrchestrationControlError(
+      "WORKFLOW_PLAN_STALE",
+      "Workflow task is bound to a plan revision that is not active",
+      {
+        executionId: record.executionId,
+        taskId: record.taskId,
+        planRevision: actual.planRevision,
+        activePlanRevision: expected.planRevision,
+      },
+    );
+  }
   if (
     !actual ||
-    actual.planRevision !== expected.planRevision ||
     actual.maxChildren !== expected.maxChildren ||
     actual.ownership.length !== expected.ownership.length
   ) {
@@ -466,10 +493,7 @@ function compareGrants(
 }
 
 function identifier(value: string, field: string): void {
-  if (
-    typeof value !== "string" ||
-    !/^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,255}$/u.test(value)
-  ) {
+  if (!isWorkflowIdentifier(value, "record")) {
     invalid(`Workflow task authority ${field} is invalid`);
   }
 }
@@ -485,14 +509,6 @@ function stale(record: WorkflowTaskRecord, message: string): never {
         ? {}
         : { planRevision: record.orchestration.planRevision }),
     },
-  );
-}
-
-function unauthorized(message: string): never {
-  throw new WorkflowOrchestrationControlError(
-    "WORKFLOW_ORCHESTRATION_INVALID_REQUEST",
-    message,
-    { reason: "unauthorized" },
   );
 }
 

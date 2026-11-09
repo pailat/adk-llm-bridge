@@ -1,42 +1,52 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import type { Content } from "@google/genai";
 import type {
+  WorkflowErrorCode,
   WorkflowSerializedError,
   WorkflowStepInterrupt,
   WorkflowStepResult,
 } from "../contracts.js";
 import { MAX_WORKFLOW_AGENT_REVISION_LENGTH } from "../contracts.js";
 
+/** Schema version written to and required of every durable checkpoint. */
 export const WORKFLOW_CHECKPOINT_SCHEMA_VERSION = 1 as const;
 
+/** Lifecycle status of a whole workflow execution. */
 export type WorkflowCheckpointStatus =
   | "running"
   | "completed"
   | "failed"
   | "cancelled";
 
+/** Lifecycle status of one step; `waiting` means the step raised an interrupt. */
 export type WorkflowCheckpointStepStatus =
   | "running"
   | "waiting"
   | "completed"
   | "failed";
 
+/** Durable record of one workflow step. */
 export interface WorkflowCheckpointStepV1 {
+  /** Step id, unique within the execution. */
   id: string;
+  /** Name of the agent that runs the step. */
   agentName: string;
+  /** Agent revision at the time the step ran; a resume with another revision is rejected. */
   agentRevision?: string;
+  /** Hash of the step input. */
   inputHash: string;
+  /** Current step status. */
   status: WorkflowCheckpointStepStatus;
+  /** Number of attempts started so far, at least 1. */
   attempts: number;
+  /** Epoch milliseconds when the first attempt started. */
   startedAt: number;
+  /** Epoch milliseconds of the last update. */
   updatedAt: number;
+  /** Epoch milliseconds when the step finished; set only for `completed` and `failed`. */
   completedAt?: number;
+  /** Durable result; set only for `completed`. */
   result?: WorkflowStepResult;
+  /** Serialized error; set only for `failed`. */
   error?: WorkflowSerializedError;
   /** Present only while `status` is `waiting`. */
   interrupt?: WorkflowStepInterrupt;
@@ -44,10 +54,15 @@ export interface WorkflowCheckpointStepV1 {
 
 /** Durable representation written to ADK session state. */
 export interface WorkflowCheckpointV1 {
+  /** Always {@link WORKFLOW_CHECKPOINT_SCHEMA_VERSION}. */
   schemaVersion: typeof WORKFLOW_CHECKPOINT_SCHEMA_VERSION;
+  /** Id of the workflow definition. */
   workflowId: string;
+  /** Version of the workflow definition. */
   workflowVersion: string;
+  /** Id of the execution this checkpoint belongs to. */
   executionId: string;
+  /** Hash of the workflow input. */
   inputHash: string;
   /**
    * Original workflow input, kept only while a step is `waiting` so the turn
@@ -56,15 +71,34 @@ export interface WorkflowCheckpointV1 {
   input?: Content;
   /** Present for script workflows; trusted handlers are versioned explicitly. */
   sourceHash?: string;
+  /** Workflow status. */
   status: WorkflowCheckpointStatus;
+  /** Steps keyed by step id. */
   steps: Record<string, WorkflowCheckpointStepV1>;
+  /** Final output; set only when `status` is `completed`. */
   output?: string | Content;
+  /** Serialized error; set only when `status` is `failed` or `cancelled`. */
   error?: WorkflowSerializedError;
+  /** Epoch milliseconds when the execution started. */
   startedAt: number;
+  /** Epoch milliseconds of the last update. */
   updatedAt: number;
+  /** Epoch milliseconds when the execution ended; unset while `running`. */
   completedAt?: number;
 }
 
+/**
+ * Type guard that validates a value read from storage as a checkpoint.
+ *
+ * @remarks
+ * Fails closed: accessors, cycles, exotic prototypes and inconsistent
+ * status/timestamp combinations all make it return `false`. Unknown JSON-safe
+ * fields are accepted for forward compatibility.
+ *
+ * @param value - Untrusted value, typically parsed JSON.
+ * @returns `true` when the value is a well-formed {@link WorkflowCheckpointV1}; never throws.
+ * @internal
+ */
 export function isWorkflowCheckpointV1(
   value: unknown,
 ): value is WorkflowCheckpointV1 {
@@ -136,7 +170,13 @@ function isWorkflowCheckpointV1Value(
   );
 }
 
-/** Removes runtime-only fields while preserving the v1 durable shape. */
+/**
+ * Removes runtime-only fields while preserving the v1 durable shape.
+ *
+ * @param checkpoint - Checkpoint that may carry transient `events` or `replayed` on step results.
+ * @returns The same object when nothing needs removing, otherwise a copy without those fields.
+ * @internal
+ */
 export function toDurableWorkflowCheckpoint(
   checkpoint: WorkflowCheckpointV1,
 ): WorkflowCheckpointV1 {
@@ -240,8 +280,39 @@ function isStepInterrupt(value: unknown): value is WorkflowStepInterrupt {
     Array.isArray(value.requests) &&
     value.requests.every(isPlainRecord) &&
     Array.isArray(value.events) &&
-    value.events.every(isPlainRecord) &&
+    value.events.every(isStoredInterruptEvent) &&
     isJsonSafe(value, new Set(), true)
+  );
+}
+
+/**
+ * The fields of an ADK `Event` that resuming an interrupted step reads. The
+ * rest of the event stays free-form JSON.
+ */
+function isStoredInterruptEvent(value: unknown): boolean {
+  if (!isPlainRecord(value)) return false;
+  const { actions, author, branch, content, longRunningToolIds } = value;
+  return (
+    (actions === undefined ||
+      (isPlainRecord(actions) &&
+        (actions.stateDelta === undefined ||
+          isPlainRecord(actions.stateDelta)))) &&
+    (author === undefined || typeof author === "string") &&
+    (branch === undefined || typeof branch === "string") &&
+    (longRunningToolIds === undefined ||
+      (Array.isArray(longRunningToolIds) &&
+        longRunningToolIds.every((id) => typeof id === "string"))) &&
+    (content === undefined ||
+      (isPlainRecord(content) &&
+        (content.role === undefined || typeof content.role === "string") &&
+        (content.parts === undefined ||
+          (Array.isArray(content.parts) &&
+            content.parts.every(
+              (part) =>
+                isPlainRecord(part) &&
+                (part.functionCall === undefined ||
+                  isPlainRecord(part.functionCall)),
+            )))))
   );
 }
 
@@ -292,23 +363,30 @@ function isSerializedError(value: unknown): value is WorkflowSerializedError {
   );
 }
 
-function isWorkflowErrorCode(value: unknown): boolean {
+/** A `Record` keyed by the union stays exhaustive when a code is added. */
+const WORKFLOW_ERROR_CODES: Readonly<Record<WorkflowErrorCode, true>> = {
+  WORKFLOW_ABORTED: true,
+  WORKFLOW_ATTEMPT_MISMATCH: true,
+  WORKFLOW_DEFINITION_INVALID: true,
+  WORKFLOW_DEFINITION_NOT_FOUND: true,
+  WORKFLOW_EXECUTION_ERROR: true,
+  WORKFLOW_INDETERMINATE_STEP: true,
+  WORKFLOW_INPUT_MISMATCH: true,
+  WORKFLOW_LIMIT_EXCEEDED: true,
+  WORKFLOW_SANDBOX_UNAVAILABLE: true,
+  WORKFLOW_SCRIPT_INVALID: true,
+  WORKFLOW_SOURCE_MISMATCH: true,
+  WORKFLOW_STEP_INTERRUPTED: true,
+  WORKFLOW_STEP_MISMATCH: true,
+  WORKFLOW_UNKNOWN_AGENT: true,
+  WORKFLOW_VERSION_MISMATCH: true,
+  WORKFLOW_WORKSPACE_LEASE_LOST: true,
+  WORKFLOW_WORKSPACE_STATE_INCOMPATIBLE: true,
+};
+
+function isWorkflowErrorCode(value: unknown): value is WorkflowErrorCode {
   return (
-    value === "WORKFLOW_ABORTED" ||
-    value === "WORKFLOW_ATTEMPT_MISMATCH" ||
-    value === "WORKFLOW_DEFINITION_INVALID" ||
-    value === "WORKFLOW_EXECUTION_ERROR" ||
-    value === "WORKFLOW_INDETERMINATE_STEP" ||
-    value === "WORKFLOW_INPUT_MISMATCH" ||
-    value === "WORKFLOW_LIMIT_EXCEEDED" ||
-    value === "WORKFLOW_SANDBOX_UNAVAILABLE" ||
-    value === "WORKFLOW_SCRIPT_INVALID" ||
-    value === "WORKFLOW_SOURCE_MISMATCH" ||
-    value === "WORKFLOW_STEP_INTERRUPTED" ||
-    value === "WORKFLOW_STEP_MISMATCH" ||
-    value === "WORKFLOW_UNKNOWN_AGENT" ||
-    value === "WORKFLOW_VERSION_MISMATCH" ||
-    value === "WORKFLOW_WORKSPACE_LEASE_LOST"
+    typeof value === "string" && Object.hasOwn(WORKFLOW_ERROR_CODES, value)
   );
 }
 

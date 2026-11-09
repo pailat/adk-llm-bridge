@@ -1,9 +1,3 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import type { QuickJSWASMModule } from "quickjs-emscripten-core";
 import { WorkflowError } from "../contracts.js";
 
@@ -17,14 +11,23 @@ import { WorkflowError } from "../contracts.js";
  * `newQuickJSWASMModuleFromVariant(...)`.
  */
 export interface QuickJSModuleLike {
+  /** Creates a QuickJS runtime. */
   newRuntime(): object;
 }
 
+/** Async factory that resolves a QuickJS WASM module. */
 export type QuickJSModuleLoader = () => Promise<QuickJSModuleLike>;
 
 let releaseModulePromise: Promise<QuickJSWASMModule> | undefined;
 
-/** Lazily loads the optional production QuickJS sync variant. */
+/**
+ * Lazily loads the optional production QuickJS sync variant and caches it.
+ *
+ * @returns The shared QuickJS module.
+ * @throws {@link WorkflowError} with code `WORKFLOW_SANDBOX_UNAVAILABLE` when the optional peers are not installed. A failed load is not cached.
+ *
+ * @internal
+ */
 export const loadReleaseQuickJS = async (): Promise<QuickJSWASMModule> => {
   if (!releaseModulePromise) {
     releaseModulePromise = (async () => {
@@ -52,6 +55,12 @@ export const loadReleaseQuickJS = async (): Promise<QuickJSWASMModule> => {
  * Narrows a loader result to the peer's module type. The loader contract
  * requires a real `QuickJSWASMModule`; this only rejects values that cannot be
  * one, with the same error as a missing peer.
+ *
+ * @param module - Value returned by a {@link QuickJSModuleLoader}.
+ * @returns The module typed as `QuickJSWASMModule`.
+ * @throws {@link WorkflowError} with code `WORKFLOW_SANDBOX_UNAVAILABLE` when `module` has no `newRuntime` function.
+ *
+ * @internal
  */
 export function quickJSModule(module: QuickJSModuleLike): QuickJSWASMModule {
   if (

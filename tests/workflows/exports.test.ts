@@ -1,16 +1,17 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import { describe, expect, test } from "bun:test";
-import packageJson from "../../package.json";
+import packageJson from "../../package.json" with { type: "json" };
 import * as root from "../../src/index.js";
 import type {
   WorkflowAgentDescriptor,
   WorkflowAgentFactory,
   WorkflowAgentHandle,
+  WorkflowChangeAuthorityErrorCode,
+  WorkflowChangeMismatchErrorCode,
+  WorkflowCheckpointFailureReason,
+  WorkflowControlPlaneErrorCode,
+  WorkflowExecutionRecordErrorCode,
+  WorkflowScriptHost,
+  WorkflowTaskRecordErrorCode,
   WorkflowWorkspaceConfig,
   WorkspaceAdapter,
 } from "../../src/workflows/index.js";
@@ -63,6 +64,8 @@ describe("workflows public exports", () => {
     expect(workflows.InMemoryWorkflowHostMutationJournal).toBeFunction();
     expect(workflows.InMemoryWorkspaceProvisioner).toBeFunction();
     expect(workflows.InMemoryWorkflowArtifactStore).toBeFunction();
+    expect(workflows.WorkflowArtifactIdentityError).toBeFunction();
+    expect(workflows.workflowArtifactStoragePath).toBeFunction();
     expect(workflows.IntegrationGate).toBeFunction();
     expect(workflows.InMemoryWorkspaceAdapter).toBeFunction();
     expect(workflows.FileSystemWorkspaceAdapter).toBeFunction();
@@ -106,6 +109,45 @@ describe("workflows public exports", () => {
     expect("WorkflowAgentHandle" in workflows).toBe(false);
   });
 
+  test("./workflows exports the error code and failure reason unions as types", () => {
+    // A Record keyed by each union fails to type-check when a member is added
+    // or removed, so these lists track the public unions.
+    const controlCodes: Record<WorkflowControlPlaneErrorCode, true> = {
+      WORKFLOW_CONTROL_INVALID_REQUEST: true,
+      WORKFLOW_CONTROL_UNAUTHORIZED: true,
+      WORKFLOW_CONTROL_UNKNOWN_OPERATION: true,
+      WORKFLOW_CONTROL_CAPABILITY_UNAVAILABLE: true,
+      WORKFLOW_CONTROL_INVALID_RESULT: true,
+    };
+    const executionRecordCodes: Record<WorkflowExecutionRecordErrorCode, true> =
+      {
+        WORKFLOW_EXECUTION_FAILED: true,
+        WORKFLOW_EXECUTION_CANCELLED: true,
+      };
+    const taskRecordCodes: Record<WorkflowTaskRecordErrorCode, true> = {
+      WORKFLOW_TASK_DRIVER_FAILED: true,
+      WORKFLOW_TASK_CANCELLED: true,
+      WORKFLOW_TASK_DISPATCH_FAILED: true,
+    };
+    const reason: WorkflowCheckpointFailureReason | undefined = undefined;
+    const mismatch: WorkflowChangeMismatchErrorCode = "CHANGE_RECEIPT_MISMATCH";
+    const authority: WorkflowChangeAuthorityErrorCode =
+      "WORKFLOW_CHANGE_AUTHORITY_REQUIRED";
+    const host: WorkflowScriptHost | undefined = undefined;
+
+    expect(Object.keys(controlCodes)).toContain(
+      "WORKFLOW_CONTROL_UNAUTHORIZED",
+    );
+    expect(Object.keys(executionRecordCodes)).toHaveLength(2);
+    expect(Object.keys(taskRecordCodes)).toHaveLength(3);
+    expect([reason, host]).toEqual([undefined, undefined]);
+    expect([mismatch, authority]).toEqual([
+      "CHANGE_RECEIPT_MISMATCH",
+      "WORKFLOW_CHANGE_AUTHORITY_REQUIRED",
+    ]);
+    expect("WorkflowScriptHost" in workflows).toBe(false);
+  });
+
   test("package exports publishes the workflows subpath", () => {
     expect(packageJson.exports["./workflows"]).toEqual({
       types: "./dist/workflows/index.d.ts",
@@ -116,5 +158,81 @@ describe("workflows public exports", () => {
       import: "./dist/workflows/node/index.js",
     });
     expect(workflowNode.NodeGitWorktreeChangeDriver).toBeFunction();
+  });
+
+  test.each([
+    "immutableJson",
+    "immutableTaskJson",
+    "immutableWorkflowOrchestrationJson",
+    "DEFAULT_WORKFLOW_EXECUTION_JSON_LIMITS",
+    "DEFAULT_WORKFLOW_TASK_JSON_LIMITS",
+    "DEFAULT_WORKFLOW_ORCHESTRATION_JSON_LIMITS",
+    "validateExecutionId",
+    "validateIdentifier",
+    "validateTaskHandle",
+    "isTerminalTaskStatus",
+    "workflowCheckpointKey",
+    "toDurableWorkflowCheckpoint",
+    "isWorkflowCheckpointV1",
+    "canonicalJson",
+    "optionalJsonObject",
+    "requiredResourceIdentity",
+    "snapshotJson",
+    "throwIfResourceAborted",
+    "workflowMutationReservations",
+    "validateWorkflowPath",
+    "verifyWorkflowChangeSet",
+    "normalizeAuthoritativeIntegrationRequest",
+    "requireWorkflowActorContext",
+    "unauthorized",
+    "isWorkflowIdentifier",
+    "normalizePortablePath",
+    "portablePathProblem",
+  ])("./workflows does not export the internal %s", (name) => {
+    expect(name in workflows).toBe(false);
+    expect(name in workflowNode).toBe(false);
+  });
+
+  test("./workflows/node exports only the Git worktree driver surface", () => {
+    expect(Object.keys(workflowNode).sort()).toEqual([
+      "FileSystemWorkflowRepositoryMutationLock",
+      "NodeGitWorktreeChangeDriver",
+      "NodeGitWorktreeError",
+    ]);
+  });
+
+  test("./workflows does not export the JSON limit types", () => {
+    type Removed = [
+      // @ts-expect-error Removed from the public surface in 0.7.
+      workflows.WorkflowExecutionJsonLimits,
+      // @ts-expect-error Removed from the public surface in 0.7.
+      workflows.WorkflowTaskJsonLimits,
+      // @ts-expect-error Removed from the public surface in 0.7.
+      workflows.WorkflowOrchestrationJsonLimits,
+    ];
+    const removed: Removed | undefined = undefined;
+    expect(removed).toBeUndefined();
+  });
+
+  test("the barrels list their exports explicitly", async () => {
+    const { readdir, readFile } = await import("node:fs/promises");
+    const { join } = await import("node:path");
+    const root = join(import.meta.dir, "../../src/workflows");
+    const barrels = [
+      "index.ts",
+      ...(await readdir(root, { withFileTypes: true }))
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => join(entry.name, "index.ts")),
+    ];
+    for (const barrel of barrels) {
+      const source = await readFile(join(root, barrel), "utf8").catch(() => "");
+      expect({
+        barrel,
+        star: /^export (type )?\* from/mu.test(source),
+      }).toEqual({
+        barrel,
+        star: false,
+      });
+    }
   });
 });

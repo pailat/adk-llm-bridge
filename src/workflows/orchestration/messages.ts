@@ -1,17 +1,14 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
+import { isWorkflowIdentifier } from "../internal/identifiers.js";
 import { WorkflowOrchestrationControlError } from "./contracts.js";
 import {
   immutableWorkflowOrchestrationJson,
   validateWorkflowPath,
 } from "./json.js";
 
+/** Protocol identifier carried by every orchestration message. */
 export const WORKFLOW_ORCHESTRATION_MESSAGE_PROTOCOL =
   "adk-llm-bridge/orchestration-message" as const;
+/** Schema version of {@link WorkflowOrchestrationMessage}. */
 export const WORKFLOW_ORCHESTRATION_MESSAGE_VERSION = 1 as const;
 
 interface WorkflowOrchestrationMessageBase<Kind extends string, Payload> {
@@ -28,6 +25,7 @@ interface WorkflowOrchestrationMessageBase<Kind extends string, Payload> {
   payload: Payload;
 }
 
+/** Announces a published contract and the paths it covers. */
 export type WorkflowContractPublishedMessage = WorkflowOrchestrationMessageBase<
   "ContractPublished",
   {
@@ -37,6 +35,7 @@ export type WorkflowContractPublishedMessage = WorkflowOrchestrationMessageBase<
   }
 >;
 
+/** Asks another task for something this task depends on. */
 export type WorkflowDependencyRequestMessage = WorkflowOrchestrationMessageBase<
   "DependencyRequest",
   {
@@ -45,6 +44,7 @@ export type WorkflowDependencyRequestMessage = WorkflowOrchestrationMessageBase<
   }
 >;
 
+/** Answers a {@link WorkflowDependencyRequestMessage}. */
 export type WorkflowDependencyResponseMessage =
   WorkflowOrchestrationMessageBase<
     "DependencyResponse",
@@ -55,6 +55,9 @@ export type WorkflowDependencyResponseMessage =
     }
   >;
 
+/**
+ * Tells the deciding task that ownership proposal `proposalId` awaits a decision.
+ */
 export type WorkflowOwnershipRequestMessage = WorkflowOrchestrationMessageBase<
   "OwnershipRequest",
   {
@@ -62,6 +65,7 @@ export type WorkflowOwnershipRequestMessage = WorkflowOrchestrationMessageBase<
   }
 >;
 
+/** Reports the decision on an ownership proposal. */
 export type WorkflowOwnershipDecisionMessage = WorkflowOrchestrationMessageBase<
   "OwnershipDecision",
   {
@@ -71,6 +75,9 @@ export type WorkflowOwnershipDecisionMessage = WorkflowOrchestrationMessageBase<
   }
 >;
 
+/**
+ * Reports that a task created a new path under a directory it may create under.
+ */
 export type WorkflowPathCreatedMessage = WorkflowOrchestrationMessageBase<
   "PathCreated",
   {
@@ -78,6 +85,9 @@ export type WorkflowPathCreatedMessage = WorkflowOrchestrationMessageBase<
   }
 >;
 
+/**
+ * Asks the integration task to integrate a commit that changed the listed paths.
+ */
 export type WorkflowIntegrationRequestMessage =
   WorkflowOrchestrationMessageBase<
     "IntegrationRequest",
@@ -87,6 +97,7 @@ export type WorkflowIntegrationRequestMessage =
     }
   >;
 
+/** Reports a review finding with its severity and affected paths. */
 export type WorkflowReviewFindingMessage = WorkflowOrchestrationMessageBase<
   "ReviewFinding",
   {
@@ -96,6 +107,7 @@ export type WorkflowReviewFindingMessage = WorkflowOrchestrationMessageBase<
   }
 >;
 
+/** Reports that a task is blocked and which tasks it blocks. */
 export type WorkflowBlockerMessage = WorkflowOrchestrationMessageBase<
   "Blocker",
   {
@@ -104,6 +116,13 @@ export type WorkflowBlockerMessage = WorkflowOrchestrationMessageBase<
   }
 >;
 
+/**
+ * Typed message exchanged between orchestrated tasks through their mailboxes.
+ *
+ * @remarks
+ * Discriminated by `kind`. Use {@link parseWorkflowOrchestrationMessage} for
+ * untrusted input.
+ */
 export type WorkflowOrchestrationMessage =
   | WorkflowContractPublishedMessage
   | WorkflowDependencyRequestMessage
@@ -129,11 +148,30 @@ const MESSAGE_FIELDS = [
   "payload",
 ] as const;
 
-/** Strictly validates an untrusted JSON envelope and returns a frozen snapshot. */
+/**
+ * Strictly validates an untrusted JSON envelope and returns a frozen snapshot.
+ *
+ * @remarks
+ * The value is copied first (each getter is called once) and the copy is
+ * validated, so the result is exactly what was checked. Symbol keys are
+ * rejected.
+ *
+ * @param value - Untrusted message.
+ * @returns The validated, deep-frozen message.
+ * @throws {@link WorkflowOrchestrationControlError} with code `WORKFLOW_ORCHESTRATION_INVALID_REQUEST`
+ * when the envelope, its kind or its payload is invalid.
+ */
 export function parseWorkflowOrchestrationMessage(
   value: unknown,
 ): WorkflowOrchestrationMessage {
-  const message = plainObject(value, "Workflow orchestration message");
+  // Validate the frozen copy, never the caller's object: a getter or proxy
+  // could otherwise answer the checks and the copy differently.
+  const message = plainObject(
+    immutableWorkflowOrchestrationJson(
+      plainObject(value, "Workflow orchestration message"),
+    ),
+    "Workflow orchestration message",
+  );
   exactFields(message, MESSAGE_FIELDS, "Workflow orchestration message");
   if (
     message.protocol !== WORKFLOW_ORCHESTRATION_MESSAGE_PROTOCOL ||
@@ -231,11 +269,15 @@ export function parseWorkflowOrchestrationMessage(
       invalid("Workflow orchestration message kind is invalid");
   }
 
-  return immutableWorkflowOrchestrationJson(
-    message as unknown as WorkflowOrchestrationMessage,
-  );
+  return message as unknown as WorkflowOrchestrationMessage;
 }
 
+/**
+ * Type guard that tells whether a value is a valid orchestration message.
+ *
+ * @param value - Candidate value.
+ * @returns `true` when {@link parseWorkflowOrchestrationMessage} accepts `value`.
+ */
 export function isWorkflowOrchestrationMessage(
   value: unknown,
 ): value is WorkflowOrchestrationMessage {
@@ -267,10 +309,7 @@ function exactFields(
 }
 
 function identifier(value: unknown, field: string): asserts value is string {
-  if (
-    typeof value !== "string" ||
-    !/^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,255}$/u.test(value)
-  ) {
+  if (!isWorkflowIdentifier(value, "record")) {
     invalid(`Workflow message ${field} is invalid`);
   }
 }

@@ -1,15 +1,10 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import { describe, expect, test } from "bun:test";
 import {
   BaseAgent,
   createEvent,
   type Event,
   InvocationContext,
+  PluginManager,
 } from "@google/adk";
 import type { Content } from "@google/genai";
 import { AgentInvocationGateway } from "../../src/runtime/agent-invocation-gateway.js";
@@ -37,6 +32,7 @@ import {
 import { QUICKJS_SYNC_CAPABILITIES } from "../../src/workflows/sandbox/quickjs-generator-runtime.js";
 import type {
   WorkflowScriptGeneratorSession,
+  WorkflowScriptGeneratorTurn,
   WorkflowScriptRuntime,
   WorkflowScriptSessionOptions,
 } from "../../src/workflows/sandbox/types.js";
@@ -94,7 +90,8 @@ class GeneratorScriptRuntime implements WorkflowScriptRuntime {
         return disposed;
       },
       next(value) {
-        return generator.next(value);
+        // A generator always sets `done`; the lib type marks it optional on yields.
+        return generator.next(value) as WorkflowScriptGeneratorTurn;
       },
       dispose() {
         disposed = true;
@@ -274,6 +271,7 @@ function invocation(
   invocationId = "inv-script-workflow",
 ): InvocationContext {
   return new InvocationContext({
+    pluginManager: new PluginManager(),
     invocationId,
     branch: "root",
     agent,
@@ -358,7 +356,9 @@ describe("ScriptWorkflowAgent", () => {
       subAgents: [planner, left, right],
       runtime,
       limits: { maxConcurrency: 2 },
-      onEvent: (event) => observed.push(event),
+      onEvent: (event) => {
+        observed.push(event);
+      },
     });
 
     const events = await collect(workflow);

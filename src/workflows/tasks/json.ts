@@ -1,20 +1,27 @@
+import { freezeJson } from "../internal/immutable-json.js";
+import { WorkflowTaskControlError } from "./contracts.js";
+
 /**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
+ * Bounds enforced on JSON values stored in tasks.
+ *
+ * @remarks
+ * Every field must be a positive safe integer.
+ * @internal
  */
-
-import {
-  WorkflowTaskControlError,
-  type WorkflowTaskJsonValue,
-} from "./contracts.js";
-
 export interface WorkflowTaskJsonLimits {
+  /** Maximum nesting depth. */
   maxDepth: number;
+  /** Maximum number of values, counting containers and leaves. */
   maxNodes: number;
+  /** Maximum length of any string value or object key. */
   maxStringLength: number;
 }
 
+/**
+ * Default {@link WorkflowTaskJsonLimits}: depth 32, 10,000 nodes, 1 MiB strings.
+ *
+ * @internal
+ */
 export const DEFAULT_WORKFLOW_TASK_JSON_LIMITS: Readonly<WorkflowTaskJsonLimits> =
   Object.freeze({
     maxDepth: 32,
@@ -22,65 +29,27 @@ export const DEFAULT_WORKFLOW_TASK_JSON_LIMITS: Readonly<WorkflowTaskJsonLimits>
     maxStringLength: 1_048_576,
   });
 
+/**
+ * Validates a JSON value and returns a deep-frozen copy.
+ *
+ * @remarks
+ * Frozen copies keep stored records from being mutated through shared
+ * references. `undefined` object properties are dropped.
+ *
+ * @param value - Value to validate and copy.
+ * @param limits - Size bounds to enforce.
+ * @returns A deep-frozen copy of `value`.
+ * @throws {@link WorkflowTaskControlError} with code `WORKFLOW_TASK_INVALID_REQUEST`
+ * when the value has a cycle, a non-finite number, a non-plain object, a
+ * symbol-keyed property, a sparse array, exceeds
+ * `limits`, or `limits` itself is invalid.
+ * @internal
+ */
 export function immutableTaskJson<T>(
   value: T,
   limits: WorkflowTaskJsonLimits = DEFAULT_WORKFLOW_TASK_JSON_LIMITS,
 ): T {
-  validateLimits(limits);
-  const seen = new Set<object>();
-  let nodes = 0;
-
-  const visit = (candidate: unknown, depth: number): WorkflowTaskJsonValue => {
-    nodes++;
-    if (nodes > limits.maxNodes) invalid("JSON value exceeds node limit");
-    if (depth > limits.maxDepth) invalid("JSON value exceeds depth limit");
-    if (candidate === null || typeof candidate === "boolean") return candidate;
-    if (typeof candidate === "string") {
-      if (candidate.length > limits.maxStringLength) {
-        invalid("JSON string exceeds length limit");
-      }
-      return candidate;
-    }
-    if (typeof candidate === "number") {
-      if (!Number.isFinite(candidate)) invalid("JSON numbers must be finite");
-      return candidate;
-    }
-    if (!candidate || typeof candidate !== "object") {
-      invalid("Value must be JSON-safe");
-    }
-    if (seen.has(candidate)) invalid("JSON value must not contain cycles");
-    seen.add(candidate);
-    try {
-      if (Array.isArray(candidate)) {
-        return Object.freeze(candidate.map((item) => visit(item, depth + 1)));
-      }
-      const prototype = Object.getPrototypeOf(candidate);
-      if (prototype !== Object.prototype && prototype !== null) {
-        invalid("JSON objects must use a plain prototype");
-      }
-      const result: Record<string, WorkflowTaskJsonValue> = {};
-      for (const [key, item] of Object.entries(candidate)) {
-        if (key.length > limits.maxStringLength) {
-          invalid("JSON object key exceeds length limit");
-        }
-        if (item === undefined) continue;
-        result[key] = visit(item, depth + 1);
-      }
-      return Object.freeze(result);
-    } finally {
-      seen.delete(candidate);
-    }
-  };
-
-  return visit(value, 0) as T;
-}
-
-function validateLimits(limits: WorkflowTaskJsonLimits): void {
-  for (const [name, value] of Object.entries(limits)) {
-    if (!Number.isSafeInteger(value) || value <= 0) {
-      invalid(`JSON limit ${name} must be a positive safe integer`);
-    }
-  }
+  return freezeJson(value, limits, invalid);
 }
 
 function invalid(message: string): never {

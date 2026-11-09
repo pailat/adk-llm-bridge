@@ -1,9 +1,3 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import type { InvocationContext } from "@google/adk";
 import type { Content } from "@google/genai";
 import {
@@ -46,22 +40,41 @@ import {
   resolveStoredDigest,
 } from "../internal/canonical-hash.js";
 
+/**
+ * Dependencies and options for {@link WorkflowCheckpointCoordinator}.
+ *
+ * @internal
+ */
 export interface WorkflowCheckpointCoordinatorConfig {
+  /** Definition whose id and version identify the checkpoint. */
   definition: WorkflowDefinition;
+  /** Durable execution id the checkpoint is keyed by. */
   executionId: string;
+  /** Workflow input, hashed into the checkpoint. */
   input: Content;
+  /** ADK invocation the checkpoint store reads and writes through. */
   context: InvocationContext;
+  /** Store that loads and saves the checkpoint with revision-based compare-and-set. */
   store: WorkflowCheckpointStore;
   /** Re-execute steps whose last attempt failed when the run is re-entered. */
   retryFailedSteps?: boolean;
+  /** Called after each successful store write, with the id of the step that triggered it when there is one; a failure here cannot roll back the committed checkpoint. */
   onWrite: (
     write: WorkflowCheckpointWrite,
     stepId?: string,
   ) => void | Promise<void>;
 }
 
+/**
+ * Step input hash and the resolution chosen from the checkpoint (for example
+ * execute, replay or resume).
+ *
+ * @internal
+ */
 export interface PreparedWorkflowStep {
+  /** Hash of the step input, or the legacy-form hash already stored for the step. */
   inputHash: string;
+  /** What to do with the step: execute it, replay a stored result, or resume it. */
   resolution: WorkflowStepResolution;
 }
 
@@ -71,6 +84,8 @@ export interface PreparedWorkflowStep {
  * Mutations are serialized so parallel steps always persist a snapshot that
  * contains every preceding transition. The coordinator never mutates ADK
  * session state; persistence is surfaced through the store's state delta.
+ *
+ * @internal
  */
 export class WorkflowCheckpointCoordinator {
   readonly #config: WorkflowCheckpointCoordinatorConfig;
@@ -82,6 +97,13 @@ export class WorkflowCheckpointCoordinator {
     this.#config = config;
   }
 
+  /**
+   * Loads the saved checkpoint, or creates and persists a new one.
+   *
+   * @throws {@link WorkflowError} with code `WORKFLOW_EXECUTION_ERROR` when the
+   * store returns an invalid checkpoint; a saved checkpoint that does not match
+   * the definition, execution id or input is rejected by validation.
+   */
   async initialize(): Promise<void> {
     await this.#exclusive(async () => {
       const candidate = await createWorkflowCheckpoint({
@@ -183,6 +205,13 @@ export class WorkflowCheckpointCoordinator {
     return { ...step, agentRevision: saved };
   }
 
+  /**
+   * Hashes the step input and decides how the step proceeds; persists the step
+   * as running when it will execute.
+   *
+   * @param step - Step about to run.
+   * @returns The input hash and the chosen resolution.
+   */
   async prepareStep(step: WorkflowStep): Promise<PreparedWorkflowStep> {
     const currentHash = await hashWorkflowInput(step.input);
     return this.#exclusive(async () => {
@@ -209,6 +238,13 @@ export class WorkflowCheckpointCoordinator {
     });
   }
 
+  /**
+   * Persists the step as running for a new attempt.
+   *
+   * @param step - Step being retried.
+   * @param inputHash - Hash returned by `prepareStep`.
+   * @param attempt - Attempt number, starting at 1.
+   */
   async startAttempt(
     step: WorkflowStep,
     inputHash: string,
@@ -225,6 +261,7 @@ export class WorkflowCheckpointCoordinator {
     });
   }
 
+  /** Persists the step result as completed. */
   async completeStep(result: WorkflowStepResult): Promise<void> {
     await this.#exclusive(async () => {
       const candidate = withWorkflowStepCompleted(this.checkpoint(), result);
@@ -252,6 +289,7 @@ export class WorkflowCheckpointCoordinator {
     });
   }
 
+  /** Persists the step as failed. */
   async failStep(failure: WorkflowStepFailure): Promise<void> {
     await this.#exclusive(async () => {
       const candidate = withWorkflowStepFailed(this.checkpoint(), failure);
@@ -259,6 +297,11 @@ export class WorkflowCheckpointCoordinator {
     });
   }
 
+  /**
+   * Persists the workflow as completed.
+   *
+   * @param output - Final output, if any.
+   */
   async completeWorkflow(output: string | Content | undefined): Promise<void> {
     await this.#exclusive(async () => {
       const candidate = withWorkflowCompleted(this.checkpoint(), output);
@@ -266,6 +309,12 @@ export class WorkflowCheckpointCoordinator {
     });
   }
 
+  /**
+   * Persists the workflow as failed or cancelled.
+   *
+   * @param error - Serialized error to record.
+   * @param status - Terminal status to record.
+   */
   async failWorkflow(
     error: WorkflowSerializedError,
     status: "failed" | "cancelled",

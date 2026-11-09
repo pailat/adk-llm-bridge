@@ -1,16 +1,13 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import { describe, expect, test } from "bun:test";
 import {
   IntegrationGate,
   type IntegrationGateDriver,
   type IntegrationGateDriverInput,
 } from "../../../src/workflows/resources/integration-gate.js";
-import { InMemoryWorkflowArtifactStore } from "../../../src/workflows/resources/workflow-artifact-store.js";
+import {
+  InMemoryWorkflowArtifactStore,
+  type WorkflowArtifactStore,
+} from "../../../src/workflows/resources/workflow-artifact-store.js";
 
 describe("IntegrationGate", () => {
   test("validates an immutable ordered artifact set without mutating the store", async () => {
@@ -74,7 +71,9 @@ describe("IntegrationGate", () => {
       result: { checked: 2 },
     });
     expect(Object.isFrozen(result)).toBe(true);
-    expect((await store.list()).artifacts).toHaveLength(2);
+    expect(
+      (await store.list({ executionId: "execution-1" })).artifacts,
+    ).toHaveLength(2);
   });
 
   test("aborts before invoking the driver", async () => {
@@ -185,7 +184,17 @@ describe("IntegrationGate", () => {
           { artifactId: stored.artifactId, revision: stored.revision },
         ],
       }),
-    ).rejects.toThrow("another execution");
+    ).rejects.toThrow("was not found in this execution");
+    // A foreign artifact with a wrong revision fails the same way, so the
+    // gate cannot be used to test another execution's revisions.
+    await expect(
+      gate.validate({
+        ...base,
+        artifacts: [
+          { artifactId: stored.artifactId, revision: "sha256:stale" },
+        ],
+      }),
+    ).rejects.toThrow("was not found in this execution");
     await expect(
       gate.validate({
         ...base,
@@ -228,5 +237,86 @@ describe("IntegrationGate", () => {
         }),
       }).validate(request),
     ).rejects.toThrow("finite JSON numbers");
+  });
+
+  test("resolves the request's own artifact when another execution reuses the id", async () => {
+    const store = new InMemoryWorkflowArtifactStore();
+    const put = (executionId: string, content: string) =>
+      store.put({
+        artifactId: "report",
+        executionId,
+        taskId: "task-1",
+        type: "text/report",
+        content,
+      });
+    const own = (await put("execution-1", "mine")).artifact;
+    const other = (await put("execution-2", "theirs")).artifact;
+    let seen: unknown;
+    const gate = new IntegrationGate(store, {
+      validate: async (input) => {
+        seen = input.artifacts.map(({ content }) => content);
+        return { verdict: "accepted", result: null };
+      },
+    });
+    const request = (revision: string) => ({
+      gateId: "gate-1",
+      executionId: "execution-1",
+      taskId: "task-1",
+      artifacts: [{ artifactId: "report", revision }],
+    });
+
+    await gate.validate(request(own.revision));
+    expect(seen).toEqual(["mine"]);
+    await expect(gate.validate(request(other.revision))).rejects.toThrow(
+      "revision does not match",
+    );
+  });
+
+  test("treats a foreign artifact from a store that ignores the execution as missing", async () => {
+    const inner = new InMemoryWorkflowArtifactStore();
+    const foreign = (
+      await inner.put({
+        artifactId: "report",
+        executionId: "execution-2",
+        taskId: "task-1",
+        type: "text/report",
+        content: "theirs",
+      })
+    ).artifact;
+    const legacy: WorkflowArtifactStore = {
+      put: (input) => inner.put(input),
+      get: async () => foreign,
+      list: (input) => inner.list(input),
+    };
+    const gate = new IntegrationGate(legacy, {
+      validate: async () => ({ verdict: "accepted", result: null }),
+    });
+    await expect(
+      gate.validate({
+        gateId: "gate-1",
+        executionId: "execution-1",
+        taskId: "task-1",
+        artifacts: [{ artifactId: "report", revision: foreign.revision }],
+      }),
+    ).rejects.toThrow("was not found in this execution");
+  });
+
+  test("rejects an invalid execution id with the typed identity error", async () => {
+    const gate = new IntegrationGate(new InMemoryWorkflowArtifactStore(), {
+      validate: async () => ({ verdict: "accepted", result: null }),
+    });
+    for (const executionId of ["", "a/b", undefined]) {
+      await expect(
+        gate.validate({
+          gateId: "gate-1",
+          executionId,
+          taskId: "task-1",
+          artifacts: [{ artifactId: "report", revision: "sha256:x" }],
+        } as never),
+      ).rejects.toMatchObject({
+        code: "WORKFLOW_ARTIFACT_IDENTITY_INVALID",
+        field: "executionId",
+      });
+    }
   });
 });

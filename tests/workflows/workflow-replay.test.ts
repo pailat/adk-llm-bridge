@@ -1,15 +1,10 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import { describe, expect, test } from "bun:test";
 import {
   BaseAgent,
   createEvent,
   type Event,
   InvocationContext,
+  PluginManager,
 } from "@google/adk";
 import {
   createWorkflowCheckpoint,
@@ -52,6 +47,7 @@ function invocation(
   invocationId = "inv-workflow",
 ): InvocationContext {
   return new InvocationContext({
+    pluginManager: new PluginManager(),
     invocationId,
     branch: "root",
     agent,
@@ -141,8 +137,14 @@ describe("WorkflowAgent durable replay", () => {
     const definition = defineWorkflow({
       id: "indeterminate",
       version: "1",
-      handler: (ctx) =>
-        ctx.run({ id: "write", agentName: "worker", input: "side effect" }),
+      handler: async (ctx) =>
+        (
+          await ctx.run({
+            id: "write",
+            agentName: "worker",
+            input: "side effect",
+          })
+        ).output,
     });
     const workflow = new WorkflowAgent({
       name: "workflow",

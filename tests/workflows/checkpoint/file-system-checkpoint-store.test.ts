@@ -1,9 +1,3 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import { describe, expect, test } from "bun:test";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
@@ -25,6 +19,7 @@ import {
   withWorkflowCompleted,
   withWorkflowStepCompleted,
   withWorkflowStepRunning,
+  withWorkflowStepWaiting,
 } from "../../../src/workflows/checkpoint/checkpoint.js";
 import {
   collectFileSystemCheckpointTombstonesOffline,
@@ -35,6 +30,7 @@ import type { WorkflowCheckpointV1 } from "../../../src/workflows/checkpoint/sch
 import {
   DEFAULT_WORKFLOW_CHECKPOINT_MAX_BYTES,
   WorkflowCheckpointConflictError,
+  type WorkflowCheckpointFailureReason,
   workflowCheckpointByteLength,
   workflowCheckpointKey,
   workflowCheckpointRevision,
@@ -44,6 +40,7 @@ import type {
   WorkflowStepResult,
 } from "../../../src/workflows/contracts.js";
 import { defineWorkflow } from "../../../src/workflows/definition.js";
+import { fromPartial } from "../../helpers/partial.js";
 
 const definition = defineWorkflow({
   id: "file-checkpoint",
@@ -174,7 +171,56 @@ describe("FileSystemWorkflowCheckpointStore", () => {
           executionId: initial.executionId,
         },
       );
-      expect(["left", "right"]).toContain(stored?.output);
+      expect<unknown[]>(["left", "right"]).toContain(stored?.output);
+    });
+  });
+
+  test("rejects a stored interrupt event whose content parts are not a list", async () => {
+    await withTemporaryRoot(async (root) => {
+      const step = {
+        id: "ask",
+        agentName: "asker",
+        input: "ask it",
+      } satisfies WorkflowStep;
+      const inputHash = await hashWorkflowInput(step.input);
+      const checkpoint = withWorkflowStepWaiting(
+        withWorkflowStepRunning(
+          await initialCheckpoint(),
+          step,
+          inputHash,
+          1,
+          10,
+        ),
+        step,
+        inputHash,
+        1,
+        {
+          kind: "input",
+          functionCallIds: ["call-1"],
+          requests: [{ functionCallId: "call-1" }],
+          events: [{ author: "asker", content: { role: "model", parts: [] } }],
+        },
+        { role: "user", parts: [{ text: "build it" }] },
+        20,
+      );
+      await new FileSystemWorkflowCheckpointStore({ root }).save({
+        context: invocationContext(),
+        checkpoint,
+        expectedRevision: null,
+      });
+      await expect(loadCheckpoint(root, checkpoint)).resolves.toMatchObject({
+        steps: { ask: { status: "waiting" } },
+      });
+
+      const checkpointPath = await findCheckpointPath(root);
+      const envelope = JSON.parse(await readFile(checkpointPath, "utf8"));
+      envelope.checkpoint.steps.ask.interrupt.events[0].content.parts = 5;
+      await writeFile(checkpointPath, JSON.stringify(envelope), "utf8");
+      const reason: WorkflowCheckpointFailureReason = "checkpoint_file_corrupt";
+      await expect(loadCheckpoint(root, checkpoint)).rejects.toMatchObject({
+        code: "WORKFLOW_EXECUTION_ERROR",
+        details: { reason },
+      });
     });
   });
 
@@ -590,7 +636,7 @@ async function legacyCheckpoint(): Promise<WorkflowCheckpointV1> {
     startedAt: 10,
     completedAt: 20,
     replayed: false,
-    events: [{ id: "legacy" }] as WorkflowStepResult["events"],
+    events: fromPartial<WorkflowStepResult["events"]>([{ id: "legacy" }]),
   };
   const legacy = withWorkflowStepCompleted(checkpoint, result, 20);
   const savedResult = legacy.steps.plan?.result;
@@ -663,7 +709,7 @@ async function withTemporaryRoot(
 }
 
 function invocationContext(): InvocationContext {
-  return {
+  return fromPartial<InvocationContext>({
     invocationId: "execution-1",
     session: {
       id: "session-1",
@@ -673,5 +719,5 @@ function invocationContext(): InvocationContext {
       events: [],
       lastUpdateTime: 1,
     },
-  } as InvocationContext;
+  });
 }

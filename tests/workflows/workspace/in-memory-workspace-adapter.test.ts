@@ -1,12 +1,7 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import { describe, expect, test } from "bun:test";
 import { InMemoryWorkspaceAdapter } from "../../../src/workflows/workspace/in-memory-workspace-adapter.js";
 import {
+  findWorkspacePathOverlaps,
   normalizeWorkspacePath,
   workspacePathsOverlap,
 } from "../../../src/workflows/workspace/workspace-adapter.js";
@@ -25,7 +20,7 @@ describe("InMemoryWorkspaceAdapter", () => {
     const lease = await coordinator.acquire({
       workspaceId: " repo ",
       ownerId: " agent-a ",
-      writePaths: ["./src//workflows/", "src\\tests", "src/workflows/runtime"],
+      writePaths: ["./src//workflows/", "src/tests/", "src/workflows/runtime"],
     });
 
     expect(lease).toMatchObject({
@@ -173,5 +168,121 @@ describe("InMemoryWorkspaceAdapter", () => {
     expect(() => normalizeWorkspacePath("C:\\repo\\src")).toThrow(
       "must be relative",
     );
+    // A backslash is a file name character on POSIX, so it is rejected
+    // rather than read as a separator.
+    expect(() => normalizeWorkspacePath("src\\tests")).toThrow(
+      "must use forward slashes",
+    );
+    expect(() => normalizeWorkspacePath("C:repo")).toThrow("must be relative");
+  });
+});
+
+describe("InMemoryWorkspaceAdapter path case", () => {
+  test("compares paths case-sensitively by default", async () => {
+    const coordinator = new InMemoryWorkspaceAdapter();
+    await coordinator.acquire({
+      workspaceId: "repo",
+      ownerId: "agent-a",
+      writePaths: ["Src/a"],
+    });
+
+    expect(
+      coordinator.conflicts({
+        workspaceId: "repo",
+        ownerId: "agent-b",
+        writePaths: ["src/a"],
+      }),
+    ).toEqual([]);
+  });
+
+  test("caseInsensitivePaths makes differently cased paths conflict", async () => {
+    const coordinator = new InMemoryWorkspaceAdapter({
+      caseInsensitivePaths: true,
+    });
+    const held = await coordinator.acquire({
+      workspaceId: "repo",
+      ownerId: "agent-a",
+      writePaths: ["Src/A"],
+    });
+
+    expect(held.writePaths).toEqual(["Src/A"]);
+    expect(
+      coordinator.conflicts({
+        workspaceId: "repo",
+        ownerId: "agent-b",
+        writePaths: ["src/a/file.ts", "SRC/b"],
+      }),
+    ).toEqual([
+      {
+        leaseId: held.leaseId,
+        workspaceId: "repo",
+        ownerId: "agent-a",
+        overlaps: [{ requestedPath: "src/a/file.ts", leasedPath: "Src/A" }],
+      },
+    ]);
+    // Composed and decomposed spellings of the same letter also conflict.
+    expect(
+      coordinator.conflicts({
+        workspaceId: "repo",
+        ownerId: "agent-b",
+        writePaths: ["Src/A/É"],
+      }),
+    ).toHaveLength(1);
+    expect(
+      findWorkspacePathOverlaps(["café"], ["CAFÉ"], {
+        caseInsensitive: true,
+      }),
+    ).toHaveLength(1);
+  });
+});
+
+describe("case-insensitive path folding", () => {
+  // Pairs that name one file on a case-insensitive APFS volume.
+  test.each([
+    ["docs/ΑΣ", "docs/ασ"], // ΑΣ / ασ (final sigma rule)
+    ["ς", "σ"], // ς / σ
+    ["ſrc", "src"], // long s
+    ["µ", "μ"], // micro sign / mu
+    ["straße", "strasse"], // ß / ss
+    ["ϐ", "β"], // ϐ / β
+    ["Src/A", "src/a"],
+    ["café", "CAFÉ"],
+  ])("%s and %s overlap", (left, right) => {
+    expect(
+      findWorkspacePathOverlaps([left], [right], { caseInsensitive: true }),
+    ).toHaveLength(1);
+    expect(
+      findWorkspacePathOverlaps([right], [left], { caseInsensitive: true }),
+    ).toHaveLength(1);
+  });
+
+  test("a second lease on the same APFS file is not granted", async () => {
+    const coordinator = new InMemoryWorkspaceAdapter({
+      caseInsensitivePaths: true,
+    });
+    await coordinator.acquire({
+      workspaceId: "repo",
+      ownerId: "agent-a",
+      writePaths: ["docs/ΑΣ"],
+    });
+
+    expect(
+      coordinator.conflicts({
+        workspaceId: "repo",
+        ownerId: "agent-b",
+        writePaths: ["docs/ασ"],
+      }),
+    ).toHaveLength(1);
+  });
+
+  test("folding keeps containment: a parent still covers its children", () => {
+    expect(
+      findWorkspacePathOverlaps(["STRASSE"], ["straße/a.ts"], {
+        caseInsensitive: true,
+      }),
+    ).toHaveLength(1);
+    expect(
+      findWorkspacePathOverlaps(["src"], ["srcs"], { caseInsensitive: true }),
+    ).toEqual([]);
   });
 });

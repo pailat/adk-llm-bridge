@@ -1,15 +1,10 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import { describe, expect, test } from "bun:test";
 import {
   BaseAgent,
   createEvent,
   type Event,
   InvocationContext,
+  PluginManager,
 } from "@google/adk";
 import { defineWorkflow } from "../../../src/workflows/definition.js";
 import { WorkflowAgent } from "../../../src/workflows/workflow-agent.js";
@@ -106,6 +101,7 @@ function invocation(
   abortSignal?: AbortSignal,
 ): InvocationContext {
   return new InvocationContext({
+    pluginManager: new PluginManager(),
     invocationId: "inv-parallel",
     branch: "root",
     agent,
@@ -169,15 +165,16 @@ describe("WorkflowRuntime parallel execution", () => {
         id: "serialized",
         version: "1",
         limits: { maxConcurrency: 3 },
-        handler: (ctx) =>
-          ctx.parallel(
+        handler: async (ctx) => {
+          await ctx.parallel(
             [
               { id: "one", agentName: "shared", input: "1" },
               { id: "two", agentName: "shared", input: "2" },
               { id: "three", agentName: "shared", input: "3" },
             ],
             { concurrency: 2 },
-          ),
+          );
+        },
       }),
       subAgents: [shared],
     });
@@ -223,11 +220,12 @@ describe("WorkflowRuntime parallel execution", () => {
         id: "fail-fast",
         version: "1",
         limits: { maxConcurrency: 2 },
-        handler: (ctx) =>
-          ctx.parallel([
+        handler: async (ctx) => {
+          await ctx.parallel([
             { id: "bad", agentName: "failing", input: "bad" },
             { id: "slow", agentName: "slow", input: "slow" },
-          ]),
+          ]);
+        },
       }),
       subAgents: [failing, slow],
     });
@@ -246,8 +244,14 @@ describe("WorkflowRuntime parallel execution", () => {
       definition: defineWorkflow({
         id: "parent-abort",
         version: "1",
-        handler: (ctx) =>
-          ctx.run({ id: "slow", agentName: "parent_slow", input: "slow" }),
+        handler: async (ctx) =>
+          (
+            await ctx.run({
+              id: "slow",
+              agentName: "parent_slow",
+              input: "slow",
+            })
+          ).output,
       }),
       subAgents: [parentSlow],
     });
@@ -270,8 +274,14 @@ describe("WorkflowRuntime parallel execution", () => {
         id: "timeout",
         version: "1",
         limits: { timeoutMs: 10 },
-        handler: (ctx) =>
-          ctx.run({ id: "slow", agentName: "timeout_slow", input: "slow" }),
+        handler: async (ctx) =>
+          (
+            await ctx.run({
+              id: "slow",
+              agentName: "timeout_slow",
+              input: "slow",
+            })
+          ).output,
       }),
       subAgents: [timeoutSlow],
     });
@@ -293,8 +303,8 @@ describe("WorkflowRuntime parallel execution", () => {
         id: "workspace-parallel",
         version: "1",
         limits: { maxConcurrency: 3 },
-        handler: (ctx) =>
-          ctx.parallel([
+        handler: async (ctx) => {
+          await ctx.parallel([
             {
               id: "first",
               agentName: "first",
@@ -313,7 +323,8 @@ describe("WorkflowRuntime parallel execution", () => {
               input: "disjoint",
               writePaths: ["docs"],
             },
-          ]),
+          ]);
+        },
       }),
       subAgents: [first, overlapping, disjoint],
       workspace: { workspaceId: "repo", adapter: workspace },
@@ -384,13 +395,15 @@ describe("WorkflowRuntime parallel execution", () => {
       definition: defineWorkflow({
         id: "workspace-abort",
         version: "1",
-        handler: (ctx) =>
-          ctx.run({
-            id: "waiting",
-            agentName: "waiting",
-            input: "wait",
-            writePaths: ["src/shared"],
-          }),
+        handler: async (ctx) =>
+          (
+            await ctx.run({
+              id: "waiting",
+              agentName: "waiting",
+              input: "wait",
+              writePaths: ["src/shared"],
+            })
+          ).output,
       }),
       subAgents: [waiting],
       workspace: { workspaceId: "repo", adapter: workspace },
@@ -422,13 +435,15 @@ describe("WorkflowRuntime parallel execution", () => {
       definition: defineWorkflow({
         id: "workspace-required",
         version: "1",
-        handler: (ctx) =>
-          ctx.run({
-            id: "writer",
-            agentName: "worker",
-            input: "write",
-            writePaths: ["src"],
-          }),
+        handler: async (ctx) =>
+          (
+            await ctx.run({
+              id: "writer",
+              agentName: "worker",
+              input: "write",
+              writePaths: ["src"],
+            })
+          ).output,
       }),
       subAgents: [worker],
     });

@@ -1,9 +1,3 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import { describe, expect, test } from "bun:test";
 import type { InvocationContext } from "@google/adk";
 import {
@@ -18,6 +12,7 @@ import {
 } from "../../src/workflows/checkpoint/store.js";
 import { WorkflowError } from "../../src/workflows/contracts.js";
 import { defineWorkflow } from "../../src/workflows/definition.js";
+import { fromPartial } from "../helpers/partial.js";
 
 const definition = defineWorkflow({
   id: "implementation",
@@ -215,7 +210,7 @@ async function legacyCheckpoint() {
 function invocationContext(
   state: Record<string, unknown> = {},
 ): InvocationContext {
-  return {
+  return fromPartial<InvocationContext>({
     invocationId: "inv-1",
     session: {
       id: "session-1",
@@ -225,5 +220,5 @@ function invocationContext(
       events: [],
       lastUpdateTime: 1,
     },
-  } as InvocationContext;
+  });
 }

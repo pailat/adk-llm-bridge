@@ -1,10 +1,5 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import { isWorkflowEvent, type WorkflowEvent } from "../events.js";
+import { isWorkflowIdentifier } from "../internal/identifiers.js";
 import {
   WorkflowExecutionControlError,
   type WorkflowExecutionEventReadRequest,
@@ -17,11 +12,17 @@ import {
 } from "./contracts.js";
 import { immutableJson } from "./json.js";
 
+/** Default page size for execution listings. */
 export const DEFAULT_WORKFLOW_EXECUTION_LIST_LIMIT = 50;
+/** Largest accepted page size for execution listings. */
 export const MAX_WORKFLOW_EXECUTION_LIST_LIMIT = 500;
+/** Default page size for event reads. */
 export const DEFAULT_WORKFLOW_EVENT_READ_LIMIT = 100;
+/** Largest accepted page size for event reads. */
 export const MAX_WORKFLOW_EVENT_READ_LIMIT = 1_000;
+/** Default maximum number of events kept per execution. */
 export const DEFAULT_WORKFLOW_EVENTS_PER_EXECUTION = 10_000;
+/** Default maximum number of events kept across all executions. */
 export const DEFAULT_WORKFLOW_EVENTS_TOTAL = 100_000;
 
 const EXECUTION_STATUSES = new Set<WorkflowExecutionStatus>([
@@ -62,41 +63,85 @@ const EXECUTION_TRANSITIONS: Readonly<
   cancelled: new Set(["queued"]),
 };
 
+/** Capacity options for {@link InMemoryWorkflowExecutionEventStore}. */
 export interface InMemoryWorkflowExecutionEventStoreConfig {
+  /**
+   * Maximum events kept per execution; a positive integer.
+   *
+   * @defaultValue 10000
+   */
   maxEventsPerExecution?: number;
+  /**
+   * Maximum events kept across all executions; a positive integer.
+   *
+   * @defaultValue 100000
+   */
   maxTotalEvents?: number;
 }
 
+/**
+ * Durable execution record storage with revision-based compare-and-set.
+ *
+ * @remarks
+ * Writers never overwrite blindly: `compareAndSet` succeeds only when the
+ * stored `revision` equals the expected one.
+ */
 export interface WorkflowExecutionStore {
+  /**
+   * Stores a new record (revision 1, attempt 1).
+   *
+   * @throws {@link WorkflowExecutionControlError} with code `WORKFLOW_EXECUTION_DUPLICATE`
+   * when the execution already exists.
+   */
   create(record: WorkflowExecutionRecord): Promise<WorkflowExecutionRecord>;
+  /** Reads a record, or `undefined` when it does not exist. */
   get(executionId: string): Promise<WorkflowExecutionRecord | undefined>;
+  /**
+   * Replaces a record if its stored revision equals `expectedRevision`.
+   *
+   * @throws {@link WorkflowExecutionControlError} with code `WORKFLOW_EXECUTION_CONFLICT`
+   * when the stored revision differs, or `WORKFLOW_EXECUTION_INVALID_TRANSITION`
+   * when the status change is not allowed.
+   */
   compareAndSet(
     record: WorkflowExecutionRecord,
     expectedRevision: number,
   ): Promise<WorkflowExecutionRecord>;
+  /** Lists records in creation order, one page at a time. */
   list(
     request?: WorkflowExecutionListRequest,
   ): Promise<WorkflowExecutionListResult>;
 }
 
+/** Append-only, ordered event log per execution. */
 export interface WorkflowExecutionEventStore {
+  /** Appends an event and assigns the next sequence number. */
   append(
     executionId: string,
     event: WorkflowEvent,
   ): Promise<WorkflowExecutionEventRecord>;
+  /** Reads events after the cursor. */
   read(
     request: WorkflowExecutionEventReadRequest,
   ): Promise<WorkflowExecutionEventReadResult>;
 }
 
+/**
+ * Single-process {@link WorkflowExecutionStore}.
+ *
+ * @remarks
+ * It validates records and status transitions but does not persist across
+ * restarts.
+ */
 export class InMemoryWorkflowExecutionStore implements WorkflowExecutionStore {
   readonly #records = new Map<string, WorkflowExecutionRecord>();
   readonly #order: string[] = [];
 
+  /** {@inheritDoc WorkflowExecutionStore.create} */
   async create(
-    record: WorkflowExecutionRecord,
+    input: WorkflowExecutionRecord,
   ): Promise<WorkflowExecutionRecord> {
-    validateRecord(record);
+    const record = validatedRecordSnapshot(input);
     if (record.revision !== 1) invalid("Initial execution revision must be 1");
     if (record.attempt !== 1) invalid("Initial execution attempt must be 1");
     if (this.#records.has(record.executionId)) {
@@ -106,22 +151,23 @@ export class InMemoryWorkflowExecutionStore implements WorkflowExecutionStore {
         { executionId: record.executionId },
       );
     }
-    const snapshot = immutableJson(record);
-    this.#records.set(record.executionId, snapshot);
+    this.#records.set(record.executionId, record);
     this.#order.push(record.executionId);
-    return snapshot;
+    return record;
   }
 
+  /** {@inheritDoc WorkflowExecutionStore.get} */
   async get(executionId: string): Promise<WorkflowExecutionRecord | undefined> {
     validateExecutionId(executionId);
     return this.#records.get(executionId);
   }
 
+  /** {@inheritDoc WorkflowExecutionStore.compareAndSet} */
   async compareAndSet(
-    record: WorkflowExecutionRecord,
+    input: WorkflowExecutionRecord,
     expectedRevision: number,
   ): Promise<WorkflowExecutionRecord> {
-    validateRecord(record);
+    const record = validatedRecordSnapshot(input);
     if (!Number.isSafeInteger(expectedRevision) || expectedRevision <= 0) {
       invalid("Expected execution revision must be a positive integer");
     }
@@ -167,11 +213,11 @@ export class InMemoryWorkflowExecutionStore implements WorkflowExecutionStore {
       invalid("Execution updatedAt cannot move backwards");
     }
     if (!resumed) validateLifecycleTransition(current, record);
-    const snapshot = immutableJson(record);
-    this.#records.set(record.executionId, snapshot);
-    return snapshot;
+    this.#records.set(record.executionId, record);
+    return record;
   }
 
+  /** {@inheritDoc WorkflowExecutionStore.list} */
   async list(
     request: WorkflowExecutionListRequest = {},
   ): Promise<WorkflowExecutionListResult> {
@@ -216,6 +262,13 @@ export class InMemoryWorkflowExecutionStore implements WorkflowExecutionStore {
   }
 }
 
+/**
+ * Bounded single-process {@link WorkflowExecutionEventStore}.
+ *
+ * @remarks
+ * Appends beyond the per-execution or total capacity are rejected with
+ * `WORKFLOW_EXECUTION_CAPACITY_EXCEEDED`.
+ */
 export class InMemoryWorkflowExecutionEventStore
   implements WorkflowExecutionEventStore
 {
@@ -247,11 +300,14 @@ export class InMemoryWorkflowExecutionEventStore
     );
   }
 
+  /** {@inheritDoc WorkflowExecutionEventStore.append} */
   async append(
     executionId: string,
-    event: WorkflowEvent,
+    input: WorkflowEvent,
   ): Promise<WorkflowExecutionEventRecord> {
     validateExecutionId(executionId);
+    // Copy once, then validate and store only the copy.
+    const event = immutableJson(input);
     if (!isWorkflowEvent(event) || event.executionId !== executionId) {
       invalid("Workflow event executionId does not match its stream");
     }
@@ -277,6 +333,7 @@ export class InMemoryWorkflowExecutionEventStore
     return record;
   }
 
+  /** {@inheritDoc WorkflowExecutionEventStore.read} */
   async read(
     request: WorkflowExecutionEventReadRequest,
   ): Promise<WorkflowExecutionEventReadResult> {
@@ -369,13 +426,34 @@ function decodeListCursor(cursor: string | undefined, size: number): number {
   return offset;
 }
 
+/**
+ * Validates an execution identifier.
+ *
+ * @remarks
+ * Identifiers start with an alphanumeric character, then allow letters, digits
+ * and `._:-`, up to 256 characters.
+ *
+ * @param executionId - Identifier to check.
+ * @throws {@link WorkflowExecutionControlError} with code `WORKFLOW_EXECUTION_INVALID_REQUEST`
+ * when the identifier is invalid.
+ * @internal
+ */
 export function validateExecutionId(executionId: string): void {
-  if (
-    typeof executionId !== "string" ||
-    !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u.test(executionId)
-  ) {
+  if (!isWorkflowIdentifier(executionId, "record")) {
     invalid("Workflow executionId is invalid");
   }
+}
+
+/**
+ * Copies the caller's record once, then validates the copy, so a getter
+ * cannot pass validation with one value and be stored with another.
+ */
+function validatedRecordSnapshot(
+  record: WorkflowExecutionRecord,
+): WorkflowExecutionRecord {
+  const snapshot = immutableJson(record);
+  validateRecord(snapshot);
+  return snapshot;
 }
 
 function validateRecord(record: WorkflowExecutionRecord): void {

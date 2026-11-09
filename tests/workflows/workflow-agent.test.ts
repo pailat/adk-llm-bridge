@@ -1,18 +1,14 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import { describe, expect, test } from "bun:test";
 import {
   BaseAgent,
   createEvent,
   type Event,
   InvocationContext,
+  PluginManager,
 } from "@google/adk";
 import type { Content } from "@google/genai";
 import { defineWorkflow } from "../../src/workflows/definition.js";
+import type { WorkflowEvent } from "../../src/workflows/events.js";
 import { WorkflowAgent } from "../../src/workflows/workflow-agent.js";
 
 class ReplyAgent extends BaseAgent {
@@ -40,8 +36,13 @@ class ReplyAgent extends BaseAgent {
   protected async *runLiveImpl() {}
 }
 
+/** The workflow event an ADK event carries in its metadata, if any. */
+const workflowEventOf = (event: Event) =>
+  event.customMetadata?.workflowEvent as WorkflowEvent | undefined;
+
 function invocation(agent: BaseAgent, input = "build it"): InvocationContext {
   return new InvocationContext({
+    pluginManager: new PluginManager(),
     invocationId: "inv-workflow",
     branch: "root",
     agent,
@@ -134,8 +135,9 @@ describe("WorkflowAgent", () => {
       definition: defineWorkflow({
         id: "outer",
         version: "1",
-        handler: (ctx) =>
-          ctx.run({ id: "nested", agentName: "nested", input: "task" }),
+        handler: async (ctx) =>
+          (await ctx.run({ id: "nested", agentName: "nested", input: "task" }))
+            .output,
       }),
       subAgents: [direct],
     });
@@ -216,6 +218,52 @@ describe("WorkflowAgent", () => {
     expect(events.at(-2)?.content?.parts?.[0]?.text).toBe("done");
   });
 
+  test("rejects retry policies that are not finite, bounded and known", async () => {
+    const invalid: Array<[unknown, string]> = [
+      [{ maxAttempts: Number.NaN }, "WORKFLOW_LIMIT_EXCEEDED"],
+      [{ maxAttempts: "2" }, "WORKFLOW_LIMIT_EXCEEDED"],
+      [{ maxAttempts: 2, delayMs: Number.NaN }, "WORKFLOW_DEFINITION_INVALID"],
+      [{ maxAttempts: 2, delayMs: "10" }, "WORKFLOW_DEFINITION_INVALID"],
+      [
+        { maxAttempts: 2, delayMs: Number.POSITIVE_INFINITY },
+        "WORKFLOW_DEFINITION_INVALID",
+      ],
+      [{ maxAttempts: 2, delayMs: 2 ** 31 }, "WORKFLOW_DEFINITION_INVALID"],
+      [{ maxAttempts: 2, maxDelayMs: 2 ** 31 }, "WORKFLOW_DEFINITION_INVALID"],
+      [
+        { maxAttempts: 2, backoffMultiplier: Number.NaN },
+        "WORKFLOW_DEFINITION_INVALID",
+      ],
+      [{ maxAttempts: 2, delayMs: -1 }, "WORKFLOW_DEFINITION_INVALID"],
+      [{ maxAttempts: 2, jitter: true }, "WORKFLOW_DEFINITION_INVALID"],
+      ["twice", "WORKFLOW_DEFINITION_INVALID"],
+    ];
+    for (const [retry, code] of invalid) {
+      const worker = new ReplyAgent("worker", ["done"]);
+      const workflow = new WorkflowAgent({
+        name: "workflow",
+        definition: defineWorkflow({
+          id: "retry-invalid",
+          version: "1",
+          limits: { maxAttemptsPerStep: 2 },
+          handler: async (ctx) =>
+            (
+              await ctx.run({
+                id: "retry-step",
+                agentName: "worker",
+                input: "task",
+                retry: retry as never,
+              })
+            ).output,
+        }),
+        subAgents: [worker],
+      });
+
+      await expect(collect(workflow)).rejects.toMatchObject({ code });
+      expect(worker.calls).toBe(0);
+    }
+  });
+
   test("preserves Content returned by a trusted workflow", async () => {
     const content: Content = {
       role: "model",
@@ -246,7 +294,7 @@ describe("WorkflowAgent", () => {
 
     const events = await collect(workflow);
     const final = events.find(
-      (event) => event.customMetadata?.workflowEvent?.type === "output",
+      (event) => workflowEventOf(event)?.type === "output",
     );
     expect(final?.output).toBe("answer");
     expect(final?.nodeInfo?.messageAsOutput).toBe(true);

@@ -1,9 +1,3 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import { afterEach, describe, expect, test } from "bun:test";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -165,7 +159,7 @@ describe("FileSystemWorkspaceAdapter", () => {
     expect(await expired.renew()).toBe(false);
     expect(expired.lossSignal.aborted).toBe(true);
     expect(expired.lossSignal.reason).toMatchObject({
-      code: "workspace_lease_lost",
+      code: "WORKSPACE_LEASE_LOST",
       workspaceId: "repo",
       leaseId: expired.leaseId,
       fencingToken: expired.fencingToken,
@@ -177,7 +171,7 @@ describe("FileSystemWorkspaceAdapter", () => {
     expiringAdapter.dispose();
     expect(disposed.lossSignal.aborted).toBe(true);
     expect(disposed.lossSignal.reason).toMatchObject({
-      code: "workspace_adapter_disposed",
+      code: "WORKSPACE_ADAPTER_DISPOSED",
       leaseId: disposed.leaseId,
     });
   });
@@ -224,7 +218,7 @@ describe("FileSystemWorkspaceAdapter", () => {
     await delay(80);
     expect(lease.lossSignal.aborted).toBe(true);
     expect(lease.lossSignal.reason).toMatchObject({
-      code: "workspace_lease_lost",
+      code: "WORKSPACE_LEASE_LOST",
       leaseId: lease.leaseId,
     });
   });
@@ -420,3 +414,97 @@ function delay(milliseconds: number): Promise<void> {
     setTimeout(resolvePromise, milliseconds),
   );
 }
+
+describe("FileSystemWorkspaceAdapter path case", () => {
+  test("compares paths case-sensitively by default", async () => {
+    const root = await stateDirectory();
+    const first = adapter(root);
+    await first.acquire(request("agent-a", ["Src/a"]));
+
+    expect(adapter(root).conflicts(request("agent-b", ["src/a"]))).toEqual([]);
+  });
+
+  test("caseInsensitivePaths makes differently cased paths conflict", async () => {
+    const root = await stateDirectory();
+    const first = adapter(root, { caseInsensitivePaths: true });
+    const held = await first.acquire(request("agent-a", ["Src/A"]));
+    const second = adapter(root, { caseInsensitivePaths: true });
+
+    const conflicts = second.conflicts(request("agent-b", ["src/a/file.ts"]));
+    expect(conflicts).toHaveLength(1);
+    expect(conflicts[0]).toMatchObject({
+      leaseId: held.leaseId,
+      overlaps: [{ requestedPath: "src/a/file.ts", leasedPath: "Src/A" }],
+    });
+
+    const controller = new AbortController();
+    const waiting = second.acquire(request("agent-b", ["SRC/a"]), {
+      signal: controller.signal,
+    });
+    await Bun.sleep(30);
+    controller.abort(new Error("still blocked"));
+    await expect(waiting).rejects.toThrow("still blocked");
+  });
+});
+
+describe("FileSystemWorkspaceAdapter state written by older releases", () => {
+  // Writes a lease file from an older release, with a path the current grammar rejects.
+  async function legacyState(root: string, legacyPath: string) {
+    let now = 1_000;
+    const writer = adapter(root, { now: () => now });
+    await writer.acquire(request("legacy-owner", ["legacy"]));
+    writer.dispose();
+    const statePath = join(
+      root,
+      createHash("sha256").update("repo").digest("hex"),
+      "state.json",
+    );
+    const state = JSON.parse(await Bun.file(statePath).text());
+    state.leases[0].writePaths = [legacyPath];
+    await writeFile(statePath, JSON.stringify(state));
+    return {
+      expiresAt: state.leases[0].expiresAt as number,
+      leaseId: state.leases[0].leaseId as string,
+      setNow: (value: number) => {
+        now = value;
+      },
+    };
+  }
+
+  test.each(["x:y", "C:x", "x".repeat(4097)])(
+    "an expired lease with a path no longer accepted (case %#) is dropped",
+    async (legacyPath) => {
+      const root = await stateDirectory();
+      const legacy = await legacyState(root, legacyPath);
+      const later = legacy.expiresAt + 1;
+      const next = adapter(root, { now: () => later });
+
+      const lease = await next.acquire(request("agent-b", ["src"]));
+      expect(lease.writePaths).toEqual(["src"]);
+      expect(next.conflicts(request("agent-c", ["src/a"]))).toHaveLength(1);
+    },
+  );
+
+  test("a live lease with a path no longer accepted fails closed and names the lease", async () => {
+    const root = await stateDirectory();
+    const legacy = await legacyState(root, "x:y");
+    const next = adapter(root, { now: () => legacy.expiresAt - 1 });
+
+    const error = await next.acquire(request("agent-b", ["src"])).then(
+      () => undefined,
+      (caught: unknown) => caught,
+    );
+    expect(error).toMatchObject({
+      name: "WorkflowError",
+      code: "WORKFLOW_WORKSPACE_STATE_INCOMPATIBLE",
+      details: {
+        workspaceId: "repo",
+        leaseId: legacy.leaseId,
+        expiresAt: legacy.expiresAt,
+      },
+    });
+    expect(() => next.conflicts(request("agent-b", ["src"]))).toThrow(
+      legacy.leaseId,
+    );
+  });
+});

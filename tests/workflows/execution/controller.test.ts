@@ -1,9 +1,3 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import { describe, expect, test } from "bun:test";
 import type { WorkflowEvent } from "../../../src/workflows/events.js";
 import type {
@@ -91,6 +85,47 @@ describe("WorkflowExecutionController", () => {
     expect(third).toBe(terminal);
   });
 
+  test("rethrows a hostile store error unchanged instead of a trap failure", async () => {
+    const trap = () => {
+      throw new Error("trap");
+    };
+    const hostile = new Proxy(
+      {},
+      { get: trap, has: trap, getPrototypeOf: trap, ownKeys: trap },
+    );
+    class HostileStore extends InMemoryWorkflowExecutionStore {
+      override async compareAndSet(): Promise<WorkflowExecutionRecord> {
+        throw hostile;
+      }
+    }
+    const store = new HostileStore();
+    await store.create({
+      executionId: "execution-1",
+      workflowId: "workflow",
+      workflowVersion: "1",
+      status: "queued",
+      revision: 1,
+      attempt: 1,
+      createdAt: 1,
+      updatedAt: 1,
+    });
+    const controller = new WorkflowExecutionController({
+      store,
+      eventStore: new InMemoryWorkflowExecutionEventStore(),
+      driver: { execute: async () => ({}) },
+    });
+
+    // Kept out of promise resolution: resolving with the proxy would read
+    // its `then` and hit the trap.
+    let outcome: unknown = "resolved";
+    try {
+      await controller.cancel("execution-1");
+    } catch (error) {
+      outcome = error;
+    }
+    expect(outcome === hostile).toBe(true);
+  });
+
   test("cancels atomically between queued read and running claim", async () => {
     const store = new ClaimBarrierStore();
     let driverCalls = 0;
@@ -149,6 +184,49 @@ describe("WorkflowExecutionController", () => {
     );
     gate.resolve({});
     await Promise.all([first.waitForIdle(), second.waitForIdle()]);
+  });
+
+  test("fails an execution whose thrown error has hostile fields", async () => {
+    const trap = () => {
+      throw new Error("proxy trap");
+    };
+    const cases: Array<[unknown, Record<string, unknown>]> = [
+      [
+        Object.defineProperty(new Error("kept"), "code", {
+          get() {
+            throw new Error("code getter");
+          },
+        }),
+        { code: "WORKFLOW_EXECUTION_FAILED", message: "kept" },
+      ],
+      [
+        new Proxy({}, { get: trap, has: trap }),
+        {
+          code: "WORKFLOW_EXECUTION_FAILED",
+          message: "Workflow execution failed",
+        },
+      ],
+      [
+        Object.assign(new Error("lower case"), { code: "not-a-code" }),
+        { code: "WORKFLOW_EXECUTION_FAILED", message: "lower case" },
+      ],
+      [
+        Object.assign(new Error("too long"), { code: `A${"B".repeat(128)}` }),
+        { code: "WORKFLOW_EXECUTION_FAILED", message: "too long" },
+      ],
+    ];
+    for (const [index, [thrown, error]] of cases.entries()) {
+      const { controller } = harness({
+        async execute() {
+          throw thrown;
+        },
+      });
+      const executionId = `execution-hostile-${index}`;
+      await controller.start(request(executionId));
+      const failed = await controller.wait(executionId);
+      expect(failed.status).toBe("failed");
+      expect(failed.error).toEqual(error as never);
+    }
   });
 
   test("resumes only terminal executions with explicit checkpoint strategy", async () => {

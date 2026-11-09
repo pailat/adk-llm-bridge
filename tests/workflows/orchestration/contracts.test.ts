@@ -1,9 +1,3 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import { describe, expect, test } from "bun:test";
 import {
   WORKFLOW_ORCHESTRATION_STATE_PROTOCOL,
@@ -131,6 +125,13 @@ describe("workflow orchestration contracts", () => {
     ).toBe(false);
   });
 
+  test("a plan base revision uses the change set revision grammar", () => {
+    expect(() => validateWorkflowPlan(plan())).not.toThrow();
+    expect(() =>
+      validateWorkflowPlan(plan({ baseRevision: "main with spaces" })),
+    ).toThrow("Workflow baseRevision is invalid");
+  });
+
   test("requires normalized repository-relative paths", () => {
     for (const invalid of [
       "/absolute",
@@ -210,6 +211,24 @@ describe("workflow orchestration contracts", () => {
         ],
       } as WorkflowOrchestrationState),
     ).toThrow(WorkflowOrchestrationControlError);
+  });
+
+  test("freezes control error details deeply and detaches them", () => {
+    const details = { paths: ["src/a.ts"], grant: { grantId: "grant-1" } };
+    const error = new WorkflowOrchestrationControlError(
+      "WORKFLOW_PATH_NOT_OWNED",
+      "Path is not owned",
+      details,
+    );
+    details.paths.push("src/b.ts");
+
+    expect(error.details).toEqual({
+      paths: ["src/a.ts"],
+      grant: { grantId: "grant-1" },
+    });
+    expect(Object.isFrozen(error.details)).toBe(true);
+    expect(Object.isFrozen(error.details?.paths)).toBe(true);
+    expect(Object.isFrozen(error.details?.grant)).toBe(true);
   });
 
   test("creates detached, deeply frozen JSON snapshots", () => {

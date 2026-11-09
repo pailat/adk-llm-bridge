@@ -1,27 +1,29 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import { createHash, randomUUID } from "node:crypto";
 import {
-  closeSync,
-  fsyncSync,
   lstatSync,
   mkdirSync,
-  openSync,
   readdirSync,
   readFileSync,
   renameSync,
   rmSync,
-  writeFileSync,
 } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { WorkflowError } from "../contracts.js";
+import { throwIfAborted } from "../internal/abort.js";
 import {
-  attachCleanupErrors,
-  isProcessAlive,
-} from "../internal/error-support.js";
+  DIRECTORY_LOCK_OWNER_FILE,
+  type DirectoryLockOwner,
+  directoryLockTokenKey,
+  directoryLockTokenMatches,
+  fsyncDirectorySync,
+  parseDirectoryLockOwner,
+  recoverDeadDirectoryLock,
+  releaseDirectoryLock,
+  tryAcquireDirectoryLock,
+  writeDurableFileSync,
+} from "../internal/directory-lock.js";
+import { attachCleanupErrors } from "../internal/error-support.js";
+import { portablePathProblem } from "../internal/portable-path.js";
 import {
   findWorkspacePathOverlaps,
   normalizeWorkspaceLeaseRequest,
@@ -34,7 +36,6 @@ import {
 } from "./workspace-adapter.js";
 
 const STATE_VERSION = 1;
-const LOCK_OWNER_FILE = "owner.json";
 const DEFAULT_LEASE_TTL_MS = 30_000;
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 10_000;
 const DEFAULT_POLL_INTERVAL_MS = 25;
@@ -43,24 +44,83 @@ const MAX_TIMER_DELAY_MS = 2_147_483_647;
 const SAFE_WORKSPACE_DIRECTORY = /^[a-f0-9]{64}$/u;
 const SAFE_WORKSPACE_TOMBSTONE = /^lock\.retired\.([a-f0-9]{64})$/u;
 
+/**
+ * Options for {@link FileSystemWorkspaceAdapter}.
+ *
+ * @remarks
+ * Every numeric option must be a positive safe integer, and
+ * `heartbeatIntervalMs` must be smaller than `leaseTtlMs`.
+ */
 export interface FileSystemWorkspaceAdapterOptions {
   /** Absolute host directory used only for coordination metadata. */
   stateDirectory: string;
+  /**
+   * Lease lifetime without renewal, in milliseconds.
+   *
+   * @defaultValue 30000
+   */
   leaseTtlMs?: number;
+  /**
+   * Interval between automatic renewals, in milliseconds.
+   *
+   * @defaultValue 10000
+   */
   heartbeatIntervalMs?: number;
+  /**
+   * Delay between attempts while a conflicting lease is active, in milliseconds.
+   *
+   * @defaultValue 25
+   */
   pollIntervalMs?: number;
+  /**
+   * Maximum wait for the per-workspace state lock, in milliseconds.
+   *
+   * @defaultValue 10000
+   */
   lockAcquireTimeoutMs?: number;
+  /**
+   * Produces lease ids; ids already active in the workspace are rejected.
+   *
+   * @defaultValue `crypto.randomUUID`
+   */
   createLeaseId?: () => string;
+  /**
+   * Clock in epoch milliseconds.
+   *
+   * @defaultValue `Date.now`
+   */
   now?: () => number;
+  /**
+   * Compare write paths without regard to letter case, for workspaces on a
+   * case-insensitive filesystem (the macOS and Windows defaults), where
+   * `Src/a` and `src/a` are the same file.
+   *
+   * @remarks
+   * Paths are compared after Unicode NFC normalization and a full case fold
+   * (so `ß` meets `ss` and `ς` meets `σ`). The fold is conservative: it may
+   * report an overlap the filesystem would not, never miss one. Lease paths
+   * keep the caller's spelling. Every adapter that shares a
+   * `stateDirectory` must use the same setting, because each one checks
+   * conflicts with its own.
+   *
+   * @defaultValue false
+   */
+  caseInsensitivePaths?: boolean;
 }
 
+/** Lease granted by {@link FileSystemWorkspaceAdapter}; all durable fields are set. */
 export interface DurableWorkspaceLease extends WorkspaceLease {
+  /** Monotonic token per workspace; resource writers must enforce it. */
   fencingToken: number;
+  /** Current expiry in epoch milliseconds, updated on each renewal. */
   expiresAt: number;
+  /** Aborts with a {@link WorkspaceLeaseLossReason} when ownership is lost. */
   lossSignal: AbortSignal;
+  /** Extends the lease; resolves `false` when ownership is already lost. */
   renew(): Promise<boolean>;
 }
 
+/** Options for {@link collectFileSystemWorkspaceTombstonesOffline}. */
 export interface OfflineWorkspaceTombstoneCollectionOptions {
   /** Absolute host-controlled workspace coordination root. */
   root: string;
@@ -68,7 +128,9 @@ export interface OfflineWorkspaceTombstoneCollectionOptions {
   confirmNoActiveWriters: true;
 }
 
+/** Result of offline tombstone collection. */
 export interface OfflineWorkspaceTombstoneCollectionResult {
+  /** Number of retired lock tombstones deleted. */
   removedTombstones: number;
 }
 
@@ -90,12 +152,6 @@ interface WorkspaceFiles {
   directory: string;
   state: string;
   lock: string;
-}
-
-interface LockOwner {
-  token: string;
-  pid: number;
-  acquiredAt: number;
 }
 
 interface LockedMutation<T> {
@@ -122,6 +178,7 @@ interface NormalizedOptions {
   lockAcquireTimeoutMs: number;
   createLeaseId: () => string;
   now: () => number;
+  caseInsensitivePaths: boolean;
 }
 
 interface OfflineTombstone {
@@ -135,6 +192,13 @@ interface OfflineTombstone {
  * the host-controlled tree has no lock or candidate. This is not safe to run
  * concurrently with adapters or writers, and intentionally has no age-based
  * mode.
+ *
+ * @param options - Root directory and the `confirmNoActiveWriters` acknowledgement.
+ * @returns How many tombstones were removed.
+ * @throws {@link TypeError} when `confirmNoActiveWriters` is not `true` or the
+ * root is not an absolute path.
+ * @throws `Error` when the root is a symlink, not a directory, or the tree
+ * holds a live lock or candidate.
  */
 export function collectFileSystemWorkspaceTombstonesOffline(
   options: OfflineWorkspaceTombstoneCollectionOptions,
@@ -158,17 +222,42 @@ export function collectFileSystemWorkspaceTombstonesOffline(
  * `fencingToken` is metadata exposed to the host. This adapter cannot prevent
  * a stale process from writing to external resources unless each resource
  * writer validates the latest token before accepting a write.
+ *
+ * @remarks
+ * Leases live in per-workspace state files guarded by a lock directory and
+ * expire unless renewed by the heartbeat, so a crashed process loses its
+ * leases after `leaseTtlMs`.
  */
 export class FileSystemWorkspaceAdapter implements WorkspaceAdapter {
   readonly #options: NormalizedOptions;
   readonly #localLeases = new Set<LocalLease>();
   #disposed = false;
 
+  /**
+   * @param options - State directory and timing options.
+   * @throws {@link TypeError} when `stateDirectory` is missing or relative, a
+   * numeric option is not a positive integer, or the heartbeat interval is not
+   * below the TTL.
+   */
   constructor(options: FileSystemWorkspaceAdapterOptions) {
     this.#options = normalizeOptions(options);
     mkdirSync(this.#options.stateDirectory, { recursive: true, mode: 0o700 });
   }
 
+  /**
+   * Acquires a durable lease, polling while a conflicting lease is active.
+   *
+   * @param request - Workspace, owner and relative write paths to own.
+   * @param options - Optional abort signal for the wait.
+   * @returns The granted lease, already heartbeating.
+   * @throws {@link TypeError} when the request is invalid.
+   * @throws `Error` when the adapter is disposed, the state lock cannot be
+   * taken within `lockAcquireTimeoutMs`, or persisted state is invalid.
+   * @throws {@link WorkflowError} with code
+   * `WORKFLOW_WORKSPACE_STATE_INCOMPATIBLE` when a live lease written by an
+   * older release holds a write path this release does not accept.
+   * @throws The signal's reason when aborted while waiting.
+   */
   async acquire(
     request: WorkspaceLeaseRequest,
     options: WorkspaceAcquireOptions = {},
@@ -177,7 +266,7 @@ export class FileSystemWorkspaceAdapter implements WorkspaceAdapter {
       throw new Error("FileSystemWorkspaceAdapter is disposed");
     }
     const normalized = normalizeWorkspaceLeaseRequest(request);
-    throwIfAborted(options.signal);
+    throwIfAborted(options.signal, "Workspace acquisition aborted");
 
     while (true) {
       const record = await this.withLockedState(
@@ -185,7 +274,13 @@ export class FileSystemWorkspaceAdapter implements WorkspaceAdapter {
         options.signal,
         (state) => {
           const dirty = purgeExpired(state, this.#options.now());
-          if (stateConflicts(state, normalized).length > 0) {
+          if (
+            stateConflicts(
+              state,
+              normalized,
+              this.#options.caseInsensitivePaths,
+            ).length > 0
+          ) {
             return { value: undefined, dirty };
           }
 
@@ -211,15 +306,31 @@ export class FileSystemWorkspaceAdapter implements WorkspaceAdapter {
     }
   }
 
+  /**
+   * Lists unexpired leases that overlap the request, read from disk without locking.
+   *
+   * @param request - Workspace, owner and relative write paths to check.
+   * @returns Conflicting leases, empty when the paths are free.
+   * @throws {@link TypeError} when the request is invalid.
+   * @throws {@link WorkflowError} with code
+   * `WORKFLOW_WORKSPACE_STATE_INCOMPATIBLE` under the same condition as
+   * {@link FileSystemWorkspaceAdapter.acquire}.
+   */
   conflicts(request: WorkspaceLeaseRequest): readonly WorkspaceLeaseConflict[] {
     const normalized = normalizeWorkspaceLeaseRequest(request);
     const files = workspaceFiles(
       this.#options.stateDirectory,
       normalized.workspaceId,
     );
-    const snapshot = readStateSync(files.state, normalized.workspaceId);
+    const snapshot = readStateSync(
+      files.state,
+      normalized.workspaceId,
+      this.#options.now(),
+    );
     purgeExpired(snapshot, this.#options.now());
-    return Object.freeze(stateConflicts(snapshot, normalized));
+    return Object.freeze(
+      stateConflicts(snapshot, normalized, this.#options.caseInsensitivePaths),
+    );
   }
 
   /**
@@ -231,7 +342,7 @@ export class FileSystemWorkspaceAdapter implements WorkspaceAdapter {
     if (this.#disposed) return;
     this.#disposed = true;
     for (const lease of this.#localLeases) {
-      this.reportLoss(lease, "workspace_adapter_disposed");
+      this.reportLoss(lease, "WORKSPACE_ADAPTER_DISPOSED");
       this.stopLifecycle(lease);
     }
     this.#localLeases.clear();
@@ -367,7 +478,7 @@ export class FileSystemWorkspaceAdapter implements WorkspaceAdapter {
       local.closed = true;
       this.stopLifecycle(local);
       this.#localLeases.delete(local);
-      if (!released) this.reportLoss(local, "workspace_lease_lost");
+      if (!released) this.reportLoss(local, "WORKSPACE_LEASE_LOST");
       return released;
     } finally {
       local.releasing = false;
@@ -377,7 +488,7 @@ export class FileSystemWorkspaceAdapter implements WorkspaceAdapter {
   private markLost(local: LocalLease): void {
     if (local.closed) return;
     local.closed = true;
-    this.reportLoss(local, "workspace_lease_lost");
+    this.reportLoss(local, "WORKSPACE_LEASE_LOST");
     this.stopLifecycle(local);
     this.#localLeases.delete(local);
   }
@@ -390,7 +501,7 @@ export class FileSystemWorkspaceAdapter implements WorkspaceAdapter {
     const reason: WorkspaceLeaseLossReason = Object.freeze({
       code,
       message:
-        code === "workspace_adapter_disposed"
+        code === "WORKSPACE_ADAPTER_DISPOSED"
           ? "Workspace adapter was disposed while the lease was active"
           : "Durable workspace lease ownership was lost",
       workspaceId: local.record.workspaceId,
@@ -412,19 +523,23 @@ export class FileSystemWorkspaceAdapter implements WorkspaceAdapter {
     const owner = await acquireLock(files.lock, this.#options, signal);
     let result: LockedMutation<T>;
     try {
-      const state = readStateSync(files.state, workspaceId);
+      const state = readStateSync(
+        files.state,
+        workspaceId,
+        this.#options.now(),
+      );
       result = operation(state);
       if (result.dirty) writeStateSync(files, state, owner.token);
     } catch (error) {
       try {
-        releaseLockSync(files.lock, owner.token);
+        releaseDirectoryLock(files.lock, owner.token);
       } catch (releaseError) {
         // Keep the primary failure visible to callers.
         attachCleanupErrors(error, [releaseError]);
       }
       throw error;
     }
-    releaseLockSync(files.lock, owner.token);
+    releaseDirectoryLock(files.lock, owner.token);
     return result.value;
   }
 }
@@ -448,9 +563,16 @@ function normalizeOptions(
       options.lockAcquireTimeoutMs ?? DEFAULT_LOCK_ACQUIRE_TIMEOUT_MS,
     createLeaseId: options.createLeaseId ?? randomUUID,
     now: options.now ?? Date.now,
+    caseInsensitivePaths: options.caseInsensitivePaths === true,
   };
   for (const [name, value] of Object.entries(normalized)) {
-    if (typeof value === "string" || typeof value === "function") continue;
+    if (
+      typeof value === "string" ||
+      typeof value === "function" ||
+      typeof value === "boolean"
+    ) {
+      continue;
+    }
     if (!Number.isSafeInteger(value) || value <= 0) {
       throw new TypeError(
         `Workspace adapter ${name} must be a positive integer`,
@@ -562,20 +684,20 @@ function assertValidWorkspaceTombstone(
   expectedTokenKey: string,
 ): void {
   const entries = readdirSync(tombstonePath);
-  if (entries.length !== 1 || entries[0] !== LOCK_OWNER_FILE) {
+  if (entries.length !== 1 || entries[0] !== DIRECTORY_LOCK_OWNER_FILE) {
     throw new Error(
       `Offline workspace tombstone has unsafe contents: ${tombstonePath}`,
     );
   }
-  const ownerPath = join(tombstonePath, LOCK_OWNER_FILE);
+  const ownerPath = join(tombstonePath, DIRECTORY_LOCK_OWNER_FILE);
   const ownerInfo = lstatSync(ownerPath);
   if (ownerInfo.isSymbolicLink() || !ownerInfo.isFile()) {
     throw new Error(
       `Offline workspace tombstone has an unsafe owner: ${tombstonePath}`,
     );
   }
-  const owner = parseLockOwner(readFileSync(ownerPath, "utf8"));
-  if (tokenKey(owner.token) !== expectedTokenKey) {
+  const owner = parseDirectoryLockOwner(readFileSync(ownerPath, "utf8"));
+  if (directoryLockTokenKey(owner.token) !== expectedTokenKey) {
     throw new Error(
       `Offline workspace tombstone token does not match its owner: ${tombstonePath}`,
     );
@@ -605,13 +727,13 @@ async function acquireLock(
   lockPath: string,
   options: NormalizedOptions,
   signal?: AbortSignal,
-): Promise<LockOwner> {
+): Promise<DirectoryLockOwner> {
   const deadline = Date.now() + options.lockAcquireTimeoutMs;
   while (true) {
-    throwIfAborted(signal);
-    const owner = tryAcquireLock(lockPath);
+    throwIfAborted(signal, "Workspace acquisition aborted");
+    const owner = tryAcquireDirectoryLock(lockPath);
     if (owner) return owner;
-    recoverDeadLockSync(lockPath);
+    recoverDeadDirectoryLock(lockPath);
     if (Date.now() >= deadline) {
       throw new Error(`Timed out acquiring workspace lock: ${lockPath}`);
     }
@@ -619,78 +741,13 @@ async function acquireLock(
   }
 }
 
-function tryAcquireLock(lockPath: string): LockOwner | undefined {
-  const owner = newLockOwner();
-  const candidate = `${lockPath}.candidate-${owner.token}`;
-  mkdirSync(candidate, { mode: 0o700 });
-  try {
-    writeDurableFileSync(
-      join(candidate, LOCK_OWNER_FILE),
-      JSON.stringify(owner),
-    );
-    try {
-      renameSync(candidate, lockPath);
-      fsyncDirectorySync(resolve(lockPath, ".."));
-      return owner;
-    } catch (error) {
-      if (hasErrorCode(error, "EEXIST") || hasErrorCode(error, "ENOTEMPTY")) {
-        return undefined;
-      }
-      throw error;
-    }
-  } finally {
-    rmSync(candidate, { recursive: true, force: true });
-  }
-}
-
-function recoverDeadLockSync(lockPath: string): void {
-  let owner: LockOwner;
-  try {
-    owner = parseLockOwner(
-      readFileSync(join(lockPath, LOCK_OWNER_FILE), "utf8"),
-    );
-  } catch {
-    // An atomically published lock should always contain a valid owner. A
-    // malformed lock is never stolen automatically because ownership cannot
-    // be proven dead.
-    return;
-  }
-  if (isProcessAlive(owner.pid)) return;
-  retireLockSync(lockPath, owner.token);
-}
-
-function retireLockSync(lockPath: string, observedToken: string): void {
-  const retired = `${lockPath}.retired.${tokenKey(observedToken)}`;
-  try {
-    renameSync(lockPath, retired);
-  } catch (error) {
-    if (
-      hasErrorCode(error, "ENOENT") ||
-      hasErrorCode(error, "EEXIST") ||
-      hasErrorCode(error, "ENOTEMPTY")
-    ) {
-      return;
-    }
-    throw error;
-  }
-  fsyncDirectorySync(resolve(lockPath, ".."));
-}
-
-function releaseLockSync(lockPath: string, token: string): void {
-  if (!lockTokenMatchesSync(lockPath, token)) return;
-  retireLockSync(lockPath, token);
-}
-
-function tokenKey(token: string): string {
-  return createHash("sha256").update(token).digest("hex");
-}
-
 function readStateSync(
   statePath: string,
   workspaceId: string,
+  now: number,
 ): PersistedWorkspaceState {
   try {
-    return parseState(readFileSync(statePath, "utf8"), workspaceId);
+    return parseState(readFileSync(statePath, "utf8"), workspaceId, now);
   } catch (error) {
     if (hasErrorCode(error, "ENOENT")) return emptyState(workspaceId);
     throw error;
@@ -705,7 +762,7 @@ function writeStateSync(
   const temporary = `${files.state}.tmp-${randomUUID()}`;
   try {
     writeDurableFileSync(temporary, serializeState(state));
-    if (!lockTokenMatchesSync(files.lock, lockToken)) {
+    if (!directoryLockTokenMatches(files.lock, lockToken)) {
       throw new Error("Workspace lock ownership changed before state commit");
     }
     renameSync(temporary, files.state);
@@ -715,70 +772,10 @@ function writeStateSync(
   }
 }
 
-function writeDurableFileSync(path: string, content: string): void {
-  const descriptor = openSync(path, "wx", 0o600);
-  try {
-    writeFileSync(descriptor, content, { encoding: "utf8" });
-    fsyncSync(descriptor);
-  } finally {
-    closeSync(descriptor);
-  }
-}
-
-function fsyncDirectorySync(directory: string): void {
-  let descriptor: number | undefined;
-  try {
-    descriptor = openSync(directory, "r");
-    fsyncSync(descriptor);
-  } catch (error) {
-    if (
-      hasErrorCode(error, "EINVAL") ||
-      hasErrorCode(error, "ENOTSUP") ||
-      hasErrorCode(error, "EPERM") ||
-      hasErrorCode(error, "EISDIR")
-    ) {
-      return;
-    }
-    throw error;
-  } finally {
-    if (descriptor !== undefined) closeSync(descriptor);
-  }
-}
-
-function lockTokenMatchesSync(lockPath: string, token: string): boolean {
-  try {
-    return (
-      parseLockOwner(readFileSync(join(lockPath, LOCK_OWNER_FILE), "utf8"))
-        .token === token
-    );
-  } catch {
-    return false;
-  }
-}
-
-function parseLockOwner(input: string): LockOwner {
-  const value: unknown = JSON.parse(input);
-  if (
-    !isRecord(value) ||
-    typeof value.token !== "string" ||
-    !value.token ||
-    !Number.isSafeInteger(value.pid) ||
-    (value.pid as number) <= 0 ||
-    typeof value.acquiredAt !== "number" ||
-    !Number.isFinite(value.acquiredAt)
-  ) {
-    throw new Error("Invalid workspace lock owner");
-  }
-  return {
-    token: value.token,
-    pid: value.pid as number,
-    acquiredAt: value.acquiredAt,
-  };
-}
-
 function parseState(
   input: string,
   workspaceId: string,
+  now: number,
 ): PersistedWorkspaceState {
   const value: unknown = JSON.parse(input);
   if (
@@ -791,13 +788,33 @@ function parseState(
   ) {
     throw new Error(`Invalid workspace state for ${workspaceId}`);
   }
-  const leases = value.leases.map((lease) => parseLease(lease, workspaceId));
-  const maxFencingToken = leases.reduce(
+  const parsed = value.leases.map((lease) => parseLease(lease, workspaceId));
+  const maxFencingToken = parsed.reduce(
     (maximum, lease) => Math.max(maximum, lease.fencingToken),
     0,
   );
   if ((value.nextFencingToken as number) < maxFencingToken) {
     throw new Error(`Invalid workspace fencing sequence for ${workspaceId}`);
+  }
+  const leases: PersistedLease[] = [];
+  for (const lease of parsed) {
+    if (lease.writePaths !== undefined) {
+      leases.push(lease as PersistedLease);
+    } else if (lease.expiresAt > now) {
+      // A lease written by an older release with a path the current grammar
+      // rejects cannot be compared safely; while it is live, fail closed.
+      throw new WorkflowError(
+        "WORKFLOW_WORKSPACE_STATE_INCOMPATIBLE",
+        `Live workspace lease ${lease.leaseId} uses a write path this release does not accept; release it or let it expire`,
+        {
+          workspaceId,
+          leaseId: lease.leaseId,
+          ownerId: lease.ownerId,
+          expiresAt: lease.expiresAt,
+        },
+      );
+    }
+    // An expired one is dropped like any other expired lease.
   }
   return {
     version: STATE_VERSION,
@@ -807,7 +824,14 @@ function parseState(
   };
 }
 
-function parseLease(input: unknown, workspaceId: string): PersistedLease {
+// A lease whose fields are well formed but whose paths the current grammar
+// rejects comes back without `writePaths`, so the caller can drop it once it
+// has expired instead of failing on it forever.
+type ParsedLease =
+  | PersistedLease
+  | (Omit<PersistedLease, "writePaths"> & { writePaths?: undefined });
+
+function parseLease(input: unknown, workspaceId: string): ParsedLease {
   const writePaths = isRecord(input) ? input.writePaths : undefined;
   if (
     !isRecord(input) ||
@@ -824,6 +848,21 @@ function parseLease(input: unknown, workspaceId: string): PersistedLease {
     (input.fencingToken as number) <= 0
   ) {
     throw new Error(`Invalid persisted workspace lease for ${workspaceId}`);
+  }
+  const fields = {
+    workspaceId,
+    ownerId: input.ownerId,
+    leaseId: input.leaseId,
+    acquiredAt: input.acquiredAt,
+    expiresAt: input.expiresAt,
+    fencingToken: input.fencingToken as number,
+  };
+  if (
+    (writePaths as string[]).some(
+      (path) => portablePathProblem(path, { allowRoot: true }) !== undefined,
+    )
+  ) {
+    return fields;
   }
   const normalized = normalizeWorkspaceLeaseRequest({
     workspaceId,
@@ -876,12 +915,14 @@ function purgeExpired(state: PersistedWorkspaceState, now: number): boolean {
 function stateConflicts(
   state: PersistedWorkspaceState,
   request: WorkspaceLeaseRequest,
+  caseInsensitive: boolean,
 ): WorkspaceLeaseConflict[] {
   const conflicts: WorkspaceLeaseConflict[] = [];
   for (const lease of state.leases) {
     const overlaps = findWorkspacePathOverlaps(
       request.writePaths,
       lease.writePaths,
+      { caseInsensitive },
     );
     if (overlaps.length === 0) continue;
     conflicts.push(
@@ -924,12 +965,8 @@ function requiredLeaseId(value: string): string {
   return value.trim();
 }
 
-function newLockOwner(): LockOwner {
-  return { token: randomUUID(), pid: process.pid, acquiredAt: Date.now() };
-}
-
 function abortableDelay(delayMs: number, signal?: AbortSignal): Promise<void> {
-  throwIfAborted(signal);
+  throwIfAborted(signal, "Workspace acquisition aborted");
   return new Promise<void>((resolvePromise, rejectPromise) => {
     const timer = setTimeout(() => {
       signal?.removeEventListener("abort", onAbort);
@@ -944,11 +981,6 @@ function abortableDelay(delayMs: number, signal?: AbortSignal): Promise<void> {
     };
     signal?.addEventListener("abort", onAbort, { once: true });
   });
-}
-
-function throwIfAborted(signal?: AbortSignal): void {
-  if (!signal?.aborted) return;
-  throw signal.reason ?? new Error("Workspace acquisition aborted");
 }
 
 function hasErrorCode(error: unknown, code: string): boolean {

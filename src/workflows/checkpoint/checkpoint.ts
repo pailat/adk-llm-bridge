@@ -1,9 +1,3 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import type { Content } from "@google/genai";
 import type {
   WorkflowSerializedError,
@@ -20,21 +14,43 @@ import {
   type WorkflowCheckpointV1,
 } from "./schema.js";
 
+/** Input to {@link createWorkflowCheckpoint}. */
 export interface CreateWorkflowCheckpointInput {
+  /** Definition the execution runs; its id, version and (for scripts) source hash are recorded. */
   definition: WorkflowDefinition;
+  /** Id of the execution the checkpoint belongs to. */
   executionId: string;
+  /** Workflow input; only its hash is stored. */
   input: unknown;
+  /**
+   * Timestamp in epoch milliseconds for `startedAt` and `updatedAt`.
+   *
+   * @defaultValue `Date.now()`
+   */
   now?: number;
 }
 
+/** Identity a stored checkpoint must match before an execution may resume from it. */
 export interface WorkflowCheckpointExpectation {
+  /** Expected workflow id. */
   workflowId: string;
+  /** Expected workflow version. */
   workflowVersion: string;
+  /** Expected execution id. */
   executionId: string;
+  /** Expected hash of the workflow input. */
   inputHash: string;
+  /** Expected hash of the script source; omitted for non-script workflows. */
   sourceHash?: string;
 }
 
+/**
+ * Creates the initial `running` checkpoint for a workflow execution.
+ *
+ * @param input - Definition, execution id, workflow input and optional clock.
+ * @returns A checkpoint with no steps, carrying the input hash and, for script workflows, the source hash.
+ * @throws {@link WorkflowError} with code `WORKFLOW_EXECUTION_ERROR` when the input or source cannot be hashed.
+ */
 export async function createWorkflowCheckpoint(
   input: CreateWorkflowCheckpointInput,
 ): Promise<WorkflowCheckpointV1> {
@@ -55,6 +71,12 @@ export async function createWorkflowCheckpoint(
   };
 }
 
+/**
+ * Derives the expectation that a resume of the same execution must satisfy.
+ *
+ * @param checkpoint - Checkpoint to copy the identity fields from.
+ * @returns The expectation; `sourceHash` is present only when the checkpoint has one.
+ */
 export function checkpointExpectation(
   checkpoint: WorkflowCheckpointV1,
 ): WorkflowCheckpointExpectation {
@@ -67,6 +89,18 @@ export function checkpointExpectation(
   };
 }
 
+/**
+ * Verifies that a stored checkpoint belongs to the execution being resumed.
+ *
+ * @remarks
+ * Resuming against a different definition, version, input or script source
+ * would replay results that do not apply, so any difference is rejected.
+ *
+ * @param checkpoint - Checkpoint loaded from the store.
+ * @param expected - Identity the current execution expects.
+ * @throws {@link WorkflowError} with code `WORKFLOW_EXECUTION_ERROR` for a different workflow id or execution id,
+ * or `WORKFLOW_VERSION_MISMATCH`, `WORKFLOW_INPUT_MISMATCH` or `WORKFLOW_SOURCE_MISMATCH`.
+ */
 export function validateWorkflowCheckpoint(
   checkpoint: WorkflowCheckpointV1,
   expected: WorkflowCheckpointExpectation,
@@ -103,12 +137,29 @@ export function validateWorkflowCheckpoint(
   }
 }
 
+/** What the runtime does with a step, as decided by {@link resolveWorkflowStep}. */
 export type WorkflowStepResolution =
   | { action: "execute"; attempt: number }
   | { action: "replay"; result: WorkflowStepResult }
   /** The step is waiting for input; continue it with the answer. */
   | { action: "resume"; attempt: number; interrupt: WorkflowStepInterrupt };
 
+/**
+ * Decides whether a step runs, is replayed from the checkpoint, or resumes after an interrupt.
+ *
+ * @remarks
+ * A `running` step has an unknown outcome and may have had side effects, so it is
+ * never re-executed unless its `resumePolicy` is `retry`.
+ *
+ * @param checkpoint - Checkpoint holding the saved steps.
+ * @param step - Step about to run.
+ * @param inputHash - Hash of the step input for this run.
+ * @param options - `retryFailed` re-runs steps that ended with a recorded failure.
+ * @returns The resolution for the step.
+ * @throws {@link WorkflowError} with code `WORKFLOW_STEP_MISMATCH` when the saved step used a different agent,
+ * agent revision or input; `WORKFLOW_EXECUTION_ERROR` for a completed step without a result or a failed step that
+ * cannot be retried; `WORKFLOW_INDETERMINATE_STEP` for a `running` step that cannot be replayed safely.
+ */
 export function resolveWorkflowStep(
   checkpoint: WorkflowCheckpointV1,
   step: WorkflowStep,
@@ -181,6 +232,16 @@ export function resolveWorkflowStep(
   );
 }
 
+/**
+ * Records a step as `running` for the given attempt.
+ *
+ * @param checkpoint - Checkpoint to update; it is not mutated.
+ * @param step - Step being started.
+ * @param inputHash - Hash of the step input.
+ * @param attempt - Attempt number, starting at 1.
+ * @param now - Timestamp in epoch milliseconds; defaults to `Date.now()`.
+ * @returns A new checkpoint with the workflow status `running`.
+ */
 export function withWorkflowStepRunning(
   checkpoint: WorkflowCheckpointV1,
   step: WorkflowStep,
@@ -206,9 +267,21 @@ export function withWorkflowStepRunning(
 }
 
 /**
- * Marks a step as waiting for input. The original workflow input is kept on the
- * checkpoint until the workflow ends, because the turn that answers the step
- * carries the answer, not the input the checkpoint was created for.
+ * Marks a step as waiting for input.
+ *
+ * @remarks
+ * The original workflow input is kept on the checkpoint until the workflow
+ * ends, because the turn that answers the step carries the answer, not the
+ * input the checkpoint was created for.
+ *
+ * @param checkpoint - Checkpoint to update; it is not mutated.
+ * @param step - Step that raised the interrupt.
+ * @param inputHash - Hash of the step input.
+ * @param attempt - Attempt number the interrupt belongs to.
+ * @param interrupt - Pending interrupt to persist.
+ * @param workflowInput - Original workflow input to keep for the resume turn.
+ * @param now - Timestamp in epoch milliseconds; defaults to `Date.now()`.
+ * @returns A new checkpoint with the step `waiting`.
  */
 export function withWorkflowStepWaiting(
   checkpoint: WorkflowCheckpointV1,
@@ -238,6 +311,18 @@ export function withWorkflowStepWaiting(
   return { ...updated, input: workflowInput };
 }
 
+/**
+ * Records a step as `completed` with its durable result.
+ *
+ * @remarks
+ * Transient `events` and the `replayed` flag are not persisted.
+ *
+ * @param checkpoint - Checkpoint to update; it is not mutated.
+ * @param result - Step result to store.
+ * @param now - Timestamp in epoch milliseconds; defaults to `Date.now()`.
+ * @returns A new checkpoint.
+ * @throws {@link WorkflowError} with code `WORKFLOW_EXECUTION_ERROR` when the step was never started.
+ */
 export function withWorkflowStepCompleted(
   checkpoint: WorkflowCheckpointV1,
   result: WorkflowStepResult,
@@ -259,6 +344,15 @@ export function withWorkflowStepCompleted(
   });
 }
 
+/**
+ * Records a step as `failed` with its serialized error.
+ *
+ * @param checkpoint - Checkpoint to update; it is not mutated.
+ * @param failure - Failure to store.
+ * @param now - Timestamp in epoch milliseconds; defaults to `Date.now()`.
+ * @returns A new checkpoint.
+ * @throws {@link WorkflowError} with code `WORKFLOW_EXECUTION_ERROR` when the step was never started.
+ */
 export function withWorkflowStepFailed(
   checkpoint: WorkflowCheckpointV1,
   failure: WorkflowStepFailure,
@@ -279,6 +373,17 @@ export function withWorkflowStepFailed(
   });
 }
 
+/**
+ * Marks the whole workflow `completed` and stores its output.
+ *
+ * @remarks
+ * The kept workflow input is dropped because no resume turn can follow.
+ *
+ * @param checkpoint - Checkpoint to update; it is not mutated.
+ * @param output - Final workflow output.
+ * @param now - Timestamp in epoch milliseconds; defaults to `Date.now()`.
+ * @returns A new checkpoint.
+ */
 export function withWorkflowCompleted(
   checkpoint: WorkflowCheckpointV1,
   output: string | Content | undefined,
@@ -295,6 +400,15 @@ export function withWorkflowCompleted(
   };
 }
 
+/**
+ * Marks the whole workflow `failed` or `cancelled` and stores the error.
+ *
+ * @param checkpoint - Checkpoint to update; it is not mutated.
+ * @param error - Serialized error describing the end state.
+ * @param status - Terminal status; defaults to `failed`.
+ * @param now - Timestamp in epoch milliseconds; defaults to `Date.now()`.
+ * @returns A new checkpoint.
+ */
 export function withWorkflowFailed(
   checkpoint: WorkflowCheckpointV1,
   error: WorkflowSerializedError,

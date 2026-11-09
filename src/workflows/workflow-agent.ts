@@ -1,9 +1,3 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import {
   BaseAgent,
   type Event,
@@ -30,10 +24,15 @@ import {
 } from "./runtime/workflow-runtime.js";
 import type { WorkflowWorkspaceConfig } from "./workspace/workspace-adapter.js";
 
+/** Configuration of a {@link WorkflowAgent}. */
 export interface WorkflowAgentConfig extends WorkflowNodeConfig {
+  /** ADK agent name. */
   name: string;
+  /** Agent description. Defaults to the definition's description. */
   description?: string;
+  /** Trusted workflow this agent runs. */
   definition: TrustedWorkflowDefinition;
+  /** Sub-agents the workflow steps may invoke by name. */
   subAgents?: BaseAgent[];
   /** Optional gateway injection for instrumentation and deterministic tests. */
   gateway?: AgentInvocationGateway;
@@ -47,8 +46,26 @@ export interface WorkflowAgentConfig extends WorkflowNodeConfig {
   workspace?: WorkflowWorkspaceConfig;
 }
 
-/** A trusted, versioned workflow that participates in ADK as a BaseAgent. */
+/**
+ * A trusted, versioned workflow that participates in ADK as a BaseAgent.
+ *
+ * @example
+ * ```ts
+ * const agent = new WorkflowAgent({
+ *   name: "pipeline",
+ *   definition: defineWorkflow({
+ *     id: "pipeline",
+ *     version: "1",
+ *     handler: async (ctx) =>
+ *       (await ctx.run({ id: "s1", agentName: "writer", input: ctx.inputText }))
+ *         .output,
+ *   }),
+ *   subAgents: [writer],
+ * });
+ * ```
+ */
 export class WorkflowAgent extends BaseAgent {
+  /** The workflow definition this agent runs. */
   readonly definition: TrustedWorkflowDefinition;
   readonly #gateway: AgentInvocationGateway;
   readonly #checkpointStore?: WorkflowCheckpointStore;
@@ -59,6 +76,10 @@ export class WorkflowAgent extends BaseAgent {
   readonly #workspace?: WorkflowWorkspaceConfig;
   readonly #declaredAgents: ReadonlyMap<string, BaseAgent>;
 
+  /**
+   * @param config - Agent identity, definition, sub-agents and optional
+   * persistence and workspace adapters.
+   */
   constructor(config: WorkflowAgentConfig) {
     const subAgents = config.subAgents ?? [];
     super({

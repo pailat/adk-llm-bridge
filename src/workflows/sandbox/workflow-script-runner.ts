@@ -1,9 +1,3 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import type { Content } from "@google/genai";
 import {
   DEFAULT_WORKFLOW_AGENT_FACTORY_LIMITS,
@@ -35,18 +29,32 @@ import type {
   WorkflowScriptSessionOptions,
 } from "./types.js";
 
+/** Options for {@link runWorkflowScript}. */
 export interface WorkflowScriptExecutionOptions
   extends WorkflowScriptSessionOptions {
+  /** Host capabilities the script reaches through yielded operations. */
   host: WorkflowScriptHost;
-  /** Maximum yielded RPC messages, including emit operations. */
+  /**
+   * Maximum yielded RPC messages, including emit operations.
+   *
+   * @defaultValue Twice the step limit plus one.
+   */
   maxMessages?: number;
-  /** Maximum simultaneously active guest-created agents. */
+  /**
+   * Maximum simultaneously active guest-created agents.
+   *
+   * @defaultValue `DEFAULT_WORKFLOW_AGENT_FACTORY_LIMITS.maxAgents`
+   */
   maxAgents?: number;
 }
 
+/** Outcome of a completed {@link runWorkflowScript} call. */
 export interface WorkflowScriptExecutionResult {
+  /** Final output the script returned, if any. */
   output: string | Content | undefined;
+  /** Number of steps the script requested. */
   steps: number;
+  /** Number of operations the script yielded before returning. */
   messages: number;
 }
 
@@ -62,12 +70,39 @@ function hasOnlyKeys(
   return Object.keys(value).every((key) => keys.has(key));
 }
 
+/**
+ * Content as host agents read it: an optional string `role` and `parts` that
+ * are all objects. ADK dereferences every part, so a `null` or scalar part
+ * would fail inside the host instead of as an invalid script.
+ */
 function isContent(value: unknown): value is Content {
-  return isObject(value) && Array.isArray(value.parts);
+  return (
+    isObject(value) &&
+    (value.role === undefined || typeof value.role === "string") &&
+    Array.isArray(value.parts) &&
+    value.parts.every(isObject)
+  );
 }
 
+const STEP_KEYS = [
+  "id",
+  "agentName",
+  "agentRevision",
+  "input",
+  "writePaths",
+  "retry",
+  "resumePolicy",
+  "metadata",
+] as const;
+const RETRY_KEYS = [
+  "maxAttempts",
+  "delayMs",
+  "backoffMultiplier",
+  "maxDelayMs",
+] as const;
+
 function isStep(value: unknown): value is WorkflowStep {
-  if (!isObject(value)) {
+  if (!isObject(value) || !hasOnlyKeys(value, STEP_KEYS)) {
     return false;
   }
   return (
@@ -77,7 +112,28 @@ function isStep(value: unknown): value is WorkflowStep {
     value.agentName.length > 0 &&
     (value.agentRevision === undefined ||
       isAgentRevision(value.agentRevision)) &&
-    (typeof value.input === "string" || isContent(value.input))
+    (typeof value.input === "string" || isContent(value.input)) &&
+    (value.writePaths === undefined ||
+      (Array.isArray(value.writePaths) &&
+        value.writePaths.every((path) => typeof path === "string"))) &&
+    (value.retry === undefined || isRetryPolicy(value.retry)) &&
+    (value.resumePolicy === undefined ||
+      value.resumePolicy === "fail" ||
+      value.resumePolicy === "retry") &&
+    (value.metadata === undefined || isObject(value.metadata))
+  );
+}
+
+/** Shape only; the runtime enforces the bounds of each field. */
+function isRetryPolicy(value: unknown): boolean {
+  return (
+    isObject(value) &&
+    hasOnlyKeys(value, RETRY_KEYS) &&
+    RETRY_KEYS.every(
+      (key) =>
+        value[key] === undefined ||
+        (typeof value[key] === "number" && Number.isFinite(value[key])),
+    )
   );
 }
 
@@ -92,7 +148,7 @@ function isAgentRevision(value: unknown): value is string {
 }
 
 function isParallelOptions(value: unknown): value is WorkflowParallelOptions {
-  if (!isObject(value)) {
+  if (!isObject(value) || !hasOnlyKeys(value, ["concurrency", "failureMode"])) {
     return false;
   }
   return (
@@ -108,6 +164,7 @@ function isParallelOptions(value: unknown): value is WorkflowParallelOptions {
 function isUserEvent(value: unknown): value is WorkflowUserEvent {
   return (
     isObject(value) &&
+    hasOnlyKeys(value, ["type", "name", "data"]) &&
     value.type === "custom" &&
     typeof value.name === "string" &&
     value.name.length > 0
@@ -169,6 +226,14 @@ function malformed(message: string): never {
 function decodeTurn(
   turn: WorkflowScriptGeneratorTurn,
 ): WorkflowScriptOperation {
+  // The turn comes from guest-controlled JSON; check its shape first.
+  if (
+    !isObject(turn) ||
+    !hasOnlyKeys(turn, ["done", "value"]) ||
+    typeof turn.done !== "boolean"
+  ) {
+    return malformed("Workflow script returned a malformed generator turn");
+  }
   if (turn.done) {
     return {
       protocol: WORKFLOW_SCRIPT_PROTOCOL,
@@ -189,12 +254,22 @@ function decodeTurn(
   }
   switch (value.op) {
     case "run":
-      if (!isStep(value.step)) {
+      if (
+        !hasOnlyKeys(value, ["protocol", "version", "op", "step"]) ||
+        !isStep(value.step)
+      ) {
         return malformed("Workflow script yielded a malformed run operation");
       }
       return value as unknown as WorkflowScriptOperation;
     case "parallel":
       if (
+        !hasOnlyKeys(value, [
+          "protocol",
+          "version",
+          "op",
+          "steps",
+          "options",
+        ]) ||
         !Array.isArray(value.steps) ||
         !value.steps.every(isStep) ||
         (value.options !== undefined && !isParallelOptions(value.options))
@@ -205,7 +280,10 @@ function decodeTurn(
       }
       return value as unknown as WorkflowScriptOperation;
     case "emit":
-      if (!isUserEvent(value.event)) {
+      if (
+        !hasOnlyKeys(value, ["protocol", "version", "op", "event"]) ||
+        !isUserEvent(value.event)
+      ) {
         return malformed("Workflow script yielded a malformed emit operation");
       }
       return value as unknown as WorkflowScriptOperation;
@@ -436,7 +514,21 @@ function wrapHostError(error: unknown): never {
 
 /**
  * Drives a synchronous guest generator while awaiting all ADK work on the host.
- * No host callback or promise is installed inside the QuickJS VM.
+ *
+ * @remarks
+ * No host callback or promise is installed inside the QuickJS VM. Every
+ * yielded operation is validated against the protocol before the host sees it,
+ * and host results are projected to the stable outcome contract before they
+ * are sent back, so the guest never receives raw ADK event history.
+ *
+ * @param runtime - Script runtime that creates the isolated session.
+ * @param options - Script source, input, host capabilities and limits.
+ * @returns The final output with the step and message counts.
+ * @throws {@link WorkflowError} with code `WORKFLOW_DEFINITION_INVALID` when `maxMessages` or `maxAgents` is not a positive safe integer.
+ * @throws {@link WorkflowError} with code `WORKFLOW_SCRIPT_INVALID` when the script yields a malformed operation or final output.
+ * @throws {@link WorkflowError} with code `WORKFLOW_LIMIT_EXCEEDED` when the message, step or dynamic agent limit is exceeded.
+ * @throws {@link WorkflowError} with code `WORKFLOW_ABORTED` when the signal aborts.
+ * @throws {@link WorkflowError} with code `WORKFLOW_EXECUTION_ERROR` when a host operation fails or returns a malformed result.
  */
 export async function runWorkflowScript(
   runtime: WorkflowScriptRuntime,

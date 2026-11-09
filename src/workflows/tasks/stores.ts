@@ -1,9 +1,4 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
+import { isWorkflowIdentifier } from "../internal/identifiers.js";
 import {
   type WorkflowTaskAppendFromClaimCommand,
   type WorkflowTaskCancelExpiredClaimRequest,
@@ -30,13 +25,21 @@ import {
 } from "./contracts.js";
 import { immutableTaskJson } from "./json.js";
 
+/** Default page size for task listings. */
 export const DEFAULT_WORKFLOW_TASK_LIST_LIMIT = 50;
+/** Largest accepted page size for task listings. */
 export const MAX_WORKFLOW_TASK_LIST_LIMIT = 500;
+/** Default page size for mailbox reads. */
 export const DEFAULT_WORKFLOW_TASK_MESSAGE_READ_LIMIT = 100;
+/** Largest accepted page size for mailbox reads. */
 export const MAX_WORKFLOW_TASK_MESSAGE_READ_LIMIT = 1_000;
+/** Default maximum number of messages per task mailbox. */
 export const DEFAULT_WORKFLOW_TASK_MAILBOX_CAPACITY = 10_000;
+/** Largest accepted mailbox capacity. */
 export const MAX_WORKFLOW_TASK_MAILBOX_CAPACITY = 100_000;
+/** Default maximum number of idempotency entries kept by the command store. */
 export const DEFAULT_WORKFLOW_TASK_COMMAND_LEDGER_CAPACITY = 10_000;
+/** Largest accepted command ledger capacity. */
 export const MAX_WORKFLOW_TASK_COMMAND_LEDGER_CAPACITY = 100_000;
 
 const TASK_STATUSES = new Set<WorkflowTaskStatus>([
@@ -51,16 +54,37 @@ const TASK_STATUSES = new Set<WorkflowTaskStatus>([
 const IN_MEMORY_TASK_ATOMIC = Symbol("workflow-task-atomic");
 const IN_MEMORY_MESSAGE_APPEND = Symbol("workflow-message-append");
 
+/**
+ * Durable task record storage with revision-based compare-and-set.
+ *
+ * @remarks
+ * Writers never overwrite blindly: `compareAndSet` succeeds only when the
+ * stored `revision` equals the expected one.
+ */
 export interface WorkflowTaskStore {
+  /**
+   * Stores a new record (revision 1).
+   *
+   * @throws {@link WorkflowTaskControlError} with code `WORKFLOW_TASK_DUPLICATE`
+   * when the task already exists.
+   */
   create(record: WorkflowTaskRecord): Promise<WorkflowTaskRecord>;
+  /** Reads a record, or `undefined` when it does not exist. */
   get(
     executionId: string,
     taskId: string,
   ): Promise<WorkflowTaskRecord | undefined>;
+  /**
+   * Replaces a record if its stored revision equals `expectedRevision`.
+   *
+   * @throws {@link WorkflowTaskControlError} with code `WORKFLOW_TASK_CONFLICT`
+   * when the stored revision differs.
+   */
   compareAndSet(
     record: WorkflowTaskRecord,
     expectedRevision: number,
   ): Promise<WorkflowTaskRecord>;
+  /** Lists the records of an execution in creation order, one page at a time. */
   list(request: WorkflowTaskListRequest): Promise<WorkflowTaskListResult>;
 }
 
@@ -73,10 +97,23 @@ export interface WorkflowTaskStore {
  * execution or effects.
  */
 export interface WorkflowTaskClaimStore extends WorkflowTaskStore {
+  /**
+   * Atomically claims a queued task, assigning the next fencing token.
+   *
+   * @throws {@link WorkflowTaskControlError} with code `WORKFLOW_TASK_CLAIM_CONFLICT`
+   * when the task is already claimed.
+   */
   claim(request: WorkflowTaskClaimRequest): Promise<WorkflowTaskRecord>;
+  /**
+   * Extends the lease of the current claim.
+   *
+   * @throws {@link WorkflowTaskControlError} with code `WORKFLOW_TASK_LEASE_EXPIRED`
+   * when the lease already expired.
+   */
   renewClaim(
     request: WorkflowTaskRenewClaimRequest,
   ): Promise<WorkflowTaskRecord>;
+  /** Writes a transition only if the claim and revision still match. */
   compareAndSetClaimed(
     request: WorkflowTaskClaimedTransitionRequest,
   ): Promise<WorkflowTaskRecord>;
@@ -87,6 +124,7 @@ export interface WorkflowTaskClaimStore extends WorkflowTaskStore {
   requestCancellation(
     request: WorkflowTaskCancellationRequest,
   ): Promise<WorkflowTaskRecord>;
+  /** Returns a running task with an expired lease to the queue. */
   requeueExpired(
     request: WorkflowTaskRequeueExpiredRequest,
   ): Promise<WorkflowTaskRecord>;
@@ -102,6 +140,12 @@ export interface WorkflowTaskClaimStore extends WorkflowTaskStore {
 
 /** Optional long-poll capability; adapters may use ordinary polling instead. */
 export interface WorkflowTaskRevisionWaitStore extends WorkflowTaskStore {
+  /**
+   * Resolves with the record once its revision exceeds `afterRevision`.
+   *
+   * @throws {@link WorkflowTaskControlError} with code `WORKFLOW_TASK_WAIT_ABORTED`
+   * when `signal` aborts the wait.
+   */
   waitForRevision(
     executionId: string,
     taskId: string,
@@ -110,13 +154,27 @@ export interface WorkflowTaskRevisionWaitStore extends WorkflowTaskStore {
   ): Promise<WorkflowTaskRecord>;
 }
 
+/** Append-only mailbox storage with ordered reads and abortable waits. */
 export interface WorkflowTaskMessageStore {
+  /**
+   * Appends a message and assigns the next sequence number.
+   *
+   * @throws {@link WorkflowTaskControlError} with code `WORKFLOW_TASK_MAILBOX_FULL`
+   * when the mailbox is at capacity.
+   */
   append(
     request: WorkflowTaskMessageAppendRequest & { sentAt: number },
   ): Promise<WorkflowTaskMessage>;
+  /** Reads messages after the cursor without waiting. */
   read(
     request: WorkflowTaskMessageReadRequest,
   ): Promise<WorkflowTaskMessageReadResult>;
+  /**
+   * Waits until a message exists after the cursor, then reads it.
+   *
+   * @throws {@link WorkflowTaskControlError} with code `WORKFLOW_TASK_WAIT_ABORTED`
+   * when `signal` aborts the wait.
+   */
   wait(
     request: WorkflowTaskMessageReadRequest,
     signal?: AbortSignal,
@@ -131,15 +189,26 @@ export interface WorkflowTaskMessageStore {
  * in controller code alone leaves an authority-to-command TOCTOU window.
  */
 export interface WorkflowTaskCommandStore {
+  /**
+   * Creates a root task; repeating the same `operationId` returns the original record.
+   */
   createRoot(
     command: WorkflowTaskCreateRootCommand,
   ): Promise<WorkflowTaskRecord>;
+  /**
+   * Creates a child task under the claimed parent.
+   *
+   * @throws {@link WorkflowTaskControlError} with code `WORKFLOW_TASK_DELEGATION_LIMIT`
+   * when the parent exhausted its child budget.
+   */
   createChildClaimed(
     command: WorkflowTaskCreateChildCommand,
   ): Promise<WorkflowTaskRecord>;
+  /** Appends a mailbox message on behalf of the claimed parent. */
   appendFromClaim(
     command: WorkflowTaskAppendFromClaimCommand,
   ): Promise<WorkflowTaskMessage>;
+  /** Requests cancellation of a target task on behalf of the claimed parent. */
   requestCancellationClaimed(
     command: WorkflowTaskCancelFromClaimCommand,
   ): Promise<WorkflowTaskRecord>;
@@ -157,7 +226,13 @@ interface InMemoryTaskAtomicAccess {
   }): WorkflowTaskRecord;
 }
 
+/** Options for {@link InMemoryWorkflowTaskStore}. */
 export interface InMemoryWorkflowTaskStoreConfig {
+  /**
+   * Clock returning epoch milliseconds.
+   *
+   * @defaultValue `Date.now`
+   */
   now?: () => number;
 }
 
@@ -179,16 +254,18 @@ export class InMemoryWorkflowTaskStore
     this.#now = config.now ?? Date.now;
   }
 
+  /** {@inheritDoc WorkflowTaskStore.create} */
   async create(record: WorkflowTaskRecord): Promise<WorkflowTaskRecord> {
     return this.#create(record);
   }
 
   #create(record: WorkflowTaskRecord): WorkflowTaskRecord {
-    validateTaskRecord(record);
-    if (record.revision !== 1) invalid("Initial task revision must be 1");
-    const key = taskKey(record.executionId, record.taskId);
-    if (this.#records.has(key)) duplicate(record.executionId, record.taskId);
-    const snapshot = normalizedTaskRecordSnapshot(record);
+    const snapshot = validatedTaskRecordSnapshot(record);
+    if (snapshot.revision !== 1) invalid("Initial task revision must be 1");
+    const key = taskKey(snapshot.executionId, snapshot.taskId);
+    if (this.#records.has(key)) {
+      duplicate(snapshot.executionId, snapshot.taskId);
+    }
     this.#records.set(key, snapshot);
     this.#order.push(key);
     this.#wakeRevisionWaiters(key, snapshot);
@@ -264,6 +341,7 @@ export class InMemoryWorkflowTaskStore
     });
   }
 
+  /** {@inheritDoc WorkflowTaskStore.get} */
   async get(
     executionId: string,
     taskId: string,
@@ -272,12 +350,12 @@ export class InMemoryWorkflowTaskStore
     return this.#records.get(taskKey(executionId, taskId));
   }
 
+  /** {@inheritDoc WorkflowTaskStore.compareAndSet} */
   async compareAndSet(
     record: WorkflowTaskRecord,
     expectedRevision: number,
   ): Promise<WorkflowTaskRecord> {
-    validateTaskRecord(record);
-    const replacement = normalizedTaskRecordSnapshot(record);
+    const replacement = validatedTaskRecordSnapshot(record);
     if (!Number.isSafeInteger(expectedRevision) || expectedRevision <= 0) {
       invalid("Expected task revision must be a positive integer");
     }
@@ -314,6 +392,7 @@ export class InMemoryWorkflowTaskStore
     return snapshot;
   }
 
+  /** {@inheritDoc WorkflowTaskClaimStore.claim} */
   async claim(request: WorkflowTaskClaimRequest): Promise<WorkflowTaskRecord> {
     validateClaimRequest(request);
     const key = taskKey(request.executionId, request.taskId);
@@ -357,6 +436,7 @@ export class InMemoryWorkflowTaskStore
     return snapshot;
   }
 
+  /** {@inheritDoc WorkflowTaskClaimStore.renewClaim} */
   async renewClaim(
     request: WorkflowTaskRenewClaimRequest,
   ): Promise<WorkflowTaskRecord> {
@@ -385,13 +465,13 @@ export class InMemoryWorkflowTaskStore
     return snapshot;
   }
 
+  /** {@inheritDoc WorkflowTaskClaimStore.compareAndSetClaimed} */
   async compareAndSetClaimed(
     request: WorkflowTaskClaimedTransitionRequest,
   ): Promise<WorkflowTaskRecord> {
     validateClaimGuard(request.claim);
     validateExpectedRevision(request.expectedRevision);
-    validateTaskRecord(request.record);
-    const replacement = normalizedTaskRecordSnapshot(request.record);
+    const replacement = validatedTaskRecordSnapshot(request.record);
     const key = taskKey(replacement.executionId, replacement.taskId);
     if (
       request.claim.executionId !== replacement.executionId ||
@@ -421,6 +501,7 @@ export class InMemoryWorkflowTaskStore
     return snapshot;
   }
 
+  /** {@inheritDoc WorkflowTaskClaimStore.requestCancellation} */
   async requestCancellation(
     request: WorkflowTaskCancellationRequest,
   ): Promise<WorkflowTaskRecord> {
@@ -457,6 +538,7 @@ export class InMemoryWorkflowTaskStore
     return snapshot;
   }
 
+  /** {@inheritDoc WorkflowTaskClaimStore.requeueExpired} */
   async requeueExpired(
     request: WorkflowTaskRequeueExpiredRequest,
   ): Promise<WorkflowTaskRecord> {
@@ -492,6 +574,7 @@ export class InMemoryWorkflowTaskStore
     return snapshot;
   }
 
+  /** {@inheritDoc WorkflowTaskClaimStore.cancelExpiredClaim} */
   async cancelExpiredClaim(
     request: WorkflowTaskCancelExpiredClaimRequest,
   ): Promise<WorkflowTaskRecord> {
@@ -526,6 +609,7 @@ export class InMemoryWorkflowTaskStore
     return snapshot;
   }
 
+  /** {@inheritDoc WorkflowTaskRevisionWaitStore.waitForRevision} */
   async waitForRevision(
     executionId: string,
     taskId: string,
@@ -592,6 +676,7 @@ export class InMemoryWorkflowTaskStore
     waiter.signal?.removeEventListener("abort", waiter.onAbort);
   }
 
+  /** {@inheritDoc WorkflowTaskStore.list} */
   async list(
     request: WorkflowTaskListRequest,
   ): Promise<WorkflowTaskListResult> {
@@ -624,7 +709,13 @@ export class InMemoryWorkflowTaskStore
   }
 }
 
+/** Options for {@link InMemoryWorkflowTaskMessageStore}. */
 export interface InMemoryWorkflowTaskMessageStoreConfig {
+  /**
+   * Maximum messages per task mailbox.
+   *
+   * @defaultValue 10000, at most 100000
+   */
   capacity?: number;
 }
 
@@ -645,6 +736,7 @@ export class InMemoryWorkflowTaskMessageStore
     );
   }
 
+  /** {@inheritDoc WorkflowTaskMessageStore.append} */
   async append(
     request: WorkflowTaskMessageAppendRequest & { sentAt: number },
   ): Promise<WorkflowTaskMessage> {
@@ -652,8 +744,10 @@ export class InMemoryWorkflowTaskMessageStore
   }
 
   [IN_MEMORY_MESSAGE_APPEND](
-    request: WorkflowTaskMessageAppendRequest & { sentAt: number },
+    input: WorkflowTaskMessageAppendRequest & { sentAt: number },
   ): WorkflowTaskMessage {
+    // Copy once, then validate and store only the copy.
+    const request = immutableTaskJson(input);
     validateMessageAppend(request);
     const key = taskKey(request.executionId, request.taskId);
     const stream = this.#streams.get(key) ?? [];
@@ -678,12 +772,14 @@ export class InMemoryWorkflowTaskMessageStore
     return record;
   }
 
+  /** {@inheritDoc WorkflowTaskMessageStore.read} */
   async read(
     request: WorkflowTaskMessageReadRequest,
   ): Promise<WorkflowTaskMessageReadResult> {
     return this.#readSnapshot(request);
   }
 
+  /** {@inheritDoc WorkflowTaskMessageStore.wait} */
   async wait(
     request: WorkflowTaskMessageReadRequest,
     signal?: AbortSignal,
@@ -768,9 +864,17 @@ export class InMemoryWorkflowTaskMessageStore
   }
 }
 
+/** Options for {@link InMemoryWorkflowTaskCommandStore}. */
 export interface InMemoryWorkflowTaskCommandStoreConfig {
+  /** Task store whose records the commands mutate atomically. */
   taskStore: InMemoryWorkflowTaskStore;
+  /** Mailbox store that receives appended messages. */
   messageStore: InMemoryWorkflowTaskMessageStore;
+  /**
+   * Maximum retained idempotency entries.
+   *
+   * @defaultValue 10000, at most 100000
+   */
   ledgerCapacity?: number;
 }
 
@@ -803,6 +907,7 @@ export class InMemoryWorkflowTaskCommandStore
     );
   }
 
+  /** {@inheritDoc WorkflowTaskCommandStore.createRoot} */
   async createRoot(
     command: WorkflowTaskCreateRootCommand,
   ): Promise<WorkflowTaskRecord> {
@@ -831,6 +936,7 @@ export class InMemoryWorkflowTaskCommandStore
     );
   }
 
+  /** {@inheritDoc WorkflowTaskCommandStore.createChildClaimed} */
   async createChildClaimed(
     command: WorkflowTaskCreateChildCommand,
   ): Promise<WorkflowTaskRecord> {
@@ -874,6 +980,7 @@ export class InMemoryWorkflowTaskCommandStore
     );
   }
 
+  /** {@inheritDoc WorkflowTaskCommandStore.appendFromClaim} */
   async appendFromClaim(
     command: WorkflowTaskAppendFromClaimCommand,
   ): Promise<WorkflowTaskMessage> {
@@ -897,6 +1004,7 @@ export class InMemoryWorkflowTaskCommandStore
     );
   }
 
+  /** {@inheritDoc WorkflowTaskCommandStore.requestCancellationClaimed} */
   async requestCancellationClaimed(
     command: WorkflowTaskCancelFromClaimCommand,
   ): Promise<WorkflowTaskRecord> {
@@ -956,6 +1064,14 @@ interface TaskRevisionWaiter {
   onAbort(): void;
 }
 
+/**
+ * Validates that a value is a task handle with well-formed identifiers.
+ *
+ * @param handle - Candidate handle.
+ * @throws {@link WorkflowTaskControlError} with code `WORKFLOW_TASK_INVALID_REQUEST`
+ * when `handle` is not an object or an identifier is invalid.
+ * @internal
+ */
 export function validateTaskHandle(handle: {
   executionId: string;
   taskId: string;
@@ -967,13 +1083,35 @@ export function validateTaskHandle(handle: {
   validateIdentifier(handle.taskId, "taskId");
 }
 
+/**
+ * Validates an execution or task identifier.
+ *
+ * @remarks
+ * Identifiers start with an alphanumeric character, then allow letters, digits
+ * and `._:-`, up to 256 characters.
+ *
+ * @param value - Identifier to check.
+ * @param field - Field name used in the error message.
+ * @throws {@link WorkflowTaskControlError} with code `WORKFLOW_TASK_INVALID_REQUEST`
+ * when `value` is not a valid identifier.
+ * @internal
+ */
 export function validateIdentifier(value: string, field: string): void {
-  if (
-    typeof value !== "string" ||
-    !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u.test(value)
-  ) {
+  if (!isWorkflowIdentifier(value, "record")) {
     invalid(`Workflow task ${field} is invalid`);
   }
+}
+
+/**
+ * Copies the caller's record once, validates the copy and normalizes it, so
+ * a getter cannot pass validation with one value and be stored with another.
+ */
+function validatedTaskRecordSnapshot(
+  record: WorkflowTaskRecord,
+): WorkflowTaskRecord {
+  const snapshot = immutableTaskJson(record);
+  validateTaskRecord(snapshot);
+  return normalizedTaskRecordSnapshot(snapshot);
 }
 
 function normalizedTaskRecordSnapshot(
@@ -1494,6 +1632,11 @@ function positiveSafeInteger(value: number): boolean {
   return Number.isSafeInteger(value) && value > 0;
 }
 
+/**
+ * Returns `true` for `completed`, `failed` and `cancelled`.
+ *
+ * @internal
+ */
 export function isTerminalTaskStatus(status: WorkflowTaskStatus): boolean {
   return (
     status === "completed" || status === "failed" || status === "cancelled"

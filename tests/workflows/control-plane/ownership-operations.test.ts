@@ -1,9 +1,3 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import { describe, expect, test } from "bun:test";
 import {
   WORKFLOW_CONTROL_PROTOCOL,
@@ -85,7 +79,7 @@ describe("WorkflowControlPlane orchestration operations", () => {
         },
         { actor: forged as never },
       ),
-    ).rejects.toMatchObject({ code: "WORKFLOW_CONTROL_INVALID_REQUEST" });
+    ).rejects.toMatchObject({ code: "WORKFLOW_CONTROL_UNAUTHORIZED" });
 
     await expect(
       control.dispatch({

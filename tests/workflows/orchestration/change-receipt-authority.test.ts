@@ -1,9 +1,3 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import { describe, expect, test } from "bun:test";
 import { WorkflowActorContext } from "../../../src/workflows/orchestration/authorization.js";
 import { WorkflowLiveChangeReceiptAuthority } from "../../../src/workflows/orchestration/change-receipt-authority.js";

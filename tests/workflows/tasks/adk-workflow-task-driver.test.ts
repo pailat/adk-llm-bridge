@@ -1,9 +1,3 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import { describe, expect, test } from "bun:test";
 import {
   BaseAgent,
@@ -17,7 +11,10 @@ import {
   AdkWorkflowTaskDriver,
   AdkWorkflowTaskDriverError,
 } from "../../../src/workflows/tasks/adk-workflow-task-driver.js";
-import type { WorkflowTaskAttemptAuthorityRequest } from "../../../src/workflows/tasks/authority.js";
+import type {
+  WorkflowTaskAttemptAuthorityRequest,
+  WorkflowTaskAuthorityPort,
+} from "../../../src/workflows/tasks/authority.js";
 import type {
   WorkflowTaskDriverRequest,
   WorkflowTaskJsonValue,
@@ -29,7 +26,7 @@ class TestAgent extends BaseAgent {
 
   constructor(
     name = "worker",
-    private readonly run: (
+    private readonly respond: (
       context: InvocationContext,
     ) => Promise<string> = async () => "done",
   ) {
@@ -38,7 +35,7 @@ class TestAgent extends BaseAgent {
 
   protected async *runAsyncImpl(context: InvocationContext) {
     this.context = context;
-    const output = await this.run(context);
+    const output = await this.respond(context);
     yield createEvent({
       invocationId: context.invocationId,
       author: this.name,
@@ -152,8 +149,8 @@ function attemptAuthority(
   validate: (
     request: WorkflowTaskAttemptAuthorityRequest,
   ) => void | Promise<void> = () => undefined,
-) {
-  return { validateAttempt: validate };
+): Pick<WorkflowTaskAuthorityPort, "validateAttempt"> {
+  return { validateAttempt: async (request) => validate(request) };
 }
 
 describe("AdkWorkflowTaskDriver", () => {
@@ -186,7 +183,11 @@ describe("AdkWorkflowTaskDriver", () => {
           taskId: "parent-1",
           payload: { kind: "ready" },
         });
-        return { release: () => lifecycle.push("release-binder") };
+        return {
+          release: () => {
+            lifecycle.push("release-binder");
+          },
+        };
       },
     };
     const driver = new AdkWorkflowTaskDriver({
@@ -194,7 +195,9 @@ describe("AdkWorkflowTaskDriver", () => {
       contextProvider: {
         acquire: () => ({
           context,
-          release: () => lifecycle.push("release-context"),
+          release: () => {
+            lifecycle.push("release-context");
+          },
         }),
       },
       attemptAuthority: attemptAuthority((validation) => {

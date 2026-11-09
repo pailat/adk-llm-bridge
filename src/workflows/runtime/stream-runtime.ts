@@ -1,13 +1,11 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import { AsyncQueue, type Event } from "@google/adk";
 import { WorkflowError } from "../contracts.js";
 
-/** Handles given to the runtime factory by {@link streamWorkflowRuntime}. */
+/**
+ * Handles given to the runtime factory by {@link streamWorkflowRuntime}.
+ *
+ * @internal
+ */
 export interface WorkflowRuntimeStreamHandles {
   /** Forwards one runtime event to the consumer of the stream. */
   push: (event: Event) => void;
@@ -24,6 +22,8 @@ export interface WorkflowRuntimeStreamHandles {
  * therefore aborts the runtime and waits for it to settle, so no LLM call or
  * checkpoint write is left running unattended. The wait is unbounded if the
  * runtime ignores the abort; ADK's node runner does not await `return()`.
+ *
+ * @internal
  */
 export async function* streamWorkflowRuntime(
   createRuntime: (handles: WorkflowRuntimeStreamHandles) => {
@@ -73,10 +73,13 @@ export async function* streamWorkflowRuntime(
 /**
  * Executions of one agent instance that have not settled yet, so a re-entry
  * (ADK node retry with the same invocation id) can wait for the previous one.
+ *
+ * @internal
  */
 export class ActiveExecutions {
   readonly #running = new Set<Promise<unknown>>();
 
+  /** Registers an execution until it settles, whether it resolves or rejects. */
   track(execution: Promise<unknown>): void {
     const settled = execution.then(
       () => undefined,
@@ -86,6 +89,7 @@ export class ActiveExecutions {
     void settled.then(() => this.#running.delete(settled));
   }
 
+  /** Resolves once every tracked execution, including ones added while waiting, has settled. */
   async settled(): Promise<void> {
     while (this.#running.size > 0) {
       await Promise.all([...this.#running]);
