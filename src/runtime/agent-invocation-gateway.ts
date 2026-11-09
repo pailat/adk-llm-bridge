@@ -22,13 +22,45 @@ import {
 import type { Content } from "@google/genai";
 import { inheritSessionPermissions } from "../agents/permissions/inheritance.js";
 
+/**
+ * Aggregate model usage of one delegated agent run.
+ *
+ * @remarks
+ * The sum of `usageMetadata` over the run's non-partial events (nested agent
+ * and workflow events included, since the gateway sees them) plus the function
+ * calls requested on those same events. Values are summed as each runtime
+ * reports them, so any double counting in a runtime's report carries into the
+ * totals. Cost is not computed: the gateway has no price source.
+ */
+export interface AgentInvocationUsage {
+  /** Summed `promptTokenCount`. */
+  promptTokens: number;
+  /** Summed `candidatesTokenCount`. */
+  completionTokens: number;
+  /** Summed `totalTokenCount` (prompt + completion when absent). */
+  totalTokens: number;
+  /**
+   * Summed `cachedContentTokenCount`. Cached tokens are part of
+   * `promptTokens`, not added on top of it.
+   */
+  cachedTokens: number;
+  /** Function calls requested on non-partial events. */
+  toolCalls: number;
+  /**
+   * Events that carried `usageMetadata`: one per model response for an
+   * `LlmAgent`, one per run for an `ExternalAgent` that ends with a final
+   * response (it reports usage once, on that event).
+   */
+  llmCalls: number;
+}
+
 /** Counters describing one delegated agent run. */
 export interface AgentInvocationExecutionSummary {
   /** Non-partial and partial events the child emitted. */
   events: number;
   /** Non-partial events that carried visible text. */
   textEvents: number;
-  /** Function calls the child requested. */
+  /** Function calls the child requested on non-partial events. */
   toolCalls: number;
   /** Errors observed during the run. */
   errors: number;
@@ -110,6 +142,8 @@ export interface AgentInvocationResult {
   events: readonly Event[];
   /** Counters for the run. */
   summary: AgentInvocationExecutionSummary;
+  /** Aggregate token and tool-call usage of the run; see {@link AgentInvocationUsage}. */
+  usage: AgentInvocationUsage;
   /** Merged state delta of the non-partial events; absent when empty. */
   stateDelta?: Record<string, unknown>;
   /** Failure message; absent on success. */
@@ -324,6 +358,7 @@ export class AgentInvocationGateway {
     let finalText: string | undefined;
     let textEvents = 0;
     let toolCalls = 0;
+    const usage: AgentInvocationUsage = emptyUsage();
     let errors = 0;
     let error: string | undefined;
     let errorKind: AgentInvocationErrorKind | undefined;
@@ -390,7 +425,11 @@ export class AgentInvocationGateway {
               fallbackOutput.push(fallback);
             }
           }
-          toolCalls += getFunctionCalls(persisted).length;
+          if (!persisted.partial) {
+            // A streamed function call is repeated on the final event.
+            toolCalls += getFunctionCalls(persisted).length;
+            addUsage(usage, persisted);
+          }
           if (persisted.errorMessage) {
             errors++;
             error = persisted.errorMessage;
@@ -436,6 +475,7 @@ export class AgentInvocationGateway {
         errors,
         durationMs: Date.now() - startedAt,
       },
+      usage: { ...usage, toolCalls },
       ...(Object.keys(stateDelta).length > 0 ? { stateDelta } : {}),
       ...(error ? { error } : {}),
       ...(error && errorKind ? { errorKind } : {}),
@@ -856,6 +896,7 @@ function failedResult(
       errors: 1,
       durationMs: Date.now() - startedAt,
     },
+    usage: emptyUsage(),
     error,
     errorKind,
   };
@@ -917,4 +958,27 @@ function stringifyUsefulOutput(value: unknown): string | undefined {
   } catch {
     return String(value);
   }
+}
+
+function emptyUsage(): AgentInvocationUsage {
+  return {
+    promptTokens: 0,
+    completionTokens: 0,
+    totalTokens: 0,
+    cachedTokens: 0,
+    toolCalls: 0,
+    llmCalls: 0,
+  };
+}
+
+function addUsage(usage: AgentInvocationUsage, event: Event): void {
+  const meta = event.usageMetadata;
+  if (!meta) return;
+  const prompt = meta.promptTokenCount ?? 0;
+  const completion = meta.candidatesTokenCount ?? 0;
+  usage.promptTokens += prompt;
+  usage.completionTokens += completion;
+  usage.totalTokens += meta.totalTokenCount ?? prompt + completion;
+  usage.cachedTokens += meta.cachedContentTokenCount ?? 0;
+  usage.llmCalls++;
 }

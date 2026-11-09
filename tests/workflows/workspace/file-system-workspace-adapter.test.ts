@@ -342,10 +342,27 @@ describe("FileSystemWorkspaceAdapter", () => {
 
   test("collects only valid workspace tombstones while offline", async () => {
     const directory = await stateDirectory();
+    const workspaceDirectory = workspaceDirectoryFor(directory);
+    // Recovering a dead owner's lock leaves a tombstone.
+    const child = spawn(process.execPath, ["-e", "process.exit(0)"], {
+      stdio: "ignore",
+    });
+    const deadPid = child.pid;
+    if (deadPid === undefined) {
+      throw new Error("Failed to start dead-owner fixture process");
+    }
+    await once(child, "exit");
+    await mkdir(join(workspaceDirectory, "lock"), {
+      recursive: true,
+      mode: 0o700,
+    });
+    await writeFile(
+      join(workspaceDirectory, "lock", "owner.json"),
+      JSON.stringify({ token: "dead", pid: deadPid, acquiredAt: Date.now() }),
+    );
     const instance = adapter(directory);
     const lease = await instance.acquire(request("agent-a", ["src"]));
     expect(await lease.release()).toBe(true);
-    const workspaceDirectory = workspaceDirectoryFor(directory);
     const unknownPath = join(workspaceDirectory, "keep.unknown");
     await writeFile(unknownPath, "keep", "utf8");
 
@@ -354,7 +371,7 @@ describe("FileSystemWorkspaceAdapter", () => {
       confirmNoActiveWriters: true,
     });
 
-    expect(result.removedTombstones).toBeGreaterThan(0);
+    expect(result.removedTombstones).toBe(1);
     expect(await Bun.file(unknownPath).text()).toBe("keep");
     expect(
       (await readdir(workspaceDirectory)).filter((entry) =>

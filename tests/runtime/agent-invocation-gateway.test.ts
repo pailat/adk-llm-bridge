@@ -29,6 +29,7 @@ import {
   setInheritedPermissions,
 } from "../../src/agents/permissions/inheritance.js";
 import { AgentInvocationGateway } from "../../src/runtime/agent-invocation-gateway.js";
+import { withDeadline } from "../agents/helpers.js";
 
 class CaptureAgent extends BaseAgent {
   context?: InvocationContext;
@@ -674,8 +675,14 @@ describe("AgentInvocationGateway", () => {
   describe("cancellation and error classification", () => {
     class StallAgent extends BaseAgent {
       returned = false;
+      /** Resolves once the agent is parked after its first event. */
+      readonly stalled: Promise<void>;
+      #markStalled!: () => void;
       constructor() {
         super({ name: "stall" });
+        this.stalled = new Promise((resolve) => {
+          this.#markStalled = resolve;
+        });
       }
       protected async *runAsyncImpl() {
         try {
@@ -684,6 +691,7 @@ describe("AgentInvocationGateway", () => {
             author: "stall",
             content: { role: "model", parts: [{ text: "started" }] },
           });
+          this.#markStalled();
           await new Promise<never>(() => undefined);
         } finally {
           this.returned = true;
@@ -695,25 +703,22 @@ describe("AgentInvocationGateway", () => {
     test("releases run() when the agent stalls without emitting after abort", async () => {
       const stall = new StallAgent();
       const abort = new AbortController();
-      setTimeout(() => abort.abort(new Error("stop now")), 50);
+      void stall.stalled.then(() => abort.abort(new Error("stop now")));
       const gateway = new AgentInvocationGateway({
         resolveAgent: () => stall,
       });
 
-      const outcome = await Promise.race([
+      const outcome = await withDeadline(
         gateway.run({
           agentName: "stall",
           input: { role: "user", parts: [{ text: "go" }] },
           parentContext: parentContext(new CaptureAgent("root")),
           abortSignal: abort.signal,
         }),
-        new Promise<"hung">((resolve) =>
-          setTimeout(() => resolve("hung"), 1500),
-        ),
-      ]);
+        5_000,
+        "run() hung after abort",
+      );
 
-      expect(outcome).not.toBe("hung");
-      if (outcome === "hung") return;
       // return() queues behind the parked await, so it cannot run: documented.
       expect(stall.returned).toBe(false);
       expect(outcome.error).toBe("stop now");
@@ -1779,6 +1784,175 @@ describe("AgentInvocationGateway", () => {
       });
       // The model kept going after the tool's pending response.
       expect(result.events.at(-1)?.content?.parts?.[0]?.text).toBe("done");
+    });
+  });
+});
+
+describe("AgentInvocationGateway usage", () => {
+  function modelEvent(
+    usageMetadata?: Event["usageMetadata"],
+    options: { partial?: boolean; calls?: number } = {},
+  ): Event {
+    const parts = Array.from({ length: options.calls ?? 0 }, (_, i) => ({
+      functionCall: { id: `call-${i}`, name: "lookup", args: {} },
+    }));
+    return createEvent({
+      invocationId: "inv-1",
+      author: "worker",
+      content: {
+        role: "model",
+        parts: parts.length ? parts : [{ text: "ok" }],
+      },
+      ...(options.partial ? { partial: true } : {}),
+      ...(usageMetadata ? { usageMetadata } : {}),
+    });
+  }
+
+  async function usageOf(events: Event[]) {
+    const worker = new CaptureAgent("worker", events);
+    const gateway = new AgentInvocationGateway({ resolveAgent: () => worker });
+    const result = await gateway.run({
+      agentName: "worker",
+      input: { role: "user", parts: [{ text: "go" }] },
+      parentContext: parentContext(new CaptureAgent("root")),
+    });
+    return result.usage;
+  }
+
+  test("a partial event's usage is not counted", async () => {
+    expect(
+      await usageOf([
+        modelEvent(
+          {
+            promptTokenCount: 99,
+            candidatesTokenCount: 99,
+            totalTokenCount: 198,
+          },
+          { partial: true },
+        ),
+        modelEvent({
+          promptTokenCount: 10,
+          candidatesTokenCount: 5,
+          totalTokenCount: 15,
+        }),
+      ]),
+    ).toEqual({
+      promptTokens: 10,
+      completionTokens: 5,
+      totalTokens: 15,
+      cachedTokens: 0,
+      toolCalls: 0,
+      llmCalls: 1,
+    });
+  });
+
+  test("a function call streamed on a partial and repeated on the final event is counted once", async () => {
+    const worker = new CaptureAgent("worker", [
+      modelEvent(undefined, { partial: true, calls: 1 }),
+      modelEvent(
+        { promptTokenCount: 4, candidatesTokenCount: 2, totalTokenCount: 6 },
+        { calls: 1 },
+      ),
+    ]);
+    const gateway = new AgentInvocationGateway({ resolveAgent: () => worker });
+    const result = await gateway.run({
+      agentName: "worker",
+      input: { role: "user", parts: [{ text: "go" }] },
+      parentContext: parentContext(new CaptureAgent("root")),
+    });
+    expect(result.usage.toolCalls).toBe(1);
+    expect(result.summary.toolCalls).toBe(1);
+    // The partial still reaches the result stream.
+    expect(result.events.filter((event) => event.partial)).toHaveLength(1);
+  });
+
+  test("the total falls back to prompt plus completion when totalTokenCount is absent", async () => {
+    expect(
+      await usageOf([
+        modelEvent({ promptTokenCount: 10, candidatesTokenCount: 5 }),
+        modelEvent({
+          promptTokenCount: 1,
+          candidatesTokenCount: 1,
+          totalTokenCount: 7,
+        }),
+      ]),
+    ).toEqual({
+      promptTokens: 11,
+      completionTokens: 6,
+      totalTokens: 22,
+      cachedTokens: 0,
+      toolCalls: 0,
+      llmCalls: 2,
+    });
+  });
+
+  test("cached prompt tokens are summed", async () => {
+    expect(
+      await usageOf([
+        modelEvent({
+          promptTokenCount: 100,
+          candidatesTokenCount: 10,
+          totalTokenCount: 110,
+          cachedContentTokenCount: 60,
+        }),
+        modelEvent({
+          promptTokenCount: 50,
+          candidatesTokenCount: 5,
+          totalTokenCount: 55,
+          cachedContentTokenCount: 40,
+        }),
+      ]),
+    ).toEqual({
+      promptTokens: 150,
+      completionTokens: 15,
+      totalTokens: 165,
+      cachedTokens: 100,
+      toolCalls: 0,
+      llmCalls: 2,
+    });
+  });
+
+  test("model calls count only the events that reported usage, and tool calls count function calls", async () => {
+    expect(
+      await usageOf([
+        modelEvent(
+          {
+            promptTokenCount: 10,
+            candidatesTokenCount: 2,
+            totalTokenCount: 12,
+          },
+          { calls: 2 },
+        ),
+        modelEvent(undefined, { calls: 1 }),
+        modelEvent(),
+      ]),
+    ).toEqual({
+      promptTokens: 10,
+      completionTokens: 2,
+      totalTokens: 12,
+      cachedTokens: 0,
+      toolCalls: 3,
+      llmCalls: 1,
+    });
+  });
+
+  test("a failed invocation reports zero usage", async () => {
+    const gateway = new AgentInvocationGateway({
+      resolveAgent: () => undefined,
+    });
+    const result = await gateway.run({
+      agentName: "missing",
+      input: { role: "user", parts: [{ text: "go" }] },
+      parentContext: parentContext(new CaptureAgent("root")),
+    });
+    expect(result.error).toBeDefined();
+    expect(result.usage).toEqual({
+      promptTokens: 0,
+      completionTokens: 0,
+      totalTokens: 0,
+      cachedTokens: 0,
+      toolCalls: 0,
+      llmCalls: 0,
     });
   });
 });

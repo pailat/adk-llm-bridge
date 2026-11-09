@@ -27,10 +27,20 @@ export type WorkflowNodeConfig = Pick<
   | "isolationScope"
 > & {
   /**
-   * Re-execute steps whose last attempt failed when the execution is entered
-   * again. Defaults to `true` when `retryConfig` is set, otherwise `false`
-   * (a failed step then requires `resumePolicy: "retry"`). Steps left
-   * `running` by a crash stay `WORKFLOW_INDETERMINATE_STEP` either way.
+   * Re-execute steps whose last attempt failed or was interrupted when the
+   * execution is entered again.
+   *
+   * @remarks
+   * A step that threw is otherwise replayed as its recorded failure (it runs
+   * again only with `resumePolicy: "retry"`). A step stopped by an abort or a
+   * timeout (closed run, node `timeout`, run timeout) is recorded
+   * `interrupted`, not failed: with this option, or when the step declares
+   * `resumePolicy: "retry"`, it runs again as the next attempt. Otherwise,
+   * and on a turn that answers a waiting step, the resume fails with
+   * `WORKFLOW_INDETERMINATE_STEP`. A step left `running` by a crash stays
+   * indeterminate unless it declares `resumePolicy: "retry"`.
+   *
+   * @defaultValue `true` when `retryConfig` is set, otherwise `false`.
    */
   retryFailedSteps?: boolean;
 };

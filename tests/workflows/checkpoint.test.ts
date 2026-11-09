@@ -174,7 +174,11 @@ describe("workflow checkpoints", () => {
         { ...step, resumePolicy: "retry" },
         inputHash,
       ),
-    ).toEqual({ action: "execute", attempt: 2 });
+    ).toEqual({
+      action: "execute",
+      attempt: 2,
+      resumeReason: "interrupted",
+    });
   });
 
   test("treats a running step as indeterminate unless retry is explicit", async () => {
@@ -196,7 +200,11 @@ describe("workflow checkpoints", () => {
         { ...step, resumePolicy: "retry" },
         inputHash,
       ),
-    ).toEqual({ action: "execute", attempt: 2 });
+    ).toEqual({
+      action: "execute",
+      attempt: 2,
+      resumeReason: "interrupted",
+    });
   });
 
   test("records failed steps and terminal workflow output immutably", async () => {
@@ -538,6 +546,216 @@ describe("workflow checkpoints", () => {
     }
     expect(isWorkflowCheckpointV1(failedWith("WORKFLOW_NOT_A_CODE"))).toBe(
       false,
+    );
+  });
+});
+
+describe("stored step usage", () => {
+  const usage = {
+    promptTokens: 10,
+    completionTokens: 5,
+    totalTokens: 15,
+    cachedTokens: 4,
+    toolCalls: 2,
+    llmCalls: 1,
+  };
+
+  async function withUsage(value: unknown): Promise<unknown> {
+    const copy = structuredClone(await completedCheckpoint()) as unknown as {
+      steps: Record<string, { result: Record<string, unknown> }>;
+    };
+    const saved = copy.steps.plan;
+    if (!saved) throw new Error("missing plan step");
+    saved.result.usage = value;
+    return copy;
+  }
+
+  test("a result with valid usage, or without usage as before usage existed, loads", async () => {
+    expect(isWorkflowCheckpointV1(await withUsage(usage))).toBe(true);
+    expect(
+      isWorkflowCheckpointV1(await withUsage({ ...usage, promptTokens: 0 })),
+    ).toBe(true);
+    expect(isWorkflowCheckpointV1(await completedCheckpoint())).toBe(true);
+    expect(requiredResult(await completedCheckpoint()).usage).toBeUndefined();
+  });
+
+  test("a result whose usage is malformed is rejected as corrupt", async () => {
+    const corrupt: Record<string, unknown> = {
+      null: null,
+      "a number": 15,
+      "an array": [usage],
+      "an empty record": {},
+    };
+    for (const field of Object.keys(usage)) {
+      const missing: Record<string, unknown> = { ...usage };
+      delete missing[field];
+      corrupt[`no ${field}`] = missing;
+      corrupt[`a negative ${field}`] = { ...usage, [field]: -1 };
+      corrupt[`a string ${field}`] = { ...usage, [field]: "10" };
+      corrupt[`a null ${field}`] = { ...usage, [field]: null };
+      corrupt[`an infinite ${field}`] = {
+        ...usage,
+        [field]: Number.POSITIVE_INFINITY,
+      };
+      corrupt[`a NaN ${field}`] = { ...usage, [field]: Number.NaN };
+    }
+    for (const [name, value] of Object.entries(corrupt)) {
+      expect({
+        name,
+        valid: isWorkflowCheckpointV1(await withUsage(value)),
+      }).toEqual({ name, valid: false });
+    }
+  });
+});
+
+describe("interrupted steps", () => {
+  async function interruptedCheckpoint(
+    code: WorkflowErrorCode = "WORKFLOW_ABORTED",
+  ): Promise<WorkflowCheckpointV1> {
+    const inputHash = await hashWorkflowInput(step.input);
+    const running = withWorkflowStepRunning(
+      await createWorkflowCheckpoint({
+        definition,
+        executionId: "inv-interrupted",
+        input: "workflow input",
+        now: 10,
+      }),
+      step,
+      inputHash,
+      1,
+      10,
+    );
+    return withWorkflowStepFailed(
+      running,
+      {
+        status: "failed",
+        id: step.id,
+        agentName: step.agentName,
+        error: { code, message: "Workflow execution aborted" },
+        attempts: 1,
+        startedAt: 10,
+        completedAt: 20,
+      },
+      20,
+    );
+  }
+
+  function withPlan(
+    checkpoint: WorkflowCheckpointV1,
+    change: (saved: Record<string, unknown>) => void,
+  ): unknown {
+    const copy = structuredClone(checkpoint) as unknown as {
+      steps: Record<string, Record<string, unknown>>;
+    };
+    const saved = copy.steps.plan;
+    if (!saved) throw new Error("missing plan step");
+    change(saved);
+    return copy;
+  }
+
+  test("an aborted step is stored as interrupted and an ordinary failure as failed", async () => {
+    const aborted = await interruptedCheckpoint();
+    expect(requiredPlan(aborted).status).toBe("interrupted");
+    expect(requiredPlan(aborted).error?.code).toBe("WORKFLOW_ABORTED");
+    expect(isWorkflowCheckpointV1(aborted)).toBe(true);
+    const failed = await interruptedCheckpoint("WORKFLOW_EXECUTION_ERROR");
+    expect(requiredPlan(failed).status).toBe("failed");
+  });
+
+  test("an inconsistent interrupted record is rejected as corrupt", async () => {
+    const valid = await interruptedCheckpoint();
+    const corrupt: Record<string, (saved: Record<string, unknown>) => void> = {
+      "no error": (saved) => {
+        delete saved.error;
+      },
+      "no completedAt": (saved) => {
+        delete saved.completedAt;
+      },
+      "a result": (saved) => {
+        saved.result = completedResult();
+      },
+      "an interrupt": (saved) => {
+        saved.interrupt = {
+          kind: "input",
+          functionCallIds: ["call-1"],
+          requests: [],
+          events: [],
+        };
+      },
+      "another error code": (saved) => {
+        saved.error = {
+          code: "WORKFLOW_EXECUTION_ERROR",
+          message: "Workflow step failed",
+        };
+      },
+      "a wrong-case status": (saved) => {
+        saved.status = "Interrupted";
+      },
+    };
+    for (const [name, change] of Object.entries(corrupt)) {
+      expect({
+        name,
+        valid: isWorkflowCheckpointV1(withPlan(valid, change)),
+      }).toEqual({
+        name,
+        valid: false,
+      });
+    }
+  });
+
+  test("a failed record with the abort code, written before interrupted existed, still loads and replays", async () => {
+    const legacy = withPlan(await interruptedCheckpoint(), (saved) => {
+      saved.status = "failed";
+    });
+    expect(isWorkflowCheckpointV1(legacy)).toBe(true);
+    const inputHash = await hashWorkflowInput(step.input);
+    const resolution = resolveWorkflowStep(
+      legacy as WorkflowCheckpointV1,
+      step,
+      inputHash,
+    );
+    expect(resolution.action).toBe("replay-failure");
+  });
+
+  test("resolves to the next attempt only on opt-in and never on an answer turn", async () => {
+    const checkpoint = await interruptedCheckpoint();
+    const inputHash = await hashWorkflowInput(step.input);
+    const rerun = {
+      action: "execute" as const,
+      attempt: 2,
+      resumeReason: "interrupted" as const,
+    };
+    expect(
+      resolveWorkflowStep(checkpoint, step, inputHash, { retryFailed: true }),
+    ).toEqual(rerun);
+    expect(
+      resolveWorkflowStep(
+        checkpoint,
+        { ...step, resumePolicy: "retry" },
+        inputHash,
+      ),
+    ).toEqual(rerun);
+    expectWorkflowCode(
+      () => resolveWorkflowStep(checkpoint, step, inputHash),
+      "WORKFLOW_INDETERMINATE_STEP",
+    );
+    expectWorkflowCode(
+      () =>
+        resolveWorkflowStep(checkpoint, step, inputHash, {
+          retryFailed: true,
+          answerTurn: true,
+        }),
+      "WORKFLOW_INDETERMINATE_STEP",
+    );
+    expectWorkflowCode(
+      () =>
+        resolveWorkflowStep(
+          checkpoint,
+          { ...step, resumePolicy: "retry" },
+          inputHash,
+          { answerTurn: true },
+        ),
+      "WORKFLOW_INDETERMINATE_STEP",
     );
   });
 });

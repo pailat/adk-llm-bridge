@@ -35,6 +35,7 @@ export type {
   WorkflowCheckpointStepStatus,
   WorkflowCheckpointStepV1,
   WorkflowCheckpointV1,
+  WorkflowStepResumeReason,
 } from "./schema.js";
 export { WORKFLOW_CHECKPOINT_SCHEMA_VERSION } from "./schema.js";
 export type {

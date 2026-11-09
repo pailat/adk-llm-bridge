@@ -18,6 +18,7 @@ import {
   isWorkflowCheckpointV1,
   toDurableWorkflowCheckpoint,
   type WorkflowCheckpointV1,
+  type WorkflowStepResumeReason,
 } from "../checkpoint/schema.js";
 import type {
   WorkflowCheckpointRevision,
@@ -58,6 +59,8 @@ export interface WorkflowCheckpointCoordinatorConfig {
   store: WorkflowCheckpointStore;
   /** Re-execute steps whose last attempt failed when the run is re-entered. */
   retryFailedSteps?: boolean;
+  /** This turn answers a waiting step; recorded failures are replayed, never re-run. */
+  answerTurn?: boolean;
   /** Called after each successful store write, with the id of the step that triggered it when there is one; a failure here cannot roll back the committed checkpoint. */
   onWrite: (
     write: WorkflowCheckpointWrite,
@@ -224,6 +227,7 @@ export class WorkflowCheckpointCoordinator {
       );
       const resolution = resolveWorkflowStep(checkpoint, step, inputHash, {
         retryFailed: this.#config.retryFailedSteps,
+        answerTurn: this.#config.answerTurn,
       });
       if (resolution.action === "execute") {
         const candidate = withWorkflowStepRunning(
@@ -231,6 +235,8 @@ export class WorkflowCheckpointCoordinator {
           step,
           inputHash,
           resolution.attempt,
+          undefined,
+          resolution.resumeReason,
         );
         await this.#persist(candidate, step.id);
       }
@@ -244,11 +250,13 @@ export class WorkflowCheckpointCoordinator {
    * @param step - Step being retried.
    * @param inputHash - Hash returned by `prepareStep`.
    * @param attempt - Attempt number, starting at 1.
+   * @param resumeReason - Why the attempt was entered; `retry` for an in-run retry.
    */
   async startAttempt(
     step: WorkflowStep,
     inputHash: string,
     attempt: number,
+    resumeReason?: WorkflowStepResumeReason,
   ): Promise<void> {
     await this.#exclusive(async () => {
       const candidate = withWorkflowStepRunning(
@@ -256,6 +264,8 @@ export class WorkflowCheckpointCoordinator {
         step,
         inputHash,
         attempt,
+        undefined,
+        resumeReason,
       );
       await this.#persist(candidate, step.id);
     });

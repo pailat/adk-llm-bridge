@@ -1,4 +1,5 @@
 import type { Content } from "@google/genai";
+import type { WorkflowStepResumeReason } from "./checkpoint/schema.js";
 import type {
   WorkflowExecutionSummary,
   WorkflowSerializedError,
@@ -33,6 +34,15 @@ export interface WorkflowStepStartedEvent extends WorkflowEventBase {
   step: WorkflowStep;
   /** One-based attempt number. */
   attempt: number;
+  /**
+   * Why this attempt was entered: `interrupted` when the previous attempt did
+   * not settle (the step was left `running` by a process that ended, or
+   * stored as `interrupted` by an abort or timeout), `retry` after a failed
+   * attempt. Unset on a first attempt and when a waiting step continues with
+   * its answer (same attempt number); the step record keeps the reason the
+   * attempt was entered with.
+   */
+  resumeReason?: WorkflowStepResumeReason;
 }
 
 /** A step finished successfully. */
@@ -49,6 +59,22 @@ export interface WorkflowStepFailedEvent extends WorkflowEventBase {
   type: "step_failed";
   /** Failure details. */
   failure: WorkflowStepFailure;
+}
+
+/**
+ * The run was aborted while a step was in flight. The checkpoint records the
+ * step as `interrupted`. A resume runs it again as the next attempt only with
+ * `retryFailedSteps` or the step's `resumePolicy: "retry"`; otherwise it fails
+ * with `WORKFLOW_INDETERMINATE_STEP`, because the step may have had side
+ * effects.
+ */
+export interface WorkflowStepInterruptedEvent extends WorkflowEventBase {
+  /** Event discriminator. */
+  type: "step_interrupted";
+  /** Id of the interrupted step. */
+  stepId: string;
+  /** Attempt that was in flight. */
+  attempt: number;
 }
 
 /** A step was answered from a checkpoint instead of running again. */
@@ -147,6 +173,7 @@ export type WorkflowEvent =
   | WorkflowStepStartedEvent
   | WorkflowStepCompletedEvent
   | WorkflowStepFailedEvent
+  | WorkflowStepInterruptedEvent
   | WorkflowStepReplayedEvent
   | WorkflowStepWaitingEvent
   | WorkflowCheckpointSavedEvent
@@ -161,6 +188,7 @@ const WORKFLOW_EVENT_TYPES = new Set<WorkflowEvent["type"]>([
   "step_started",
   "step_completed",
   "step_failed",
+  "step_interrupted",
   "step_replayed",
   "step_waiting",
   "checkpoint_saved",

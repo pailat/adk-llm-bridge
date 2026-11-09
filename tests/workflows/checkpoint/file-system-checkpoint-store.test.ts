@@ -1,6 +1,7 @@
-import { describe, expect, test } from "bun:test";
-import { spawn } from "node:child_process";
+import { describe, expect, spyOn, test } from "bun:test";
+import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import {
   lstat,
   mkdir,
@@ -224,6 +225,60 @@ describe("FileSystemWorkflowCheckpointStore", () => {
     });
   });
 
+  test("rejects a stored step result whose usage is not a usage record", async () => {
+    await withTemporaryRoot(async (root) => {
+      const step = {
+        id: "plan",
+        agentName: "planner",
+        input: "plan it",
+      } satisfies WorkflowStep;
+      const checkpoint = withWorkflowStepCompleted(
+        withWorkflowStepRunning(
+          await initialCheckpoint(),
+          step,
+          await hashWorkflowInput(step.input),
+          1,
+          10,
+        ),
+        {
+          status: "completed",
+          id: step.id,
+          agentName: step.agentName,
+          output: "planned",
+          attempts: 1,
+          startedAt: 10,
+          completedAt: 20,
+          usage: {
+            promptTokens: 10,
+            completionTokens: 5,
+            totalTokens: 15,
+            cachedTokens: 0,
+            toolCalls: 1,
+            llmCalls: 1,
+          },
+        },
+        20,
+      );
+      await new FileSystemWorkflowCheckpointStore({ root }).save({
+        context: invocationContext(),
+        checkpoint,
+        expectedRevision: null,
+      });
+      await expect(loadCheckpoint(root, checkpoint)).resolves.toMatchObject({
+        steps: { plan: { result: { usage: { toolCalls: 1 } } } },
+      });
+
+      const checkpointPath = await findCheckpointPath(root);
+      const envelope = JSON.parse(await readFile(checkpointPath, "utf8"));
+      envelope.checkpoint.steps.plan.result.usage.promptTokens = -1;
+      await writeFile(checkpointPath, JSON.stringify(envelope), "utf8");
+      await expect(loadCheckpoint(root, checkpoint)).rejects.toMatchObject({
+        code: "WORKFLOW_EXECUTION_ERROR",
+        details: { reason: "checkpoint_file_corrupt" },
+      });
+    });
+  });
+
   test("rejects malformed JSON and a mismatched stored revision", async () => {
     await withTemporaryRoot(async (root) => {
       const checkpoint = await initialCheckpoint();
@@ -399,6 +454,188 @@ describe("FileSystemWorkflowCheckpointStore", () => {
 
       expect((await loadCheckpoint(root, initial))?.output).toBe("recovered");
       await expect(lstat(lockPath)).rejects.toMatchObject({ code: "ENOENT" });
+      // The dead owner's tombstone stays: it fences a delayed second recoverer.
+      expect((await lstat(`${lockPath}.retired.dead`)).isDirectory()).toBe(
+        true,
+      );
+    });
+  });
+
+  test("rejects a directory or a FIFO at the checkpoint path without blocking", async () => {
+    await withTemporaryRoot(async (root) => {
+      const checkpoint = await initialCheckpoint();
+      await new FileSystemWorkflowCheckpointStore({ root }).save({
+        context: invocationContext(),
+        checkpoint,
+        expectedRevision: null,
+      });
+      const checkpointPath = await findCheckpointPath(root);
+      const unsafe = [
+        async () => await mkdir(checkpointPath),
+        ...(process.platform === "win32"
+          ? []
+          : [
+              async () => {
+                const made = spawnSync("mkfifo", [checkpointPath]);
+                if (made.status !== 0) throw new Error("mkfifo failed");
+              },
+            ]),
+      ];
+      for (const plant of unsafe) {
+        await rm(checkpointPath, { recursive: true, force: true });
+        await plant();
+        await expect(loadCheckpoint(root, checkpoint)).rejects.toMatchObject({
+          code: "WORKFLOW_EXECUTION_ERROR",
+          details: { reason: "checkpoint_file_unsafe" },
+        });
+      }
+    });
+  });
+
+  test("a released lock leaves no tombstone behind", async () => {
+    await withTemporaryRoot(async (root) => {
+      const initial = await initialCheckpoint();
+      const store = new FileSystemWorkflowCheckpointStore({ root });
+      await store.save({
+        context: invocationContext(),
+        checkpoint: initial,
+        expectedRevision: null,
+      });
+      const next = withWorkflowCompleted(initial, "again", 20);
+      await store.save({
+        context: invocationContext(),
+        checkpoint: next,
+        expectedRevision: await workflowCheckpointRevision(initial),
+      });
+
+      expect(
+        (await allEntryNames(root)).filter((entry) => entry.includes(".lock")),
+      ).toEqual([]);
+    });
+  });
+
+  test("a recoverer leaves the lock alone when its owner changed after the liveness check", async () => {
+    await withTemporaryRoot(async (root) => {
+      const initial = await initialCheckpoint();
+      const initialRevision = await workflowCheckpointRevision(initial);
+      await new FileSystemWorkflowCheckpointStore({ root }).save({
+        context: invocationContext(),
+        checkpoint: initial,
+        expectedRevision: null,
+      });
+      const lockPath = `${await findCheckpointPath(root)}.lock`;
+      const deadPid = await exitedProcessId();
+      await writeLock(lockPath, {
+        pid: deadPid,
+        createdAt: Date.now(),
+        token: "dead",
+      });
+      // The dead owner's lock is released and a live owner takes it while the
+      // recoverer is still deciding (its own release left no tombstone).
+      const realKill = process.kill.bind(process);
+      const kill = spyOn(process, "kill").mockImplementation(((
+        pid: number,
+        signal?: string | number,
+      ) => {
+        if (pid !== deadPid) return realKill(pid, signal);
+        rmSync(lockPath, { recursive: true });
+        mkdirSync(lockPath, { mode: 0o700 });
+        writeFileSync(
+          join(lockPath, "owner.json"),
+          JSON.stringify({ pid: process.pid, createdAt: 1, token: "live" }),
+        );
+        throw Object.assign(new Error("no such process"), { code: "ESRCH" });
+      }) as typeof process.kill);
+      try {
+        const next = withWorkflowCompleted(initial, "stolen", 20);
+        await expect(
+          new FileSystemWorkflowCheckpointStore({
+            root,
+            lockTimeoutMs: 30,
+            lockRetryMs: 2,
+          }).save({
+            context: invocationContext(),
+            checkpoint: next,
+            expectedRevision: initialRevision,
+          }),
+        ).rejects.toMatchObject({
+          details: { reason: "checkpoint_lock_timeout" },
+        });
+      } finally {
+        kill.mockRestore();
+      }
+      expect(
+        JSON.parse(await readFile(join(lockPath, "owner.json"), "utf8")).token,
+      ).toBe("live");
+      expect(
+        (await allEntryNames(root)).some((entry) =>
+          entry.includes(".retired."),
+        ),
+      ).toBe(false);
+    });
+  });
+
+  test("a recoverer leaves the lock alone when a new owner reuses the dead owner's pid", async () => {
+    await withTemporaryRoot(async (root) => {
+      const initial = await initialCheckpoint();
+      const initialRevision = await workflowCheckpointRevision(initial);
+      await new FileSystemWorkflowCheckpointStore({ root }).save({
+        context: invocationContext(),
+        checkpoint: initial,
+        expectedRevision: null,
+      });
+      const lockPath = `${await findCheckpointPath(root)}.lock`;
+      const deadPid = await exitedProcessId();
+      await writeLock(lockPath, {
+        pid: deadPid,
+        createdAt: Date.now(),
+        token: "dead",
+      });
+      // The token is the lock's identity: a new process gets the dead owner's
+      // pid back and takes the lock with a new token while the recoverer is
+      // still deciding. From then on that pid is alive.
+      let reused = false;
+      const realKill = process.kill.bind(process);
+      const kill = spyOn(process, "kill").mockImplementation(((
+        pid: number,
+        signal?: string | number,
+      ) => {
+        if (pid !== deadPid) return realKill(pid, signal);
+        if (reused) return true;
+        reused = true;
+        rmSync(lockPath, { recursive: true });
+        mkdirSync(lockPath, { mode: 0o700 });
+        writeFileSync(
+          join(lockPath, "owner.json"),
+          JSON.stringify({ pid: deadPid, createdAt: 1, token: "reused" }),
+        );
+        throw Object.assign(new Error("no such process"), { code: "ESRCH" });
+      }) as typeof process.kill);
+      try {
+        await expect(
+          new FileSystemWorkflowCheckpointStore({
+            root,
+            lockTimeoutMs: 30,
+            lockRetryMs: 2,
+          }).save({
+            context: invocationContext(),
+            checkpoint: withWorkflowCompleted(initial, "stolen", 20),
+            expectedRevision: initialRevision,
+          }),
+        ).rejects.toMatchObject({
+          details: { reason: "checkpoint_lock_timeout" },
+        });
+      } finally {
+        kill.mockRestore();
+      }
+      expect(
+        JSON.parse(await readFile(join(lockPath, "owner.json"), "utf8")).token,
+      ).toBe("reused");
+      expect(
+        (await allEntryNames(root)).some((entry) =>
+          entry.includes(".retired."),
+        ),
+      ).toBe(false);
     });
   });
 
@@ -510,11 +747,27 @@ describe("FileSystemWorkflowCheckpointStore", () => {
 
   test("collects only valid checkpoint tombstones while offline", async () => {
     await withTemporaryRoot(async (root) => {
-      const checkpoint = await initialCheckpoint();
-      await new FileSystemWorkflowCheckpointStore({ root }).save({
+      const initial = await initialCheckpoint();
+      const store = new FileSystemWorkflowCheckpointStore({
+        root,
+        lockRetryMs: 1,
+      });
+      await store.save({
+        context: invocationContext(),
+        checkpoint: initial,
+        expectedRevision: null,
+      });
+      // Recovering a dead owner's lock leaves a tombstone.
+      await writeLock(`${await findCheckpointPath(root)}.lock`, {
+        pid: await exitedProcessId(),
+        createdAt: Date.now(),
+        token: "dead",
+      });
+      const checkpoint = withWorkflowCompleted(initial, "recovered", 20);
+      await store.save({
         context: invocationContext(),
         checkpoint,
-        expectedRevision: null,
+        expectedRevision: await workflowCheckpointRevision(initial),
       });
       const unknownPath = join(root, "keep.unknown");
       await writeFile(unknownPath, "keep", "utf8");
@@ -524,7 +777,7 @@ describe("FileSystemWorkflowCheckpointStore", () => {
         confirmNoActiveWriters: true,
       });
 
-      expect(result.removedTombstones).toBeGreaterThan(0);
+      expect(result.removedTombstones).toBe(1);
       expect(await readFile(unknownPath, "utf8")).toBe("keep");
       expect(
         (await allEntryNames(root)).filter(

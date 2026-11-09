@@ -1,6 +1,7 @@
 import type { Event } from "@google/adk";
 import type { Content } from "@google/genai";
 import type { WorkflowUserEvent } from "./events.js";
+import { toJsonSafeRecord } from "./internal/json-safe-record.js";
 
 /** Reserved child-session state key for the active workflow attempt. */
 export const WORKFLOW_ATTEMPT_CONTEXT_STATE_KEY =
@@ -32,7 +33,10 @@ export interface WorkflowRetryPolicy {
   maxDelayMs?: number;
 }
 
-/** Behavior when a checkpoint contains a step whose completion is unknown. */
+/**
+ * Behavior when a re-entered checkpoint holds a step that did not complete
+ * (left `running`, failed, or `interrupted` by an abort or timeout).
+ */
 export type WorkflowResumePolicy = "fail" | "retry";
 
 /** A deterministic invocation of a declared ADK sub-agent. */
@@ -55,10 +59,45 @@ export interface WorkflowStep {
   writePaths?: readonly string[];
   /** Retry policy for this step. Without it the step runs once. */
   retry?: WorkflowRetryPolicy;
-  /** Defaults to `fail`, preventing accidental duplicate side effects. */
+  /**
+   * Defaults to `fail`, preventing accidental duplicate side effects. With
+   * `retry`, a re-entered execution runs the step again when it was left
+   * `running`, was `interrupted` by an abort or timeout, or ended with a
+   * recorded failure. A turn that answers a waiting step still replays a
+   * recorded failure, and fails an `interrupted` step with
+   * `WORKFLOW_INDETERMINATE_STEP`.
+   */
   resumePolicy?: WorkflowResumePolicy;
   /** Free-form JSON-safe data attached to the step for observers. */
   metadata?: Record<string, unknown>;
+}
+
+/**
+ * Aggregate usage of one step's agent run, JSON-safe.
+ *
+ * @remarks
+ * Sums non-partial event `usageMetadata` and the function calls on those
+ * events, including events of nested workflow agents. Only the successful
+ * attempt is counted: failed attempts that were retried, and failed steps,
+ * report no usage. Values are summed as each runtime reports them, so any
+ * double counting there carries into the totals. Cost is not computed.
+ */
+export interface WorkflowStepUsage {
+  /** Summed prompt tokens. */
+  promptTokens: number;
+  /** Summed completion tokens. */
+  completionTokens: number;
+  /** Summed total tokens. */
+  totalTokens: number;
+  /** Summed cached prompt tokens; part of `promptTokens`, not added on top. */
+  cachedTokens: number;
+  /** Function calls requested on non-partial events. */
+  toolCalls: number;
+  /**
+   * Events that reported usage: one per model response for an `LlmAgent`, one
+   * per run for an `ExternalAgent` that ends with a final response.
+   */
+  llmCalls: number;
 }
 
 /** Successful result returned by `WorkflowContext.run`. */
@@ -77,6 +116,14 @@ export interface WorkflowStepResult {
   events?: readonly Event[];
   /** Session state changes made by the agent. */
   stateDelta?: Record<string, unknown>;
+  /**
+   * Aggregate usage of the successful attempt's agent run; earlier failed
+   * attempts are not included. Absent in checkpoints written before 0.7.
+   * When present in a stored checkpoint it must hold every
+   * {@link WorkflowStepUsage} field as a finite, non-negative number, or the
+   * checkpoint is rejected as corrupt.
+   */
+  usage?: WorkflowStepUsage;
   /** Attempts used, including the successful one. */
   attempts: number;
   /** Epoch milliseconds when the step started. */
@@ -103,6 +150,11 @@ export interface WorkflowStepFailure {
   startedAt: number;
   /** Epoch milliseconds when the step finished. */
   completedAt: number;
+  /**
+   * True when the failure was read back from the checkpoint instead of
+   * happening on this turn (the step did not run again).
+   */
+  replayed?: boolean;
 }
 
 /** JSON-safe workspace capability granted to one workflow attempt. */
@@ -344,12 +396,21 @@ export class WorkflowError extends Error {
     this.details = details;
   }
 
-  /** Returns the JSON-safe form of this error. */
+  /**
+   * Returns the JSON-safe form of this error.
+   *
+   * @remarks
+   * `details` is a JSON projection, so the result can always be recorded in a
+   * checkpoint: `undefined` values and functions are dropped, non-finite
+   * numbers become `null` and a `bigint` becomes its decimal string. Details
+   * that do not project onto an object are omitted.
+   */
   toJSON(): WorkflowSerializedError {
+    const details = toJsonSafeRecord(this.details);
     return {
       code: this.code,
       message: this.message,
-      ...(this.details ? { details: this.details } : {}),
+      ...(details ? { details } : {}),
     };
   }
 }

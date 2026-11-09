@@ -4,6 +4,7 @@ import type {
   WorkflowSerializedError,
   WorkflowStepInterrupt,
   WorkflowStepResult,
+  WorkflowStepUsage,
 } from "../contracts.js";
 import { MAX_WORKFLOW_AGENT_REVISION_LENGTH } from "../contracts.js";
 
@@ -17,12 +18,29 @@ export type WorkflowCheckpointStatus =
   | "failed"
   | "cancelled";
 
-/** Lifecycle status of one step; `waiting` means the step raised an interrupt. */
+/**
+ * Lifecycle status of one step. `waiting` means the step raised an interrupt;
+ * `interrupted` means the run was aborted while the step was in flight, so the
+ * step neither completed nor failed on its own. A resume clears it by running
+ * the step again when `retryFailedSteps` or `resumePolicy: "retry"` is set;
+ * otherwise it fails with `WORKFLOW_INDETERMINATE_STEP`.
+ */
 export type WorkflowCheckpointStepStatus =
   | "running"
   | "waiting"
   | "completed"
-  | "failed";
+  | "failed"
+  | "interrupted";
+
+/**
+ * Why a step attempt was entered when it was not a first attempt.
+ *
+ * - `interrupted`: the previous attempt did not settle: it was still `running`
+ *   in the checkpoint (the process ended first), or it was stored as
+ *   `interrupted` by an abort or timeout.
+ * - `retry`: the previous attempt had failed and the step ran again.
+ */
+export type WorkflowStepResumeReason = "interrupted" | "retry";
 
 /** Durable record of one workflow step. */
 export interface WorkflowCheckpointStepV1 {
@@ -38,15 +56,20 @@ export interface WorkflowCheckpointStepV1 {
   status: WorkflowCheckpointStepStatus;
   /** Number of attempts started so far, at least 1. */
   attempts: number;
+  /**
+   * Why the current attempt was entered; absent on a first attempt and in
+   * checkpoints written before this field existed.
+   */
+  resumeReason?: WorkflowStepResumeReason;
   /** Epoch milliseconds when the first attempt started. */
   startedAt: number;
   /** Epoch milliseconds of the last update. */
   updatedAt: number;
-  /** Epoch milliseconds when the step finished; set only for `completed` and `failed`. */
+  /** Epoch milliseconds when the step finished; set only for `completed`, `failed` and `interrupted`. */
   completedAt?: number;
   /** Durable result; set only for `completed`. */
   result?: WorkflowStepResult;
-  /** Serialized error; set only for `failed`. */
+  /** Serialized error; set only for `failed` and `interrupted`. */
   error?: WorkflowSerializedError;
   /** Present only while `status` is `waiting`. */
   interrupt?: WorkflowStepInterrupt;
@@ -213,9 +236,13 @@ function isStep(
     (value.status === "running" ||
       value.status === "waiting" ||
       value.status === "completed" ||
-      value.status === "failed") &&
+      value.status === "failed" ||
+      value.status === "interrupted") &&
     Number.isSafeInteger(value.attempts) &&
     (value.attempts as number) >= 1 &&
+    (value.resumeReason === undefined ||
+      value.resumeReason === "interrupted" ||
+      value.resumeReason === "retry") &&
     isFiniteNumber(value.startedAt) &&
     isFiniteNumber(value.updatedAt) &&
     value.updatedAt >= value.startedAt &&
@@ -240,7 +267,9 @@ function isStep(
       return false;
     }
     if (
-      (value.status === "completed" || value.status === "failed") &&
+      (value.status === "completed" ||
+        value.status === "failed" ||
+        value.status === "interrupted") &&
       value.interrupt !== undefined
     ) {
       return false;
@@ -254,10 +283,19 @@ function isStep(
       return false;
     }
     if (
-      value.status === "failed" &&
+      (value.status === "failed" || value.status === "interrupted") &&
       (value.completedAt === undefined ||
         value.result !== undefined ||
         !isSerializedError(value.error))
+    ) {
+      return false;
+    }
+    // Only an abort writes `interrupted`; any other error with it means the
+    // record is corrupt, and a corrupt marker must not unlock a re-run.
+    if (
+      value.status === "interrupted" &&
+      (value.error as WorkflowSerializedError | undefined)?.code !==
+        "WORKFLOW_ABORTED"
     ) {
       return false;
     }
@@ -347,7 +385,32 @@ function isStepResult(
     (value.events === undefined || Array.isArray(value.events)) &&
     isWorkflowContent(value.content) &&
     (value.stateDelta === undefined ||
-      (isPlainRecord(value.stateDelta) && isJsonSafe(value.stateDelta)))
+      (isPlainRecord(value.stateDelta) && isJsonSafe(value.stateDelta))) &&
+    (value.usage === undefined || isWorkflowStepUsage(value.usage))
+  );
+}
+
+const WORKFLOW_STEP_USAGE_FIELDS = [
+  "promptTokens",
+  "completionTokens",
+  "totalTokens",
+  "cachedTokens",
+  "toolCalls",
+  "llmCalls",
+] as const satisfies readonly (keyof WorkflowStepUsage)[];
+
+/**
+ * Whether a stored value is a {@link WorkflowStepUsage}: every field present
+ * and a finite, non-negative number. Results saved before usage existed carry
+ * no `usage` and are accepted by the caller.
+ */
+function isWorkflowStepUsage(value: unknown): value is WorkflowStepUsage {
+  return (
+    isPlainRecord(value) &&
+    WORKFLOW_STEP_USAGE_FIELDS.every((field) => {
+      const count = value[field];
+      return isFiniteNumber(count) && count >= 0;
+    })
   );
 }
 

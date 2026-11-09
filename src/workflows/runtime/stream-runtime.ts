@@ -7,14 +7,22 @@ import { WorkflowError } from "../contracts.js";
  * @internal
  */
 export interface WorkflowRuntimeStreamHandles {
-  /** Forwards one runtime event to the consumer of the stream. */
-  push: (event: Event) => void;
+  /**
+   * Forwards one runtime event to the consumer of the stream. Resolves once
+   * the consumer has taken the event and asked for the next one, or once the
+   * stream is closed.
+   */
+  push: (event: Event) => Promise<void>;
   /** Aborted when the consumer closes the stream before the run finishes. */
   signal: AbortSignal;
 }
 
 /**
  * Streams the events of a workflow runtime as an async generator.
+ *
+ * Delivery has back-pressure, like any ADK agent generator: a runtime that
+ * awaits `push` continues only after the consumer has handled the event, so
+ * a `step_started` reaches the consumer before the step's agent starts.
  *
  * When a consumer stops early (`break`, `iterator.return()`, or a node
  * `timeout` that ADK enforces by closing the generator) only the generator is
@@ -36,12 +44,19 @@ export async function* streamWorkflowRuntime(
   // instead of a step still marked `running`, and never writes concurrently.
   await active?.settled();
   const queue = new AsyncQueue<Event>();
+  // One resolver per pushed event, in queue order.
+  const delivered: Array<() => void> = [];
+  let closed = false;
   const abort = new AbortController();
   let execution: Promise<unknown> | undefined;
   let settled = false;
   try {
     const runtime = createRuntime({
-      push: (event) => queue.push(event),
+      push: (event) => {
+        if (closed) return Promise.resolve();
+        queue.push(event);
+        return new Promise<void>((resolve) => delivered.push(resolve));
+      },
       signal: abort.signal,
     });
     execution = runtime.execute();
@@ -56,8 +71,14 @@ export async function* streamWorkflowRuntime(
         queue.fail(error);
       },
     );
-    yield* queue;
+    for await (const event of queue) {
+      yield event;
+      delivered.shift()?.();
+    }
   } finally {
+    // Never leave the runtime waiting on a consumer that is gone.
+    closed = true;
+    for (const resolve of delivered.splice(0)) resolve();
     if (execution && !settled) {
       abort.abort(
         new WorkflowError(

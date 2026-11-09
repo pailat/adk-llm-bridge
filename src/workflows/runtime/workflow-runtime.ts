@@ -57,6 +57,7 @@ import type {
   WorkflowStartedEvent,
   WorkflowStepCompletedEvent,
   WorkflowStepFailedEvent,
+  WorkflowStepInterruptedEvent,
   WorkflowStepReplayedEvent,
   WorkflowStepStartedEvent,
   WorkflowStepWaitingEvent,
@@ -185,7 +186,12 @@ export interface WorkflowRuntimeConfig {
   structuredOutput?: boolean;
   /**
    * Re-execute steps whose last recorded attempt failed when the same execution
-   * is entered again (an ADK node retry with the same invocation id). Steps left
+   * is entered again (an ADK node retry with the same invocation id). Without
+   * it, and on every turn that answers a waiting step, a recorded failure is
+   * replayed. A step stopped by an abort or timeout (closed run, node
+   * `timeout`, run timeout) is recorded `interrupted`, not failed: with this
+   * option, or with `resumePolicy: "retry"` on the step, it runs again;
+   * otherwise the resume fails with `WORKFLOW_INDETERMINATE_STEP`. Steps left
    * `running` stay indeterminate unless they declare `resumePolicy: "retry"`.
    */
   retryFailedSteps?: boolean;
@@ -284,6 +290,7 @@ export class WorkflowRuntime {
         context: this.#parentContext,
         store: this.#checkpointStore,
         retryFailedSteps: this.#retryFailedSteps,
+        answerTurn: this.#inputOverride !== undefined,
         onWrite: (write, stepId) => this.emitCheckpointSaved(write, stepId),
       });
       await this.#checkpointCoordinator.initialize();
@@ -448,7 +455,9 @@ export class WorkflowRuntime {
       step,
     } satisfies WorkflowStepHookContext;
     const prepared = await this.checkpointCoordinator().prepareStep(step);
-    throwIfAborted(signal);
+    // A step about to execute is already saved `running`, so its abort check
+    // runs inside the try below, where the abort is recorded as `interrupted`.
+    if (prepared.resolution.action !== "execute") throwIfAborted(signal);
     if (prepared.resolution.action === "replay") {
       const result = {
         ...prepared.resolution.result,
@@ -461,6 +470,22 @@ export class WorkflowRuntime {
         result,
       } satisfies WorkflowStepReplayedEvent);
       return result;
+    }
+    if (prepared.resolution.action === "replay-failure") {
+      // The step failed on an earlier turn of this execution. Report the same
+      // failure so the workflow takes the same path it took then.
+      const { failure } = prepared.resolution;
+      this.#replayedStepCount++;
+      await this.emitWorkflowEvent({
+        ...this.envelope(),
+        type: "step_failed",
+        failure,
+      } satisfies WorkflowStepFailedEvent);
+      throw new WorkflowError(
+        failure.error.code,
+        failure.error.message,
+        failure.error.details,
+      );
     }
 
     // A waiting step continues with the answer carried by this turn; without
@@ -481,6 +506,7 @@ export class WorkflowRuntime {
       ? undefined
       : prepared.resolution.attempt;
     try {
+      throwIfAborted(signal);
       const hookResult = resume
         ? undefined
         : await this.#hooks?.beforeStep?.(hookContext);
@@ -525,7 +551,6 @@ export class WorkflowRuntime {
         let lastError: WorkflowError | undefined;
         for (let attemptIndex = 0; attemptIndex < maxAttempts; attemptIndex++) {
           const attempt = prepared.resolution.attempt + attemptIndex;
-          if (!(resume && attemptIndex === 0)) unsettledAttempt = attempt;
           const attemptContext = createWorkflowAttemptContext({
             definition: this.#definition,
             executionId: this.executionId(),
@@ -542,13 +567,26 @@ export class WorkflowRuntime {
               step,
               prepared.inputHash,
               attempt,
+              "retry",
             );
+            // Only now is the retry saved `running`. An abort during the delay
+            // leaves the previous attempt's recorded failure in place.
+            unsettledAttempt = attempt;
           }
+          // An in-run retry is always `retry`. Otherwise the reason comes from
+          // the checkpoint resolution and is unset on a first attempt.
+          const resumeReason =
+            attemptIndex > 0
+              ? "retry"
+              : prepared.resolution.action === "execute"
+                ? prepared.resolution.resumeReason
+                : undefined;
           await this.emitWorkflowEvent({
             ...this.envelope(),
             type: "step_started",
             step,
             attempt,
+            ...(resumeReason === undefined ? {} : { resumeReason }),
           } satisfies WorkflowStepStartedEvent);
 
           const replay = await this.#hooks?.beforeAttempt?.(attemptContext);
@@ -618,7 +656,12 @@ export class WorkflowRuntime {
           lastError = new WorkflowError(
             "WORKFLOW_EXECUTION_ERROR",
             `Workflow step ${step.id} failed: ${result.error}`,
-            { agentName: step.agentName, stepId: step.id, attempt },
+            {
+              agentName: step.agentName,
+              stepId: step.id,
+              attempt,
+              ...agentFailureCause(result),
+            },
           );
           const failure = failureFromError(step, lastError, attempt, startedAt);
           await this.#hooks?.attemptFailed?.(attemptContext, failure);
@@ -768,12 +811,25 @@ export class WorkflowRuntime {
     attempt: number,
     caught: unknown,
   ): Promise<void> {
+    let failure: WorkflowStepFailure;
     try {
-      await this.checkpointCoordinator().failStep(
-        failureFromError(step, caught, attempt),
-      );
+      failure = failureFromError(step, caught, attempt);
+      await this.checkpointCoordinator().failStep(failure);
     } catch {
       // A broken store cannot record the failure; the original error wins.
+      return;
+    }
+    if (failure.error.code === "WORKFLOW_ABORTED") {
+      try {
+        await this.emitWorkflowEvent({
+          ...this.envelope(),
+          type: "step_interrupted",
+          stepId: step.id,
+          attempt,
+        } satisfies WorkflowStepInterruptedEvent);
+      } catch {
+        // A throwing event sink must not replace the original error.
+      }
     }
   }
 
@@ -1435,6 +1491,7 @@ function stepResult(
     ...(content ? { content } : {}),
     events: invocation.events,
     ...stepStateDelta(invocation.stateDelta),
+    usage: { ...invocation.usage },
     attempts,
     startedAt,
     completedAt: Date.now(),
@@ -1456,6 +1513,25 @@ function stepStateDelta(
     ([key]) => !key.startsWith(`${WORKFLOW_CHECKPOINT_STATE_PREFIX}:`),
   );
   return entries.length > 0 ? { stateDelta: Object.fromEntries(entries) } : {};
+}
+
+/**
+ * Error code and kind of a failed delegation: `causeCode` is the `errorCode`
+ * of the last event that reported an error, `errorKind` the gateway's
+ * classification. Absent fields are omitted.
+ */
+function agentFailureCause(result: AgentInvocationResult): {
+  causeCode?: string;
+  errorKind?: string;
+} {
+  const failedEvent = result.events.findLast(
+    (event) =>
+      event.errorMessage !== undefined || event.errorCode !== undefined,
+  );
+  return {
+    ...(failedEvent?.errorCode ? { causeCode: failedEvent.errorCode } : {}),
+    ...(result.errorKind ? { errorKind: result.errorKind } : {}),
+  };
 }
 
 function failureFromError(
@@ -1632,6 +1708,8 @@ function workflowEventTitle(event: WorkflowEvent): string {
       return `Workflow ${event.workflowId}: ${event.result.id} completed`;
     case "step_failed":
       return `Workflow ${event.workflowId}: ${event.failure.id} failed`;
+    case "step_interrupted":
+      return `Workflow ${event.workflowId}: ${event.stepId} interrupted`;
     case "step_replayed":
       return `Workflow ${event.workflowId}: ${event.result.id} replayed`;
     case "step_waiting":

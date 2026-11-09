@@ -9,6 +9,7 @@ export type {
   AgentInvocationRequest,
   AgentInvocationResult,
   AgentInvocationResume,
+  AgentInvocationUsage,
   AgentInvocationValidationPhase,
   AgentInvocationValidator,
   AgentResolver,
@@ -51,6 +52,7 @@ export type {
   WorkflowCheckpointV1,
   WorkflowCheckpointWrite,
   WorkflowStepResolution,
+  WorkflowStepResumeReason,
 } from "./checkpoint/index.js";
 export {
   ADKSessionCheckpointStore,
@@ -101,6 +103,7 @@ export type {
   WorkflowStepInterrupt,
   WorkflowStepOutcome,
   WorkflowStepResult,
+  WorkflowStepUsage,
 } from "./contracts.js";
 export {
   DEFAULT_WORKFLOW_EXECUTION_LIMITS,
@@ -149,6 +152,7 @@ export type {
   WorkflowStartedEvent,
   WorkflowStepCompletedEvent,
   WorkflowStepFailedEvent,
+  WorkflowStepInterruptedEvent,
   WorkflowStepReplayedEvent,
   WorkflowStepStartedEvent,
   WorkflowStepWaitingEvent,

@@ -16,27 +16,38 @@ import {
 } from "../../src/workflows/definition.js";
 import { ScriptWorkflowAgent } from "../../src/workflows/script-workflow-agent.js";
 import { WorkflowAgent } from "../../src/workflows/workflow-agent.js";
+import { withDeadline } from "../agents/helpers.js";
 
 /** Contract with ADK's (experimental) graph engine: our agents work as nodes. */
 
+/**
+ * Replies `<name>:<input>`. With `waitForAbort`, it first blocks until the run
+ * is aborted, so a test that expects a timeout hangs (and hits its deadline)
+ * instead of passing by luck when the timeout does not fire.
+ */
 class ReplyAgent extends BaseAgent {
   aborted = false;
-  readonly #delayMs: number;
+  /** Resolves when the run's abort signal fires. */
+  readonly abortSeen: Promise<void>;
+  readonly #waitForAbort: boolean;
+  #markAborted!: () => void;
 
-  constructor(name: string, delayMs = 0) {
+  constructor(name: string, waitForAbort = false) {
     super({ name });
-    this.#delayMs = delayMs;
+    this.#waitForAbort = waitForAbort;
+    this.abortSeen = new Promise((resolve) => {
+      this.#markAborted = resolve;
+    });
   }
 
   protected async *runAsyncImpl(context: InvocationContext) {
-    if (this.#delayMs > 0) {
+    if (this.#waitForAbort) {
       await new Promise<void>((resolve) => {
-        const timer = setTimeout(resolve, this.#delayMs);
         context.abortSignal?.addEventListener(
           "abort",
           () => {
             this.aborted = true;
-            clearTimeout(timer);
+            this.#markAborted();
             resolve();
           },
           { once: true },
@@ -186,7 +197,7 @@ describe("ADK Workflow interop", () => {
   });
 
   test("a node timeout stops the child agent and the handler", async () => {
-    const slow = new ReplyAgent("slow", 2_000);
+    const slow = new ReplyAgent("slow", true);
     let reachedSecondStep = false;
     const durable = new WorkflowAgent({
       name: "durable",
@@ -208,16 +219,16 @@ describe("ADK Workflow interop", () => {
       edges: [["START", durable]],
     });
 
-    const started = Date.now();
-    const { events, error } = await run(graph);
+    // The slow agent only returns once aborted, so only the timeout ends it.
+    const { events, error } = await withDeadline(run(graph), 5_000, "hung");
 
-    expect(Date.now() - started).toBeLessThan(1_500);
     const failed =
       error !== undefined ||
       events.some((event) => (event as { isNodeError?: boolean }).isNodeError);
     expect(failed).toBe(true);
-    // Allow the aborted runtime to settle before checking the handler.
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    await withDeadline(slow.abortSeen, 5_000, "child never aborted");
+    // One macrotask turn lets a handler that wrongly survived the abort move on.
+    await new Promise((resolve) => setImmediate(resolve));
     expect(slow.aborted).toBe(true);
     expect(reachedSecondStep).toBe(false);
   });
@@ -400,7 +411,7 @@ describe("ADK Workflow interop", () => {
       expect(second.calls).toBe(1);
     });
 
-    test("a node timeout records the step as failed and the retry completes", async () => {
+    test("a node timeout records the step as interrupted and the retry re-runs it", async () => {
       const first = new FlakyAgent("first", ["ok"]);
       const second = new FlakyAgent("second", ["slow", "ok"]);
       const graph = new Workflow({
@@ -421,6 +432,25 @@ describe("ADK Workflow interop", () => {
       expect(first.calls).toBe(1);
       expect(second.calls).toBe(2);
       expect(events.some((e) => e.output === "first:ok|second:ok")).toBe(true);
+      const workflowEvents = events
+        .map((e) => e.customMetadata?.workflowEvent)
+        .filter(Boolean) as Array<{
+        type: string;
+        stepId?: string;
+        attempt?: number;
+        resumeReason?: string;
+        step?: { id: string };
+      }>;
+      // ADK stops reading the timed-out node, so its step_interrupted event
+      // does not reach the Runner; the retry shows the recorded state.
+      expect(
+        workflowEvents.find(
+          (e) =>
+            e.type === "step_started" &&
+            e.step?.id === "second" &&
+            e.attempt === 2,
+        )?.resumeReason,
+      ).toBe("interrupted");
     });
   });
 });

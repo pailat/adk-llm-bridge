@@ -9,8 +9,12 @@
  * A lock is retired by renaming it to `<lock>.retired.<sha256(token)>`. The
  * name is keyed by the token the retiring process observed, so a delayed
  * retirement of a dead owner's lock collides with the first one instead of
- * moving a newer owner's lock away. Retired directories (tombstones) are kept;
- * deleting one while other processes run would reopen that race.
+ * moving a newer owner's lock away. That tombstone is kept; deleting it while
+ * other processes run would reopen the race.
+ *
+ * A live owner that releases its lock removes its own tombstone: a recoverer
+ * re-reads the owner after finding its process dead and retires only a lock
+ * that still carries the dead token, and a dead owner can no longer release.
  */
 
 import { createHash, randomUUID } from "node:crypto";
@@ -109,11 +113,16 @@ export function recoverDeadDirectoryLock(lockPath: string): void {
     return;
   }
   if (isProcessAlive(owner.pid)) return;
+  // The owner may have released the lock (and removed its tombstone) after
+  // the first read, letting a newer owner take the path. Retire only a lock
+  // that still carries the dead token.
+  if (!directoryLockTokenMatches(lockPath, owner.token)) return;
   retireDirectoryLock(lockPath, owner.token);
 }
 
 /**
- * Releases the lock when `token` still owns it.
+ * Releases the lock when `token` still owns it, and removes the tombstone
+ * the release leaves.
  *
  * @param lockPath - Lock directory.
  * @param token - Token returned by {@link tryAcquireDirectoryLock}.
@@ -124,7 +133,16 @@ export function recoverDeadDirectoryLock(lockPath: string): void {
  */
 export function releaseDirectoryLock(lockPath: string, token: string): boolean {
   if (!directoryLockTokenMatches(lockPath, token)) return false;
-  return retireDirectoryLock(lockPath, token);
+  if (!retireDirectoryLock(lockPath, token)) return false;
+  try {
+    rmSync(retiredDirectoryLockPath(lockPath, token), {
+      recursive: true,
+      force: true,
+    });
+  } catch {
+    // Best effort: a leftover tombstone is collected offline.
+  }
+  return true;
 }
 
 /**
@@ -240,8 +258,12 @@ export function fsyncDirectorySync(directory: string): void {
   }
 }
 
+function retiredDirectoryLockPath(lockPath: string, token: string): string {
+  return `${lockPath}.retired.${directoryLockTokenKey(token)}`;
+}
+
 function retireDirectoryLock(lockPath: string, observedToken: string): boolean {
-  const retired = `${lockPath}.retired.${directoryLockTokenKey(observedToken)}`;
+  const retired = retiredDirectoryLockPath(lockPath, observedToken);
   try {
     renameSync(lockPath, retired);
   } catch (error) {

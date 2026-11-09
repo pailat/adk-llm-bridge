@@ -1,6 +1,7 @@
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import type { ExternalAgentDefinitionRegistry } from "../../agents/agent-registry.js";
 import type { ExternalAgentDefinitionConfig } from "../../agents/agent-schema.js";
+import { canonicalPath } from "../../agents/permissions/paths.js";
 import type { ExternalAgentPermissionPolicy } from "../../agents/permissions/schema.js";
 import { rememberLegacyDigest } from "../internal/canonical-hash.js";
 import {
@@ -71,7 +72,13 @@ export interface WorkflowAgentPolicyCeilings {
    * @defaultValue false
    */
   allowNetwork?: boolean;
-  /** Absolute directories that agent working directories and allowed paths must lie within; when empty, working directories and allowed paths are rejected. */
+  /**
+   * Absolute directories that agent working directories and allowed paths
+   * must lie within; when empty, working directories and allowed paths are
+   * rejected. Containment is checked on real paths (symlinks resolved on both
+   * sides, dangling links followed), so a symlink inside a root that points
+   * outside it is rejected.
+   */
   workingDirectoryRoots?: readonly string[];
 }
 
@@ -284,9 +291,7 @@ function normalizeWorkingDirectory(
   }
 
   const normalized = resolve(requested);
-  if (
-    !policy.workingDirectoryRoots.some((root) => isPathWithin(root, normalized))
-  ) {
+  if (!isWithinRoots(normalized, policy.workingDirectoryRoots)) {
     policyExceeded(
       `Workflow agent workingDirectory is outside host-configured roots: ${requested}`,
     );
@@ -387,9 +392,7 @@ function normalizeAllowedPath(
   const normalized = isAbsolute(requested)
     ? resolve(requested)
     : resolve(workingDirectory as string, requested);
-  if (
-    !policy.workingDirectoryRoots.some((root) => isPathWithin(root, normalized))
-  ) {
+  if (!isWithinRoots(normalized, policy.workingDirectoryRoots)) {
     policyExceeded(
       `Workflow agent allowedPath is outside host-configured roots: ${requested}`,
     );
@@ -537,6 +540,22 @@ function safeString(
     invalid(`Workflow agent ${field} contains unsafe characters`);
   }
   return value;
+}
+
+/**
+ * Whether `path` lies within one of `roots` once symlinks are resolved on both
+ * sides (the deepest existing ancestor, following dangling links), so a link
+ * inside a root cannot point outside it. Resolved on every request, so a link
+ * changed after the factory was built is followed to where it points now. A
+ * path or root whose links loop is never within.
+ */
+function isWithinRoots(path: string, roots: readonly string[]): boolean {
+  const real = canonicalPath(path, "/");
+  if (real === undefined) return false;
+  return roots.some((root) => {
+    const realRoot = canonicalPath(root, "/");
+    return realRoot !== undefined && isPathWithin(realRoot, real);
+  });
 }
 
 function isPathWithin(root: string, candidate: string): boolean {

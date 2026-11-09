@@ -349,18 +349,25 @@ describe("WorkflowAgent", () => {
   test("aborts the runtime when the consumer closes the event stream", async () => {
     let aborted = false;
     let reachedSecondStep = false;
-    let markStarted: () => void = () => {};
-    const started = new Promise<void>((resolve) => {
-      markStarted = resolve;
-    });
     class SlowAgent extends BaseAgent {
       constructor() {
         super({ name: "slow" });
       }
 
       protected async *runAsyncImpl(context: InvocationContext) {
-        markStarted();
+        // Delivery has back-pressure: the step is mid-flight while the
+        // consumer holds this event.
+        yield createEvent({
+          invocationId: context.invocationId,
+          author: this.name,
+          content: { role: "model", parts: [{ text: "working" }] },
+        });
         await new Promise<void>((resolve) => {
+          if (context.abortSignal?.aborted) {
+            aborted = true;
+            resolve();
+            return;
+          }
           const timer = setTimeout(resolve, 2_000);
           context.abortSignal?.addEventListener(
             "abort",
@@ -399,9 +406,11 @@ describe("WorkflowAgent", () => {
     const iterator = workflow
       .runAsync(invocation(workflow))
       [Symbol.asyncIterator]();
-    // First events are lifecycle/checkpoint ones; step one is still running.
-    await iterator.next();
-    await started;
+    // First events are lifecycle/checkpoint ones; stop at step one's first event.
+    while (true) {
+      const next = await iterator.next();
+      if (next.done || next.value.author === "slow") break;
+    }
     const closedAt = Date.now();
     await iterator.return?.();
 

@@ -11,6 +11,7 @@ import {
   unlink,
 } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { warn } from "../../utils/log.js";
 import { WorkflowError } from "../contracts.js";
 import {
   attachCause,
@@ -38,6 +39,12 @@ import {
   workflowCheckpointSizeLimitError,
 } from "./store.js";
 
+/**
+ * Warning code logged when a save committed its checkpoint but could not
+ * release the checkpoint lock afterwards.
+ */
+const CHECKPOINT_LOCK_RELEASE_FAILED =
+  "WORKFLOW_CHECKPOINT_LOCK_RELEASE_FAILED";
 const FILE_FORMAT = "adk-llm-bridge/workflow-checkpoint-file";
 const FILE_FORMAT_VERSION = 1;
 const LOCK_OWNER_FILE = "owner.json";
@@ -188,6 +195,10 @@ export class FileSystemWorkflowCheckpointStore
   /**
    * Reads a checkpoint file without taking the lock.
    *
+   * @remarks
+   * The file is opened once without following symlinks, and checked and read
+   * through that handle.
+   *
    * @param input - Workflow id and execution id.
    * @returns The checkpoint, or `undefined` when no file exists.
    * @throws {@link WorkflowError} with code `WORKFLOW_EXECUTION_ERROR` when the file is unreadable, malformed,
@@ -211,6 +222,17 @@ export class FileSystemWorkflowCheckpointStore
 
   /**
    * Writes a checkpoint atomically under a cross-process lock.
+   *
+   * @remarks
+   * Once the checkpoint file is replaced the save has succeeded, unless the
+   * lock turns out to belong to another owner: then the save rejects with
+   * `checkpoint_lock_ownership_lost`, because a concurrent writer may have
+   * replaced the same checkpoint (`checkpoint_lock_corrupt` when the lock has
+   * no valid owner any more). If only the release I/O fails (the rename
+   * or the directory sync), the save still resolves and logs the warning
+   * `WORKFLOW_CHECKPOINT_LOCK_RELEASE_FAILED` through ADK's logger; a lock
+   * left behind makes the next save of the same execution fail with
+   * `checkpoint_lock_timeout` until the process exits.
    *
    * @param input - Checkpoint plus optional revision preconditions.
    * @returns The key and the `stateDelta` for the saved checkpoint.
@@ -302,7 +324,30 @@ export class FileSystemWorkflowCheckpointStore
       }
       throw error;
     }
-    if (!failed) await lock.release();
+    if (!failed) {
+      try {
+        await lock.release();
+      } catch (releaseError) {
+        // A lost lock means another process took it over and may have written
+        // this checkpoint too, so the revision check above guarantees nothing:
+        // fail the save. Only an I/O failure of the release itself (rename or
+        // directory sync) leaves a durable, uncontested save; a lock left
+        // behind then makes the next save on this key fail with
+        // `checkpoint_lock_timeout`.
+        if (
+          !(releaseError instanceof WorkflowError) ||
+          releaseError.details?.reason !== "checkpoint_lock_release_failed"
+        ) {
+          throw releaseError;
+        }
+        warn(
+          CHECKPOINT_LOCK_RELEASE_FAILED,
+          `Workflow checkpoint was saved but its lock could not be released: ${checkpointKey} (${String(
+            releaseError.details?.causeCode,
+          )})`,
+        );
+      }
+    }
 
     return {
       checkpointKey,
@@ -497,45 +542,19 @@ async function readCheckpointFile(
   checkpointKey: string,
   maxCheckpointBytes: number,
 ): Promise<CheckpointFileV1 | undefined> {
-  let fileBytes = 0;
-  try {
-    const info = await lstat(checkpointPath);
-    if (info.isSymbolicLink() || !info.isFile()) {
-      throw checkpointFileError(
-        "checkpoint_file_unsafe",
-        checkpointKey,
-        `Workflow checkpoint path is not a regular file: ${checkpointKey}`,
-      );
-    }
-    fileBytes = info.size;
-    const envelopeOverheadBytes =
-      checkpointEnvelopeOverheadBytes(checkpointKey);
-    const maxFileBytes = maxCheckpointBytes + envelopeOverheadBytes;
-    if (fileBytes > maxFileBytes) {
-      throw workflowCheckpointSizeLimitError(
-        checkpointKey,
-        maxCheckpointBytes,
-        fileBytes - envelopeOverheadBytes,
-        "load",
-      );
-    }
-  } catch (error) {
-    if (hasErrorCode(error, "ENOENT")) {
-      return undefined;
-    }
-    if (error instanceof WorkflowError) {
-      throw error;
-    }
-    throw ioError("checkpoint_stat_failed", checkpointKey, error);
+  const raw = await readCheckpointBytes(
+    checkpointPath,
+    checkpointKey,
+    maxCheckpointBytes,
+  );
+  if (raw === undefined) {
+    return undefined;
   }
 
   let parsed: unknown;
   try {
-    parsed = JSON.parse(await readFile(checkpointPath, "utf8"));
+    parsed = JSON.parse(raw);
   } catch (error) {
-    if (hasErrorCode(error, "ENOENT")) {
-      return undefined;
-    }
     if (error instanceof SyntaxError) {
       throw checkpointFileError(
         "checkpoint_file_corrupt",
@@ -584,6 +603,98 @@ async function readCheckpointFile(
     checkpoint: durableCheckpoint,
     revision: canonicalRevision,
   };
+}
+
+/**
+ * Opens the checkpoint file once, without following a symlink, and checks and
+ * reads it through that handle, so a path swapped after the check is never
+ * read. A FIFO is opened non-blocking and then rejected as not a regular file.
+ * Where the platform has no `O_NOFOLLOW` (Windows), a symlink is rejected by
+ * an `lstat` before the open instead.
+ */
+async function readCheckpointBytes(
+  checkpointPath: string,
+  checkpointKey: string,
+  maxCheckpointBytes: number,
+): Promise<string | undefined> {
+  if (constants.O_NOFOLLOW === undefined) {
+    try {
+      if ((await lstat(checkpointPath)).isSymbolicLink()) {
+        throw unsafeCheckpointFileError(checkpointKey);
+      }
+    } catch (error) {
+      if (error instanceof WorkflowError) throw error;
+      if (hasErrorCode(error, "ENOENT")) return undefined;
+      throw ioError("checkpoint_stat_failed", checkpointKey, error);
+    }
+  }
+  let handle: Awaited<ReturnType<typeof open>>;
+  try {
+    handle = await open(
+      checkpointPath,
+      constants.O_RDONLY |
+        (constants.O_NOFOLLOW ?? 0) |
+        (constants.O_NONBLOCK ?? 0),
+    );
+  } catch (error) {
+    if (hasErrorCode(error, "ENOENT")) {
+      return undefined;
+    }
+    // O_NOFOLLOW reports a symlink as ELOOP (EMLINK on FreeBSD).
+    if (hasErrorCode(error, "ELOOP") || hasErrorCode(error, "EMLINK")) {
+      throw unsafeCheckpointFileError(checkpointKey);
+    }
+    throw ioError("checkpoint_stat_failed", checkpointKey, error);
+  }
+  try {
+    let info: Awaited<ReturnType<typeof handle.stat>>;
+    try {
+      info = await handle.stat();
+    } catch (error) {
+      throw ioError("checkpoint_stat_failed", checkpointKey, error);
+    }
+    if (!info.isFile()) {
+      throw unsafeCheckpointFileError(checkpointKey);
+    }
+    const envelopeOverheadBytes =
+      checkpointEnvelopeOverheadBytes(checkpointKey);
+    const maxFileBytes = maxCheckpointBytes + envelopeOverheadBytes;
+    if (info.size > maxFileBytes) {
+      throw workflowCheckpointSizeLimitError(
+        checkpointKey,
+        maxCheckpointBytes,
+        info.size - envelopeOverheadBytes,
+        "load",
+      );
+    }
+    let raw: string;
+    try {
+      raw = await handle.readFile("utf8");
+    } catch (error) {
+      throw ioError("checkpoint_read_failed", checkpointKey, error);
+    }
+    const readBytes = Buffer.byteLength(raw, "utf8");
+    if (readBytes > maxFileBytes) {
+      // The file grew after the size check.
+      throw workflowCheckpointSizeLimitError(
+        checkpointKey,
+        maxCheckpointBytes,
+        readBytes - envelopeOverheadBytes,
+        "load",
+      );
+    }
+    return raw;
+  } finally {
+    await handle.close().catch(() => {});
+  }
+}
+
+function unsafeCheckpointFileError(checkpointKey: string): WorkflowError {
+  return checkpointFileError(
+    "checkpoint_file_unsafe",
+    checkpointKey,
+    `Workflow checkpoint path is not a regular file: ${checkpointKey}`,
+  );
 }
 
 function checkpointEnvelopeOverheadBytes(checkpointKey: string): number {
@@ -841,6 +952,11 @@ async function releaseLock(
   } catch (error) {
     throw ioError("checkpoint_lock_release_failed", checkpointKey, error);
   }
+  // A live owner's own tombstone fences nothing: a recoverer retires a lock
+  // only after re-reading it under a dead owner (see recoverAbandonedLock).
+  // Removing it keeps the root from growing on every save; a leftover after a
+  // crash is collected offline.
+  await rm(retiredPath, { recursive: true, force: true }).catch(() => {});
 }
 
 async function recoverAbandonedLock(
@@ -853,6 +969,14 @@ async function recoverAbandonedLock(
   }
   if (isProcessAlive(metadata.pid)) {
     return false;
+  }
+  // Read the owner again now that it is known dead. If it released the lock
+  // after the first read (and removed its tombstone), a newer owner may hold
+  // the path; a dead owner cannot release, so a token that is still there is
+  // the abandoned lock, and only another recoverer can race this rename.
+  const current = await readLockOwner(lockPath, checkpointKey);
+  if (current?.token !== metadata.token) {
+    return true;
   }
   const retiredPath = `${lockPath}.retired.${metadata.token}`;
   try {
