@@ -77,13 +77,23 @@ jobs:
             const optional = Object.entries(JSON.parse(
               (await import('node:fs')).readFileSync('node_modules/adk-llm-bridge/package.json', 'utf8'),
             ).peerDependenciesMeta).filter(([, m]) => m.optional).map(([n]) => n);
+            // An optional peer may still be present when a required peer depends on it
+            // (zod comes with @google/adk). It must never be installed because of this package.
+            const { execFileSync } = await import('node:child_process');
+            const transitive = [];
             for (const name of optional) {
-              try { await import(name); throw new Error(name + ' is installed'); }
-              catch (error) { if (error.message.endsWith(' is installed')) throw error; }
+              let nodes = [];
+              try { nodes = JSON.parse(execFileSync('npm', ['explain', name, '--json'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })); }
+              catch { continue; }
+              const dependents = nodes.flatMap((n) => n.dependents ?? []).map((d) => d.from?.name);
+              if (dependents.length === 0 || dependents.every((d) => d === 'adk-llm-bridge' || d === undefined)) {
+                throw new Error(name + ' is installed for adk-llm-bridge alone');
+              }
+              transitive.push(name + ' (via ' + [...new Set(dependents)].join(', ') + ')');
             }
-            for (const p of ['adk-llm-bridge', 'adk-llm-bridge/agents', 'adk-llm-bridge/workflows', 'adk-llm-bridge/workflows/node']) await import(p);
+            for (const p of ['adk-llm-bridge', 'adk-llm-bridge/agents', 'adk-llm-bridge/agents/session-store/sqlite', 'adk-llm-bridge/workflows', 'adk-llm-bridge/workflows/node']) await import(p);
             await import('adk-llm-bridge/package.json', { with: { type: 'json' } });
-            console.log('entries import without', optional.join(', '), 'on', process.version);
+            console.log('entries import with optional peers absent on', process.version, '| present transitively:', transitive.join('; ') || 'none');
           "
 
   # Non-blocking canary: builds @google/adk from google/adk-js `main` (the next
