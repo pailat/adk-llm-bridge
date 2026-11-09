@@ -1,8 +1,12 @@
 {
   "name": "codex-workflow",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "main": "agent.ts",
+  "engines": {
+    "node": ">=22.0.0"
+  },
   "scripts": {
     "smoke": "bun agent.ts",
     "typecheck": "tsc --noEmit"

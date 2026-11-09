@@ -1,9 +1,17 @@
 # Basic Agent with Claude (Claude Agent SDK)
 
+## What it shows
+
 A minimal example running [Anthropic](https://anthropic.com/) Claude as an
 external ADK agent through the official
 [`@anthropic-ai/claude-agent-sdk`](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk)
 driver. The `ClaudeAgent` is the root ADK agent, wrapped in an ADK `Runner`.
+
+## Requirements
+
+- Bun and Node.js 22 or newer.
+- Credentials are optional when the local Claude Code CLI is already authenticated: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` or `CLAUDE_CODE_OAUTH_TOKEN`
+- Optional: `CLAUDE_CONFIG_DIR`, `CLAUDE_CODE_EXECUTABLE`, `CLAUDE_CODE_PATH`, `SMOKE_PROMPT`
 
 ## Architecture
 
@@ -13,7 +21,7 @@ graph TD
     Runner --> Claude[ClaudeAssistant<br/>ClaudeAgent + Claude Agent SDK driver]
 ```
 
-## Setup
+## Run
 
 1. Copy the environment file. Credentials are optional if the local Claude Code
    CLI is already authenticated on this machine:

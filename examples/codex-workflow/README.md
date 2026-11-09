@@ -1,5 +1,7 @@
 # Codex-only dynamic workflow
 
+## What it shows
+
 This smoke example runs a first-class `ScriptWorkflowAgent` whose three direct
 subagents are all `CodexAgent` instances:
 
@@ -15,7 +17,14 @@ The implementer has `workspace-write`; the other two agents are read-only. For
 safety, point the example at a disposable Git worktree, never at your primary
 checkout.
 
-## Run the smoke
+## Requirements
+
+- Bun and Node.js 22 or newer.
+- `OPENAI_API_KEY` or `CODEX_API_KEY`, or a readable `~/.codex/auth.json`
+- `WORKFLOW_TARGET`: path of a disposable Git worktree
+- Git
+
+## Run
 
 From the repository root:
 

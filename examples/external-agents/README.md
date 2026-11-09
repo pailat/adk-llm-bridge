@@ -8,7 +8,7 @@ ClaudeCodeRoot: ClaudeAgent
   -> OpenRouterSupportSpecialist: LlmAgent + OpenRouter(...)
 ```
 
-## What This Demonstrates
+## What it shows
 
 - `ClaudeAgent` can be the ADK `rootAgent`.
 - `CodexAgent` can be a normal ADK subagent even though it is an external runtime.
@@ -17,7 +17,14 @@ ClaudeCodeRoot: ClaudeAgent
 - `run_adk_subagent` remains bounded RPC semantics: Claude calls a tool, the bridge runs a subagent, then Claude receives the result.
 - External runtime APIs stay opt-in through `adk-llm-bridge/agents`, while model providers stay in the root `adk-llm-bridge` import.
 
-## Quick Start
+## Requirements
+
+- Bun and Node.js 22 or newer.
+- Claude Code and Codex authenticated with their native tooling (`claude --version`, `codex --version`)
+- `OPENROUTER_API_KEY` for the OpenRouter support specialist
+- Optional: Claude and Codex env auth, `OPENROUTER_MODEL`, `SMOKE_HELPDESK_TARGET`
+
+## Run
 
 First make sure Claude Code and Codex are authenticated with their native tooling.
 
@@ -105,10 +112,10 @@ For local usage, Claude Code can use the credentials already configured on your 
 The OpenRouter subagent requires `OPENROUTER_API_KEY` unless your environment already provides it. You can change the model with:
 
 ```bash
-OPENROUTER_MODEL=google/gemini-2.0-flash-001
+OPENROUTER_MODEL=google/gemini-3.8-flash
 ```
 
-The default is `google/gemini-2.0-flash-001` because the free DeepSeek route can return intermittent OpenRouter provider `429` errors during tool-heavy support flows.
+The default is `openrouter/auto`. Set `OPENROUTER_MODEL` to pin a model, for example `google/gemini-3.8-flash`.
 
 The bridge does not persist provider secrets. Install and authenticate each runtime using its native documentation when you want that runtime to execute real work.
 

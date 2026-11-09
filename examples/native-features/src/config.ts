@@ -12,17 +12,17 @@ export const PROVIDERS: Record<
   ProviderName,
   { defaultModel: string; envKey: string }
 > = {
-  anthropic: { defaultModel: "claude-sonnet-4-6", envKey: "ANTHROPIC_API_KEY" },
-  openai: { defaultModel: "gpt-4o", envKey: "OPENAI_API_KEY" },
+  anthropic: { defaultModel: "claude-sonnet-5-5", envKey: "ANTHROPIC_API_KEY" },
+  openai: { defaultModel: "gpt-4.1", envKey: "OPENAI_API_KEY" },
   "ai-gateway": {
-    defaultModel: "anthropic/claude-sonnet-4.6",
+    defaultModel: "anthropic/claude-sonnet-5.5",
     envKey: "AI_GATEWAY_API_KEY",
   },
   openrouter: {
-    defaultModel: "openai/gpt-4o",
+    defaultModel: "openai/gpt-4.1",
     envKey: "OPENROUTER_API_KEY",
   },
-  xai: { defaultModel: "grok-4.3", envKey: "XAI_API_KEY" },
+  xai: { defaultModel: "grok-4.7", envKey: "XAI_API_KEY" },
 };
 
 // Reasoning/thinking is model-gated; only these providers' default models reason.
@@ -32,16 +32,17 @@ const REASONING_PROVIDERS: ReadonlySet<ProviderName> = new Set([
 ]);
 
 /**
- * A reasoning-capable model per provider. The `reasoning` demo uses these so it
- * always exercises extended thinking — verified to emit thought parts and/or
- * `thoughtsTokenCount`. Override with `--model` to try another reasoning model.
+ * A reasoning-capable model chosen per provider. The `reasoning` demo uses these
+ * to exercise extended thinking and reads thought parts and/or
+ * `thoughtsTokenCount` when the model returns them. Override with `--model` to
+ * try another reasoning model.
  */
 export const REASONING_MODELS: Record<ProviderName, string> = {
-  anthropic: "claude-sonnet-4-6", // native extended thinking (thought parts)
-  openai: "gpt-5.5", // reasoning_effort + reasoning_tokens
-  "ai-gateway": "openai/gpt-5.5", // OpenAI reasoning via the gateway
-  openrouter: "deepseek/deepseek-r1", // returns reasoning content
-  xai: "grok-4.3", // Grok reasoning (thought parts)
+  anthropic: "claude-sonnet-5-5", // native extended thinking (thought parts)
+  openai: "gpt-6.1-sol", // reasoning_effort + reasoning_tokens
+  "ai-gateway": "openai/gpt-6.1-sol", // OpenAI reasoning via the gateway
+  openrouter: "deepseek/deepseek-v4-pro", // returns reasoning content
+  xai: "grok-4.7", // Grok reasoning (thought parts)
 };
 
 /** The reasoning model for a config: an explicit --model wins, else the default reasoner. */

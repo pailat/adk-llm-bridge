@@ -1,6 +1,20 @@
 # Basic Agent with LM Studio (Local Models)
 
+## What it shows
+
 A multi-agent HelpDesk system using [LM Studio](https://lmstudio.ai/) for local model inference.
+
+## Requirements
+
+- Bun and Node.js 22 or newer.
+- A running LM Studio local server:
+  1. **Download LM Studio:** https://lmstudio.ai
+  2. **Download a model** in LM Studio (recommended: Llama 3.2, Mistral, Qwen)
+  3. **Start the local server** in LM Studio:
+     - Go to the "Local Server" tab
+     - Load your preferred model
+     - Click "Start Server" (default port: 1234)
+- Optional: `LMSTUDIO_BASE_URL` (default `http://localhost:1234/v1`)
 
 ## Architecture
 
@@ -17,16 +31,7 @@ graph TD
     Support --> T4[reset_password]
 ```
 
-## Prerequisites
-
-1. **Download LM Studio:** https://lmstudio.ai
-2. **Download a model** in LM Studio (recommended: Llama 3.2, Mistral, Qwen)
-3. **Start the local server** in LM Studio:
-   - Go to the "Local Server" tab
-   - Load your preferred model
-   - Click "Start Server" (default port: 1234)
-
-## Setup
+## Run
 
 1. (Optional) Copy the environment file to change the default URL:
    ```bash

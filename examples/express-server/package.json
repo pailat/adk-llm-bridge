@@ -1,7 +1,11 @@
 {
   "name": "express-server-example",
   "private": true,
+  "license": "MIT",
   "type": "module",
+  "engines": {
+    "node": ">=22.0.0"
+  },
   "scripts": {
     "start": "bun run index.ts",
     "dev": "bun run --watch index.ts"

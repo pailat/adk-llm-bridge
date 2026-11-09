@@ -1,7 +1,15 @@
 # Basic Agent with OpenAI Codex (external ADK agent)
 
+## What it shows
+
 A single-agent example running [OpenAI Codex](https://developers.openai.com/codex/sdk/)
 as an external ADK agent via the bundled Codex SDK driver.
+
+## Requirements
+
+- Bun and Node.js 22 or newer.
+- `OPENAI_API_KEY` or `CODEX_API_KEY`, or a local `codex` CLI with native auth
+- Optional: `CODEX_HOME`, `CODEX_EXECUTABLE`, `CODEX_CLI_PATH`, `SMOKE_PROMPT`
 
 ## Architecture
 
@@ -18,7 +26,7 @@ bridge. It is an external agent: the `CodexSdkDriver` (the default driver for
 `CODEX_AGENT_DEFINITION`) launches Codex through `@openai/codex-sdk` and streams
 its events back into the ADK runner.
 
-## Setup
+## Run
 
 1. Copy the environment file and add your credential:
    ```bash

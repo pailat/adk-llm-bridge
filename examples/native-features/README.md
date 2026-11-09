@@ -1,5 +1,7 @@
 # Native Features Showcase
 
+## What it shows
+
 A programmatic [Bun](https://bun.sh) + TypeScript CLI that demonstrates **every
 native-model capability** [`adk-llm-bridge`](https://www.npmjs.com/package/adk-llm-bridge)
 passes through to [Google ADK](https://google.github.io/adk-docs/)
@@ -10,7 +12,13 @@ exact events, parts, and usage metadata the chat UI normally hides
 (`usageMetadata.thoughtsTokenCount`, `part.thought === true`, partial-vs-final
 streaming events, multimodal base64 input, and forced tool calls).
 
-## Setup
+## Requirements
+
+- Bun and Node.js 22 or newer.
+- `ANTHROPIC_API_KEY` (default provider), or the key of the provider selected with `PROVIDER`: `OPENAI_API_KEY`, `AI_GATEWAY_API_KEY`, `OPENROUTER_API_KEY`, `XAI_API_KEY`
+- Optional: `MODEL`
+
+## Run
 
 1. Copy the env file and add your key (Anthropic is the default provider):
    ```bash
@@ -45,7 +53,7 @@ streaming events, multimodal base64 input, and forced tool calls).
 You can override the provider/model per run:
 
 ```bash
-bun run src/cli.ts sampling --provider openai --model gpt-4o
+bun run src/cli.ts sampling --provider openai --model gpt-4.1
 ```
 
 ## Web UI (adk-devtools)
@@ -197,16 +205,16 @@ model with `--model <id>` (or `MODEL`). Each provider reads its own key from
 
 | Provider | Key | Default model | Reasoning model (auto for the `reasoning` demo) |
 |---|---|---|---|
-| `anthropic` (default) | `ANTHROPIC_API_KEY` | `claude-sonnet-4-6` | `claude-sonnet-4-6` |
-| `openai` | `OPENAI_API_KEY` | `gpt-4o` | `gpt-5.5` |
-| `ai-gateway` | `AI_GATEWAY_API_KEY` | `anthropic/claude-sonnet-4.6` | `openai/gpt-5.5` |
-| `openrouter` | `OPENROUTER_API_KEY` | `openai/gpt-4o` | `deepseek/deepseek-r1` |
-| `xai` | `XAI_API_KEY` | `grok-4.3` | `grok-4.3` |
+| `anthropic` (default) | `ANTHROPIC_API_KEY` | `claude-sonnet-5-5` | `claude-sonnet-5-5` |
+| `openai` | `OPENAI_API_KEY` | `gpt-4.1` | `gpt-6.1-sol` |
+| `ai-gateway` | `AI_GATEWAY_API_KEY` | `anthropic/claude-sonnet-5.5` | `openai/gpt-6.1-sol` |
+| `openrouter` | `OPENROUTER_API_KEY` | `openai/gpt-4.1` | `deepseek/deepseek-v4-pro` |
+| `xai` | `XAI_API_KEY` | `grok-4.7` | `grok-4.7` |
 
 ```bash
-bun run all --provider openai            # all demos on gpt-4o
-bun run reasoning --provider openrouter  # auto-uses deepseek/deepseek-r1
-bun run sampling --provider xai --model grok-4.3
+bun run all --provider openai            # all demos on gpt-4.1
+bun run reasoning --provider openrouter  # auto-uses deepseek/deepseek-v4-pro
+bun run sampling --provider xai --model grok-4.7
 ```
 
 **Reasoning is model-gated.** Because most providers' *default* models don't
@@ -221,11 +229,11 @@ Every feature passes on every provider with an appropriate model. Notes on
 model behavior (not bridge limitations):
 
 - OpenAI / AI-Gateway reasoning models report `thoughtsTokenCount` but hide the
-  reasoning *text*; Anthropic, Grok and DeepSeek-R1 surface thought parts.
+  reasoning *text*; Anthropic, Grok and DeepSeek reasoning models surface thought parts.
 - **xAI Grok returns an empty response whenever `stop`/`stopSequences` is set**,
   so the `sampling` demo omits `stopSequences` on xAI (the bridge forwards it
   correctly; it works on the other four providers).
-- `grok-4.3` does not reliably honor JSON-schema structured output.
+- Grok models may not reliably honor JSON-schema structured output.
 
 ## Local development (testing against the local build)
 

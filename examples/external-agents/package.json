@@ -1,8 +1,12 @@
 {
   "name": "external-agents",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "main": "agent.ts",
+  "engines": {
+    "node": ">=22.0.0"
+  },
   "scripts": {
     "dev": "bunx @google/adk-devtools run agent.ts",
     "web": "bunx @google/adk-devtools web",

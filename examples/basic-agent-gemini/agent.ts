@@ -41,7 +41,12 @@ const geminiConfig: GeminiCliAgentConfig = {
   description: "A helpful assistant running Google Gemini via the Gemini CLI.",
   credentialProvider: new EnvCredentialProvider(),
   workingDirectory: process.cwd(),
-  permissions: mapPermissionModeToPolicy("read-only"),
+  permissions: {
+    ...mapPermissionModeToPolicy("read-only"),
+    // Gemini CLI cannot keep its web tools and MCP servers off the network,
+    // so it runs only when the policy allows the network explicitly.
+    allowNetwork: true,
+  },
   instruction: `You are a concise, helpful assistant running as a Gemini ADK agent.
 
 Answer the user's question directly and briefly. Do not modify files.`,

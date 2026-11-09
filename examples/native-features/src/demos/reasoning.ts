@@ -26,7 +26,7 @@ export const reasoningDemo: Demo = {
 
     // Reasoning is model-gated, so this demo uses a reasoning-capable model for
     // the provider (overridable with --model). The default models for some
-    // providers (e.g. gpt-4o) do not reason.
+    // providers (e.g. gpt-4.1) do not reason.
     const model = reasoningModelFor(config);
     out.label("reasoning model", model);
 

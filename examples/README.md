@@ -12,6 +12,10 @@ Examples of using `adk-llm-bridge` with Google ADK and multiple LLM providers.
 | [basic-agent-anthropic](./basic-agent-anthropic) | Anthropic | Multi-agent HelpDesk with Claude models |
 | [basic-agent-xai](./basic-agent-xai) | xAI | Multi-agent HelpDesk with Grok models |
 | [basic-agent-lmstudio](./basic-agent-lmstudio) | LM Studio | Multi-agent HelpDesk with local models |
+| [basic-agent-claude](./basic-agent-claude) | Claude Agent SDK | Claude as an external ADK agent |
+| [basic-agent-codex](./basic-agent-codex) | OpenAI Codex | Codex as an external ADK agent |
+| [basic-agent-gemini](./basic-agent-gemini) | Gemini CLI | Gemini CLI as an external ADK agent |
+| [external-agents](./external-agents) | Claude Code, Codex, OpenRouter | HelpDesk mixing external runtime agents and an `LlmAgent` |
 | [express-server](./express-server) | AI Gateway | Full HTTP API with tools, state & streaming |
 | [native-features](./native-features) | Anthropic / OpenAI | CLI showcasing sampling, reasoning, structured output, multimodal, tool choice & streaming |
 | [codex-workflow](./codex-workflow) | OpenAI Codex | Dynamic planner → implementer → reviewer workflow using only Codex agents |
@@ -200,7 +204,7 @@ bun run all          # run all six demos
 
 The `basic-agent-*` examples use the **factory pattern** (`model: AIGateway(...)`, `model: Anthropic(...)`, etc.) — a `BaseLlm` instance is passed straight to `LlmAgent`, so **no registration is needed** and they run under `adk-devtools` as-is.
 
-Manual registration is required **only** when you reference a model by **string id** (as `express-server` does with `model: "anthropic/claude-sonnet-4.6"`): import `LLMRegistry` from `@google/adk` and register the LLM class manually, because `adk-devtools` bundles its own copy of `@google/adk`.
+Manual registration is required **only** when you reference a model by **string id** (as `express-server` does with `model: "anthropic/claude-sonnet-5.5"`): import `LLMRegistry` from `@google/adk` and register the LLM class manually, because `adk-devtools` bundles its own copy of `@google/adk`.
 
 ### AI Gateway
 
@@ -213,7 +217,7 @@ LLMRegistry.register(AIGatewayLlm);
 
 export const rootAgent = new LlmAgent({
   name: "my_agent",
-  model: "anthropic/claude-sonnet-4",
+  model: "anthropic/claude-sonnet-5.5",
   instruction: "You are helpful.",
 });
 ```
@@ -229,7 +233,7 @@ LLMRegistry.register(OpenRouterLlm);
 
 export const rootAgent = new LlmAgent({
   name: "my_agent",
-  model: "anthropic/claude-sonnet-4",
+  model: "anthropic/claude-sonnet-5.5",
   instruction: "You are helpful.",
 });
 ```
@@ -245,7 +249,7 @@ LLMRegistry.register(OpenAILlm);
 
 export const rootAgent = new LlmAgent({
   name: "assistant",
-  model: "gpt-4.1",
+  model: "gpt-6.1-sol",
   instruction: "You are helpful.",
 });
 ```
@@ -261,7 +265,7 @@ LLMRegistry.register(AnthropicLlm);
 
 export const rootAgent = new LlmAgent({
   name: "assistant",
-  model: "claude-sonnet-4-5",
+  model: "claude-sonnet-5-5",
   instruction: "You are helpful.",
 });
 ```
@@ -277,7 +281,7 @@ LLMRegistry.register(XAILlm);
 
 export const rootAgent = new LlmAgent({
   name: "assistant",
-  model: "grok-3-beta",
+  model: "grok-4.7",
   instruction: "You are helpful.",
 });
 ```

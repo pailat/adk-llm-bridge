@@ -1,7 +1,11 @@
 {
   "name": "native-features-example",
   "private": true,
+  "license": "MIT",
   "type": "module",
+  "engines": {
+    "node": ">=22.0.0"
+  },
   "scripts": {
     "start": "bun run src/cli.ts",
     "dev": "bun run --watch src/cli.ts",
