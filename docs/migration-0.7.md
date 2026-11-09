@@ -69,6 +69,9 @@ Related behavior changes:
   them.
 - `candidateCount` other than `1` is rejected on OpenAI-compatible providers.
   Send separate requests if you need several candidates.
+- **Streams cut short now fail.** A stream that ends before its final chunk
+  reports `INCOMPLETE_STREAM` (`PROVIDER_ERROR_INCOMPLETE_STREAM`). Discard the
+  partial text, or retry, when you see it.
 
 ## 3. Logging and validation
 
@@ -78,6 +81,36 @@ Related behavior changes:
   silence them.
 - Invalid configuration (for example an empty API key or model id) throws
   ADK's `InputValidationError`. Credentials are redacted from the message.
+- **Integer options are checked.** `timeout`, `maxRetries` and Anthropic
+  `maxTokens` throw `InputValidationError` for a non-integer (for example
+  `1500.5`, or `Number(process.env.X)` when X is unset, which is `NaN`), and
+  `timeout` throws above 2147483647 ms. `register*()` checks them too. Round or
+  validate values before passing them; `null` still means the default.
+- Each warning names its stable code in the message:
+  `[adk-llm-bridge] [BUILTIN_TOOLS_DROPPED] dropping ...`. A custom logger
+  that read the code from the second argument (`{ code }`) reads it from the
+  message instead, for example with `/^\[adk-llm-bridge\] \[([^\]]+)\]/`.
+- Register functions are typed per provider (`registerOpenAI(options:
+  OpenAIRegisterOptions)` and so on). Code that passed options of another
+  provider, or misspelled keys, no longer compiles.
+- On Anthropic, a user tool named `json_output` together with
+  `responseSchema` / `responseJsonSchema` throws `InputValidationError`.
+  Rename the tool.
+- Anthropic structured output (non-streaming) carries integers beyond 2^53 as
+  strings, as streaming did. Declare such fields as `z.string()` or a union.
+- AI Gateway reads only `AI_GATEWAY_API_KEY` and `AI_GATEWAY_URL`. It no
+  longer falls back to `OPENAI_API_KEY` / `OPENAI_BASE_URL`, so it never sends
+  an OpenAI key to `ai-gateway.vercel.sh`. Set `AI_GATEWAY_API_KEY` (or pass
+  `apiKey`) if you relied on the fallback. AI Gateway, OpenRouter, xAI and
+  custom providers no longer send `OPENAI_ORG_ID` / `OPENAI_PROJECT_ID` as
+  `OpenAI-Organization` / `OpenAI-Project` headers. A custom endpoint that
+  needs them can set them in its `headers` option.
+- The OpenAI provider sends `maxOutputTokens` as `max_completion_tokens` for
+  every model. A proxy behind `OPENAI_BASE_URL` that only knows `max_tokens`
+  needs `registerCustomProvider` instead. `gpt-<N>` with N of 5 or more
+  (`gpt-6.1-sol`, ...) and `o<N>` are reasoning models on every provider:
+  `temperature`, `top_p`, stop sequences, penalties and logprobs are dropped
+  for them, and `thinkingConfig` maps to `reasoning_effort`.
 
 ## 4. Usage metadata
 
@@ -116,6 +149,11 @@ new in 0.7.0. If you already use them, these changes apply:
   set `delegation: { finalAnswer: "coordinator" }`.
 - **`transfer_to_agent` arguments** are `{ agent_name }` (ADK 2.1+), not
   `{ agentName }`. Update code that reads these events.
+- **Delegation events** always have the native ADK shape: a
+  `transfer_to_agent` call and response, and the sub-agent's events on the
+  root branch. `ExternalAgent` has no option for the old `run_adk_subagent`
+  shape. `nativeDelegationShape: false` exists only on `ToolGatewayConfig`,
+  for hosts that build a `ToolGateway` themselves.
 - **Permissions.** A child agent can no longer run wider than the agents above
   it, even through intermediate ADK agents or a direct resume. If a child
   relied on a wider policy than its parent, widen the parent or run the child
@@ -126,17 +164,52 @@ new in 0.7.0. If you already use them, these changes apply:
 - **Codex outside a git repository.** Codex refuses to run outside a trusted
   git repository. Pass `skipGitRepoCheck: true` to `CodexSdkDriver` or
   `CodexCliDriver` if you run it from a temporary directory.
-- **Errors.** "Usage limit" errors from Codex are now non-recoverable
-  `CODEX_QUOTA_EXHAUSTED`.
-- **Capabilities.** The Codex and Gemini CLI definitions no longer declare
-  `tools` / `mcpServers` support.
+- **Errors.** Error codes no longer name a provider. A usage cap from any
+  runtime is the non-recoverable `QUOTA_EXHAUSTED` (was
+  `CODEX_QUOTA_EXHAUSTED` for Codex only); `CLAUDE_RATE_LIMIT` is
+  `RATE_LIMIT`, `CLAUDE_AUTH_ERROR` is `AUTH_ERROR`, `error_max_turns` is
+  `MAX_TURNS_EXCEEDED`. To compare stored codes, pass them through
+  `normalizeRecoverableErrorCode()`; the full table is in
+  [External agent isolation](external-agent-isolation.md), "Classified
+  codes". Codex CLI stderr on exit 0 is a logged `CODEX_CLI_STDERR` warning,
+  not an error event.
+- **Capabilities** are declared only by drivers (`driver.capabilities?.()`);
+  definitions no longer have a `capabilities` field
+  (`CLAUDE_AGENT_DEFINITION.capabilities` becomes
+  `new ClaudeAgentSdkDriver().capabilities()`).
+- **Definitions.** A custom `ExternalAgentDefinition` whose `createDriver`
+  takes no argument still works; to accept `driverOptions`, type it
+  `ExternalAgentDefinition<MyOptions>` and use
+  `createDriver(options) { return new MyDriver(options); }`.
+  `registry.create(id, { name, driverOptions })` configures the default
+  driver.
+- **Credentials.** Return `{ kind: "env", env }`, `{ kind: "none" }` or
+  `undefined` from a credential provider; any other kind (including the old
+  `"custom"`) ends the turn with `EXTERNAL_AGENT_CREDENTIAL_UNSUPPORTED`.
+  `CodexAgent` now uses `EnvCredentialProvider`; to keep the runtime login
+  only, pass `credentialProvider: new NoopCredentialProvider()`.
+- **Custom drivers.** `ExternalAgent` no longer fills `request.runtimeSession`;
+  read the runtime's session id from your own state. A host that runs a
+  driver directly can pass `runtimeSession: { id }` to resume a known Codex
+  thread or Claude session. `request.tools` is gone; use `request.adkTools`.
+- **Imports.** The driver mappers and input converters are internal;
+  `mapPermissionModeToPolicy` stays. Replace `externalAgentDefinitionRegistry`
+  / `externalAgentProviderRegistry` with
+  `createDefaultExternalAgentDefinitionRegistry()` /
+  `createDefaultExternalAgentProviderRegistry()`; extend a CLI driver class
+  instead of `SubprocessJsonlDriver`.
+- **Delegated paths.** Nested parent and child roots now intersect to the
+  narrower root instead of nothing. Use absolute or `~` roots in a parent's
+  `allowedPaths`: relative roots are not passed to delegated agents, and a
+  child of a parent with only relative roots can reach no path. The derived
+  policy carries `pathBounds`; the guard enforces them.
 - **Isolated Claude agents.** `ClaudeAgent` no longer inherits the host's
   Claude Code setup. If your agent relied on host tools (Task sub-agents,
   Skill, cron, worktrees...), on MCP servers from your user or project
   config, or on claude.ai connectors, pass a driver:
   `driver: new ClaudeAgentSdkDriver({ inheritHostConfig: true })`, or list the
   built-in tools you need with
-  `driver: new ClaudeAgentSdkDriver({ tools: [...DEFAULT_CLAUDE_SDK_TOOLS, "Task"] })`.
+  `driver: new ClaudeAgentSdkDriver({ tools: [...DEFAULT_CLAUDE_TOOLS, "Task"] })`.
   `settingSources` still defaults to `[]`. Under `read-only`, write, shell and
   web tools are no longer offered to the model (calls to them were already
   denied).
@@ -144,6 +217,73 @@ new in 0.7.0. If you already use them, these changes apply:
   delegation is one `execute_tool transfer_to_agent` span around the
   sub-agent's run. If you query traces for the previous 0 ms span pairs or for
   `gen_ai.request.model = "claude"`, update those queries.
+- **ADK tool actions.** A bridged ADK tool that sets `skipSummarization` or
+  `transferToAgent` now ends the external agent's turn after the call. A tool
+  that sets only `escalate` no longer has it ignored: it is published, and an
+  enclosing `LoopAgent` stops after the turn. Stop setting an action if you
+  relied on it being dropped.
+- **`requestConfirmation()` in a bridged tool** is now confirmed instead of
+  failing. The tool runs a second time with `toolContext.toolConfirmation` set
+  (including the human's `payload`), and the first run's response and state
+  changes are dropped, as in ADK.
+- **Driver options.** `ClaudeAgent({ driver: new ClaudeAgentSdkDriver({ tools }) })`
+  can be written `ClaudeAgent({ driverOptions: { tools } })`. Passing both
+  throws `InputValidationError`.
+- **Claude CLI isolation.** `ClaudeCliDriver` no longer loads your Claude
+  Code tools, MCP servers, skills, settings files or claude.ai connectors. Pass
+  `new ClaudeCliDriver({ inheritHostConfig: true })` to keep them, or
+  `tools: [...]` to choose the built-in tools. A `read-only` agent now runs
+  with `--permission-mode dontAsk` instead of `plan`, so it uses the model you
+  configured. Its write and shell tools are removed, and MCP tools are
+  denied, also with `inheritHostConfig: true` (both Claude drivers). Give a
+  host MCP server's tools to an `ask` or `workspace-write` agent instead.
+- **Isolation check.** If a run stops with `EXTERNAL_AGENT_ISOLATION_VIOLATED`,
+  a host or managed setting added tools or MCP servers to an isolated Claude
+  agent, at start or during the run. Remove that setting, or pass
+  `inheritHostConfig: true` if you trust it.
+- **`requiredMcpServers`.** Requiring a host MCP server now needs
+  `inheritHostConfig: true` on `ClaudeAgentSdkDriver` (or in `ClaudeAgent`'s
+  `driverOptions`); without it the constructor throws `InputValidationError`.
+  Before, such a run always failed with "Required Claude MCP server
+  unavailable".
+- **Network is off unless `allowNetwork: true`.** An unset `allowNetwork`,
+  or no `permissions` at all, now means `false` everywhere: at the root, in
+  workflow steps, in delegated children and in a driver run directly. An
+  agent that needs the network (web tools, a shell that downloads, remote MCP
+  servers) must set `allowNetwork: true` in its own policy. Under an
+  `ExternalAgent` ancestor (directly or through the session registry that
+  `AgentInvocationGateway` copies), the ancestor's policy is a ceiling, so a
+  child keeps network only when both set `true`. A root `WorkflowAgent` with
+  no external ancestor applies no ceiling: a step with `allowNetwork: true`
+  keeps network, a step without it has none. See
+  [External agent isolation](external-agent-isolation.md).
+  - Claude agents run Bash in a sandbox with no network, and the run fails
+    at start where the sandbox cannot run. On Linux install bubblewrap (and
+    socat). On Windows the sandbox is not available: set
+    `allowNetwork: true`, or pass `allowUnsandboxedShell: true` to the
+    driver. Either remedy also works on Linux.
+  - Codex agents in `full-access` mode are refused: use `workspace-write` or
+    `ask`, set `allowNetwork: true`, or pass `allowUnenforcedNetwork: true`.
+    In the other modes Codex turns off the MCP servers of your Codex config
+    for the run, and refuses the run if `codex mcp list --json` fails.
+  - `new CodexSdkDriver({ sdk })` (a prebuilt client) is refused, because the
+    driver cannot turn off that client's host MCP servers. Let the driver
+    build the client, set `allowNetwork: true`, or pass
+    `allowUnenforcedNetwork: true`.
+  - Gemini CLI agents without `allowNetwork: true` are refused in every mode,
+    so a Gemini CLI agent with no `permissions` no longer runs. Set
+    `allowNetwork: true` for them, or pass `allowUnenforcedNetwork: true` to
+    `GeminiCliDriver` (or `GeminiCliAgent`'s `driverOptions`) to run with the
+    network reachable.
+  - Approvers no longer see MCP tools of other servers, or unsandboxed shell
+    calls; the guard denies them first.
+- **Missing SDKs and binaries.** A missing `@anthropic-ai/claude-agent-sdk`,
+  `@openai/codex-sdk`, or `claude`/`codex`/`gemini` binary is now an error
+  event (`EXTERNAL_AGENT_DEPENDENCY_MISSING` or `MISSING_BINARY`) with the
+  install command, not an exception from `runAsync`.
+- **Cancel.** CLI processes get `killGraceMs` (default 2000 ms) to exit after
+  SIGTERM before SIGKILL. On macOS and Linux the whole process group of the
+  CLI is killed, and host signals are forwarded to it.
 
 ## 7. Agent invocation gateway
 
@@ -185,6 +325,83 @@ checkpoints:
   a new `operationId` instead, check the target ref first: the earlier attempt
   may already have applied the change. Checkpoints,
   artifacts, change sets and worktrees from earlier versions keep working.
+- Custom control-plane services must return plain JSON. Class instances,
+  `Date`, `Map` and non-finite numbers are rejected at the control plane with
+  `WORKFLOW_CONTROL_INVALID_RESULT` instead of reaching the transport.
+- **Registry.** Replace `registry.get(id)` / `require(id)` / `has(id)` /
+  `delete(id)` with the `(id, version)` form; catch
+  `WORKFLOW_DEFINITION_NOT_FOUND` for an unknown workflow.
+- **Ids.** Workflow definition ids and versions follow the opaque id grammar
+  (letters, digits, `. _ : + / -`, starting with a letter or digit, up to
+  256). Agent, task, execution and message ids use `A-Z a-z 0-9 . _ : -` (no
+  `/`, `@` or `+`); keep `@` and `/` for the actor's `actorId` only, and map
+  `user+tag@example.com` to another principal id. Plan base revisions must not
+  contain spaces. Executions or checkpoints stored under other ids still load
+  but cannot be resumed on 0.7; finish them first. Stored Git workspace
+  descriptors with `+` or `/` in `taskId` or `executionId`, and
+  host-persisted orchestration messages with `@` or `/` in their ids, fail to
+  load; drain them before upgrading.
+- **Paths.** Pass `/`-separated paths to workspace leases: a `\` is rejected
+  instead of converted, and a first segment of one letter and a colon
+  (`x:y`, `a:b.txt`) is rejected as a drive prefix; rename such files. Set
+  `caseInsensitivePaths: true` on the workspace adapter for a workspace on a
+  case-insensitive filesystem (default macOS APFS, Windows).
+- **Workspace leases.** Drain or delete workspace `stateDirectory` lease files
+  before upgrading. Expired legacy leases with rejected paths are dropped; a
+  live one fails with `WORKFLOW_WORKSPACE_STATE_INCOMPATIBLE` until it is
+  released or expires. Compare lease loss `reason.code` with
+  `WORKSPACE_LEASE_LOST` / `WORKSPACE_ADAPTER_DISPOSED`.
+- **Orchestration authorization.** Branch on
+  `code === "WORKFLOW_ORCHESTRATION_UNAUTHORIZED"`;
+  `details.reason === "unauthorized"` still works in 0.7 but will be removed.
+  Refresh an actor's or task's binding only on `WORKFLOW_PLAN_STALE`;
+  `WORKFLOW_ORCHESTRATION_UNAUTHORIZED` for a revision mismatch means the
+  actor is used outside its scope.
+- **`task.sweep`.** Catch `WorkflowTaskControlError` with
+  `WORKFLOW_TASK_INVALID_REQUEST` instead of `TypeError`.
+- **Git driver errors.** Handle `GIT_COMMAND_FAILED` (process failures, with
+  `cause`) and `GIT_ENTRY_UNSUPPORTED` where `GIT_CONFIGURATION_INVALID` or a
+  raw `ExecException` was handled, and catch `NodeGitWorktreeError`
+  `GIT_CONFIGURATION_INVALID` instead of `TypeError` around `create()`.
+  Remove untracked nested repositories from worktrees or add them as
+  submodules.
+- **Removed helpers.** The internal workflow helpers listed in the CHANGELOG
+  have no public replacement. Hosts that need JSON snapshots copy and freeze
+  values themselves; store implementations validate their own ids.
+- **Control plane without an actor, or with a task-bound actor.** Without
+  `trustedHostMode`, `execution.*`, `artifact.*` and `integration.validate`
+  need the host-authenticated `WorkflowActorContext` of the execution, and
+  `execution.*` needs one that is not bound to a task (task agents read their
+  own state with `task.*`). Otherwise they fail with
+  `WORKFLOW_CONTROL_UNAUTHORIZED`. `execution.list` always needs
+  `trustedHostMode`. Code that matched
+  `WORKFLOW_CONTROL_INVALID_REQUEST` to detect a missing or mismatched actor
+  should match `WORKFLOW_CONTROL_UNAUTHORIZED`; payload errors keep
+  `WORKFLOW_CONTROL_INVALID_REQUEST`.
+- **Artifacts are keyed by execution.** `WorkflowArtifactStore.get` takes
+  `{ executionId, artifactId }` and `list` requires `executionId`, as do the
+  `artifact.get` and `artifact.list` control payloads (without it they fail
+  with `WORKFLOW_CONTROL_INVALID_REQUEST`, even in trusted host mode). The
+  same artifact id in two executions names two artifacts. A missing or
+  invalid id throws `WorkflowArtifactIdentityError`
+  (`WORKFLOW_ARTIFACT_IDENTITY_INVALID`, a `TypeError`); artifact execution
+  ids use the record grammar, so `/` and `+` are rejected there.
+- **Custom artifact stores** must key by both ids and return only artifacts
+  of the requested execution. Records written by earlier versions already
+  carry their `executionId`, and the old store held each artifact id once,
+  so re-keying every record under `(executionId, artifactId)` is a one-time
+  migration without collisions; revisions do not change. Until a store is
+  re-keyed, the control plane and `IntegrationGate` fail closed: an artifact
+  returned for another execution reads as absent from `artifact.get`, is
+  dropped from an `artifact.list` page, and is reported as missing by
+  `integration.validate`. A file-backed store can use the async
+  `workflowArtifactStoragePath` for a per-execution layout whose file names
+  stay within 255 characters.
+- **Retry policies** with unknown keys, non-finite or negative numbers, or
+  delays above 2^31-1 ms are rejected at definition time.
+- **Git driver environment.** The driver no longer honors `GIT_*` pathspec,
+  quarantine, replace, graft and shallow variables from the host, and always
+  sets `GIT_NO_REPLACE_OBJECTS=1`.
 
 ## Coming from the 0.6.0 tag
 

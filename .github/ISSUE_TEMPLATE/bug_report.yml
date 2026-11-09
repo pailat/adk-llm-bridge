@@ -1,0 +1,103 @@
+name: Bug report
+description: Report a bug to help us improve
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. For security problems, do not use this form: see [SECURITY.md](https://github.com/pailat/adk-llm-bridge/blob/main/SECURITY.md).
+  - type: textarea
+    id: description
+    attributes:
+      label: Bug description
+      description: A clear description of what the bug is.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: A minimal example or the steps that reproduce the problem.
+      placeholder: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include error messages and logs. Remove API keys and credentials.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: adk-llm-bridge version
+      placeholder: 0.7.0
+    validations:
+      required: true
+  - type: input
+    id: adk-version
+    attributes:
+      label: "@google/adk version"
+      placeholder: 2.4.0
+    validations:
+      required: true
+  - type: dropdown
+    id: runtime
+    attributes:
+      label: Runtime
+      options:
+        - Node.js
+        - Bun
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: runtime-version
+    attributes:
+      label: Runtime version
+      placeholder: Node.js 22.12.0
+    validations:
+      required: true
+  - type: dropdown
+    id: provider
+    attributes:
+      label: Provider or agent
+      options:
+        - AI Gateway
+        - OpenRouter
+        - OpenAI
+        - Anthropic
+        - xAI
+        - Custom OpenAI-compatible endpoint
+        - Claude agent
+        - Codex agent
+        - Gemini CLI agent
+        - Workflows
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: Model
+      description: The model id, if the bug depends on it.
+      placeholder: anthropic/claude-sonnet-4.6
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: macOS 15, Ubuntu 24.04
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context

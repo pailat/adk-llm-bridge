@@ -41,6 +41,28 @@ New writes remove runtime-only step events and replay markers before hashing or
 persistence. Both bundled checkpoint stores reject malformed durable graphs
 and enforce a configurable 4 MiB UTF-8 JSON limit by default.
 
+### Checkpoint failure reasons
+
+Checkpoint stores throw `WorkflowError` with code `WORKFLOW_EXECUTION_ERROR`
+and a `details.reason` from the exported `WorkflowCheckpointFailureReason`
+union. `details.checkpointKey` names the checkpoint; file system failures also
+carry `details.causeCode` (the system error code) and, when available,
+`details.causeMessage`.
+
+| `details.reason` | Meaning |
+| --- | --- |
+| `checkpoint_revision_conflict` | A compare-and-swap write found another revision (`WorkflowCheckpointConflictError`, with `expectedRevision` and `actualRevision`). Reload and retry. |
+| `checkpoint_size_limit_exceeded` | The checkpoint is larger than the configured limit (`maxBytes`, `actualBytes`, `direction`). |
+| `checkpoint_revision_invalid` | The supplied revision does not match the checkpoint, or a stored file carries an invalid revision. |
+| `checkpoint_schema_invalid` | A save was given an invalid checkpoint. |
+| `checkpoint_file_corrupt` | A stored file is not valid JSON or not a valid checkpoint file. |
+| `checkpoint_file_unsafe` | The checkpoint path is a symlink or not a regular file. |
+| `checkpoint_directory_create_failed`, `checkpoint_read_failed`, `checkpoint_stat_failed`, `checkpoint_write_failed` | A file system call on the checkpoint failed. |
+| `checkpoint_lock_timeout` | The per-checkpoint lock was not acquired in time. |
+| `checkpoint_lock_corrupt` | The lock is not a safe directory or has no valid owner; it is never taken over automatically. |
+| `checkpoint_lock_ownership_lost` | Another writer took the lock before the commit. |
+| `checkpoint_lock_acquire_failed`, `checkpoint_lock_candidate_failed`, `checkpoint_lock_candidate_cleanup_failed`, `checkpoint_lock_read_failed`, `checkpoint_lock_recovery_failed`, `checkpoint_lock_release_failed`, `checkpoint_lock_cleanup_failed` | A file system call on the lock failed. |
+
 ## Waiting steps
 
 A step whose sub-agent asks for input is stored with `status: "waiting"` and an
@@ -49,7 +71,11 @@ JSON). The checkpoint also keeps the original workflow `input` until the
 workflow ends, because the turn that answers the step carries only the answer.
 Both fields are optional, so existing checkpoints load unchanged; a checkpoint
 that contains a waiting step cannot be read by earlier versions. Interrupt
-events count toward the checkpoint size limit.
+events count toward the checkpoint size limit. On load, the fields that
+resuming reads from each stored event (`author`, `branch`, `longRunningToolIds`, `content.role`,
+`content.parts`, each part's `functionCall`, `actions` and
+`actions.stateDelta`) must have their ADK types; a
+checkpoint that fails this check is rejected as `checkpoint_file_corrupt`.
 
 ## Workspace leases and fencing
 
@@ -72,7 +98,32 @@ cancellation and stops the active attempt if ownership expires, renewal proves
 that the lease is stale, or the adapter is disposed. The resulting
 `WORKFLOW_WORKSPACE_LEASE_LOST` error includes the JSON-safe lease-loss reason.
 This closes the local execution window, but the external writer must still
-enforce `fencingToken` before every durable write.
+enforce `fencingToken` before every durable write. The reason's `code` is
+`WORKSPACE_LEASE_LOST` when the lease expired or was taken over, and
+`WORKSPACE_ADAPTER_DISPOSED` when the adapter was disposed.
+
+Lease files written by an older release may hold write paths the
+[portable path grammar](./workflow-orchestration.md#identifiers-and-paths)
+rejects, such as `x:y` or a path longer than 4096 characters. An expired lease
+with such a path is dropped. A live one makes `acquire` and `conflicts` throw
+`WorkflowError` with code `WORKFLOW_WORKSPACE_STATE_INCOMPATIBLE` (details:
+`workspaceId`, `leaseId`, `ownerId`, `expiresAt`) instead of guessing at its
+scope; release it or let it expire.
+
+### Path case
+
+Both adapters compare write paths case-sensitively by default, so on a
+case-insensitive filesystem (the macOS and Windows defaults) `Src/a` and
+`src/a` would not conflict although they are the same file. Set
+`caseInsensitivePaths: true` on `InMemoryWorkspaceAdapter` or
+`FileSystemWorkspaceAdapter` for such a workspace: paths then conflict after
+Unicode NFC normalization and a full case fold, so `Straße` meets `STRASSE`,
+`ς` meets `σ`, and the long s and micro sign meet `s` and `μ`. The fold is
+conservative: it may report an overlap the filesystem would not (dotless `ı`
+meets `i`), but never fewer. Leases keep the caller's spelling. Every
+`FileSystemWorkspaceAdapter` that shares a `stateDirectory` must use the same
+setting. Write paths follow the
+[portable path grammar](./workflow-orchestration.md#identifiers-and-paths).
 
 ## Retired lock tombstones
 
@@ -137,7 +188,17 @@ The execution controller, recursive task controller, mailbox, artifact store,
 and integration gate are transport-neutral ports. Their bundled in-memory
 implementations are bounded test/development references, not process-restart
 durability. Production adapters must preserve CAS transitions, monotonic
-cursors, mailbox capacity, and immutable artifact revisions. See the
+cursors, mailbox capacity, and immutable artifact revisions. An artifact
+store keys each artifact by execution id and artifact id, and returns only
+artifacts of the execution it is asked for; a file-backed store can use
+`await workflowArtifactStoragePath({ executionId, artifactId })` for a
+`<executionId>/<artifactId>` layout in which each id is one escaped, portable
+segment of at most 255 characters (an id whose escaped form is longer becomes
+`~` and its SHA-256 hex digest). The last segment is the complete file
+name, so do not append an extension; use it as a directory for fixed, short
+file names if the store needs several files. An invalid id throws
+`WorkflowArtifactIdentityError` with code `WORKFLOW_ARTIFACT_IDENTITY_INVALID`.
+See the
 [workflow control-plane guide](./workflow-control-plane.md) for the JSON/MCP
 boundary and the exact single-process limitations.
 

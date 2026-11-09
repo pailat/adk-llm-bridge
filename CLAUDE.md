@@ -75,7 +75,7 @@ API keys/URLs resolve in order: instance config → global config (via `setProvi
 
 ### JSON Safety
 
-`src/utils/json.ts` provides `safeJsonParse` which pre-processes large integers (17+ digits) to prevent IEEE 754 precision loss before `JSON.parse`.
+`src/utils/json.ts` parses payloads without IEEE 754 precision loss: integers beyond `Number.MAX_SAFE_INTEGER` become strings of their exact digits (a `JSON.parse` reviver that reads `context.source`). `tryParseJson` parses tool-call arguments and tells invalid JSON from a non-object; `parseJson` parses any JSON value.
 
 ## Testing
 

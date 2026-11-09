@@ -128,10 +128,16 @@ its final result at once; a tool that finishes immediately should be a plain
 `FunctionTool`. ADK `NodeTool` calls are the exception: ADK marks them
 long-running only so a paused node can resume, so they never pause the step by
 themselves. When the wrapped node pauses, its own request (for example an
-`adk_request_input` call) is what the step waits on. A `NodeTool` is recognized
-in the `tools` list of the `LlmAgent` that made the call (the step's agent or
-one of its sub-agents); one provided by a toolset is treated like any other
-long-running tool.
+`adk_request_input` call) is what the step waits on. A `NodeTool` call is
+recognized wherever the calling `LlmAgent` sits: the step's agent, one of its
+sub-agents, or a graph node of an ADK `Workflow` wrapped in a `NodeTool`
+(nested to any depth). The tool is looked up by name in that agent's `tools`
+list; a listed tool that is not a `NodeTool` keeps the call pending. A
+`NodeTool` provided by a toolset is not listed, and the interrupt scan never
+calls `getTools` (it may do I/O), so it is recognized by the branch ADK runs
+the node on (`<tool name>@<call id>`): any event of the delegation on that
+branch shows the call ran a node. A wrapped node that emits no event at all
+leaves no such branch, and its call still counts as long-running.
 
 1. The step is saved as `waiting` in the checkpoint, together with the
    interrupt (kind, function-call ids, the delegation events) and the original
@@ -146,8 +152,14 @@ long-running tool.
    Every other turn goes to the same waiting run and runs no agent: a different
    message, or a `functionResponse` that answers nothing, is rejected with
    `WORKFLOW_INPUT_MISMATCH` (no `workflow_started`, the run keeps waiting); the
-   original message again replays the finished steps and ends with
-   `workflow_waiting`.
+   original message again replays the finished steps, emits the waiting
+   step's pending request events and its `step_waiting` event again, and ends
+   with `workflow_waiting`. Because the request is emitted on every such turn,
+   a caller that only sees that turn still gets the interrupt: an outer
+   workflow or `AgentInvocationGateway` delegation that re-enters a
+   still-waiting inner workflow (for example a fresh outer run after the
+   first one failed) waits on the same request instead of completing, and
+   answering it resumes the inner run.
 
 The default execution id finds the waiting run from the most recent
 `step_waiting` event this workflow agent emitted in the session, so no custom

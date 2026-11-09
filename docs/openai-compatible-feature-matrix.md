@@ -111,15 +111,22 @@ const alternatives = await Promise.all(
 The OpenAI-compatible converter uses a strict allowlist; ADK config is never
 spread wholesale into Chat Completions.
 
-- For recognized OpenAI reasoning IDs (`gpt-5*` and the `o1`, `o3`, and `o4`
-  families), the bridge uses `max_completion_tokens` and removes `temperature`,
+- OpenAI reasoning IDs are recognized by family and version: `gpt-<N>` with
+  N of 5 or more (`gpt-5`, `gpt-6.1-sol`, `gpt-7`, ...) and the o-series
+  (`o1`, `o3-mini`, `o4-mini`, ...), with or without a `vendor/` prefix or an `ft:` fine-tune id. For
+  them the bridge uses `max_completion_tokens` and removes `temperature`,
   `top_p`, stop sequences, presence/frequency penalties, `logprobs`, and
   `top_logprobs`, because those APIs reject the fields.
+- The OpenAI provider sends `max_completion_tokens` for every model, since
+  OpenAI deprecates `max_tokens`. Other providers send `max_tokens` unless the
+  model is an OpenAI reasoning ID.
 - When logprobs are otherwise allowed, setting ADK `logprobs` also sends
   OpenAI-compatible `logprobs: true` and clamps `top_logprobs` into the
   accepted `0`–`20` range.
 - Direct OpenAI and xAI use a strict, model-name-gated
   `reasoning_effort`. Unknown or non-reasoning model IDs do not receive it.
+  On xAI only `grok-3-mini*` and the explicit `*-reasoning` variants get it;
+  Grok 4.x models reason on their own and showed no response to it.
 - OpenRouter and AI Gateway receive the provider-native `reasoning` object.
   A positive ADK `thinkingBudget` maps to exactly one of `effort` or
   `max_tokens`; sending both would be rejected. These gateways may accept and
@@ -170,7 +177,7 @@ Native Anthropic instead injects and selects a synthetic `json_output` tool.
 Extended thinking forbids forced tool choice, so the bridge warns:
 
 ```text
-[adk-llm-bridge] Anthropic forbids a forced tool_choice while extended thinking is enabled; downgrading tool_choice to { type: 'auto' }. Structured output / forced function calling is best-effort in this request. Disable thinking to force tool use.
+[adk-llm-bridge] [THINKING_TOOL_CHOICE_DOWNGRADED] Anthropic forbids a forced tool_choice while extended thinking is enabled; downgrading tool_choice to { type: 'auto' }. Structured output / forced function calling is best-effort in this request. Disable thinking to force tool use.
 ```
 
 An explicit Anthropic tool-choice mode of `NONE` also wins over the synthetic
@@ -188,7 +195,7 @@ declarations. A request that contains them produces one warning naming all
 dropped fields:
 
 ```text
-[adk-llm-bridge] dropping Gemini-only built-in tool(s) not supported on this provider: googleSearch, codeExecution, urlContext
+[adk-llm-bridge] [BUILTIN_TOOLS_DROPPED] dropping Gemini-only built-in tool(s) not supported on this provider: googleSearch, codeExecution, urlContext
 ```
 
 Replace them with application-owned ADK function tools:
