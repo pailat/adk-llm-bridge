@@ -58,6 +58,7 @@ Optional peers, only for the features that use them:
 | Feature | Install |
 |---|---|
 | zod schemas (ADK 2.4 requires zod 4) | `zod@^4` |
+| Run spec, `adk-llm-bridge/workflows/spec` (experimental) | `zod@^4`; zod >= 4 is required by this subpath only |
 | `ClaudeAgent` | `@anthropic-ai/claude-agent-sdk@">=0.3.319 <0.4"` |
 | `CodexAgent` | `@openai/codex-sdk@">=0.167.0 <0.168"` |
 | `GeminiCliAgent` | the `gemini` CLI on `PATH` |
@@ -67,7 +68,8 @@ Import only the documented subpaths: `adk-llm-bridge` (providers),
 `adk-llm-bridge/agents` (external agents),
 `adk-llm-bridge/agents/session-store/sqlite` (Claude session store),
 `adk-llm-bridge/workflows`
-(workflows), `adk-llm-bridge/workflows/node` (Node host adapters) and
+(workflows), `adk-llm-bridge/workflows/node` (Node host adapters),
+`adk-llm-bridge/workflows/spec` (experimental run spec, needs zod >= 4) and
 `adk-llm-bridge/package.json`. Files under `dist/` are build output, and their
 names change between releases.
 

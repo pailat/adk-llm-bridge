@@ -10,7 +10,10 @@
  *    an `/agents` object where `/workflows` expects it fails to compile.
  * 2. Each entry, and `adk-llm-bridge/package.json`, imports under Node from a
  *    consumer that has the required peers but none of the optional ones, by
- *    package name, so the `exports` map is exercised too.
+ *    package name, so the `exports` map is exercised too. The one exception
+ *    is a declared map of entry to required optional peers (the spec entry
+ *    needs zod): those entries import only from a consumer that has exactly
+ *    those peers, and every other entry is still checked without them.
  * 3. A name exported by more than one entry is the same value in each, so
  *    singletons such as error classes and registries are shared.
  *
@@ -95,84 +98,138 @@ for (const [name, files] of declaredIn) {
 }
 if (declaredIn.size === 0) failures.push("no class declarations found in dist");
 
-// 2 and 3. Import every entry from a consumer without the optional peers.
-const consumer = mkdtempSync(join(tmpdir(), "adk-llm-bridge-entries-"));
-try {
-  const modules = join(consumer, "node_modules");
-  const installed = join(modules, pkg.name);
-  mkdirSync(installed, { recursive: true });
-  cpSync(join(root, "package.json"), join(installed, "package.json"));
-  cpSync(distDir, join(installed, "dist"), { recursive: true });
-  const linked: string[] = [];
-  for (const entry of readdirSync(join(root, "node_modules"))) {
-    if (entry.startsWith(".") || entry === pkg.name) continue;
-    const names = entry.startsWith("@")
-      ? readdirSync(join(root, "node_modules", entry)).map(
-          (child) => `${entry}/${child}`,
-        )
-      : [entry];
-    for (const name of names) {
-      if (optionalPeers.has(name)) continue;
-      mkdirSync(join(modules, name, ".."), { recursive: true });
-      symlinkSync(join(root, "node_modules", name), join(modules, name));
-      linked.push(name);
+// 2 and 3. Import the entries from consumers with and without optional peers.
+/**
+ * Entries that need an optional peer, by `exports` key. Every other entry must
+ * import with no optional peer installed; these are imported only from a
+ * consumer that has the listed peers.
+ */
+const entryOptionalPeers: Readonly<Record<string, readonly string[]>> = {
+  "./workflows/spec": ["zod"],
+};
+for (const [key, peers] of Object.entries(entryOptionalPeers)) {
+  if (!(key in pkg.exports))
+    failures.push(`${key} is not in package.json exports`);
+  for (const peer of peers) {
+    if (!optionalPeers.has(peer)) {
+      failures.push(`${key} requires ${peer}, which is not an optional peer`);
     }
   }
+}
 
-  const specifiers = Object.keys(pkg.exports).map((key) =>
-    key === "." ? pkg.name : `${pkg.name}/${key.slice(2)}`,
-  );
-  const probe = `
-    const specifiers = ${JSON.stringify(specifiers)};
-    const optional = ${JSON.stringify([...optionalPeers])};
-    const failures = [];
-    for (const name of optional) {
-      try {
-        await import(name);
-        failures.push("optional peer " + name + " is installed in the consumer");
-      } catch {}
-    }
-    const owners = new Map();
-    for (const specifier of specifiers) {
-      let mod;
-      try {
-        mod = specifier.endsWith("/package.json")
-          ? await import(specifier, { with: { type: "json" } })
-          : await import(specifier);
-      } catch (error) {
-        failures.push(specifier + " failed to import: " + (error?.message ?? error));
-        continue;
+const allKeys = Object.keys(pkg.exports);
+const specifierOf = (key: string): string =>
+  key === "." ? pkg.name : `${pkg.name}/${key.slice(2)}`;
+const needsPeers = (key: string): boolean =>
+  (entryOptionalPeers[key]?.length ?? 0) > 0;
+
+/** Imports `keys` from a consumer where only `present` optional peers exist. */
+function checkConsumer(
+  label: string,
+  keys: readonly string[],
+  present: ReadonlySet<string>,
+): void {
+  const consumer = mkdtempSync(join(tmpdir(), "adk-llm-bridge-entries-"));
+  try {
+    const modules = join(consumer, "node_modules");
+    const installed = join(modules, pkg.name);
+    mkdirSync(installed, { recursive: true });
+    cpSync(join(root, "package.json"), join(installed, "package.json"));
+    cpSync(distDir, join(installed, "dist"), { recursive: true });
+    const linked: string[] = [];
+    for (const entry of readdirSync(join(root, "node_modules"))) {
+      if (entry.startsWith(".") || entry === pkg.name) continue;
+      const names = entry.startsWith("@")
+        ? readdirSync(join(root, "node_modules", entry)).map(
+            (child) => `${entry}/${child}`,
+          )
+        : [entry];
+      for (const name of names) {
+        if (optionalPeers.has(name) && !present.has(name)) continue;
+        mkdirSync(join(modules, name, ".."), { recursive: true });
+        symlinkSync(join(root, "node_modules", name), join(modules, name));
+        linked.push(name);
       }
-      if (specifier.endsWith("/package.json")) continue;
-      for (const [name, value] of Object.entries(mod)) {
-        const first = owners.get(name);
-        if (!first) owners.set(name, { specifier, value });
-        else if (first.value !== value)
-          failures.push(name + " differs between " + first.specifier + " and " + specifier);
+    }
+
+    const absent = [...optionalPeers].filter((name) => !present.has(name));
+    const probe = `
+      const specifiers = ${JSON.stringify(keys.map(specifierOf))};
+      const absent = ${JSON.stringify(absent)};
+      const present = ${JSON.stringify([...present])};
+      const failures = [];
+      for (const name of absent) {
+        try {
+          await import(name);
+          failures.push("optional peer " + name + " is installed in the consumer");
+        } catch {}
       }
+      for (const name of present) {
+        try {
+          await import(name);
+        } catch {
+          failures.push("optional peer " + name + " is missing from the consumer");
+        }
+      }
+      const owners = new Map();
+      for (const specifier of specifiers) {
+        let mod;
+        try {
+          mod = specifier.endsWith("/package.json")
+            ? await import(specifier, { with: { type: "json" } })
+            : await import(specifier);
+        } catch (error) {
+          failures.push(specifier + " failed to import: " + (error?.message ?? error));
+          continue;
+        }
+        if (specifier.endsWith("/package.json")) continue;
+        for (const [name, value] of Object.entries(mod)) {
+          const first = owners.get(name);
+          if (!first) owners.set(name, { specifier, value });
+          else if (first.value !== value)
+            failures.push(name + " differs between " + first.specifier + " and " + specifier);
+        }
+      }
+      if (failures.length > 0) {
+        console.error(failures.join("\\n"));
+        process.exit(1);
+      }
+      console.log("imported " + specifiers.join(", "));
+    `;
+    const probeFile = join(consumer, "probe.mjs");
+    writeFileSync(probeFile, probe);
+    const result = spawnSync("node", [probeFile], {
+      cwd: consumer,
+      encoding: "utf8",
+    });
+    if (result.status !== 0) {
+      failures.push(
+        `Node import ${label} failed:\n${result.stderr || result.stdout || result.error}`,
+      );
+    } else {
+      console.log(`check-dist-entries: ${label}: ${result.stdout.trim()}`);
     }
-    if (failures.length > 0) {
-      console.error(failures.join("\\n"));
-      process.exit(1);
-    }
-    console.log("imported " + specifiers.join(", "));
-  `;
-  const probeFile = join(consumer, "probe.mjs");
-  writeFileSync(probeFile, probe);
-  const result = spawnSync("node", [probeFile], {
-    cwd: consumer,
-    encoding: "utf8",
-  });
-  if (result.status !== 0) {
-    failures.push(
-      `Node import without optional peers failed:\n${result.stderr || result.stdout || result.error}`,
-    );
-  } else {
-    console.log(`check-dist-entries: ${result.stdout.trim()}`);
+    if (linked.length === 0) failures.push("no packages were linked");
+  } finally {
+    rmSync(consumer, { recursive: true, force: true });
   }
-  if (linked.length === 0) failures.push("no packages were linked");
-} finally {
-  rmSync(consumer, { recursive: true, force: true });
+}
+
+// Entries that need no optional peer, with every optional peer absent.
+checkConsumer(
+  "without optional peers",
+  allKeys.filter((key) => !needsPeers(key)),
+  new Set(),
+);
+// Every entry, with exactly the peers the declared entries require, so the
+// values shared across entries are compared including the spec entry.
+const requiredPeers = new Set(Object.values(entryOptionalPeers).flat());
+if (requiredPeers.size > 0) {
+  checkConsumer(
+    `with ${[...requiredPeers].join(", ")}`,
+    allKeys,
+    requiredPeers,
+  );
 }
 
 if (failures.length > 0) {
@@ -181,5 +238,5 @@ if (failures.length > 0) {
   process.exit(1);
 }
 console.log(
-  `check-dist-entries: OK (${definedIn.size} classes defined once, ${declaredIn.size} declared once; optional peers absent: ${[...optionalPeers].join(", ")})`,
+  `check-dist-entries: OK (${definedIn.size} classes defined once, ${declaredIn.size} declared once; optional peers absent for entries that do not declare them: ${[...optionalPeers].join(", ")})`,
 );

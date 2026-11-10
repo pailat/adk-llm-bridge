@@ -1,0 +1,270 @@
+{
+  "description": "Five fixes to the workflow layer and the Claude driver, one lane per finding: interrupted-step marker on resume, explicit abort state, sub-workflow usage, resumed-session cost, and a false isolation violation. Each lane runs a test writer, an implementer and an Opus review with up to two change rounds. The lanes are independent and run three at a time. The run produced patches only, with QA as the gate and no commit. The lanes of the real run shared files such as CHANGELOG.md and src/workflows/index.ts; here each shared file belongs to one lane, because two lanes may not own the same path.",
+  "rules": {
+    "id": "fix-df-host",
+    "maxBudgetUsd": 40,
+    "maxConcurrency": 3,
+    "maxLanes": 10,
+    "maxStringLength": 4096,
+    "maxArrayLength": 64,
+    "maxChangeRounds": 2,
+    "maxAgentRuns": 100,
+    "allowedProviderIds": ["claude"],
+    "allowedModels": ["claude-opus-5-5", "claude-sonnet-5-5"],
+    "allowedPermissionModes": ["read-only", "workspace-write"],
+    "allowNetwork": false,
+    "allowedTools": [
+      "Bash",
+      "Edit",
+      "Glob",
+      "Grep",
+      "NotebookEdit",
+      "Read",
+      "Write"
+    ],
+    "allowedEnvNames": [],
+    "deniedPathPatterns": [
+      ".env",
+      ".env.*",
+      "*.pem",
+      "*.key",
+      "*.p12",
+      "*.pfx",
+      "*.jks",
+      "*.keystore",
+      "id_rsa*",
+      "id_dsa*",
+      "id_ecdsa*",
+      "id_ed25519*",
+      ".ssh",
+      ".gnupg",
+      ".aws",
+      ".npmrc",
+      ".netrc",
+      ".pypirc",
+      ".git",
+      ".git-credentials",
+      "credentials.json",
+      "secrets.*"
+    ],
+    "allowedQaCommands": [["bun", "run", "ci"]],
+    "requireQa": true,
+    "allowedPublishKinds": ["none"],
+    "allowedWorkflows": [
+      {
+        "workflowId": "fix-df",
+        "workflowVersion": "1"
+      }
+    ],
+    "allowedTargetRefs": []
+  },
+  "spec": {
+    "specVersion": 1,
+    "workflowId": "fix-df",
+    "workflowVersion": "1",
+    "projectRoot": ".",
+    "budget": {
+      "maxUsd": 40
+    },
+    "maxConcurrency": 3,
+    "lanes": [
+      {
+        "taskId": "resume-marker",
+        "title": "Mark a step that was interrupted and then resumed",
+        "role": "worker",
+        "dependsOn": [],
+        "allowedPaths": [
+          "src/workflows/checkpoint",
+          "tests/workflows/checkpoint",
+          "docs/workflow-durability.md"
+        ],
+        "agent": {
+          "providerId": "claude",
+          "model": "claude-sonnet-5-5",
+          "mode": "workspace-write",
+          "tools": [
+            "Bash",
+            "Edit",
+            "Glob",
+            "Grep",
+            "NotebookEdit",
+            "Read",
+            "Write"
+          ]
+        },
+        "steps": {
+          "testsFirst": true,
+          "review": {
+            "kind": "agent",
+            "providerId": "claude",
+            "model": "claude-opus-5-5",
+            "maxChangeRounds": 2
+          }
+        }
+      },
+      {
+        "taskId": "abort-state",
+        "title": "Record an explicit interrupted state when a run is aborted",
+        "role": "worker",
+        "dependsOn": [],
+        "allowedPaths": [
+          "src/workflows/runtime",
+          "src/workflows/node-config.ts",
+          "tests/workflows/runtime",
+          "tests/df-fixes",
+          "docs/migration-0.7.md",
+          "docs/glossary.md"
+        ],
+        "agent": {
+          "providerId": "claude",
+          "model": "claude-sonnet-5-5",
+          "mode": "workspace-write",
+          "tools": [
+            "Bash",
+            "Edit",
+            "Glob",
+            "Grep",
+            "NotebookEdit",
+            "Read",
+            "Write"
+          ]
+        },
+        "steps": {
+          "testsFirst": true,
+          "review": {
+            "kind": "agent",
+            "providerId": "claude",
+            "model": "claude-opus-5-5",
+            "maxChangeRounds": 2
+          }
+        }
+      },
+      {
+        "taskId": "sub-workflow-usage",
+        "title": "Report aggregate usage of a sub-workflow on its parent step",
+        "role": "worker",
+        "dependsOn": [],
+        "allowedPaths": [
+          "src/workflows/index.ts",
+          "src/workflows/events.ts",
+          "src/workflows/contracts.ts",
+          "src/workflows/workflow-agent.ts",
+          "src/workflows/script-workflow-agent.ts",
+          "src/runtime/agent-invocation-gateway.ts",
+          "tests/workflows/sub-workflow",
+          "tests/runtime",
+          "docs/workflow-adk-interop.md",
+          "docs/workflow-orchestration.md",
+          "CHANGELOG.md"
+        ],
+        "agent": {
+          "providerId": "claude",
+          "model": "claude-sonnet-5-5",
+          "mode": "workspace-write",
+          "tools": [
+            "Bash",
+            "Edit",
+            "Glob",
+            "Grep",
+            "NotebookEdit",
+            "Read",
+            "Write"
+          ]
+        },
+        "steps": {
+          "testsFirst": true,
+          "review": {
+            "kind": "agent",
+            "providerId": "claude",
+            "model": "claude-opus-5-5",
+            "maxChangeRounds": 2
+          }
+        }
+      },
+      {
+        "taskId": "resumed-session-cost",
+        "title": "Report per-run cost for a resumed Claude session",
+        "role": "worker",
+        "dependsOn": [],
+        "allowedPaths": [
+          "src/agents/driver/claude-agent-sdk.ts",
+          "src/agents/driver/run-summary.ts",
+          "src/agents/driver/claude-cli.ts",
+          "src/agents/events.ts",
+          "src/agents/telemetry.ts",
+          "tests/agents/driver",
+          "README.md"
+        ],
+        "agent": {
+          "providerId": "claude",
+          "model": "claude-sonnet-5-5",
+          "mode": "workspace-write",
+          "tools": [
+            "Bash",
+            "Edit",
+            "Glob",
+            "Grep",
+            "NotebookEdit",
+            "Read",
+            "Write"
+          ]
+        },
+        "steps": {
+          "testsFirst": true,
+          "review": {
+            "kind": "agent",
+            "providerId": "claude",
+            "model": "claude-opus-5-5",
+            "maxChangeRounds": 2
+          }
+        }
+      },
+      {
+        "taskId": "tool-isolation",
+        "title": "Stop reporting an offered tool as an isolation violation",
+        "role": "worker",
+        "dependsOn": [],
+        "allowedPaths": [
+          "src/agents/driver/claude-isolation.ts",
+          "tests/agents/isolation",
+          "docs/external-agent-isolation.md"
+        ],
+        "agent": {
+          "providerId": "claude",
+          "model": "claude-sonnet-5-5",
+          "mode": "workspace-write",
+          "tools": [
+            "Bash",
+            "Edit",
+            "Glob",
+            "Grep",
+            "NotebookEdit",
+            "Read",
+            "Write"
+          ]
+        },
+        "steps": {
+          "testsFirst": true,
+          "review": {
+            "kind": "agent",
+            "providerId": "claude",
+            "model": "claude-opus-5-5",
+            "maxChangeRounds": 2
+          }
+        }
+      }
+    ],
+    "gates": {
+      "qa": [
+        {
+          "id": "ci",
+          "command": ["bun", "run", "ci"]
+        }
+      ],
+      "publish": {
+        "kind": "none"
+      }
+    },
+    "env": []
+  }
+}

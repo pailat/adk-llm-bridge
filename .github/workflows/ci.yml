@@ -38,7 +38,7 @@ jobs:
       - name: Smoke-import dist on Node ${{ matrix.node }}
         run: |
           node --input-type=module -e "
-            for (const p of ['./dist/index.js','./dist/agents/index.js','./dist/workflows/index.js','./dist/workflows/node/index.js']) await import(p);
+            for (const p of ['./dist/index.js','./dist/agents/index.js','./dist/workflows/index.js','./dist/workflows/node/index.js','./dist/workflows/spec/index.js']) await import(p);
             console.log('dist imports OK on', process.version);
           "
 
@@ -120,6 +120,18 @@ jobs:
             for (const p of ['adk-llm-bridge', 'adk-llm-bridge/agents', 'adk-llm-bridge/agents/session-store/sqlite', 'adk-llm-bridge/workflows', 'adk-llm-bridge/workflows/node']) await import(p);
             await import('adk-llm-bridge/package.json', { with: { type: 'json' } });
             console.log('entries import with optional peers absent on', process.version, '| present transitively:', transitive.join('; ') || 'none');
+          "
+      # The spec entry needs zod, an optional peer: install it explicitly so the
+      # entry is exercised with zod present and never relies on a transitive copy.
+      - name: Import the spec entry with zod installed
+        working-directory: ${{ runner.temp }}/consumer
+        run: |
+          npm install --no-audit --no-fund zod@^4
+          node --input-type=module -e "
+            await import('zod');
+            const spec = await import('adk-llm-bridge/workflows/spec');
+            if (typeof spec.validateRunSpec !== 'function') throw new Error('validateRunSpec is missing');
+            console.log('spec entry imports with zod on', process.version);
           "
 
   # Non-blocking canary: builds @google/adk from google/adk-js `main` (the next

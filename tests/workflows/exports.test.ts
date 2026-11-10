@@ -17,6 +17,7 @@ import type {
 } from "../../src/workflows/index.js";
 import * as workflows from "../../src/workflows/index.js";
 import * as workflowNode from "../../src/workflows/node/index.js";
+import * as workflowSpec from "../../src/workflows/spec/index.js";
 
 describe("workflows public exports", () => {
   test("root export remains LLM-focused", () => {
@@ -234,5 +235,71 @@ describe("workflows public exports", () => {
         star: false,
       });
     }
+  });
+  test("package exports publishes the experimental spec subpath", () => {
+    expect(packageJson.exports["./workflows/spec"]).toEqual({
+      types: "./dist/workflows/spec/index.d.ts",
+      import: "./dist/workflows/spec/index.js",
+    });
+  });
+
+  test("the spec subpath exposes exactly the value exports of its barrel", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const { join } = await import("node:path");
+    const source = await readFile(
+      join(import.meta.dir, "../../src/workflows/spec/index.ts"),
+      "utf8",
+    );
+    const declared = [
+      ...source.matchAll(/export\s*\{([^}]*)\}\s*from/gu),
+      // Type-only export lists are skipped below.
+    ]
+      .filter((match) => !/export\s+type\s*\{/u.test(match[0]))
+      .flatMap((match) =>
+        (match[1] ?? "")
+          .split(",")
+          .map((name) => name.trim())
+          .filter((name) => name.length > 0 && !name.startsWith("type "))
+          .map((name) => name.split(/\s+as\s+/u).pop() as string),
+      );
+    expect(declared.length).toBeGreaterThan(0);
+    expect(Object.keys(workflowSpec).sort()).toEqual([...declared].sort());
+    expect(workflowSpec.RunSpecSchema).toBeDefined();
+    expect(workflowSpec.validateRunSpec).toBeFunction();
+  });
+
+  test("the spec subpath keeps its internal projection helpers private", () => {
+    // resolveRunPlan already returns their results: the topology, each
+    // lane's agent runs and the QA command allowlist check.
+    for (const name of [
+      "runSpecPlanTopology",
+      "runSpecLaneMaxAgentRuns",
+      "runSpecCommandKey",
+    ]) {
+      expect({ name, exported: name in workflowSpec }).toEqual({
+        name,
+        exported: false,
+      });
+    }
+  });
+
+  test("the spec values do not leak into the other entries", () => {
+    for (const name of Object.keys(workflowSpec)) {
+      expect({ name, inWorkflows: name in workflows }).toEqual({
+        name,
+        inWorkflows: false,
+      });
+      expect({ name, inRoot: name in root }).toEqual({ name, inRoot: false });
+    }
+  });
+
+  test("the spec barrel has no star exports", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const { join } = await import("node:path");
+    const source = await readFile(
+      join(import.meta.dir, "../../src/workflows/spec/index.ts"),
+      "utf8",
+    );
+    expect(/^export (type )?\*/mu.test(source)).toBe(false);
   });
 });

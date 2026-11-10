@@ -7,6 +7,7 @@ export default defineConfig({
     "src/agents/session-store/sqlite/index.ts",
     "src/workflows/index.ts",
     "src/workflows/node/index.ts",
+    "src/workflows/spec/index.ts",
   ],
   format: ["esm"],
   target: "node",

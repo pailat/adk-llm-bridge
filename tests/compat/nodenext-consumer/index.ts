@@ -13,6 +13,10 @@ import {
   ScriptWorkflowAgent,
   WorkflowAgent,
 } from "../../../dist/workflows/index.js";
+import {
+  RunSpecSchema,
+  validateRunSpec,
+} from "../../../dist/workflows/spec/index.js";
 
 void OpenAI;
 void OpenRouter;
@@ -22,6 +26,8 @@ void WorkflowAgent;
 void ScriptWorkflowAgent;
 void defineWorkflow;
 void defineScriptWorkflow;
+void RunSpecSchema;
+void validateRunSpec;
 
 // Classes with `#private` members are nominal: a class declared once per entry
 // in the `.d.ts` files would make these cross-entry uses fail to compile.
