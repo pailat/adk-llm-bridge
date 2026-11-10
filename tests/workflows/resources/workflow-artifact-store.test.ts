@@ -70,28 +70,33 @@ describe("InMemoryWorkflowArtifactStore", () => {
     );
   });
 
-  test("deterministically rejects a concurrent conflicting duplicate", async () => {
+  test("accepts exactly one of two concurrent conflicting duplicates", async () => {
+    // Concurrent puts settle when their content is hashed, not in call
+    // order, so either caller may win. The store keeps the winner and
+    // rejects the other with a conflict.
     const store = new InMemoryWorkflowArtifactStore();
-    const outcomes = await Promise.allSettled([
-      store.put(artifact("artifact-1", { winner: true })),
-      store.put(artifact("artifact-1", { winner: false })),
-    ]);
+    const contents = [{ winner: 0 }, { winner: 1 }];
+    const outcomes = await Promise.allSettled(
+      contents.map((content) => store.put(artifact("artifact-1", content))),
+    );
 
-    expect(outcomes[0]?.status).toBe("fulfilled");
-    expect(outcomes[1]?.status).toBe("rejected");
-    if (outcomes[1]?.status === "rejected") {
-      expect(outcomes[1].reason).toBeInstanceOf(WorkflowArtifactConflictError);
-    }
-    expect(
-      (
-        await store.get({
-          executionId: "execution-1",
-          artifactId: "artifact-1",
-        })
-      )?.content,
-    ).toEqual({
-      winner: true,
+    const winners = outcomes.flatMap((outcome, index) =>
+      outcome.status === "fulfilled" ? [{ index, result: outcome.value }] : [],
+    );
+    const losers = outcomes.flatMap((outcome) =>
+      outcome.status === "rejected" ? [outcome.reason] : [],
+    );
+    expect(winners).toHaveLength(1);
+    expect(losers).toHaveLength(1);
+    expect(losers[0]).toBeInstanceOf(WorkflowArtifactConflictError);
+    const [winner] = winners;
+    expect(winner?.result.created).toBe(true);
+    const stored = await store.get({
+      executionId: "execution-1",
+      artifactId: "artifact-1",
     });
+    expect(stored).toBe(winner?.result.artifact);
+    expect(stored?.content).toEqual(contents[winner?.index ?? -1]);
   });
 
   test("filters and paginates a stable bounded listing", async () => {
