@@ -9,6 +9,10 @@ import type Anthropic from "@anthropic-ai/sdk";
 import type { LlmResponse } from "@google/adk";
 import { FinishReason, type Part } from "@google/genai";
 import {
+  contentFilteredError,
+  modelVersionOf,
+} from "../../../converters/finish.js";
+import {
   type MalformedToolCall,
   malformedToolCallResponse,
   parseToolArguments,
@@ -179,6 +183,12 @@ export interface AnthropicStreamAccumulator {
   stopReason?: Anthropic.StopReason | null;
 
   /**
+   * Model reported by the `message_start` event. Emitted as `modelVersion` on
+   * the final response.
+   */
+  model?: string;
+
+  /**
    * Whether the request injected the synthetic `json_output` tool; see
    * {@link AnthropicResponseOptions.structuredOutput}. Absent means `true`.
    */
@@ -304,15 +314,23 @@ export function convertAnthropicResponse(
       })
     : undefined;
 
+  const modelVersion = modelVersionOf(message.model);
+
   if (malformed.length) {
-    return malformedToolCallResponse(parts, malformed, { usageMetadata });
+    return malformedToolCallResponse(parts, malformed, {
+      usageMetadata,
+      ...modelVersion,
+    });
   }
 
+  const finishReason = mapAnthropicStopReason(message.stop_reason);
   return {
     content: parts.length ? { role: "model", parts } : undefined,
     turnComplete: true,
-    finishReason: mapAnthropicStopReason(message.stop_reason),
+    finishReason,
+    ...contentFilteredError(finishReason, parts.length > 0),
     usageMetadata,
+    ...modelVersion,
   };
 }
 
@@ -351,6 +369,7 @@ export function convertAnthropicStreamEvent(
 ): AnthropicStreamResult {
   switch (event.type) {
     case "message_start": {
+      acc.model = event.message?.model || undefined;
       // Capture input tokens from message_start event
       if (event.message?.usage?.input_tokens) {
         acc.inputTokens = event.message.usage.input_tokens;
@@ -558,6 +577,7 @@ export function convertAnthropicStreamEvent(
         : undefined;
 
       const finishReason = mapAnthropicStopReason(acc.stopReason);
+      const modelVersion = modelVersionOf(acc.model);
 
       // Reset accumulator
       acc.text = "";
@@ -569,12 +589,17 @@ export function convertAnthropicStreamEvent(
       acc.cacheReadTokens = undefined;
       acc.cacheCreationTokens = undefined;
       acc.stopReason = undefined;
+      acc.model = undefined;
 
       if (malformed.length) {
         return {
-          response: malformedToolCallResponse(parts, malformed, {
-            usageMetadata,
-          }),
+          response: {
+            ...malformedToolCallResponse(parts, malformed, {
+              usageMetadata,
+              ...modelVersion,
+            }),
+            partial: false,
+          },
           isComplete: true,
         };
       }
@@ -582,9 +607,12 @@ export function convertAnthropicStreamEvent(
       return {
         response: {
           content: parts.length ? { role: "model", parts } : undefined,
+          partial: false,
           turnComplete: true,
           finishReason,
+          ...contentFilteredError(finishReason, parts.length > 0),
           usageMetadata,
+          ...modelVersion,
         },
         isComplete: true,
       };

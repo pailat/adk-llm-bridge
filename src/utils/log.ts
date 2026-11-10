@@ -28,6 +28,10 @@ export const LogCode = {
   MEDIA_MIME_UNSUPPORTED: "MEDIA_MIME_UNSUPPORTED",
   MEDIA_URI_UNSUPPORTED: "MEDIA_URI_UNSUPPORTED",
   THINKING_TOOL_CHOICE_DOWNGRADED: "THINKING_TOOL_CHOICE_DOWNGRADED",
+  REQUEST_MODEL_IGNORED: "REQUEST_MODEL_IGNORED",
+  ADK_TOOL_IN_MODEL_SKIPPED: "ADK_TOOL_IN_MODEL_SKIPPED",
+  ADK_TOOL_REQUEST_PROCESSING_SKIPPED: "ADK_TOOL_REQUEST_PROCESSING_SKIPPED",
+  ADK_TOOLSET_FAILED: "ADK_TOOLSET_FAILED",
 } as const;
 
 /** One of the stable warning codes in {@link LogCode}. */
@@ -78,10 +82,18 @@ export function resetWarnOnce(): void {
 export class WarningScope {
   private readonly seen = new Set<string>();
 
-  /** Logs `message` unless this scope already warned for `code`. */
-  warnOnce(code: LogCodeValue | string, message: string): void {
-    if (this.seen.has(code)) return;
-    this.seen.add(code);
+  /**
+   * Logs `message` unless this scope already warned for `code` and `subject`.
+   *
+   * @param code - The stable warning code.
+   * @param message - The warning text.
+   * @param subject - What the warning is about (for example a tool name), so
+   * one code can warn once per subject. Defaults to one warning per code.
+   */
+  warnOnce(code: LogCodeValue | string, message: string, subject = ""): void {
+    const key = `${code}\u0000${subject}`;
+    if (this.seen.has(key)) return;
+    this.seen.add(key);
     warn(code, message);
   }
 }

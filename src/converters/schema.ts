@@ -169,6 +169,12 @@ function normalizeGeminiValue(key: string, value: unknown): unknown {
     // Convert UPPERCASE type to lowercase (OBJECT -> object, STRING -> string)
     return value.toLowerCase();
   }
+  if (key === "type" && Array.isArray(value)) {
+    // JSON Schema type union (["STRING", "NULL"]): lowercase each name.
+    return value.map((item) =>
+      typeof item === "string" ? item.toLowerCase() : item,
+    );
+  }
   if (INT64_COUNT_KEYWORDS.has(key)) return coerceCount(value);
   if (NUMBER_BOUND_KEYWORDS.has(key)) return coerceBound(value);
   if (DATA_KEYWORDS.has(key)) return value;

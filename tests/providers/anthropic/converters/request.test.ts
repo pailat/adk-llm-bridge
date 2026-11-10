@@ -1428,8 +1428,15 @@ describe("convertAnthropicRequest", () => {
         spy.mockRestore();
       }
       const warns = spy.mock.calls.map((c) => String(c[0]));
-      expect(warns.some((w) => w.includes("scheme: gs"))).toBe(true);
-      expect(warns.join("\n")).not.toContain("bucket/img.png");
+      // Exact text, as pinned for the OpenAI-compatible converter in
+      // tests/converters/file-data-warning.test.ts.
+      const matches = warns.filter((w) =>
+        w.includes("dropping non-http fileData URI"),
+      );
+      expect(matches).toEqual([
+        "[adk-llm-bridge] dropping non-http fileData URI (scheme: gs)",
+      ]);
+      expect(warns.join("\n")).not.toContain("bucket");
       expect(spy.codes).toContain(LogCode.MEDIA_URI_UNSUPPORTED);
       expect(result.messages[0].content).toEqual([
         { type: "text", text: "hi" },

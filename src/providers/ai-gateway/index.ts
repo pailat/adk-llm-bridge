@@ -3,7 +3,10 @@ import {
   createProviderFactory,
 } from "../../core/create-provider.js";
 import { createRegisterFunction } from "../../core/create-register.js";
-import type { AIGatewayConfig, RegisterOptions } from "../../types.js";
+import type {
+  AIGatewayProviderConfig,
+  AIGatewayRegisterOptions,
+} from "../../types.js";
 import { AI_GATEWAY_DEFINITION } from "./definition.js";
 
 export { AI_GATEWAY_DEFINITION } from "./definition.js";
@@ -18,21 +21,21 @@ export { AI_GATEWAY_DEFINITION } from "./definition.js";
  * `AI_GATEWAY_URL`, then the default gateway URL; `OPENAI_BASE_URL` is never
  * read. No `OpenAI-Organization` or `OpenAI-Project` header is sent.
  */
-export const AIGatewayLlm = createProviderClass<AIGatewayConfig>(
+export const AIGatewayLlm = createProviderClass<AIGatewayProviderConfig>(
   AI_GATEWAY_DEFINITION,
 );
 /**
  * Creates an ADK model backed by Vercel AI Gateway.
  *
  * @param model - Model id accepted by the provider.
- * @param options - Per-instance options: any `AIGatewayConfig` field except `model`.
+ * @param options - Per-instance options: any `AIGatewayProviderConfig` field except `model`.
  * @returns An ADK `BaseLlm` instance.
  */
-export const AIGateway = createProviderFactory<AIGatewayConfig>(
+export const AIGateway = createProviderFactory<AIGatewayProviderConfig>(
   AI_GATEWAY_DEFINITION,
 );
 
-const reg = createRegisterFunction<RegisterOptions>(
+const reg = createRegisterFunction<AIGatewayRegisterOptions>(
   AI_GATEWAY_DEFINITION,
   AIGatewayLlm,
 );

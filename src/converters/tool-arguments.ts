@@ -58,12 +58,16 @@ export function parseToolArguments(
  *
  * @param parts - All parts of the turn, including the function calls
  * @param failures - The malformed calls (at least one)
- * @param extra - Usage and custom metadata to carry over
+ * @param extra - Usage metadata, custom metadata and model version to carry
+ *   over
  */
 export function malformedToolCallResponse(
   parts: readonly Part[],
   failures: readonly MalformedToolCall[],
-  extra: Pick<LlmResponse, "usageMetadata" | "customMetadata"> = {},
+  extra: Pick<
+    LlmResponse,
+    "usageMetadata" | "customMetadata" | "modelVersion"
+  > = {},
 ): LlmResponse {
   const kept = parts.filter((part) => !part.functionCall);
   const names = failures

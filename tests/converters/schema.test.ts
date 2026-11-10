@@ -27,6 +27,29 @@ describe("normalizeSchema", () => {
     });
   });
 
+  it("lowercases each string of a type array and keeps other entries", () => {
+    const result = normalizeSchema({
+      type: "OBJECT",
+      properties: {
+        name: { type: ["STRING", "NULL"] },
+        odd: { type: ["Integer", 7, null] },
+      },
+    });
+
+    expect(result).toEqual({
+      type: "object",
+      properties: {
+        name: { type: ["string", "null"] },
+        odd: { type: ["integer", 7, null] },
+      },
+    });
+  });
+
+  it("leaves a type array alone in counts mode", () => {
+    const schema = { type: ["STRING", "NULL"] };
+    expect(normalizeJsonSchemaCounts(schema)).toEqual(schema);
+  });
+
   it("is idempotent on already-lowercase schemas", () => {
     const schema = {
       type: "object",

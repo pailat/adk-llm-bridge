@@ -2,8 +2,8 @@
  * Factory functions for custom LLM providers.
  */
 
-import type { CustomLlmConfig } from "../../types.js";
-import { CustomLlm, type CustomLlmProviderConfig } from "./custom-llm.js";
+import type { CustomProviderConfig } from "../../types.js";
+import { CustomLlm } from "./custom-llm.js";
 
 /**
  * Creates a custom LLM instance.
@@ -80,14 +80,14 @@ import { CustomLlm, type CustomLlmProviderConfig } from "./custom-llm.js";
  * @see {@link CustomLlm} for direct class usage
  * @see {@link Custom} for a shorthand alias
  */
-export function createCustomLlm(config: CustomLlmProviderConfig): CustomLlm {
+export function createCustomLlm(config: CustomProviderConfig): CustomLlm {
   return new CustomLlm(config);
 }
 
 /**
  * Configuration options for the Custom factory (model is specified separately).
  */
-type CustomOptions = Omit<CustomLlmConfig, "model"> & {
+type CustomOptions = Omit<CustomProviderConfig, "model"> & {
   /**
    * Base URL for the API endpoint. Falls back to CUSTOM_LLM_BASE_URL.
    */

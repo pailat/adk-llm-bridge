@@ -192,12 +192,14 @@ export class AnthropicLlm extends BaseProviderLlm {
       // Anthropic rejects an empty `messages` array, and recent Claude models
       // reject a conversation that ends with an assistant turn.
       const request = this.withUserTurn(llmRequest);
+      const model = this.requestModel(llmRequest, ANTHROPIC_MODEL_PATTERNS);
 
       const { messages, system, tools, params, toolChoice, structuredOutput } =
         convertAnthropicRequest(request);
 
       if (stream) {
         const completed = yield* this.streamResponse(
+          model,
           messages,
           system,
           tools,
@@ -209,6 +211,7 @@ export class AnthropicLlm extends BaseProviderLlm {
         incomplete = !completed && !abortSignal?.aborted;
       } else {
         yield await this.singleResponse(
+          model,
           messages,
           system,
           tools,
@@ -250,6 +253,8 @@ export class AnthropicLlm extends BaseProviderLlm {
    *
    * Per-request `config.maxOutputTokens` (params.max_tokens) overrides the
    * instance default. Anthropic requires `max_tokens` to always be present.
+   * `model` is the id to send (see `requestModel`); it defaults to this
+   * instance's model.
    */
   private buildRequestParams(
     messages: AnthropicSDK.MessageParam[],
@@ -257,6 +262,7 @@ export class AnthropicLlm extends BaseProviderLlm {
     tools: AnthropicSDK.Tool[] | undefined,
     params?: AnthropicGenerationParams,
     toolChoice?: AnthropicSDK.ToolChoice,
+    model: string = this.model,
   ): AnthropicSDK.MessageCreateParamsNonStreaming {
     const { max_tokens, ...sampling } = params ?? {};
 
@@ -305,7 +311,7 @@ export class AnthropicLlm extends BaseProviderLlm {
     }
 
     return {
-      model: this.model,
+      model,
       max_tokens: resolvedMaxTokens,
       messages,
       ...sampling,
@@ -321,6 +327,7 @@ export class AnthropicLlm extends BaseProviderLlm {
    * Makes a single (non-streaming) API request.
    */
   private async singleResponse(
+    model: string,
     messages: AnthropicSDK.MessageParam[],
     system: string | undefined,
     tools: AnthropicSDK.Tool[] | undefined,
@@ -334,7 +341,14 @@ export class AnthropicLlm extends BaseProviderLlm {
     // `parseJson` keeps them exact, as strings, like the streaming path.
     const raw = await this.client.messages
       .create(
-        this.buildRequestParams(messages, system, tools, params, toolChoice),
+        this.buildRequestParams(
+          messages,
+          system,
+          tools,
+          params,
+          toolChoice,
+          model,
+        ),
         abortSignal ? { signal: abortSignal } : undefined,
       )
       .asResponse();
@@ -367,6 +381,7 @@ export class AnthropicLlm extends BaseProviderLlm {
    * early or the caller aborted.
    */
   private async *streamResponse(
+    model: string,
     messages: AnthropicSDK.MessageParam[],
     system: string | undefined,
     tools: AnthropicSDK.Tool[] | undefined,
@@ -376,7 +391,14 @@ export class AnthropicLlm extends BaseProviderLlm {
     structuredOutput = false,
   ): AsyncGenerator<LlmResponse, boolean> {
     const stream = this.client.messages.stream(
-      this.buildRequestParams(messages, system, tools, params, toolChoice),
+      this.buildRequestParams(
+        messages,
+        system,
+        tools,
+        params,
+        toolChoice,
+        model,
+      ),
       abortSignal ? { signal: abortSignal } : undefined,
     );
 

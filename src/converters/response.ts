@@ -10,6 +10,7 @@ import { FinishReason, type Part } from "@google/genai";
 import type OpenAI from "openai";
 import { PROVIDER_ERROR_NO_CHOICE } from "../core/provider-llm-error.js";
 import type { StreamAccumulator, StreamChunkResult } from "../types.js";
+import { contentFilteredError, modelVersionOf } from "./finish.js";
 import {
   type MalformedToolCall,
   malformedToolCallResponse,
@@ -126,19 +127,25 @@ export function convertResponse(response: OpenAI.ChatCompletion): LlmResponse {
     ? { logprobs: choice.logprobs }
     : undefined;
 
+  const modelVersion = modelVersionOf(response.model);
+
   if (malformed.length) {
     return malformedToolCallResponse(parts, malformed, {
       usageMetadata,
       customMetadata,
+      ...modelVersion,
     });
   }
 
+  const finishReason = mapOpenAIFinishReason(choice.finish_reason);
   return {
     content: parts.length ? { role: "model", parts } : undefined,
     turnComplete: true,
-    finishReason: mapOpenAIFinishReason(choice.finish_reason),
+    finishReason,
+    ...contentFilteredError(finishReason, parts.length > 0),
     usageMetadata,
     customMetadata,
+    ...modelVersion,
   };
 }
 
@@ -347,6 +354,7 @@ export function convertStreamChunk(
   if (chunk.usage) {
     acc.usage = buildUsageMetadata(chunk.usage);
   }
+  if (chunk.model) acc.model = chunk.model;
 
   const choice = chunk.choices[0];
   if (!choice) return { isComplete: false };
@@ -446,6 +454,7 @@ export function convertStreamChunk(
 
     const finishReason = mapOpenAIFinishReason(choice.finish_reason);
     const usageMetadata = acc.usage;
+    const modelVersion = modelVersionOf(acc.model);
 
     acc.text = "";
     acc.reasoning = "";
@@ -455,9 +464,13 @@ export function convertStreamChunk(
 
     if (malformed.length) {
       return {
-        response: malformedToolCallResponse(parts, malformed, {
-          usageMetadata,
-        }),
+        response: {
+          ...malformedToolCallResponse(parts, malformed, {
+            usageMetadata,
+            ...modelVersion,
+          }),
+          partial: false,
+        },
         isComplete: true,
       };
     }
@@ -465,9 +478,12 @@ export function convertStreamChunk(
     return {
       response: {
         content: parts.length ? { role: "model", parts } : undefined,
+        partial: false,
         turnComplete: true,
         finishReason,
+        ...contentFilteredError(finishReason, parts.length > 0),
         usageMetadata,
+        ...modelVersion,
       },
       isComplete: true,
     };

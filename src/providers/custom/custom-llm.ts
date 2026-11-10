@@ -15,19 +15,16 @@ import {
   OpenAICompatibleLlm,
 } from "../../core/openai-compatible-llm.js";
 import type { ProviderDefinition } from "../../core/provider-definition.js";
-import type { CustomLlmConfig } from "../../types.js";
+import type { CustomProviderConfig } from "../../types.js";
 
 /**
- * Configuration for custom providers.
+ * Former name of {@link CustomProviderConfig}.
  *
- * `baseURL` may be supplied explicitly or through `CUSTOM_LLM_BASE_URL`.
- * `apiKey` is optional for unauthenticated local servers. `CUSTOM_LLM_API_KEY`
- * is the credential of the `CUSTOM_LLM_BASE_URL` endpoint only: it is used
- * when the base URL also comes from the environment, and never sent to an
- * explicit `baseURL` (pass `apiKey` for that host). Explicit values, including
- * an explicitly empty API key, take precedence over environment variables.
+ * @deprecated Use {@link CustomProviderConfig}, the same type under the
+ * `<Provider>ProviderConfig` naming scheme. This alias stays until the next
+ * major version.
  */
-export type CustomLlmProviderConfig = CustomLlmConfig;
+export type CustomLlmProviderConfig = CustomProviderConfig;
 
 const CUSTOM_DEFINITION: ProviderDefinition = {
   id: "custom",
@@ -51,7 +48,7 @@ const CUSTOM_DEFINITION: ProviderDefinition = {
  * credential, so the env key never reaches another host.
  */
 export function resolveCustomConfig(
-  config: CustomLlmProviderConfig,
+  config: CustomProviderConfig,
 ): ResolvedConfig {
   return resolveConfig(CUSTOM_DEFINITION, config);
 }
@@ -134,7 +131,7 @@ export class CustomLlm extends OpenAICompatibleLlm {
    * });
    * ```
    */
-  constructor(config: CustomLlmProviderConfig) {
+  constructor(config: CustomProviderConfig) {
     const resolved = resolveCustomConfig(config);
 
     // Build final URL with query params if provided

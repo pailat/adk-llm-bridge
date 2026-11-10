@@ -145,6 +145,7 @@ export {
   CustomLlm,
   type CustomLlmProviderConfig,
   type CustomProviderRegistrationConfig,
+  type CustomRegisterOptions,
   createCustomLlm,
   registerCustomProvider,
 } from "./providers/custom/index.js";
@@ -156,6 +157,8 @@ export {
 export type {
   // AI Gateway types
   AIGatewayConfig,
+  AIGatewayProviderConfig,
+  AIGatewayRegisterOptions,
   // Anthropic types
   AnthropicProviderConfig,
   AnthropicRegisterOptions,
@@ -164,12 +167,14 @@ export type {
   BaseRegisterOptions,
   // Custom LLM types
   CustomLlmConfig,
+  CustomProviderConfig,
   ErrorMode,
   // OpenAI types
   OpenAIProviderConfig,
   OpenAIRegisterOptions,
   // OpenRouter types
   OpenRouterConfig,
+  OpenRouterProviderConfig,
   OpenRouterProviderPreferences,
   OpenRouterRegisterOptions,
   RegisterOptions,

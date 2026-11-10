@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { type Span, SpanStatusCode, trace } from "@opentelemetry/api";
 import {
   annotateLlmSpan,
+  genAiProviderName,
   recordLlmError,
   serverAddress,
   shouldCaptureMessageContent,
@@ -90,8 +91,32 @@ describe("annotateLlmSpan", () => {
 
   it("skips undefined values", () => {
     const { span, record } = fakeSpan();
-    annotateLlmSpan({ provider: "xai" }, span);
-    expect(record.attributes).toEqual({ "gen_ai.provider.name": "xai" });
+    annotateLlmSpan({ provider: "openai" }, span);
+    expect(record.attributes).toEqual({ "gen_ai.provider.name": "openai" });
+  });
+
+  it("uses the OTel GenAI semconv provider name where one exists", () => {
+    const cases: [string, string][] = [
+      ["openai", "openai"],
+      ["anthropic", "anthropic"],
+      ["xai", "x_ai"],
+      // No semconv value: the bridge id is kept (semconv allows custom values).
+      ["openrouter", "openrouter"],
+      ["ai-gateway", "ai-gateway"],
+      ["custom", "custom"],
+      ["my-local-llm", "my-local-llm"],
+    ];
+    for (const [provider, expected] of cases) {
+      const { span, record } = fakeSpan();
+      annotateLlmSpan({ provider }, span);
+      expect(record.attributes["gen_ai.provider.name"]).toBe(expected);
+      expect(genAiProviderName(provider)).toBe(expected);
+    }
+  });
+
+  it("does not map inherited object keys", () => {
+    expect(genAiProviderName("constructor")).toBe("constructor");
+    expect(genAiProviderName("__proto__")).toBe("__proto__");
   });
 
   it("uses the active span by default and is a no-op without one", () => {

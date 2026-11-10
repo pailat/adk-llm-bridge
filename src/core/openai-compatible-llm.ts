@@ -189,6 +189,12 @@ export class OpenAICompatibleLlm extends BaseProviderLlm {
   /** Output-limit parameter from the provider definition (undefined = `max_tokens`). */
   private readonly _maxTokensParam?: ProviderDefinition["maxTokensParam"];
 
+  /**
+   * Model ids a rewritten `llmRequest.model` must match to be sent; see
+   * {@link BaseProviderLlm.requestModel}. `undefined` in manual mode.
+   */
+  private readonly _modelPatterns?: readonly (string | RegExp)[];
+
   /** Declarative constructor: definition + config */
   constructor(definition: ProviderDefinition, config: BaseProviderConfig);
   /** Manual constructor: config + clientConfig (for CustomLlm) */
@@ -208,6 +214,7 @@ export class OpenAICompatibleLlm extends BaseProviderLlm {
       this._providerId = definition.id;
       this._reasoning = definition.reasoning;
       this._maxTokensParam = definition.maxTokensParam;
+      this._modelPatterns = definition.modelPatterns;
 
       const resolved = resolveConfig(definition, config);
       this.client = new OpenAI({
@@ -299,15 +306,17 @@ export class OpenAICompatibleLlm extends BaseProviderLlm {
         provider: this._providerId,
         baseURL: this.client.baseURL,
       });
+      const model = this.requestModel(llmRequest, this._modelPatterns);
       const { messages, tools, params, toolChoice } = convertRequest(
         this.withUserTurn(llmRequest),
-        this.model,
+        model,
         { reasoning: this._reasoning, maxTokensParam: this._maxTokensParam },
       );
       converted = true;
 
       if (stream) {
         const completed = yield* this.streamResponse(
+          model,
           messages,
           tools,
           params,
@@ -317,6 +326,7 @@ export class OpenAICompatibleLlm extends BaseProviderLlm {
         incomplete = !completed && !abortSignal?.aborted;
       } else {
         const response = await this.singleResponse(
+          model,
           messages,
           tools,
           params,
@@ -382,6 +392,7 @@ export class OpenAICompatibleLlm extends BaseProviderLlm {
   }
 
   private async singleResponse(
+    model: string,
     messages: OpenAI.ChatCompletionMessageParam[],
     tools?: OpenAI.ChatCompletionTool[],
     params?: Record<string, unknown>,
@@ -390,7 +401,7 @@ export class OpenAICompatibleLlm extends BaseProviderLlm {
   ): Promise<LlmResponse> {
     const response = await this.client.chat.completions.create(
       {
-        model: this.model,
+        model,
         messages,
         ...params,
         ...(tools?.length ? { tools } : {}),
@@ -408,6 +419,7 @@ export class OpenAICompatibleLlm extends BaseProviderLlm {
    * was yielded, `false` when the stream ended early or the caller aborted.
    */
   private async *streamResponse(
+    model: string,
     messages: OpenAI.ChatCompletionMessageParam[],
     tools?: OpenAI.ChatCompletionTool[],
     params?: Record<string, unknown>,
@@ -416,7 +428,7 @@ export class OpenAICompatibleLlm extends BaseProviderLlm {
   ): AsyncGenerator<LlmResponse, boolean> {
     const stream = await this.client.chat.completions.create(
       {
-        model: this.model,
+        model,
         messages,
         stream: true,
         stream_options: { include_usage: true },
