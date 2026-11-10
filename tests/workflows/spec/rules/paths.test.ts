@@ -1,9 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import type { RunSpecIssue } from "../../../../src/workflows/spec/issues.js";
-import { checkPathRules } from "../../../../src/workflows/spec/rules/paths.js";
-import type {
-  RunRules,
-  RunSpec,
+import {
+  checkPathRules,
+  MAX_GLOB_MATCH_WORK,
+} from "../../../../src/workflows/spec/rules/paths.js";
+import {
+  RUN_SPEC_LIMITS,
+  type RunRules,
+  type RunSpec,
 } from "../../../../src/workflows/spec/schema.js";
 import { testRules, validSpec, wideSpec } from "../helpers.js";
 
@@ -536,6 +540,50 @@ describe("RUN_SPEC_PATH_DENIED", () => {
   });
 });
 
+describe("RUN_SPEC_PATH_DENIED: Windows short names", () => {
+  test("denies a segment shaped like an 8.3 short name, such as GIT~1", () => {
+    for (const path of [
+      "GIT~1/hooks",
+      "src/GIT~1",
+      "src/progra~2/x",
+      "a/ENV~1.TXT",
+      "src/abcd~123",
+    ]) {
+      const issues = run(withPaths([path]));
+      expect(codes(issues)).toEqual(["RUN_SPEC_PATH_DENIED"]);
+      expect(issues[0]?.message).toContain("short name");
+    }
+  });
+
+  test("denies a short-name projectRoot", () => {
+    const spec = validSpec();
+    spec.projectRoot = "PROJEC~1";
+    expect(codes(run(spec))).toContain("RUN_SPEC_PATH_DENIED");
+  });
+
+  test("denies short names even when the rule set denies nothing", () => {
+    const rules = testRules();
+    rules.deniedPathPatterns = [];
+    expect(codes(run(withPaths(["GIT~1"]), rules))).toEqual([
+      "RUN_SPEC_PATH_DENIED",
+    ]);
+  });
+
+  test("accepts a tilde that is not a short-name suffix", () => {
+    for (const path of [
+      "src/~1",
+      "src/a~",
+      "src/a~b",
+      "src/abcdefg~1",
+      "src/a~1x",
+      "src/a.b~1",
+      "src/abcd~1234",
+    ]) {
+      expect(run(withPaths([path]))).toEqual([]);
+    }
+  });
+});
+
 describe("RUN_SPEC_PATH_DENIED: default patterns", () => {
   test.each([
     ".envrc",
@@ -817,8 +865,150 @@ describe("cost", () => {
       );
     });
     const started = performance.now();
-    expect(run(spec)).toEqual([]);
+    const issues = run(spec);
     expect(performance.now() - started).toBeLessThan(2_000);
+    // Each path is over the segment limit, so none is matched or compared.
+    expect(issues).toHaveLength(40 * 64);
+    expect(new Set(codes(issues))).toEqual(new Set(["RUN_SPEC_PATH_INVALID"]));
+    expect(issues[0]?.message).toContain(
+      `at most ${RUN_SPEC_LIMITS.maxPathSegments} segments`,
+    );
+  });
+
+  test("accepts a path at the segment limit and rejects one segment more", () => {
+    const at = Array.from(
+      { length: RUN_SPEC_LIMITS.maxPathSegments },
+      (_, index) => `s${index}`,
+    ).join("/");
+    expect(run(withPaths([at]))).toEqual([]);
+    expect(codes(run(withPaths([`${at}/x`])))).toEqual([
+      "RUN_SPEC_PATH_INVALID",
+    ]);
+    const root = validSpec();
+    root.projectRoot = `${at}/x`;
+    expect(codes(run(root))).toContain("RUN_SPEC_PATH_INVALID");
+  });
+
+  test("matches distinct segments against many glob patterns within the time budget", () => {
+    // Every segment name is new, so no remembered result helps. 1,024 paths of
+    // 64 segments against 1,024 globs is the most a valid spec and rule set
+    // can ask for, and it fits the matching budget.
+    const rules = testRules();
+    rules.deniedPathPatterns = Array.from(
+      { length: 1_024 },
+      (_, index) => `zz${index}*.secret`,
+    );
+    const spec = wideSpec(16);
+    spec.lanes.forEach((lane, laneIndex) => {
+      lane.allowedPaths = Array.from({ length: 64 }, (_, pathIndex) =>
+        Array.from(
+          { length: RUN_SPEC_LIMITS.maxPathSegments },
+          (_, segment) => `l${laneIndex}p${pathIndex}s${segment}`,
+        ).join("/"),
+      );
+    });
+    const started = performance.now();
+    expect(run(spec, rules)).toEqual([]);
+    expect(performance.now() - started).toBeLessThan(5_000);
+  });
+
+  test("the matching budget covers every segment and pattern pair of a spec at the plan limits", () => {
+    expect(MAX_GLOB_MATCH_WORK).toBe(
+      RUN_SPEC_LIMITS.maxTotalAllowedPaths *
+        RUN_SPEC_LIMITS.maxPathSegments *
+        RUN_SPEC_LIMITS.maxRuleListEntries,
+    );
+  });
+
+  test("denies a path it cannot match within the budget, once, and keeps checking the rest", () => {
+    // The longest literal of each pattern is in every segment, so each pair is
+    // a full match that fails at the end: about four units per pair.
+    const rules = testRules();
+    rules.deniedPathPatterns = Array.from(
+      { length: 1_024 },
+      (_, index) => `*${"a".repeat(40)}*q${index}`,
+    );
+    const spec = wideSpec(16);
+    spec.lanes.forEach((lane, laneIndex) => {
+      lane.allowedPaths = Array.from({ length: 64 }, (_, pathIndex) =>
+        Array.from(
+          { length: RUN_SPEC_LIMITS.maxPathSegments },
+          (_, segment) =>
+            `${"a".repeat(45)}l${laneIndex}p${pathIndex}s${segment}`,
+        ).join("/"),
+      );
+    });
+    laneAt(spec, 15).allowedPaths[63] = "x/y~1";
+    const started = performance.now();
+    const issues = run(spec, rules);
+    expect(performance.now() - started).toBeLessThan(5_000);
+    const budget = issues.filter((issue) =>
+      issue.message.includes("matching budget"),
+    );
+    expect(budget).toHaveLength(1);
+    expect(budget[0]?.code).toBe("RUN_SPEC_PATH_DENIED");
+    // The short-name check does not depend on the patterns and still runs.
+    expect(
+      issues.some(
+        (issue) =>
+          issue.message.includes("short name") &&
+          issue.path.join("/") === "lanes/15/allowedPaths/63",
+      ),
+    ).toBe(true);
+  });
+
+  test("2,048 distinct segments against 1,024 globs with many parts are accepted within the time budget", () => {
+    const rules = testRules();
+    rules.deniedPathPatterns = Array.from(
+      { length: 1_024 },
+      (_, index) => `*${"a*".repeat(55)}-${index}*`,
+    );
+    let next = 0;
+    const paths = Array.from({ length: 32 }, () =>
+      Array.from(
+        { length: 64 },
+        () => `${"a".repeat(55)}${(next++).toString(36).padStart(4, "0")}`,
+      ).join("/"),
+    );
+    const started = performance.now();
+    expect(run(withPaths(paths), rules)).toEqual([]);
+    expect(performance.now() - started).toBeLessThan(1_000);
+  });
+
+  test("a glob still matches when its longest literal is in the middle", () => {
+    const rules = testRules();
+    rules.deniedPathPatterns = ["a*secret*z"];
+    expect(codes(run(withPaths(["src/aXsecretYz"]), rules))).toEqual([
+      "RUN_SPEC_PATH_DENIED",
+    ]);
+    // The literal alone, out of place, is not a match.
+    expect(run(withPaths(["src/secretaz"]), rules)).toEqual([]);
+  });
+});
+
+describe("trailing dots and spaces", () => {
+  test("a run of 4,000 dots or spaces inside a segment is checked in linear time", () => {
+    for (const filler of [" ", "."]) {
+      const paths = Array.from(
+        { length: 64 },
+        (_, index) => `p${index}${filler.repeat(4_000)}b`,
+      );
+      const started = performance.now();
+      expect(run(withPaths(paths))).toEqual([]);
+      expect(performance.now() - started).toBeLessThan(500);
+    }
+  });
+
+  test("are still dropped at the end of a segment before matching", () => {
+    for (const path of ["cfg/.env. . .", "cfg/.env   ", "cfg/.git...::$DATA"]) {
+      expect(codes(run(withPaths([path])))).toContain("RUN_SPEC_PATH_DENIED");
+    }
+  });
+
+  test("are still dropped at the end of a segment for overlap", () => {
+    expect(codes(run(withPaths(["src/api"], ["src/api. ."])))).toContain(
+      "RUN_SPEC_PATH_OVERLAP",
+    );
   });
 });
 

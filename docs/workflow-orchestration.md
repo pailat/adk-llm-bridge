@@ -5,6 +5,10 @@ remote workers into a versioned and fenced workflow. Agents are first-class
 tasks, but authority stays in host-owned ports; JSON is data, never a
 capability.
 
+To accept a lanes job as data, validate it against host rules and turn it into
+a workflow plan, see [Workflow run spec](workflow-run-spec.md) (experimental,
+needs zod >= 4).
+
 ```text
 versioned plan + active revision
               |

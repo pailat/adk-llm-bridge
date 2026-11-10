@@ -2,13 +2,14 @@
  * Issue codes of run spec validation.
  *
  * @remarks
- * Every way a run spec can be rejected has one stable code. Branch on the
+ * Every way a run spec can be rejected has one code. Branch on the
  * code, never on the message. Each code belongs to one family, and each
  * family is checked by one module.
  *
  * @packageDocumentation
  */
 import { z } from "zod";
+import { runSpecRegistry } from "./registry.js";
 
 /**
  * Families of run spec issues, in the order they are checked.
@@ -43,8 +44,13 @@ export type RunSpecIssueFamily = (typeof RUN_SPEC_ISSUE_FAMILY_NAMES)[number];
  */
 export const RUN_SPEC_ISSUE_FAMILIES = {
   // --- shape -----------------------------------------------------------
-  /** The rule set passed to the validator does not match `RunRulesSchema`. */
+  /** The rule set passed to the validator does not match `RunRulesSchema`: a host error. */
   RUN_SPEC_RULES_INVALID: "shape",
+  /**
+   * A rule family failed unexpectedly, a defect of the library; the families
+   * after it did not run and the spec is not accepted.
+   */
+  RUN_SPEC_INTERNAL_ERROR: "shape",
   /** The input is not plain JSON: a cycle, a class instance, a sparse array, a non-finite number, a function or a symbol key. */
   RUN_SPEC_INPUT_NOT_JSON: "shape",
   /** The input has more values, or a longer string or key, than `RUN_SPEC_INPUT_LIMITS` allows. */
@@ -85,7 +91,11 @@ export const RUN_SPEC_ISSUE_FAMILIES = {
   // --- paths -----------------------------------------------------------
   /** A path starts with `/` or with a drive prefix such as `C:`. */
   RUN_SPEC_PATH_ABSOLUTE: "paths",
-  /** A path has a `..` segment. */
+  /**
+   * A path has a `..` segment, or a segment a host could read as `..`: `..`
+   * with trailing dots or spaces, percent escapes, compatibility characters
+   * or slash look-alikes.
+   */
   RUN_SPEC_PATH_TRAVERSAL: "paths",
   /** A path contains a backslash. */
   RUN_SPEC_PATH_BACKSLASH: "paths",
@@ -93,13 +103,29 @@ export const RUN_SPEC_ISSUE_FAMILIES = {
   RUN_SPEC_PATH_NOT_CANONICAL: "paths",
   /** A lane's allowed path names the project root itself. */
   RUN_SPEC_PATH_ROOT_NOT_ALLOWED: "paths",
-  /** A path is blank, contains a NUL character or fails the portable path grammar for another reason. */
+  /**
+   * A path is blank, contains a NUL, control, format or other invisible
+   * character or a lone surrogate, has more than
+   * `RUN_SPEC_LIMITS.maxPathSegments` segments, is too long once joined to
+   * `projectRoot`, or fails the portable path grammar for another reason.
+   */
   RUN_SPEC_PATH_INVALID: "paths",
-  /** A segment of a path matches one of the rule set's denied patterns, such as `.env` or `*.pem`. */
+  /**
+   * A segment of a path, or of `projectRoot`, matches one of the rule set's
+   * denied patterns, such as `.env` or `*.pem`, after invisible characters,
+   * an alternate data stream suffix and trailing dots and spaces are dropped;
+   * or a segment is shaped like a Windows 8.3 short name such as `GIT~1`.
+   */
   RUN_SPEC_PATH_DENIED: "paths",
-  /** Two allowed paths of one lane are equal, or one contains the other, ignoring case. */
+  /**
+   * Two allowed paths of one lane are equal, or one contains the other,
+   * ignoring case, Unicode composition and what Windows ignores in a name.
+   */
   RUN_SPEC_PATH_DUPLICATE: "paths",
-  /** Allowed paths of two lanes are equal, or one contains the other, ignoring case. */
+  /**
+   * Allowed paths of two lanes are equal, or one contains the other, ignoring
+   * case, Unicode composition and what Windows ignores in a name.
+   */
   RUN_SPEC_PATH_OVERLAP: "paths",
 
   // --- budget ----------------------------------------------------------
@@ -125,6 +151,11 @@ export const RUN_SPEC_ISSUE_FAMILIES = {
   // --- models ----------------------------------------------------------
   /** A lane's agent or reviewer names a provider outside the rule set's `allowedProviderIds`. */
   RUN_SPEC_PROVIDER_NOT_ALLOWED: "models",
+  /**
+   * The spec's `workflowId` and `workflowVersion` are not an entry of the rule
+   * set's `allowedWorkflows`.
+   */
+  RUN_SPEC_WORKFLOW_NOT_ALLOWED: "models",
   /** A lane's agent or reviewer names a model outside the rule set's `allowedModels`. */
   RUN_SPEC_MODEL_NOT_ALLOWED: "models",
   /** A lane's agent asks for a permission mode outside the rule set's `allowedPermissionModes`; `full-access` is always outside. */
@@ -141,7 +172,7 @@ export const RUN_SPEC_ISSUE_FAMILIES = {
   RUN_SPEC_ENV_NAME_DUPLICATE: "models",
 
   // --- graph -----------------------------------------------------------
-  /** Two lanes have the same `taskId`. */
+  /** Two lanes have the same `taskId`, or ids that differ only in case. */
   RUN_SPEC_LANE_ID_DUPLICATE: "graph",
   /** A lane's `dependsOn` names a task id that no lane has. */
   RUN_SPEC_DEPENDENCY_UNKNOWN: "graph",
@@ -163,12 +194,14 @@ export const RUN_SPEC_ISSUE_FAMILIES = {
   RUN_SPEC_QA_REQUIRED: "gates",
   /** `gates.publish.kind` is outside the rule set's `allowedPublishKinds`. */
   RUN_SPEC_PUBLISH_KIND_NOT_ALLOWED: "gates",
+  /** The integration's `targetRef` is not in the rule set's `allowedTargetRefs`. */
+  RUN_SPEC_TARGET_REF_NOT_ALLOWED: "gates",
   /** The spec commits or merges and `gates.publish.hitl` is not true. */
   RUN_SPEC_HITL_REQUIRED: "gates",
 } as const satisfies Record<`RUN_SPEC_${string}`, RunSpecIssueFamily>;
 
 /**
- * Stable code of a run spec issue.
+ * Code of a run spec issue; see the stability policy in the run spec guide.
  *
  * @experimental
  */
@@ -190,9 +223,10 @@ export const RUN_SPEC_ISSUE_CODES = Object.freeze(
  * For any JSON document that does not trip the input guard
  * (`RUN_SPEC_INPUT_NOT_JSON`, `RUN_SPEC_INPUT_TOO_LARGE`,
  * `RUN_SPEC_INPUT_TOO_DEEP`), `runSpecJsonSchema` rejects the document
- * exactly when the validator reports at least one of these codes. The other
- * shape codes describe the call (the rule set, the input guard, the cut of a
- * long issue list), which a JSON Schema cannot express.
+ * exactly when the validator reports at least one of these codes. String
+ * lengths count Unicode code points on both sides. The other shape codes
+ * describe the call (the rule set, the input guard, the cut of a long issue
+ * list), which a JSON Schema cannot express.
  *
  * @experimental
  */
@@ -234,7 +268,7 @@ export const RUN_SPEC_MAX_ISSUE_MESSAGE_LENGTH = 512;
 /**
  * Most unknown keys of one object reported as separate issues.
  *
- * @experimental
+ * @internal
  */
 export const RUN_SPEC_MAX_UNKNOWN_KEYS_REPORTED = 16;
 
@@ -247,22 +281,30 @@ export const RunSpecIssueSchema = z
   .strictObject({
     code: z
       .enum(RUN_SPEC_ISSUE_CODES as [RunSpecIssueCode, ...RunSpecIssueCode[]])
-      .describe("Stable code of the issue. Branch on it."),
+      .clone()
+      .register(runSpecRegistry, {
+        description: "Code of the issue. Branch on it, not on the message.",
+      }),
     path: z
       .array(z.union([z.string(), z.int().min(0)]))
       .max(32)
-      .describe(
-        "Location of the value in the spec, as object keys and array indexes from the root. Empty for the whole spec.",
-      ),
+      .clone()
+      .register(runSpecRegistry, {
+        description:
+          "Location of the value in the spec, as object keys and array indexes from the root. Empty for the whole spec.",
+      }),
     message: z
       .string()
       .min(1)
       .max(RUN_SPEC_MAX_ISSUE_MESSAGE_LENGTH)
-      .describe(
-        "Explanation for people. It may change between releases and never holds a secret.",
-      ),
+      .clone()
+      .register(runSpecRegistry, {
+        description:
+          "Explanation for people. It may change between releases and never holds a secret.",
+      }),
   })
-  .meta({
+  .clone()
+  .register(runSpecRegistry, {
     id: "RunSpecIssue",
     description: "One reason a run spec was rejected.",
   });
@@ -305,7 +347,7 @@ export function runSpecIssueFamily(code: RunSpecIssueCode): RunSpecIssueFamily {
  * @param path - Location of the value in the spec.
  * @param message - Explanation for people.
  * @returns The issue.
- * @experimental
+ * @internal
  */
 export function runSpecIssue(
   code: RunSpecIssueCode,

@@ -1,9 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import type { RunSpecIssue } from "../../../../src/workflows/spec/issues.js";
+import {
+  RUN_SPEC_MAX_ISSUES,
+  type RunSpecIssue,
+} from "../../../../src/workflows/spec/issues.js";
 import { checkBudgetRules } from "../../../../src/workflows/spec/rules/budget.js";
-import type {
-  RunRules,
-  RunSpec,
+import {
+  RUN_SPEC_LIMITS,
+  type RunRules,
+  type RunSpec,
 } from "../../../../src/workflows/spec/schema.js";
 import { testRules, validSpec, wideSpec } from "../helpers.js";
 
@@ -649,6 +653,28 @@ describe("RUN_SPEC_PLAN_TOO_LARGE", () => {
     expect(only(run(wideSpec(1_000)), "RUN_SPEC_PLAN_TOO_LARGE")).toEqual([]);
   });
 
+  test("is reported once when the lanes own more paths in total than the limit", () => {
+    const lanes = RUN_SPEC_LIMITS.maxTotalAllowedPaths / 64;
+    const spec = wideSpec(lanes + 1);
+    spec.lanes.forEach((lane, laneIndex) => {
+      lane.allowedPaths = Array.from(
+        { length: 64 },
+        (_, index) => `src/l${laneIndex}/p${index}`,
+      );
+    });
+    const extra = spec.lanes[lanes];
+    if (extra === undefined) throw new Error("the extra lane is missing");
+    extra.allowedPaths = [`src/l${lanes}/p0`];
+    const issues = only(run(spec), "RUN_SPEC_PLAN_TOO_LARGE");
+    expect(issues).toHaveLength(1);
+    expect(issues[0]?.path).toEqual(["lanes"]);
+    expect(issues[0]?.message).toContain(
+      String(RUN_SPEC_LIMITS.maxTotalAllowedPaths),
+    );
+    extra.allowedPaths = [];
+    expect(only(run(spec), "RUN_SPEC_PLAN_TOO_LARGE")).toEqual([]);
+  });
+
   test("is not reported for the valid spec", () => {
     expect(only(run(validSpec()), "RUN_SPEC_PLAN_TOO_LARGE")).toEqual([]);
   });
@@ -712,6 +738,20 @@ describe("combined and hostile input", () => {
         "RUN_SPEC_PLAN_TOO_LARGE",
       ]).toContain(issue.code);
     }
+  });
+
+  test("stops at exactly the issue cap when every lane has a long string", () => {
+    const spec = wideSpec(RUN_SPEC_MAX_ISSUES + 10);
+    for (const lane of spec.lanes) lane.title = "t".repeat(64);
+    const rules = testRules();
+    rules.maxLanes = 1_000;
+    rules.maxAgentRuns = 1_000;
+    rules.maxStringLength = 32;
+    const issues = run(spec, rules);
+    expect(only(issues, "RUN_SPEC_STRING_LIMIT_EXCEEDED").length).toBe(
+      RUN_SPEC_MAX_ISSUES,
+    );
+    expect(issues).toHaveLength(RUN_SPEC_MAX_ISSUES);
   });
 
   test("keeps every message within 512 units and free of secrets", () => {

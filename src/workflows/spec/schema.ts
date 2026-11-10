@@ -11,13 +11,15 @@
  * No schema has a default or a transform, so the input and output types are
  * the same and a validated spec is the document that was submitted.
  *
- * This module needs `zod` 4. Importing it registers the field descriptions in
- * zod's global registry and has no other effect.
+ * This module needs `zod` 4. Field descriptions and schema ids live in a
+ * registry of this module, not in zod's global registry, so importing it has
+ * no side effect.
  *
  * @packageDocumentation
  */
 import { z } from "zod";
 import type { ExternalAgentPermissionMode } from "../../agents/permissions/schema.js";
+import { freezeJson } from "../internal/immutable-json.js";
 import { MAX_PORTABLE_PATH_LENGTH } from "../internal/portable-path.js";
 import {
   WORKFLOW_PLAN_PROTOCOL,
@@ -30,6 +32,8 @@ import {
   type WorkflowPlanLane,
   type WorkflowPlanWave,
 } from "../orchestration/contracts.js";
+import { boundedCopy } from "./copy.js";
+import { runSpecRegistry } from "./registry.js";
 
 // ---------------------------------------------------------------------------
 // Limits
@@ -52,6 +56,11 @@ export const RUN_SPEC_LIMITS = Object.freeze({
   maxDependsOn: 256,
   /** Most entries in one lane's `allowedPaths`. */
   maxAllowedPaths: 64,
+  /**
+   * Most allowed paths over all lanes. The plan validator compares every pair
+   * of path claims, so this bounds its cost.
+   */
+  maxTotalAllowedPaths: 1_024,
   /** Most tool names for one agent. */
   maxTools: 64,
   /** Most environment variable names in one spec. */
@@ -60,7 +69,7 @@ export const RUN_SPEC_LIMITS = Object.freeze({
   maxQaCommands: 32,
   /** Most arguments of one QA command, counting the executable. */
   maxCommandArgs: 64,
-  /** Longest QA command argument, in UTF-16 code units. */
+  /** Longest QA command argument, in Unicode code points. */
   maxCommandArgLength: 1_024,
   /** Most review-and-change rounds for one lane. */
   maxChangeRounds: 10,
@@ -68,10 +77,15 @@ export const RUN_SPEC_LIMITS = Object.freeze({
   maxConcurrency: 256,
   /** Largest budget a spec or a rule set can name, in USD. */
   maxBudgetUsd: 1_000_000,
-  /** Longest lane title, in UTF-16 code units. */
+  /** Longest lane title, in Unicode code points. */
   maxTitleLength: 256,
-  /** Longest path, in UTF-16 code units; the portable path limit. */
+  /**
+   * Longest path, in Unicode code points. The paths rules also apply the
+   * portable path limit, the same number in UTF-16 code units.
+   */
   maxPathLength: MAX_PORTABLE_PATH_LENGTH,
+  /** Most segments in one path, so matching paths against patterns stays bounded. */
+  maxPathSegments: 64,
   /** Most extension keys on one object. */
   maxExtensions: 16,
   /** Most entries in one allowlist or denylist of a rule set. */
@@ -209,13 +223,59 @@ const providerId = () => z.string().min(1).max(64).regex(PROVIDER_ID_PATTERN);
 const modelId = () => z.string().min(1).max(256).regex(MODEL_PATTERN);
 const toolName = () => z.string().min(1).max(128).regex(TOOL_NAME_PATTERN);
 const envName = () => z.string().min(1).max(128).regex(ENV_NAME_PATTERN);
-const relativePath = () => z.string().min(1).max(RUN_SPEC_LIMITS.maxPathLength);
-const commandArgument = () =>
+/**
+ * Number of Unicode code points in a string, the unit JSON Schema
+ * `maxLength` counts. A lone surrogate counts as one.
+ */
+function codePointLength(value: string): number {
+  let count = value.length;
+  for (let index = 0; index < value.length - 1; index += 1) {
+    const high = value.charCodeAt(index);
+    if (high < 0xd800 || high > 0xdbff) continue;
+    const low = value.charCodeAt(index + 1);
+    if (low >= 0xdc00 && low <= 0xdfff) {
+      count -= 1;
+      index += 1;
+    }
+  }
+  return count;
+}
+
+/**
+ * A non-empty string of at most `max` code points, with `maxLength` in its
+ * JSON Schema.
+ *
+ * @remarks
+ * Free text can hold astral characters such as emoji, which are two UTF-16
+ * code units but one code point. zod 4 releases differ on which of the two
+ * `.max()` counts, so the bound is checked here, in code points, and both
+ * the shape parser and the JSON Schema agree on every zod 4.
+ */
+const text = (max: number) =>
   z
     .string()
     .min(1)
-    .max(RUN_SPEC_LIMITS.maxCommandArgLength)
-    .regex(NO_CONTROL_CHARACTERS_PATTERN);
+    .superRefine((value, context) => {
+      if (codePointLength(value) > max) {
+        context.addIssue({
+          code: "too_big",
+          origin: "string",
+          maximum: max,
+          inclusive: true,
+          input: value,
+        });
+      }
+    })
+    .register(runSpecRegistry, { maxLength: max });
+
+const relativePath = () => text(RUN_SPEC_LIMITS.maxPathLength);
+const commandArgument = () =>
+  text(RUN_SPEC_LIMITS.maxCommandArgLength).regex(
+    NO_CONTROL_CHARACTERS_PATTERN,
+  );
+
+const targetRefName = () =>
+  z.string().min(1).max(256).regex(TARGET_REF_PATTERN);
 
 const ROLES = {
   architect: "architect",
@@ -254,22 +314,28 @@ const PUBLISH_KINDS = {
  *
  * @experimental
  */
-export const RunSpecRoleSchema = z.enum(ROLES).meta({
-  id: "RunSpecRole",
-  description:
-    "Role of the lane's agent, as in a workflow plan: architect, worker, integration or critic.",
-});
+export const RunSpecRoleSchema = z
+  .enum(ROLES)
+  .clone()
+  .register(runSpecRegistry, {
+    id: "RunSpecRole",
+    description:
+      "Role of the lane's agent, as in a workflow plan: architect, worker, integration or critic.",
+  });
 
 /**
  * Permission mode an agent asks for: the external agent modes, unchanged.
  *
  * @experimental
  */
-export const RunSpecPermissionModeSchema = z.enum(PERMISSION_MODES).meta({
-  id: "RunSpecPermissionMode",
-  description:
-    "Permission mode of the agent, from most to least restrictive: read-only, ask, workspace-write, full-access. Host rules never allow full-access.",
-});
+export const RunSpecPermissionModeSchema = z
+  .enum(PERMISSION_MODES)
+  .clone()
+  .register(runSpecRegistry, {
+    id: "RunSpecPermissionMode",
+    description:
+      "Permission mode of the agent, from most to least restrictive: read-only, ask, workspace-write, full-access. Host rules never allow full-access.",
+  });
 
 /**
  * Extension data: keys `x-<vendor>`, values opaque JSON.
@@ -283,7 +349,8 @@ export const RunSpecPermissionModeSchema = z.enum(PERMISSION_MODES).meta({
  */
 export const RunSpecExtensionsSchema = z
   .record(z.string().min(3).max(64).regex(EXTENSION_KEY_PATTERN), z.unknown())
-  .meta({
+  .clone()
+  .register(runSpecRegistry, {
     id: "RunSpecExtensions",
     description:
       "Vendor data the library does not interpret. Keys are x-<vendor> in lower case; each value is JSON of bounded size.",
@@ -300,29 +367,33 @@ export const RunSpecExtensionsSchema = z
  */
 export const RunSpecAgentSchema = z
   .strictObject({
-    providerId: providerId().describe(
-      "Id of the agent provider or driver registered on the host, for example claude-code or codex.",
-    ),
-    model: modelId().describe(
-      "Model id passed to the provider. It must be in the host's model allowlist.",
-    ),
-    mode: RunSpecPermissionModeSchema.describe(
-      "Permission mode the agent runs under. It must be in the host's permission mode allowlist.",
-    ),
-    allowNetwork: z
-      .boolean()
-      .optional()
-      .describe(
+    providerId: providerId().clone().register(runSpecRegistry, {
+      description:
+        "Id of the agent provider or driver registered on the host, for example claude-code or codex.",
+    }),
+    model: modelId().clone().register(runSpecRegistry, {
+      description:
+        "Model id passed to the provider. It must be in the host's model allowlist.",
+    }),
+    mode: RunSpecPermissionModeSchema.clone().register(runSpecRegistry, {
+      description:
+        "Permission mode the agent runs under. It must be in the host's permission mode allowlist.",
+    }),
+    allowNetwork: z.boolean().optional().clone().register(runSpecRegistry, {
+      description:
         "Whether the agent may reach the network. Absent means false. True is accepted only when the host rules allow network access.",
-      ),
+    }),
     tools: z
       .array(toolName())
       .max(RUN_SPEC_LIMITS.maxTools)
-      .describe(
-        "Names of the tools the agent may use. Each must be in the host's tool allowlist; an empty list means no optional tool.",
-      ),
+      .clone()
+      .register(runSpecRegistry, {
+        description:
+          "Names of the tools the agent may use. Each must be in the host's tool allowlist; an empty list means no optional tool.",
+      }),
   })
-  .meta({
+  .clone()
+  .register(runSpecRegistry, {
     id: "RunSpecAgent",
     description:
       "Agent of a lane: provider, model, permission mode, network access and tools. It carries no credential and no host handle.",
@@ -336,28 +407,34 @@ export const RunSpecAgentSchema = z
 export const RunSpecReviewSchema = z
   .discriminatedUnion("kind", [
     z.strictObject({
-      kind: z.literal("none").describe("The lane's result is not reviewed."),
+      kind: z.literal("none").clone().register(runSpecRegistry, {
+        description: "The lane's result is not reviewed.",
+      }),
     }),
     z.strictObject({
-      kind: z
-        .literal("agent")
-        .describe("A second agent reviews the lane's result."),
-      providerId: providerId().describe(
-        "Id of the provider that runs the reviewer.",
-      ),
-      model: modelId().describe(
-        "Model id of the reviewer. It must be in the host's model allowlist.",
-      ),
+      kind: z.literal("agent").clone().register(runSpecRegistry, {
+        description: "A second agent reviews the lane's result.",
+      }),
+      providerId: providerId().clone().register(runSpecRegistry, {
+        description: "Id of the provider that runs the reviewer.",
+      }),
+      model: modelId().clone().register(runSpecRegistry, {
+        description:
+          "Model id of the reviewer. It must be in the host's model allowlist.",
+      }),
       maxChangeRounds: z
         .int()
         .min(0)
         .max(RUN_SPEC_LIMITS.maxChangeRounds)
-        .describe(
-          "Most rounds in which the lane's agent changes its work after a review. 0 means one review and no change.",
-        ),
+        .clone()
+        .register(runSpecRegistry, {
+          description:
+            "Most rounds in which the lane's agent changes its work after a review. 0 means one review and no change.",
+        }),
     }),
   ])
-  .meta({
+  .clone()
+  .register(runSpecRegistry, {
     id: "RunSpecReview",
     description:
       "Review policy of a lane: none, or a reviewer agent that runs read-only without network and a bound on change rounds.",
@@ -371,14 +448,16 @@ export const RunSpecReviewSchema = z
  */
 export const RunSpecStepsPolicySchema = z
   .strictObject({
-    testsFirst: z
-      .boolean()
-      .describe(
+    testsFirst: z.boolean().clone().register(runSpecRegistry, {
+      description:
         "Whether the lane's agent writes failing tests in a separate run before the implementation.",
-      ),
-    review: RunSpecReviewSchema.describe("How the lane's result is reviewed."),
+    }),
+    review: RunSpecReviewSchema.clone().register(runSpecRegistry, {
+      description: "How the lane's result is reviewed.",
+    }),
   })
-  .meta({
+  .clone()
+  .register(runSpecRegistry, {
     id: "RunSpecStepsPolicy",
     description:
       "Step policy of a lane. It fixes the largest number of agent runs the lane can use.",
@@ -391,34 +470,46 @@ export const RunSpecStepsPolicySchema = z
  */
 export const RunSpecLaneSchema = z
   .strictObject({
-    taskId: recordId().describe(
-      "Identifier of the lane, unique in the spec. It becomes the task id of the plan lane.",
-    ),
-    title: z
-      .string()
-      .min(1)
-      .max(RUN_SPEC_LIMITS.maxTitleLength)
-      .describe("Short description of the lane's work, for people."),
-    role: RunSpecRoleSchema.describe("Role the lane's agent plays."),
+    taskId: recordId().clone().register(runSpecRegistry, {
+      description:
+        "Identifier of the lane, unique in the spec. It becomes the task id of the plan lane.",
+    }),
+    title: text(RUN_SPEC_LIMITS.maxTitleLength)
+      .clone()
+      .register(runSpecRegistry, {
+        description: "Short description of the lane's work, for people.",
+      }),
+    role: RunSpecRoleSchema.clone().register(runSpecRegistry, {
+      description: "Role the lane's agent plays.",
+    }),
     dependsOn: z
       .array(recordId())
       .max(RUN_SPEC_LIMITS.maxDependsOn)
-      .describe(
-        "Task ids of the lanes that must finish before this lane starts. Each must name another lane of the spec; the graph must have no cycle.",
-      ),
+      .clone()
+      .register(runSpecRegistry, {
+        description:
+          "Task ids of the lanes that must finish before this lane starts. Each must name another lane of the spec; the graph must have no cycle.",
+      }),
     allowedPaths: z
       .array(relativePath())
       .max(RUN_SPEC_LIMITS.maxAllowedPaths)
-      .describe(
-        "Paths the lane may change, relative to projectRoot, in canonical form with forward slashes. Each covers the entry and everything below it. No two lanes may name overlapping paths.",
-      ),
-    agent: RunSpecAgentSchema.describe("Agent that runs the lane."),
-    steps: RunSpecStepsPolicySchema.describe("Steps the lane runs."),
-    extensions: RunSpecExtensionsSchema.optional().describe(
-      "Vendor data for this lane.",
-    ),
+      .clone()
+      .register(runSpecRegistry, {
+        description:
+          "Paths the lane may change, relative to projectRoot, in canonical form with forward slashes. Each covers the entry and everything below it. No two lanes may name overlapping paths.",
+      }),
+    agent: RunSpecAgentSchema.clone().register(runSpecRegistry, {
+      description: "Agent that runs the lane.",
+    }),
+    steps: RunSpecStepsPolicySchema.clone().register(runSpecRegistry, {
+      description: "Steps the lane runs.",
+    }),
+    extensions: RunSpecExtensionsSchema.optional()
+      .clone()
+      .register(runSpecRegistry, { description: "Vendor data for this lane." }),
   })
-  .meta({
+  .clone()
+  .register(runSpecRegistry, {
     id: "RunSpecLane",
     description:
       "A unit of work owned by one agent, with the paths it may change and the lanes it waits for.",
@@ -431,16 +522,21 @@ export const RunSpecLaneSchema = z
  */
 export const RunSpecQaCommandSchema = z
   .strictObject({
-    id: recordId().describe("Identifier of the command, unique in the spec."),
+    id: recordId().clone().register(runSpecRegistry, {
+      description: "Identifier of the command, unique in the spec.",
+    }),
     command: z
       .array(commandArgument())
       .min(1)
       .max(RUN_SPEC_LIMITS.maxCommandArgs)
-      .describe(
-        "Executable and arguments, one string each. It is not a shell line. The whole list must equal an entry of the host's QA command allowlist.",
-      ),
+      .clone()
+      .register(runSpecRegistry, {
+        description:
+          "Executable and arguments, one string each. It is not a shell line. The whole list must equal an entry of the host's QA command allowlist.",
+      }),
   })
-  .meta({
+  .clone()
+  .register(runSpecRegistry, {
     id: "RunSpecQaCommand",
     description:
       "A check the host runs in the project root after the lanes finish, such as a test or lint command.",
@@ -454,40 +550,39 @@ export const RunSpecQaCommandSchema = z
 export const RunSpecPublishSchema = z
   .discriminatedUnion("kind", [
     z.strictObject({
-      kind: z
-        .literal(PUBLISH_KINDS.none)
-        .describe("Nothing is committed; changes stay in the workspaces."),
+      kind: z.literal(PUBLISH_KINDS.none).clone().register(runSpecRegistry, {
+        description: "Nothing is committed; changes stay in the workspaces.",
+      }),
     }),
     z.strictObject({
-      kind: z
-        .literal(PUBLISH_KINDS.commit)
-        .describe("Each lane's accepted change is committed."),
-      hitl: z
-        .boolean()
-        .describe(
+      kind: z.literal(PUBLISH_KINDS.commit).clone().register(runSpecRegistry, {
+        description: "Each lane's accepted change is committed.",
+      }),
+      hitl: z.boolean().clone().register(runSpecRegistry, {
+        description:
           "Whether a person approves before each commit. It must be true.",
-        ),
+      }),
     }),
     z.strictObject({
       kind: z
         .literal(PUBLISH_KINDS.integration)
-        .describe("Changes are committed and then merged into the target ref."),
-      hitl: z
-        .boolean()
-        .describe(
+        .clone()
+        .register(runSpecRegistry, {
+          description:
+            "Changes are committed and then merged into the target ref.",
+        }),
+      hitl: z.boolean().clone().register(runSpecRegistry, {
+        description:
           "Whether a person approves before each commit and before the merge. It must be true.",
-        ),
-      targetRef: z
-        .string()
-        .min(1)
-        .max(256)
-        .regex(TARGET_REF_PATTERN)
-        .describe(
+      }),
+      targetRef: targetRefName().clone().register(runSpecRegistry, {
+        description:
           "Git ref the commits are merged into, for example refs/heads/main. It must be a valid ref name: no '..', ':', '//', segment starting with '.', or trailing '/' or '.'.",
-        ),
+      }),
     }),
   ])
-  .meta({
+  .clone()
+  .register(runSpecRegistry, {
     id: "RunSpecPublish",
     description:
       "Publication of the run: none, commit, or commit followed by a merge into a target ref. Commit and merge need human approval.",
@@ -503,14 +598,17 @@ export const RunSpecGatesSchema = z
     qa: z
       .array(RunSpecQaCommandSchema)
       .max(RUN_SPEC_LIMITS.maxQaCommands)
-      .describe(
-        "Commands that must all succeed before anything is published, in order.",
-      ),
-    publish: RunSpecPublishSchema.describe(
-      "What the run publishes and whether a person approves it.",
-    ),
+      .clone()
+      .register(runSpecRegistry, {
+        description:
+          "Commands that must all succeed before anything is published, in order.",
+      }),
+    publish: RunSpecPublishSchema.clone().register(runSpecRegistry, {
+      description: "What the run publishes and whether a person approves it.",
+    }),
   })
-  .meta({
+  .clone()
+  .register(runSpecRegistry, {
     id: "RunSpecGates",
     description: "QA commands and the publication policy of the run.",
   });
@@ -526,11 +624,14 @@ export const RunSpecBudgetSchema = z
       .number()
       .positive()
       .max(RUN_SPEC_LIMITS.maxBudgetUsd)
-      .describe(
-        "Most the whole run may cost, in USD. The host stops starting agent runs when the metered cost reaches it.",
-      ),
+      .clone()
+      .register(runSpecRegistry, {
+        description:
+          "Most the whole run may cost, in USD. The host stops starting agent runs when the metered cost reaches it.",
+      }),
   })
-  .meta({
+  .clone()
+  .register(runSpecRegistry, {
     id: "RunSpecBudget",
     description: "Spending limit of the run.",
   });
@@ -542,41 +643,58 @@ export const RunSpecBudgetSchema = z
  */
 export const RunSpecV1Schema = z
   .strictObject({
-    specVersion: z
-      .literal(1)
-      .describe("Version of the run spec contract. This schema is version 1."),
-    workflowId: opaqueId().describe(
-      "Id of the registered workflow that executes the spec.",
-    ),
-    workflowVersion: opaqueId().describe(
-      "Version of the registered workflow that executes the spec.",
-    ),
-    projectRoot: relativePath().describe(
-      "Directory the lanes work in, relative to the workspace root the host binds, in canonical form with forward slashes. Use . for the workspace root itself. Absolute paths are rejected.",
-    ),
-    budget: RunSpecBudgetSchema.describe("Spending limit of the run."),
+    specVersion: z.literal(1).clone().register(runSpecRegistry, {
+      description:
+        "Version of the run spec contract. This schema is version 1.",
+    }),
+    workflowId: opaqueId().clone().register(runSpecRegistry, {
+      description: "Id of the registered workflow that executes the spec.",
+    }),
+    workflowVersion: opaqueId().clone().register(runSpecRegistry, {
+      description: "Version of the registered workflow that executes the spec.",
+    }),
+    projectRoot: relativePath().clone().register(runSpecRegistry, {
+      description:
+        "Directory the lanes work in, relative to the workspace root the host binds, in canonical form with forward slashes. Use . for the workspace root itself. Absolute paths are rejected.",
+    }),
+    budget: RunSpecBudgetSchema.clone().register(runSpecRegistry, {
+      description: "Spending limit of the run.",
+    }),
     maxConcurrency: z
       .int()
       .min(1)
       .max(RUN_SPEC_LIMITS.maxConcurrency)
-      .describe("Most lanes that run at the same time."),
+      .clone()
+      .register(runSpecRegistry, {
+        description: "Most lanes that run at the same time.",
+      }),
     lanes: z
       .array(RunSpecLaneSchema)
       .min(1)
       .max(RUN_SPEC_LIMITS.maxLanes)
-      .describe("Lanes of the run. Their order breaks ties inside a wave."),
-    gates: RunSpecGatesSchema.describe("QA commands and publication policy."),
+      .clone()
+      .register(runSpecRegistry, {
+        description: "Lanes of the run. Their order breaks ties inside a wave.",
+      }),
+    gates: RunSpecGatesSchema.clone().register(runSpecRegistry, {
+      description: "QA commands and publication policy.",
+    }),
     env: z
       .array(envName())
       .max(RUN_SPEC_LIMITS.maxEnvNames)
-      .describe(
-        "Names of the environment variables the agents may read. Names only: a spec never carries a value. Each must be in the host's allowlist.",
-      ),
-    extensions: RunSpecExtensionsSchema.optional().describe(
-      "Vendor data for the whole run.",
-    ),
+      .clone()
+      .register(runSpecRegistry, {
+        description:
+          "Names of the environment variables the agents may read. Names only: a spec never carries a value. Each must be in the host's allowlist.",
+      }),
+    extensions: RunSpecExtensionsSchema.optional()
+      .clone()
+      .register(runSpecRegistry, {
+        description: "Vendor data for the whole run.",
+      }),
   })
-  .meta({
+  .clone()
+  .register(runSpecRegistry, {
     id: "RunSpecV1",
     description:
       "A run submitted as data: the workflow, the project root, the budget, the lanes with their agents and paths, and the gates.",
@@ -593,7 +711,8 @@ export const RunSpecV1Schema = z
  */
 export const RunSpecSchema = z
   .discriminatedUnion("specVersion", [RunSpecV1Schema])
-  .meta({
+  .clone()
+  .register(runSpecRegistry, {
     title: "RunSpec",
     description:
       "A run of a lanes workflow, submitted as data. Rules that compare fields with each other or with host rules are checked by validateRunSpec, not by this schema.",
@@ -627,10 +746,14 @@ export const RUN_RULE_KEYS = [
   "allowedQaCommands",
   "requireQa",
   "allowedPublishKinds",
+  "allowedWorkflows",
+  "allowedTargetRefs",
 ] as const;
 
 const ruleSetId = () =>
-  recordId().describe("Name of the rule set, for example base or team-ci.");
+  recordId().clone().register(runSpecRegistry, {
+    description: "Name of the rule set, for example base or team-ci.",
+  });
 
 const ruleList = <Item extends z.ZodType>(item: Item) =>
   z.array(item).max(RUN_SPEC_LIMITS.maxRuleListEntries);
@@ -640,85 +763,149 @@ const RULE_FIELDS = {
     .number()
     .positive()
     .max(RUN_SPEC_LIMITS.maxBudgetUsd)
-    .describe("Largest budget a spec may declare, in USD."),
+    .clone()
+    .register(runSpecRegistry, {
+      description: "Largest budget a spec may declare, in USD.",
+    }),
   maxConcurrency: z
     .int()
     .min(1)
     .max(RUN_SPEC_LIMITS.maxConcurrency)
-    .describe("Largest concurrency a spec may declare."),
+    .clone()
+    .register(runSpecRegistry, {
+      description: "Largest concurrency a spec may declare.",
+    }),
   maxLanes: z
     .int()
     .min(1)
     .max(RUN_SPEC_LIMITS.maxLanes)
-    .describe("Most lanes a spec may have."),
+    .clone()
+    .register(runSpecRegistry, { description: "Most lanes a spec may have." }),
   maxStringLength: z
     .int()
     .min(1)
     .max(RUN_SPEC_LIMITS.maxPathLength)
-    .describe(
-      "Longest string a spec may hold outside extensions, in UTF-16 code units.",
-    ),
+    .clone()
+    .register(runSpecRegistry, {
+      description:
+        "Longest string a spec may hold outside extensions, in UTF-16 code units.",
+    }),
   maxArrayLength: z
     .int()
     .min(1)
     .max(RUN_SPEC_LIMITS.maxDependsOn)
-    .describe("Longest array a spec may hold, other than lanes."),
+    .clone()
+    .register(runSpecRegistry, {
+      description: "Longest array a spec may hold, other than lanes.",
+    }),
   maxChangeRounds: z
     .int()
     .min(0)
     .max(RUN_SPEC_LIMITS.maxChangeRounds)
-    .describe("Most change rounds a lane's review may declare."),
+    .clone()
+    .register(runSpecRegistry, {
+      description: "Most change rounds a lane's review may declare.",
+    }),
   maxAgentRuns: z
     .int()
     .min(1)
     .max(1_000_000)
-    .describe(
-      "Most agent runs the whole spec may need in the worst case, summed over its lanes.",
-    ),
-  allowedProviderIds: ruleList(providerId()).describe(
-    "Provider ids a lane or a reviewer may name. Compared exactly.",
-  ),
-  allowedModels: ruleList(modelId()).describe(
-    "Model ids a lane or a reviewer may name. Compared exactly, case included.",
-  ),
+    .clone()
+    .register(runSpecRegistry, {
+      description:
+        "Most agent runs the whole spec may need in the worst case, summed over its lanes.",
+    }),
+  allowedProviderIds: ruleList(providerId()).clone().register(runSpecRegistry, {
+    description:
+      "Provider ids a lane or a reviewer may name. Compared exactly.",
+  }),
+  allowedModels: ruleList(modelId()).clone().register(runSpecRegistry, {
+    description:
+      "Model ids a lane or a reviewer may name. Compared exactly, case included.",
+  }),
   allowedPermissionModes: z
     .array(
-      z
-        .enum(HOST_PERMISSION_MODES)
-        .describe("A permission mode other than full-access."),
+      z.enum(HOST_PERMISSION_MODES).clone().register(runSpecRegistry, {
+        description: "A permission mode other than full-access.",
+      }),
     )
     .max(3)
-    .describe(
-      "Permission modes a lane's agent may ask for. full-access cannot be listed.",
-    ),
-  allowNetwork: z
-    .boolean()
-    .describe(
+    .clone()
+    .register(runSpecRegistry, {
+      description:
+        "Permission modes a lane's agent may ask for. full-access cannot be listed.",
+    }),
+  allowNetwork: z.boolean().clone().register(runSpecRegistry, {
+    description:
       "Whether a lane's agent may ask for network access. False rejects every lane that sets allowNetwork to true.",
-    ),
-  allowedTools: ruleList(toolName()).describe(
-    "Tool names an agent may list. Compared exactly.",
-  ),
-  allowedEnvNames: ruleList(envName()).describe(
-    "Environment variable names a spec may list. Compared exactly.",
-  ),
-  deniedPathPatterns: ruleList(z.string().regex(PATH_PATTERN_PATTERN)).describe(
-    "File name patterns no path may contain. A pattern is compared with each path segment, ignoring case; * stands for any run of characters inside a segment.",
-  ),
+  }),
+  allowedTools: ruleList(toolName()).clone().register(runSpecRegistry, {
+    description: "Tool names an agent may list. Compared exactly.",
+  }),
+  allowedEnvNames: ruleList(envName()).clone().register(runSpecRegistry, {
+    description:
+      "Environment variable names a spec may list. Compared exactly.",
+  }),
+  deniedPathPatterns: ruleList(z.string().regex(PATH_PATTERN_PATTERN))
+    .clone()
+    .register(runSpecRegistry, {
+      description:
+        "File name patterns no path may contain. A pattern is compared with each path segment, ignoring case; * stands for any run of characters inside a segment.",
+    }),
   allowedQaCommands: ruleList(
     z.array(commandArgument()).min(1).max(RUN_SPEC_LIMITS.maxCommandArgs),
-  ).describe(
-    "QA commands a spec may declare, each as the full list of executable and arguments. A command is allowed only when it equals one entry.",
-  ),
-  requireQa: z
-    .boolean()
-    .describe(
+  )
+    .clone()
+    .register(runSpecRegistry, {
+      description:
+        "QA commands a spec may declare, each as the full list of executable and arguments. A command is allowed only when it equals one entry.",
+    }),
+  requireQa: z.boolean().clone().register(runSpecRegistry, {
+    description:
       "Whether a spec that publishes must declare at least one QA command.",
-    ),
+  }),
   allowedPublishKinds: z
-    .array(z.enum(PUBLISH_KINDS).describe("A publication kind."))
+    .array(
+      z
+        .enum(PUBLISH_KINDS)
+        .clone()
+        .register(runSpecRegistry, { description: "A publication kind." }),
+    )
     .max(3)
-    .describe("Publication kinds a spec may ask for."),
+    .clone()
+    .register(runSpecRegistry, {
+      description: "Publication kinds a spec may ask for.",
+    }),
+  allowedWorkflows: ruleList(
+    z
+      .strictObject({
+        workflowId: opaqueId().clone().register(runSpecRegistry, {
+          description: "Id of a registered workflow.",
+        }),
+        workflowVersion: opaqueId().clone().register(runSpecRegistry, {
+          description: "Version of that workflow.",
+        }),
+      })
+      .clone()
+      .register(runSpecRegistry, {
+        description: "A workflow id and version, compared exactly.",
+      }),
+  )
+    .clone()
+    .register(runSpecRegistry, {
+      description:
+        "Workflows a spec may run, each as an id and a version. A spec is allowed only when both equal one entry. An empty list allows none.",
+    }),
+  allowedTargetRefs: ruleList(
+    targetRefName().clone().register(runSpecRegistry, {
+      description: "A git ref name, compared exactly.",
+    }),
+  )
+    .clone()
+    .register(runSpecRegistry, {
+      description:
+        "Git refs an integration may merge into, for example refs/heads/main. A ref is allowed only when it equals one entry. An empty list allows no integration.",
+    }),
 } as const satisfies { [Key in (typeof RUN_RULE_KEYS)[number]]: z.ZodType };
 
 /**
@@ -742,11 +929,14 @@ export const RunRulesSchema = z
         z.array(recordId()).min(1).max(RUN_SPEC_LIMITS.maxRuleOrigins),
       )
       .optional()
-      .describe(
-        "For a merged rule set: the ids of the rule sets that decided each effective value. Written by mergeRunRules; absent means every value comes from this rule set.",
-      ),
+      .clone()
+      .register(runSpecRegistry, {
+        description:
+          "For a merged rule set: the ids of the rule sets that decided each effective value. Written by mergeRunRules; absent means every value comes from this rule set.",
+      }),
   })
-  .meta({
+  .clone()
+  .register(runSpecRegistry, {
     id: "RunRules",
     description:
       "Limits and allowlists a host enforces on a run spec. Missing permission is never implied.",
@@ -766,7 +956,8 @@ export const RunRulesOverrideSchema = z
     id: ruleSetId(),
     ...z.strictObject(RULE_FIELDS).partial().shape,
   })
-  .meta({
+  .clone()
+  .register(runSpecRegistry, {
     id: "RunRulesOverride",
     description:
       "Rules a host layers over a base rule set. Each can only make the result more restrictive.",
@@ -947,6 +1138,43 @@ export const RUN_SPEC_DRY_RUN_BINDING: Readonly<RunSpecPlanBinding> =
     status: "draft",
   });
 
+/** The JSON guard callback for a rule set; {@link readRuleSet} catches it. */
+function failRuleSet(message: string): never {
+  throw new TypeError(message);
+}
+
+/**
+ * Reads a host rule set once and checks the copy against its schema.
+ *
+ * @remarks
+ * The rule set is copied as plain JSON first: own enumerable keys only, each
+ * getter called once, within `RUN_SPEC_INPUT_LIMITS`. Callers use the
+ * returned copy, never the input, so a getter cannot answer differently after
+ * the check and a key inherited from a prototype is not a rule.
+ *
+ * @param schema - {@link RunRulesSchema} or {@link RunRulesOverrideSchema}.
+ * @param value - The host's value.
+ * @returns The checked copy, or `undefined` when the value is not plain JSON,
+ * does not match the schema, or throws while it is read.
+ * @internal
+ */
+export function readRuleSet<Schema extends z.ZodType>(
+  schema: Schema,
+  value: unknown,
+): z.infer<Schema> | undefined {
+  try {
+    const copy = freezeJson(
+      boundedCopy(value, RUN_SPEC_INPUT_LIMITS, failRuleSet),
+      RUN_SPEC_INPUT_LIMITS,
+      failRuleSet,
+    );
+    const parsed = schema.safeParse(copy);
+    return parsed.success ? parsed.data : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Merges a base rule set with host overrides; the most restrictive value of
  * each rule wins.
@@ -955,7 +1183,9 @@ export const RUN_SPEC_DRY_RUN_BINDING: Readonly<RunSpecPlanBinding> =
  * Overrides apply in order. For each rule an override names:
  *
  * - numeric caps: the smaller value;
- * - allowlists: the entries present in both lists, in the base order;
+ * - allowlists (including `allowedWorkflows`, compared by id and version, and
+ *   `allowedTargetRefs`): the entries present in both lists, in the base
+ *   order;
  * - `deniedPathPatterns`: the entries of both lists, base first;
  * - `allowNetwork`: true only when both are true;
  * - `requireQa`: true when either is true.
@@ -968,12 +1198,46 @@ export const RUN_SPEC_DRY_RUN_BINDING: Readonly<RunSpecPlanBinding> =
  *
  * @param base - Complete rule set to start from.
  * @param overrides - Partial rule sets, applied in order.
- * @returns A new complete rule set.
+ * @returns A new complete rule set that matches {@link RunRulesSchema}.
+ * @throws `TypeError` when `base` does not match {@link RunRulesSchema}, an
+ * override does not match {@link RunRulesOverrideSchema}, or a rule would
+ * record more than `RUN_SPEC_LIMITS.maxRuleOrigins` origins.
  * @experimental
  */
 export function mergeRunRules(
   base: RunRules,
   ...overrides: readonly RunRulesOverride[]
+): RunRules {
+  const checkedBase = readRuleSet(RunRulesSchema, base);
+  if (checkedBase === undefined) {
+    throw new TypeError(
+      "mergeRunRules: the base does not match RunRulesSchema.",
+    );
+  }
+  const checkedOverrides = overrides.map((override, index) => {
+    const checked = readRuleSet(RunRulesOverrideSchema, override);
+    if (checked === undefined) {
+      throw new TypeError(
+        `mergeRunRules: override ${index} does not match RunRulesOverrideSchema.`,
+      );
+    }
+    return checked;
+  });
+  const merged = mergeCheckedRunRules(checkedBase, checkedOverrides);
+  for (const key of RUN_RULE_KEYS) {
+    if ((merged.origins?.[key]?.length ?? 0) > RUN_SPEC_LIMITS.maxRuleOrigins) {
+      throw new TypeError(
+        `mergeRunRules: ${key} would record more than ${RUN_SPEC_LIMITS.maxRuleOrigins} origins.`,
+      );
+    }
+  }
+  return merged;
+}
+
+/** {@link mergeRunRules} on inputs that already match their schemas. */
+function mergeCheckedRunRules(
+  base: RunRules,
+  overrides: readonly RunRulesOverride[],
 ): RunRules {
   const origins = {} as Record<RunRuleKey, string[]>;
   for (const key of RUN_RULE_KEYS) {
@@ -989,6 +1253,8 @@ export function mergeRunRules(
     deniedPathPatterns: [...base.deniedPathPatterns],
     allowedQaCommands: base.allowedQaCommands.map((command) => [...command]),
     allowedPublishKinds: [...base.allowedPublishKinds],
+    allowedWorkflows: base.allowedWorkflows.map((entry) => ({ ...entry })),
+    allowedTargetRefs: [...base.allowedTargetRefs],
     origins,
   };
   const changed = (key: RunRuleKey, id: string): void => {
@@ -1066,6 +1332,18 @@ export function mergeRunRules(
       override.allowedQaCommands,
       runSpecCommandKey,
     );
+    merged.allowedWorkflows = narrow(
+      "allowedWorkflows",
+      merged.allowedWorkflows,
+      override.allowedWorkflows,
+      runSpecWorkflowKey,
+    );
+    merged.allowedTargetRefs = narrow(
+      "allowedTargetRefs",
+      merged.allowedTargetRefs,
+      override.allowedTargetRefs,
+      String,
+    );
 
     if (override.deniedPathPatterns !== undefined) {
       const present = new Set(merged.deniedPathPatterns);
@@ -1089,6 +1367,24 @@ const CAP_KEYS = [
   "maxChangeRounds",
   "maxAgentRuns",
 ] as const satisfies readonly RunRuleKey[];
+
+/**
+ * Identity of a workflow for comparison with an `allowedWorkflows` entry.
+ *
+ * @remarks
+ * The JSON text of the id and the version, so neither can imitate a
+ * separator.
+ *
+ * @param workflow - Workflow id and version.
+ * @returns A string equal for equal id and version pairs only.
+ * @internal
+ */
+export function runSpecWorkflowKey(workflow: {
+  readonly workflowId: string;
+  readonly workflowVersion: string;
+}): string {
+  return JSON.stringify([workflow.workflowId, workflow.workflowVersion]);
+}
 
 /**
  * Identity of a QA command for comparison with an allowlist entry.

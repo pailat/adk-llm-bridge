@@ -95,6 +95,8 @@ export function testRules(): RunRules {
     ],
     requireQa: true,
     allowedPublishKinds: ["none", "commit"],
+    allowedWorkflows: [{ workflowId: "lanes", workflowVersion: "1" }],
+    allowedTargetRefs: ["refs/heads/main"],
   };
 }
 

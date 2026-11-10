@@ -10,10 +10,8 @@ export {
   RUN_SPEC_ISSUE_FAMILY_NAMES,
   RUN_SPEC_MAX_ISSUE_MESSAGE_LENGTH,
   RUN_SPEC_MAX_ISSUES,
-  RUN_SPEC_MAX_UNKNOWN_KEYS_REPORTED,
   RUN_SPEC_SCHEMA_ISSUE_CODES,
   RunSpecIssueSchema,
-  runSpecIssue,
   runSpecIssueFamily,
 } from "./issues.js";
 export { runSpecJsonSchema } from "./json-schema.js";
@@ -84,8 +82,6 @@ export type {
   RunPlanResult,
   RunPlanStartInput,
   RunPlanWave,
-  RunSpecLatest,
-  RunSpecUpgrade,
   RunSpecValidationResult,
 } from "./types.js";
 export { validateRunSpec } from "./validate.js";

@@ -11,6 +11,7 @@
  */
 import type { z } from "zod";
 import { freezeJson } from "../internal/immutable-json.js";
+import { boundedCopy } from "./copy.js";
 import {
   RUN_SPEC_MAX_UNKNOWN_KEYS_REPORTED,
   type RunSpecIssue,
@@ -119,69 +120,6 @@ function hasTooManyLanes(input: unknown): boolean {
     if (input === null || typeof input !== "object") return false;
     const lanes = Object.getOwnPropertyDescriptor(input, "lanes")?.value;
     return Array.isArray(lanes) && lanes.length > RUN_SPEC_LIMITS.maxLanes;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * True when the input has more values than the node limit, found without
- * copying it.
- *
- * @remarks
- * The JSON guard reads every descriptor of an array before it counts, so a
- * dense array of millions of items would take seconds to reject. This walk
- * reads only data descriptors, one at a time, never calls a getter, and
- * stops as soon as the count passes the limit, so its cost is bounded by
- * the limit. An array longer than the remaining budget counts as too large
- * when its last index is set; a sparse one is left to the guard, which
- * reports it as not JSON. A repeated object, a depth beyond the limit or a
- * failure to look ends the walk with "not too large": the guard then
- * reports it.
- */
-function exceedsNodeLimit(input: unknown): boolean {
-  const { maxDepth, maxNodes } = RUN_SPEC_INPUT_LIMITS;
-  try {
-    let budget = maxNodes;
-    const seen = new Set<object>();
-    const stack: [unknown, number][] = [[input, 0]];
-    for (let next = stack.pop(); next !== undefined; next = stack.pop()) {
-      const [value, depth] = next;
-      budget -= 1;
-      if (budget < 0) return true;
-      if (value === null || typeof value !== "object" || depth >= maxDepth) {
-        continue;
-      }
-      if (seen.has(value)) return false;
-      seen.add(value);
-      const items: unknown[] = [];
-      if (Array.isArray(value)) {
-        const length = Object.getOwnPropertyDescriptor(value, "length")?.value;
-        if (!Number.isSafeInteger(length)) return false;
-        if (length > budget) {
-          return (
-            Object.getOwnPropertyDescriptor(value, String(length - 1)) !==
-            undefined
-          );
-        }
-        for (let index = 0; index < length; index += 1) {
-          items.push(Object.getOwnPropertyDescriptor(value, String(index)));
-        }
-      } else {
-        const keys = Object.keys(value);
-        if (keys.length > budget) return true;
-        for (const key of keys) {
-          items.push(Object.getOwnPropertyDescriptor(value, key));
-        }
-      }
-      for (const descriptor of items) {
-        const item = descriptor as PropertyDescriptor | undefined;
-        if (item !== undefined && "value" in item) {
-          stack.push([item.value, depth + 1]);
-        }
-      }
-    }
-    return false;
   } catch {
     return false;
   }
@@ -461,13 +399,13 @@ export function parseRunSpecShape(
     );
     return undefined;
   }
-  if (exceedsNodeLimit(input)) {
-    issues.push(guardIssue(new InputGuardFailure("node limit")));
-    return undefined;
-  }
   let frozen: unknown;
   try {
-    frozen = freezeJson(input, RUN_SPEC_INPUT_LIMITS, failGuard);
+    frozen = freezeJson(
+      boundedCopy(input, RUN_SPEC_INPUT_LIMITS, failGuard),
+      RUN_SPEC_INPUT_LIMITS,
+      failGuard,
+    );
   } catch (error) {
     issues.push(guardIssue(error));
     return undefined;

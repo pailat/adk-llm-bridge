@@ -18,6 +18,10 @@ Provider credentials, `BaseAgent` instances, workspace host handles, and
 `AbortSignal` objects never enter the JSON payload. Drivers and adapters remain
 host-owned capabilities.
 
+A start request can come from a run spec: [Workflow run spec](workflow-run-spec.md)
+validates a submitted lanes job against host rules and maps it to the start
+request and the workflow plan (experimental, needs zod >= 4).
+
 ## Construct the host services
 
 ```typescript

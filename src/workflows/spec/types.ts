@@ -223,23 +223,3 @@ export type RunPlan = {
 export type RunPlanResult =
   | { ok: true; plan: RunPlan }
   | { ok: false; errors: RunSpecIssue[] };
-
-/**
- * The newest version of the run spec.
- *
- * @experimental
- */
-export type RunSpecLatest = RunSpecV1;
-
-/**
- * Reserved signature of `upgradeRunSpec`, which will turn a valid spec of any
- * supported version into the newest version.
- *
- * @remarks
- * No implementation exists while version 1 is the only version. An upgrade is
- * pure and never changes the meaning of a spec; the upgraded spec has a new
- * hash.
- *
- * @experimental
- */
-export type RunSpecUpgrade = (spec: RunSpec) => RunSpecLatest;

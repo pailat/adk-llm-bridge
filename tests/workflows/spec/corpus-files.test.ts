@@ -22,12 +22,14 @@ const MIN_VALID_CASES = 8;
 const BROKEN_RULES_CODE = "RUN_SPEC_RULES_INVALID";
 
 /**
- * Codes without a corpus file. `RUN_SPEC_PLAN_REJECTED` is reported only when
- * the existing plan validator rejects a lane graph that every other graph rule
- * accepted, which takes hundreds of densely linked lanes: far too large for a
- * corpus file, so the unit tests of the graph family cover it.
+ * Codes no JSON document can produce, so they have no corpus file.
+ * `RUN_SPEC_INTERNAL_ERROR` reports a defect of the library: a rule family
+ * that throws on a spec whose shape and rule set are valid. The validator
+ * tests reach it with a rule set whose getter throws on its second read.
  */
-const UNREACHABLE_CODES: readonly string[] = ["RUN_SPEC_PLAN_REJECTED"];
+const CODES_WITHOUT_CORPUS_CASE: readonly string[] = [
+  "RUN_SPEC_INTERNAL_ERROR",
+];
 
 /** Keys every corpus file must have, checked before the schema runs. */
 const REQUIRED_KEYS = ["description", "rules", "spec", "expectCodes"] as const;
@@ -222,15 +224,16 @@ describe("run spec corpus files", () => {
   });
 
   test("every issue code has an invalid case that lists it", () => {
-    const missing = RUN_SPEC_ISSUE_CODES.filter((code) => {
-      if (UNREACHABLE_CODES.includes(code)) return false;
-      return !cases.some(
-        (item) =>
-          item.group === "invalid" &&
-          item.name === `${code.toLowerCase()}.json` &&
-          item.case.expectCodes.includes(code),
-      );
-    });
+    const missing = RUN_SPEC_ISSUE_CODES.filter(
+      (code) =>
+        !CODES_WITHOUT_CORPUS_CASE.includes(code) &&
+        !cases.some(
+          (item) =>
+            item.group === "invalid" &&
+            item.name === `${code.toLowerCase()}.json` &&
+            item.case.expectCodes.includes(code),
+        ),
+    );
     expect(missing).toEqual([]);
   });
 });

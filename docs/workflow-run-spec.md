@@ -13,8 +13,9 @@ subpath validates a spec against the host's rule set, plans it without running
 anything, and exports the JSON Schema of its shape.
 
 The module does no I/O, reads no environment variable and has no side effects
-at import. It starts no agent, touches no file and calls no provider. Those
-belong to the host, see [What the host must do at run time](#what-the-host-must-do-at-run-time).
+at import: the ids and descriptions of its zod schemas live in a registry of
+the module, not in zod's global registry. It starts no agent, touches no file
+and calls no provider. Those belong to the host, see [What the host must do at run time](#what-the-host-must-do-at-run-time).
 
 ## Status and requirements
 
@@ -23,8 +24,13 @@ belong to the host, see [What the host must do at run time](#what-the-host-must-
   type is `z.infer` of a schema, and each schema is strict.
 - Validation and planning are deterministic. They read no clock and no random
   source.
-- Only `specVersion: 1` exists. `RunSpecUpgrade` is reserved for a later
-  version and has no implementation.
+- Only `specVersion: 1` exists. There is no upgrade function: a later
+  version will ship one together with its schema.
+- **Stability policy.** While the subpath is experimental, a minor release can
+  add, rename or remove an issue code, a rule key or a limit, and every such
+  change is listed in the CHANGELOG. Within one release, the codes in
+  `RUN_SPEC_ISSUE_CODES` are a closed set and each keeps one meaning, so a
+  host can branch on them. This is the only place the policy is stated.
 
 ## Comparison with the existing plan and control-plane concepts
 
@@ -41,7 +47,7 @@ already exists. It adds only what a plan does not describe.
 | Workflow identity | `WorkflowExecutionRequest.workflowId`, `workflowVersion` | Same names and id grammar |
 | Concurrency | `WorkflowExecutionLimits.maxConcurrency` | `maxConcurrency`, with the same meaning |
 | Merge | `WorkflowMutationReservationPhase`, phase `integration` | `gates.publish.kind` is `integration` |
-| Plan validation | `validateWorkflowPlan` | Called on every projected plan. Its failure is reported as `RUN_SPEC_PLAN_REJECTED` |
+| Plan validation | `validateWorkflowPlan` | Called by `validateRunSpec` on the full plan of every spec the rule families accept, on the plan without paths once the graph rules pass, and by `resolveRunPlan`. Its failure is reported as `RUN_SPEC_PLAN_REJECTED` |
 | Hash and JSON bounds | `canonicalDigest`, `freezeJson`, `immutableJson` | Called, not copied |
 | Added by the spec | none | Budget, model, tool and environment allowlists, denied path patterns, step policy, QA and publish gates, human approval, `extensions` |
 
@@ -187,6 +193,8 @@ limit and allowlist, so a missing rule never means "allowed". The rule set's
 | `allowedQaCommands` | QA commands a spec may declare, each as the full argument list |
 | `requireQa` | Whether a spec that publishes must declare a QA command |
 | `allowedPublishKinds` | Publication kinds a spec may ask for: `none`, `commit`, `integration` |
+| `allowedWorkflows` | Workflows a spec may run, each as `{ workflowId, workflowVersion }`, compared exactly. An empty list allows none |
+| `allowedTargetRefs` | Git refs an integration may merge into, compared exactly. An empty list allows no integration |
 
 `RunRulesOverride` is a partial rule set. `mergeRunRules(base, ...overrides)`
 layers overrides over a base, and each one can only make the result more
@@ -194,12 +202,17 @@ restrictive:
 
 - Caps take the smaller value.
 - Allowlists keep the entries present in both lists, in the base order.
+  `allowedWorkflows` entries are equal when both the id and the version are.
 - `deniedPathPatterns` takes the entries of both lists, base first.
 - `allowNetwork` is true only when both are true.
 - `requireQa` is true when either is true.
 
 The merged rule set has `origins`: for each rule, the ids of the rule sets that
-decided its value. The inputs are not modified.
+decided its value. The inputs are not modified. `mergeRunRules` throws a
+`TypeError` when the base does not match `RunRulesSchema`, an override does not
+match `RunRulesOverrideSchema`, or a rule would record more than
+`RUN_SPEC_LIMITS.maxRuleOrigins` origins, so it never returns a rule set that
+`validateRunSpec` would reject.
 
 `DEFAULT_DENIED_PATH_PATTERNS` lists file name patterns that usually hold
 secrets, such as `.env`, `*.pem` and `.git`. It is a starting list for a host's
@@ -212,21 +225,30 @@ rule set, and the library does not apply it on its own.
 
 | Family | Module | Checks |
 | --- | --- | --- |
-| rule set | `validate.ts` | `rules` matches `RunRulesSchema`. Otherwise the call returns `RUN_SPEC_RULES_INVALID` and nothing else |
+| rule set | `validate.ts` | `rules` is read once into a plain JSON copy (own keys only, each getter called once) and the copy matches `RunRulesSchema`. Otherwise the call returns `RUN_SPEC_RULES_INVALID` and nothing else. The families read the copy, never the host's object |
 | shape | `shape.ts` | The input is plain JSON within the input bounds, then the zod schema. Runs first and alone |
 | paths | `rules/paths.ts` | Path grammar, root, denied patterns, duplicate and overlapping paths |
 | budget | `rules/budget.ts` | Budget, concurrency, lane count, agent runs, change rounds, string and array caps, `extensions`, plan size |
-| models | `rules/models.ts` | Providers, models, permission modes, network, tools and environment names |
+| models | `rules/models.ts` | Workflow, providers, models, permission modes, network, tools and environment names |
 | graph | `rules/graph.ts` | Lane ids, dependencies, cycles, then the existing plan validator |
-| gates | `rules/gates.ts` | QA ids and commands, QA requirement, publish kind and human approval |
+| gates | `rules/gates.ts` | QA ids and commands, QA requirement, publish kind, merge target and human approval |
+| full plan | `rules/graph.ts` | Only when every family above accepts the spec: the existing plan validator on the full plan, owned paths included |
 
 The families after shape run only on a spec with a valid shape, and all of
 them run, so one call reports each broken rule. A family that throws becomes
-`RUN_SPEC_RULES_INVALID` and stops the families after it. The list of issues is
+`RUN_SPEC_INTERNAL_ERROR`, a defect of the library, and stops the families
+after it; `RUN_SPEC_RULES_INVALID` only ever means the host's rule set is
+wrong. The list of issues is
 cut at 256 entries, and the last entry is `RUN_SPEC_ISSUES_TRUNCATED`.
 
 Validation never repairs a spec. On success the result holds a deep-frozen copy
 of the input.
+
+The spec and the rule set are each read once, within the input bounds, and
+array lengths are checked before any item is read. Listing the keys of an
+object or array still calls a proxy's `ownKeys` trap, and a getter runs
+whatever code it holds, so their cost is theirs: a host must not pass proxies
+or getters it does not control. Parsed JSON has neither.
 
 ## Error codes
 
@@ -238,8 +260,9 @@ family order.
 
 | Code | Reported when |
 | --- | --- |
-| `RUN_SPEC_RULES_INVALID` | The rule set does not match `RunRulesSchema`, or a rule family failed unexpectedly |
-| `RUN_SPEC_INPUT_NOT_JSON` | The input has a cycle, a class instance, a sparse array, a non-finite number, a function, a symbol key or an unreadable property |
+| `RUN_SPEC_RULES_INVALID` | The rule set is not plain JSON (a class instance, a cycle, a key inherited from a prototype instead of an own key, a getter that throws) or does not match `RunRulesSchema`: a host error |
+| `RUN_SPEC_INTERNAL_ERROR` | A rule family failed unexpectedly: a library defect. The families after it did not run, and the spec is not accepted |
+| `RUN_SPEC_INPUT_NOT_JSON` | The input has a cycle, a class instance, a sparse array, an array whose `length` is not a safe integer or is shorter than its items, a non-finite number, a function, a symbol key or an unreadable property |
 | `RUN_SPEC_INPUT_TOO_LARGE` | The input has more values than `RUN_SPEC_INPUT_LIMITS` allows, or a string or key longer than its limit |
 | `RUN_SPEC_INPUT_TOO_DEEP` | The input is nested deeper than `RUN_SPEC_INPUT_LIMITS.maxDepth` |
 | `RUN_SPEC_VERSION_UNSUPPORTED` | `specVersion` is missing or names a version this library does not support |
@@ -268,7 +291,7 @@ family order.
 | `RUN_SPEC_PATH_NOT_CANONICAL` | A path has an empty segment, a `.` segment or a trailing slash |
 | `RUN_SPEC_PATH_ROOT_NOT_ALLOWED` | A lane's allowed path names the project root itself |
 | `RUN_SPEC_PATH_INVALID` | A path is blank, contains a NUL character, a control, format or other invisible character (such as a newline, a bidi override, a zero-width mark or a byte order mark) or a lone surrogate, or fails the portable path grammar for another reason |
-| `RUN_SPEC_PATH_DENIED` | A segment of a path, or of `projectRoot`, matches a denied pattern, after invisible characters are dropped |
+| `RUN_SPEC_PATH_DENIED` | A segment of a path, or of `projectRoot`, matches a denied pattern, after invisible characters are dropped, or the path could not be matched within the glob matching budget |
 | `RUN_SPEC_PATH_DUPLICATE` | Two allowed paths of one lane are equal, or one contains the other |
 | `RUN_SPEC_PATH_OVERLAP` | Allowed paths of two lanes are equal, or one contains the other |
 
@@ -284,12 +307,13 @@ family order.
 | `RUN_SPEC_CHANGE_ROUNDS_EXCEEDED` | A lane's review declares more change rounds than the rule set's `maxChangeRounds` |
 | `RUN_SPEC_AGENT_RUN_LIMIT_EXCEEDED` | The worst-case agent runs, summed over the lanes, are above the rule set's `maxAgentRuns` |
 | `RUN_SPEC_EXTENSION_TOO_LARGE` | `extensions` has too many keys, or a value is not plain JSON or is beyond `RUN_SPEC_EXTENSION_LIMITS` |
-| `RUN_SPEC_PLAN_TOO_LARGE` | The workflow plan the spec maps to is beyond the size limits of the plan store |
+| `RUN_SPEC_PLAN_TOO_LARGE` | The workflow plan the spec maps to is beyond the size limits of the plan store, or the lanes own more than `RUN_SPEC_LIMITS.maxTotalAllowedPaths` (1,024) paths in total, which bounds the plan validator's pairwise ownership check |
 
 ### models
 
 | Code | Reported when |
 | --- | --- |
+| `RUN_SPEC_WORKFLOW_NOT_ALLOWED` | `workflowId` and `workflowVersion` are not an entry of `allowedWorkflows`; reported at `workflowVersion` when the id is listed in another version |
 | `RUN_SPEC_PROVIDER_NOT_ALLOWED` | An agent or a reviewer names a provider outside `allowedProviderIds` |
 | `RUN_SPEC_MODEL_NOT_ALLOWED` | An agent or a reviewer names a model outside `allowedModels` |
 | `RUN_SPEC_PERMISSION_MODE_NOT_ALLOWED` | An agent asks for a mode outside `allowedPermissionModes`. `full-access` is always outside |
@@ -303,12 +327,12 @@ family order.
 
 | Code | Reported when |
 | --- | --- |
-| `RUN_SPEC_LANE_ID_DUPLICATE` | Two lanes have the same `taskId` |
+| `RUN_SPEC_LANE_ID_DUPLICATE` | Two lanes have the same `taskId`, or ids that differ only in case (`api` and `API`) |
 | `RUN_SPEC_DEPENDENCY_UNKNOWN` | A lane's `dependsOn` names a task id that no lane has |
 | `RUN_SPEC_DEPENDENCY_SELF` | A lane's `dependsOn` names the lane itself |
 | `RUN_SPEC_DEPENDENCY_DUPLICATE` | A lane's `dependsOn` names the same lane twice |
 | `RUN_SPEC_DEPENDENCY_CYCLE` | A lane is on a dependency cycle or waits for one |
-| `RUN_SPEC_PLAN_REJECTED` | The existing workflow plan validator rejects the plan for a reason no other graph code names |
+| `RUN_SPEC_PLAN_REJECTED` | The existing workflow plan validator rejects the plan for a reason no other code names: the plan without paths after the graph rules, or the full plan after every family |
 
 ### gates
 
@@ -318,6 +342,7 @@ family order.
 | `RUN_SPEC_QA_COMMAND_NOT_ALLOWED` | A QA command is not an entry of `allowedQaCommands` |
 | `RUN_SPEC_QA_REQUIRED` | The spec publishes, `requireQa` is true and `gates.qa` is empty |
 | `RUN_SPEC_PUBLISH_KIND_NOT_ALLOWED` | `gates.publish.kind` is outside `allowedPublishKinds` |
+| `RUN_SPEC_TARGET_REF_NOT_ALLOWED` | An integration's `targetRef` is not in `allowedTargetRefs` |
 | `RUN_SPEC_HITL_REQUIRED` | The spec commits or merges and `gates.publish.hitl` is not true |
 
 The codes are exported as `RUN_SPEC_ISSUE_CODES`, with their families in
@@ -343,8 +368,25 @@ that the JSON Schema agrees with.
 - The joined path is `projectRoot/path`, or the path alone when `projectRoot`
   is `.`. `runSpecWorkspacePath` builds it, and the plan maps it to a
   `subtree` claim.
-- A path is at most `RUN_SPEC_LIMITS.maxPathLength` UTF-16 code units, the
-  portable path limit.
+- A path is at most `RUN_SPEC_LIMITS.maxPathLength` Unicode code points in the
+  shape check, the unit JSON Schema `maxLength` counts, and at most the same
+  number of UTF-16 code units in the paths rules, the portable path limit.
+  Lane titles and QA arguments are counted in code points too.
+- A path has at most `RUN_SPEC_LIMITS.maxPathSegments` (64) segments; a deeper
+  path is `RUN_SPEC_PATH_INVALID`.
+- Matching against glob patterns (those with `*`) is bounded per call: one
+  unit per distinct segment and glob pattern pair, plus one unit per pattern
+  part when the pattern's longest literal part is in the segment. The budget
+  is 1,024 paths x 64 segments x 1,024 patterns units, the most a spec at the
+  plan limits can need for the pairs alone, and takes under a second to spend.
+  A path reached after the budget is spent is `RUN_SPEC_PATH_DENIED`, reported
+  once; it is never accepted unchecked. Exact patterns are a set lookup.
+- A segment shaped like a Windows 8.3 short name, such as `GIT~1`, `PROGRA~2`
+  or `ENV~1.TXT` (one to six characters, `~`, digits, an optional extension of
+  up to three characters, eight characters before the extension at most), is
+  `RUN_SPEC_PATH_DENIED` whatever the denied patterns are. NTFS can open it as
+  an alias of a longer name, such as `.git`, and which one depends on the
+  volume, so the validator cannot tell what it names.
 - Denied patterns match segment by segment. Comparison folds case and Unicode
   composition. `*` stands for any run of characters inside one segment. The
   text after the first `:` is dropped, and trailing dots and spaces are
@@ -455,10 +497,15 @@ grammars and bounds. Rules that compare fields with each other or with the
 host's rules are not in it, and `validateRunSpec` checks them. For any JSON
 document that does not trip the input guard, the schema rejects the document
 exactly when the validator reports a code in `RUN_SPEC_SCHEMA_ISSUE_CODES`.
+String lengths count Unicode code points on both sides, so an emoji is one
+character for the schema and for the validator, whatever zod 4 release is
+installed.
 
-The repository has no JSON Schema validator dependency, so this parity is
-documented, not tested by this release. A host that validates with JSON Schema
-must still run `validateRunSpec` for the rules.
+The parity is tested: the repository has no JSON Schema validator dependency,
+so the tests evaluate the generated schema with a small evaluator of the
+keywords it uses, on every corpus case and several hundred generated
+documents, and compare the result with the shape parser. A host that
+validates with JSON Schema must still run `validateRunSpec` for the rules.
 
 ## What the host must do at run time
 
@@ -483,11 +530,24 @@ The library is pure. It decides what a spec may ask for. The host enforces it.
    succeeds.
 7. **Ask a person.** Before each commit, and before each merge into
    `targetRef`, a person approves (`run-spec.human-approval`).
+   `allowedTargetRefs` limits where a merge may go; the person still decides
+   whether it happens. Run exactly the workflow and version the spec names,
+   which `allowedWorkflows` has allowed, and never resolve a name to another
+   version.
 8. **Complete the plan.** Supply the execution id, base revision, objective
    and creation time. Write the plan only after `validateWorkflowPlan` accepts
    it.
 9. **Store large specs.** When `startInput` is `reference`, store the spec under
    its `runSpecHash` and resolve the hash at start.
+10. **Resolve names on the real file system.** The validator rejects 8.3 short
+    names and case-only differences it can see, but only the host's file
+    system knows what a name opens. Disable 8.3 name creation on Windows
+    volumes that hold workspaces, or resolve every path to its long, real form
+    before it enforces a claim.
+11. **Treat lane ids as case-insensitive names.** A lane id becomes branch,
+    worktree or file names. The validator rejects ids that differ only in
+    case, so a host may fold case when it derives names; it must not derive a
+    name that two different ids can map to in another way.
 
 ## Next
 

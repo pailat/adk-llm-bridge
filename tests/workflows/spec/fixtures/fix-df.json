@@ -49,7 +49,14 @@
     ],
     "allowedQaCommands": [["bun", "run", "ci"]],
     "requireQa": true,
-    "allowedPublishKinds": ["none"]
+    "allowedPublishKinds": ["none"],
+    "allowedWorkflows": [
+      {
+        "workflowId": "fix-df",
+        "workflowVersion": "1"
+      }
+    ],
+    "allowedTargetRefs": []
   },
   "spec": {
     "specVersion": 1,

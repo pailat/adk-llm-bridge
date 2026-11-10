@@ -44,29 +44,72 @@ function describeCycle(
 }
 
 /**
+ * Runs the existing plan validator on the full plan of a spec, owned paths
+ * included, and appends `RUN_SPEC_PLAN_REJECTED` when it objects.
+ *
+ * @remarks
+ * Call it only on a spec every rule family accepted: the paths and budget
+ * families then guarantee valid, non-overlapping paths and at most
+ * `RUN_SPEC_LIMITS.maxTotalAllowedPaths` claims, which bounds the validator's
+ * pairwise ownership check.
+ *
+ * @param spec - A spec that passed every rule family.
+ * @param issues - Receives the issue, if any.
+ * @internal
+ */
+export function checkFullWorkflowPlan(
+  spec: RunSpec,
+  issues: RunSpecIssue[],
+): void {
+  try {
+    const { waves } = layerRunSpecLanes(spec.lanes);
+    validateWorkflowPlan(
+      runSpecWorkflowPlan(
+        runSpecPlanTopology(spec, waves),
+        RUN_SPEC_DRY_RUN_BINDING,
+      ),
+    );
+  } catch (error) {
+    issues.push(
+      runSpecIssue(
+        "RUN_SPEC_PLAN_REJECTED",
+        ["lanes"],
+        `The workflow plan validator rejected the plan: ${
+          error instanceof Error ? error.message : "unknown error"
+        }`,
+      ),
+    );
+  }
+}
+
+/**
  * Checks the graph rules of a run spec whose shape is already valid and
  * appends one issue per violation.
  *
  * @remarks
- * Task ids and dependencies are compared as exact strings, with no case
- * folding, trimming or decoding, and are looked up in a `Map`, so ids such as
- * `__proto__` are ordinary names. Every pass is iterative and linear in
+ * Task ids and dependencies are compared as exact strings, with no trimming
+ * or decoding, and are looked up in a `Map`, so ids such as `__proto__` are
+ * ordinary names. Two lane ids that differ only in case are also reported as
+ * duplicates, because a host may turn an id into a branch, worktree or file
+ * name on a case-insensitive file system. The id grammar is ASCII, so lower
+ * case is a complete fold. Such a lane still takes part in the other checks
+ * under its exact id. Every pass is iterative and linear in
  * lanes plus dependencies. The existing plan validator runs last, on the
  * projected topology without paths, and only when this family found nothing.
  *
  * @param spec - The spec, already shape-checked.
- * @param rules - The host's rules.
+ * @param _rules - The host's rules; no graph rule depends on them.
  * @param issues - Receives the issues found.
  * @experimental
  */
 export function checkGraphRules(
   spec: RunSpec,
-  rules: RunRules,
+  _rules: RunRules,
   issues: RunSpecIssue[],
 ): void {
-  void rules;
   const before = issues.length;
   const firstIndex = new Map<string, number>();
+  const firstFolded = new Map<string, number>();
 
   // Linear checks, in spec order.
   const clean: { taskId: string; dependsOn: string[] }[] = [];
@@ -84,6 +127,19 @@ export function checkGraphRules(
       );
     } else {
       firstIndex.set(lane.taskId, index);
+      const folded = lane.taskId.toLowerCase();
+      const caseTwin = firstFolded.get(folded);
+      if (caseTwin === undefined) {
+        firstFolded.set(folded, index);
+      } else {
+        issues.push(
+          runSpecIssue(
+            "RUN_SPEC_LANE_ID_DUPLICATE",
+            ["lanes", index, "taskId"],
+            `Lane id ${echo(lane.taskId)} differs only in case from the id of lane ${caseTwin}.`,
+          ),
+        );
+      }
     }
     const seen = new Set<string>();
     const kept: string[] = [];

@@ -9,6 +9,7 @@ import {
   runSpecIssue,
 } from "../issues.js";
 import {
+  RUN_SPEC_LIMITS,
   type RunRules,
   type RunSpec,
   runSpecWorkspacePath,
@@ -68,14 +69,70 @@ const PERCENT_SEPARATOR = /%(?:2f|5c)/giu;
  */
 const PARENT_ALIAS = /^\.\.[. ]*$/u;
 
+/**
+ * A segment shaped like a Windows 8.3 short name, such as `GIT~1`,
+ * `PROGRA~2` or `ENV~1.TXT`: one to six characters without a dot or a tilde,
+ * a tilde and digits, and an optional extension of one to three characters.
+ * NTFS can open such a name as an alias of a longer one, and which one
+ * depends on the volume, so a pure check cannot tell what it names.
+ */
+const SHORT_NAME = /^[^.~]{1,6}~[0-9]{1,6}(?:\.[^.]{1,3})?$/u;
+
+/** Longest name before the extension of an 8.3 short name. */
+const SHORT_NAME_BASE_LENGTH = 8;
+
+/** Most segment names remembered per call, so the memo stays bounded. */
+const MAX_REMEMBERED_SEGMENTS = 4_096;
+
+/**
+ * Most units of glob matching work per call: one per segment and glob
+ * pattern pair, plus one per pattern part scanned in a full match.
+ *
+ * @remarks
+ * One unit per pair for a spec at the plan limits (1,024 paths of 64 distinct
+ * segments) against the most glob patterns a rule set may hold (1,024), so
+ * such a spec is never denied for its size alone; full matches use the rest.
+ * Spending it takes under a second. A path that would exceed it is denied
+ * unchecked.
+ *
+ * @internal
+ */
+export const MAX_GLOB_MATCH_WORK =
+  RUN_SPEC_LIMITS.maxTotalAllowedPaths *
+  RUN_SPEC_LIMITS.maxPathSegments *
+  RUN_SPEC_LIMITS.maxRuleListEntries;
+
+/** Reason given for a path with more segments than the hard limit. */
+const SEGMENTS_PROBLEM = `must have at most ${RUN_SPEC_LIMITS.maxPathSegments} segments`;
+
+/** Why a path is denied, or `undefined` when it is not. */
+type DeniedReason = "pattern" | "short name" | "unchecked";
+
 /** Denied patterns prepared once per call. */
 interface DeniedMatcher {
   /** Folded patterns without `*`, matched by equality. */
   readonly exact: ReadonlySet<string>;
-  /** Folded patterns with `*`, split on it. */
-  readonly globs: readonly (readonly string[])[];
-  /** Result per segment name already seen in this call. */
+  /** Folded patterns with `*`, prepared for matching. */
+  readonly globs: readonly Glob[];
+  /**
+   * Result per segment name already seen in this call, up to
+   * {@link MAX_REMEMBERED_SEGMENTS} names.
+   */
   readonly seen: Map<string, boolean>;
+  /** Units of glob work left in this call; see {@link MAX_GLOB_MATCH_WORK}. */
+  work: number;
+  /**
+   * Set once a path was reported unchecked: the spec is already rejected, so
+   * later paths skip the patterns and the issue list keeps room for others.
+   */
+  exhausted: boolean;
+}
+
+/** A glob pattern split on `*`, with its longest literal part. */
+interface Glob {
+  readonly parts: readonly string[];
+  /** The longest part: a name without it cannot match. */
+  readonly literal: string;
 }
 
 interface Entry {
@@ -91,15 +148,24 @@ interface Entry {
  *
  * @remarks
  * Every path must be a canonical portable path below the project root, with
- * no segment matching a denied pattern, and the allowed paths of the lanes
+ * at most `RUN_SPEC_LIMITS.maxPathSegments` segments, no segment matching a
+ * denied pattern and no segment shaped like a Windows 8.3 short name
+ * (`GIT~1`), which could alias a denied name. The allowed paths of the lanes
  * must not repeat or nest, ignoring case and Unicode composition. A path is
  * also a traversal when a segment would read as `..` after a host strips
  * trailing dots and spaces, maps compatibility characters (NFKC) or
  * separator look-alikes to ASCII, or decodes percent escapes. Overlap also
  * ignores what Windows ignores in a name: everything from the first `:` (an
  * alternate data stream) and trailing dots and spaces. Values are never
- * rewritten; those readings are only compared. Cost is `O(p log p)` for `p`
- * paths.
+ * rewritten; those readings are only compared.
+ *
+ * Cost: sorting is `O(p log p)` for `p` paths. Exact patterns are a set
+ * lookup. Glob matching first looks for the longest literal part of each
+ * pattern in the segment, and is bounded by {@link MAX_GLOB_MATCH_WORK} units
+ * per call, whatever the number of distinct segments and host patterns; a path
+ * reached after the budget is spent is denied, not accepted unchecked, and
+ * the paths after it are not matched against the patterns. Lane ids are compared
+ * case-sensitively here; case-only lane id collisions are a graph issue.
  *
  * @param spec - The spec, already shape-checked.
  * @param rules - The host's rules.
@@ -118,21 +184,17 @@ export function checkPathRules(
       allowRoot: true,
     }) ??
     hiddenCharacterProblem(spec.projectRoot) ??
-    traversalAliasProblem(spec.projectRoot);
+    traversalAliasProblem(spec.projectRoot) ??
+    segmentsProblem(spec.projectRoot);
   if (rootProblem !== undefined) {
     issues.push(problemIssue(["projectRoot"], "projectRoot", rootProblem));
   }
-  if (
-    (rootProblem === undefined || rootProblem === HIDDEN_CHARACTER_PROBLEM) &&
-    isDenied(spec.projectRoot, denied)
-  ) {
-    issues.push(
-      runSpecIssue(
-        "RUN_SPEC_PATH_DENIED",
-        ["projectRoot"],
-        "projectRoot has a segment that matches a denied path pattern",
-      ),
-    );
+  const rootDenied =
+    rootProblem === undefined || rootProblem === HIDDEN_CHARACTER_PROBLEM
+      ? deniedReason(spec.projectRoot, denied)
+      : undefined;
+  if (rootDenied !== undefined) {
+    issues.push(deniedIssue(["projectRoot"], "projectRoot", rootDenied));
   }
 
   const entries: Entry[] = [];
@@ -142,13 +204,18 @@ export function checkPathRules(
       const problem =
         portablePathProblem(path, { canonical: true }) ??
         hiddenCharacterProblem(path) ??
-        traversalAliasProblem(path);
+        traversalAliasProblem(path) ??
+        segmentsProblem(path);
       if (problem !== undefined) {
         issues.push(problemIssue(location, "allowed path", problem));
         // A path that only hides a denied name is reported as both, so the
         // reader sees that it names a secret file.
-        if (problem === HIDDEN_CHARACTER_PROBLEM && isDenied(path, denied)) {
-          issues.push(deniedIssue(location));
+        const hidden =
+          problem === HIDDEN_CHARACTER_PROBLEM
+            ? deniedReason(path, denied)
+            : undefined;
+        if (hidden !== undefined) {
+          issues.push(deniedIssue(location, "allowed path", hidden));
         }
         return;
       }
@@ -162,8 +229,9 @@ export function checkPathRules(
         );
         return;
       }
-      if (isDenied(path, denied)) {
-        issues.push(deniedIssue(location));
+      const reason = deniedReason(path, denied);
+      if (reason !== undefined) {
+        issues.push(deniedIssue(location, "allowed path", reason));
       }
       const folded = overlapFold(path);
       entries.push({
@@ -216,11 +284,30 @@ function traversalAliasProblem(path: string): string | undefined {
   return undefined;
 }
 
-function deniedIssue(location: (string | number)[]): RunSpecIssue {
+/** Reports a path with more segments than `RUN_SPEC_LIMITS.maxPathSegments`. */
+function segmentsProblem(path: string): string | undefined {
+  let segments = 1;
+  for (let index = path.indexOf("/"); index !== -1; ) {
+    segments += 1;
+    if (segments > RUN_SPEC_LIMITS.maxPathSegments) return SEGMENTS_PROBLEM;
+    index = path.indexOf("/", index + 1);
+  }
+  return undefined;
+}
+
+function deniedIssue(
+  location: (string | number)[],
+  what: string,
+  reason: DeniedReason,
+): RunSpecIssue {
   return runSpecIssue(
     "RUN_SPEC_PATH_DENIED",
     location,
-    "allowed path has a segment that matches a denied path pattern",
+    reason === "pattern"
+      ? `${what} has a segment that matches a denied path pattern`
+      : reason === "short name"
+        ? `${what} has a segment that may be a Windows short name (8.3 form), which can alias a denied name`
+        : `${what} could not be matched against the denied path patterns within the matching budget; use fewer distinct segments or fewer glob patterns`,
   );
 }
 
@@ -308,51 +395,119 @@ function overlapFold(path: string): string {
 function windowsName(segment: string): string {
   const colon = segment.indexOf(":");
   const name = colon === -1 ? segment : segment.slice(0, colon);
-  return name.replace(/[. ]+$/u, "");
+  return trimDotsAndSpaces(name);
+}
+
+/**
+ * A name without trailing dots and spaces.
+ *
+ * A loop, not `/[. ]+$/`, which backtracks over every run of dots or spaces
+ * that does not end the name: quadratic in the run length.
+ */
+function trimDotsAndSpaces(name: string): string {
+  let end = name.length;
+  while (end > 0) {
+    const last = name.charCodeAt(end - 1);
+    if (last !== 0x2e && last !== 0x20) break;
+    end -= 1;
+  }
+  return name.slice(0, end);
 }
 
 function deniedMatcher(patterns: readonly string[]): DeniedMatcher {
   const exact = new Set<string>();
-  const globs: string[][] = [];
+  const globs: Glob[] = [];
   for (const pattern of patterns) {
     const folded = fold(pattern);
-    if (folded.includes("*")) globs.push(folded.split("*"));
-    else exact.add(folded);
+    if (!folded.includes("*")) {
+      exact.add(folded);
+      continue;
+    }
+    const parts = folded.split("*");
+    let literal = "";
+    for (const part of parts) if (part.length > literal.length) literal = part;
+    globs.push({ parts, literal });
   }
-  return { exact, globs, seen: new Map() };
+  return {
+    exact,
+    globs,
+    seen: new Map(),
+    work: MAX_GLOB_MATCH_WORK,
+    exhausted: false,
+  };
 }
 
 /**
- * Tells whether any segment of a path matches a denied pattern.
+ * Tells whether a path is denied: a segment matches a denied pattern, or is
+ * shaped like a Windows short name.
  *
  * @remarks
  * Hidden characters are dropped first, as HFS+ does. Everything from the
  * first `:` is dropped (NTFS alternate data streams such as `.env::$DATA`),
  * and so are trailing dots and spaces, because some file systems treat
- * `.env.` and `.env ` as `.env`. Each distinct segment is matched once per
- * call, so a path of many repeated segments costs one match per segment
- * name, not one per pattern per segment.
+ * `.env.` and `.env ` as `.env`. The short-name check applies whatever the
+ * host's patterns are. Up to {@link MAX_REMEMBERED_SEGMENTS} distinct
+ * segment names are remembered per call, so a repeated name is matched once.
+ * A segment that cannot be matched within the call's work budget makes the
+ * path `"unchecked"`, which is reported as denied; the paths after it skip
+ * the patterns, since the spec is already rejected.
  */
-function isDenied(path: string, matcher: DeniedMatcher): boolean {
-  if (matcher.exact.size === 0 && matcher.globs.length === 0) return false;
+function deniedReason(
+  path: string,
+  matcher: DeniedMatcher,
+): DeniedReason | undefined {
+  const patterns =
+    !matcher.exhausted && (matcher.exact.size > 0 || matcher.globs.length > 0);
   for (const segment of fold(path.replace(HIDDEN_CHARACTERS, "")).split("/")) {
     if (segment === "" || segment === ".") continue;
+    if (isShortName(segment)) return "short name";
+    if (!patterns) continue;
     let denied = matcher.seen.get(segment);
     if (denied === undefined) {
       denied = segmentDenied(segment, matcher);
-      matcher.seen.set(segment, denied);
+      if (denied === undefined) {
+        matcher.exhausted = true;
+        return "unchecked";
+      }
+      if (matcher.seen.size < MAX_REMEMBERED_SEGMENTS) {
+        matcher.seen.set(segment, denied);
+      }
     }
-    if (denied) return true;
+    if (denied) return "pattern";
   }
-  return false;
+  return undefined;
 }
 
-function segmentDenied(segment: string, matcher: DeniedMatcher): boolean {
+/** Whether a folded segment, as Windows opens it, looks like an 8.3 short name. */
+function isShortName(segment: string): boolean {
+  const name = windowsName(segment);
+  return (
+    SHORT_NAME.test(name) &&
+    (name.split(".")[0] ?? "").length <= SHORT_NAME_BASE_LENGTH
+  );
+}
+
+/**
+ * Whether a folded segment matches a denied pattern, or `undefined` when the
+ * glob work budget runs out first.
+ */
+function segmentDenied(
+  segment: string,
+  matcher: DeniedMatcher,
+): boolean | undefined {
   const name = segment.split(":")[0] ?? "";
-  const stripped = name.replace(/[. ]+$/u, "");
+  const stripped = trimDotsAndSpaces(name);
   if (matcher.exact.has(name) || matcher.exact.has(stripped)) return true;
-  for (const parts of matcher.globs) {
-    if (globMatches(parts, name) || globMatches(parts, stripped)) return true;
+  const names = stripped === name ? [name] : [name, stripped];
+  for (const glob of matcher.globs) {
+    for (const candidate of names) {
+      matcher.work -= 1;
+      if (matcher.work < 0) return undefined;
+      if (!candidate.includes(glob.literal)) continue;
+      matcher.work -= glob.parts.length;
+      if (matcher.work < 0) return undefined;
+      if (globMatches(glob.parts, candidate)) return true;
+    }
   }
   return false;
 }

@@ -9,7 +9,9 @@ import { type RunRules, type RunSpec, runSpecCommandKey } from "../schema.js";
  * QA ids must be unique (compared exactly, case-sensitive). Each QA command
  * must equal an entry of the allowlist as a whole argument list; no
  * normalization is applied. A spec that publishes needs QA when the rules
- * ask for it, and its publish kind must be allowed. A commit or merge always
+ * ask for it, and its publish kind must be allowed. An integration's
+ * `targetRef` must equal an entry of `allowedTargetRefs`; an empty list
+ * allows no integration. A commit or merge always
  * needs `hitl` to be exactly `true`, whatever the rules say.
  *
  * @param spec - The spec, already shape-checked.
@@ -77,6 +79,19 @@ export function checkGateRules(
         "The publish kind is not in the rule set's allowed kinds.",
       ),
     );
+  }
+
+  if (publish.kind === "integration") {
+    const ref = publish.targetRef;
+    if (!rules.allowedTargetRefs.some((allowedRef) => allowedRef === ref)) {
+      issues.push(
+        runSpecIssue(
+          "RUN_SPEC_TARGET_REF_NOT_ALLOWED",
+          ["gates", "publish", "targetRef"],
+          "The merge target is not in the rule set's allowed target refs.",
+        ),
+      );
+    }
   }
 
   if (

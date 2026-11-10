@@ -8,6 +8,7 @@ import {
 import {
   mergeRunRules,
   RUN_SPEC_DRY_RUN_BINDING,
+  RUN_SPEC_LIMITS,
   type RunSpec,
   type RunSpecLane,
   runSpecWorkflowPlan,
@@ -450,6 +451,45 @@ describe("resolveRunPlan scale", () => {
     expect(flatPlan.waves).toHaveLength(1);
     expect(flatPlan.waves[0]?.taskIds).toHaveLength(1_000);
     expect(performance.now() - start).toBeLessThan(4_000);
+  });
+});
+
+describe("resolveRunPlan with many paths per lane", () => {
+  /** Lanes that each own `paths` paths under one long shared prefix. */
+  function manyPaths(lanes: number, paths: number) {
+    const prefix = Array.from(
+      { length: 60 },
+      (_, index) => `segment-${"x".repeat(50)}-${index}`,
+    ).join("/");
+    const spec = wideSpec(lanes);
+    spec.lanes.forEach((lane, laneIndex) => {
+      lane.allowedPaths = Array.from(
+        { length: paths },
+        (_, pathIndex) => `${prefix}/l${laneIndex}p${pathIndex}`,
+      );
+    });
+    return spec;
+  }
+
+  test("plans the most paths a spec may own, with long shared prefixes, within a generous bound", () => {
+    const lanes = RUN_SPEC_LIMITS.maxTotalAllowedPaths / 64;
+    const spec = manyPaths(lanes, 64);
+    const start = performance.now();
+    const result = resolveRunPlan(spec, testRules());
+    expect(result.ok ? [] : result.errors).toEqual([]);
+    // Measured at about 0.3 s; the bound leaves room for a slow machine.
+    expect(performance.now() - start).toBeLessThan(10_000);
+  });
+
+  test("rejects one path more than the limit before comparing any claims", () => {
+    const lanes = RUN_SPEC_LIMITS.maxTotalAllowedPaths / 64;
+    const spec = manyPaths(lanes + 1, 64);
+    const result = resolveRunPlan(spec, testRules());
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.errors.map((issue) => issue.code)).toEqual([
+      "RUN_SPEC_PLAN_TOO_LARGE",
+    ]);
   });
 });
 

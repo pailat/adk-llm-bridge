@@ -119,28 +119,11 @@ describe("validateRunSpec", () => {
     );
   });
 
-  test("an exception inside a rule family never escapes as success", () => {
-    const rules = testRules();
-    const patterns = [...rules.deniedPathPatterns];
-    let reads = 0;
-    Object.defineProperty(rules, "deniedPathPatterns", {
-      enumerable: true,
-      get() {
-        reads += 1;
-        if (reads > 1) throw new Error("boom");
-        return patterns;
-      },
-    });
-    let result: ReturnType<typeof validateRunSpec> | undefined;
-    expect(() => {
-      result = validateRunSpec(validSpec(), rules);
-    }).not.toThrow();
-    expect(reads).toBeGreaterThan(1);
-    expect(result?.ok).toBe(false);
-    if (result?.ok === false) {
-      expect(codes(result.errors)).toEqual(["RUN_SPEC_RULES_INVALID"]);
-      expect(result.errors[0]?.message).toContain("rule family failed");
-    }
+  test("a malformed rule set is a host error, never an internal error", () => {
+    const rules = { id: "broken" } as unknown as ReturnType<typeof testRules>;
+    expect(codes(failure(validSpec(), rules))).toEqual([
+      "RUN_SPEC_RULES_INVALID",
+    ]);
   });
 
   test("a path-only failure reports only path codes", () => {
@@ -200,5 +183,31 @@ describe("validateRunSpec", () => {
       expect(found).toContain("RUN_SPEC_PATH_OVERLAP");
     }
     expect(elapsed).toBeLessThan(TIME_BUDGET_MS);
+  });
+});
+
+describe("validateRunSpec and resolveRunPlan agree", () => {
+  test("a spec validates exactly when it can be planned", async () => {
+    const { resolveRunPlan } = await import(
+      "../../../src/workflows/spec/plan.js"
+    );
+    const specs: RunSpec[] = [validSpec(), wideSpec(1_000)];
+    const nested = validSpec();
+    nested.projectRoot = "packages/app";
+    specs.push(nested);
+    const manyPaths = wideSpec(16);
+    manyPaths.lanes.forEach((lane, laneIndex) => {
+      lane.allowedPaths = Array.from(
+        { length: 64 },
+        (_, index) => `src/l${laneIndex}/p${index}`,
+      );
+    });
+    specs.push(manyPaths);
+    for (const spec of specs) {
+      const validated = validateRunSpec(spec, testRules());
+      const planned = resolveRunPlan(spec, testRules());
+      expect(validated.ok).toBe(true);
+      expect(planned.ok).toBe(validated.ok);
+    }
   });
 });

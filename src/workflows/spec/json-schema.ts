@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { runSpecRegistry } from "./registry.js";
 import { RunSpecSchema } from "./schema.js";
 
 type JsonObject = Record<string, unknown>;
@@ -45,6 +46,7 @@ function buildRunSpecJsonSchema(): Record<string, unknown> {
   const generated: Record<string, unknown> = z.toJSONSchema(RunSpecSchema, {
     target: "draft-2020-12",
     io: "input",
+    metadata: runSpecRegistry,
   });
   describeRefProperties(generated);
   return generated;

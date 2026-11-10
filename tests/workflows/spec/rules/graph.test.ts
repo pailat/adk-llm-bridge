@@ -104,6 +104,47 @@ describe("checkGraphRules: valid graphs", () => {
 });
 
 describe("RUN_SPEC_LANE_ID_DUPLICATE", () => {
+  test("is reported for ids that differ only in case, on the later lane", () => {
+    const issues = run(
+      ordered([
+        ["api", []],
+        ["docs", []],
+        ["API", []],
+      ]),
+    );
+    expect(codes(issues)).toEqual(["RUN_SPEC_LANE_ID_DUPLICATE"]);
+    expect(issues[0]?.path).toEqual(["lanes", 2, "taskId"]);
+    expect(issues[0]?.message).toContain("differs only in case");
+    expect(issues[0]?.message).toContain("lane 0");
+  });
+
+  test("is reported once per later lane when three ids fold to one", () => {
+    const issues = run(
+      ordered([
+        ["Build", []],
+        ["build", []],
+        ["BUILD", []],
+      ]),
+    );
+    expect(codes(issues)).toEqual([
+      "RUN_SPEC_LANE_ID_DUPLICATE",
+      "RUN_SPEC_LANE_ID_DUPLICATE",
+    ]);
+    expect(issues.map((issue) => issue.path[1])).toEqual([1, 2]);
+  });
+
+  test("keeps ids that differ in more than case apart", () => {
+    expect(
+      run(
+        ordered([
+          ["api-1", []],
+          ["api_1", []],
+          ["api.1", []],
+        ]),
+      ),
+    ).toEqual([]);
+  });
+
   test("is reported on the later lane only", () => {
     const issues = run(
       ordered([
@@ -130,14 +171,17 @@ describe("RUN_SPEC_LANE_ID_DUPLICATE", () => {
     ]);
   });
 
-  test("compares ids exactly, so a different case is another lane", () => {
+  test("compares ids exactly, so a different case is another lane that collides", () => {
     const issues = run(
       ordered([
         ["api", []],
         ["API", []],
+        ["docs", ["API"]],
       ]),
     );
-    expect(issues).toEqual([]);
+    // One collision issue, and the dependency on the exact id "API" resolves.
+    expect(codes(issues)).toEqual(["RUN_SPEC_LANE_ID_DUPLICATE"]);
+    expect(issues[0]?.path).toEqual(["lanes", 1, "taskId"]);
   });
 
   test("compares a prototype-like id as a plain string", () => {
@@ -281,7 +325,10 @@ describe("RUN_SPEC_DEPENDENCY_SELF", () => {
   });
 
   test("an id that differs only by case is not a self reference", () => {
-    expect(run(graph({ a: [], A: ["a"] }))).toEqual([]);
+    // The two ids collide when case is ignored, which is its own error.
+    expect(codes(run(graph({ a: [], A: ["a"] })))).toEqual([
+      "RUN_SPEC_LANE_ID_DUPLICATE",
+    ]);
   });
 
   test("a prototype-like self reference is reported", () => {
@@ -314,7 +361,11 @@ describe("RUN_SPEC_DEPENDENCY_DUPLICATE", () => {
   });
 
   test("does not report ids that differ only by case", () => {
-    expect(run(graph({ a: [], A: [], c: ["a", "A"] }))).toEqual([]);
+    // The lane ids collide, which is reported once on the lane; the two
+    // dependencies are still different entries.
+    expect(codes(run(graph({ a: [], A: [], c: ["a", "A"] })))).toEqual([
+      "RUN_SPEC_LANE_ID_DUPLICATE",
+    ]);
   });
 
   test("a repeated unknown id is reported unknown, then as a duplicate", () => {

@@ -636,3 +636,59 @@ describe("checkModelRules: several violations", () => {
     expect(codes(run(spec))).toEqual(["RUN_SPEC_ENV_NAME_NOT_ALLOWED"]);
   });
 });
+
+describe("RUN_SPEC_WORKFLOW_NOT_ALLOWED", () => {
+  function rules(
+    allowedWorkflows: { workflowId: string; workflowVersion: string }[],
+  ): RunRules {
+    const result = testRules();
+    result.allowedWorkflows = allowedWorkflows;
+    return result;
+  }
+
+  test("accepts a listed workflow and version", () => {
+    expect(
+      run(validSpec(), rules([{ workflowId: "lanes", workflowVersion: "1" }])),
+    ).toEqual([]);
+  });
+
+  test("is reported at workflowId for a workflow that is not listed", () => {
+    const spec = { ...validSpec(), workflowId: "deploy" };
+    const issues = run(spec);
+    expect(codes(issues)).toEqual(["RUN_SPEC_WORKFLOW_NOT_ALLOWED"]);
+    expect(issues[0]?.path).toEqual(["workflowId"]);
+  });
+
+  test("is reported at workflowVersion for a listed workflow in another version", () => {
+    const spec = { ...validSpec(), workflowVersion: "2" };
+    const issues = run(spec);
+    expect(codes(issues)).toEqual(["RUN_SPEC_WORKFLOW_NOT_ALLOWED"]);
+    expect(issues[0]?.path).toEqual(["workflowVersion"]);
+  });
+
+  test("compares exactly, case included", () => {
+    const spec = { ...validSpec(), workflowId: "Lanes" };
+    expect(codes(run(spec))).toEqual(["RUN_SPEC_WORKFLOW_NOT_ALLOWED"]);
+  });
+
+  test("denies every workflow when the list is empty", () => {
+    expect(codes(run(validSpec(), rules([])))).toEqual([
+      "RUN_SPEC_WORKFLOW_NOT_ALLOWED",
+    ]);
+  });
+
+  test("does not let an id and a version of different entries combine", () => {
+    const spec = { ...validSpec(), workflowId: "deploy", workflowVersion: "1" };
+    expect(
+      codes(
+        run(
+          spec,
+          rules([
+            { workflowId: "lanes", workflowVersion: "1" },
+            { workflowId: "deploy", workflowVersion: "2" },
+          ]),
+        ),
+      ),
+    ).toEqual(["RUN_SPEC_WORKFLOW_NOT_ALLOWED"]);
+  });
+});

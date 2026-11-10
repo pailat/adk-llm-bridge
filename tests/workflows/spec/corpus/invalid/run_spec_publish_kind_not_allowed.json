@@ -41,7 +41,14 @@
     ],
     "allowedQaCommands": [["bun", "run", "test"], ["bun", "run", "lint"]],
     "requireQa": true,
-    "allowedPublishKinds": ["none"]
+    "allowedPublishKinds": ["none"],
+    "allowedWorkflows": [
+      {
+        "workflowId": "lanes",
+        "workflowVersion": "1"
+      }
+    ],
+    "allowedTargetRefs": []
   },
   "spec": {
     "specVersion": 1,

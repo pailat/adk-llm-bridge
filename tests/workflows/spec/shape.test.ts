@@ -34,6 +34,25 @@ function codes(issues: RunSpecIssue[]): RunSpecIssueCode[] {
 }
 
 /** Asserts exactly one issue with the given code and path. */
+/** Wraps an array in a proxy that counts the properties read from it. */
+function countingArray(target: unknown[]): {
+  array: unknown[];
+  reads: () => number;
+} {
+  let reads = 0;
+  const array = new Proxy(target, {
+    getOwnPropertyDescriptor(inner, key) {
+      reads += 1;
+      return Reflect.getOwnPropertyDescriptor(inner, key);
+    },
+    ownKeys(inner) {
+      reads += 1;
+      return Reflect.ownKeys(inner);
+    },
+  });
+  return { array, reads: () => reads };
+}
+
 function expectOne(
   result: ReturnType<typeof run>,
   code: RunSpecIssueCode,
@@ -280,27 +299,33 @@ describe("parseRunSpecShape: input guard", () => {
   test("rejects a huge array as too large without copying it", () => {
     const spec: Loose = validSpec();
     spec.env = new Array(5_000_000).fill("CI");
-    const started = performance.now();
     expectOne(run(spec), "RUN_SPEC_INPUT_TOO_LARGE", []);
-    expect(performance.now() - started).toBeLessThan(250);
+    const counted = countingArray(new Array(5_000_000).fill("CI"));
+    spec.env = counted.array;
+    expectOne(run(spec), "RUN_SPEC_INPUT_TOO_LARGE", []);
+    expect(counted.reads()).toBeLessThan(10);
   });
 
-  test("rejects a huge array of any item type quickly", () => {
+  test("rejects a huge array of any item type without reading its items", () => {
     const spec: Loose = validSpec();
     spec.env = new Array(5_000_000).fill(0);
-    const started = performance.now();
     expectOne(run(spec), "RUN_SPEC_INPUT_TOO_LARGE", []);
-    expect(performance.now() - started).toBeLessThan(250);
+    const counted = countingArray(new Array(5_000_000).fill(0));
+    spec.env = counted.array;
+    expectOne(run(spec), "RUN_SPEC_INPUT_TOO_LARGE", []);
+    expect(counted.reads()).toBeLessThan(10);
   });
 
-  test("rejects a huge array inside an extension value quickly", () => {
+  test("rejects a huge array inside an extension value without reading its items", () => {
     const spec: Loose = validSpec();
     spec.lanes[0].extensions = {
       "x-vendor": { list: new Array(5_000_000).fill(1) },
     };
-    const started = performance.now();
     expectOne(run(spec), "RUN_SPEC_INPUT_TOO_LARGE", []);
-    expect(performance.now() - started).toBeLessThan(250);
+    const counted = countingArray(new Array(5_000_000).fill(1));
+    spec.lanes[0].extensions = { "x-vendor": { list: counted.array } };
+    expectOne(run(spec), "RUN_SPEC_INPUT_TOO_LARGE", []);
+    expect(counted.reads()).toBeLessThan(10);
   });
 
   test("rejects an object with more keys than the node limit quickly", () => {
@@ -345,6 +370,94 @@ describe("parseRunSpecShape: input guard", () => {
     const spec: Loose = validSpec();
     spec.lanes[0].allowedPaths = new Array(1_000_000).fill("src/a");
     expectOne(run(spec), "RUN_SPEC_INPUT_TOO_LARGE", []);
+  });
+
+  /** A huge array behind a proxy that counts the properties read from it. */
+  function countedHugeArray(): { array: unknown[]; reads: () => number } {
+    let reads = 0;
+    const array = new Proxy(new Array(5_000_000).fill("Read"), {
+      getOwnPropertyDescriptor(target, key) {
+        reads += 1;
+        return Reflect.getOwnPropertyDescriptor(target, key);
+      },
+      ownKeys(target) {
+        reads += 1;
+        return Reflect.ownKeys(target);
+      },
+    });
+    return { array, reads: () => reads };
+  }
+
+  test("rejects a huge array that follows a shared object without reading its items", () => {
+    const spec: Loose = validSpec();
+    const qa = { id: "test", command: ["bun", "test"] };
+    spec.gates.qa = [qa, qa];
+    const huge = countedHugeArray();
+    spec.lanes[0].agent.tools = huge.array;
+    expectOne(run(spec), "RUN_SPEC_INPUT_TOO_LARGE", []);
+    expect(huge.reads()).toBeLessThan(10);
+  });
+
+  test("rejects a huge array returned by a getter, calling the getter once", () => {
+    const spec: Loose = validSpec();
+    const huge = countedHugeArray();
+    let calls = 0;
+    Object.defineProperty(spec.lanes[0].agent, "tools", {
+      enumerable: true,
+      get() {
+        calls += 1;
+        return huge.array;
+      },
+    });
+    expectOne(run(spec), "RUN_SPEC_INPUT_TOO_LARGE", []);
+    expect(calls).toBe(1);
+    expect(huge.reads()).toBeLessThan(10);
+  });
+
+  test("rejects an object with more keys than the node limit before reading them", () => {
+    let reads = 0;
+    const keys = Array.from(
+      { length: RUN_SPEC_INPUT_LIMITS.maxNodes + 1 },
+      (_, index) => `k${index}`,
+    );
+    // Hidden keys are skipped without spending budget, so only the key count
+    // can stop the walk early.
+    const hidden = new Proxy(
+      {},
+      {
+        ownKeys: () => keys,
+        getOwnPropertyDescriptor() {
+          reads += 1;
+          return {
+            value: 1,
+            enumerable: false,
+            configurable: true,
+            writable: true,
+          };
+        },
+      },
+    );
+    const spec: Loose = validSpec();
+    spec.extensions = { "x-vendor": hidden };
+    expectOne(run(spec), "RUN_SPEC_INPUT_TOO_LARGE", []);
+    expect(reads).toBe(0);
+  });
+
+  test("counts a shared object once per place it appears", () => {
+    const spec: Loose = validSpec();
+    const block = new Array(1_000).fill(0);
+    spec.extensions = { "x-vendor": new Array(300).fill(block) };
+    expectOne(run(spec), "RUN_SPEC_INPUT_TOO_LARGE", []);
+  });
+
+  test("accepts a shared object that is small enough in every place", () => {
+    const spec: Loose = validSpec();
+    const qa = { id: "test", command: ["bun", "test"] };
+    spec.gates.qa = [qa, { ...qa, id: "again" }];
+    spec.extensions = { "x-a": { n: 1 }, "x-b": spec.lanes[0].agent };
+    const result = run(spec);
+    expect(result.issues).toEqual([]);
+    expect(result.value?.extensions?.["x-b"]).toEqual(spec.lanes[0].agent);
   });
 
   test("still reports a long sparse array as not JSON", () => {
@@ -410,6 +523,75 @@ describe("parseRunSpecShape: input guard", () => {
     for (const input of [null, 42, "text", true, []]) {
       expectOne(run(input), "RUN_SPEC_INVALID_TYPE", []);
     }
+  });
+});
+
+describe("parseRunSpecShape: array length pre-check", () => {
+  /** A proxy over `target` whose `length` descriptor reports `length`. */
+  function lyingLength(target: unknown[], length: unknown): unknown[] {
+    return new Proxy(target, {
+      getOwnPropertyDescriptor(inner, key) {
+        const descriptor = Reflect.getOwnPropertyDescriptor(inner, key);
+        return key === "length" ? { ...descriptor, value: length } : descriptor;
+      },
+    });
+  }
+
+  /** Counts the times the key list of `target` is asked for. */
+  function countingKeys(target: unknown[]): {
+    array: unknown[];
+    listed: () => number;
+  } {
+    let listed = 0;
+    const array = new Proxy(target, {
+      ownKeys(inner) {
+        listed += 1;
+        return Reflect.ownKeys(inner);
+      },
+    });
+    return { array, listed: () => listed };
+  }
+
+  test("an array that reports a length shorter than its items is not JSON, and its keys are never listed", () => {
+    const { array, listed } = countingKeys(["CI", "NODE_ENV", "EXTRA"]);
+    const lying = new Proxy(array, {
+      getOwnPropertyDescriptor(inner, key) {
+        const descriptor = Reflect.getOwnPropertyDescriptor(inner, key);
+        return key === "length" ? { ...descriptor, value: 1 } : descriptor;
+      },
+    });
+    const spec: Loose = validSpec();
+    spec.env = lying;
+    expectOne(run(spec), "RUN_SPEC_INPUT_NOT_JSON", []);
+    expect(listed()).toBe(0);
+  });
+
+  test("an array whose length is not a safe integer is not JSON", () => {
+    for (const length of [1.5, -1, Number.NaN, "1", 2 ** 53]) {
+      const spec: Loose = validSpec();
+      spec.env = lyingLength(["CI"], length);
+      expectOne(run(spec), "RUN_SPEC_INPUT_NOT_JSON", []);
+    }
+  });
+
+  test("a proxy over 5,000,000 items that reports length 1 or 1.5 is rejected within the time budget", () => {
+    const huge = new Array(5_000_000).fill(0);
+    for (const length of [1, 1.5]) {
+      const spec: Loose = validSpec();
+      spec.env = lyingLength(huge, length);
+      const started = performance.now();
+      const { value } = run(spec);
+      expect(performance.now() - started).toBeLessThan(500);
+      expect(value).toBeUndefined();
+    }
+  });
+
+  test("a plain array is still copied and accepted", () => {
+    const spec: Loose = validSpec();
+    spec.env = countingKeys(["CI"]).array;
+    const { value, issues } = run(spec);
+    expect(issues).toEqual([]);
+    expect(value?.env).toEqual(["CI"]);
   });
 });
 
@@ -987,6 +1169,41 @@ describe("parseRunSpecShape: strings", () => {
       "RUN_SPEC_STRING_TOO_LONG",
       ["gates", "qa", 0, "command", 0],
     );
+  });
+
+  test("counts code points, as JSON Schema does, so an emoji is one character", () => {
+    const emoji = (count: number) => "\u{1F600}".repeat(count);
+    const title = RUN_SPEC_LIMITS.maxTitleLength;
+    expect(broken((s) => (s.lanes[0].title = emoji(title))).issues).toEqual([]);
+    expectOne(
+      broken((s) => (s.lanes[0].title = emoji(title + 1))),
+      "RUN_SPEC_STRING_TOO_LONG",
+      ["lanes", 0, "title"],
+    );
+    const arg = RUN_SPEC_LIMITS.maxCommandArgLength;
+    expect(
+      broken((s) => (s.gates.qa[0].command = ["bun", emoji(arg)])).issues,
+    ).toEqual([]);
+    expectOne(
+      broken((s) => (s.gates.qa[0].command = ["bun", emoji(arg + 1)])),
+      "RUN_SPEC_STRING_TOO_LONG",
+      ["gates", "qa", 0, "command", 1],
+    );
+    const path = RUN_SPEC_LIMITS.maxPathLength;
+    expect(
+      broken((s) => (s.lanes[0].allowedPaths[0] = `s/${emoji(path - 2)}`))
+        .issues,
+    ).toEqual([]);
+    expectOne(
+      broken((s) => (s.lanes[0].allowedPaths[0] = `s/${emoji(path - 1)}`)),
+      "RUN_SPEC_STRING_TOO_LONG",
+      ["lanes", 0, "allowedPaths", 0],
+    );
+  });
+
+  test("counts a lone surrogate as one character", () => {
+    const title = `${"t".repeat(RUN_SPEC_LIMITS.maxTitleLength - 1)}\ud800`;
+    expect(broken((s) => (s.lanes[0].title = title)).issues).toEqual([]);
   });
 
   test("accepts strings exactly at their limit", () => {

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
+import { z } from "zod";
 
 const srcRoot = resolve(import.meta.dir, "../../../src");
 const specRoot = join(srcRoot, "workflows", "spec");
@@ -99,5 +100,39 @@ describe("spec module packaging", () => {
       .map((file) => relative(srcRoot, file));
     // Entries that must load without the optional peer cannot import it.
     expect(withZod).toEqual([]);
+  });
+});
+
+describe("spec module import", () => {
+  test("registers no run spec schema in zod's global registry", async () => {
+    const spec = await import("../../../src/workflows/spec/index.js");
+    const schemas = Object.entries(spec).filter(
+      ([name, value]) => name.endsWith("Schema") && value instanceof z.ZodType,
+    );
+    expect(schemas.length).toBeGreaterThan(10);
+    const registered = schemas
+      .filter(([, schema]) => z.globalRegistry.has(schema as z.ZodType))
+      .map(([name]) => name);
+    expect(registered).toEqual([]);
+  });
+
+  test("lets a host schema use an id the run spec schemas use", async () => {
+    const { RunRulesSchema } = await import(
+      "../../../src/workflows/spec/index.js"
+    );
+    const host = z.object({
+      mine: z.string().meta({ id: "RunRules" }),
+      rules: RunRulesSchema,
+    });
+    expect(() => z.toJSONSchema(host)).not.toThrow();
+  });
+
+  test("can be evaluated a second time", async () => {
+    // A query string makes the runtime evaluate the module again.
+    const specifier = "../../../src/workflows/spec/json-schema.js?again";
+    const again: { runSpecJsonSchema: Record<string, unknown> } = await import(
+      specifier
+    );
+    expect(again.runSpecJsonSchema.$defs).toBeDefined();
   });
 });

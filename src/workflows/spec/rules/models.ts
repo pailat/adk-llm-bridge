@@ -5,6 +5,7 @@ import {
   type RunSpec,
   RunSpecAgentSchema,
   RunSpecV1Schema,
+  runSpecWorkflowKey,
 } from "../schema.js";
 
 // Name grammars come from the schema, the single source of truth. A value that
@@ -44,7 +45,9 @@ function allowSet(list: readonly unknown[] | undefined): Set<string> {
  * normalized, so a lookalike never matches an allowlist entry. `full-access`
  * is rejected whatever the rule set lists, and the network stays off unless
  * the rule set is exactly `allowNetwork: true`. Provider ids, model ids,
- * tool names and `env` names must also match their grammar, and a message never echoes an `env` entry.
+ * tool names and `env` names must also match their grammar, and a message
+ * never echoes an `env` entry. The workflow id and version must equal one
+ * entry of `allowedWorkflows`; an empty list allows none.
  *
  * @param spec - The spec, already shape-checked.
  * @param rules - The host's rules.
@@ -67,6 +70,8 @@ export function checkModelRules(
   const tools = allowSet(rules.allowedTools);
   const envNames = allowSet(rules.allowedEnvNames);
   const networkAllowed = (rules.allowNetwork as unknown) === true;
+
+  checkWorkflow(spec, rules, issues);
 
   const checkProvider = (
     value: string,
@@ -203,4 +208,29 @@ export function checkModelRules(
       seenEnv.add(name);
     }
   });
+}
+
+/** Reports a workflow id and version that no `allowedWorkflows` entry names. */
+function checkWorkflow(
+  spec: RunSpec,
+  rules: RunRules,
+  issues: RunSpecIssue[],
+): void {
+  const entries = Array.isArray(rules.allowedWorkflows)
+    ? rules.allowedWorkflows
+    : [];
+  const wanted = runSpecWorkflowKey(spec);
+  if (entries.some((entry) => runSpecWorkflowKey(entry) === wanted)) return;
+  const idListed = entries.some(
+    (entry) => entry.workflowId === spec.workflowId,
+  );
+  issues.push(
+    runSpecIssue(
+      "RUN_SPEC_WORKFLOW_NOT_ALLOWED",
+      [idListed ? "workflowVersion" : "workflowId"],
+      idListed
+        ? "The workflow version is not in the rule set's allowed workflows."
+        : "The workflow is not in the rule set's allowed workflows.",
+    ),
+  );
 }

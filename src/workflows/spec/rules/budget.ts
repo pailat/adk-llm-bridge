@@ -179,7 +179,8 @@ function checkSizes(
  * @remarks
  * Covers the budget and concurrency ceilings, the size caps (lanes, strings,
  * arrays, change rounds, worst-case agent runs), the bounds of `extensions`
- * and whether the projected plan fits the plan store. Every comparison fails
+ * and whether the projected plan fits the plan store, with at most
+ * `RUN_SPEC_LIMITS.maxTotalAllowedPaths` paths over all lanes. Every comparison fails
  * closed: a value that is not a number at or below its cap is reported. The
  * function never throws and reads no extension value through a getter.
  *
@@ -281,8 +282,24 @@ export function checkBudgetRules(
   }
 }
 
-/** Reports when the projected plan would not fit the plan store limits. */
+/**
+ * Reports when the projected plan would not fit the plan store limits, or
+ * when the lanes own more paths in total than
+ * `RUN_SPEC_LIMITS.maxTotalAllowedPaths`.
+ */
 function checkPlanSize(spec: RunSpec, report: Report): void {
+  let paths = 0;
+  for (const lane of spec.lanes) {
+    paths += Array.isArray(lane?.allowedPaths) ? lane.allowedPaths.length : 0;
+  }
+  if (paths > RUN_SPEC_LIMITS.maxTotalAllowedPaths) {
+    report(
+      "RUN_SPEC_PLAN_TOO_LARGE",
+      ["lanes"],
+      `The lanes own ${paths} paths in total; at most ${RUN_SPEC_LIMITS.maxTotalAllowedPaths} are allowed in one plan.`,
+    );
+    return;
+  }
   let plan: ReturnType<typeof runSpecWorkflowPlan>;
   try {
     const { waves } = layerRunSpecLanes(spec.lanes);

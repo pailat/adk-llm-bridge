@@ -56,4 +56,19 @@ describe("run spec corpus through validateRunSpec", () => {
       }
     });
   }
+
+  test("the path_invalid case reports the NUL path and the 4,096-character path", () => {
+    const item = invalid.find(
+      ([name]) => name === "run_spec_path_invalid.json",
+    );
+    expect(item).toBeDefined();
+    if (item === undefined) return;
+    const result = validateRunSpec(item[1].spec, item[1].rules ?? testRules());
+    const paths = result.ok
+      ? []
+      : result.errors
+          .filter((issue) => issue.code === "RUN_SPEC_PATH_INVALID")
+          .map((issue) => issue.path.join("."));
+    expect(paths).toEqual(["lanes.0.allowedPaths.0", "lanes.1.allowedPaths.0"]);
+  });
 });

@@ -617,8 +617,15 @@ from the 0.6.0 tag.
 - **Run spec, `adk-llm-bridge/workflows/spec` (experimental).** Validation,
   planning and the JSON Schema of a lanes job submitted as data: `validateRunSpec`,
   `resolveRunPlan`, `mergeRunRules`, `layerRunSpecLanes`, `runSpecHash` and
-  `runSpecJsonSchema`, with stable `RUN_SPEC_*` issue codes. Needs `zod` >= 4; no
-  other subpath changes. See [docs/workflow-run-spec.md](./docs/workflow-run-spec.md).
+  `runSpecJsonSchema`, with documented `RUN_SPEC_*` issue codes (stability
+  policy in the doc). Rule sets also name the workflows a spec may run
+  (`allowedWorkflows`) and the refs it may merge into (`allowedTargetRefs`);
+  both are required and an empty list allows nothing. Needs `zod` >= 4; no
+  other subpath changes. Conservative by design: lane ids that differ only in
+  case, path segments shaped like Windows 8.3 short names (`GIT~1`) and paths
+  deeper than 64 segments are rejected; string lengths count code points, as
+  JSON Schema does; schema ids live in a registry of the module, not in zod's
+  global one. See [docs/workflow-run-spec.md](./docs/workflow-run-spec.md).
 - **`resumeReason` (`"interrupted" | "retry"`) on `step_started` events and
   checkpoint step records**, so consumers can tell a resume after an interruption
   from a retry after a failure. Unset on a first attempt and on the

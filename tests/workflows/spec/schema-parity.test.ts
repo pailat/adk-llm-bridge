@@ -5,7 +5,11 @@ import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import { RUN_SPEC_SCHEMA_ISSUE_CODES } from "../../../src/workflows/spec/issues.js";
 import { runSpecJsonSchema } from "../../../src/workflows/spec/json-schema.js";
-import { RunSpecSchema } from "../../../src/workflows/spec/schema.js";
+import { runSpecRegistry } from "../../../src/workflows/spec/registry.js";
+import {
+  RUN_SPEC_LIMITS,
+  RunSpecSchema,
+} from "../../../src/workflows/spec/schema.js";
 import { parseRunSpecShape } from "../../../src/workflows/spec/shape.js";
 import { validSpec, wideSpec } from "./helpers.js";
 import { EVALUATED_KEYWORDS, jsonSchemaAccepts } from "./json-schema-eval.js";
@@ -413,6 +417,52 @@ function generatedSamples(): Sample[] {
     ),
   );
   add("__proto__ in extensions", ext(JSON.parse('{"__proto__":1}')));
+  // Lengths count code points on both sides: an astral character such as an
+  // emoji is one character for the schema and for the shape parser.
+  const astral = (count: number): string => "\u{1F600}".repeat(count);
+  add(
+    "lane title of 256 astral characters",
+    mutated(["lanes", 0, "title"], astral(RUN_SPEC_LIMITS.maxTitleLength)),
+  );
+  add(
+    "lane title of 257 astral characters",
+    mutated(["lanes", 0, "title"], astral(RUN_SPEC_LIMITS.maxTitleLength + 1)),
+  );
+  add(
+    "lane title mixing ASCII and astral characters at the limit",
+    mutated(
+      ["lanes", 0, "title"],
+      `${"t".repeat(RUN_SPEC_LIMITS.maxTitleLength - 1)}${astral(1)}`,
+    ),
+  );
+  add(
+    "path of astral characters at the limit",
+    mutated(
+      ["lanes", 0, "allowedPaths", 0],
+      `s/${astral(RUN_SPEC_LIMITS.maxPathLength - 2)}`,
+    ),
+  );
+  add(
+    "path of astral characters one over the limit",
+    mutated(
+      ["lanes", 0, "allowedPaths", 0],
+      `s/${astral(RUN_SPEC_LIMITS.maxPathLength - 1)}`,
+    ),
+  );
+  add(
+    "QA argument of astral characters at the limit",
+    mutated(
+      ["gates", "qa", 0, "command", 1],
+      astral(RUN_SPEC_LIMITS.maxCommandArgLength),
+    ),
+  );
+  add(
+    "QA argument of astral characters one over the limit",
+    mutated(
+      ["gates", "qa", 0, "command", 1],
+      astral(RUN_SPEC_LIMITS.maxCommandArgLength + 1),
+    ),
+  );
   add("two lanes same id", {
     ...validSpec(),
     lanes: [validSpec().lanes[0], validSpec().lanes[0]],
@@ -486,6 +536,7 @@ describe("runSpecJsonSchema document", () => {
     const expected = z.toJSONSchema(RunSpecSchema, {
       target: "draft-2020-12",
       io: "input",
+      metadata: runSpecRegistry,
     });
     const strip = (node: unknown): unknown => {
       if (Array.isArray(node)) return node.map(strip);
@@ -566,6 +617,7 @@ describe("runSpecJsonSchema document", () => {
     const raw = z.toJSONSchema(RunSpecSchema, {
       target: "draft-2020-12",
       io: "input",
+      metadata: runSpecRegistry,
     });
     const defs = schema.$defs as Record<string, Record<string, unknown>>;
     let checked = 0;
@@ -610,8 +662,7 @@ describe("evaluator self-check", () => {
   });
 });
 
-// The shape parser wrongly accepts this case (see the known-defect test
-// below), so the main parity loop skips it.
+/** The sample whose extension key is `__proto__`, checked on its own below. */
 const PROTO_EXTENSION_CASE = "__proto__ in extensions";
 
 describe("schema and shape parser parity", () => {
@@ -629,9 +680,6 @@ describe("schema and shape parser parity", () => {
     let compared = 0;
     for (const sample of samples) {
       const expected = shapeAccepts(sample.spec);
-      if (sample.name === PROTO_EXTENSION_CASE) {
-        continue;
-      }
       if (expected === "guard") {
         continue;
       }

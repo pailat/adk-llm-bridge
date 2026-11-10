@@ -506,3 +506,51 @@ describe("one call reports every gates rule that is broken", () => {
     }
   });
 });
+
+describe("RUN_SPEC_TARGET_REF_NOT_ALLOWED", () => {
+  function integration(targetRef: string): RunSpec {
+    return withGates([{ id: "test", command: ["bun", "run", "test"] }], {
+      kind: "integration",
+      targetRef,
+      hitl: true,
+    });
+  }
+  function rules(allowedTargetRefs: string[]): RunRules {
+    const result = testRules();
+    result.allowedPublishKinds = ["none", "commit", "integration"];
+    result.allowedTargetRefs = allowedTargetRefs;
+    return result;
+  }
+
+  test("accepts a merge into a listed ref", () => {
+    expect(
+      run(integration("refs/heads/main"), rules(["refs/heads/main"])),
+    ).toEqual([]);
+  });
+
+  test("is reported at targetRef for a ref that is not listed", () => {
+    const issues = run(
+      integration("refs/heads/release"),
+      rules(["refs/heads/main"]),
+    );
+    expect(codes(issues)).toEqual(["RUN_SPEC_TARGET_REF_NOT_ALLOWED"]);
+    expect(issues[0]?.path).toEqual(["gates", "publish", "targetRef"]);
+  });
+
+  test("compares exactly, case included", () => {
+    expect(
+      codes(run(integration("refs/heads/Main"), rules(["refs/heads/main"]))),
+    ).toEqual(["RUN_SPEC_TARGET_REF_NOT_ALLOWED"]);
+  });
+
+  test("denies every merge when the list is empty", () => {
+    expect(codes(run(integration("refs/heads/main"), rules([])))).toEqual([
+      "RUN_SPEC_TARGET_REF_NOT_ALLOWED",
+    ]);
+  });
+
+  test("does not apply to a spec that commits or publishes nothing", () => {
+    expect(run(withGates([], { kind: "none" }), rules([]))).toEqual([]);
+    expect(run(withCommand(["bun", "run", "test"]), rules([]))).toEqual([]);
+  });
+});
