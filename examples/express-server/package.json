@@ -1,16 +1,20 @@
 {
   "name": "express-server-example",
   "private": true,
+  "license": "MIT",
   "type": "module",
+  "engines": {
+    "node": ">=22.0.0"
+  },
   "scripts": {
     "start": "bun run index.ts",
     "dev": "bun run --watch index.ts"
   },
   "dependencies": {
-    "@google/adk": "^1.2.0",
-    "@types/express": "^5.0.0",
-    "adk-llm-bridge": "^0.5.3",
-    "express": "^5.0.0",
-    "zod": "^4.2.1"
+    "@google/adk": "^2.4.0",
+    "@types/express": "^5.0.6",
+    "adk-llm-bridge": "file:../..",
+    "express": "^5.3.0",
+    "zod": "^4.6.7"
   }
 }

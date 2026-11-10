@@ -1,7 +1,15 @@
 # Basic Agent with Gemini (Gemini CLI)
 
+## What it shows
+
 A single external ADK agent that runs [Google Gemini](https://ai.google.dev/) via
 the Gemini CLI driver (`GeminiCliAgent` from `adk-llm-bridge/agents`).
+
+## Requirements
+
+- Bun and Node.js 22 or newer.
+- `GEMINI_API_KEY` or `GOOGLE_API_KEY`, a local authenticated `gemini` CLI, or Vertex AI settings
+- Optional: `SMOKE_PROMPT`
 
 ## Architecture
 
@@ -11,7 +19,7 @@ graph TD
     Gemini --> CLI[gemini CLI driver]
 ```
 
-## Setup
+## Run
 
 1. Copy the environment file and add your Gemini credential:
    ```bash

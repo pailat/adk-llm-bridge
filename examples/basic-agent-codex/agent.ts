@@ -4,6 +4,7 @@ import { join } from "node:path";
 import type * as Adk from "@google/adk";
 import {
   CodexAgent,
+  CodexSdkDriver,
   EnvCredentialProvider,
   mapPermissionModeToPolicy,
 } from "adk-llm-bridge/agents";
@@ -46,12 +47,17 @@ export const rootAgent = new CodexAgent({
     "A general-purpose assistant running OpenAI Codex as an external ADK agent.",
   credentialProvider,
   workingDirectory,
+  // Codex refuses to run outside a trusted git repository unless the check is
+  // skipped. The smoke run may start from a copy or a temp directory, and the
+  // read-only policy below already limits what Codex can touch.
+  driver: new CodexSdkDriver({ skipGitRepoCheck: true }),
   permissions: {
-    // Read-only keeps the smoke run from modifying files. Restrict reachable
-    // paths to this example directory.
+    // Read-only keeps the smoke run from modifying files. No allowedPaths:
+    // Codex runs its file tools without asking the bridge, so the driver
+    // would refuse them (EXTERNAL_AGENT_PATHS_UNENFORCEABLE); Codex's own
+    // read-only sandbox decides what it reaches.
     ...mapPermissionModeToPolicy("read-only"),
     allowNetwork: false,
-    allowedPaths: [workingDirectory],
   },
   instruction: `You are a concise, friendly assistant running as a Codex ADK agent.
 

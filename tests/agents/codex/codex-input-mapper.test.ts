@@ -1,7 +1,7 @@
+import { describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, test } from "bun:test";
 import {
   summarizeHistoryForColdStart,
   userContentToCodexInput,
@@ -149,10 +149,7 @@ describe("userContentToCodexInput", () => {
   test("thought parts are dropped", () => {
     const mapping = userContentToCodexInput({
       role: "user",
-      parts: [
-        { text: "reasoning omitted", thought: true },
-        { text: "ask" },
-      ],
+      parts: [{ text: "reasoning omitted", thought: true }, { text: "ask" }],
     });
     expect(mapping.input).toBe("ask");
   });

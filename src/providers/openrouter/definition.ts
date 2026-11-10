@@ -1,10 +1,6 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
 import type { ProviderDefinition } from "../../core/provider-definition.js";
 
+/** Declarative definition of the OpenRouter provider (endpoint, env keys, model patterns). */
 export const OPENROUTER_DEFINITION: ProviderDefinition = {
   id: "openrouter",
   errorPrefix: "OPENROUTER",
@@ -12,13 +8,17 @@ export const OPENROUTER_DEFINITION: ProviderDefinition = {
   envKeys: { apiKey: ["OPENROUTER_API_KEY"] },
   modelPatterns: [/.+\/.+/],
   requireApiKey: true,
+  // OpenRouter proxies arbitrary vendor/model ids and tolerates reasoning
+  // params on non-reasoning models (HTTP 200, silently ignored), so always
+  // send the native reasoning object and round-trip signed reasoning details.
+  reasoning: { style: "openrouter" },
   buildHeaders: (config) => {
     const headers: Record<string, string> = {};
     const siteUrl =
-      (config as Record<string, unknown>).siteUrl as string | undefined ??
+      ((config as Record<string, unknown>).siteUrl as string | undefined) ??
       process.env.OPENROUTER_SITE_URL;
     const appName =
-      (config as Record<string, unknown>).appName as string | undefined ??
+      ((config as Record<string, unknown>).appName as string | undefined) ??
       process.env.OPENROUTER_APP_NAME;
     if (siteUrl) headers["HTTP-Referer"] = siteUrl;
     if (appName) headers["X-Title"] = appName;

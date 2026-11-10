@@ -1,7 +1,13 @@
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { describe, expect, test } from "bun:test";
+import {
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, test } from "bun:test";
 import {
   isPathAllowed,
   normalizeAllowedDirectory,
@@ -27,9 +33,9 @@ describe("external-agents path config", () => {
   });
 
   test("rejects missing paths", () => {
-    expect(() => parseArchitectureAnalysisPaths("/definitely/missing/path")).toThrow(
-      /does not exist/,
-    );
+    expect(() =>
+      parseArchitectureAnalysisPaths("/definitely/missing/path"),
+    ).toThrow(/does not exist/);
   });
 
   test("rejects files", () => {
@@ -37,7 +43,9 @@ describe("external-agents path config", () => {
     const file = join(dir, "file.txt");
     writeFileSync(file, "not a directory");
     try {
-      expect(() => normalizeAllowedDirectory(file)).toThrow(/must be directories/);
+      expect(() => normalizeAllowedDirectory(file)).toThrow(
+        /must be directories/,
+      );
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

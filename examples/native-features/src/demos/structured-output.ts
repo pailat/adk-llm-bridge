@@ -51,7 +51,10 @@ export const structuredOutputDemo: Demo = {
       outputKey: "cityFact",
     });
 
-    out.label("outputSchema", "z.object({ city, country, populationMillions, summary })");
+    out.label(
+      "outputSchema",
+      "z.object({ city, country, populationMillions, summary })",
+    );
     out.section("response");
 
     const result = await harness.run(

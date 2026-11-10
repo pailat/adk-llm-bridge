@@ -1,6 +1,14 @@
 # Basic Agent with OpenRouter
 
+## What it shows
+
 A multi-agent HelpDesk system using [OpenRouter](https://openrouter.ai/) as the LLM provider.
+
+## Requirements
+
+- Bun and Node.js 22 or newer.
+- `OPENROUTER_API_KEY`
+- Optional: `OPENROUTER_SITE_URL`, `OPENROUTER_APP_NAME`
 
 ## Architecture
 
@@ -17,7 +25,7 @@ graph TD
     Support --> T4[reset_password]
 ```
 
-## Setup
+## Run
 
 1. Copy the environment file and add your OpenRouter API key:
    ```bash
@@ -51,7 +59,7 @@ You can configure provider preferences programmatically:
 ```typescript
 import { OpenRouter } from "adk-llm-bridge";
 
-const llm = OpenRouter("anthropic/claude-sonnet-4.5", {
+const llm = OpenRouter("anthropic/claude-sonnet-5.5", {
   provider: {
     sort: "latency",        // or "price", "throughput"
     allow_fallbacks: true,

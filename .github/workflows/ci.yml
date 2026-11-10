@@ -1,0 +1,132 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main, "release/**"]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    name: bun run ci (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [22, 24, 26]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ matrix.node }}
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.4
+      - run: bun install --frozen-lockfile
+      - run: bun run ci
+      - name: Smoke-import dist on Node ${{ matrix.node }}
+        run: |
+          node --input-type=module -e "
+            for (const p of ['./dist/index.js','./dist/agents/index.js','./dist/workflows/index.js','./dist/workflows/node/index.js']) await import(p);
+            console.log('dist imports OK on', process.version);
+          "
+      - name: NodeNext consumer typecheck
+        run: bun run typecheck:compat:nodenext
+
+  # Installs the packed tarball with npm into an empty project, which pulls in
+  # the required peers and skips the optional ones, then imports every entry.
+  package-consumer:
+    name: packed tarball without optional peers
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.4
+      - run: bun install --frozen-lockfile
+      - run: bun run build
+      - name: Pack
+        run: npm pack --pack-destination "$RUNNER_TEMP"
+      - name: Install the tarball in an empty project
+        working-directory: ${{ runner.temp }}
+        run: |
+          mkdir consumer && cd consumer
+          npm init -y > /dev/null
+          npm pkg set type=module
+          npm install --no-audit --no-fund "$RUNNER_TEMP"/adk-llm-bridge-*.tgz
+      - name: Import every entry with the optional peers absent
+        working-directory: ${{ runner.temp }}/consumer
+        run: |
+          node --input-type=module -e "
+            const optional = Object.entries(JSON.parse(
+              (await import('node:fs')).readFileSync('node_modules/adk-llm-bridge/package.json', 'utf8'),
+            ).peerDependenciesMeta).filter(([, m]) => m.optional).map(([n]) => n);
+            // An optional peer may still be present when a required peer depends on it
+            // (zod comes with @google/adk). It must never be installed because of this package.
+            const { execFileSync } = await import('node:child_process');
+            const transitive = [];
+            for (const name of optional) {
+              let nodes = [];
+              try { nodes = JSON.parse(execFileSync('npm', ['explain', name, '--json'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })); }
+              catch { continue; }
+              const dependents = nodes.flatMap((n) => n.dependents ?? []).map((d) => d.from?.name);
+              if (dependents.length === 0 || dependents.every((d) => d === 'adk-llm-bridge' || d === undefined)) {
+                throw new Error(name + ' is installed for adk-llm-bridge alone');
+              }
+              transitive.push(name + ' (via ' + [...new Set(dependents)].join(', ') + ')');
+            }
+            for (const p of ['adk-llm-bridge', 'adk-llm-bridge/agents', 'adk-llm-bridge/agents/session-store/sqlite', 'adk-llm-bridge/workflows', 'adk-llm-bridge/workflows/node']) await import(p);
+            await import('adk-llm-bridge/package.json', { with: { type: 'json' } });
+            console.log('entries import with optional peers absent on', process.version, '| present transitively:', transitive.join('; ') || 'none');
+          "
+
+  # Non-blocking canary: builds @google/adk from google/adk-js `main` (the next
+  # release, e.g. 2.5.0, is not on npm until it is published) and runs the full
+  # suite against it, so incompatibilities show up before the release lands.
+  adk-canary:
+    name: adk-canary (@google/adk from main)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.4
+      - name: Build @google/adk from google/adk-js main
+        run: |
+          git clone --depth 1 https://github.com/google/adk-js.git "$RUNNER_TEMP/adk-js"
+          git -C "$RUNNER_TEMP/adk-js" log -1 --format='ADK canary commit: %H (%s)' | tee -a "$GITHUB_STEP_SUMMARY"
+          cd "$RUNNER_TEMP/adk-js"
+          npm ci --ignore-scripts
+          cd core
+          npm run build
+          npm pack --ignore-scripts --pack-destination "$RUNNER_TEMP"
+          echo "ADK_TARBALL=$(ls "$RUNNER_TEMP"/google-adk-*.tgz | head -n1)" >> "$GITHUB_ENV"
+      - run: bun install --frozen-lockfile
+      - name: Install the canary @google/adk (not committed)
+        run: bun add --dev "@google/adk@file:$ADK_TARBALL"
+      - run: bun run ci
+      - name: NodeNext consumer typecheck
+        run: bun run typecheck:compat:nodenext

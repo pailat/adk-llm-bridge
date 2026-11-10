@@ -10,7 +10,7 @@
  *
  * It uses the recommended factory form (`Anthropic(...)` from adk-llm-bridge)
  * — no `LLMRegistry.register` needed. The agent is configured with the native
- * ADK model knobs that adk-llm-bridge now passes through:
+ * ADK model knobs that adk-llm-bridge passes through:
  *   - extended thinking via `generateContentConfig.thinkingConfig`
  *     (the model's reasoning is shown in the UI before the answer)
  *   - a real `FunctionTool` (tool calling)
@@ -18,8 +18,9 @@
  *
  * Requires `ANTHROPIC_API_KEY` in `.env` (Bun loads it from the cwd).
  */
-import { FunctionTool, LlmAgent } from "@google/adk";
+
 import type { Context } from "@google/adk";
+import { FunctionTool, LlmAgent } from "@google/adk";
 import { Anthropic } from "adk-llm-bridge";
 import { z } from "zod";
 
@@ -46,14 +47,14 @@ const getWeather = new FunctionTool({
 export const rootAgent = new LlmAgent({
   name: "native_features_assistant",
   // Factory form — passes a BaseLlm instance straight to the agent.
-  model: Anthropic("claude-sonnet-4-6"),
+  model: Anthropic("claude-sonnet-5-5"),
   description:
     "Showcase assistant: extended thinking, tool calling and multimodal vision.",
   instruction: `You are a helpful assistant that thinks step by step.
 Use the get_weather tool when asked about weather.
 If the user attaches an image, describe what you see.`,
   tools: [getWeather],
-  // Native passthrough: ADK's thinkingConfig now reaches the provider.
+  // Native passthrough: ADK's thinkingConfig reaches the provider.
   // (With thinking enabled the bridge omits temperature/top_p/top_k, which
   // Anthropic disallows alongside extended thinking.)
   generateContentConfig: {

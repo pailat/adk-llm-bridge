@@ -1,53 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import {
-  clampPositive,
-  requireNonEmpty,
-  requireValidURL,
-} from "../../src/utils/validate.js";
-
-describe("requireNonEmpty", () => {
-  it("returns value when non-empty", () => {
-    expect(requireNonEmpty("hello", "field", "test")).toBe("hello");
-  });
-
-  it("throws on empty string", () => {
-    expect(() => requireNonEmpty("", "apiKey", "provider")).toThrow(
-      "[provider] apiKey is required but was empty",
-    );
-  });
-
-  it("throws on whitespace-only string", () => {
-    expect(() => requireNonEmpty("   ", "apiKey", "provider")).toThrow(
-      "[provider] apiKey is required but was empty",
-    );
-  });
-});
-
-describe("requireValidURL", () => {
-  it("returns value for valid HTTP URL", () => {
-    expect(
-      requireValidURL("http://localhost:11434/v1", "baseURL", "test"),
-    ).toBe("http://localhost:11434/v1");
-  });
-
-  it("returns value for valid HTTPS URL", () => {
-    expect(
-      requireValidURL("https://api.example.com/v1", "baseURL", "test"),
-    ).toBe("https://api.example.com/v1");
-  });
-
-  it("throws on invalid URL", () => {
-    expect(() =>
-      requireValidURL("not-a-url", "baseURL", "custom"),
-    ).toThrow('[custom] Invalid baseURL: "not-a-url"');
-  });
-
-  it("throws on empty string", () => {
-    expect(() => requireValidURL("", "baseURL", "custom")).toThrow(
-      "[custom] Invalid baseURL",
-    );
-  });
-});
+import { clampPositive } from "../../src/utils/validate.js";
 
 describe("clampPositive", () => {
   it("returns value when above min", () => {

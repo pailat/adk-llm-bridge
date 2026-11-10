@@ -1,6 +1,13 @@
 # Basic Agent with AI Gateway
 
+## What it shows
+
 A multi-agent HelpDesk system using [Vercel AI Gateway](https://vercel.com/ai-gateway) as the LLM provider.
+
+## Requirements
+
+- Bun and Node.js 22 or newer.
+- `AI_GATEWAY_API_KEY`. Provider keys such as `OPENAI_API_KEY` are not read.
 
 ## Architecture
 
@@ -29,7 +36,9 @@ flowchart TB
     end
 ```
 
-## Setup
+## Run
+
+### Setup
 
 ```bash
 cd examples/basic-agent-ai-gateway
@@ -40,12 +49,9 @@ Create a `.env` file:
 
 ```env
 AI_GATEWAY_API_KEY=your-api-key
-# Or use provider-specific keys:
-# ANTHROPIC_API_KEY=your-key
-# OPENAI_API_KEY=your-key
 ```
 
-## Run
+### Start
 
 ```bash
 # Start the DevTools web UI
@@ -151,9 +157,9 @@ You can easily modify the agents to use different models:
 ```typescript
 const billingAgent = new LlmAgent({
   name: "Billing",
-  model: "openai/gpt-4o",  // Use OpenAI instead
+  model: "openai/gpt-6.1-sol",  // Use OpenAI instead
   // ...
 });
 ```
 
-Supported model formats: `provider/model-name` (e.g., `anthropic/claude-sonnet-4.5`, `openai/gpt-4.1`, `google/gemini-2.5-flash`)
+Supported model formats: `provider/model-name` (e.g., `anthropic/claude-sonnet-5.5`, `openai/gpt-6.1-sol`, `google/gemini-3.8-flash`)

@@ -1,12 +1,13 @@
 import { describe, expect, it } from "bun:test";
-import { BaseProviderLlm } from "../../src/core/base-provider-llm.js";
 import type { LlmRequest, LlmResponse } from "@google/adk";
+import { BaseProviderLlm } from "../../src/core/base-provider-llm.js";
 
 // Concrete subclass for testing the abstract base
 class TestLlm extends BaseProviderLlm {
   async *generateContentAsync(
     _llmRequest: LlmRequest,
     _stream?: boolean,
+    _abortSignal?: AbortSignal,
   ): AsyncGenerator<LlmResponse, void> {
     // no-op
   }

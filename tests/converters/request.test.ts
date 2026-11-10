@@ -1,6 +1,11 @@
-import { describe, expect, it, spyOn } from "bun:test";
+import { describe, expect, it } from "bun:test";
 import type { LlmRequest } from "@google/adk";
-import { FunctionCallingConfigMode } from "@google/genai";
+import { FunctionCallingConfigMode, Type } from "@google/genai";
+import type {
+  ChatCompletionFunctionTool,
+  ChatCompletionMessageParam,
+  ChatCompletionTool,
+} from "openai/resources/chat/completions";
 import {
   convertGenerationConfig,
   convertLogprobsConfig,
@@ -9,6 +14,24 @@ import {
   convertStructuredOutput,
   convertToolChoice,
 } from "../../src/converters/request.js";
+import { captureWarnings } from "../helpers/fake-logger.js";
+
+/** Narrows a converted tool to the function variant; this converter emits no custom tools. */
+/** A converted message as plain fields, to read provider extensions such as `reasoning_details`. */
+function messageFields(
+  message: ChatCompletionMessageParam | undefined,
+): Record<string, unknown> {
+  return { ...message };
+}
+
+function functionTool(
+  tool: ChatCompletionTool | undefined,
+): ChatCompletionFunctionTool {
+  if (tool?.type !== "function") {
+    throw new Error(`expected a function tool, got ${tool?.type}`);
+  }
+  return tool;
+}
 
 function createLlmRequest(overrides: Partial<LlmRequest> = {}): LlmRequest {
   return {
@@ -119,8 +142,69 @@ describe("convertRequest", () => {
       });
     });
 
+    it("generates an OpenAI-compatible ID and warns when an ID is missing", () => {
+      const warnSpy = captureWarnings();
+      try {
+        const request = createLlmRequest({
+          contents: [
+            {
+              role: "model",
+              parts: [
+                {
+                  functionCall: {
+                    name: "get_weather",
+                    args: { city: "Tokyo" },
+                  },
+                },
+              ],
+            },
+          ],
+        });
+
+        const result = convertRequest(request);
+        const message = result.messages[0] as {
+          tool_calls: Array<{ id: string }>;
+        };
+
+        expect(message.tool_calls[0].id).toMatch(/^call_[0-9a-f]{32}$/);
+        expect(warnSpy).toHaveBeenCalledWith(
+          "[adk-llm-bridge] functionCall missing id, using generated ID",
+        );
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it("generates distinct IDs for multiple missing-ID calls in one message", () => {
+      const warnSpy = captureWarnings();
+      try {
+        const request = createLlmRequest({
+          contents: [
+            {
+              role: "model",
+              parts: [
+                { functionCall: { name: "first_tool", args: {} } },
+                { functionCall: { name: "second_tool", args: {} } },
+              ],
+            },
+          ],
+        });
+
+        const result = convertRequest(request);
+        const message = result.messages[0] as {
+          tool_calls: Array<{ id: string }>;
+        };
+        const ids = message.tool_calls.map((call) => call.id);
+
+        expect(ids).toHaveLength(2);
+        expect(new Set(ids).size).toBe(2);
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
     it("drops image parts on a model/assistant turn and warns", () => {
-      const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
+      const warnSpy = captureWarnings();
       try {
         const request = createLlmRequest({
           contents: [
@@ -151,7 +235,7 @@ describe("convertRequest", () => {
     });
 
     it("keeps image parts on a user turn (regression guard)", () => {
-      const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
+      const warnSpy = captureWarnings();
       try {
         const request = createLlmRequest({
           contents: [
@@ -213,6 +297,279 @@ describe("convertRequest", () => {
         tool_call_id: "call_789",
         content: '{"temperature":22}',
       });
+    });
+
+    it("round-trips multiple missing and empty IDs across the request", () => {
+      const warnSpy = captureWarnings();
+      try {
+        const request = createLlmRequest({
+          contents: [
+            {
+              role: "model",
+              parts: [
+                {
+                  functionCall: {
+                    name: "get_weather",
+                    args: { city: "Tokyo" },
+                  },
+                },
+                {
+                  functionCall: {
+                    id: "call_explicit",
+                    name: "get_time",
+                    args: { city: "London" },
+                  },
+                },
+                {
+                  functionCall: {
+                    id: "",
+                    name: "get_weather",
+                    args: { city: "Paris" },
+                  },
+                },
+                {
+                  functionCall: {
+                    id: "",
+                    name: "get_stock",
+                    args: { symbol: "ADK" },
+                  },
+                },
+              ],
+            },
+            {
+              role: "user",
+              parts: [
+                {
+                  functionResponse: {
+                    id: "",
+                    name: "get_stock",
+                    response: { price: 87 },
+                  },
+                },
+                {
+                  functionResponse: {
+                    name: "get_weather",
+                    response: { city: "Tokyo", temperature: 22 },
+                  },
+                },
+                {
+                  functionResponse: {
+                    id: "call_explicit",
+                    name: "get_time",
+                    response: { time: "12:00" },
+                  },
+                },
+                {
+                  functionResponse: {
+                    id: "",
+                    name: "get_weather",
+                    response: { city: "Paris", temperature: 18 },
+                  },
+                },
+              ],
+            },
+          ],
+        });
+
+        const result = convertRequest(request);
+        const assistant = result.messages[0] as {
+          tool_calls: Array<{ id: string }>;
+        };
+        const [tokyoWeatherId, explicitId, parisWeatherId, stockId] =
+          assistant.tool_calls.map((call) => call.id);
+        const responseIds = result.messages
+          .slice(1)
+          .map(
+            (message) =>
+              (message as { role: "tool"; tool_call_id: string }).tool_call_id,
+          );
+
+        expect(tokyoWeatherId).toMatch(/^call_[0-9a-f]{32}$/);
+        expect(explicitId).toBe("call_explicit");
+        expect(parisWeatherId).toMatch(/^call_[0-9a-f]{32}$/);
+        expect(stockId).toMatch(/^call_[0-9a-f]{32}$/);
+        expect(responseIds).toEqual([
+          stockId,
+          tokyoWeatherId,
+          explicitId,
+          parisWeatherId,
+        ]);
+        expect(responseIds.every(Boolean)).toBe(true);
+        expect(
+          warnSpy.mock.calls.filter(
+            ([message]) =>
+              message ===
+              "[adk-llm-bridge] functionCall missing id, using generated ID",
+          ),
+        ).toHaveLength(3);
+        expect(
+          warnSpy.mock.calls.filter(
+            ([message]) =>
+              message === "[adk-llm-bridge] functionResponse missing id",
+          ),
+        ).toHaveLength(3);
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it("prefers a generated same-name call for an out-of-order missing-ID response", () => {
+      const warnSpy = captureWarnings();
+      try {
+        const request = createLlmRequest({
+          contents: [
+            {
+              role: "model",
+              parts: [
+                {
+                  functionCall: {
+                    id: "call_explicit",
+                    name: "get_weather",
+                    args: { city: "Tokyo" },
+                  },
+                },
+                {
+                  functionCall: {
+                    name: "get_weather",
+                    args: { city: "Paris" },
+                  },
+                },
+              ],
+            },
+            {
+              role: "user",
+              parts: [
+                {
+                  functionResponse: {
+                    name: "get_weather",
+                    response: { city: "Paris", temperature: 18 },
+                  },
+                },
+                {
+                  functionResponse: {
+                    id: "call_explicit",
+                    name: "get_weather",
+                    response: { city: "Tokyo", temperature: 22 },
+                  },
+                },
+              ],
+            },
+          ],
+        });
+
+        const result = convertRequest(request);
+        const assistant = result.messages[0] as {
+          tool_calls: Array<{ id: string }>;
+        };
+        const [explicitId, generatedId] = assistant.tool_calls.map(
+          (call) => call.id,
+        );
+
+        expect(explicitId).toBe("call_explicit");
+        expect(generatedId).toMatch(/^call_[0-9a-f]{32}$/);
+        expect(
+          result.messages
+            .slice(1)
+            .map(
+              (message) =>
+                (message as { role: "tool"; tool_call_id: string })
+                  .tool_call_id,
+            ),
+        ).toEqual([generatedId, explicitId]);
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it("does not consume an unrelated pending call for an unmatched response name", () => {
+      const warnSpy = captureWarnings();
+      try {
+        const request = createLlmRequest({
+          contents: [
+            {
+              role: "model",
+              parts: [
+                {
+                  functionCall: {
+                    name: "get_weather",
+                    args: { city: "Tokyo" },
+                  },
+                },
+              ],
+            },
+            {
+              role: "user",
+              parts: [
+                {
+                  functionResponse: {
+                    name: "get_time",
+                    response: { time: "12:00" },
+                  },
+                },
+                {
+                  functionResponse: {
+                    name: "get_weather",
+                    response: { city: "Tokyo", temperature: 22 },
+                  },
+                },
+              ],
+            },
+          ],
+        });
+
+        const result = convertRequest(request);
+        const assistant = result.messages[0] as {
+          tool_calls: Array<{ id: string }>;
+        };
+        const generatedCallId = assistant.tool_calls[0].id;
+        const [unmatchedResponseId, matchingResponseId] = result.messages
+          .slice(1)
+          .map(
+            (message) =>
+              (message as { role: "tool"; tool_call_id: string }).tool_call_id,
+          );
+
+        expect(unmatchedResponseId).toMatch(/^call_[0-9a-f]{32}$/);
+        expect(unmatchedResponseId).not.toBe(generatedCallId);
+        expect(matchingResponseId).toBe(generatedCallId);
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it("replaces an unmatched empty response ID after warning", () => {
+      const warnSpy = captureWarnings();
+      try {
+        const request = createLlmRequest({
+          contents: [
+            {
+              role: "user",
+              parts: [
+                {
+                  functionResponse: {
+                    id: "",
+                    name: "orphan_tool",
+                    response: { ok: true },
+                  },
+                },
+              ],
+            },
+          ],
+        });
+
+        const result = convertRequest(request);
+        const toolMessage = result.messages[0] as {
+          role: "tool";
+          tool_call_id: string;
+        };
+
+        expect(toolMessage.tool_call_id).toMatch(/^call_[0-9a-f]{32}$/);
+        expect(warnSpy).toHaveBeenCalledWith(
+          "[adk-llm-bridge] functionResponse missing id",
+        );
+      } finally {
+        warnSpy.mockRestore();
+      }
     });
   });
 
@@ -290,7 +647,7 @@ describe("convertRequest", () => {
       const result = convertRequest(request);
 
       expect(result.tools).toHaveLength(1);
-      expect(result.tools?.[0].function.name).toBe("valid_tool");
+      expect(functionTool(result.tools?.[0]).function.name).toBe("valid_tool");
     });
 
     it("skips function declarations with undefined name", () => {
@@ -334,7 +691,6 @@ describe("convertRequest", () => {
           seed: 42,
           presencePenalty: 0.5,
           frequencyPenalty: 0.3,
-          candidateCount: 2,
         },
       });
 
@@ -346,7 +702,53 @@ describe("convertRequest", () => {
         seed: 42,
         presence_penalty: 0.5,
         frequency_penalty: 0.3,
-        n: 2,
+      });
+    });
+
+    describe("candidateCount", () => {
+      it.each([
+        ["zero", 0],
+        ["null", null],
+        ["a negative integer", -1],
+        ["a fractional value", 1.5],
+        ["NaN", Number.NaN],
+        ["positive infinity", Number.POSITIVE_INFINITY],
+        ["negative infinity", Number.NEGATIVE_INFINITY],
+        ["more than one", 2],
+      ])("rejects %s instead of treating it as one candidate", (_, value) => {
+        // @ts-expect-error The table includes null on purpose, to check runtime validation.
+        const request = createLlmRequest({ config: { candidateCount: value } });
+
+        expect(() => convertGenerationConfig(request, "gpt-4.1")).toThrow(
+          "candidateCount must be exactly 1 when provided: adk-llm-bridge returns one ADK LlmResponse per provider response and cannot represent multiple Chat Completions choices. Set candidateCount to 1 or omit it.",
+        );
+      });
+
+      it("rejects multiple candidates for reasoning models instead of silently dropping them", () => {
+        const request = createLlmRequest({ config: { candidateCount: 3 } });
+
+        expect(() => convertGenerationConfig(request, "gpt-5")).toThrow(
+          /candidateCount must be exactly 1 when provided/,
+        );
+      });
+
+      it("rejects through the request converter shared by streaming and non-streaming providers", () => {
+        const request = createLlmRequest({ config: { candidateCount: 2 } });
+
+        expect(() => convertRequest(request, "gpt-4.1")).toThrow(
+          /Set candidateCount to 1 or omit it/,
+        );
+      });
+
+      it("supports one candidate without sending an unnecessary n parameter", () => {
+        for (const model of ["gpt-4.1", "gpt-5"]) {
+          const request = createLlmRequest({ config: { candidateCount: 1 } });
+
+          expect(convertGenerationConfig(request, model)).not.toHaveProperty(
+            "n",
+          );
+          expect(convertRequest(request, model).params).toBeUndefined();
+        }
       });
     });
 
@@ -466,8 +868,8 @@ describe("convertRequest", () => {
       const request = createLlmRequest({
         config: {
           responseSchema: {
-            type: "OBJECT",
-            properties: { answer: { type: "STRING" } },
+            type: Type.OBJECT,
+            properties: { answer: { type: Type.STRING } },
           },
         },
       });
@@ -597,7 +999,16 @@ describe("convertRequest", () => {
         ],
       });
 
-      const result = convertRequest(request);
+      const warnSpy = captureWarnings();
+      let result: ReturnType<typeof convertRequest>;
+      try {
+        result = convertRequest(request);
+      } finally {
+        warnSpy.mockRestore();
+      }
+      const warns = warnSpy.mock.calls.map((c) => String(c[0]));
+      expect(warns.some((w) => w.includes("scheme: gs"))).toBe(true);
+      expect(warns.join("\n")).not.toContain("bucket/img.png");
       // No image present -> falls back to string content path.
       expect(result.messages[0]).toEqual({ role: "user", content: "hi" });
     });
@@ -800,26 +1211,6 @@ describe("convertRequest", () => {
         expect(result.top_p).toBe(0.8);
       });
 
-      it("drops n (candidateCount) for gpt-5 reasoning models", () => {
-        const request = createLlmRequest({ config: { candidateCount: 2 } });
-        const result = convertGenerationConfig(request, "gpt-5");
-        expect(result).not.toHaveProperty("n");
-      });
-
-      it("drops n for o-series and provider-prefixed reasoning models", () => {
-        for (const model of ["o1", "o3-mini", "o4-mini", "openai/gpt-5-mini"]) {
-          const request = createLlmRequest({ config: { candidateCount: 3 } });
-          const result = convertGenerationConfig(request, model);
-          expect(result).not.toHaveProperty("n");
-        }
-      });
-
-      it("keeps n (candidateCount) for non-reasoning models (gpt-4.1)", () => {
-        const request = createLlmRequest({ config: { candidateCount: 2 } });
-        const result = convertGenerationConfig(request, "gpt-4.1");
-        expect(result.n).toBe(2);
-      });
-
       it("end-to-end: gpt-5 request carries no temperature/top_p/logprobs but keeps reasoning_effort", () => {
         const request = createLlmRequest({
           contents: [{ role: "user", parts: [{ text: "Hi" }] }],
@@ -916,14 +1307,385 @@ describe("convertRequest", () => {
       });
     });
 
+    describe("openrouter reasoning style (provider-aware)", () => {
+      const OR = { reasoning: { style: "openrouter" as const } };
+
+      it("emits native reasoning.max_tokens from budget for a vendor/model id", () => {
+        const request = createLlmRequest({
+          config: { thinkingConfig: { thinkingBudget: 5000 } },
+        });
+        const result = convertReasoningConfig(request, "z-ai/glm-5.2", OR);
+        // Only max_tokens (not effort) — OpenRouter 400s if both are present.
+        expect(result).toEqual({ reasoning: { max_tokens: 5000 } });
+      });
+
+      it("ignores the model-name gate (sends reasoning to non-reasoning ids)", () => {
+        const request = createLlmRequest({
+          config: { thinkingConfig: { thinkingBudget: 1000 } },
+        });
+        // openai/gpt-4o-mini would be gated out under the strict path, but the
+        // openrouter style always sends the native reasoning object.
+        const result = convertReasoningConfig(
+          request,
+          "openai/gpt-4o-mini",
+          OR,
+        );
+        expect(result).toEqual({ reasoning: { max_tokens: 1000 } });
+      });
+
+      it("maps includeThoughts:false to reasoning.exclude:true", () => {
+        const request = createLlmRequest({
+          config: {
+            thinkingConfig: { includeThoughts: false, thinkingBudget: 3000 },
+          },
+        });
+        const result = convertReasoningConfig(
+          request,
+          "deepseek/deepseek-r1",
+          OR,
+        );
+        expect(result).toEqual({
+          reasoning: { max_tokens: 3000, exclude: true },
+        });
+      });
+
+      it("disables reasoning (enabled:false) when budget is 0", () => {
+        const request = createLlmRequest({
+          config: { thinkingConfig: { thinkingBudget: 0 } },
+        });
+        const result = convertReasoningConfig(request, "z-ai/glm-5.2", OR);
+        expect(result).toEqual({ reasoning: { enabled: false } });
+      });
+
+      it("enables with effort:medium when thinkingConfig has no budget", () => {
+        const request = createLlmRequest({
+          config: { thinkingConfig: { includeThoughts: true } },
+        });
+        const result = convertReasoningConfig(
+          request,
+          "anthropic/claude-sonnet-4.5",
+          OR,
+        );
+        expect(result).toEqual({ reasoning: { effort: "medium" } });
+      });
+
+      it("emits nothing when thinkingConfig is absent", () => {
+        const request = createLlmRequest({ config: {} });
+        expect(convertReasoningConfig(request, "z-ai/glm-5.2", OR)).toEqual({});
+      });
+
+      it("end-to-end: convertRequest emits reasoning object for openrouter style", () => {
+        const request = createLlmRequest({
+          contents: [{ role: "user", parts: [{ text: "Hi" }] }],
+          config: { thinkingConfig: { thinkingBudget: 9000 } },
+        });
+        const result = convertRequest(request, "z-ai/glm-5.2", OR);
+        expect(result.params?.reasoning).toEqual({ max_tokens: 9000 });
+        expect(result.params).not.toHaveProperty("reasoning_effort");
+      });
+    });
+
+    describe("openrouter budget lever routing (provider-aware control)", () => {
+      const OR = { reasoning: { style: "openrouter" as const } };
+
+      // Effort-family models (OpenAI gpt-5*/o-series, xAI Grok reasoners) IGNORE
+      // reasoning.max_tokens via OpenRouter but honor reasoning.effort, so a
+      // budget must route to a bucketed `effort` for them (never max_tokens).
+      it("routes a budget to reasoning.effort for openai/gpt-5-mini", () => {
+        const request = createLlmRequest({
+          config: { thinkingConfig: { thinkingBudget: 1000 } },
+        });
+        const result = convertReasoningConfig(request, "openai/gpt-5-mini", OR);
+        expect(result).toEqual({ reasoning: { effort: "low" } });
+      });
+
+      it("buckets the budget to effort low/medium/high for gpt-5-mini", () => {
+        const low = convertReasoningConfig(
+          createLlmRequest({
+            config: { thinkingConfig: { thinkingBudget: 1000 } },
+          }),
+          "openai/gpt-5-mini",
+          OR,
+        );
+        const medium = convertReasoningConfig(
+          createLlmRequest({
+            config: { thinkingConfig: { thinkingBudget: 5000 } },
+          }),
+          "openai/gpt-5-mini",
+          OR,
+        );
+        const high = convertReasoningConfig(
+          createLlmRequest({
+            config: { thinkingConfig: { thinkingBudget: 20000 } },
+          }),
+          "openai/gpt-5-mini",
+          OR,
+        );
+        expect(low).toEqual({ reasoning: { effort: "low" } });
+        expect(medium).toEqual({ reasoning: { effort: "medium" } });
+        expect(high).toEqual({ reasoning: { effort: "high" } });
+      });
+
+      it("routes a budget to reasoning.effort for o-series via openrouter", () => {
+        const request = createLlmRequest({
+          config: { thinkingConfig: { thinkingBudget: 20000 } },
+        });
+        const result = convertReasoningConfig(request, "openai/o4-mini", OR);
+        expect(result).toEqual({ reasoning: { effort: "high" } });
+      });
+
+      it("routes a budget to reasoning.effort for xAI grok reasoners", () => {
+        const request = createLlmRequest({
+          config: { thinkingConfig: { thinkingBudget: 5000 } },
+        });
+        const result = convertReasoningConfig(
+          request,
+          "x-ai/grok-4-fast-reasoning",
+          OR,
+        );
+        expect(result).toEqual({ reasoning: { effort: "medium" } });
+      });
+
+      it("keeps reasoning.max_tokens for gemini (honors token budget)", () => {
+        const request = createLlmRequest({
+          config: { thinkingConfig: { thinkingBudget: 16384 } },
+        });
+        const result = convertReasoningConfig(
+          request,
+          "google/gemini-2.5-flash",
+          OR,
+        );
+        expect(result).toEqual({ reasoning: { max_tokens: 16384 } });
+      });
+
+      it("keeps reasoning.max_tokens for default/unknown reasoners", () => {
+        const request = createLlmRequest({
+          config: { thinkingConfig: { thinkingBudget: 4000 } },
+        });
+        expect(
+          convertReasoningConfig(request, "deepseek/deepseek-r1", OR),
+        ).toEqual({ reasoning: { max_tokens: 4000 } });
+        expect(convertReasoningConfig(request, "z-ai/glm-5.2", OR)).toEqual({
+          reasoning: { max_tokens: 4000 },
+        });
+      });
+
+      it("combines effort routing with exclude for effort-family models", () => {
+        const request = createLlmRequest({
+          config: {
+            thinkingConfig: { includeThoughts: false, thinkingBudget: 1000 },
+          },
+        });
+        const result = convertReasoningConfig(request, "openai/gpt-5-mini", OR);
+        expect(result).toEqual({
+          reasoning: { effort: "low", exclude: true },
+        });
+      });
+    });
+
+    describe("multi-turn reasoning_details echo (openrouter style)", () => {
+      const OR = { reasoning: { style: "openrouter" as const } };
+      const details = [
+        { type: "reasoning.text", text: "thinking...", signature: "sig-abc" },
+      ];
+
+      it("echoes reasoning_details verbatim and drops thought text from content", () => {
+        const request = createLlmRequest({
+          contents: [
+            {
+              role: "model",
+              parts: [
+                {
+                  text: "thinking...",
+                  thought: true,
+                  thoughtSignature: JSON.stringify(details),
+                },
+                { text: "The answer is 782." },
+              ],
+            },
+          ],
+        });
+        const result = convertRequest(
+          request,
+          "anthropic/claude-sonnet-4.5",
+          OR,
+        );
+        const msg = messageFields(result.messages[0]);
+        expect(msg.role).toBe("assistant");
+        expect(msg.content).toBe("The answer is 782.");
+        expect(msg.reasoning_details).toEqual(details);
+      });
+
+      it("still echoes reasoning_details when a planner cleared the thought flag", () => {
+        // ADK's NlPlanningRequestProcessor removes `thought` but keeps
+        // `thoughtSignature` on every history part.
+        const request = createLlmRequest({
+          contents: [
+            {
+              role: "model",
+              parts: [
+                {
+                  text: "thinking...",
+                  thoughtSignature: JSON.stringify(details),
+                },
+                { text: "The answer is 782." },
+              ],
+            },
+          ],
+        });
+        const msg = messageFields(
+          convertRequest(request, "anthropic/claude-sonnet-4.5", OR)
+            .messages[0],
+        );
+        expect(msg.content).toBe("The answer is 782.");
+        expect(msg.reasoning_details).toEqual(details);
+      });
+
+      it("never treats a function call or response part as a thought, even with a reasoning signature", () => {
+        const request = createLlmRequest({
+          contents: [
+            {
+              role: "model",
+              parts: [
+                {
+                  functionCall: { id: "c1", name: "f", args: { a: 1 } },
+                  thoughtSignature: JSON.stringify(details),
+                },
+              ],
+            },
+          ],
+        });
+        const msg = messageFields(
+          convertRequest(request, "anthropic/claude-sonnet-4.5", OR)
+            .messages[0],
+        );
+        expect(msg.tool_calls).toEqual([
+          {
+            id: "c1",
+            type: "function",
+            function: { name: "f", arguments: '{"a":1}' },
+          },
+        ]);
+        expect(msg).not.toHaveProperty("reasoning_details");
+      });
+
+      it("does not treat foreign signatures (Gemini base64, other JSON) as reasoning", () => {
+        for (const signature of [
+          "CiQBjz1rX3abc/+=",
+          JSON.stringify([{ foo: "bar" }]),
+          JSON.stringify({ type: "reasoning.text" }),
+          JSON.stringify([]),
+        ]) {
+          const request = createLlmRequest({
+            contents: [
+              {
+                role: "model",
+                parts: [
+                  { text: "visible answer", thoughtSignature: signature },
+                ],
+              },
+            ],
+          });
+          const msg = messageFields(
+            convertRequest(request, "google/gemini-3", OR).messages[0],
+          );
+          expect(msg.content).toBe("visible answer");
+          expect(msg).not.toHaveProperty("reasoning_details");
+        }
+      });
+
+      it("keeps a signature-only part as visible text under the strict style", () => {
+        const request = createLlmRequest({
+          contents: [
+            {
+              role: "model",
+              parts: [
+                { text: "answer", thoughtSignature: JSON.stringify(details) },
+              ],
+            },
+          ],
+        });
+        const msg = messageFields(
+          convertRequest(request, "gpt-5", {
+            reasoning: { style: "openai-effort" },
+          }).messages[0],
+        );
+        expect(msg.content).toBe("answer");
+      });
+
+      it("round-trips an encrypted-only thought part that has no text", () => {
+        const encrypted = [
+          { type: "reasoning.encrypted", data: "gAAAA-opaque", index: 0 },
+        ];
+        const request = createLlmRequest({
+          contents: [
+            {
+              role: "model",
+              parts: [
+                { thought: true, thoughtSignature: JSON.stringify(encrypted) },
+                { functionCall: { id: "c1", name: "f", args: {} } },
+              ],
+            },
+          ],
+        });
+        const msg = messageFields(
+          convertRequest(request, "x-ai/grok-4.3", OR).messages[0],
+        );
+        expect(msg.reasoning_details).toEqual(encrypted);
+        expect((msg.tool_calls as unknown[]).length).toBe(1);
+        expect(msg.content).toBeNull();
+      });
+
+      it("drops display-only thought text and adds no reasoning_details key", () => {
+        const request = createLlmRequest({
+          contents: [
+            {
+              role: "model",
+              parts: [
+                { text: "let me think", thought: true },
+                { text: "Final answer." },
+              ],
+            },
+          ],
+        });
+        const result = convertRequest(request, "z-ai/glm-5.2", OR);
+        const msg = messageFields(result.messages[0]);
+        expect(msg.content).toBe("Final answer.");
+        expect(msg).not.toHaveProperty("reasoning_details");
+      });
+
+      it("strips thought parts from content under the strict (openai-effort) style too", () => {
+        const request = createLlmRequest({
+          contents: [
+            {
+              role: "model",
+              parts: [
+                {
+                  text: "secret reasoning",
+                  thought: true,
+                  thoughtSignature: JSON.stringify(details),
+                },
+                { text: "Answer." },
+              ],
+            },
+          ],
+        });
+        // No opts -> strict default: thought text stripped, no reasoning_details.
+        const result = convertRequest(request, "gpt-5");
+        const msg = messageFields(result.messages[0]);
+        expect(msg.content).toBe("Answer.");
+        expect(msg).not.toHaveProperty("reasoning_details");
+      });
+    });
+
     describe("strict:false on partial schemas", () => {
       it("defaults strict:false for a responseSchema missing additionalProperties/required", () => {
         const request = createLlmRequest({
           config: {
             responseSchema: {
-              type: "OBJECT",
+              type: Type.OBJECT,
               properties: {
-                a: { type: "STRING" },
+                a: { type: Type.STRING },
                 b: { type: "NUMBER" },
               },
               // no required, no additionalProperties -> would 400 under strict
@@ -1070,16 +1832,15 @@ describe("convertRequest", () => {
 
   describe("Gemini-only built-in tools", () => {
     function withConsoleWarn<T>(fn: () => T): { result: T; warns: string[] } {
-      const warns: string[] = [];
-      const original = console.warn;
-      console.warn = (...args: unknown[]) => {
-        warns.push(args.map(String).join(" "));
-      };
+      const warnSpy = captureWarnings();
       try {
         const result = fn();
-        return { result, warns };
+        return {
+          result,
+          warns: warnSpy.mock.calls.map((c) => String(c[0])),
+        };
       } finally {
-        console.warn = original;
+        warnSpy.mockRestore();
       }
     }
 
@@ -1124,7 +1885,7 @@ describe("convertRequest", () => {
       const { result, warns } = withConsoleWarn(() => convertRequest(request));
 
       expect(result.tools).toHaveLength(1);
-      expect(result.tools?.[0].function.name).toBe("get_weather");
+      expect(functionTool(result.tools?.[0]).function.name).toBe("get_weather");
       expect(warns).toHaveLength(1);
       expect(warns[0]).toContain("codeExecution");
     });
@@ -1221,5 +1982,131 @@ describe("convertRequest", () => {
         expect(result.params ?? {}).not.toHaveProperty(forbidden);
       }
     });
+  });
+});
+
+describe("convertRequest tool declarations", () => {
+  const schema = {
+    type: "object",
+    properties: { a: { type: "string" } },
+    required: ["a"],
+  };
+
+  it("forwards parametersJsonSchema as-is", () => {
+    const result = convertRequest(
+      createLlmRequest({
+        config: {
+          tools: [
+            {
+              functionDeclarations: [
+                { name: "f", description: "d", parametersJsonSchema: schema },
+              ],
+            },
+          ],
+        },
+      }),
+    );
+    expect(result.tools?.[0]).toEqual({
+      type: "function",
+      function: { name: "f", description: "d", parameters: schema },
+    });
+  });
+
+  it("prefers parametersJsonSchema over parameters", () => {
+    const result = convertRequest(
+      createLlmRequest({
+        config: {
+          tools: [
+            {
+              functionDeclarations: [
+                {
+                  name: "f",
+                  parameters: { type: Type.OBJECT, properties: {} },
+                  parametersJsonSchema: schema,
+                },
+              ],
+            },
+          ],
+        },
+      }),
+    );
+    expect(functionTool(result.tools?.[0]).function.parameters).toEqual(schema);
+  });
+
+  it("still normalizes Gemini-style parameters and defaults to an empty object", () => {
+    const result = convertRequest(
+      createLlmRequest({
+        config: {
+          tools: [
+            {
+              functionDeclarations: [
+                {
+                  name: "g",
+                  parameters: {
+                    type: Type.OBJECT,
+                    properties: { x: { type: Type.STRING } },
+                  },
+                },
+                { name: "h" },
+              ],
+            },
+          ],
+        },
+      }),
+    );
+    expect(functionTool(result.tools?.[0]).function.parameters).toEqual({
+      type: "object",
+      properties: { x: { type: "string" } },
+    });
+    expect(functionTool(result.tools?.[1]).function.parameters).toEqual({
+      type: "object",
+      properties: {},
+    });
+  });
+});
+
+describe("convertRequest warnings (ADK logger)", () => {
+  it("routes warnings through ADK's logger with stable codes", () => {
+    const spy = captureWarnings();
+    try {
+      convertRequest(
+        createLlmRequest({
+          contents: [
+            {
+              role: "model",
+              parts: [{ functionCall: { name: "f", args: {} } }],
+            },
+          ],
+        }),
+      );
+    } finally {
+      spy.mockRestore();
+    }
+    expect(spy.codes).toEqual(["TOOL_CALL_MISSING_ID"]);
+  });
+
+  it("logs a repeated media warning once per request, not once per part", () => {
+    const spy = captureWarnings();
+    const turn = {
+      role: "model",
+      parts: [
+        { inlineData: { mimeType: "image/png", data: "AA==" } },
+        { text: "x" },
+      ],
+    };
+    try {
+      convertRequest(
+        createLlmRequest({ contents: [turn, turn, turn] as never }),
+      );
+      expect(spy.codes).toEqual(["IMAGE_DROPPED_ON_MODEL_TURN"]);
+      // A new request starts a new scope.
+      convertRequest(createLlmRequest({ contents: [turn] as never }));
+      expect(spy.codes).toEqual([
+        "IMAGE_DROPPED_ON_MODEL_TURN",
+        "IMAGE_DROPPED_ON_MODEL_TURN",
+      ]);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });

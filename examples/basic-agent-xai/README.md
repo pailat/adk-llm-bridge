@@ -1,6 +1,13 @@
 # Basic Agent with xAI (Grok)
 
+## What it shows
+
 A multi-agent HelpDesk system using [xAI](https://x.ai/) Grok as the LLM provider.
+
+## Requirements
+
+- Bun and Node.js 22 or newer.
+- `XAI_API_KEY`
 
 ## Architecture
 
@@ -17,7 +24,7 @@ graph TD
     Support --> T4[reset_password]
 ```
 
-## Setup
+## Run
 
 1. Copy the environment file and add your xAI API key:
    ```bash
@@ -37,9 +44,9 @@ graph TD
 
 ## Supported Models
 
-- `grok-3-beta` (default)
-- `grok-3-fast-beta`
-- `grok-2`
+- `grok-4.7` (default)
+- `grok-4.6`
+- `grok-4.5`
 
 To change the model, edit `agent.ts` and update the `model` property.
 

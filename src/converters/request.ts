@@ -1,16 +1,8 @@
 /**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
-/**
  * Request converter for ADK to OpenAI format.
  *
  * This module handles the conversion of ADK LlmRequest objects to
  * OpenAI-compatible chat completion request format.
- *
- * @module converters/request
  */
 
 import type { LlmRequest } from "@google/adk";
@@ -20,58 +12,89 @@ import {
   type Part,
 } from "@google/genai";
 import type OpenAI from "openai";
+import type { ReasoningCapability } from "../core/provider-definition.js";
+import { LogCode, WarningScope, warn } from "../utils/log.js";
+import { uriScheme } from "../utils/uri.js";
 import { normalizeSchema } from "./schema.js";
+import { ToolCallIdCorrelator } from "./tool-call-ids.js";
+import {
+  extractSystemInstruction,
+  normalizeJsonSchemaValue,
+  readToolDeclarations,
+  serializeToolResponse,
+} from "./tool-declarations.js";
+
+/**
+ * Provider-aware options forwarded into {@link convertRequest}.
+ *
+ * Carries the declarative {@link ReasoningCapability} so the request converter
+ * can choose between the strict `reasoning_effort` path (OpenAI/xAI) and the
+ * permissive native `reasoning` object path (OpenRouter/AI Gateway).
+ */
+export interface ConvertRequestOptions {
+  /** Reasoning capability from the provider definition (undefined = strict). */
+  reasoning?: ReasoningCapability;
+  /**
+   * Output-limit parameter for models the name rules do not mark as reasoning
+   * models. Reasoning models always get `max_completion_tokens`.
+   *
+   * @defaultValue `"max_tokens"`
+   */
+  maxTokensParam?: "max_tokens" | "max_completion_tokens";
+}
 
 /**
  * Extracts the bare model name from a possibly provider-prefixed id.
  *
- * OpenAI-compatible providers accept ids like `gpt-5`, `openai/gpt-5`,
- * `o3-mini`, or `x-ai/grok-4`. For feature gating we only care about the final
+ * OpenAI-compatible providers accept ids like `gpt-6.1-sol`,
+ * `openai/gpt-6.1-sol`, `o3-mini`, or `x-ai/grok-4.7`. For feature gating we only care about the final
  * segment (the actual model name), lowercased for case-insensitive matching.
+ * An OpenAI fine-tune id (`ft:<base>:<org>:<suffix>:<id>`) yields its base
+ * model, so `ft:o4-mini-2025-04-16:org::abc` gives `o4-mini-2025-04-16`.
  *
  * @internal
  */
 function bareModelName(model: string | undefined): string {
   if (!model) return "";
   const slash = model.lastIndexOf("/");
-  const name = slash >= 0 ? model.slice(slash + 1) : model;
-  return name.toLowerCase();
+  let name = (slash >= 0 ? model.slice(slash + 1) : model).toLowerCase();
+  if (name.startsWith("ft:")) {
+    const end = name.indexOf(":", 3);
+    name = end >= 0 ? name.slice(3, end) : name.slice(3);
+  }
+  return name;
 }
 
 /**
- * Detects OpenAI reasoning-style models that reject `max_tokens` and require
- * `max_completion_tokens` instead.
+ * Detects OpenAI reasoning models, which reject `max_tokens` and sampling
+ * controls and require `max_completion_tokens`.
  *
- * These are the GPT-5 family and the o-series (o1/o3/o4...). Sending plain
- * `max_tokens` to these models returns a 400 ("Unsupported parameter:
- * 'max_tokens' ... Use 'max_completion_tokens' instead"). Non-OpenAI providers
- * (xAI Grok, OpenRouter, etc.) continue to use `max_tokens`.
+ * Matches by family and version, so new releases need no code change:
+ * `gpt-<N>` with N of 5 or more (`gpt-5`, `gpt-5.1-codex`, `gpt-6.1-sol`,
+ * `gpt-7`, ...) and the o-series `o<N>` (`o1`, `o3-mini`, `o4-mini`, ...).
+ * `gpt-4o` and other `gpt-4*` / `gpt-3.5*` chat models do not match. The
+ * provider prefix (`openai/`), an `ft:` fine-tune id and case are ignored.
  *
  * @internal
  */
 export function usesMaxCompletionTokens(model: string | undefined): boolean {
   const name = bareModelName(model);
   if (!name) return false;
-  // GPT-5 family (gpt-5, gpt-5-mini, gpt-5.1, gpt-5-codex, ...).
-  if (/^gpt-5/.test(name)) return true;
-  // o-series reasoning models: o1, o3, o4 (and -mini/-pro variants).
-  // Guard against false positives like "gpt-4o" by anchoring at the start.
-  if (/^o[134](?:-|$)/.test(name)) return true;
-  return false;
+  const gpt = /^gpt-(\d+)/.exec(name);
+  if (gpt) return Number(gpt[1]) >= 5;
+  return /^o\d+(?:-|$)/.test(name);
 }
 
 /**
  * Detects models that accept the `reasoning_effort` parameter.
  *
- * Reasoning-capable models only — sending `reasoning_effort` to a plain chat
- * model (gpt-4.1, gpt-4o, grok-4 non-reasoning, ...) returns a 400
- * ("Unsupported value: 'reasoning_effort' ..."). Covers:
- * - OpenAI GPT-5 family + o-series (same set as {@link usesMaxCompletionTokens})
- * - xAI Grok reasoning variants (e.g. `grok-4-fast-reasoning`,
- *   `grok-3-mini`/`grok-3-mini-fast`, which expose reasoning_effort)
- *
- * When in doubt this returns false, so reasoning_effort is dropped rather than
- * risking a 400 on a non-reasoning model.
+ * Sending `reasoning_effort` to a plain chat model (gpt-4.1, gpt-4o, grok-4)
+ * returns a 400 on the direct APIs, so this returns false when in doubt.
+ * Covers:
+ * - every OpenAI reasoning model ({@link usesMaxCompletionTokens});
+ * - xAI `grok-3-mini*` and the explicit `*-reasoning` Grok variants, but not
+ *   `*-non-reasoning`. Other Grok 4.x models reason on their own and showed
+ *   no response to `reasoning_effort`, so they do not get it.
  *
  * @internal
  */
@@ -79,11 +102,9 @@ export function supportsReasoningEffort(model: string | undefined): boolean {
   const name = bareModelName(model);
   if (!name) return false;
   if (usesMaxCompletionTokens(name)) return true;
-  // xAI Grok reasoning variants expose reasoning_effort. Grok-3 mini models and
-  // the explicit "*-reasoning" Grok variants reason; plain grok-4 does not.
-  if (/^grok-3-mini/.test(name)) return true;
-  if (/^grok-.*reasoning/.test(name)) return true;
-  return false;
+  if (!name.startsWith("grok-")) return false;
+  if (name.includes("non-reasoning")) return false;
+  return name.startsWith("grok-3-mini") || name.includes("reasoning");
 }
 
 /**
@@ -176,8 +197,12 @@ export interface ConvertedRequest {
 export function convertRequest(
   llmRequest: LlmRequest,
   model?: string,
+  opts?: ConvertRequestOptions,
 ): ConvertedRequest {
   const messages: OpenAI.ChatCompletionMessageParam[] = [];
+  const toolCallIdCorrelation = new ToolCallIdCorrelator();
+  // One scope per request: a long history logs each repeated condition once.
+  const warnings = new WarningScope();
 
   const systemContent = extractSystemInstruction(llmRequest);
   if (systemContent) {
@@ -185,10 +210,16 @@ export function convertRequest(
   }
 
   for (const content of llmRequest.contents ?? []) {
-    processContent(content, messages);
+    processContent(
+      content,
+      messages,
+      toolCallIdCorrelation,
+      warnings,
+      opts?.reasoning,
+    );
   }
 
-  const tools = convertTools(llmRequest);
+  const tools = convertTools(llmRequest, warnings);
 
   // Prefer the caller-supplied model (the LLM instance's resolved model id),
   // falling back to the request's model field. Used for provider feature gating
@@ -196,9 +227,9 @@ export function convertRequest(
   const resolvedModel = model ?? llmRequest.model;
 
   const params: Record<string, unknown> = {
-    ...convertGenerationConfig(llmRequest, resolvedModel),
+    ...convertGenerationConfig(llmRequest, resolvedModel, opts),
     ...convertStructuredOutput(llmRequest),
-    ...convertReasoningConfig(llmRequest, resolvedModel),
+    ...convertReasoningConfig(llmRequest, resolvedModel, opts),
     ...convertLogprobsConfig(llmRequest, resolvedModel),
   };
 
@@ -224,16 +255,19 @@ export function convertRequest(
 export function convertGenerationConfig(
   req: LlmRequest,
   model?: string,
+  opts?: ConvertRequestOptions,
 ): Record<string, unknown> {
   const config = req.config;
   if (!config) return {};
+
+  assertSupportedCandidateCount(config.candidateCount);
 
   const resolvedModel = model ?? req.model;
   const reasoningModel = usesMaxCompletionTokens(resolvedModel);
 
   const params: Record<string, unknown> = {};
 
-  // OpenAI reasoning models (gpt-5*, o-series) reject sampling controls
+  // OpenAI reasoning models (gpt-5 and later, o-series) reject sampling controls
   // ENTIRELY: temperature and top_p both return a 400 ("Unsupported value")
   // even when set to their defaults. They only accept reasoning_effort/verbosity
   // for steering. Drop temperature/top_p for reasoning models; keep them for
@@ -242,10 +276,11 @@ export function convertGenerationConfig(
     params.temperature = config.temperature;
   if (config.topP !== undefined && !reasoningModel) params.top_p = config.topP;
   if (config.maxOutputTokens !== undefined) {
-    // OpenAI reasoning models (gpt-5*, o-series) REJECT max_tokens with a 400 —
-    // they require max_completion_tokens (which also covers reasoning tokens).
-    // Everything else (xAI, OpenRouter, plain OpenAI chat models) uses max_tokens.
-    if (reasoningModel) {
+    // OpenAI reasoning models reject max_tokens with a 400 and require
+    // max_completion_tokens (which also covers reasoning tokens). A provider
+    // can make max_completion_tokens its default (OpenAI: max_tokens is
+    // deprecated there); everything else uses max_tokens.
+    if (reasoningModel || opts?.maxTokensParam === "max_completion_tokens") {
       params.max_completion_tokens = config.maxOutputTokens;
     } else {
       params.max_tokens = config.maxOutputTokens;
@@ -261,10 +296,6 @@ export function convertGenerationConfig(
     params.presence_penalty = config.presencePenalty;
   if (config.frequencyPenalty !== undefined && !reasoningModel)
     params.frequency_penalty = config.frequencyPenalty;
-  // n>1 stays cosmetic: convertResponse reads choices[0] only. Reasoning
-  // models (gpt-5*, o-series) reject n>1 with a 400, so drop it for them.
-  if (config.candidateCount !== undefined && !reasoningModel)
-    params.n = config.candidateCount;
   // topK intentionally dropped — no OpenAI Chat Completions equivalent.
   // Reasoning is handled separately in convertReasoningConfig.
 
@@ -272,39 +303,139 @@ export function convertGenerationConfig(
 }
 
 /**
- * Maps ADK `thinkingConfig` to an OpenAI-compatible `reasoning_effort`.
+ * Rejects unsupported ADK response-candidate counts.
  *
- * GPT-5 / o-series and other reasoning-capable OpenAI-compatible models accept
- * a `reasoning_effort` of "low" | "medium" | "high" on the Chat Completions
- * body. ADK expresses reasoning intent via `config.thinkingConfig`
- * (`thinkingBudget`, `includeThoughts`). We map the budget to coarse buckets:
+ * The bridge produces one ADK `LlmResponse` for each provider response, so it
+ * cannot faithfully represent multiple Chat Completions choices from a single
+ * response. The shared request converter runs before both streaming and
+ * non-streaming provider calls; rejecting here prevents providers from
+ * generating paid choices that the bridge would discard. A `candidateCount`
+ * of `1` remains supported and is omitted because Chat Completions defaults to
+ * one choice.
  *
- * - budget <= 0 (or `includeThoughts === false` with no budget) -> not emitted
- * - 0 < budget <= 2048 -> "low"
- * - 2048 < budget <= 8192 -> "medium"
- * - budget > 8192 -> "high"
- * - no budget set (but thinkingConfig present) -> "medium" (sensible default)
+ * @param candidateCount - Requested number of ADK response candidates
+ * @throws {@link Error} When a provided value is anything other than integer `1`
+ * @internal
+ */
+function assertSupportedCandidateCount(candidateCount: unknown): void {
+  if (candidateCount === undefined) return;
+
+  if (
+    typeof candidateCount !== "number" ||
+    !Number.isInteger(candidateCount) ||
+    candidateCount !== 1
+  ) {
+    throw new Error(
+      "candidateCount must be exactly 1 when provided: adk-llm-bridge returns one ADK LlmResponse per provider response and cannot represent multiple Chat Completions choices. Set candidateCount to 1 or omit it.",
+    );
+  }
+}
+
+/**
+ * Buckets an ADK `thinkingBudget` into a coarse `reasoning_effort` level.
  *
- * CRITICAL: `reasoning_effort` is only emitted when `thinkingConfig` is present
- * AND the resolved model is reasoning-capable. gpt-4.1, gpt-4o, plain grok-4,
- * etc. return a 400 on `reasoning_effort`, so when a model is supplied and it is
- * NOT reasoning-capable we drop it entirely. When no model is supplied we keep
- * the legacy thinkingConfig-only behavior (used by callers that gate elsewhere).
+ * - no budget set → "medium" (sensible default)
+ * - `0 < budget ≤ 2048` → "low"
+ * - `2048 < budget ≤ 8192` → "medium"
+ * - `budget > 8192` → "high"
+ *
+ * Callers handle the budget ≤ 0 ("disable") case before calling this.
+ *
+ * @internal
+ */
+function budgetToEffort(
+  budget: number | null | undefined,
+): "low" | "medium" | "high" {
+  if (budget === undefined || budget === null) return "medium";
+  if (budget <= 2048) return "low";
+  if (budget <= 8192) return "medium";
+  return "high";
+}
+
+/**
+ * Decides which depth lever a budget should steer for an OpenRouter-routed
+ * model: the coarse `reasoning.effort` bucket vs the token-precise
+ * `reasoning.max_tokens`.
+ *
+ * OpenRouter rejects sending BOTH `reasoning.effort` and `reasoning.max_tokens`
+ * in one request ("Only one of 'reasoning.effort' and 'reasoning.max_tokens'
+ * can be specified"), so a single ADK `thinkingBudget` must be mapped to exactly
+ * one of them — and the choice must match the lever the target model family
+ * actually honors:
+ *
+ * - **effort-family**: OpenAI reasoning models (gpt-5 and later, o-series) and xAI Grok
+ *   reasoners IGNORE `max_tokens` through OpenRouter but respond cleanly to
+ *   `effort` (verified: gpt-5-mini low→high ~10x reasoning tokens). Anthropic
+ *   thinking is also routed via `effort` here (OpenRouter maps it to a thinking
+ *   budget under the hood and `effort` gives monotonic control). These reuse the
+ *   existing {@link supportsReasoningEffort} model-name gate.
+ * - **everything else** (gemini thinking, glm/deepseek, and unknown/default
+ *   reasoners): honor `max_tokens` cleanly (verified: gemini-2.5-flash
+ *   256→16384 budget scales reasoning tokens monotonically), so a budget maps
+ *   to `max_tokens`.
+ *
+ * @returns `"effort"` for effort-family models, otherwise `"max_tokens"`
+ * @internal
+ */
+function openRouterBudgetLever(
+  model: string | undefined,
+): "effort" | "max_tokens" {
+  return supportsReasoningEffort(model) ? "effort" : "max_tokens";
+}
+
+/**
+ * Maps ADK `thinkingConfig` to a provider-appropriate reasoning param.
+ *
+ * Behavior is selected by the provider's declarative {@link ReasoningCapability}
+ * (`opts.reasoning.style`); when absent the strict `"openai-effort"` path is
+ * used.
+ *
+ * **`"openai-effort"` (strict — OpenAI, xAI, manual/custom):**
+ * Emit `reasoning_effort` of "low" | "medium" | "high" ONLY when the resolved
+ * model is reasoning-capable (the {@link supportsReasoningEffort} model-name
+ * gate). gpt-4.1, gpt-4o, plain grok-4, etc. return a 400 on `reasoning_effort`,
+ * so when a model is supplied and it is NOT reasoning-capable we drop it
+ * entirely. When no model is supplied we keep the legacy emit behavior (used by
+ * callers that gate elsewhere). The budget bucketing is described in
+ * {@link budgetToEffort}.
+ *
+ * **`"openrouter"` (permissive — OpenRouter, AI Gateway):**
+ * NO model-name gate (these providers return HTTP 200 and ignore reasoning on
+ * non-reasoning models). Build the native OpenRouter `reasoning` object:
+ * - `includeThoughts === false` → `{ exclude: true }` (reason but do not
+ *   surface the thoughts) merged with the enable controls below.
+ * - `thinkingBudget > 0` → a SINGLE depth lever chosen by
+ *   {@link openRouterBudgetLever}: `{ effort: <bucket> }` for effort-family
+ *   models (OpenAI/xAI/Anthropic reasoners, which ignore `max_tokens` via
+ *   OpenRouter) or `{ max_tokens: budget }` for everything else (gemini and
+ *   default reasoners). Only one may be sent — OpenRouter 400s if both are
+ *   present.
+ * - `thinkingBudget === 0` (explicit) → `{ enabled: false }` (leave reasoning
+ *   off).
+ * - `thinkingBudget` unset (but `thinkingConfig` present) → `{ effort: "medium" }`
+ *   (sensible enable default; no `max_tokens`).
  *
  * @param req - The LLM request
  * @param model - The resolved model id (for reasoning-capability gating)
- * @returns A params object with `reasoning_effort`, or `{}` when not applicable
+ * @param opts - Provider-aware options carrying the reasoning capability
+ * @returns A params object with `reasoning_effort` or a native `reasoning`
+ *   object, or `{}` when not applicable
  */
 export function convertReasoningConfig(
   req: LlmRequest,
   model?: string,
+  opts?: ConvertRequestOptions,
 ): Record<string, unknown> {
   const thinking = req.config?.thinkingConfig;
   if (!thinking) return {};
 
-  // When a model is known, only emit reasoning_effort for reasoning-capable
-  // models. If no model is supplied, fall back to the request's model field;
-  // if that is also absent, keep the legacy behavior (emit).
+  if (opts?.reasoning?.style === "openrouter") {
+    return convertOpenRouterReasoning(thinking, model ?? req.model);
+  }
+
+  // Strict "openai-effort" path (default). When a model is known, only emit
+  // reasoning_effort for reasoning-capable models. If no model is supplied, fall
+  // back to the request's model field; if that is also absent, emit (legacy).
   const resolvedModel = model ?? req.model;
   if (resolvedModel && !supportsReasoningEffort(resolvedModel)) return {};
 
@@ -314,24 +445,58 @@ export function convertReasoningConfig(
   // left at its own default behavior rather than forced to reason.
   if (budget !== undefined && budget !== null && budget <= 0) return {};
 
-  let effort: "low" | "medium" | "high";
-  if (budget === undefined || budget === null) {
-    effort = "medium";
-  } else if (budget <= 2048) {
-    effort = "low";
-  } else if (budget <= 8192) {
-    effort = "medium";
+  return { reasoning_effort: budgetToEffort(budget) };
+}
+
+/**
+ * Builds the native OpenRouter `reasoning` object from ADK `thinkingConfig`.
+ *
+ * See {@link convertReasoningConfig} for the mapping rules. Returns `{}` only
+ * when there is nothing meaningful to send.
+ *
+ * @param thinking - The ADK thinkingConfig
+ * @param model - The resolved model id (selects the depth lever for a budget;
+ *   see {@link openRouterBudgetLever})
+ * @internal
+ */
+function convertOpenRouterReasoning(
+  thinking: NonNullable<NonNullable<LlmRequest["config"]>["thinkingConfig"]>,
+  model: string | undefined,
+): Record<string, unknown> {
+  const budget = thinking.thinkingBudget;
+  const reasoning: Record<string, unknown> = {};
+
+  if (budget !== undefined && budget !== null && budget <= 0) {
+    // Explicit disable: turn reasoning off rather than forcing it on.
+    reasoning.enabled = false;
+  } else if (budget !== undefined && budget !== null) {
+    // A budget is given. OpenRouter 400s if BOTH `max_tokens` and `effort` are
+    // present ("Only one of 'reasoning.effort' and 'reasoning.max_tokens' can be
+    // specified"), so route the budget to the SINGLE lever the target model
+    // family actually honors (effort-family ignore max_tokens via OpenRouter).
+    if (openRouterBudgetLever(model) === "effort") {
+      reasoning.effort = budgetToEffort(budget);
+    } else {
+      reasoning.max_tokens = budget;
+    }
   } else {
-    effort = "high";
+    // thinkingConfig present without a budget: enable with a sensible default.
+    reasoning.effort = "medium";
   }
 
-  return { reasoning_effort: effort };
+  // includeThoughts === false means "reason internally but don't surface the
+  // thoughts". Map to exclude:true (still reasons; thoughts not returned).
+  if (thinking.includeThoughts === false) {
+    reasoning.exclude = true;
+  }
+
+  return Object.keys(reasoning).length ? { reasoning } : {};
 }
 
 /**
  * Maps ADK logprobs config to OpenAI-compatible `logprobs` / `top_logprobs`.
  *
- * ADK (@google/genai GenerateContentConfig) expresses logprobs intent via:
+ * ADK (`GenerateContentConfig` from `@google/genai`) expresses logprobs intent via:
  * - `responseLogprobs` (boolean) — request log probabilities of output tokens
  * - `logprobs` (number) — how many top alternatives to return per token
  *
@@ -341,8 +506,8 @@ export function convertReasoningConfig(
  *   `logprobs: true`
  *
  * Mapping rules (each field only emitted when set, never blind-spread):
- * - `responseLogprobs === true` -> `logprobs: true`
- * - `logprobs` (number) -> `top_logprobs: <n>`. Because OpenAI requires
+ * - `responseLogprobs === true` → `logprobs: true`
+ * - `logprobs` (number) → `top_logprobs: <n>`. Because OpenAI requires
  *   `logprobs: true` whenever `top_logprobs` is present, we also force
  *   `logprobs: true` so the count is never sent in isolation (which providers
  *   reject).
@@ -350,7 +515,7 @@ export function convertReasoningConfig(
  * CRITICAL: nothing is emitted unless one of these ADK fields is explicitly
  * set, so non-logprobs requests are completely unaffected.
  *
- * OpenAI reasoning models (gpt-5*, o-series) do NOT support logprobs at all —
+ * OpenAI reasoning models (gpt-5 and later, o-series) do NOT support logprobs at all —
  * sending `logprobs`/`top_logprobs` returns a 400. When the resolved model is a
  * reasoning model these fields are dropped (rather than risking the 400). They
  * are still emitted for every other model that requested them.
@@ -389,9 +554,9 @@ export function convertLogprobsConfig(
 /**
  * Maps ADK `functionCallingConfig` to an OpenAI `tool_choice`.
  *
- * - AUTO -> "auto"
- * - NONE -> "none"
- * - ANY / VALIDATED -> "required" (or a specific function when exactly one
+ * - AUTO → "auto"
+ * - NONE → "none"
+ * - ANY / VALIDATED → "required" (or a specific function when exactly one
  *   allowedFunctionName is given)
  *
  * @param req - The LLM request
@@ -424,9 +589,10 @@ export function convertToolChoice(
 /**
  * Maps ADK structured-output config to an OpenAI `response_format`.
  *
- * - `responseJsonSchema` -> json_schema (passthrough, already JSON Schema)
- * - `responseSchema` -> json_schema (normalized from Gemini types)
- * - `responseMimeType === "application/json"` only -> json_object
+ * - `responseJsonSchema` → json_schema (already JSON Schema; only string
+ *   int64 counts are converted to integers)
+ * - `responseSchema` → json_schema (normalized from Gemini types)
+ * - `responseMimeType === "application/json"` only → json_object
  *
  * `strict` is intentionally `false`. OpenAI strict mode imposes hard structural
  * requirements (every object must set `additionalProperties: false` and list
@@ -444,13 +610,14 @@ export function convertStructuredOutput(
   if (!config) return {};
 
   if (config.responseJsonSchema) {
+    const jsonSchema = config.responseJsonSchema;
     return {
       response_format: {
         type: "json_schema",
         json_schema: {
           name: "response",
           strict: false,
-          schema: config.responseJsonSchema,
+          schema: normalizeJsonSchemaValue(jsonSchema),
         },
       },
     };
@@ -477,36 +644,52 @@ export function convertStructuredOutput(
 }
 
 /**
- * Extracts the system instruction from an LlmRequest.
+ * Parses an ADK thought part's `thoughtSignature` back into an OpenRouter
+ * `reasoning_details` array.
  *
- * Handles both string and Content object formats.
+ * The response converter stores the entire `reasoning_details` array verbatim as
+ * a JSON string on `thoughtSignature` (so the signed reasoning round-trips
+ * byte-for-byte). Here we parse it back. Display-only thought parts (no parseable
+ * array — e.g. glm/deepseek string reasoning) return undefined, in which case the
+ * thought text is simply dropped from the assistant turn.
  *
- * @param req - The LLM request
- * @returns The system instruction text, or null if not present
+ * @param signature - The thoughtSignature value (may be undefined)
+ * @returns The parsed reasoning_details array, or undefined when not present/valid
  *
  * @internal
  */
-function extractSystemInstruction(req: LlmRequest): string | null {
-  const sys = req.config?.systemInstruction;
-  if (!sys) return null;
-  if (typeof sys === "string") return sys;
-  if ("parts" in sys) return extractText(sys.parts ?? []);
-  return null;
+function parseReasoningDetails(
+  signature: string | undefined,
+): unknown[] | undefined {
+  if (!signature) return undefined;
+  try {
+    const parsed = JSON.parse(signature);
+    return Array.isArray(parsed) ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
- * Extracts text from an array of Parts.
- *
- * @param parts - Array of Part objects
- * @returns Concatenated text from all text parts
+ * Whether a `thoughtSignature` is a `reasoning_details` array produced by this
+ * bridge: a non-empty JSON array of objects whose `type` starts with
+ * `reasoning.` (`reasoning.text`, `reasoning.summary`, `reasoning.encrypted`).
  *
  * @internal
  */
-function extractText(parts: Part[]): string {
-  return parts
-    .map((p) => p.text)
-    .filter(Boolean)
-    .join("\n");
+function isReasoningDetailsSignature(signature: string | undefined): boolean {
+  const parsed = parseReasoningDetails(signature);
+  return (
+    parsed !== undefined &&
+    parsed.length > 0 &&
+    parsed.every(
+      (entry) =>
+        entry !== null &&
+        typeof entry === "object" &&
+        typeof (entry as { type?: unknown }).type === "string" &&
+        (entry as { type: string }).type.startsWith("reasoning."),
+    )
+  );
 }
 
 /**
@@ -522,40 +705,82 @@ function extractText(parts: Part[]): string {
 function processContent(
   content: Content,
   messages: OpenAI.ChatCompletionMessageParam[],
+  correlation: ToolCallIdCorrelator,
+  warnings: WarningScope,
+  reasoning?: ReasoningCapability,
 ): void {
   if (!content.parts?.length) return;
 
   const texts: string[] = [];
   const images: OpenAI.ChatCompletionContentPartImage[] = [];
-  const calls: { id: string; name: string; arguments: string }[] = [];
+  const calls: {
+    id: string;
+    name: string;
+    arguments: string;
+    generated: boolean;
+  }[] = [];
   const responses: { id: string; content: string }[] = [];
+  // reasoning_details arrays parsed from thought parts' thoughtSignature, to be
+  // echoed verbatim on the assistant turn (openrouter style only).
+  const reasoningDetails: unknown[] = [];
 
   for (const part of content.parts) {
+    // Thought parts (captured from a prior assistant turn) must NEVER be folded
+    // back into answer content — re-sending reasoning as plain text pollutes the
+    // context and, for signature-strict upstreams, corrupts the round-trip.
+    // Handled before the text branch so a thought part never falls through.
+    //
+    // ADK's planners (`BuiltInPlanner`, `PlanReActPlanner`) clear `thought` on
+    // every history part before the request is built, but keep
+    // `thoughtSignature`. Our own `reasoning_details` JSON in the signature is
+    // an unambiguous marker (a Gemini signature is opaque base64 and never
+    // parses to this shape), so such a part is still a thought part.
+    if (
+      part.thought ||
+      (reasoning?.style === "openrouter" &&
+        !part.functionCall &&
+        !part.functionResponse &&
+        isReasoningDetailsSignature(part.thoughtSignature))
+    ) {
+      if (reasoning?.style === "openrouter") {
+        const parsed = parseReasoningDetails(part.thoughtSignature);
+        if (parsed) reasoningDetails.push(...parsed);
+      }
+      continue;
+    }
     if (part.text) texts.push(part.text);
-    const image = partToOpenAIImage(part);
+    const image = partToOpenAIImage(part, warnings);
     if (image) images.push(image);
     if (part.functionCall) {
       if (!part.functionCall.id) {
-        console.warn(
-          "[adk-llm-bridge] functionCall missing id, using generated ID",
+        warn(
+          LogCode.TOOL_CALL_MISSING_ID,
+          "functionCall missing id, using generated ID",
         );
       }
       if (!part.functionCall.name) {
-        console.warn("[adk-llm-bridge] functionCall missing name");
+        warn(LogCode.TOOL_CALL_MISSING_NAME, "functionCall missing name");
       }
       calls.push({
-        id: part.functionCall.id ?? `call_${Date.now()}`,
+        id: correlation.callId(part.functionCall.id),
         name: part.functionCall.name ?? "",
         arguments: JSON.stringify(part.functionCall.args ?? {}),
+        generated: !part.functionCall.id,
       });
     }
     if (part.functionResponse) {
       if (!part.functionResponse.id) {
-        console.warn("[adk-llm-bridge] functionResponse missing id");
+        warn(LogCode.TOOL_RESPONSE_MISSING_ID, "functionResponse missing id");
       }
       responses.push({
-        id: part.functionResponse.id ?? "",
-        content: JSON.stringify(part.functionResponse.response ?? {}),
+        id:
+          content.role === "user"
+            ? correlation.response(
+                part.functionResponse.id,
+                part.functionResponse.name,
+              )
+            : correlation.callId(part.functionResponse.id),
+        content: serializeToolResponse(part.functionResponse.response),
       });
     }
   }
@@ -579,22 +804,33 @@ function processContent(
     if (images.length) {
       // OpenAI assistant messages cannot carry images; only user messages can.
       // Drop image parts on a model/assistant turn (keep text + tool_calls).
-      console.warn(
-        "[adk-llm-bridge] dropping image part(s) on an assistant/model turn — " +
+      warnings.warnOnce(
+        LogCode.IMAGE_DROPPED_ON_MODEL_TURN,
+        "dropping image part(s) on an assistant/model turn — " +
           "OpenAI assistant messages cannot carry images",
       );
     }
-    if (texts.length || calls.length) {
+    if (texts.length || calls.length || reasoningDetails.length) {
       const msg: OpenAI.ChatCompletionAssistantMessageParam = {
         role: "assistant",
         content: texts.length ? texts.join("\n") : null,
       };
       if (calls.length) {
+        for (const { id, name, generated } of calls) {
+          correlation.track({ id, name, generated });
+        }
         msg.tool_calls = calls.map((c) => ({
           id: c.id,
           type: "function" as const,
           function: { name: c.name, arguments: c.arguments },
         }));
+      }
+      // Echo signed reasoning back verbatim so signature-strict upstreams
+      // (Anthropic/Gemini thinking via OpenRouter) accept the continuation.
+      // The OpenAI SDK type has no reasoning_details field; attach defensively.
+      if (reasoningDetails.length) {
+        (msg as unknown as Record<string, unknown>).reasoning_details =
+          reasoningDetails;
       }
       messages.push(msg);
     }
@@ -604,8 +840,8 @@ function processContent(
 /**
  * Maps an ADK Part with image media to an OpenAI image content part.
  *
- * - `inlineData` (base64) -> `data:` URL
- * - `fileData` -> the http(s) URI (gs:// and other schemes are dropped)
+ * - `inlineData` (base64) → `data:` URL
+ * - `fileData` → the http(s) URI (gs:// and other schemes are dropped)
  *
  * Non-image media (audio/video) is dropped with a single warning. Returns
  * undefined when the part carries no usable image.
@@ -614,12 +850,14 @@ function processContent(
  */
 function partToOpenAIImage(
   part: Part,
+  warnings: WarningScope,
 ): OpenAI.ChatCompletionContentPartImage | undefined {
   const inline = part.inlineData;
   if (inline?.data && inline.mimeType) {
     if (!inline.mimeType.startsWith("image/")) {
-      console.warn(
-        `[adk-llm-bridge] dropping unsupported inlineData mime type: ${inline.mimeType}`,
+      warnings.warnOnce(
+        LogCode.MEDIA_MIME_UNSUPPORTED,
+        `dropping unsupported inlineData mime type: ${inline.mimeType}`,
       );
       return undefined;
     }
@@ -637,58 +875,22 @@ function partToOpenAIImage(
       file.fileUri.startsWith("https://")
     ) {
       if (!isImage) {
-        console.warn(
-          `[adk-llm-bridge] dropping unsupported fileData mime type: ${file.mimeType}`,
+        warnings.warnOnce(
+          LogCode.MEDIA_MIME_UNSUPPORTED,
+          `dropping unsupported fileData mime type: ${file.mimeType}`,
         );
         return undefined;
       }
       return { type: "image_url", image_url: { url: file.fileUri } };
     }
     // gs:// and other non-fetchable schemes are dropped cleanly.
-    console.warn(
-      `[adk-llm-bridge] dropping non-http fileData URI: ${file.fileUri}`,
+    warnings.warnOnce(
+      LogCode.MEDIA_URI_UNSUPPORTED,
+      `dropping non-http fileData URI (scheme: ${uriScheme(file.fileUri)})`,
     );
   }
 
   return undefined;
-}
-
-/**
- * Gemini-only built-in tool group keys.
- *
- * These are server-side tools (grounding, code execution, retrieval, etc.) that
- * only Gemini/Vertex executes. On OpenAI-compatible providers they have no
- * equivalent, so they are skipped cleanly (never forwarded) and the user is
- * warned once per request that the named built-in(s) won't run.
- *
- * @internal
- */
-const GEMINI_ONLY_TOOL_KEYS = [
-  "googleSearch",
-  "googleSearchRetrieval",
-  "codeExecution",
-  "urlContext",
-  "retrieval",
-  "googleMaps",
-  "enterpriseWebSearch",
-  "computerUse",
-  "fileSearch",
-  "parallelAiSearch",
-  "mcpServers",
-] as const;
-
-/**
- * Collects the names of Gemini-only built-in tools present in a tool group.
- *
- * @param group - A single ADK tool group object
- * @returns The Gemini-only keys present on the group (e.g. ["googleSearch"])
- *
- * @internal
- */
-function collectGeminiOnlyToolNames(group: Record<string, unknown>): string[] {
-  return GEMINI_ONLY_TOOL_KEYS.filter(
-    (key) => group[key] !== undefined && group[key] !== null,
-  );
 }
 
 /**
@@ -707,52 +909,14 @@ function collectGeminiOnlyToolNames(group: Record<string, unknown>): string[] {
  */
 function convertTools(
   req: LlmRequest,
+  warnings: WarningScope,
 ): OpenAI.ChatCompletionTool[] | undefined {
-  const adkTools = req.config?.tools;
-  if (!adkTools?.length) return undefined;
-
-  const tools: OpenAI.ChatCompletionTool[] = [];
-  const droppedBuiltins = new Set<string>();
-
-  for (const group of adkTools) {
-    if (
-      "functionDeclarations" in group &&
-      Array.isArray(group.functionDeclarations)
-    ) {
-      for (const fn of group.functionDeclarations) {
-        if (!fn.name) {
-          console.warn("[adk-llm-bridge] Tool function missing name, skipping");
-          continue;
-        }
-        tools.push({
-          type: "function",
-          function: {
-            name: fn.name,
-            description: fn.description ?? "",
-            parameters: normalizeSchema(fn.parameters) ?? {
-              type: "object",
-              properties: {},
-            },
-          },
-        });
-      }
-    }
-
-    // Skip (and record) any Gemini-only built-in tools on this group.
-    for (const name of collectGeminiOnlyToolNames(
-      group as Record<string, unknown>,
-    )) {
-      droppedBuiltins.add(name);
-    }
-  }
-
-  if (droppedBuiltins.size > 0) {
-    console.warn(
-      `[adk-llm-bridge] dropping Gemini-only built-in tool(s) not supported on this provider: ${[
-        ...droppedBuiltins,
-      ].join(", ")}`,
-    );
-  }
-
+  const tools: OpenAI.ChatCompletionTool[] = readToolDeclarations(
+    req,
+    warnings,
+  ).map((declaration) => ({
+    type: "function",
+    function: declaration,
+  }));
   return tools.length ? tools : undefined;
 }

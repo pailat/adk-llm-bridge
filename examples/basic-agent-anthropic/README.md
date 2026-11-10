@@ -1,6 +1,13 @@
 # Basic Agent with Anthropic (Claude)
 
+## What it shows
+
 A multi-agent HelpDesk system using [Anthropic](https://anthropic.com/) Claude as the LLM provider.
+
+## Requirements
+
+- Bun and Node.js 22 or newer.
+- `ANTHROPIC_API_KEY`
 
 ## Architecture
 
@@ -17,7 +24,7 @@ graph TD
     Support --> T4[reset_password]
 ```
 
-## Setup
+## Run
 
 1. Copy the environment file and add your Anthropic API key:
    ```bash
@@ -37,10 +44,10 @@ graph TD
 
 ## Supported Models
 
-- `claude-sonnet-4-5-20250929` (default)
-- `claude-opus-4-5`
-- `claude-3-5-haiku-latest`
-- `claude-3-sonnet`
+- `claude-sonnet-5-5` (default)
+- `claude-fable-5-1`
+- `claude-opus-5-5`
+- `claude-haiku-5-5`
 
 To change the model, edit `agent.ts` and update the `model` property.
 

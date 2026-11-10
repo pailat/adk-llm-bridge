@@ -17,8 +17,9 @@
  * stop signal). This is the idiomatic ADK way to demonstrate a one-shot forced
  * tool call.
  */
-import { FunctionTool, LlmAgent } from "@google/adk";
+
 import type { Context } from "@google/adk";
+import { FunctionTool, LlmAgent } from "@google/adk";
 import { FunctionCallingConfigMode } from "@google/genai";
 import { z } from "zod";
 import { makeModel } from "../providers";
@@ -87,11 +88,17 @@ export const toolChoiceDemo: Demo = {
         out.label(`call → ${call.name}`, call.args);
       }
     } else {
-      out.label("note", "no function call captured (provider may not support ANY)");
+      out.label(
+        "note",
+        "no function call captured (provider may not support ANY)",
+      );
     }
 
     out.section("final answer");
-    out.label("final", result.finalText.trim() || "(model returned tool call only)");
+    out.label(
+      "final",
+      result.finalText.trim() || "(model returned tool call only)",
+    );
     if (result.stoppedByLlmCallLimit) {
       out.label(
         "note",

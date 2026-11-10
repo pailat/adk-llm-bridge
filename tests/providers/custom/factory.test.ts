@@ -1,6 +1,9 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
 import { CustomLlm } from "../../../src/providers/custom/custom-llm.js";
-import { Custom, createCustomLlm } from "../../../src/providers/custom/factory.js";
+import {
+  Custom,
+  createCustomLlm,
+} from "../../../src/providers/custom/factory.js";
 
 describe("createCustomLlm", () => {
   it("creates a CustomLlm instance", () => {
@@ -29,7 +32,7 @@ describe("createCustomLlm", () => {
   });
 
   describe("common use cases", () => {
-    it("works for Ollama", () => {
+    it("creates an LLM with the model id for Ollama", () => {
       const llm = createCustomLlm({
         name: "ollama",
         model: "llama3",
@@ -38,7 +41,7 @@ describe("createCustomLlm", () => {
       expect(llm.model).toBe("llama3");
     });
 
-    it("works for vLLM", () => {
+    it("creates an LLM with the model id for vLLM", () => {
       const llm = createCustomLlm({
         name: "vllm",
         model: "meta-llama/Llama-3-8b",
@@ -47,7 +50,7 @@ describe("createCustomLlm", () => {
       expect(llm.model).toBe("meta-llama/Llama-3-8b");
     });
 
-    it("works for Azure OpenAI", () => {
+    it("creates an LLM with the model id for Azure OpenAI", () => {
       const llm = createCustomLlm({
         name: "azure",
         model: "gpt-4",
@@ -60,7 +63,7 @@ describe("createCustomLlm", () => {
       expect(llm.model).toBe("gpt-4");
     });
 
-    it("works for LM Studio", () => {
+    it("creates an LLM with the model id for LM Studio", () => {
       const llm = createCustomLlm({
         name: "lmstudio",
         model: "local-model",
@@ -72,6 +75,10 @@ describe("createCustomLlm", () => {
 });
 
 describe("Custom", () => {
+  afterEach(() => {
+    delete process.env.CUSTOM_LLM_BASE_URL;
+  });
+
   it("creates a CustomLlm instance", () => {
     const llm = Custom("llama3", {
       baseURL: "http://localhost:11434/v1",
@@ -106,6 +113,14 @@ describe("Custom", () => {
       baseURL: "http://localhost:11434/v1",
     });
     expect(llm.model).toBe("llama3");
+  });
+
+  it("allows environment-only endpoint configuration", () => {
+    process.env.CUSTOM_LLM_BASE_URL = "http://localhost:11434/v1";
+
+    const llm = Custom("llama3");
+
+    expect(llm).toBeInstanceOf(CustomLlm);
   });
 });
 

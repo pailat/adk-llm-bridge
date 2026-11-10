@@ -1,6 +1,14 @@
 # Basic Agent with OpenAI
 
+## What it shows
+
 A multi-agent HelpDesk system using [OpenAI](https://openai.com/) as the LLM provider.
+
+## Requirements
+
+- Bun and Node.js 22 or newer.
+- `OPENAI_API_KEY`
+- Optional: `OPENAI_ORGANIZATION`, `OPENAI_PROJECT`
 
 ## Architecture
 
@@ -17,7 +25,7 @@ graph TD
     Support --> T4[reset_password]
 ```
 
-## Setup
+## Run
 
 1. Copy the environment file and add your OpenAI API key:
    ```bash
@@ -37,11 +45,10 @@ graph TD
 
 ## Supported Models
 
-- `gpt-4.1` (default)
-- `gpt-4o`
-- `gpt-4o-mini`
-- `o1`, `o3`
-- `chatgpt-4o-latest`
+- `gpt-6.1-sol` (default)
+- `gpt-6-astra`
+- `gpt-6.1-terra`
+- `gpt-6-luna`
 
 To change the model, edit `agent.ts` and update the `model` property.
 

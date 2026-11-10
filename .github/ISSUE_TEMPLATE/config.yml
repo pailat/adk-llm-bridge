@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Documentation
+    url: https://github.com/pailat/adk-llm-bridge/tree/main/docs
+    about: Guides, feature matrix and migration notes.
+  - name: Security vulnerability
+    url: https://github.com/pailat/adk-llm-bridge/security/policy
+    about: Report vulnerabilities privately, not in a public issue. See SECURITY.md.

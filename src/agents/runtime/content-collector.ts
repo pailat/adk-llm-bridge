@@ -1,36 +1,47 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import type { InvocationContext } from "@google/adk";
 import type { Content, Part } from "@google/genai";
 
 /**
- * Reimplementation of ADK's `getContents` (see
- * node_modules/@google/adk/dist/esm/agents/processors/content_processor_utils.js)
- * that is not exposed via the package's public `exports` map. Walks the session
- * event history for the current invocation, filters events by branch and
- * visibility, rewrites foreign-agent turns into user-role context markers, and
- * reorders async function-call/response pairs so each response sits adjacent to
- * its call.
+ * Builds the conversation history of the current invocation from the session
+ * events.
+ *
+ * @remarks
+ * Reimplements ADK's `getContents` (in `content_processor_utils.js` of the
+ * `@google/adk` package), which the package does not export. It filters
+ * events by branch and visibility, rewrites foreign-agent turns into user-role
+ * context markers, and reorders async function-call/response pairs so each
+ * response sits adjacent to its call.
+ *
+ * @param context - The ADK invocation context. A context without a session
+ * yields an empty list.
+ * @returns The history as `Content` turns, ending with the user's message.
  */
 export function collectContents(context: InvocationContext): Content[] {
   const ctxRecord = (context ?? {}) as unknown as Record<string, unknown>;
-  const session = ctxRecord.session as { events?: ReadonlyArray<AdkEventLike> } | undefined;
-  // If no session is present we treat this as a synthetic context and bail out;
-  // the driver fallback path will reconstruct the prompt via extractContextText.
+  const session = ctxRecord.session as
+    | { events?: ReadonlyArray<AdkEventLike> }
+    | undefined;
+  // A context without a session is synthetic; the driver falls back to
+  // rebuilding the prompt from the context text.
   if (!session || !Array.isArray(session.events)) {
     return [];
   }
   const events: ReadonlyArray<AdkEventLike> = session.events;
   const agentName = (ctxRecord.agent as { name?: string } | undefined)?.name;
   const currentBranch =
-    typeof ctxRecord.branch === "string" ? (ctxRecord.branch as string) : undefined;
+    typeof ctxRecord.branch === "string"
+      ? (ctxRecord.branch as string)
+      : undefined;
   const userContent = ctxRecord.userContent as Content | undefined;
+  const invocationId =
+    typeof ctxRecord.invocationId === "string" && ctxRecord.invocationId
+      ? ctxRecord.invocationId
+      : undefined;
 
   const filtered: AdkEventLike[] = [];
+  // The user's own last visible message (not another agent's turn rewritten
+  // as user-role context) and the invocation that wrote it.
+  let lastUserEvent: AdkEventLike | undefined;
   for (const event of events) {
     if (!event || typeof event !== "object") {
       continue;
@@ -39,7 +50,11 @@ export function collectContents(context: InvocationContext): Content[] {
       continue;
     }
     const content = event.content;
-    if (!content || !Array.isArray(content.parts) || content.parts.length === 0) {
+    if (
+      !content ||
+      !Array.isArray(content.parts) ||
+      content.parts.length === 0
+    ) {
       continue;
     }
     if (!hasVisibleContent(content.parts)) {
@@ -57,6 +72,7 @@ export function collectContents(context: InvocationContext): Content[] {
     if (isForeignEvent(agentName, event)) {
       filtered.push(rewriteForeignEvent(event));
     } else {
+      if (event.author === "user") lastUserEvent = event;
       filtered.push(event);
     }
   }
@@ -70,9 +86,20 @@ export function collectContents(context: InvocationContext): Content[] {
     }
   }
 
+  // The Runner (and the invocation gateway) stores the user's message as a
+  // session event with the context's invocation id before the agent runs, so
+  // the current turn is usually already in the history. Skip `userContent`
+  // only when the user's last message was written by this invocation and has
+  // the same parts; an older identical message ("yes", "continue") is history,
+  // not the current turn. The history holds normalized copies, so the parts
+  // are compared, not the objects.
   if (userContent) {
-    const last = contents[contents.length - 1];
-    if (!last || last !== userContent) {
+    const alreadyInHistory =
+      invocationId !== undefined &&
+      lastUserEvent?.invocationId === invocationId &&
+      lastUserEvent.content !== undefined &&
+      sameTurn(lastUserEvent.content, userContent);
+    if (!alreadyInHistory) {
       contents.push(userContent);
     }
   }
@@ -81,10 +108,16 @@ export function collectContents(context: InvocationContext): Content[] {
 }
 
 /**
- * Render `Content[]` into a deterministic prompt string suitable for external
- * runtimes that consume a single text turn.
+ * Renders `Content[]` into a deterministic prompt string for external runtimes
+ * that consume a single text turn.
+ *
+ * @param contents - The conversation turns.
+ * @returns One block per turn, headed `assistant:` or `user:`. Thought parts
+ * are omitted and non-text parts are rendered as short bracketed markers.
  */
-export function flattenContentsToPrompt(contents: ReadonlyArray<Content>): string {
+export function flattenContentsToPrompt(
+  contents: ReadonlyArray<Content>,
+): string {
   const blocks: string[] = [];
   for (const content of contents) {
     const header = content.role === "model" ? "assistant:" : "user:";
@@ -100,13 +133,15 @@ export function flattenContentsToPrompt(contents: ReadonlyArray<Content>): strin
     }
     blocks.push(`${header}\n${partStrings.join("\n")}`);
   }
-  return blocks.join("\n\n").replace(/\s+$/g, "");
+  // `trimEnd` removes the same characters as `\s`, in linear time.
+  return blocks.join("\n\n").trimEnd();
 }
 
 // --- internals ----------------------------------------------------------------
 
 type AdkEventLike = {
   author?: string;
+  invocationId?: string;
   branch?: string;
   partial?: boolean;
   content?: Content;
@@ -114,17 +149,30 @@ type AdkEventLike = {
 
 function hasVisibleContent(parts: ReadonlyArray<Part>): boolean {
   for (const part of parts) {
-    if (typeof part.text === "string" && part.text.length > 0) {
+    // Thought text is never rendered (see `renderPart`), so it is not visible.
+    if (
+      !part.thought &&
+      typeof part.text === "string" &&
+      part.text.length > 0
+    ) {
       return true;
     }
-    if (part.inlineData || part.fileData || part.functionCall || part.functionResponse) {
+    if (
+      part.inlineData ||
+      part.fileData ||
+      part.functionCall ||
+      part.functionResponse
+    ) {
       return true;
     }
   }
   return false;
 }
 
-function isForeignEvent(agentName: string | undefined, event: AdkEventLike): boolean {
+function isForeignEvent(
+  agentName: string | undefined,
+  event: AdkEventLike,
+): boolean {
   if (!agentName) {
     return false;
   }
@@ -139,7 +187,11 @@ function rewriteForeignEvent(event: AdkEventLike): AdkEventLike {
   const newParts: Part[] = [];
 
   for (const part of parts) {
-    if (typeof part.text === "string" && part.text.length > 0 && !part.thought) {
+    if (
+      typeof part.text === "string" &&
+      part.text.length > 0 &&
+      !part.thought
+    ) {
       textParts.push(part.text);
     }
   }
@@ -153,7 +205,8 @@ function rewriteForeignEvent(event: AdkEventLike): AdkEventLike {
         text: `[${author} called tool ${part.functionCall.name ?? "<unknown>"} with parameters ${safeJsonStringify(args)}]`,
       });
     }
-    // functionResponse, inlineData, fileData from foreign agents are intentionally dropped.
+    // functionResponse, inlineData and fileData from foreign agents are
+    // dropped: only what the other agent said and asked for is relevant context.
   }
 
   return {
@@ -169,7 +222,9 @@ function rewriteForeignEvent(event: AdkEventLike): AdkEventLike {
  * the call. Mirrors the common-case behaviour of ADK's
  * `rearrangeEventsForAsyncFunctionResponsesInHistory`.
  */
-function rearrangeAsyncFunctionResponses(events: AdkEventLike[]): AdkEventLike[] {
+function rearrangeAsyncFunctionResponses(
+  events: AdkEventLike[],
+): AdkEventLike[] {
   const responseIndexById = new Map<string, number>();
   for (let i = 0; i < events.length; i++) {
     for (const part of events[i].content?.parts ?? []) {
@@ -191,7 +246,7 @@ function rearrangeAsyncFunctionResponses(events: AdkEventLike[]): AdkEventLike[]
       (part) => part.functionResponse,
     );
     if (isResponseEvent && hasMatchingEarlierCall(events, event, i)) {
-      // Skip — will be (or has been) appended after its call.
+      // Appended right after its call, so it is skipped at its own position.
       continue;
     }
     result.push(event);
@@ -202,7 +257,11 @@ function rearrangeAsyncFunctionResponses(events: AdkEventLike[]): AdkEventLike[]
     }
     for (const callId of callIds) {
       const responseIdx = responseIndexById.get(callId);
-      if (responseIdx !== undefined && responseIdx !== i && !consumed.has(responseIdx)) {
+      if (
+        responseIdx !== undefined &&
+        responseIdx !== i &&
+        !consumed.has(responseIdx)
+      ) {
         result.push(events[responseIdx]);
         consumed.add(responseIdx);
       }
@@ -246,6 +305,19 @@ function hasMatchingEarlierCall(
     }
   }
   return false;
+}
+
+/**
+ * Whether `userContent` is the user's last message already in the history:
+ * the same parts (the role is always the user's on both sides).
+ */
+function sameTurn(a: Content, b: Content): boolean {
+  try {
+    return JSON.stringify(a.parts ?? []) === JSON.stringify(b.parts ?? []);
+  } catch {
+    // Not serializable: treat as different, so the turn is kept.
+    return false;
+  }
 }
 
 function normalizeContent(content: Content): Content {
@@ -300,5 +372,22 @@ function safeJsonStringify(value: unknown): string {
     return JSON.stringify(value) ?? "{}";
   } catch {
     return "{}";
+  }
+}
+
+/**
+ * Like {@link collectContents} but never throws. A malformed or synthetic
+ * invocation context yields an empty list so callers fall back to their text
+ * extractor.
+ *
+ * @param context - The ADK invocation context.
+ * @returns The history, or an empty list on any failure.
+ * @internal
+ */
+export function safeCollectContents(context: InvocationContext): Content[] {
+  try {
+    return collectContents(context);
+  } catch {
+    return [];
   }
 }

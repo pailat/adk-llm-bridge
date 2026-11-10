@@ -1,20 +1,16 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import { describe, expect, test } from "bun:test";
 import {
-  GeminiCliAgent,
-  GeminiCliDriver,
-  GEMINI_CLI_ENV_ALLOWLIST,
-  GEMINI_CLI_PROVIDER,
   buildGeminiArgs,
   mapGeminiPermissionArgs,
+} from "../../../src/agents/driver/gemini-cli.js";
+import type { ExternalAgentRunRequest } from "../../../src/agents/index.js";
+import {
+  GEMINI_CLI_ENV_ALLOWLIST,
+  GEMINI_CLI_PROVIDER,
+  GeminiCliAgent,
+  GeminiCliDriver,
   type GeminiCliSpawn,
 } from "../../../src/agents/index.js";
-import type { ExternalAgentRunRequest } from "../../../src/agents/index.js";
 
 function request(
   overrides: Partial<ExternalAgentRunRequest> = {},
@@ -23,6 +19,8 @@ function request(
     provider: GEMINI_CLI_PROVIDER,
     context: {} as ExternalAgentRunRequest["context"],
     instruction: "say hello",
+    // Gemini CLI cannot keep the network off, so it runs only with network on.
+    permissions: { mode: "ask", allowNetwork: true },
     ...overrides,
   };
 }
@@ -87,8 +85,7 @@ describe("GeminiCliDriver", () => {
     expect(calls).toHaveLength(1);
     expect(calls[0]?.[0]).toBe("gemini");
     expect(calls[0]?.[1]).toEqual([
-      "-p",
-      "say hello",
+      "--prompt=say hello",
       "--output-format",
       "stream-json",
       "--approval-mode=default",
@@ -174,10 +171,15 @@ describe("GeminiCliDriver", () => {
     ]);
   });
 
+  test("a prompt that looks like a flag stays the prompt's value", () => {
+    const args = buildGeminiArgs("--yolo");
+    expect(args[0]).toBe("--prompt=--yolo");
+    expect(args).not.toContain("--yolo");
+  });
+
   test("maps permission presets without defaulting to yolo", () => {
     expect(buildGeminiArgs("prompt")).toEqual([
-      "-p",
-      "prompt",
+      "--prompt=prompt",
       "--output-format",
       "stream-json",
       "--approval-mode=default",
@@ -207,5 +209,194 @@ describe("GeminiCliDriver", () => {
     expect(mapGeminiPermissionArgs({ mode: "full-access" })).toEqual([
       "--approval-mode=yolo",
     ]);
+  });
+  test("parses the native stream-json schema (init/message/tool_use/tool_result/error/result)", () => {
+    const driver = new GeminiCliDriver();
+    const toolNames = new Map<string, string>();
+    const parse = (value: unknown) =>
+      driver.parseGeminiLine(JSON.stringify(value), toolNames);
+
+    expect(
+      parse({ type: "init", timestamp: "t", session_id: "s", model: "m" }),
+    ).toBeUndefined();
+    // The CLI echoes the user prompt as a message with role "user".
+    expect(
+      parse({ type: "message", role: "user", content: "SECRET PROMPT" }),
+    ).toBeUndefined();
+    expect(
+      parse({ type: "message", role: "assistant", content: "hi", delta: true }),
+    ).toMatchObject({ type: "output", content: "hi" });
+    expect(
+      parse({
+        type: "tool_use",
+        tool_name: "read_file",
+        tool_id: "a1",
+        parameters: { path: "x" },
+      }),
+    ).toMatchObject({
+      type: "tool_call",
+      name: "read_file",
+      callId: "a1",
+      input: { path: "x" },
+    });
+    expect(
+      parse({
+        type: "tool_result",
+        tool_id: "a1",
+        status: "success",
+        output: "data",
+      }),
+    ).toMatchObject({
+      type: "tool_result",
+      name: "read_file",
+      callId: "a1",
+      result: "data",
+      error: undefined,
+    });
+    expect(
+      parse({
+        type: "tool_result",
+        tool_id: "a1",
+        status: "error",
+        error: { type: "x", message: "denied" },
+      }),
+    ).toMatchObject({ type: "tool_result", error: "denied" });
+    expect(
+      parse({ type: "error", severity: "warning", message: "loop" }),
+    ).toMatchObject({ type: "error", recoverable: true });
+    // The driver sends `completed` once the process exits.
+    expect(parse({ type: "result", status: "success" })).toBeUndefined();
+    expect(
+      parse({
+        type: "result",
+        status: "error",
+        error: { type: "quota", message: "out of quota" },
+      }),
+    ).toMatchObject({
+      type: "error",
+      message: "out of quota",
+      code: "quota",
+      recoverable: false,
+    });
+  });
+});
+
+describe("Gemini CLI prompt", () => {
+  test("sends the ADK user turn after the instruction", async () => {
+    const calls: Array<Parameters<GeminiCliSpawn>> = [];
+    const spawn: GeminiCliSpawn = (command, args, options) => {
+      calls.push([command, args, options]);
+      return { stdout: [], exited: Promise.resolve(0) };
+    };
+    const driver = new GeminiCliDriver({ spawn, env: { PATH: "/bin" } });
+
+    await collect(
+      driver.run(
+        request({
+          context: {
+            userContent: { role: "user", parts: [{ text: "list the files" }] },
+          } as unknown as ExternalAgentRunRequest["context"],
+        }),
+      ),
+    );
+
+    expect(calls[0]?.[1][0]).toBe("--prompt=say hello\n\nlist the files");
+  });
+});
+
+describe("Gemini CLI non-object JSON lines", () => {
+  test("parseGeminiLine skips null, numbers and arrays", () => {
+    const driver = new GeminiCliDriver();
+
+    expect(driver.parseGeminiLine("null")).toBeUndefined();
+    expect(driver.parseGeminiLine("7")).toBeUndefined();
+    expect(driver.parseGeminiLine("[]")).toBeUndefined();
+  });
+
+  test("a null line does not end the run", async () => {
+    const spawn: GeminiCliSpawn = () => ({
+      stdout: [
+        new TextEncoder().encode('null\n{"type":"content","text":"hi"}\n'),
+      ],
+      exited: Promise.resolve(0),
+    });
+    const driver = new GeminiCliDriver({ spawn, env: { PATH: "/bin" } });
+
+    const events = await collect(driver.run(request()));
+
+    expect(events.map((event) => event.type)).toEqual([
+      "started",
+      "output",
+      "completed",
+    ]);
+  });
+});
+
+describe("Gemini CLI bridge-shaped lines", () => {
+  test("driver-owned events from the child are dropped", async () => {
+    const lines = [
+      { type: "completed", exitCode: "weird" },
+      { type: "state_delta", stateDelta: { injected: true } },
+      { type: "output", content: "hi", stream: "bogus" },
+    ];
+    const spawn: GeminiCliSpawn = () => ({
+      stdout: [
+        new TextEncoder().encode(
+          lines.map((line) => `${JSON.stringify(line)}\n`).join(""),
+        ),
+      ],
+      exited: Promise.resolve(0),
+    });
+    const driver = new GeminiCliDriver({ spawn, env: { PATH: "/bin" } });
+
+    const events = await collect(driver.run(request()));
+
+    expect(events.map((event) => event.type)).toEqual([
+      "started",
+      "output",
+      "completed",
+    ]);
+    expect(events[1]).toEqual({ type: "output", content: "hi" });
+    expect(events[2]).toMatchObject({ exitCode: 0 });
+  });
+});
+
+describe("Gemini CLI exit errors", () => {
+  test("a non-zero exit reports the stderr tail and classifies it", async () => {
+    const spawn: GeminiCliSpawn = () => ({
+      stdout: [],
+      stderr: ["warming up\n", "Error: 401 Unauthorized\n"],
+      exited: Promise.resolve(2),
+    });
+    const driver = new GeminiCliDriver({ spawn, env: { PATH: "/bin" } });
+
+    const events = await collect(driver.run(request()));
+
+    expect(events.filter((event) => event.type === "error")).toEqual([
+      {
+        type: "error",
+        message: "warming up\nError: 401 Unauthorized",
+        code: "GEMINI_CLI_EXIT",
+        recoverable: false,
+        timestamp: expect.any(Number),
+      },
+    ]);
+    expect(events.at(-1)).toMatchObject({ type: "completed", exitCode: 2 });
+  });
+
+  test("an empty stderr keeps the generic message", async () => {
+    const spawn: GeminiCliSpawn = () => ({
+      stdout: [],
+      exited: Promise.resolve(3),
+    });
+    const driver = new GeminiCliDriver({ spawn, env: { PATH: "/bin" } });
+
+    const events = await collect(driver.run(request()));
+
+    expect(events.find((event) => event.type === "error")).toMatchObject({
+      message: "Gemini CLI exited with code 3",
+      code: "GEMINI_CLI_EXIT",
+      recoverable: true,
+    });
   });
 });

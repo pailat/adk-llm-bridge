@@ -1,11 +1,12 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import { describe, expect, test } from "bun:test";
-import { EnvCredentialProvider, readAllowedEnv } from "../../src/agents/index.js";
+import {
+  buildChildEnv,
+  credentialEnv,
+} from "../../src/agents/driver/shared.js";
+import {
+  EnvCredentialProvider,
+  readAllowedEnv,
+} from "../../src/agents/index.js";
 
 describe("environment credential allowlist", () => {
   test("reads only allowlisted non-empty variables", () => {
@@ -15,9 +16,11 @@ describe("environment credential allowlist", () => {
       EMPTY: "",
     };
 
-    expect(readAllowedEnv(env, ["OPENAI_API_KEY", "EMPTY", "MISSING"])).toEqual({
-      OPENAI_API_KEY: "allowed",
-    });
+    expect(readAllowedEnv(env, ["OPENAI_API_KEY", "EMPTY", "MISSING"])).toEqual(
+      {
+        OPENAI_API_KEY: "allowed",
+      },
+    );
   });
 
   test("credential provider does not read unallowlisted values", async () => {
@@ -42,7 +45,51 @@ describe("environment credential allowlist", () => {
     const provider = new EnvCredentialProvider({ SECRET_TOKEN: "blocked" });
 
     await expect(
-      provider.getCredential({ providerId: "codex", envAllowlist: ["OPENAI_API_KEY"] }),
+      provider.getCredential({
+        providerId: "codex",
+        envAllowlist: ["OPENAI_API_KEY"],
+      }),
     ).resolves.toBeUndefined();
+  });
+});
+
+describe("driver child environment", () => {
+  const provider = {
+    id: "p",
+    name: "P",
+    command: "p",
+    envAllowlist: ["API_KEY", "HOME"],
+  };
+
+  test("keeps only base keys and allowlisted credential values", () => {
+    const env = buildChildEnv(
+      { PATH: "/bin", HOME: "/h", SECRET: "host-secret", EMPTY: "" },
+      ["PATH", "HOME", "EMPTY", "MISSING"],
+      {
+        provider,
+        context: {} as never,
+        credential: {
+          kind: "env",
+          env: { API_KEY: "k", HOME: "/credential-home", OTHER: "x" },
+        },
+      },
+    );
+
+    expect(env).toEqual({
+      PATH: "/bin",
+      HOME: "/credential-home",
+      API_KEY: "k",
+    });
+  });
+
+  test("ignores credentials that are not of kind env", () => {
+    expect(
+      credentialEnv({
+        provider,
+        context: {} as never,
+        credential: { kind: "none" } as never,
+      }),
+    ).toEqual({});
+    expect(credentialEnv({ provider, context: {} as never })).toEqual({});
   });
 });

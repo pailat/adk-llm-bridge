@@ -22,9 +22,18 @@ export async function main(): Promise<void> {
   // @google/adk would try to execute a .d.ts file.
   const adkRuntime = await import(
     new URL(
-      ["..", "..", "node_modules", "@google", "adk", "dist", "esm", "index.js"].join("/"),
+      [
+        "..",
+        "..",
+        "node_modules",
+        "@google",
+        "adk",
+        "dist",
+        "esm",
+        "index.js",
+      ].join("/"),
       import.meta.url,
-    ).href,
+    ).href
   );
   const { InMemorySessionService, Runner } = adkRuntime as typeof Adk;
 
@@ -80,7 +89,9 @@ export async function main(): Promise<void> {
         targetFunctionCalls++;
       }
       if (part.functionResponse?.name === "run_adk_subagent") {
-        const response = part.functionResponse.response as { agentName?: unknown; error?: unknown } | undefined;
+        const response = part.functionResponse.response as
+          | { agentName?: unknown; error?: unknown }
+          | undefined;
         if (response?.agentName === scenario.agentName) {
           targetFunctionResponses++;
         }
@@ -129,7 +140,9 @@ function readTarget(): HelpDeskTarget {
   if (value === "billing" || value === "support") {
     return value;
   }
-  throw new Error(`SMOKE_HELPDESK_TARGET must be billing or support. Received: ${value}`);
+  throw new Error(
+    `SMOKE_HELPDESK_TARGET must be billing or support. Received: ${value}`,
+  );
 }
 
 function readAgentName(value: unknown): string | undefined {

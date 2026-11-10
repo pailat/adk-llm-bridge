@@ -9,10 +9,10 @@
 import {
   AIGateway,
   Anthropic,
+  type BaseLlm,
   OpenAI,
   OpenRouter,
   XAI,
-  type BaseLlm,
 } from "adk-llm-bridge";
 import type { AppConfig } from "./types";
 

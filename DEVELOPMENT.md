@@ -1,52 +1,39 @@
 # Development Guide
 
-This document covers internal development workflows, architecture decisions, and troubleshooting for contributors.
+This document covers setup, commands, architecture decisions and troubleshooting for contributors. For the contribution workflow, pull requests and project policies, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Project Structure
 
 ```
 adk-llm-bridge/
 ├── src/
-│   ├── index.ts                 # Main entry point, exports all public APIs
-│   ├── config.ts                # Global configuration management
-│   ├── constants.ts             # Shared constants (URLs, patterns)
-│   ├── types.ts                 # TypeScript type definitions
-│   ├── core/
-│   │   ├── base-provider-llm.ts # Abstract base class for all providers
-│   │   └── openai-compatible-llm.ts # Base class for OpenAI-compatible APIs
-│   ├── converters/
-│   │   ├── request.ts           # ADK → OpenAI request conversion
-│   │   └── response.ts          # OpenAI → ADK response conversion
-│   └── providers/
-│       ├── ai-gateway/          # Vercel AI Gateway provider
-│       ├── openrouter/          # OpenRouter provider
-│       ├── openai/              # OpenAI direct provider
-│       ├── anthropic/           # Anthropic direct provider (native SDK)
-│       ├── xai/                 # xAI direct provider
-│       └── custom/              # Custom/generic provider
-├── tests/                       # Test files (mirrors src/ structure)
-├── examples/                    # Example projects
-│   ├── basic-agent-anthropic/
-│   ├── basic-agent-ai-gateway/
-│   ├── basic-agent-openai/
-│   ├── basic-agent-xai/
-│   ├── basic-agent-openrouter/
-│   ├── basic-agent-lmstudio/
-│   └── express-server/
-├── bunup.config.ts             # Build config (bunup)
-├── scripts/
-│   └── test-example.sh          # Test examples with npm pack
-└── dist/                        # Built output (generated)
+│   ├── index.ts            # Main entry point, exports the public API
+│   ├── config.ts           # Global configuration management
+│   ├── constants.ts        # Shared constants
+│   ├── types.ts            # Shared types
+│   ├── core/               # Base classes, provider definitions, config resolution
+│   ├── converters/         # ADK <-> OpenAI request and response conversion
+│   ├── providers/          # ai-gateway, openrouter, openai, anthropic, xai, custom
+│   ├── agents/             # External agents (Claude, Codex, Gemini CLI)
+│   ├── workflows/          # Workflow engine, control plane, durability
+│   ├── runtime/            # Agent invocation gateway
+│   └── utils/              # JSON, logging, URI and validation helpers
+├── tests/                  # Tests, mirroring src/
+├── examples/               # Example projects (see examples/README.md)
+├── docs/                   # Guides and references (see docs/README.md)
+├── scripts/                # Build checks, comment check, conformance runner
+├── bunup.config.ts         # Build config (bunup)
+└── dist/                   # Built output (generated)
 ```
 
-## Development Environment Setup
+## Development Setup
 
 ### Prerequisites
 
-- [Bun](https://bun.sh/) >= 1.0.0
-- Node.js >= 18.0.0
+- [Bun](https://bun.sh/) >= 1.4.4
+- Node.js >= 22.0.0 (CI tests 22, 24 and 26; `mise.toml` pins 26.13.0 for local dev)
 
-### Initial Setup
+### Initial setup
 
 ```bash
 git clone https://github.com/pailat/adk-llm-bridge.git
@@ -54,18 +41,29 @@ cd adk-llm-bridge
 bun install
 ```
 
-### Available Commands
+### Available commands
 
 | Command | Description |
 |---------|-------------|
-| `bun run build` | Build the package to `dist/` |
+| `bun run build` | Build the package to `dist/` and fix the private declarations |
 | `bun run test` | Run all tests |
 | `bun run typecheck` | Type check `src/` only |
-| `bun run typecheck:all` | Type check `src/` + `tests/` |
-| `bun run lint` | Run Biome linter |
+| `bun run typecheck:all` | Type check `src/` and `tests/` |
+| `bun run typecheck:conformance` | Type check the runtime conformance runner |
+| `bun run typecheck:compat:nodenext` | Build, then type check a NodeNext consumer |
+| `bun run lint` | Run the Biome linter (whole repo) |
 | `bun run lint:fix` | Auto-fix lint issues |
-| `bun run check:fix` | Auto-fix lint + formatting |
-| `bun run ci` | Full CI: typecheck + lint + test + build |
+| `bun run format` | Check formatting |
+| `bun run format:fix` | Fix formatting |
+| `bun run check` | Biome lint, format and import order (enforced by CI) |
+| `bun run check:fix` | Auto-fix lint and formatting |
+| `bun run check:comments` | Check the [code comment standard](docs/contributing/comments.md) |
+| `bun run check:export-docs` | After a build, check that every public export has a TSDoc summary |
+| `bun run check:links` | Check relative links and anchors in Markdown files (offline) |
+| `bun run lint:publish` | Check the package with `publint` and `attw` |
+| `bun run ci` | Full CI: typechecks, Biome check, comment check, link check, tests, build, package checks |
+
+Run a single test file with `bun test <file>`.
 
 ## Running Examples Locally
 
@@ -75,10 +73,10 @@ Examples use `"adk-llm-bridge": "file:../..` for local development. This creates
 
 ```
 example/node_modules/
-├── @google/adk@0.2.2          # Copy 1
+├── @google/adk@2.4.0          # Copy 1
 └── adk-llm-bridge/
     └── node_modules/
-        └── @google/adk@0.2.2  # Copy 2 (symlink to root)
+        └── @google/adk@2.4.0  # Copy 2 (symlink to root)
 ```
 
 This causes TypeScript errors because ADK uses a private symbol (`BASE_MODEL_SYMBOL`) for type checking:
@@ -215,8 +213,12 @@ BaseProviderLlm (abstract)
 
 ### Enable Debug Logs
 
-```bash
-DEBUG=adk:* bun run web
+`@google/adk` reads no `DEBUG` variable. Set the level in your code:
+
+```typescript
+import { LogLevel, setLogLevel } from "@google/adk";
+
+setLogLevel(LogLevel.DEBUG);
 ```
 
 ### Common Issues
@@ -226,7 +228,7 @@ DEBUG=adk:* bun run web
 Check model patterns in provider constants:
 
 ```typescript
-// src/providers/anthropic/constants.ts
+// src/providers/anthropic/anthropic-llm.ts
 export const ANTHROPIC_MODEL_PATTERNS = [/claude-.*/];
 ```
 
@@ -267,64 +269,55 @@ bun test --grep "Anthropic"
 
 ## Adding a New Provider
 
-1. Create provider directory:
-   ```
-   src/providers/my-provider/
-   ├── constants.ts      # MODEL_PATTERNS, ENV vars
-   ├── my-provider-llm.ts
-   ├── factory.ts        # MyProvider() function
-   ├── register.ts       # registerMyProvider()
-   └── index.ts          # Re-exports
-   ```
+### OpenAI-compatible provider
 
-2. Extend appropriate base class:
-   ```typescript
-   // For OpenAI-compatible APIs
-   export class MyProviderLlm extends OpenAICompatibleLlm { ... }
+OpenAI-compatible providers are declarative: a `ProviderDefinition` plus factory
+functions.
 
-   // For native SDKs
-   export class MyProviderLlm extends BaseProviderLlm { ... }
-   ```
+1. Create `src/providers/my-provider/definition.ts` with a `ProviderDefinition`
+   (`id`, `errorPrefix`, `defaultBaseURL`, `envKeys`, `modelPatterns`, ...).
+2. Create `src/providers/my-provider/index.ts` that calls `createProviderClass`,
+   `createProviderFactory` and `createRegisterFunction`. Copy
+   `src/providers/openai/index.ts` as a template.
+3. Export the new symbols from `src/index.ts`.
+4. Add tests in `tests/providers/my-provider/`.
+5. Create an example in `examples/basic-agent-my-provider/`.
 
-3. Add to `src/index.ts`:
-   ```typescript
-   export { MyProvider, MyProviderLlm, registerMyProvider } from "./providers/my-provider";
-   ```
+### Provider with a native SDK
 
-4. Add tests in `tests/providers/my-provider/`
-
-5. Create example in `examples/basic-agent-my-provider/`
+Extend `BaseProviderLlm` (see `src/providers/anthropic/`) and add request and
+response converters for the SDK format. Then follow steps 3 to 5 above.
 
 ## Release Checklist
 
-1. Update `version` in `package.json`
+Releases are tag-driven: pushing a `vX.Y.Z` tag runs `.github/workflows/release.yml`,
+which verifies the tag, runs `bun run ci`, publishes to npm with trusted
+publishing and provenance, and creates the GitHub release from `CHANGELOG.md`.
+
+1. Update `version` in `package.json`.
 2. Bump the `adk-llm-bridge` dependency in every `examples/*/package.json` to the
-   new version (keep the caret range, e.g. `^0.5.2`)
-3. Add a `CHANGELOG.md` entry for the new version
-4. Run full CI: `bun run ci` (typecheck + lint + test + build + `publint`/`attw` gates)
-5. Test an example with `npm pack` (simulates production install, dedupes `@google/adk`):
+   new version when an example pins a published version.
+3. Add a `CHANGELOG.md` section `## [X.Y.Z]` for the new version.
+4. Run `bun run ci`.
+5. Test an example against the packed build (see
+   [Running Examples Locally](#running-examples-locally)):
    ```bash
    ./scripts/test-example.sh basic-agent-anthropic
    ```
-6. Commit everything together: `chore: release vX.Y.Z`
-7. Create an annotated git tag on that commit and push both:
+6. Commit everything together on `main`: `chore(release): X.Y.Z`.
+7. Create an annotated tag on that commit and push it:
    ```bash
    git tag -a vX.Y.Z -m "vX.Y.Z"
    git push origin main && git push origin vX.Y.Z
    ```
-8. Publish to npm (the `prepublishOnly` hook re-runs build + `publint`/`attw`):
+8. Wait for the Release workflow to finish.
+9. If a previously published version is broken, deprecate it:
    ```bash
-   npm publish --provenance --access public
+   npm deprecate adk-llm-bridge@<broken> "Broken; upgrade to >=X.Y.Z. See #NN."
    ```
-9. Create the GitHub Release from the tag (`gh release create vX.Y.Z --generate-notes`)
-10. If a previously published version is broken, deprecate it:
-    ```bash
-    npm deprecate adk-llm-bridge@<broken> "Broken; upgrade to >=X.Y.Z. See #NN."
-    ```
 
 > **Build note:** the package is built with [`bunup`](https://bunup.dev)
-> (`bunup.config.ts`); there is no longer a `scripts/build.ts`. `scripts/` now
-> contains only `test-example.sh`.
+> (`bunup.config.ts`).
 
 ## Resources
 

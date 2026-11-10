@@ -1,25 +1,15 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import { describe, expect, test } from "bun:test";
 import type { Content } from "@google/genai";
 import {
   type ClaudeDocumentBlockParam,
   type ClaudeImageBlockParam,
   type ClaudeTextBlockParam,
-  type ClaudeToolResultBlockParam,
-  type ClaudeToolUseBlockParam,
   contentsToSdkMessages,
 } from "../../../src/agents/driver/claude-message-mapper.js";
 
 describe("contentsToSdkMessages", () => {
   test("single text-only user content emits one message with shouldQuery", () => {
-    const contents: Content[] = [
-      { role: "user", parts: [{ text: "hello" }] },
-    ];
+    const contents: Content[] = [{ role: "user", parts: [{ text: "hello" }] }];
     const messages = contentsToSdkMessages(contents);
     expect(messages).toHaveLength(1);
     const message = messages[0];
@@ -43,7 +33,22 @@ describe("contentsToSdkMessages", () => {
     expect(messages[0].message.role).toBe("user");
     expect(messages[1].shouldQuery).toBe(true);
     expect(messages[1].isSynthetic).toBeUndefined();
-    expect(messages[1].message.role).toBe("assistant");
+    // USER-ONLY: even a model turn is emitted as a user-role message because
+    // the SDK streaming-input channel rejects assistant-role input messages.
+    expect(messages[1].message.role).toBe("user");
+  });
+
+  test("mixed history [user, model, user] never emits an assistant-role message", () => {
+    const contents: Content[] = [
+      { role: "user", parts: [{ text: "first" }] },
+      { role: "model", parts: [{ text: "reply" }] },
+      { role: "user", parts: [{ text: "second" }] },
+    ];
+    const messages = contentsToSdkMessages(contents);
+    expect(messages).toHaveLength(3);
+    for (const message of messages) {
+      expect(message.message.role).toBe("user");
+    }
   });
 
   test("inlineData PNG becomes base64 image block", () => {
@@ -117,7 +122,10 @@ describe("contentsToSdkMessages", () => {
         role: "user",
         parts: [
           {
-            fileData: { fileUri: "gs://bucket/file.bin", mimeType: "application/octet-stream" },
+            fileData: {
+              fileUri: "gs://bucket/file.bin",
+              mimeType: "application/octet-stream",
+            },
           },
         ],
       },
@@ -125,10 +133,12 @@ describe("contentsToSdkMessages", () => {
     const [message] = contentsToSdkMessages(contents);
     const block = message.message.content[0] as ClaudeTextBlockParam;
     expect(block.type).toBe("text");
-    expect(block.text).toBe("[file: gs://bucket/file.bin (application/octet-stream)]");
+    expect(block.text).toBe(
+      "[file: gs://bucket/file.bin (application/octet-stream)]",
+    );
   });
 
-  test("functionCall on model content emits tool_use with assistant role", () => {
+  test("functionCall on model content renders user-role text (no tool_use block)", () => {
     const contents: Content[] = [
       {
         role: "model",
@@ -138,15 +148,18 @@ describe("contentsToSdkMessages", () => {
       },
     ];
     const [message] = contentsToSdkMessages(contents);
-    expect(message.message.role).toBe("assistant");
-    const block = message.message.content[0] as ClaudeToolUseBlockParam;
-    expect(block.type).toBe("tool_use");
-    expect(block.id).toBe("call-1");
-    expect(block.name).toBe("lookup");
-    expect(block.input).toEqual({ q: "x" });
+    // USER-ONLY: model tool-calls become user-role text markers, never an
+    // assistant-role message nor an input `tool_use` block.
+    expect(message.message.role).toBe("user");
+    const block = message.message.content[0] as ClaudeTextBlockParam;
+    expect(block.type).toBe("text");
+    expect(block.text).toBe('[assistant tool-call lookup({"q":"x"})]');
+    for (const b of message.message.content) {
+      expect(b.type).not.toBe("tool_use");
+    }
   });
 
-  test("functionResponse forces user role and emits tool_result", () => {
+  test("functionResponse renders user-role text (no orphan tool_result block)", () => {
     const contents: Content[] = [
       {
         role: "model",
@@ -163,20 +176,19 @@ describe("contentsToSdkMessages", () => {
     ];
     const [message] = contentsToSdkMessages(contents);
     expect(message.message.role).toBe("user");
-    const block = message.message.content[0] as ClaudeToolResultBlockParam;
-    expect(block.type).toBe("tool_result");
-    expect(block.tool_use_id).toBe("call-1");
-    expect(block.content).toBe('{"value":42}');
+    const block = message.message.content[0] as ClaudeTextBlockParam;
+    expect(block.type).toBe("text");
+    expect(block.text).toBe('[tool lookup result: {"value":42}]');
+    for (const b of message.message.content) {
+      expect(b.type).not.toBe("tool_result");
+    }
   });
 
   test("thought parts are dropped", () => {
     const contents: Content[] = [
       {
         role: "model",
-        parts: [
-          { text: "kept" },
-          { thought: true, text: "hidden" },
-        ],
+        parts: [{ text: "kept" }, { thought: true, text: "hidden" }],
       },
     ];
     const [message] = contentsToSdkMessages(contents);
@@ -193,7 +205,7 @@ describe("contentsToSdkMessages", () => {
     expect(messages[0].message.role).toBe("user");
   });
 
-  test("missing tool IDs are generated deterministically", () => {
+  test("functionCall without id renders deterministic user-role text", () => {
     const contents: Content[] = [
       {
         role: "model",
@@ -202,9 +214,10 @@ describe("contentsToSdkMessages", () => {
     ];
     const first = contentsToSdkMessages(contents);
     const second = contentsToSdkMessages(contents);
-    const blockA = first[0].message.content[0] as ClaudeToolUseBlockParam;
-    const blockB = second[0].message.content[0] as ClaudeToolUseBlockParam;
-    expect(blockA.id).toBe("tool_0_0");
-    expect(blockA.id).toBe(blockB.id);
+    const blockA = first[0].message.content[0] as ClaudeTextBlockParam;
+    const blockB = second[0].message.content[0] as ClaudeTextBlockParam;
+    expect(blockA.type).toBe("text");
+    expect(blockA.text).toBe("[assistant tool-call go({})]");
+    expect(blockA.text).toBe(blockB.text);
   });
 });

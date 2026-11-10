@@ -1,17 +1,9 @@
 /**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
-/**
  * Declarative provider definition interface.
  *
  * Providers that use OpenAI-compatible APIs differ only in configuration
  * (URLs, env vars, headers), not behavior. This interface captures those
  * differences as data instead of requiring class inheritance.
- *
- * @module core/provider-definition
  */
 
 /**
@@ -22,6 +14,35 @@ export interface ProviderEnvKeys {
   apiKey: string[];
   /** Env var names to check for base URL, in priority order */
   baseURL?: string[];
+}
+
+/**
+ * Declarative reasoning capability for a provider.
+ *
+ * Controls how ADK `config.thinkingConfig` is mapped onto the request body and
+ * whether provider reasoning is round-tripped across turns. This is the
+ * provider-aware switch that lets OpenRouter / AI Gateway honor reasoning
+ * intent while OpenAI / xAI keep their strict, model-name-gated behavior.
+ *
+ * - `"openai-effort"` (strict, the default when `reasoning` is undefined):
+ *   Emit `reasoning_effort` ONLY when the resolved model is reasoning-capable
+ *   (the {@link supportsReasoningEffort} model-name gate). Direct OpenAI and
+ *   xAI return a 400 when `reasoning_effort` is sent to a non-reasoning model
+ *   (on OpenAI, anything but gpt-5 and later and the o-series), so the name
+ *   gate MUST be preserved for them.
+ *
+ * - `"openrouter"` (permissive / native object): ALWAYS emit the native
+ *   OpenRouter `reasoning` object (no model-name gate). OpenRouter / AI Gateway
+ *   return HTTP 200 and silently ignore reasoning params on non-reasoning
+ *   models, so it is safe to always send them — this both enables opt-in
+ *   reasoners and steers depth on default reasoners. This style also opts into
+ *   capturing `reasoning_details` and echoing the signed reasoning back across
+ *   turns (required by signature-strict upstreams like Anthropic / Gemini
+ *   thinking routed through OpenRouter).
+ */
+export interface ReasoningCapability {
+  /** Reasoning mapping style (see {@link ReasoningCapability}). */
+  style: "openai-effort" | "openrouter";
 }
 
 /**
@@ -71,7 +92,32 @@ export interface ProviderDefinition {
    * Cloud providers (AI Gateway, OpenRouter, OpenAI, xAI) should set this
    * to true. Local/self-hosted providers that may not need auth can omit it.
    *
-   * @default false
+   * @defaultValue false
    */
   requireApiKey?: boolean;
+
+  /**
+   * Declarative reasoning capability for this provider.
+   *
+   * When omitted, the strict `"openai-effort"` behavior applies (model-name
+   * gated `reasoning_effort`). Providers that proxy arbitrary vendor/model ids
+   * and tolerate reasoning params on non-reasoning models (OpenRouter, AI
+   * Gateway) should set `{ style: "openrouter" }` to honor `thinkingConfig`
+   * (enable + steer + exclude) and round-trip signed reasoning across turns.
+   *
+   * @see {@link ReasoningCapability}
+   */
+  reasoning?: ReasoningCapability;
+
+  /**
+   * Output-limit parameter for models that are not OpenAI reasoning models
+   * (those always get `max_completion_tokens`).
+   *
+   * OpenAI sets `"max_completion_tokens"`: its API deprecates `max_tokens`.
+   * Gateways and other OpenAI-compatible APIs keep `"max_tokens"`, the
+   * parameter OpenAI-compatible servers accept.
+   *
+   * @defaultValue `"max_tokens"`
+   */
+  maxTokensParam?: "max_tokens" | "max_completion_tokens";
 }

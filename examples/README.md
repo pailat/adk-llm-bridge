@@ -12,8 +12,36 @@ Examples of using `adk-llm-bridge` with Google ADK and multiple LLM providers.
 | [basic-agent-anthropic](./basic-agent-anthropic) | Anthropic | Multi-agent HelpDesk with Claude models |
 | [basic-agent-xai](./basic-agent-xai) | xAI | Multi-agent HelpDesk with Grok models |
 | [basic-agent-lmstudio](./basic-agent-lmstudio) | LM Studio | Multi-agent HelpDesk with local models |
+| [basic-agent-claude](./basic-agent-claude) | Claude Agent SDK | Claude as an external ADK agent |
+| [basic-agent-codex](./basic-agent-codex) | OpenAI Codex | Codex as an external ADK agent |
+| [basic-agent-gemini](./basic-agent-gemini) | Gemini CLI | Gemini CLI as an external ADK agent |
+| [external-agents](./external-agents) | Claude Code, Codex, OpenRouter | HelpDesk mixing external runtime agents and an `LlmAgent` |
 | [express-server](./express-server) | AI Gateway | Full HTTP API with tools, state & streaming |
 | [native-features](./native-features) | Anthropic / OpenAI | CLI showcasing sampling, reasoning, structured output, multimodal, tool choice & streaming |
+| [codex-workflow](./codex-workflow) | OpenAI Codex | Dynamic planner → implementer → reviewer workflow using only Codex agents |
+
+## Requirements
+
+Every example needs Bun and Node.js 22 or newer. `@google/genai` and
+`@opentelemetry/api` are required peers of `adk-llm-bridge` 0.7. The examples do
+not list them in their own `package.json`: inside this workspace they come from
+the root install. If you copy an example out of the repository, install both
+next to `@google/adk` and `adk-llm-bridge`.
+
+## Feature Portability
+
+The examples demonstrate bridge mappings; they do not guarantee that every
+runtime/model supports each mapped feature. Check the
+[OpenAI-compatible feature degradation and capability matrix](../docs/openai-compatible-feature-matrix.md)
+before moving a demo between OpenAI, OpenRouter, xAI, AI Gateway, Ollama, vLLM,
+LM Studio, and native Anthropic.
+
+For local endpoints, the
+[runtime conformance matrix](../docs/runtime-conformance.md) distinguishes
+deterministic fixtures from exact Ollama, vLLM, and manual LM Studio profiles.
+The feature matrix is updated with those fixtures. In all OpenAI-compatible
+examples, omit `candidateCount` or set it to exactly `1`; use separate requests
+for multiple alternatives.
 
 ## Known limitations
 
@@ -184,7 +212,7 @@ bun run all          # run all six demos
 
 The `basic-agent-*` examples use the **factory pattern** (`model: AIGateway(...)`, `model: Anthropic(...)`, etc.) — a `BaseLlm` instance is passed straight to `LlmAgent`, so **no registration is needed** and they run under `adk-devtools` as-is.
 
-Manual registration is required **only** when you reference a model by **string id** (as `express-server` does with `model: "anthropic/claude-sonnet-4.6"`): import `LLMRegistry` from `@google/adk` and register the LLM class manually, because `adk-devtools` bundles its own copy of `@google/adk`.
+Manual registration is required **only** when you reference a model by **string id** (as `express-server` does with `model: "anthropic/claude-sonnet-5.5"`): import `LLMRegistry` from `@google/adk` and register the LLM class manually, because `adk-devtools` bundles its own copy of `@google/adk`.
 
 ### AI Gateway
 
@@ -197,7 +225,7 @@ LLMRegistry.register(AIGatewayLlm);
 
 export const rootAgent = new LlmAgent({
   name: "my_agent",
-  model: "anthropic/claude-sonnet-4",
+  model: "anthropic/claude-sonnet-5.5",
   instruction: "You are helpful.",
 });
 ```
@@ -213,7 +241,7 @@ LLMRegistry.register(OpenRouterLlm);
 
 export const rootAgent = new LlmAgent({
   name: "my_agent",
-  model: "anthropic/claude-sonnet-4",
+  model: "anthropic/claude-sonnet-5.5",
   instruction: "You are helpful.",
 });
 ```
@@ -229,7 +257,7 @@ LLMRegistry.register(OpenAILlm);
 
 export const rootAgent = new LlmAgent({
   name: "assistant",
-  model: "gpt-4.1",
+  model: "gpt-6.1-sol",
   instruction: "You are helpful.",
 });
 ```
@@ -245,7 +273,7 @@ LLMRegistry.register(AnthropicLlm);
 
 export const rootAgent = new LlmAgent({
   name: "assistant",
-  model: "claude-sonnet-4-5",
+  model: "claude-sonnet-5-5",
   instruction: "You are helpful.",
 });
 ```
@@ -261,7 +289,7 @@ LLMRegistry.register(XAILlm);
 
 export const rootAgent = new LlmAgent({
   name: "assistant",
-  model: "grok-3-beta",
+  model: "grok-4.7",
   instruction: "You are helpful.",
 });
 ```
@@ -314,9 +342,17 @@ bun run examples/basic-agent-ai-gateway/agent.ts
 |----------|----------|-------------|
 | `AI_GATEWAY_API_KEY` | AI Gateway | Vercel AI Gateway API key |
 | `OPENAI_API_KEY` | OpenAI / AI Gateway | OpenAI API key |
+| `OPENAI_BASE_URL` | OpenAI / AI Gateway fallback | Optional OpenAI-compatible endpoint |
 | `ANTHROPIC_API_KEY` | Anthropic | Anthropic API key |
 | `XAI_API_KEY` | xAI | xAI API key |
 | `OPENROUTER_API_KEY` | OpenRouter | OpenRouter API key |
 | `OPENROUTER_SITE_URL` | OpenRouter | Your site URL (for ranking) |
 | `OPENROUTER_APP_NAME` | OpenRouter | Your app name (for ranking) |
+| `CUSTOM_LLM_BASE_URL` | Custom | Fallback endpoint; required when `baseURL` is omitted |
+| `CUSTOM_LLM_API_KEY` | Custom | Optional fallback credential |
 | `LMSTUDIO_BASE_URL` | LM Studio | Local server URL (default: http://localhost:1234/v1) |
+
+For Custom and direct OpenAI, explicit configuration wins over global
+configuration, which wins over environment variables and then provider
+defaults. Custom has no default endpoint. See
+[Custom provider configuration](../docs/custom-provider-configuration.md).

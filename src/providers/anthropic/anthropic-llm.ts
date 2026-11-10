@@ -1,27 +1,26 @@
 /**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
-/**
  * Anthropic (Claude) LLM provider implementation.
  *
  * This module provides the Anthropic-specific LLM class that connects
  * directly to Anthropic's Messages API.
- *
- * @module providers/anthropic/anthropic-llm
  */
 
 import AnthropicSDK from "@anthropic-ai/sdk";
 import type { LlmRequest, LlmResponse } from "@google/adk";
+import { InputValidationError } from "@google/adk";
 import { getProviderConfig } from "../../config.js";
-import { DEFAULT_MAX_RETRIES, DEFAULT_TIMEOUT } from "../../constants.js";
 import { BaseProviderLlm } from "../../core/base-provider-llm.js";
+import { resolveConfig } from "../../core/config-resolver.js";
+import type { ProviderDefinition } from "../../core/provider-definition.js";
+import { PROVIDER_ERROR_INCOMPLETE_STREAM } from "../../core/provider-llm-error.js";
+import { annotateLlmSpan, recordLlmError } from "../../core/telemetry.js";
 import type { AnthropicProviderConfig } from "../../types.js";
-import { clampPositive } from "../../utils/validate.js";
-/** Environment variable names for Anthropic configuration. */
-const ANTHROPIC_ENV = { API_KEY: "ANTHROPIC_API_KEY" } as const;
+import { parseJson } from "../../utils/json.js";
+import { LogCode, resetWarnOnce, warnOnce } from "../../utils/log.js";
+import { resolveIntegerOption } from "../../utils/validate.js";
+
+/** Marker read by ADK's ContentRequestProcessor to treat a model as Claude. */
+const CLAUDE_MODEL_SYMBOL = Symbol.for("google.adk.claudeModel");
 
 /** Default max tokens for Anthropic requests. */
 const DEFAULT_ANTHROPIC_MAX_TOKENS = 4096;
@@ -30,10 +29,27 @@ const DEFAULT_ANTHROPIC_MAX_TOKENS = 4096;
 export const ANTHROPIC_MODEL_PATTERNS = [/claude-.*/];
 
 /**
- * Tracks whether the "thinking downgrades forced tool_choice" warning has
- * already been emitted, so it is logged at most once per process.
+ * How {@link resolveConfig} resolves Anthropic's API key, base URL, timeout
+ * and retries: instance config, then `setProviderConfig("anthropic", ...)`,
+ * then `ANTHROPIC_API_KEY` / `ANTHROPIC_BASE_URL`, then the defaults.
  */
-let warnedThinkingToolChoiceDowngrade = false;
+const ANTHROPIC_CONFIG: ProviderDefinition = {
+  id: "anthropic",
+  errorPrefix: "ANTHROPIC",
+  defaultBaseURL: "https://api.anthropic.com",
+  envKeys: { apiKey: ["ANTHROPIC_API_KEY"], baseURL: ["ANTHROPIC_BASE_URL"] },
+  modelPatterns: ANTHROPIC_MODEL_PATTERNS,
+  requireApiKey: true,
+};
+
+/**
+ * Resets the one-time warning memory. Test-only.
+ *
+ * @internal
+ */
+export function _resetAnthropicWarningState(): void {
+  resetWarnOnce();
+}
 
 import type { AnthropicGenerationParams } from "./converters/request.js";
 import {
@@ -61,11 +77,11 @@ import {
  * @example
  * ```typescript
  * // Basic usage
- * const llm = new AnthropicLlm({ model: "claude-sonnet-4-5-20250929" });
+ * const llm = new AnthropicLlm({ model: "claude-sonnet-5-5" });
  *
  * // With max tokens
  * const llm = new AnthropicLlm({
- *   model: "claude-sonnet-4-5-20250929",
+ *   model: "claude-sonnet-5-5",
  *   apiKey: "...",
  *   maxTokens: 8192
  * });
@@ -80,29 +96,21 @@ export class AnthropicLlm extends BaseProviderLlm {
    *
    * Used by ADK's LLMRegistry to match model strings to this provider.
    * Matches: claude-*
-   *
-   * @static
    */
   static readonly supportedModels = ANTHROPIC_MODEL_PATTERNS;
 
   /**
    * The Anthropic SDK client instance.
-   *
-   * @private
    */
   private readonly client: AnthropicSDK;
 
   /**
    * Maximum tokens to generate in responses.
-   *
-   * @private
    */
   private readonly maxTokens: number;
 
   /**
    * Whether opt-in prompt caching is enabled for this instance.
-   *
-   * @private
    */
   private readonly promptCaching: boolean;
 
@@ -110,11 +118,15 @@ export class AnthropicLlm extends BaseProviderLlm {
    * Creates a new Anthropic LLM instance.
    *
    * @param config - Configuration options for the Anthropic provider
+   * @throws {@link InputValidationError} When no API key is found, or the
+   *   base URL (from `baseURL`, the global config or `ANTHROPIC_BASE_URL`) is
+   *   not a valid absolute URL, or `timeout`, `maxRetries` or `maxTokens` is
+   *   set and is not an integer. An integer below the minimum is clamped.
    *
    * @example
    * ```typescript
    * const llm = new AnthropicLlm({
-   *   model: "claude-sonnet-4-5-20250929",
+   *   model: "claude-sonnet-5-5",
    *   apiKey: process.env.ANTHROPIC_API_KEY,
    *   maxTokens: 4096
    * });
@@ -124,44 +136,31 @@ export class AnthropicLlm extends BaseProviderLlm {
     super(config);
 
     const globalConfig = getProviderConfig("anthropic") ?? {};
+    const resolved = resolveConfig(ANTHROPIC_CONFIG, config);
 
-    const apiKey =
-      config.apiKey ??
-      globalConfig.apiKey ??
-      process.env[ANTHROPIC_ENV.API_KEY] ??
-      "";
-
-    if (!apiKey) {
-      throw new Error(
-        `[anthropic] API key is required. Provide it via config, ` +
-          `setProviderConfig("anthropic", { apiKey }), or set the ANTHROPIC_API_KEY env var.`,
-      );
-    }
-
-    this.maxTokens = clampPositive(
-      config.maxTokens ??
-        globalConfig.maxTokens ??
-        DEFAULT_ANTHROPIC_MAX_TOKENS,
-      DEFAULT_ANTHROPIC_MAX_TOKENS,
-      1,
-    );
+    this.maxTokens = resolveIntegerOption({
+      owner: ANTHROPIC_CONFIG.id,
+      name: "maxTokens",
+      value: config.maxTokens ?? globalConfig.maxTokens,
+      fallback: DEFAULT_ANTHROPIC_MAX_TOKENS,
+      min: 1,
+    });
 
     this.promptCaching =
       config.promptCaching ?? globalConfig.promptCaching ?? false;
 
     this.client = new AnthropicSDK({
-      apiKey,
-      timeout: clampPositive(
-        config.timeout ?? DEFAULT_TIMEOUT,
-        DEFAULT_TIMEOUT,
-        1000,
-      ),
-      maxRetries: clampPositive(
-        config.maxRetries ?? DEFAULT_MAX_RETRIES,
-        DEFAULT_MAX_RETRIES,
-        0,
-      ),
+      apiKey: resolved.apiKey,
+      baseURL: resolved.baseURL,
+      timeout: resolved.timeout,
+      maxRetries: resolved.maxRetries,
     });
+
+    // Opt in to ADK's Claude handling: ContentRequestProcessor keeps the
+    // `adk-*` function call/response ids for Claude models, detected by this
+    // symbol or by a /^claude-/ model name. The symbol also covers aliases such
+    // as `us.anthropic.claude-...` that the name check misses.
+    (this as unknown as Record<symbol, boolean>)[CLAUDE_MODEL_SYMBOL] = true;
   }
 
   /**
@@ -172,18 +171,42 @@ export class AnthropicLlm extends BaseProviderLlm {
    *
    * @param llmRequest - The ADK LLM request
    * @param stream - Whether to stream the response (default: false)
+   * @param abortSignal - Optional signal used to cancel the provider request
    * @returns An async generator yielding LLM responses
+   * @throws {@link InputValidationError} In every `errorMode`, when the request
+   *   cannot be sent as is: a user tool named `json_output` together with
+   *   structured output. Provider failures follow `errorMode`.
+   * @throws {@link ProviderLlmError} Only in `"throw"` mode, with code
+   *   `API_ERROR_<status>`, `ANTHROPIC_ERROR` or
+   *   {@link PROVIDER_ERROR_INCOMPLETE_STREAM} (a stream that ended before
+   *   `message_stop`).
    */
   async *generateContentAsync(
     llmRequest: LlmRequest,
     stream = false,
+    abortSignal?: AbortSignal,
   ): AsyncGenerator<LlmResponse, void> {
+    annotateLlmSpan({ provider: "anthropic", baseURL: this.client.baseURL });
+    let incomplete = false;
     try {
-      const { messages, system, tools, params, toolChoice } =
-        convertAnthropicRequest(llmRequest);
+      // Anthropic rejects an empty `messages` array, and recent Claude models
+      // reject a conversation that ends with an assistant turn.
+      const request = this.withUserTurn(llmRequest);
+
+      const { messages, system, tools, params, toolChoice, structuredOutput } =
+        convertAnthropicRequest(request);
 
       if (stream) {
-        yield* this.streamResponse(messages, system, tools, params, toolChoice);
+        const completed = yield* this.streamResponse(
+          messages,
+          system,
+          tools,
+          params,
+          toolChoice,
+          abortSignal,
+          structuredOutput,
+        );
+        incomplete = !completed && !abortSignal?.aborted;
       } else {
         yield await this.singleResponse(
           messages,
@@ -191,10 +214,34 @@ export class AnthropicLlm extends BaseProviderLlm {
           tools,
           params,
           toolChoice,
+          abortSignal,
+          structuredOutput,
         );
       }
     } catch (error) {
-      yield this.createErrorResponse(error, "ANTHROPIC");
+      if (abortSignal?.aborted) return;
+      recordLlmError(error);
+      // A request the bridge refuses before calling the API (a reserved tool
+      // name) is a configuration error, not a provider failure: surface it as
+      // is in every error mode.
+      if (error instanceof InputValidationError) throw error;
+      yield this.handleProviderError(error, {
+        prefix: "ANTHROPIC",
+        providerId: "anthropic",
+      });
+      return;
+    }
+    if (incomplete) {
+      // Partials without `message_stop` are not a turn: report it so the
+      // caller does not take the cut text as the whole answer. Outside the
+      // `try` so a throw is not wrapped.
+      const error = new Error("Stream ended before message_stop");
+      recordLlmError(error);
+      yield this.handleProviderError(error, {
+        prefix: "ANTHROPIC",
+        providerId: "anthropic",
+        code: PROVIDER_ERROR_INCOMPLETE_STREAM,
+      });
     }
   }
 
@@ -203,8 +250,6 @@ export class AnthropicLlm extends BaseProviderLlm {
    *
    * Per-request `config.maxOutputTokens` (params.max_tokens) overrides the
    * instance default. Anthropic requires `max_tokens` to always be present.
-   *
-   * @private
    */
   private buildRequestParams(
     messages: AnthropicSDK.MessageParam[],
@@ -250,15 +295,13 @@ export class AnthropicLlm extends BaseProviderLlm {
       (toolChoice?.type === "any" || toolChoice?.type === "tool")
     ) {
       resolvedToolChoice = { type: "auto" };
-      if (!warnedThinkingToolChoiceDowngrade) {
-        warnedThinkingToolChoiceDowngrade = true;
-        console.warn(
-          "[adk-llm-bridge] Anthropic forbids a forced tool_choice while " +
-            "extended thinking is enabled; downgrading tool_choice to " +
-            "{ type: 'auto' }. Structured output / forced function calling " +
-            "is best-effort in this request. Disable thinking to force tool use.",
-        );
-      }
+      warnOnce(
+        LogCode.THINKING_TOOL_CHOICE_DOWNGRADED,
+        "Anthropic forbids a forced tool_choice while extended thinking is " +
+          "enabled; downgrading tool_choice to { type: 'auto' }. Structured " +
+          "output / forced function calling is best-effort in this request. " +
+          "Disable thinking to force tool use.",
+      );
     }
 
     return {
@@ -276,8 +319,6 @@ export class AnthropicLlm extends BaseProviderLlm {
 
   /**
    * Makes a single (non-streaming) API request.
-   *
-   * @private
    */
   private async singleResponse(
     messages: AnthropicSDK.MessageParam[],
@@ -285,17 +326,45 @@ export class AnthropicLlm extends BaseProviderLlm {
     tools: AnthropicSDK.Tool[] | undefined,
     params?: AnthropicGenerationParams,
     toolChoice?: AnthropicSDK.ToolChoice,
+    abortSignal?: AbortSignal,
+    structuredOutput = false,
   ): Promise<LlmResponse> {
-    const response = await this.client.messages.create(
-      this.buildRequestParams(messages, system, tools, params, toolChoice),
-    );
-    return convertAnthropicResponse(response);
+    // The raw body is parsed here, not by the SDK: `JSON.parse` would round
+    // integers beyond `Number.MAX_SAFE_INTEGER` in tool inputs (19-digit ids);
+    // `parseJson` keeps them exact, as strings, like the streaming path.
+    const raw = await this.client.messages
+      .create(
+        this.buildRequestParams(messages, system, tools, params, toolChoice),
+        abortSignal ? { signal: abortSignal } : undefined,
+      )
+      .asResponse();
+    const body = parseJson(await raw.text());
+    const value = body.ok ? body.value : undefined;
+    if (
+      typeof value !== "object" ||
+      value === null ||
+      Array.isArray(value) ||
+      !Array.isArray((value as { content?: unknown }).content)
+    ) {
+      throw new Error(
+        `Anthropic returned a response body that is not a JSON object with a content array (${
+          body.ok ? "unexpected shape" : "invalid-json"
+        }).`,
+      );
+    }
+    const response = value as AnthropicSDK.Message;
+    annotateLlmSpan({
+      provider: "anthropic",
+      model: response.model,
+      responseId: response.id,
+    });
+    return convertAnthropicResponse(response, { structuredOutput });
   }
 
   /**
    * Makes a streaming API request and yields responses as they arrive.
-   *
-   * @private
+   * Returns `true` when `message_stop` arrived, `false` when the stream ended
+   * early or the caller aborted.
    */
   private async *streamResponse(
     messages: AnthropicSDK.MessageParam[],
@@ -303,17 +372,29 @@ export class AnthropicLlm extends BaseProviderLlm {
     tools: AnthropicSDK.Tool[] | undefined,
     params?: AnthropicGenerationParams,
     toolChoice?: AnthropicSDK.ToolChoice,
-  ): AsyncGenerator<LlmResponse, void> {
+    abortSignal?: AbortSignal,
+    structuredOutput = false,
+  ): AsyncGenerator<LlmResponse, boolean> {
     const stream = this.client.messages.stream(
       this.buildRequestParams(messages, system, tools, params, toolChoice),
+      abortSignal ? { signal: abortSignal } : undefined,
     );
 
-    const acc = createAnthropicStreamAccumulator();
+    const acc = createAnthropicStreamAccumulator({ structuredOutput });
 
     for await (const event of stream) {
+      if (abortSignal?.aborted) return false;
+      if (event.type === "message_start") {
+        annotateLlmSpan({
+          provider: "anthropic",
+          model: event.message?.model,
+          responseId: event.message?.id,
+        });
+      }
       const { response, isComplete } = convertAnthropicStreamEvent(event, acc);
       if (response) yield response;
-      if (isComplete) break;
+      if (isComplete) return true;
     }
+    return false;
   }
 }

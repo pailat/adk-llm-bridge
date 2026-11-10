@@ -8,7 +8,7 @@ ClaudeCodeRoot: ClaudeAgent
   -> OpenRouterSupportSpecialist: LlmAgent + OpenRouter(...)
 ```
 
-## What This Demonstrates
+## What it shows
 
 - `ClaudeAgent` can be the ADK `rootAgent`.
 - `CodexAgent` can be a normal ADK subagent even though it is an external runtime.
@@ -17,7 +17,14 @@ ClaudeCodeRoot: ClaudeAgent
 - `run_adk_subagent` remains bounded RPC semantics: Claude calls a tool, the bridge runs a subagent, then Claude receives the result.
 - External runtime APIs stay opt-in through `adk-llm-bridge/agents`, while model providers stay in the root `adk-llm-bridge` import.
 
-## Quick Start
+## Requirements
+
+- Bun and Node.js 22 or newer.
+- Claude Code and Codex authenticated with their native tooling (`claude --version`, `codex --version`)
+- `OPENROUTER_API_KEY` for the OpenRouter support specialist
+- Optional: Claude and Codex env auth, `OPENROUTER_MODEL`, `SMOKE_HELPDESK_TARGET`
+
+## Run
 
 First make sure Claude Code and Codex are authenticated with their native tooling.
 
@@ -105,10 +112,10 @@ For local usage, Claude Code can use the credentials already configured on your 
 The OpenRouter subagent requires `OPENROUTER_API_KEY` unless your environment already provides it. You can change the model with:
 
 ```bash
-OPENROUTER_MODEL=google/gemini-2.0-flash-001
+OPENROUTER_MODEL=google/gemini-3.8-flash
 ```
 
-The default is `google/gemini-2.0-flash-001` because the free DeepSeek route can return intermittent OpenRouter provider `429` errors during tool-heavy support flows.
+The default is `openrouter/auto`. Set `OPENROUTER_MODEL` to pin a model, for example `google/gemini-3.8-flash`.
 
 The bridge does not persist provider secrets. Install and authenticate each runtime using its native documentation when you want that runtime to execute real work.
 
@@ -126,6 +133,6 @@ External runtime usage is opt-in:
 import { CodexAgent, ClaudeAgent } from "adk-llm-bridge/agents";
 ```
 
-Claude Agent SDK execution is side-effectful and uses the permissions configured on the `ClaudeAgent`; this example defaults to `ask` mode and limits allowed paths to the current working directory plus any paths in `ARCHITECTURE_ANALYSIS_PATHS`. Subagent permissions are inherited conservatively, so `CodexBillingSpecialist` cannot expand beyond the root agent restrictions.
+Claude Agent SDK execution is side-effectful and uses the permissions configured on the `ClaudeAgent`; this example defaults to `ask` mode and limits allowed paths to the current working directory plus any paths in `ARCHITECTURE_ANALYSIS_PATHS`. Mode and network are inherited conservatively, so `CodexBillingSpecialist` cannot get a less restrictive mode than the root's `ask` (it runs `read-only`) or the network the root does not have. Paths are different: Codex cannot check them (its file tools do not ask the bridge), so its driver is built with `allowUnenforcedPaths: true`. The inherited paths are then not enforced, and only Codex's own read-only sandbox limits what it reads. Without that option the sub-agent is refused with `EXTERNAL_AGENT_PATHS_UNENFORCEABLE`.
 
 The example `tsconfig.json` maps `adk-llm-bridge`, `adk-llm-bridge/agents`, and `@google/adk` for local type-checking, avoiding duplicate nominal ADK symbols while using a file dependency. The agent imports the ADK runtime ESM build directly so Bun does not execute declaration files at runtime.

@@ -1,7 +1,11 @@
 {
   "name": "native-features-example",
   "private": true,
+  "license": "MIT",
   "type": "module",
+  "engines": {
+    "node": ">=22.0.0"
+  },
   "scripts": {
     "start": "bun run src/cli.ts",
     "dev": "bun run --watch src/cli.ts",
@@ -17,11 +21,11 @@
     "web:dev": "bunx @google/adk-devtools run agent.ts"
   },
   "dependencies": {
-    "@google/adk": "^1.2.0",
-    "adk-llm-bridge": "^0.5.3",
-    "zod": "^4.2.1"
+    "@google/adk": "^2.4.0",
+    "adk-llm-bridge": "file:../..",
+    "zod": "^4.6.7"
   },
   "devDependencies": {
-    "@types/bun": "latest"
+    "@types/bun": "^1.4.4"
   }
 }
