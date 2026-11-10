@@ -9,6 +9,10 @@
  *
  * - `invoke_workflow <workflowName>`: `gen_ai.operation.name=invoke_workflow`,
  *   `gen_ai.conversation.id`, `adk.workflow.name`, `adk.node.path`.
+ * - `adk_llm_bridge.workflow.execution_id` is also set on the
+ *   `invoke_workflow` span once the execution id is resolved, exactly as
+ *   given (never shortened), so a span processor can join the spans of a
+ *   trace to the workflow's events.
  * - `execute_node <name>`: `gen_ai.operation.name=execute_node`,
  *   `adk.node.path`, `adk.node.run_id`, `adk.node.attempt`, `adk.node.status`
  *   (`completed` | `waiting` | `failed`, and `cancelled` for an abandoned
@@ -34,6 +38,8 @@
  */
 
 import { context, type Span, SpanStatusCode, trace } from "@opentelemetry/api";
+
+import { WORKFLOW_EXECUTION_ID_SPAN_ATTRIBUTE } from "./storage/span-export-processor.js";
 
 const TRACER_NAME = "gcp.vertex.agent";
 const TRACER_VERSION = "adk-llm-bridge";
@@ -176,6 +182,21 @@ export function withWorkflowSpan<T>(
       span.end();
     }
   });
+}
+
+/**
+ * Records the workflow execution id on the active `invoke_workflow` span, so
+ * a span processor can export the spans of the trace under that execution.
+ * A no-op without an active span.
+ *
+ * @param executionId - The resolved execution id.
+ *
+ * @internal
+ */
+export function setWorkflowExecutionIdOnActiveSpan(executionId: string): void {
+  trace
+    .getActiveSpan()
+    ?.setAttribute(WORKFLOW_EXECUTION_ID_SPAN_ATTRIBUTE, executionId);
 }
 
 class StepState implements WorkflowStepSpanHandle {

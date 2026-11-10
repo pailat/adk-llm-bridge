@@ -1028,6 +1028,20 @@ from the 0.6.0 tag.
 - `ExternalAgentModelUsage`, the type of an `ExternalAgentUsage.byModel` entry.
 - `WORKFLOW_STEP_MISMATCH` details include the saved step's `savedStatus` and
   `savedAttempts`.
+- Workflow storage providers. Checkpoint and event providers are chosen by
+  injection (`checkpointStore`) or by URI (`getWorkflowCheckpointStoreFromUri`,
+  `getWorkflowEventExporterFromUri`), with custom schemes through
+  `registerWorkflowStorageProvider`. Events export through
+  `WorkflowEventExportPlugin` and `WorkflowSpanExportProcessor`. The SQLite
+  providers load from `adk-llm-bridge/workflows/checkpoint/sqlite` and
+  `adk-llm-bridge/workflows/events/sqlite`, and the conformance suite from
+  `adk-llm-bridge/workflows/storage/conformance`. The default checkpoint
+  store does not change: it was `ADKSessionCheckpointStore` before this
+  addition and still is; a provider is used only when you pass or select one.
+  On Windows the SQLite stores and the JSONL exporter set no owner-only mode and
+  refuse symbolic links from `lstat`; see
+  [Choosing storage providers](./docs/storage-providers.md) and
+  [Workflow durability](./docs/workflow-durability.md).
 
 ### Changed
 

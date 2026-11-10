@@ -76,7 +76,11 @@ import { isRecord } from "../internal/guards.js";
 import { monotonicNow } from "../internal/monotonic-clock.js";
 import { resolveStepLimits, StepBudget } from "../internal/step-limit.js";
 import { isWorkflowAgent } from "../internal/workflow-agent-brand.js";
-import { withStepSpan, withWorkflowSpan } from "../telemetry.js";
+import {
+  setWorkflowExecutionIdOnActiveSpan,
+  withStepSpan,
+  withWorkflowSpan,
+} from "../telemetry.js";
 import type {
   WorkflowWorkspaceConfig,
   WorkspaceLease,
@@ -318,6 +322,7 @@ export class WorkflowRuntime {
       throwIfRunAborted(abortScope.signal);
       this.#executionId = await this.#resolveExecutionId(this.#parentContext);
       validateExecutionId(this.#executionId);
+      setWorkflowExecutionIdOnActiveSpan(this.#executionId);
       this.#inputOverride = await this.restoreWaitingInput();
       this.#checkpointCoordinator = new WorkflowCheckpointCoordinator({
         definition: this.#checkpointDefinition,

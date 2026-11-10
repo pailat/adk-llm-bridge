@@ -7,8 +7,13 @@ import {
   openSync,
   statSync,
 } from "node:fs";
-import { createRequire } from "node:module";
-import { dirname } from "node:path";
+import { dirname, resolve } from "node:path";
+import {
+  openSqliteDatabase,
+  type SqliteDatabaseHandle,
+  type SqliteOpenFailure,
+  type SqliteStatementHandle,
+} from "../../utils/sqlite-database.js";
 import type { SessionKey, SessionStore, SessionStoreEntry } from "./types.js";
 
 /** Codes of {@link SqliteSessionStoreError}. */
@@ -86,30 +91,31 @@ export interface SqliteSessionStoreOptions {
   busyTimeoutMs?: number;
 }
 
-/** The subset of `node:sqlite` the store uses. */
-interface SqliteStatement {
-  run(...parameters: Array<string | number | null>): unknown;
-  get(...parameters: Array<string | number | null>): unknown;
-  all(...parameters: Array<string | number | null>): unknown[];
-}
-interface SqliteDatabase {
-  exec(sql: string): void;
-  prepare(sql: string): SqliteStatement;
-  close(): void;
-}
-type SqliteModule = {
-  DatabaseSync: new (
-    path: string,
-    options?: { timeout?: number },
-  ) => SqliteDatabase;
-};
-
-const SCHEMA_VERSION = 1;
 const TABLE = "claude_session_entries";
 // The main transcript has no subpath; the SDK forbids an empty one, so ''
 // stands for "main" and keeps the unique index free of NULL subpaths.
 const MAIN = "";
 const MAX_BUSY_TIMEOUT_MS = 2 ** 31 - 1;
+const SCHEMA_MIGRATIONS = [
+  {
+    version: 1,
+    sql: `
+      CREATE TABLE IF NOT EXISTS ${TABLE} (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT,
+        project_key TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        subpath TEXT NOT NULL,
+        uuid TEXT,
+        entry TEXT NOT NULL,
+        mtime INTEGER NOT NULL
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS ${TABLE}_uuid
+        ON ${TABLE} (project_key, session_id, subpath, uuid);
+      CREATE INDEX IF NOT EXISTS ${TABLE}_key
+        ON ${TABLE} (project_key, session_id, subpath, seq);
+    `,
+  },
+];
 
 /**
  * Creates or checks the database file before SQLite opens it.
@@ -239,9 +245,9 @@ function wrapOpenError(
  * contract.
  */
 export class SqliteSessionStore implements SessionStore {
-  readonly #db: SqliteDatabase;
-  readonly #upsert: SqliteStatement;
-  readonly #insert: SqliteStatement;
+  readonly #db: SqliteDatabaseHandle;
+  readonly #upsert: SqliteStatementHandle;
+  readonly #insert: SqliteStatementHandle;
 
   /**
    * Opens (and creates when missing) the database.
@@ -270,13 +276,22 @@ export class SqliteSessionStore implements SessionStore {
         `busyTimeoutMs must be an integer from 0 to ${MAX_BUSY_TIMEOUT_MS}; got ${String(options.busyTimeoutMs)}.`,
       );
     }
-    const { DatabaseSync } = loadSqlite();
-    if (options.path !== ":memory:") {
-      prepareDatabaseFile(options.path);
+    const path =
+      options.path === ":memory:" ? ":memory:" : resolve(options.path);
+    if (path !== ":memory:") {
+      prepareDatabaseFile(path);
     }
-    this.#db = new DatabaseSync(options.path, { timeout });
+    // prepareDatabaseFile has created or checked the file without following
+    // a symlink, so the helper opens that checked file as it is.
+    this.#db = openSqliteDatabase({
+      path,
+      busyTimeoutMs: timeout,
+      synchronous: "full",
+      symlinks: "follow",
+      fail: failOpen,
+    });
     try {
-      this.#migrate();
+      this.#db.migrate("session store", SCHEMA_MIGRATIONS, "user_version");
     } catch (error) {
       this.#db.close();
       throw error;
@@ -292,56 +307,6 @@ export class SqliteSessionStore implements SessionStore {
       `INSERT INTO ${TABLE} (project_key, session_id, subpath, uuid, entry, mtime)
        VALUES (?, ?, ?, NULL, ?, ?)`,
     );
-  }
-
-  #migrate(): void {
-    this.#db.exec("PRAGMA journal_mode = WAL");
-    const row = this.#db.prepare("PRAGMA user_version").get() as {
-      user_version: number;
-    };
-    if (row.user_version > SCHEMA_VERSION) {
-      throw new SqliteSessionStoreError(
-        "SESSION_STORE_SCHEMA_UNSUPPORTED",
-        `The session store database has schema version ${row.user_version}; this version of adk-llm-bridge reads version ${SCHEMA_VERSION}. Upgrade adk-llm-bridge.`,
-      );
-    }
-    this.#transaction(() => {
-      this.#db.exec(`
-        CREATE TABLE IF NOT EXISTS ${TABLE} (
-          seq INTEGER PRIMARY KEY AUTOINCREMENT,
-          project_key TEXT NOT NULL,
-          session_id TEXT NOT NULL,
-          subpath TEXT NOT NULL,
-          uuid TEXT,
-          entry TEXT NOT NULL,
-          mtime INTEGER NOT NULL
-        );
-        CREATE UNIQUE INDEX IF NOT EXISTS ${TABLE}_uuid
-          ON ${TABLE} (project_key, session_id, subpath, uuid);
-        CREATE INDEX IF NOT EXISTS ${TABLE}_key
-          ON ${TABLE} (project_key, session_id, subpath, seq);
-        PRAGMA user_version = ${SCHEMA_VERSION};
-      `);
-    });
-  }
-
-  #transaction(body: () => void): void {
-    // IMMEDIATE takes the write lock up front, so a concurrent writer waits
-    // on the busy timeout instead of failing mid-transaction.
-    this.#db.exec("BEGIN IMMEDIATE");
-    try {
-      body();
-      this.#db.exec("COMMIT");
-    } catch (error) {
-      // SQLite may have rolled back already (a full disk, an interrupt, a
-      // RAISE(ROLLBACK)); then ROLLBACK itself fails. Keep the first error.
-      try {
-        this.#db.exec("ROLLBACK");
-      } catch {
-        // Nothing left to roll back.
-      }
-      throw error;
-    }
   }
 
   /**
@@ -394,7 +359,7 @@ export class SqliteSessionStore implements SessionStore {
     });
     if (rows.length === 0) return;
     const mtime = Date.now();
-    this.#transaction(() => {
+    this.#db.transaction(() => {
       for (const row of rows) {
         if (row.uuid === undefined) {
           this.#insert.run(projectKey, sessionId, subpath, row.json, mtime);
@@ -533,14 +498,31 @@ function checkKey(key: {
   };
 }
 
-function loadSqlite(): SqliteModule {
-  try {
-    return createRequire(import.meta.url)("node:sqlite") as SqliteModule;
-  } catch (error) {
-    throw new SqliteSessionStoreError(
-      "SESSION_STORE_SQLITE_UNAVAILABLE",
-      "SqliteSessionStore needs the built-in node:sqlite module: Node 22.13 or later, or Bun. On Node 22.5 to 22.12 run with --experimental-sqlite.",
-      { cause: error },
-    );
+function failOpen(
+  failure: SqliteOpenFailure,
+  message: string,
+  cause?: unknown,
+): Error {
+  switch (failure) {
+    case "unavailable":
+      return new SqliteSessionStoreError(
+        "SESSION_STORE_SQLITE_UNAVAILABLE",
+        "SqliteSessionStore needs the built-in node:sqlite module: Node 22.13 or later, or Bun. On Node 22.5 to 22.12 run with --experimental-sqlite.",
+        { cause },
+      );
+    case "invalid_option":
+      return new SqliteSessionStoreError(
+        "SESSION_STORE_INVALID_OPTION",
+        message,
+      );
+    case "schema_unsupported":
+      return new SqliteSessionStoreError(
+        "SESSION_STORE_SCHEMA_UNSUPPORTED",
+        message,
+      );
+    default:
+      // `not_a_database` rethrows the plain `node:sqlite` error; `unsafe_path`
+      // (a directory or FIFO at the path) has no cause and gets a plain Error.
+      return cause instanceof Error ? cause : new Error(message, { cause });
   }
 }

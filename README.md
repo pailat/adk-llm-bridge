@@ -658,6 +658,7 @@ directory). See [examples/README.md](examples/README.md).
 - [Multi-agent workflow orchestration](docs/workflow-orchestration.md)
 - [Workflow control plane](docs/workflow-control-plane.md)
 - [Workflow durability](docs/workflow-durability.md)
+- [Choosing storage providers](docs/storage-providers.md)
 - [Workflows and ADK's `Workflow`](docs/workflow-adk-interop.md)
 
 All documents, including the [glossary](docs/glossary.md), are listed in
