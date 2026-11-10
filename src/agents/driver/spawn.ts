@@ -124,6 +124,25 @@ const NATIVE_EXTENSIONS = [".com", ".exe"] as const;
 const BATCH_EXTENSIONS = [".bat", ".cmd"] as const;
 
 /**
+ * `value` without its trailing run of the characters in `chars`.
+ *
+ * @remarks
+ * A loop, not a `/[...]+$/` regular expression: that pattern backtracks
+ * quadratically on a long run that does not reach the end of the string.
+ *
+ * @param value - The text.
+ * @param chars - The characters to drop from the end.
+ * @returns The trimmed text.
+ */
+export function trimEndOf(value: string, chars: string): string {
+  let end = value.length;
+  while (end > 0 && chars.includes(value[end - 1] as string)) {
+    end--;
+  }
+  return value.slice(0, end);
+}
+
+/**
  * What a Windows file name can be to the CLI lookups: `native` (`.com`,
  * `.exe`: runs directly), `batch` (`.bat`, `.cmd`: never run, only reported),
  * or `other` (no extension, `.ps1`, anything else: not runnable by itself, so
@@ -135,7 +154,7 @@ const BATCH_EXTENSIONS = [".bat", ".cmd"] as const;
 export function windowsExecutableKind(
   fileName: string,
 ): "native" | "batch" | "other" {
-  const extension = win32.extname(fileName.replace(/[. ]+$/, "")).toLowerCase();
+  const extension = win32.extname(trimEndOf(fileName, ". ")).toLowerCase();
   if ((NATIVE_EXTENSIONS as readonly string[]).includes(extension)) {
     return "native";
   }
@@ -171,10 +190,7 @@ function windowsCanonical(path: string): string {
 function isUnderRoots(path: string, roots: readonly string[]): boolean {
   const lower = win32.resolve(path).toLowerCase();
   return roots.some((root) => {
-    const base = win32
-      .resolve(root)
-      .toLowerCase()
-      .replace(/[\\/]+$/, "");
+    const base = trimEndOf(win32.resolve(root).toLowerCase(), "\\/");
     return lower === base || lower.startsWith(`${base}\\`);
   });
 }
@@ -286,7 +302,7 @@ export function resolveWindowsCommand(
     !isUnderRoots(windowsCanonical(path), excluded) &&
     !isUnderRoots(path, excluded);
   // Windows ignores trailing dots and spaces in a file name.
-  const trimmed = command.replace(/[. ]+$/, "");
+  const trimmed = trimEndOf(command, ". ");
   const extension = win32.extname(trimmed).toLowerCase();
   if ((BATCH_EXTENSIONS as readonly string[]).includes(extension)) {
     throw refusal(command, command);
