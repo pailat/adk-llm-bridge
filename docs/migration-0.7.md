@@ -369,7 +369,10 @@ new in 0.7.0. If you already use them, these changes apply:
   bridge saw: a host or managed setting added tools or MCP servers (remove
   that setting, or pass `inheritHostConfig: true` if you trust it), or the
   model asked for a tool it was not offered (a model error; retrying the step
-  usually works). The check accepts an offered
+  usually works). On `ClaudeAgentSdkDriver` a call the runtime refuses on its
+  own (an error result, no hook reached) no longer stops the run: it is
+  tagged `metadata.isolation: "EXTERNAL_AGENT_TOOL_NOT_OFFERED"` on its
+  `tool_result` event, and the third one in a run stops it. The check accepts an offered
   built-in under another case (`bash` for `Bash`); any other name outside the
   offered set stops the run, including an unknown name, an `mcp__` name in
   another case (`MCP__x`), and a `tool_use` with an empty or missing name. A tool call
@@ -489,6 +492,14 @@ new in 0.7.0. If you already use them, these changes apply:
 - **Cancel.** CLI processes get `killGraceMs` (default 2000 ms) to exit after
   SIGTERM before SIGKILL. On macOS and Linux the whole process group of the
   CLI is killed, and host signals are forwarded to it.
+- **Windows batch shims.** `ClaudeCliDriver`, `CodexCliDriver` and
+  `GeminiCliDriver` resolve their command over `.com` and `.exe` only and never
+  run a `.cmd` or `.bat` file (it would go through `cmd.exe` and re-parse the
+  prompt). A shim such as `gemini.cmd` ends the run with
+  `EXTERNAL_AGENT_BATCH_COMMAND_REFUSED`. Use the native `claude.exe` or
+  `codex.exe`, or, for Gemini CLI, a custom `spawn` that runs Node with the
+  package's entry; see
+  [Windows: batch files and npm installs](./external-agent-isolation.md#windows-batch-files-and-npm-installs).
 
 ## 7. Agent invocation gateway
 
@@ -653,6 +664,16 @@ checkpoints:
   save of that execution fails with `checkpoint_lock_timeout` while the lock
   is left behind. A lock lost to another owner still fails the save with
   `checkpoint_lock_ownership_lost`.
+- **Replay mismatches stop the run in `ctx.parallel`.** A checkpoint mismatch
+  (`WORKFLOW_STEP_MISMATCH`, `WORKFLOW_INPUT_MISMATCH`,
+  `WORKFLOW_VERSION_MISMATCH`, `WORKFLOW_SOURCE_MISMATCH` or
+  `WORKFLOW_ATTEMPT_MISMATCH`) is no longer a `failed` outcome of
+  `failureMode: "all-settled"`; the run fails at the step that changed. Remove
+  code that inspects `*_MISMATCH` outcomes after a fan-out.
+- **Nested workflow outcome.** A `WorkflowAgent` used as a step reports its
+  final status to the parent. Before, an error event of a retried inner
+  attempt could turn a completed nested run into a failed parent step. Code
+  that worked around it (for example by re-running the "failed" step) can go.
 
 ## Coming from the 0.6.0 tag
 

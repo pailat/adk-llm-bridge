@@ -68,8 +68,12 @@ policy to its dispatcher.
 agent instance runs one step at a time: the runtime holds a per-agent lock
 (`AsyncSemaphore(1)`) because ADK agents are not re-entrant. Parallel steps
 whose `agentName` resolves to the same sub-agent therefore run one after the
-other, with no warning. For fan-out, declare one sub-agent per concurrent
-branch, each with its own name:
+other. Such a `ctx.parallel(...)` call logs a warning through ADK's logger,
+once per run and shared sub-agent:
+`[adk-llm-bridge] [WORKFLOW_PARALLEL_STEPS_SHARE_AGENT] ...` names the
+workflow, the sub-agent and up to five step ids. A call with `concurrency: 1`
+does not warn. For fan-out, declare one sub-agent per concurrent branch, each
+with its own name:
 
 ```typescript
 import { LlmAgent } from "@google/adk";

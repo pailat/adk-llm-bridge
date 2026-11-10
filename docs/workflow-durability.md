@@ -97,8 +97,8 @@ const running = (async () => {
 })();
 // ...later, for example from a budget guard:
 controller.abort(new Error("budget exceeded"));
-// With a checkpoint store that writes outside the session (see below), the
-// iterator ends once the workflow has recorded the abort.
+// The iterator ends once the workflow has recorded the abort, with either
+// checkpoint store (see below); a delegated workflow gets at most 500 ms.
 await running.catch(() => undefined);
 process.exit(0); // safe now
 ```
@@ -111,12 +111,23 @@ from it and drain as above. Without one, the host ends by the signal as usual.
 `runner.runAsync` ends normally after an abort (no `WORKFLOW_ABORTED`
 rejection), and the runner stops forwarding events once the signal aborts, so
 `step_interrupted` and the terminal `error` event reach only a consumer of
-`agent.runAsync` directly. Through `Runner`, read the abort from a checkpoint
-store that writes outside the session, such as
-`FileSystemWorkflowCheckpointStore`: with the default ADK session store the
-final checkpoint travels on an event the runner no longer reads, so session
-state keeps the execution and the step `running`, and a later resume reports
-the step as indeterminate.
+`agent.runAsync` directly. The abort is still recorded in the checkpoint.
+`FileSystemWorkflowCheckpointStore` writes it to disk. With the default ADK
+session store, the workflow appends one event that carries the final
+checkpoints to the session itself, before the runner seals the aborted
+invocation, so session state shows the run `cancelled` and the step
+`interrupted`.
+
+That event also covers a workflow delegated from this one. The root waits up to
+500 ms for it to settle. A delegated workflow still going after that, such as a
+handler awaiting something that ignores the signal, is recorded as it stood:
+its run, and any step it had not recorded yet, stay `running`. What it records
+later does not reach the session, and a resume reports that step as
+indeterminate.
+
+If the session service rejects that append, the workflow logs
+`WORKFLOW_CHECKPOINT_ABORT_RECORD_FAILED` and the session keeps the step
+`running`, which a later resume reports as indeterminate.
 
 The workflow execution timeout aborts the same way (`WORKFLOW_ABORTED`), so a
 step that was in flight at the timeout is also recorded `interrupted` and a
@@ -155,12 +166,66 @@ re-enter the execution with a turn that does not carry the answer, with
 `interrupted` step and, when it reaches the waiting step, emits its pending
 request again; the next answer turn then proceeds.
 
+### Stopping on Ctrl+C (SIGINT)
+
+Ctrl+C in a terminal or pane sends SIGINT to the foreground process group.
+Node and Bun end a process that has no SIGINT listener at once, so nothing
+unwinds and no abort is recorded. To stop cleanly, register a listener with
+`process.on`, abort the run on the first signal, drain the run, then exit.
+Handle repeats yourself: a second Ctrl+C may exit at once, knowingly, and
+accepts the state described below.
+
+```ts
+const controller = new AbortController();
+let signals = 0;
+process.on("SIGINT", () => {
+  signals += 1;
+  if (signals === 1) controller.abort(new Error("SIGINT"));
+  else process.exit(130); // second Ctrl+C: stop now, knowingly
+});
+// Pass controller.signal as `abortSignal` to the run, for example
+// `runner.runAsync({ userId, sessionId, newMessage, abortSignal: controller.signal })`,
+// drain it, then:
+process.exit(0); // after the drain, never inside the first-signal branch
+```
+
+Use `process.on` rather than `process.once` because the listener stays
+registered, so it also receives the second Ctrl+C. With `process.once` the
+first signal aborts the run and drains it as above, but a second signal finds no
+host listener and ends the host as it would without any handler.
+
+On macOS and Linux, external CLI agents run in their own process group, so the
+terminal does not signal them. While one is live, the bridge forwards the
+host's SIGINT, SIGTERM and SIGHUP to it. When the host has its own SIGINT
+listener (`process.on` or `process.once`), that listener decides what happens to
+the host; the bridge ends the host itself only when no host listener is
+registered. On Windows the CLIs are not placed in a separate process group.
+
+If the process tree is killed before the abort unwinds (SIGKILL, a second
+forced stop, a crash, a pane that is closed), the store keeps the last
+checkpoint it wrote before the kill:
+
+- The execution is still `running` and each in-flight step is `running`, with
+  its attempt number; nothing records the stop.
+- A resume of that execution id reports `WORKFLOW_INDETERMINATE_STEP` for the
+  step, with `stepId` and `attempts`, and runs nothing, because the killed
+  attempt may have had side effects.
+- A step declared with `resumePolicy: "retry"` runs again as the next
+  attempt. `retryFailedSteps` applies to `interrupted` and `failed` steps, not
+  to a `running` one.
+- A step input hash is checked on resume for every recorded step, so a step
+  cannot be resumed with a corrected input; give the step a new id instead.
+
 ## Waiting steps
 
 A step whose sub-agent asks for input is stored with `status: "waiting"` and an
 `interrupt` (kind, function-call ids, requests and the delegation events, all
 JSON). The checkpoint also keeps the original workflow `input` until the
 workflow ends, because the turn that answers the step carries only the answer.
+A run that fails after a step began waiting keeps that input, so the wait can
+still be answered. A resume that re-reaches a recorded wait without an answer
+stores the checkpoint as `running` with its input again, which also repairs a
+checkpoint written by an earlier release that lost the input.
 Both fields are optional, so existing checkpoints load unchanged; a checkpoint
 that contains a waiting step cannot be read by earlier versions. Interrupt
 events count toward the checkpoint size limit. On load, the fields that
@@ -168,6 +233,22 @@ resuming reads from each stored event (`author`, `branch`, `longRunningToolIds`,
 `content.parts`, each part's `functionCall`, `actions` and
 `actions.stateDelta`) must have their ADK types; a
 checkpoint that fails this check is rejected as `checkpoint_file_corrupt`.
+
+## Step limit on a resumed run
+
+`limits.maxSteps` bounds the steps one turn of the workflow may invoke. Steps
+replayed from the checkpoint count too. A resumed turn replays every recorded
+step through the handler, so in effect the limit bounds every step the
+execution has ever run, and a long-lived run reaches `WORKFLOW_LIMIT_EXCEEDED`
+on a later resume even though each turn ran few new steps. The error details
+carry `limit`, `stepId` and `replayedSteps`, for handler and script workflows
+alike, and the execution summary reports `steps` and `replayedSteps`. A script
+workflow also bounds its yielded messages at twice `maxSteps` plus one, so a
+raised limit raises that bound too.
+
+To continue the run, raise `limits.maxSteps` in the definition (the limit is not
+part of the checkpoint identity) and resume the same execution id: finished
+steps replay and the run goes on from where it stopped.
 
 ## Re-entered steps
 
