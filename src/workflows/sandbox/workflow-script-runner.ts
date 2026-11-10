@@ -5,7 +5,6 @@ import {
   type WorkflowAgentFactoryRequest,
 } from "../agents/workflow-agent-factory.js";
 import {
-  DEFAULT_WORKFLOW_EXECUTION_LIMITS,
   MAX_WORKFLOW_AGENT_REVISION_LENGTH,
   WorkflowError,
   type WorkflowParallelOptions,
@@ -16,7 +15,11 @@ import {
 } from "../contracts.js";
 import type { WorkflowUserEvent } from "../events.js";
 import { attachCause } from "../internal/error-support.js";
-import { stepLimitExceeded } from "../internal/step-limit.js";
+import {
+  resolveStepLimits,
+  StepBudget,
+  type StepLimits,
+} from "../internal/step-limit.js";
 import {
   WORKFLOW_SCRIPT_PROTOCOL,
   WORKFLOW_SCRIPT_PROTOCOL_VERSION,
@@ -36,16 +39,26 @@ export interface WorkflowScriptExecutionOptions
   /** Host capabilities the script reaches through yielded operations. */
   host: WorkflowScriptHost;
   /**
-   * Number of steps the host has replayed from a checkpoint so far, reported in
-   * the step limit error.
+   * Set when the host may answer a step from a checkpoint instead of running
+   * its agent.
    *
-   * @defaultValue Zero.
+   * @remarks
+   * Without it every requested step counts toward `limits.maxSteps` before the
+   * host sees it. With it the runner cannot know in advance which steps
+   * replay, so it enforces only the combined bound: it refuses a request that
+   * would take the steps of this call past `maxSteps + maxReplayedSteps`, with
+   * `limitName: "maxSteps + maxReplayedSteps"`. The host owns the per-kind
+   * bounds and must refuse a step over `maxSteps` before running its agent, and
+   * a replayed step over `maxReplayedSteps`, as the workflow runtime does.
+   *
+   * @defaultValue `false`
    */
-  replayedSteps?: () => number;
+  replaysFromCheckpoint?: boolean;
   /**
    * Maximum yielded RPC messages, including emit operations.
    *
-   * @defaultValue Twice the step limit plus one.
+   * @defaultValue Twice the step limit plus one; the step limit is
+   * `maxSteps + maxReplayedSteps` when `replaysFromCheckpoint` is set.
    */
   maxMessages?: number;
   /**
@@ -524,6 +537,36 @@ function wrapHostError(error: unknown): never {
   );
 }
 
+function stepIdOf(step: { id?: unknown } | undefined): string {
+  return typeof step?.id === "string" ? step.id : "";
+}
+
+/**
+ * Refuses a request that would take the steps of this call past
+ * `maxSteps + maxReplayedSteps`, naming its first step over that bound.
+ */
+function admitReplayable(
+  limits: StepLimits,
+  admitted: number,
+  requested: readonly { id?: unknown }[],
+): void {
+  const bound = limits.maxSteps + limits.maxReplayedSteps;
+  const room = bound - admitted;
+  if (requested.length <= room) return;
+  throw new WorkflowError(
+    "WORKFLOW_LIMIT_EXCEEDED",
+    `Workflow script exceeded maxSteps + maxReplayedSteps (${bound} steps in one turn); raise limits.maxSteps or limits.maxReplayedSteps and resume the same execution id to continue`,
+    {
+      limit: bound,
+      limitName: "maxSteps + maxReplayedSteps",
+      stepId: stepIdOf(requested[room]),
+      requestedSteps: admitted,
+      maxSteps: limits.maxSteps,
+      maxReplayedSteps: limits.maxReplayedSteps,
+    },
+  );
+}
+
 /**
  * Drives a synchronous guest generator while awaiting all ADK work on the host.
  *
@@ -546,9 +589,11 @@ export async function runWorkflowScript(
   runtime: WorkflowScriptRuntime,
   options: WorkflowScriptExecutionOptions,
 ): Promise<WorkflowScriptExecutionResult> {
-  const maxSteps =
-    options.limits?.maxSteps ?? DEFAULT_WORKFLOW_EXECUTION_LIMITS.maxSteps;
-  const maxMessages = options.maxMessages ?? maxSteps * 2 + 1;
+  const replays = options.replaysFromCheckpoint === true;
+  const budget = new StepBudget(resolveStepLimits(options.limits));
+  const stepBound =
+    budget.limits.maxSteps + (replays ? budget.limits.maxReplayedSteps : 0);
+  const maxMessages = options.maxMessages ?? stepBound * 2 + 1;
   if (!Number.isSafeInteger(maxMessages) || maxMessages <= 0) {
     throw new WorkflowError(
       "WORKFLOW_DEFINITION_INVALID",
@@ -590,27 +635,18 @@ export async function runWorkflowScript(
           `Workflow script exceeded the ${maxMessages} message limit`,
         );
       }
-      const requestedSteps =
+      const requested =
         operation.op === "run"
-          ? 1
+          ? [operation.step]
           : operation.op === "parallel"
-            ? operation.steps.length
-            : 0;
-      steps += requestedSteps;
-      if (steps > maxSteps) {
-        // The first step of this request that passes the limit.
-        const over =
-          operation.op === "parallel"
-            ? operation.steps[maxSteps - (steps - requestedSteps)]
-            : operation.op === "run"
-              ? operation.step
-              : undefined;
-        throw stepLimitExceeded(
-          maxSteps,
-          typeof over?.id === "string" ? over.id : "",
-          options.replayedSteps?.() ?? 0,
-        );
+            ? operation.steps
+            : [];
+      if (replays) {
+        admitReplayable(budget.limits, steps, requested);
+      } else {
+        for (const step of requested) budget.takeExecuted(stepIdOf(step));
       }
+      steps += requested.length;
 
       try {
         switch (operation.op) {

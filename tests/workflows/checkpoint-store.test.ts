@@ -5,7 +5,7 @@ import {
   withWorkflowCompleted,
 } from "../../src/workflows/checkpoint/checkpoint.js";
 import {
-  ADKSessionCheckpointStore,
+  AdkSessionCheckpointStore,
   workflowCheckpointByteLength,
   workflowCheckpointKey,
   workflowCheckpointRevision,
@@ -20,7 +20,7 @@ const definition = defineWorkflow({
   handler: () => "done",
 });
 
-describe("ADKSessionCheckpointStore", () => {
+describe("AdkSessionCheckpointStore", () => {
   test("returns stateDelta without mutating ADK session state", async () => {
     const context = invocationContext();
     const checkpoint = await createWorkflowCheckpoint({
@@ -29,7 +29,7 @@ describe("ADKSessionCheckpointStore", () => {
       input: "build it",
       now: 10,
     });
-    const store = new ADKSessionCheckpointStore();
+    const store = new AdkSessionCheckpointStore();
     const write = await store.save({ context, checkpoint });
     const key = workflowCheckpointKey("implementation", "inv-1");
 
@@ -48,7 +48,7 @@ describe("ADKSessionCheckpointStore", () => {
       input: "build it",
     });
     const key = workflowCheckpointKey("implementation", "inv-1");
-    const store = new ADKSessionCheckpointStore();
+    const store = new AdkSessionCheckpointStore();
 
     expect(
       await store.load({
@@ -60,7 +60,7 @@ describe("ADKSessionCheckpointStore", () => {
   });
 
   test("returns undefined for a missing checkpoint and rejects invalid state", async () => {
-    const store = new ADKSessionCheckpointStore();
+    const store = new AdkSessionCheckpointStore();
     expect(
       await store.load({
         context: invocationContext(),
@@ -87,7 +87,7 @@ describe("ADKSessionCheckpointStore", () => {
     const checkpoint = await legacyCheckpoint();
     const key = workflowCheckpointKey("implementation", "inv-legacy");
     const context = invocationContext({ [key]: checkpoint });
-    const store = new ADKSessionCheckpointStore();
+    const store = new AdkSessionCheckpointStore();
 
     const loaded = await store.load({
       context,
@@ -122,7 +122,7 @@ describe("ADKSessionCheckpointStore", () => {
     const valid = withWorkflowCompleted(initial, "ok", 20);
     const maxCheckpointBytes = workflowCheckpointByteLength(valid) + 8;
     const oversized = withWorkflowCompleted(initial, "x".repeat(4_096), 20);
-    const store = new ADKSessionCheckpointStore({ maxCheckpointBytes });
+    const store = new AdkSessionCheckpointStore({ maxCheckpointBytes });
     const context = invocationContext();
     const initialWrite = await store.save({
       context,
@@ -162,7 +162,7 @@ describe("ADKSessionCheckpointStore", () => {
 
     const oversizedKey = workflowCheckpointKey("implementation", "inv-size");
     await expect(
-      new ADKSessionCheckpointStore({ maxCheckpointBytes }).load({
+      new AdkSessionCheckpointStore({ maxCheckpointBytes }).load({
         context: invocationContext({ [oversizedKey]: oversized }),
         workflowId: "implementation",
         executionId: "inv-size",

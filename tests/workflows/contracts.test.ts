@@ -121,6 +121,7 @@ describe("workflow contracts", () => {
   test("provides bounded defaults for every runtime", () => {
     expect(DEFAULT_WORKFLOW_EXECUTION_LIMITS).toEqual({
       maxSteps: 100,
+      maxReplayedSteps: 1000,
       maxConcurrency: 4,
       maxAttemptsPerStep: 1,
       timeoutMs: 300_000,

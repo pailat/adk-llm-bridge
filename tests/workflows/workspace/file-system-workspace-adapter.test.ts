@@ -176,6 +176,43 @@ describe("FileSystemWorkspaceAdapter", () => {
     });
   });
 
+  test("after a host sleep longer than the TTL the next heartbeat reports the loss and a peer takes over", async () => {
+    const directory = await stateDirectory();
+    // While a host sleeps no timer runs and the wall clock keeps moving: on
+    // wake the clock is past the lease expiry before any renewal ran.
+    let now = 10_000;
+    const sleeper = adapter(directory, {
+      leaseTtlMs: 100,
+      heartbeatIntervalMs: 10,
+      now: () => now,
+    });
+    const lease = await sleeper.acquire(request("agent-a", ["src"]));
+    expect(lease.expiresAt).toBe(10_100);
+
+    now += 3_600_000;
+    await delay(40);
+
+    expect(lease.lossSignal.aborted).toBe(true);
+    expect(lease.lossSignal.reason).toMatchObject({
+      code: "WORKSPACE_LEASE_LOST",
+      leaseId: lease.leaseId,
+      fencingToken: lease.fencingToken,
+    });
+    expect(await lease.renew()).toBe(false);
+
+    const peer = adapter(directory, { now: () => now });
+    expect(peer.conflicts(request("observer", ["src"]))).toEqual([]);
+    const next = await peer.acquire(request("agent-b", ["src"]));
+    expect(next.fencingToken).toBeGreaterThan(lease.fencingToken);
+    expect(await lease.release()).toBe(false);
+    expect(
+      peer
+        .conflicts(request("observer", ["src"]))
+        .map((conflict) => conflict.fencingToken),
+    ).toEqual([next.fencingToken]);
+    expect(await next.release()).toBe(true);
+  });
+
   test("does not report loss after successful renew and release", async () => {
     const directory = await stateDirectory();
     let now = 4_000;

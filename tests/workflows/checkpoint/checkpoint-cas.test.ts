@@ -6,7 +6,7 @@ import {
 } from "../../../src/workflows/checkpoint/checkpoint.js";
 import type { WorkflowCheckpointV1 } from "../../../src/workflows/checkpoint/schema.js";
 import {
-  ADKSessionCheckpointStore,
+  AdkSessionCheckpointStore,
   type LoadWorkflowCheckpointInput,
   type SaveWorkflowCheckpointInput,
   WorkflowCheckpointConflictError,
@@ -34,8 +34,8 @@ describe("workflow checkpoint optimistic concurrency", () => {
     });
     const key = workflowCheckpointKey(definition.id, "execution-1");
     const context = invocationContext({ [key]: initial });
-    const store = new ADKSessionCheckpointStore();
-    const staleStore = new ADKSessionCheckpointStore();
+    const store = new AdkSessionCheckpointStore();
+    const staleStore = new AdkSessionCheckpointStore();
     const expectedRevision = await workflowCheckpointRevision(initial);
     const next = withWorkflowCompleted(initial, "first", 20);
     const nextRevision = await workflowCheckpointRevision(next);

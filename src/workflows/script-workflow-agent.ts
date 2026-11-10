@@ -27,9 +27,9 @@ import { attachCause } from "./internal/error-support.js";
 import { WORKFLOW_AGENT_BRAND } from "./internal/workflow-agent-brand.js";
 import {
   invocationContextForNode,
-  pickWorkflowNodeConfig,
   resolveRetryFailedSteps,
   type WorkflowNodeConfig,
+  workflowAgentBaseConfig,
 } from "./node-config.js";
 import {
   ActiveExecutions,
@@ -45,7 +45,16 @@ import type { WorkflowScriptRuntime } from "./sandbox/types.js";
 import { runWorkflowScript } from "./sandbox/workflow-script-runner.js";
 import type { WorkflowWorkspaceConfig } from "./workspace/workspace-adapter.js";
 
-/** Configuration of a {@link ScriptWorkflowAgent}. */
+/**
+ * Configuration of a {@link ScriptWorkflowAgent}.
+ *
+ * @remarks
+ * The whole object is forwarded to `BaseAgent`, so `clone()` rebuilds the
+ * agent from it: the clone shares the definition and any `runtime`,
+ * `gateway`, `createAgentFactory`, `checkpointStore`, `runtimeHooks` and
+ * `workspace` given here (without `runtime`, each instance creates its own
+ * QuickJS runtime), and gets clones of the sub-agents.
+ */
 export interface ScriptWorkflowAgentConfig extends WorkflowNodeConfig {
   /** ADK agent name. */
   name: string;
@@ -117,12 +126,11 @@ export class ScriptWorkflowAgent extends BaseAgent {
    */
   constructor(config: ScriptWorkflowAgentConfig) {
     const subAgents = config.subAgents ?? [];
-    super({
-      name: config.name,
-      description: config.description ?? config.definition.description,
-      subAgents,
-      ...pickWorkflowNodeConfig(config),
-    });
+    super(
+      workflowAgentBaseConfig(config, {
+        description: config.definition.description,
+      }),
+    );
     this.definition = config.definition;
     this.#checkpointStore = config.checkpointStore;
     this.#resolveExecutionId = config.resolveExecutionId;
@@ -215,25 +223,17 @@ export class ScriptWorkflowAgent extends BaseAgent {
       description: this.definition.description,
       limits: this.#limits,
       handler: async (context) => {
-        let replayedSteps = 0;
         const execution = await runWorkflowScript(this.#scriptRuntime, {
           source: this.definition.source,
           input: context.input,
           signal: context.signal,
           limits: this.#limits,
           filename: `${this.definition.id}.workflow.js`,
-          replayedSteps: () => replayedSteps,
+          // The workflow runtime below enforces both step limits per step.
+          replaysFromCheckpoint: this.#checkpointStore !== undefined,
           host: {
-            run: async (step) => {
-              const result = await context.run(step);
-              if (result.replayed) replayedSteps += 1;
-              return result;
-            },
-            parallel: async (steps, options) => {
-              const outcomes = await context.parallel(steps, options);
-              replayedSteps += outcomes.filter((o) => o.replayed).length;
-              return outcomes;
-            },
+            run: (step) => context.run(step),
+            parallel: (steps, options) => context.parallel(steps, options),
             emit: (event) => context.emit(event),
             ...(dynamicAgents
               ? {

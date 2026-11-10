@@ -391,6 +391,140 @@ describe("runWorkflowScript", () => {
     ).rejects.toMatchObject({ code: "WORKFLOW_LIMIT_EXCEEDED" });
   });
 
+  test("a replaying host may answer steps past maxSteps from its checkpoint", async () => {
+    const log: string[] = [];
+    const host = createHost(log);
+    const run = host.run;
+    host.run = async (step) => ({
+      ...(await run(step)),
+      replayed: step.id.startsWith("old"),
+    });
+    const execution = await runWorkflowScript(
+      new QuickJSSyncGeneratorRuntime(),
+      {
+        source: `
+          for (const id of ["old1", "old2", "old3", "new1"]) {
+            yield ctx.run({ id, agentName: "agent", input: id });
+          }
+          return "done";
+        `,
+        host,
+        limits: { maxSteps: 1, maxReplayedSteps: 3 },
+        replaysFromCheckpoint: true,
+      },
+    );
+
+    expect(execution).toMatchObject({ output: "done", steps: 4 });
+  });
+
+  test("a replaying host owns the per-kind bounds; the runner enforces their sum across calls", async () => {
+    const log: string[] = [];
+    await expect(
+      runWorkflowScript(new QuickJSSyncGeneratorRuntime(), {
+        source: `
+          for (const id of ["one", "two", "three"]) {
+            yield ctx.run({ id, agentName: "agent", input: id });
+          }
+        `,
+        // The host reports every step as executed; the runner does not
+        // second-guess that classification.
+        host: createHost(log),
+        limits: { maxSteps: 1, maxReplayedSteps: 1 },
+        replaysFromCheckpoint: true,
+      }),
+    ).rejects.toMatchObject({
+      code: "WORKFLOW_LIMIT_EXCEEDED",
+      details: {
+        limit: 2,
+        limitName: "maxSteps + maxReplayedSteps",
+        stepId: "three",
+        requestedSteps: 2,
+        maxSteps: 1,
+        maxReplayedSteps: 1,
+      },
+    });
+    expect(log).toEqual(["run:one:one", "run:two:two"]);
+  });
+
+  test("a replaying host is not asked for a request past both step limits", async () => {
+    const log: string[] = [];
+    await expect(
+      runWorkflowScript(new QuickJSSyncGeneratorRuntime(), {
+        source: `
+          yield ctx.parallel([
+            { id: "one", agentName: "agent", input: "1" },
+            { id: "two", agentName: "agent", input: "2" },
+            { id: "three", agentName: "agent", input: "3" },
+          ]);
+        `,
+        host: createHost(log),
+        limits: { maxSteps: 1, maxReplayedSteps: 1 },
+        replaysFromCheckpoint: true,
+      }),
+    ).rejects.toMatchObject({
+      code: "WORKFLOW_LIMIT_EXCEEDED",
+      details: {
+        limit: 2,
+        limitName: "maxSteps + maxReplayedSteps",
+        stepId: "three",
+        requestedSteps: 0,
+      },
+    });
+    expect(log).toEqual([]);
+  });
+
+  test("without replaysFromCheckpoint every requested step counts toward maxSteps before the host runs it", async () => {
+    const log: string[] = [];
+    const host = createHost(log);
+    const run = host.run;
+    host.run = async (step) => ({ ...(await run(step)), replayed: true });
+    await expect(
+      runWorkflowScript(new QuickJSSyncGeneratorRuntime(), {
+        source: `
+          yield ctx.run({ id: "one", agentName: "agent", input: "1" });
+          yield ctx.run({ id: "two", agentName: "agent", input: "2" });
+        `,
+        host,
+        limits: { maxSteps: 1 },
+      }),
+    ).rejects.toMatchObject({
+      code: "WORKFLOW_LIMIT_EXCEEDED",
+      details: {
+        limit: 1,
+        limitName: "maxSteps",
+        stepId: "two",
+        executedSteps: 1,
+        replayedSteps: 0,
+        maxSteps: 1,
+        maxReplayedSteps: 10,
+      },
+    });
+    expect(log).toEqual(["run:one:1"]);
+  });
+
+  test("the default message bound includes maxReplayedSteps for a replaying host", async () => {
+    const source = `
+      for (let i = 0; i < 4; i++) yield ctx.emit({ type: "custom", name: "e", data: i });
+      return "done";
+    `;
+    // maxSteps 1: 3 messages without replays, 2 * (1 + 10) + 1 with them.
+    await expect(
+      runWorkflowScript(new QuickJSSyncGeneratorRuntime(), {
+        source,
+        host: createHost([]),
+        limits: { maxSteps: 1 },
+      }),
+    ).rejects.toMatchObject({ code: "WORKFLOW_LIMIT_EXCEEDED" });
+    await expect(
+      runWorkflowScript(new QuickJSSyncGeneratorRuntime(), {
+        source,
+        host: createHost([]),
+        limits: { maxSteps: 1 },
+        replaysFromCheckpoint: true,
+      }),
+    ).resolves.toMatchObject({ output: "done" });
+  });
+
   test("enforces the active dynamic agent limit", async () => {
     const host = createHost([]);
     host.spawnAgent = async ({ providerId, name }) => ({

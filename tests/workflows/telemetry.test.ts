@@ -362,6 +362,33 @@ describe("withStepSpanStream", () => {
     const step = byName("execute_node early");
     expect(step.ended).toBe(true);
     expect(step.status).toBeUndefined();
+    expect(step.attributes["adk.node.status"]).toBe("cancelled");
+  });
+
+  it("records an exhausted stream as completed", async () => {
+    await collect(
+      withStepSpanStream({ name: "full" }, async function* () {
+        yield 1;
+      }),
+    );
+    expect(byName("execute_node full").attributes["adk.node.status"]).toBe(
+      "completed",
+    );
+  });
+
+  it("keeps waiting for a waiting step whose consumer stops", async () => {
+    const stream = withStepSpanStream(
+      { name: "hitl-stop" },
+      async function* (handle) {
+        handle.waiting(1);
+        yield "request-input";
+        yield "never";
+      },
+    );
+    for await (const _ of stream) break;
+    expect(byName("execute_node hitl-stop").attributes["adk.node.status"]).toBe(
+      "waiting",
+    );
   });
 
   it("supports waiting via the handle", async () => {

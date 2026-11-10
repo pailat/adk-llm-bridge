@@ -423,7 +423,7 @@ async function normalizeArtifact(
  *
  * @remarks
  * Accepts the canonical digest and the insertion-order digest written by
- * releases before 0.7.0, so durable stores can accept artifacts they already hold.
+ * 0.7.0 pre-release builds (no earlier release wrote artifacts), so durable stores can accept artifacts they already hold.
  *
  * @param artifact - Artifact whose fields are digested.
  * @param revision - Revision read from storage.

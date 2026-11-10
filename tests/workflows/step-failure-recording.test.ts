@@ -92,8 +92,55 @@ class ScriptedAgent extends BaseAgent {
   protected async *runLiveImpl() {}
 }
 
+/** Fails with an agent error once `gate` resolves. */
+class GatedFailAgent extends BaseAgent {
+  calls = 0;
+
+  constructor(
+    name: string,
+    private readonly gate: () => Promise<void>,
+  ) {
+    super({ name });
+  }
+
+  protected async *runAsyncImpl(context: InvocationContext) {
+    this.calls += 1;
+    await this.gate();
+    yield createEvent({
+      invocationId: context.invocationId,
+      author: this.name,
+      errorCode: "MODEL_ERROR",
+      errorMessage: "planned failure",
+    });
+  }
+
+  protected async *runLiveImpl() {}
+}
+
+/** Answers once `gate` resolves, unless its run was aborted first. */
+class GatedOkAgent extends BaseAgent {
+  constructor(
+    name: string,
+    private readonly gate: () => Promise<void>,
+  ) {
+    super({ name });
+  }
+
+  protected async *runAsyncImpl(context: InvocationContext) {
+    await this.gate();
+    yield createEvent({
+      invocationId: context.invocationId,
+      author: this.name,
+      content: { role: "model", parts: [{ text: "done" }] },
+    });
+  }
+
+  protected async *runLiveImpl() {}
+}
+
 type WorkflowEventRecord = {
   type?: string;
+  failure?: { id?: string; error?: { code?: string } };
   stepId?: string;
   attempt?: number;
   resumeReason?: string;
@@ -487,5 +534,270 @@ describe("step failure recording", () => {
     expect(error).toBeDefined();
     expect(store.checkpoint?.steps.s?.status).toBe("failed");
     expect(types(events)).not.toContain("step_interrupted");
+  });
+  describe("fail-fast parallel", () => {
+    const failFast = async (ctx: WorkflowContext) => {
+      await ctx.parallel([
+        { id: "a", agentName: "worker", input: "a" },
+        { id: "b", agentName: "failing", input: "b" },
+      ]);
+      return "done";
+    };
+
+    async function failFastRun(store: MemoryStore, retryFailedSteps = false) {
+      const worker = new ScriptedAgent(["block"]);
+      const failing = new GatedFailAgent("failing", () => worker.blocked());
+      const events: WorkflowEventRecord[] = [];
+      const error = await drain(
+        agentFor(worker, store, {
+          handler: failFast,
+          others: [failing],
+          retryFailedSteps,
+        }),
+        undefined,
+        events,
+      );
+      return { error, events, worker, failing };
+    }
+
+    test("a sibling stopped by another step's failure is interrupted with WORKFLOW_ABORTED", async () => {
+      const store = new MemoryStore();
+      const { error, events } = await failFastRun(store);
+
+      // The run fails with the failing step's own error, not an abort.
+      expect(error?.code).toBe("WORKFLOW_EXECUTION_ERROR");
+      expect(store.checkpoint?.status).toBe("failed");
+      expect(store.checkpoint?.error?.code).toBe("WORKFLOW_EXECUTION_ERROR");
+      expect(store.checkpoint?.steps.b?.status).toBe("failed");
+      expect(store.checkpoint?.steps.b?.error?.code).toBe(
+        "WORKFLOW_EXECUTION_ERROR",
+      );
+      expect(store.checkpoint?.steps.a?.status).toBe("interrupted");
+      expect(store.checkpoint?.steps.a?.attempts).toBe(1);
+      expect(store.checkpoint?.steps.a?.error).toMatchObject({
+        code: "WORKFLOW_ABORTED",
+        details: {
+          reasonCode: "WORKFLOW_EXECUTION_ERROR",
+          failedStepId: "b",
+        },
+      });
+      // The sibling's record does not carry the failing step's own details.
+      expect(store.checkpoint?.steps.a?.error?.details?.stepId).toBeUndefined();
+      expect(
+        events
+          .filter((e) => e.type === "step_interrupted")
+          .map((e) => e.stepId),
+      ).toEqual(["a"]);
+      expect(
+        events
+          .filter((e) => e.type === "step_failed")
+          .map((e) => e.failure?.id),
+      ).toEqual(["b"]);
+    });
+
+    test("a resume without opt-in does not re-run the interrupted sibling", async () => {
+      const store = new MemoryStore();
+      await failFastRun(store);
+
+      const worker = new ScriptedAgent();
+      const failing = new GatedFailAgent("failing", async () => {});
+      const error = await drain(
+        agentFor(worker, store, { handler: failFast, others: [failing] }),
+      );
+
+      expect(error?.code).toBe("WORKFLOW_INDETERMINATE_STEP");
+      expect(worker.calls).toBe(0);
+      expect(failing.calls).toBe(0);
+      expect(store.checkpoint?.status).toBe("failed");
+    });
+
+    test("retryFailedSteps re-runs both the failed step and the interrupted sibling", async () => {
+      const store = new MemoryStore();
+      await failFastRun(store, true);
+
+      const worker = new ScriptedAgent();
+      const recovered = new ScriptedAgent([], "failing");
+      const events: WorkflowEventRecord[] = [];
+      const error = await drain(
+        agentFor(worker, store, {
+          handler: failFast,
+          others: [recovered],
+          retryFailedSteps: true,
+        }),
+        undefined,
+        events,
+      );
+
+      expect(error).toBeUndefined();
+      expect(worker.calls).toBe(1);
+      expect(recovered.calls).toBe(1);
+      expect(store.checkpoint?.status).toBe("completed");
+      expect(store.checkpoint?.steps.a).toMatchObject({
+        status: "completed",
+        attempts: 2,
+        resumeReason: "interrupted",
+      });
+      expect(store.checkpoint?.steps.b).toMatchObject({
+        status: "completed",
+        attempts: 2,
+        resumeReason: "retry",
+      });
+    });
+
+    test("a failure that is not a WorkflowError is named by its mapped code", async () => {
+      const store = new MemoryStore();
+      const worker = new ScriptedAgent(["block"]);
+      const runtimeHooks: WorkflowRuntimeHooks = {
+        beforeAttempt: async (context) => {
+          if (context.stepId !== "b") return undefined;
+          await worker.blocked();
+          throw new Error("hook failed");
+        },
+      };
+      const error = await drain(
+        agentFor(worker, store, {
+          handler: failFast,
+          others: [new ScriptedAgent([], "failing")],
+          runtimeHooks,
+        }),
+      );
+
+      expect(error?.code).toBe("WORKFLOW_EXECUTION_ERROR");
+      expect(store.checkpoint?.steps.a?.status).toBe("interrupted");
+      expect(store.checkpoint?.steps.a?.error).toMatchObject({
+        code: "WORKFLOW_ABORTED",
+        message:
+          'Stopped because parallel step "b" failed with WORKFLOW_EXECUTION_ERROR',
+        details: {
+          reasonCode: "WORKFLOW_EXECUTION_ERROR",
+          failedStepId: "b",
+        },
+      });
+    });
+
+    test("a malformed step stops its siblings without a failed step id", async () => {
+      const store = new MemoryStore();
+      const worker = new ScriptedAgent(["block"]);
+      const error = await drain(
+        agentFor(worker, store, {
+          handler: async (ctx) => {
+            await ctx.parallel([
+              { id: "a", agentName: "worker", input: "a" },
+              { agentName: "worker", input: "b" } as unknown as WorkflowStep,
+            ]);
+            return "done";
+          },
+        }),
+      );
+
+      expect(error?.code).toBe("WORKFLOW_STEP_MISMATCH");
+      // The sibling was already started, so it is recorded as stopped.
+      expect(store.checkpoint?.steps.a?.status).toBe("interrupted");
+      expect(store.checkpoint?.steps.a?.error).toMatchObject({
+        message:
+          "Stopped because a parallel step failed with WORKFLOW_STEP_MISMATCH",
+        details: { reasonCode: "WORKFLOW_STEP_MISMATCH" },
+      });
+      expect(
+        store.checkpoint?.steps.a?.error?.details?.failedStepId,
+      ).toBeUndefined();
+    });
+
+    test("a queued sibling is not started and the run keeps the failing step's error (concurrency 1)", async () => {
+      const store = new MemoryStore();
+      const worker = new ScriptedAgent();
+      const failing = new GatedFailAgent("failing", async () => {});
+      const error = await drain(
+        agentFor(worker, store, {
+          others: [failing],
+          handler: async (ctx) => {
+            await ctx.parallel(
+              [
+                { id: "b", agentName: "failing", input: "b" },
+                { id: "a", agentName: "worker", input: "a" },
+              ],
+              { concurrency: 1 },
+            );
+            return "done";
+          },
+        }),
+      );
+
+      expect(error?.code).toBe("WORKFLOW_EXECUTION_ERROR");
+      expect(store.checkpoint?.status).toBe("failed");
+      expect(store.checkpoint?.error?.code).toBe("WORKFLOW_EXECUTION_ERROR");
+      expect(store.checkpoint?.steps.b?.status).toBe("failed");
+      expect(store.checkpoint?.steps.a).toBeUndefined();
+      expect(worker.calls).toBe(0);
+    });
+
+    test("an in-flight sibling is interrupted and a queued one is not recorded (concurrency 2)", async () => {
+      const store = new MemoryStore();
+      const worker = new ScriptedAgent(["block"]);
+      const queued = new ScriptedAgent([], "queued");
+      const failing = new GatedFailAgent("failing", () => worker.blocked());
+      const events: WorkflowEventRecord[] = [];
+      const error = await drain(
+        agentFor(worker, store, {
+          others: [failing, queued],
+          handler: async (ctx) => {
+            await ctx.parallel(
+              [
+                { id: "a", agentName: "worker", input: "a" },
+                { id: "b", agentName: "failing", input: "b" },
+                { id: "c", agentName: "queued", input: "c" },
+              ],
+              { concurrency: 2 },
+            );
+            return "done";
+          },
+        }),
+        undefined,
+        events,
+      );
+
+      expect(error?.code).toBe("WORKFLOW_EXECUTION_ERROR");
+      expect(store.checkpoint?.status).toBe("failed");
+      expect(store.checkpoint?.error?.code).toBe("WORKFLOW_EXECUTION_ERROR");
+      expect(store.checkpoint?.steps.a?.status).toBe("interrupted");
+      expect(store.checkpoint?.steps.b?.status).toBe("failed");
+      expect(store.checkpoint?.steps.c).toBeUndefined();
+      expect(queued.calls).toBe(0);
+      expect(types(events).at(-1)).toBe("error");
+    });
+
+    test("all-settled does not stop a sibling in flight", async () => {
+      const store = new MemoryStore();
+      let bFailed!: () => void;
+      const bRecorded = new Promise<void>((resolve) => {
+        bFailed = resolve;
+      });
+      store.onSave = (checkpoint) => {
+        if (checkpoint.steps.b?.status === "failed") bFailed();
+      };
+      const failing = new GatedFailAgent("failing", async () => {});
+      // Finishes only after b's failure is recorded.
+      const worker = new GatedOkAgent("worker", () => bRecorded);
+      let statuses: string[] = [];
+      const error = await drain(
+        agentFor(worker, store, {
+          others: [failing],
+          handler: async (ctx) => {
+            const outcomes = await ctx.parallel(
+              [
+                { id: "a", agentName: "worker", input: "a" },
+                { id: "b", agentName: "failing", input: "b" },
+              ],
+              { failureMode: "all-settled" },
+            );
+            statuses = outcomes.map((outcome) => outcome.status);
+            return "done";
+          },
+        }),
+      );
+      expect(error).toBeUndefined();
+      expect(statuses).toEqual(["completed", "failed"]);
+      expect(store.checkpoint?.steps.a?.status).toBe("completed");
+    });
   });
 });

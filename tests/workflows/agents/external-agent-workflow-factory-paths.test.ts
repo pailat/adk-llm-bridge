@@ -181,3 +181,27 @@ describe.skipIf(process.platform === "win32")(
     });
   },
 );
+
+describe("workflow factory readPaths", () => {
+  test("a declarative agent cannot set readPaths (code-defined agents can)", () => {
+    const { root, outside } = layout();
+    const factory = new ExternalAgentWorkflowFactory({
+      registry: registry(),
+      policy: { workingDirectoryRoots: [root] },
+    });
+    expect(() =>
+      factory.create({
+        providerId: "codex",
+        name: "reader",
+        config: {
+          workingDirectory: root,
+          permissions: {
+            mode: "workspace-write",
+            allowedPaths: [root],
+            readPaths: [outside],
+          },
+        },
+      }),
+    ).toThrow(/readPaths/);
+  });
+});

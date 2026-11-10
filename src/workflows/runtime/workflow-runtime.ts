@@ -24,7 +24,7 @@ import type {
   WorkflowCheckpointWrite,
 } from "../checkpoint/store.js";
 import {
-  ADKSessionCheckpointStore,
+  AdkSessionCheckpointStore,
   WORKFLOW_CHECKPOINT_STATE_PREFIX,
 } from "../checkpoint/store.js";
 import {
@@ -54,6 +54,7 @@ import type {
 } from "../definition.js";
 import type {
   WorkflowCheckpointSavedEvent,
+  WorkflowCheckpointSizeWarningEvent,
   WorkflowCompletedEvent,
   WorkflowCustomEvent,
   WorkflowErrorEvent,
@@ -72,7 +73,8 @@ import type {
 import { isWorkflowEvent } from "../events.js";
 import { canonicalJson } from "../internal/canonical-hash.js";
 import { isRecord } from "../internal/guards.js";
-import { stepLimitExceeded } from "../internal/step-limit.js";
+import { monotonicNow } from "../internal/monotonic-clock.js";
+import { resolveStepLimits, StepBudget } from "../internal/step-limit.js";
 import { isWorkflowAgent } from "../internal/workflow-agent-brand.js";
 import { withStepSpan, withWorkflowSpan } from "../telemetry.js";
 import type {
@@ -80,7 +82,10 @@ import type {
   WorkspaceLease,
 } from "../workspace/workspace-adapter.js";
 import { AsyncSemaphore } from "./async-semaphore.js";
-import { WorkflowCheckpointCoordinator } from "./workflow-checkpoint-coordinator.js";
+import {
+  WorkflowCheckpointCoordinator,
+  type WorkflowCheckpointSizeWarning,
+} from "./workflow-checkpoint-coordinator.js";
 
 /**
  * Resolves the durable execution id for an ADK invocation.
@@ -253,6 +258,7 @@ export class WorkflowRuntime {
   #checkpointCoordinator?: WorkflowCheckpointCoordinator;
   #stepCount = 0;
   #replayedStepCount = 0;
+  readonly #stepBudget: StepBudget;
 
   constructor(config: WorkflowRuntimeConfig) {
     this.#definition = config.definition;
@@ -268,7 +274,7 @@ export class WorkflowRuntime {
     };
     this.#hooks = config.hooks;
     this.#checkpointStore =
-      config.checkpointStore ?? new ADKSessionCheckpointStore();
+      config.checkpointStore ?? new AdkSessionCheckpointStore();
     this.#resolveExecutionId =
       config.resolveExecutionId ??
       ((context) => this.defaultExecutionId(context));
@@ -277,6 +283,7 @@ export class WorkflowRuntime {
     this.#structuredOutput = config.structuredOutput === true;
     this.#retryFailedSteps = config.retryFailedSteps === true;
     this.#limits = validateLimits(config.definition.limits);
+    this.#stepBudget = new StepBudget(this.#limits);
     this.#globalSemaphore = new AsyncSemaphore(this.#limits.maxConcurrency);
   }
 
@@ -321,6 +328,7 @@ export class WorkflowRuntime {
         retryFailedSteps: this.#retryFailedSteps,
         answerTurn: this.#inputOverride !== undefined,
         onWrite: (write, stepId) => this.emitCheckpointSaved(write, stepId),
+        onSizeWarning: (warning) => this.emitCheckpointSizeWarning(warning),
       });
       await this.#checkpointCoordinator.initialize();
       checkpointInitialized = true;
@@ -420,6 +428,10 @@ export class WorkflowRuntime {
     ]);
 
     const interrupts: WorkflowInterruptedError["interrupts"][number][] = [];
+    // The failure that stopped the fan-out. A queued step rejects with the
+    // stop reason before the failing step settles, and a stopped sibling
+    // throws it too, so `Promise.all` may settle with the stop reason instead.
+    let stoppedBy: { error: unknown } | undefined;
     const pending = steps.map((step) =>
       localSemaphore.use(scopeSignal, async () => {
         try {
@@ -432,9 +444,20 @@ export class WorkflowRuntime {
             return undefined as unknown as WorkflowStepOutcome;
           }
           if (failureMode === "fail-fast" || isReplayIntegrityError(caught)) {
+            // Only the first failure stops the fan-out; a stopped sibling
+            // rethrows the stop reason and must not replace it.
+            if (stoppedBy === undefined) {
+              stoppedBy = { error: caught };
+              parallelAbort.abort(siblingStopReason(step, caught));
+            }
             throw caught;
           }
-          return failureFromError(step, caught);
+          // A recorded failure keeps its stored record, marked `replayed`.
+          return (
+            (caught instanceof WorkflowError
+              ? replayedFailures.get(caught)
+              : undefined) ?? failureFromError(step, caught)
+          );
         }
       }),
     );
@@ -446,7 +469,7 @@ export class WorkflowRuntime {
     } catch (caught) {
       parallelAbort.abort(caught);
       await Promise.allSettled(pending);
-      throw caught;
+      throw stoppedBy ? stoppedBy.error : caught;
     }
   }
 
@@ -500,13 +523,6 @@ export class WorkflowRuntime {
     }
     this.#seenStepIds.add(step.id);
     this.#stepCount++;
-    if (this.#stepCount > this.#limits.maxSteps) {
-      throw stepLimitExceeded(
-        this.#limits.maxSteps,
-        step.id,
-        this.#replayedStepCount,
-      );
-    }
     const declaredAgent = this.#declaredAgents.get(step.agentName);
     if (!declaredAgent) {
       throw new WorkflowError(
@@ -521,8 +537,19 @@ export class WorkflowRuntime {
       executionId: this.executionId(),
       step,
     } satisfies WorkflowStepHookContext;
+    // The step limits are checked once the checkpoint tells whether the step
+    // replays or executes, before it is saved `running`.
     const prepared = await this.checkpointCoordinator()
-      .prepareStep(step)
+      .prepareStep(step, (resolution) => {
+        if (
+          resolution.action === "replay" ||
+          resolution.action === "replay-failure"
+        ) {
+          this.#stepBudget.takeReplayed(step.id);
+        } else {
+          this.#stepBudget.takeExecuted(step.id);
+        }
+      })
       .catch(async (caught: unknown) => {
         if (isReplayIntegrityError(caught)) {
           await this.emitWorkflowEvent({
@@ -559,11 +586,13 @@ export class WorkflowRuntime {
         type: "step_failed",
         failure,
       } satisfies WorkflowStepFailedEvent);
-      throw new WorkflowError(
+      const error = new WorkflowError(
         failure.error.code,
         failure.error.message,
         failure.error.details,
       );
+      replayedFailures.set(error, failure);
+      throw error;
     }
 
     // A waiting step continues with the answer carried by this turn; without
@@ -1127,6 +1156,16 @@ export class WorkflowRuntime {
     );
   }
 
+  private async emitCheckpointSizeWarning(
+    warning: WorkflowCheckpointSizeWarning,
+  ): Promise<void> {
+    await this.emitWorkflowEvent({
+      ...this.envelope(),
+      type: "checkpoint_size_warning",
+      ...warning,
+    } satisfies WorkflowCheckpointSizeWarningEvent);
+  }
+
   private async emitOutput(
     output: Exclude<WorkflowOutput, undefined>,
   ): Promise<void> {
@@ -1526,7 +1565,11 @@ function isJsonSafe(value: unknown, seen = new Set<object>()): boolean {
 function validateLimits(
   limits: WorkflowExecutionLimits | undefined,
 ): Required<WorkflowExecutionLimits> {
-  const merged = { ...DEFAULT_WORKFLOW_EXECUTION_LIMITS, ...limits };
+  const merged = {
+    ...DEFAULT_WORKFLOW_EXECUTION_LIMITS,
+    ...limits,
+    ...resolveStepLimits(limits),
+  };
   for (const [name, value] of Object.entries(merged)) {
     if (!Number.isFinite(value) || value <= 0) {
       throw new WorkflowError(
@@ -1538,6 +1581,7 @@ function validateLimits(
   }
   for (const name of [
     "maxSteps",
+    "maxReplayedSteps",
     "maxConcurrency",
     "maxAttemptsPerStep",
   ] as const) {
@@ -1821,6 +1865,9 @@ function withoutSettledNestedErrors(
   return settled;
 }
 
+/** Recorded failures replayed by `runStep`, keyed by the error it throws. */
+const replayedFailures = new WeakMap<WorkflowError, WorkflowStepFailure>();
+
 function failureFromError(
   step: WorkflowStep,
   caught: unknown,
@@ -1912,10 +1959,10 @@ async function settledWithin(
   runs: ReadonlySet<DelegatedRun>,
   timeoutMs: number,
 ): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
+  const deadline = monotonicNow() + timeoutMs;
   while (true) {
     const pending = [...runs].filter((run) => !run.done);
-    const remaining = deadline - Date.now();
+    const remaining = deadline - monotonicNow();
     if (pending.length === 0 || remaining <= 0) return;
     let timer: ReturnType<typeof setTimeout> | undefined;
     await Promise.race([
@@ -1998,6 +2045,33 @@ function abortReasonOf(reason: unknown): unknown {
     ...reason.details,
     reasonCode: reason.code,
   });
+}
+
+/**
+ * The reason `ctx.parallel` aborts the remaining steps with when one of them
+ * fails in `fail-fast` mode (or hits a checkpoint mismatch in any mode):
+ * `WORKFLOW_ABORTED`, with the failing step's code
+ * as `details.reasonCode` and its id as `details.failedStepId`. A sibling in
+ * flight is then recorded `interrupted`, like any aborted step, so a resume
+ * re-runs it only with `retryFailedSteps` or `resumePolicy: "retry"`. The
+ * failing step's own details are not copied: they describe that step, not
+ * the sibling. When the run itself was aborted, the siblings have already
+ * stopped with the run's reason, so this one is not used.
+ */
+function siblingStopReason(failedStep: WorkflowStep, caught: unknown): unknown {
+  const error = asWorkflowError(caught);
+  const failedStepId =
+    typeof failedStep?.id === "string" ? failedStep.id : undefined;
+  return new WorkflowError(
+    "WORKFLOW_ABORTED",
+    failedStepId === undefined
+      ? `Stopped because a parallel step failed with ${error.code}`
+      : `Stopped because parallel step ${JSON.stringify(failedStepId)} failed with ${error.code}`,
+    {
+      reasonCode: error.code,
+      ...(failedStepId === undefined ? {} : { failedStepId }),
+    },
+  );
 }
 
 /**
@@ -2093,6 +2167,8 @@ function workflowEventTitle(event: WorkflowEvent): string {
       return `Workflow ${event.workflowId}: waiting for input`;
     case "checkpoint_saved":
       return `Workflow ${event.workflowId}: checkpoint saved`;
+    case "checkpoint_size_warning":
+      return `Workflow ${event.workflowId}: checkpoint size warning`;
     case "output":
       return `Workflow ${event.workflowId}: output`;
     case "error":

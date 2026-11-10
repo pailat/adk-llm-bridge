@@ -15,6 +15,7 @@ const TOOL_NAME_SCHEMA = RunSpecAgentSchema.shape.tools.element;
 const ENV_NAME_SCHEMA = RunSpecV1Schema.shape.env.element;
 const MODEL_SCHEMA = RunSpecAgentSchema.shape.model;
 const PROVIDER_SCHEMA = RunSpecAgentSchema.shape.providerId;
+const MCP_PROVIDER_SCHEMA = RunSpecAgentSchema.shape.mcp.unwrap().element;
 // Modes a rule set may allow: the schema leaves out `full-access`.
 const HOST_MODE_SCHEMA = RunRulesSchema.shape.allowedPermissionModes.element;
 
@@ -45,8 +46,10 @@ function allowSet(list: readonly unknown[] | undefined): Set<string> {
  * normalized, so a lookalike never matches an allowlist entry. `full-access`
  * is rejected whatever the rule set lists, and the network stays off unless
  * the rule set is exactly `allowNetwork: true`. Provider ids, model ids,
- * tool names and `env` names must also match their grammar, and a message
- * never echoes an `env` entry. The workflow id and version must equal one
+ * tool names, MCP provider ids and `env` names must also match their
+ * grammar, and a message never echoes an `env` entry. An MCP provider id must
+ * be in `allowedMcpProviders` (an empty list allows none) and unique in its
+ * agent ignoring case. The workflow id and version must equal one
  * entry of `allowedWorkflows`; an empty list allows none.
  *
  * @param spec - The spec, already shape-checked.
@@ -69,6 +72,7 @@ export function checkModelRules(
   }
   const tools = allowSet(rules.allowedTools);
   const envNames = allowSet(rules.allowedEnvNames);
+  const mcpProviders = allowSet(rules.allowedMcpProviders);
   const networkAllowed = (rules.allowNetwork as unknown) === true;
 
   checkWorkflow(spec, rules, issues);
@@ -135,6 +139,7 @@ export function checkModelRules(
       );
     }
 
+    const grant = new Set(agent.mcp ?? []);
     const seenTools = new Set<string>();
     agent.tools.forEach((tool, toolIndex) => {
       const path = [...base, "agent", "tools", toolIndex];
@@ -152,6 +157,15 @@ export function checkModelRules(
           ),
         );
       }
+      if (!mcpToolGranted(tool, grant)) {
+        issues.push(
+          runSpecIssue(
+            "RUN_SPEC_MCP_TOOL_NOT_GRANTED",
+            path,
+            `The tool ${echo(tool)} reaches an MCP provider that is not in this agent's mcp list.`,
+          ),
+        );
+      }
       if (seenTools.has(tool)) {
         issues.push(
           runSpecIssue(
@@ -162,6 +176,35 @@ export function checkModelRules(
         );
       } else {
         seenTools.add(tool);
+      }
+    });
+
+    // MCP providers are names the host resolves: deny by default, compared
+    // exactly with the allowlist, unique ignoring case (like lane ids, a host
+    // may derive file or config names from them).
+    const seenMcp = new Set<string>();
+    (agent.mcp ?? []).forEach((id, mcpIndex) => {
+      const path = [...base, "agent", "mcp", mcpIndex];
+      if (!mcpProviders.has(id) || !MCP_PROVIDER_SCHEMA.safeParse(id).success) {
+        issues.push(
+          runSpecIssue(
+            "RUN_SPEC_MCP_PROVIDER_NOT_ALLOWED",
+            path,
+            `The MCP provider ${echo(id)} is not in the allowed MCP providers.`,
+          ),
+        );
+      }
+      const folded = id.toLowerCase();
+      if (seenMcp.has(folded)) {
+        issues.push(
+          runSpecIssue(
+            "RUN_SPEC_MCP_PROVIDER_DUPLICATE",
+            path,
+            `The MCP provider ${echo(id)} is listed more than once for this agent, ignoring case.`,
+          ),
+        );
+      } else {
+        seenMcp.add(folded);
       }
     });
 
@@ -208,6 +251,40 @@ export function checkModelRules(
       seenEnv.add(name);
     }
   });
+}
+
+/**
+ * Built-in Claude Code tools that read the resources of every connected MCP
+ * server, compared ignoring case (Claude Code matches built-in names that
+ * way).
+ */
+const MCP_RESOURCE_TOOLS = new Set([
+  "listmcpresourcestool",
+  "readmcpresourcetool",
+]);
+
+/**
+ * Whether a tool name that reaches an MCP server is covered by the agent's
+ * MCP grant; true for every other tool name.
+ *
+ * @remarks
+ * Fails closed. A name whose prefix is `mcp__` in any case is an MCP tool
+ * name: it is granted only as exactly `mcp__<id>` (every tool of the
+ * provider) or `mcp__<id>__<tool>` with a non-empty tool part, where `<id>`
+ * is in the grant exactly. An id never contains `__`, so the first `__`
+ * after the prefix ends it. The MCP resource tools are granted only when the
+ * grant is not empty.
+ */
+function mcpToolGranted(tool: string, grant: ReadonlySet<string>): boolean {
+  if (MCP_RESOURCE_TOOLS.has(tool.toLowerCase())) return grant.size > 0;
+  if (!tool.toLowerCase().startsWith("mcp__")) return true;
+  if (!tool.startsWith("mcp__")) return false;
+  const rest = tool.slice("mcp__".length);
+  const end = rest.indexOf("__");
+  if (end === -1) return grant.has(rest);
+  // An empty id (`mcp____t`) is never in a grant: ids have one character
+  // at least.
+  return rest.length > end + 2 && grant.has(rest.slice(0, end));
 }
 
 /** Reports a workflow id and version that no `allowedWorkflows` entry names. */

@@ -72,6 +72,12 @@ export type RunPlanAgent = {
   allowNetwork: boolean;
   /** Tools the agent may use. A reviewer has none. */
   tools: string[];
+  /**
+   * MCP provider ids the agent may use: the lane's grant, empty when the
+   * lane lists none. A reviewer has none. The host resolves each id to a
+   * server and its credentials (`run-spec.mcp-providers`).
+   */
+  mcp: string[];
   /** Most runs of this agent the lane can need. */
   maxRuns: number;
 };
