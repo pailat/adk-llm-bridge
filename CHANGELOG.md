@@ -401,8 +401,9 @@ from the 0.6.0 tag.
   used as given; set one if the only copy lives in the workspace. When the
   bridge finds nothing, the SDK still falls back to the binary bundled with
   its own install, so a host installed inside a workspace the agent can
-  write remains exposed: install it outside, or give the run another
-  `workingDirectory`.
+  write remains exposed: install it outside, give the run another
+  `workingDirectory`, or turn on `strictBinaryResolution` to refuse such
+  runs.
 - **The CLI drivers no longer start a `claude`, `codex` or `gemini` from the
   run's working directory.** `ClaudeCliDriver`, `CodexCliDriver` and
   `GeminiCliDriver` started a bare `command` through the child's `PATH`,
@@ -638,6 +639,19 @@ from the 0.6.0 tag.
 
 ### Added
 
+- **Opt-in strict binary resolution for the SDK drivers.**
+  `ClaudeAgentSdkDriver` and `CodexSdkDriver` take `strictBinaryResolution`
+  (default `false`, behaviour unchanged). When it is on, no explicit path is
+  set and the lookup finds no binary outside the workspace, the run is
+  refused with `MISSING_BINARY` instead of letting the SDK fall back to its
+  bundled binary, if the bridge's install, the SDK package or the package
+  holding its binary overlaps the run's `workingDirectory` or
+  `allowedPaths` (at or under one, or containing one), or the SDK package
+  cannot be located. An SDK module the host injects is not inspected. `CodexSdkDriver`
+  throws `EXTERNAL_AGENT_OPTION_UNSUPPORTED` for the option with a prebuilt
+  `sdk` client. It narrows the bundled-binary residual, it does not close
+  it: the agent can still edit the installed JavaScript. See
+  [Strict binary resolution](docs/external-agent-isolation.md#strict-binary-resolution).
 - **Run spec, `adk-llm-bridge/workflows/spec` (experimental).** Validation,
   planning and the JSON Schema of a lanes job submitted as data: `validateRunSpec`,
   `resolveRunPlan`, `mergeRunRules`, `layerRunSpecLanes`, `runSpecHash` and
