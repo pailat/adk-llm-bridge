@@ -7,6 +7,7 @@ import {
 import { AgentInvocationGateway } from "../runtime/agent-invocation-gateway.js";
 import type { WorkflowCheckpointStore } from "./checkpoint/store.js";
 import type { TrustedWorkflowDefinition } from "./definition.js";
+import { WORKFLOW_AGENT_BRAND } from "./internal/workflow-agent-brand.js";
 import {
   invocationContextForNode,
   pickWorkflowNodeConfig,
@@ -65,6 +66,8 @@ export interface WorkflowAgentConfig extends WorkflowNodeConfig {
  * ```
  */
 export class WorkflowAgent extends BaseAgent {
+  /** @internal */
+  readonly [WORKFLOW_AGENT_BRAND] = true;
   /** The workflow definition this agent runs. */
   readonly definition: TrustedWorkflowDefinition;
   readonly #gateway: AgentInvocationGateway;

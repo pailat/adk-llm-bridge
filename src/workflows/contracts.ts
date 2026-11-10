@@ -114,7 +114,10 @@ export interface WorkflowStepResult {
   content?: Content;
   /** Runtime-only ADK events; omitted from journaled results. */
   events?: readonly Event[];
-  /** Session state changes made by the agent. */
+  /**
+   * Session state changes made by the agent. ADK `temp:` keys and the
+   * checkpoint's own keys are left out.
+   */
   stateDelta?: Record<string, unknown>;
   /**
    * Aggregate usage of the successful attempt's agent run; earlier failed
@@ -235,7 +238,20 @@ export interface WorkflowParallelOptions {
  * Unset fields use {@link DEFAULT_WORKFLOW_EXECUTION_LIMITS}.
  */
 export interface WorkflowExecutionLimits {
-  /** Maximum number of step invocations in one execution. */
+  /**
+   * Maximum number of steps one turn of the workflow may invoke.
+   *
+   * @remarks
+   * Steps replayed from the checkpoint count too. A resumed turn replays every
+   * recorded step through the handler, so in effect the limit bounds every
+   * step the execution has ever run. When a resume fails with
+   * `WORKFLOW_LIMIT_EXCEEDED`, raise this limit and resume the same execution
+   * id. The error details carry `limit`, `stepId` and `replayedSteps`, for
+   * handler and script workflows alike, and the execution summary reports
+   * `steps` and `replayedSteps`. A script workflow also bounds its yielded
+   * messages at twice this limit plus one, so a raised limit raises that bound
+   * too.
+   */
   maxSteps?: number;
   /** Maximum parallel steps in flight. */
   maxConcurrency?: number;

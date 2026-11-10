@@ -28,6 +28,27 @@ come from the model or from a server or connector that connected after start.
 A tool call seen before `system/init` gets a neutral message. The code and
 recoverability are the same in every case.
 
+`ClaudeAgentSdkDriver` does not stop for a call the runtime refuses on its
+own. When the model asks for a built-in or unknown tool that `system/init`
+did not list, the driver waits for the runtime's answer to that call:
+
+- An error `tool_result` (the runtime has no such tool, so no hook or
+  permission step ran) is a refused call. The run goes on. Its `tool_result`
+  event carries `metadata.isolation: "EXTERNAL_AGENT_TOOL_NOT_OFFERED"`
+  (exported as `EXTERNAL_AGENT_TOOL_NOT_OFFERED`), and a warning with that
+  code is logged. The third refused call in one run stops it with
+  `EXTERNAL_AGENT_ISOLATION_VIOLATED`, so a model that keeps asking does not
+  spend the budget.
+- Everything else still stops the run at once or at its answer: a call the
+  `PreToolUse` hook or the permission callback was reached for (the tool
+  exists), a result that is not an error (it ran), no result before the run
+  ends, an `mcp__` tool, a call before `system/init`, and a call with no name
+  or no call id.
+
+Only the message structure is used (`is_error`, the call id), never the error
+text. `ClaudeCliDriver` has no hook signal to tell a refused call from one
+that reached a tool, so it stops the run on every call outside the set.
+
 Built-in names in `tools` are passed on in their canonical spelling (`bash`
 becomes `Bash`), so the shell sandbox, the web-tool refusal and the
 `read-only` removals see a shell or web tool named in any case. The
@@ -206,6 +227,30 @@ the guard checks every bound when a request arrives. A kept root that a
 symlink later points outside the parent's roots (a link created or retargeted
 after delegation) is therefore still denied.
 
+### Reading wider than you write
+
+`allowedPaths` is one list for reads and writes. The path guard checks the
+path arguments of read tools (`Read`, `Glob`, `Grep`, `read_file`,
+`read_many_files`) against it exactly as it checks write tools, so a writer
+confined to `out/` cannot read `src/`: the call is denied with "outside the
+paths allowed by this agent's policy". There is no separate read root, and a
+delegated agent cannot get roots wider than its parent's (the intersection
+in the previous paragraphs). The only reads the guard does not see are the ones inside a shell
+command, which is a gap, not a way to grant read access.
+
+To give a step more read access than write access:
+
+- **Split the step.** Run a `read-only` agent whose `allowedPaths` cover what it
+  must read (it can write nothing), and pass what the writer needs as the
+  writer's step input or session state. The writer keeps roots that cover only
+  what it may change.
+- **Put the material inside the writer's roots.** Copy (not symlink: a link
+  that leaves the roots is denied) what it must read into a directory that its
+  `allowedPaths` include. The guard does not make that copy read-only, so use
+  the first option when the writer must not change it.
+- **One agent with wide roots.** If its `allowedPaths` cover both, it can also
+  write everywhere they cover. Choose this only when that is acceptable.
+
 ## Credentials
 
 `ClaudeAgent`, `CodexAgent` and `GeminiCliAgent` read credentials with
@@ -247,6 +292,10 @@ event with `EXTERNAL_AGENT_DEPENDENCY_MISSING`. A missing `claude`, `codex` or
 (`EXTERNAL_AGENT_MISSING_BINARY`). Both name the install command; neither
 throws out of the agent.
 
+On Windows the CLI drivers refuse a `.cmd` or `.bat` command with
+`EXTERNAL_AGENT_BATCH_COMMAND_REFUSED`; see
+[Windows: batch files and npm installs](#windows-batch-files-and-npm-installs).
+
 The SDK drivers look for the `claude` or `codex` binary under `PATH`, the home
 directory, `executableSearchPaths` (Claude), and the `node_modules` of the
 host process directory and of the bridge's own install. They skip every
@@ -286,6 +335,65 @@ given, so a relative one (`./claude`, `node_modules/.bin/claude`) resolves in
 the run's working directory, which the agent can write: pass an absolute
 path instead. A custom `spawn` gets `command` as given.
 
+## Windows: batch files and npm installs
+
+On Windows the CLI drivers (`ClaudeCliDriver`, `CodexCliDriver`,
+`GeminiCliDriver`) look their command up themselves instead of leaving it to
+the runtime: over the absolute entries of `PATH`, in the default `PATHEXT`
+order (`.com`, `.exe`), never in the working directory, and the spawned path is
+always absolute. A batch file is never run. Only a `.com` or `.exe` file is an answer: the three
+files `npm install -g` writes (an extensionless shell shim, `.cmd` and `.ps1`)
+are skipped when a native file comes later on `PATH`, so an npm shim does not
+hide a real `.exe`. When the command itself is a batch file, or only a batch file is found
+(the shim `npm install -g` creates, such as `gemini.cmd`), the run ends with
+`EXTERNAL_AGENT_BATCH_COMMAND_REFUSED`: running it goes through `cmd.exe`,
+which parses the prompt and the other arguments again, so a prompt with `&` or
+`|` could run as a command. Nothing found is `MISSING_BINARY`, as elsewhere.
+`PATH` entries at or under the run's working directory (or `allowedPaths`) are
+never searched; a command with a directory in it is your choice and is used
+as given, with or without its extension. macOS and Linux are unchanged.
+
+What to run instead depends on the CLI:
+
+| CLI | Supported route on Windows |
+|---|---|
+| Claude | The native `claude.exe` from Claude's native installer. Put it on `PATH` or set `command` to its path. |
+| Codex | The native `codex.exe` inside the `@openai/codex` package: `<npm root -g>\@openai\codex\node_modules\@openai\codex-win32-x64\vendor\x86_64-pc-windows-msvc\bin\codex.exe` (`codex-win32-arm64` and `aarch64-pc-windows-msvc` on ARM). That is the layout of `@openai/codex` 0.167.0, read from the `@openai/codex-sdk` 0.167.0 lookup this package pins; older versions keep it at `vendor\<triple>\codex\codex.exe`. It was not checked on a Windows machine. To find it for another version, search `npm root -g` for `codex.exe`. Set `command` to its path. |
+| Gemini | Gemini CLI ships only as an npm package, so there is no `.exe`. Pass a `spawn` that runs `process.execPath` (Node) with the package's JavaScript entry, the file named by `bin.gemini` in `@google/gemini-cli`'s `package.json`. A custom `spawn` does not go through the bridge's own spawn, so nothing runs through `cmd.exe`. |
+
+The Gemini route, as code:
+
+```ts
+import { spawn as nodeSpawn } from "node:child_process";
+import { GeminiCliDriver, type GeminiCliSpawn } from "adk-llm-bridge/agents";
+
+// The file named by `bin.gemini` in @google/gemini-cli's package.json.
+const entry = String.raw`C:\Users\me\AppData\Roaming\npm\node_modules\@google\gemini-cli\bundle\gemini.js`;
+
+const spawn: GeminiCliSpawn = (_command, args, options) => {
+  const child = nodeSpawn(process.execPath, [entry, ...args], {
+    cwd: options.cwd,
+    env: options.env,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  return {
+    stdout: child.stdout,
+    stderr: child.stderr,
+    exited: new Promise<number>((resolve, reject) => {
+      child.once("error", reject);
+      child.once("exit", (code) => resolve(code ?? 1));
+    }),
+    kill: (signal) => child.kill(signal),
+  };
+};
+
+const driver = new GeminiCliDriver({ spawn });
+```
+
+`tests/agents/driver/windows-command.test.ts` runs this rerouting against a
+fake process. The policy (`allowNetwork`, paths) applies as for any other
+run; the custom `spawn` only replaces how the process starts.
+
 ## Error codes
 
 An error event's code lands on the ADK event's `errorCode`. The constants are
@@ -307,6 +415,7 @@ exported from `adk-llm-bridge/agents`.
 | `EXTERNAL_AGENT_OPTION_UNSUPPORTED` | `EXTERNAL_AGENT_OPTION_UNSUPPORTED` | No | Thrown (not an event) when a driver is built with an option its runtime cannot honor: `sessionStore` on `ClaudeCliDriver`. |
 | `CLAUDE_SESSION_STORE_MIRROR_ERROR` | `CLAUDE_SESSION_STORE_MIRROR_ERROR` | Yes | The Claude Agent SDK dropped a transcript batch its `sessionStore` rejected or timed out on (3 attempts in total); the run goes on. See [Persisting Claude sessions](claude-session-store.md). |
 | `MISSING_BINARY` | `EXTERNAL_AGENT_MISSING_BINARY` | No | The `claude`, `codex` or `gemini` binary was not found. |
+| `EXTERNAL_AGENT_BATCH_COMMAND_REFUSED` | `EXTERNAL_AGENT_BATCH_COMMAND_REFUSED` | No | On Windows, the CLI command is or resolves to a `.cmd` or `.bat` file (for example an npm shim). Remedy per CLI: [Windows: batch files and npm installs](#windows-batch-files-and-npm-installs). |
 | `CLAUDE_CLI_EXIT`, `CODEX_CLI_EXIT`, `GEMINI_CLI_EXIT` | - | From the message | The CLI exited with a nonzero code (Codex: and reported no error of its own). The message holds the stderr tail; auth, billing and quota failures are not recoverable. |
 | `CLAUDE_PERMISSION_DENIED` | - | No | The Claude Agent SDK denied a tool call (the message names the tool and the reason). |
 | `CLAUDE_AGENT_SDK_ERROR` | - | From the message | The Claude Agent SDK threw; used when the message matches no known failure. |

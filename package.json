@@ -83,9 +83,10 @@
     "check:dist": "bun scripts/check-export-docs.ts && bun scripts/fix-dts-private.ts --check && bun scripts/check-dts-extensions.ts && bun scripts/check-dist-permissions.ts && bun scripts/check-dist-entries.ts",
     "check:fix": "biome check --write .",
     "lint:publish": "publint --strict && attw --pack --profile esm-only",
-    "ci": "bun run typecheck:all && bun run typecheck:conformance && bun run check && bun run check:comments && bun run check:links && bun test && bun run build && bun run check:dist && bun run lint:publish",
+    "ci": "bun run typecheck:all && bun run typecheck:conformance && bun run check && bun run check:comments && bun run check:links && bun test && bun run build && bun run check:dist && bun run check:compat:nodenext && bun run lint:publish",
     "prepublishOnly": "bun run check:comments && bun run build && bun run check:dist && bun run lint:publish",
-    "typecheck:compat:nodenext": "bun run build && bunx tsc -p tests/compat/nodenext-consumer/tsconfig.json"
+    "check:compat:nodenext": "bunx tsc -p tests/compat/nodenext-consumer/tsconfig.json",
+    "typecheck:compat:nodenext": "bun run build && bun run check:compat:nodenext"
   },
   "peerDependencies": {
     "@anthropic-ai/claude-agent-sdk": ">=0.3.319 <0.4",

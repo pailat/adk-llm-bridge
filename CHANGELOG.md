@@ -520,7 +520,12 @@ from the 0.6.0 tag.
   `PreToolUse` hook in `ClaudeAgentSdkDriver`, a `permissions.deny` rule for
   MCP tools in `ClaudeCliDriver`); the bridge's own tools are matched by their
   registered names. A host admin or managed policy that adds tools or
-  connectors, at start or later, no longer goes unnoticed.
+  connectors, at start or later, no longer goes unnoticed. On
+  `ClaudeAgentSdkDriver` a call to a tool the model was not offered, which the
+  runtime refuses without running, is reported on its `tool_result` event
+  (`metadata.isolation: "EXTERNAL_AGENT_TOOL_NOT_OFFERED"`, new export
+  `EXTERNAL_AGENT_TOOL_NOT_OFFERED`) and the run goes on; the third one in a
+  run stops it.
 - Network is off unless the policy sets `allowNetwork: true`; an unset
   `allowNetwork`, or no policy, is `false`. Keeping it off covers shell
   commands and MCP tools. Claude agents run
@@ -634,6 +639,9 @@ from the 0.6.0 tag.
   `SESSION_STORE_INVALID_ENTRY`, and an out-of-range `busyTimeoutMs` with the
   new `SESSION_STORE_INVALID_OPTION`. Follows the SDK's `@alpha` contract. See
   `docs/claude-session-store.md`.
+- **A warning when parallel steps share a sub-agent.** `ctx.parallel` logs
+  `WORKFLOW_PARALLEL_STEPS_SHARE_AGENT` once per run and sub-agent when two
+  or more steps name the same sub-agent, which runs them one at a time.
 - **Aggregate `usage` on workflow step results.** `step_completed` and
   `step_replayed` results now carry `usage` (`WorkflowStepUsage`: tokens, tool
   calls, and events that reported usage) summed over the successful attempt's
@@ -931,6 +939,19 @@ from the 0.6.0 tag.
 
 ### Fixed
 
+- **A checkpoint mismatch inside `ctx.parallel` fails the run.** With
+  `failureMode: "all-settled"` too, it now throws at the changed step after a
+  `step_failed` event, instead of returning a failed outcome.
+- **A workflow run that failed after a step began waiting for input keeps that
+  wait answerable.** The checkpoint keeps the original input, and a resume that
+  re-reaches the wait stores it and the `running` status again, so answering it
+  no longer fails with `WORKFLOW_INPUT_MISMATCH`.
+- **The `limits.maxSteps` error says that replayed steps count.** It carries
+  `limit`, `stepId` and `replayedSteps` for handler and script workflows, and
+  the resume procedure (raise the limit, resume in place) is documented.
+- **A nested workflow's outcome decides its parent step.** A run that completed
+  or is waiting is no longer reported as failed because of a retried inner attempt.
+- **The CLI drivers never run a Windows `.cmd` or `.bat` file.** The command is resolved over `.com` and `.exe` on `PATH`; a batch shim ends the run with `EXTERNAL_AGENT_BATCH_COMMAND_REFUSED` (use the native `.exe`, or a custom `spawn` for Gemini CLI; see docs/external-agent-isolation.md), and a Windows CI job checks it with fake `.cmd` files on Bun and Node.
 - **Aborting a workflow run records an explicit `interrupted` state.** The
   execution is `cancelled` and each in-flight step is checkpointed as
   `interrupted` with a `step_interrupted` event, instead of `failed`, including
@@ -947,6 +968,10 @@ from the 0.6.0 tag.
   its details. `docs/workflow-durability.md` documents the
   supported way to stop a run (abort the signal, wait for the workflow to
   record it, then exit) and how to recover an answer turn.
+- **A `Runner` abort is recorded with the default ADK session store.** The
+  workflow appends its final checkpoints, and those of a workflow it delegated
+  to, to the session. State then shows the step `interrupted` instead of
+  `running`. A failed append logs `WORKFLOW_CHECKPOINT_ABORT_RECORD_FAILED`.
 - **A `read-only` agent with `allowNetwork: true` can use its web tools.**
   The confirmation guard denied every call under `read-only`, so WebFetch and
   WebSearch were refused even with the network on and a research agent could
@@ -969,6 +994,9 @@ from the 0.6.0 tag.
   come from a server or connector that connected after start; a call seen
   before `system/init` gets a neutral message. The code, recoverability and
   event shape are unchanged, and the run still stops.
+- **ADK `temp:` state keys never reach a delegated result or a checkpoint.**
+  `AgentInvocationResult.stateDelta`, `WorkflowStepResult.stateDelta` and a
+  waiting step's stored events drop them, even with an ADK that keeps them.
 - **Delegated runs count each function call once.** `AgentInvocationUsage.toolCalls`,
   `AgentInvocationExecutionSummary.toolCalls` and `WorkflowStepUsage.toolCalls`
   now count function calls on non-partial events only, the same events whose

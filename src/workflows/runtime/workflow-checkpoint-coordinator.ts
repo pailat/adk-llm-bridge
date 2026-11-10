@@ -299,6 +299,33 @@ export class WorkflowCheckpointCoordinator {
     });
   }
 
+  /**
+   * Stores a recorded wait again when the checkpoint no longer shows the run as
+   * `running` with its input, as after a run that failed past the wait. Writes
+   * nothing when the checkpoint already shows it, so re-emitting a wait that
+   * is still pending does not rewrite the store.
+   */
+  async restoreWaitingStep(
+    step: WorkflowStep,
+    inputHash: string,
+    attempt: number,
+    interrupt: WorkflowStepInterrupt,
+  ): Promise<void> {
+    await this.#exclusive(async () => {
+      const current = this.checkpoint();
+      if (current.status === "running" && current.input !== undefined) return;
+      const candidate = withWorkflowStepWaiting(
+        current,
+        step,
+        inputHash,
+        attempt,
+        interrupt,
+        this.#config.input,
+      );
+      await this.#persist(candidate, step.id);
+    });
+  }
+
   /** Persists the step as failed. */
   async failStep(failure: WorkflowStepFailure): Promise<void> {
     await this.#exclusive(async () => {

@@ -12,6 +12,7 @@ import { GEMINI_CLI_PROVIDER } from "../provider/gemini-cli.js";
 import type { AgentRuntimeCapabilities } from "../runtime/capabilities.js";
 import { collectTail, type LineSource, readLines } from "./lines.js";
 import {
+  batchCommandRefusal,
   dependencyMissing,
   type ExternalAgentPolicyError,
   isCommandNotFound,
@@ -29,7 +30,11 @@ import {
   stringValue,
   validateDriverConfig,
 } from "./shared.js";
-import { spawnSubprocess, superviseSubprocess } from "./spawn.js";
+import {
+  BatchCommandRefusedError,
+  spawnSubprocess,
+  superviseSubprocess,
+} from "./spawn.js";
 import {
   resolveCliCommand,
   SubprocessJsonlDriver,
@@ -284,6 +289,11 @@ export class GeminiCliDriver extends SubprocessJsonlDriver {
         env,
       });
     } catch (error) {
+      if (error instanceof BatchCommandRefusedError) {
+        yield policyErrorEvent(batchCommandRefusal(error, "gemini"));
+        yield { type: "completed", exitCode: 1, timestamp: Date.now() };
+        return;
+      }
       // Bun.spawn throws when the binary does not exist.
       if (!isCommandNotFound(error)) {
         throw error;

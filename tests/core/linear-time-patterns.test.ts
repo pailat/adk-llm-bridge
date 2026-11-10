@@ -86,3 +86,22 @@ describe("flattenContentsToPrompt trailing whitespace", () => {
     expect(ms).toBeLessThan(BOUND_MS);
   });
 });
+
+describe("trimEndOf (driver spawn)", () => {
+  it("drops only the trailing run", async () => {
+    const { trimEndOf } = await import("../../src/agents/driver/spawn.js");
+    expect(trimEndOf("claude.exe. . ", ". ")).toBe("claude.exe");
+    expect(trimEndOf("C:\\tools\\\\//", "\\/")).toBe("C:\\tools");
+    expect(trimEndOf("a b", ". ")).toBe("a b");
+    expect(trimEndOf(" . ", ". ")).toBe("");
+  });
+
+  it("stays linear on a long run that does not reach the end", async () => {
+    const { trimEndOf } = await import("../../src/agents/driver/spawn.js");
+    const input = `${" ".repeat(200_000)}x`;
+    const started = performance.now();
+    expect(trimEndOf(input, ". ")).toBe(input);
+    expect(trimEndOf(`${"/".repeat(200_000)}x`, "\\/")).toHaveLength(200_001);
+    expect(performance.now() - started).toBeLessThan(1_000);
+  });
+});

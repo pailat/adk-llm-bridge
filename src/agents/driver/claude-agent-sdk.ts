@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { InputValidationError } from "@google/adk";
+import { warn } from "../../utils/log.js";
 import type { ExternalAgentEvent } from "../events.js";
 import {
   type ExternalAgentRunRequest,
@@ -18,11 +19,11 @@ import {
 import { classifyRecoverable } from "../runtime/error-classification.js";
 import type { SessionStore } from "../session-store/types.js";
 import {
-  assertClaudeMessageIsolated,
   BRIDGE_MCP_SERVER,
   BRIDGE_TOOL_PREFIX,
   type ClaudeIsolationExpectation,
   type ClaudeIsolationPlan,
+  ClaudeToolUseCheck,
   claudeInitTools,
   DEFAULT_CLAUDE_TOOLS,
   isExpectedClaudeTool,
@@ -37,6 +38,7 @@ import {
   EXTERNAL_AGENT_ISOLATION_VIOLATED,
   EXTERNAL_AGENT_MISSING_BINARY,
   EXTERNAL_AGENT_PATHS_UNENFORCEABLE,
+  EXTERNAL_AGENT_TOOL_NOT_OFFERED,
   ExternalAgentPolicyError,
   networkUnenforceable,
   policyErrorEvent,
@@ -583,6 +585,8 @@ export class ClaudeAgentSdkDriver {
     const blockedTools: string[] = [];
     // The tools the session's system/init reported, for the stop message.
     let offeredTools: string[] | undefined;
+    // Out-of-set calls held until the runtime answers them.
+    let toolUseCheck: ClaudeToolUseCheck | undefined;
     try {
       // Shell writes that the sandbox cannot keep inside allowedPaths: refuse
       // before anything starts.
@@ -619,6 +623,7 @@ export class ClaudeAgentSdkDriver {
             }
           : undefined;
       if (expectation) {
+        toolUseCheck = new ClaudeToolUseCheck(expectation, "Claude Agent SDK");
         // Three layers: the hook blocks the call in every permission mode,
         // the permission callback denies it when the host handles prompts,
         // and the message check below ends the run.
@@ -632,6 +637,9 @@ export class ClaudeAgentSdkDriver {
                 canUseTool: denyOutsideIsolation(
                   options.canUseTool,
                   expectation,
+                  (name) => {
+                    blockedTools.push(name);
+                  },
                 ),
               }
             : {}),
@@ -666,6 +674,9 @@ export class ClaudeAgentSdkDriver {
       stream: while (true) {
         const next = await iterator.next();
         if (next.done) {
+          // A call held for the runtime's answer that never came stops the
+          // run, as a result message without it does.
+          toolUseCheck?.finish();
           break;
         }
         const message = next.value;
@@ -673,17 +684,15 @@ export class ClaudeAgentSdkDriver {
         if (!startedEmitted) {
           yield startedEvent(initModel);
         }
-        if (expectation) {
-          offeredTools = claudeInitTools(message) ?? offeredTools;
-          assertClaudeMessageIsolated(
-            message,
-            expectation,
-            "Claude Agent SDK",
-            offeredTools,
-          );
+        let refusedCalls: readonly string[] = [];
+        if (toolUseCheck) {
+          // A blocked call means the tool exists: stop before the check
+          // can count its error result as a refusal.
           if (blockedTools.length > 0) {
             throw isolationHookViolation(blockedTools);
           }
+          offeredTools = claudeInitTools(message) ?? offeredTools;
+          refusedCalls = toolUseCheck.check(message, offeredTools);
         }
         this.assertRequiredMcpServersConnected(message);
         // Capture the SDK session id (system/init or result) so the
@@ -722,7 +731,25 @@ export class ClaudeAgentSdkDriver {
           resolvedResume !== undefined,
         );
         for (let event of events) {
+          if (
+            event.type === "tool_result" &&
+            event.callId !== undefined &&
+            refusedCalls.includes(event.callId)
+          ) {
+            warn(
+              EXTERNAL_AGENT_TOOL_NOT_OFFERED,
+              `Claude Agent SDK: the model requested ${JSON.stringify(event.name)} (call ${event.callId}), a tool it was not offered; the runtime refused it and the run goes on.`,
+            );
+            event = {
+              ...event,
+              metadata: {
+                ...event.metadata,
+                isolation: EXTERNAL_AGENT_TOOL_NOT_OFFERED,
+              },
+            };
+          }
           if (event.type === "completed") {
+            toolUseCheck?.finish();
             completed = true;
             if (!event.model && initModel) {
               event = { ...event, model: initModel };
@@ -1767,14 +1794,18 @@ function isolationHookViolation(
 function denyOutsideIsolation(
   canUseTool: ClaudeAgentSdkCanUseTool,
   expectation: ClaudeIsolationExpectation,
+  onDenied: (toolName: string) => void,
 ): ClaudeAgentSdkCanUseTool {
-  return (toolName, input, extra) =>
-    isExpectedClaudeTool(toolName, expectation)
-      ? canUseTool(toolName, input, extra)
-      : Promise.resolve({
-          behavior: "deny",
-          message: `${toolName} is outside this agent's isolated tool set.`,
-        });
+  return (toolName, input, extra) => {
+    if (isExpectedClaudeTool(toolName, expectation)) {
+      return canUseTool(toolName, input, extra);
+    }
+    onDenied(toolName);
+    return Promise.resolve({
+      behavior: "deny",
+      message: `${toolName} is outside this agent's isolated tool set.`,
+    });
+  };
 }
 
 /**

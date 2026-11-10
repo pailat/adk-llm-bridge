@@ -7,13 +7,17 @@ import {
   REQUEST_CONFIRMATION_FUNCTION_CALL_NAME,
   REQUEST_CREDENTIAL_FUNCTION_CALL_NAME,
   REQUEST_INPUT_FUNCTION_CALL_NAME,
+  type Session,
 } from "@google/adk";
 import type { Content, Part } from "@google/genai";
 import type {
   AgentInvocationGateway,
   AgentInvocationResult,
 } from "../../runtime/agent-invocation-gateway.js";
+import { rootSessionOf } from "../../runtime/agent-invocation-gateway.js";
 import { parseJson } from "../../utils/json.js";
+import { warn } from "../../utils/log.js";
+import { isTempStateKey, withoutTempStateKeys } from "../../utils/state.js";
 import { hashWorkflowValue } from "../checkpoint/hash.js";
 import type {
   WorkflowCheckpointStore,
@@ -66,7 +70,10 @@ import type {
   WorkflowWaitingEvent,
 } from "../events.js";
 import { isWorkflowEvent } from "../events.js";
+import { canonicalJson } from "../internal/canonical-hash.js";
 import { isRecord } from "../internal/guards.js";
+import { stepLimitExceeded } from "../internal/step-limit.js";
+import { isWorkflowAgent } from "../internal/workflow-agent-brand.js";
 import { withStepSpan, withWorkflowSpan } from "../telemetry.js";
 import type {
   WorkflowWorkspaceConfig,
@@ -200,6 +207,15 @@ export interface WorkflowRuntimeConfig {
 }
 
 /**
+ * Warning code logged when parallel steps share a sub-agent, so they run one
+ * at a time.
+ */
+const PARALLEL_STEPS_SHARE_AGENT = "WORKFLOW_PARALLEL_STEPS_SHARE_AGENT";
+
+/** Step ids named in that warning before it shortens the list. */
+const MAX_LISTED_SHARED_STEPS = 5;
+
+/**
  * Executes one trusted workflow definition inside an ADK invocation.
  *
  * @internal
@@ -212,6 +228,11 @@ export class WorkflowRuntime {
   readonly #declaredAgents: ReadonlyMap<string, BaseAgent>;
   readonly #gateway: AgentInvocationGateway;
   readonly #eventSink: (event: Event) => void | Promise<void>;
+  /**
+   * Last value of each checkpoint key carried by an event this runtime
+   * emitted, its own and those forwarded from delegated workflows.
+   */
+  readonly #emittedCheckpoints = new Map<string, unknown>();
   readonly #hooks?: WorkflowRuntimeHooks;
   readonly #checkpointStore: WorkflowCheckpointStore;
   readonly #resolveExecutionId: WorkflowExecutionIdResolver;
@@ -222,6 +243,8 @@ export class WorkflowRuntime {
   readonly #limits: Required<WorkflowExecutionLimits>;
   readonly #globalSemaphore: AsyncSemaphore;
   readonly #agentSemaphores = new WeakMap<BaseAgent, AsyncSemaphore>();
+  /** Sub-agents already reported as shared by parallel steps in this run. */
+  readonly #warnedSharedAgents = new Set<BaseAgent>();
   readonly #seenStepIds = new Set<string>();
   #executionSignal?: AbortSignal;
   #executionId?: string;
@@ -239,7 +262,10 @@ export class WorkflowRuntime {
     this.#agentName = config.agentName;
     this.#declaredAgents = config.declaredAgents;
     this.#gateway = config.gateway;
-    this.#eventSink = config.eventSink;
+    this.#eventSink = (event) => {
+      this.recordCheckpointDelta(event);
+      return config.eventSink(event);
+    };
     this.#hooks = config.hooks;
     this.#checkpointStore =
       config.checkpointStore ?? new ADKSessionCheckpointStore();
@@ -279,6 +305,7 @@ export class WorkflowRuntime {
     );
     this.#executionSignal = abortScope.signal;
     let checkpointInitialized = false;
+    const delegatedRun = this.registerDelegatedRun();
 
     try {
       throwIfRunAborted(abortScope.signal);
@@ -347,6 +374,8 @@ export class WorkflowRuntime {
       throw error;
     } finally {
       abortScope.dispose();
+      await this.persistCheckpointsAfterAbort();
+      delegatedRun?.();
       this.#executionSignal = undefined;
       this.#checkpointCoordinator = undefined;
       this.#executionId = undefined;
@@ -382,6 +411,7 @@ export class WorkflowRuntime {
     validateParallelOptions(options, this.#limits.maxConcurrency);
     const failureMode = options.failureMode ?? "fail-fast";
     const concurrency = options.concurrency ?? this.#limits.maxConcurrency;
+    if (concurrency > 1) this.warnSharedParallelAgents(steps);
     const localSemaphore = new AsyncSemaphore(concurrency);
     const parallelAbort = new AbortController();
     const scopeSignal = AbortSignal.any([
@@ -401,7 +431,9 @@ export class WorkflowRuntime {
             interrupts.push(...caught.interrupts);
             return undefined as unknown as WorkflowStepOutcome;
           }
-          if (failureMode === "fail-fast") throw caught;
+          if (failureMode === "fail-fast" || isReplayIntegrityError(caught)) {
+            throw caught;
+          }
           return failureFromError(step, caught);
         }
       }),
@@ -415,6 +447,39 @@ export class WorkflowRuntime {
       parallelAbort.abort(caught);
       await Promise.allSettled(pending);
       throw caught;
+    }
+  }
+
+  /**
+   * Warns once per run and sub-agent when parallel steps resolve to the same
+   * declared sub-agent: its per-agent lock runs them one at a time, so the
+   * fan-out is not parallel. Steps that fail validation are left to
+   * {@link runStep}; names and ids are quoted in the message.
+   */
+  private warnSharedParallelAgents(steps: readonly WorkflowStep[]): void {
+    const stepIdsByAgent = new Map<BaseAgent, string[]>();
+    for (const step of steps) {
+      if (typeof step?.id !== "string" || typeof step.agentName !== "string") {
+        continue;
+      }
+      const agent = this.#declaredAgents.get(step.agentName);
+      if (!agent) continue;
+      const ids = stepIdsByAgent.get(agent) ?? [];
+      ids.push(step.id);
+      stepIdsByAgent.set(agent, ids);
+    }
+    for (const [agent, ids] of stepIdsByAgent) {
+      if (ids.length < 2 || this.#warnedSharedAgents.has(agent)) continue;
+      this.#warnedSharedAgents.add(agent);
+      const listed = ids
+        .slice(0, MAX_LISTED_SHARED_STEPS)
+        .map((id) => JSON.stringify(id))
+        .join(", ");
+      const more = ids.length > MAX_LISTED_SHARED_STEPS ? ", ..." : "";
+      warn(
+        PARALLEL_STEPS_SHARE_AGENT,
+        `Workflow ${JSON.stringify(this.#agentName)}: ${ids.length} parallel steps (${listed}${more}) use the same sub-agent ${JSON.stringify(agent.name)}, which runs one step at a time. Declare one sub-agent per concurrent branch to run them in parallel.`,
+      );
     }
   }
 
@@ -436,10 +501,10 @@ export class WorkflowRuntime {
     this.#seenStepIds.add(step.id);
     this.#stepCount++;
     if (this.#stepCount > this.#limits.maxSteps) {
-      throw new WorkflowError(
-        "WORKFLOW_LIMIT_EXCEEDED",
-        `Workflow exceeded the maximum of ${this.#limits.maxSteps} steps`,
-        { limit: this.#limits.maxSteps, stepId: step.id },
+      throw stepLimitExceeded(
+        this.#limits.maxSteps,
+        step.id,
+        this.#replayedStepCount,
       );
     }
     const declaredAgent = this.#declaredAgents.get(step.agentName);
@@ -456,7 +521,18 @@ export class WorkflowRuntime {
       executionId: this.executionId(),
       step,
     } satisfies WorkflowStepHookContext;
-    const prepared = await this.checkpointCoordinator().prepareStep(step);
+    const prepared = await this.checkpointCoordinator()
+      .prepareStep(step)
+      .catch(async (caught: unknown) => {
+        if (isReplayIntegrityError(caught)) {
+          await this.emitWorkflowEvent({
+            ...this.envelope(),
+            type: "step_failed",
+            failure: failureFromError(step, caught, 0),
+          } satisfies WorkflowStepFailedEvent);
+        }
+        throw caught;
+      });
     // A step about to execute is already saved `running`, so its abort check
     // runs inside the try below, where the abort is recorded as `interrupted`.
     if (prepared.resolution.action !== "execute") throwIfRunAborted(signal);
@@ -498,6 +574,7 @@ export class WorkflowRuntime {
             step,
             prepared.resolution.interrupt,
             prepared.resolution.attempt,
+            prepared.inputHash,
           )
         : undefined;
 
@@ -699,6 +776,13 @@ export class WorkflowRuntime {
       if (unsettledAttempt !== undefined) {
         await this.recordStepFailure(step, unsettledAttempt, caught);
       }
+      if (isReplayIntegrityError(caught)) {
+        await this.emitWorkflowEvent({
+          ...this.envelope(),
+          type: "step_failed",
+          failure: failureFromError(step, caught, unsettledAttempt ?? 0),
+        } satisfies WorkflowStepFailedEvent);
+      }
       throw caught;
     }
   }
@@ -713,6 +797,7 @@ export class WorkflowRuntime {
     step: WorkflowStep,
     interrupt: WorkflowStepInterrupt,
     attempt: number,
+    inputHash: string,
   ): Promise<StepResume> {
     const answer = this.#parentContext.userContent;
     const answered = functionResponseIds(answer);
@@ -720,6 +805,14 @@ export class WorkflowRuntime {
       !answer ||
       !interrupt.functionCallIds.some((callId) => answered.has(callId))
     ) {
+      // The run may have failed past this wait earlier; the answer turn needs
+      // the checkpoint to show it as running with its input again.
+      await this.checkpointCoordinator().restoreWaitingStep(
+        step,
+        inputHash,
+        attempt,
+        interrupt,
+      );
       await this.reemitPendingInterrupt(step, interrupt, attempt);
       throw new WorkflowInterruptedError([{ stepId: step.id, interrupt }]);
     }
@@ -898,7 +991,7 @@ export class WorkflowRuntime {
           attempt: attemptContext.attempt - 1,
         },
         async (handle) => {
-          const result = await this.#gateway.run({
+          const delegated = await this.#gateway.run({
             agentName: step.agentName,
             input: resume ? resume.answer : stepInputContent(step),
             parentContext: this.#parentContext,
@@ -915,6 +1008,10 @@ export class WorkflowRuntime {
             ...(resume ? { resume: { events: resume.events } } : {}),
             eventSink: (event) => this.#eventSink(event),
           });
+          const result = withoutSettledNestedErrors(
+            delegated,
+            this.#declaredAgents.get(step.agentName),
+          );
           if (result.interrupt) {
             handle.waiting(result.interrupt.functionCallIds.length);
           }
@@ -1056,6 +1153,130 @@ export class WorkflowRuntime {
         nodeInfo: { messageAsOutput: true },
       }),
     );
+  }
+
+  private recordCheckpointDelta(event: Event): void {
+    // Checkpoint deltas ride only on `checkpoint_saved` events, which are never
+    // partial, so no partial filter is needed here.
+    for (const [key, value] of Object.entries(
+      event.actions?.stateDelta ?? {},
+    )) {
+      if (key.startsWith(`${WORKFLOW_CHECKPOINT_STATE_PREFIX}:`)) {
+        this.#emittedCheckpoints.set(key, value);
+      }
+    }
+  }
+
+  /**
+   * Registers a run whose session is a gateway child session with the root
+   * session, so the root can collect its checkpoints after an abort. The entry
+   * holds this run's live checkpoint map, so the root can read it even while
+   * the run is still going.
+   *
+   * @returns A function that marks the run settled, or `undefined` for a run
+   * in a root session.
+   */
+  private registerDelegatedRun(): (() => void) | undefined {
+    const session = this.#parentContext.session;
+    if (!session) return undefined;
+    const root = rootSessionOf(session);
+    if (root === session) return undefined;
+    let runs = delegatedRuns.get(root);
+    if (!runs) {
+      runs = new Set();
+      delegatedRuns.set(root, runs);
+    }
+    const registry = runs;
+    let markSettled: () => void = () => {};
+    const run: DelegatedRun = {
+      checkpoints: this.#emittedCheckpoints,
+      settled: new Promise<void>((resolve) => {
+        markSettled = resolve;
+      }),
+      done: false,
+      collected: false,
+    };
+    registry.add(run);
+    return () => {
+      run.done = true;
+      markSettled();
+      // An aborted run stays registered until its root collects it; any other
+      // run, or one the root already collected, is dropped now.
+      if (run.collected || !this.#parentContext.abortSignal?.aborted) {
+        registry.delete(run);
+      }
+    };
+  }
+
+  /**
+   * Appends the checkpoints that an aborted run emitted but that never reached
+   * session state.
+   *
+   * @remarks
+   * An ADK `Runner` stops appending events once its signal aborts, so the
+   * events that record the abort (step `interrupted`, run `cancelled`) are
+   * dropped and, with the default session store, the session would keep the
+   * step `running`. The Runner waits for the workflow's generator to close
+   * before it seals the invocation, so this append lands before the Runner's
+   * own abort events and never runs concurrently with them.
+   *
+   * Only the workflow that runs in the root session appends. A delegated
+   * workflow runs in a gateway child session, which the context's
+   * `sessionService` does not own, and the gateway stops forwarding its events
+   * on abort. The root waits up to {@link DELEGATED_ABORT_GRACE_MS} for those
+   * runs to settle, then appends their checkpoints with its own, in one event.
+   * A delegated run still going after the grace period (a handler that ignores
+   * the signal) contributes the checkpoint it had at that moment, usually its
+   * step or the run still `running`; what it records later does not reach the
+   * session, so a resume reports that step as indeterminate. A failed append
+   * is logged and never replaces the run's own outcome.
+   */
+  private async persistCheckpointsAfterAbort(): Promise<void> {
+    const { abortSignal, session, sessionService } = this.#parentContext;
+    if (
+      !abortSignal?.aborted ||
+      !session ||
+      !sessionService ||
+      rootSessionOf(session) !== session
+    ) {
+      return;
+    }
+    const latest = new Map(this.#emittedCheckpoints);
+    const runs = delegatedRuns.get(session);
+    if (runs) {
+      await settledWithin(runs, DELEGATED_ABORT_GRACE_MS);
+      for (const run of runs) {
+        // A delegated run's values are newer than the copies it forwarded.
+        for (const [key, value] of run.checkpoints) latest.set(key, value);
+        run.collected = true;
+        if (run.done) runs.delete(run);
+      }
+    }
+    const missing: Record<string, unknown> = {};
+    for (const [key, value] of latest) {
+      if (!sameCheckpointValue(session.state?.[key], value)) {
+        missing[key] = value;
+      }
+    }
+    if (Object.keys(missing).length === 0) return;
+    try {
+      await sessionService.appendEvent({
+        session,
+        event: createEvent({
+          invocationId: this.#parentContext.invocationId,
+          author: this.#agentName,
+          branch: this.#parentContext.branch,
+          actions: createEventActions({ stateDelta: missing }),
+        }),
+      });
+    } catch (error) {
+      warn(
+        WORKFLOW_CHECKPOINT_ABORT_RECORD_FAILED,
+        `Workflow ${this.#definition.id} was aborted but its final checkpoint could not be appended to the session: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
   }
 
   private async emitWorkflowEvent(
@@ -1225,8 +1446,12 @@ function validateAttemptReplay(
       },
     );
   }
+  // A journal is an external store: its `stateDelta` gets the same filter as
+  // a live step's before it reaches the checkpoint.
+  const { stateDelta, ...rest } = result as unknown as WorkflowStepResult;
   return {
-    ...(result as unknown as WorkflowStepResult),
+    ...rest,
+    ...stepStateDelta(stateDelta),
     attempts: context.attempt,
     replayed: true,
   };
@@ -1508,7 +1733,9 @@ function stepStateDelta(
 ): { stateDelta: Record<string, unknown> } | Record<string, never> {
   if (!stateDelta) return {};
   const entries = Object.entries(stateDelta).filter(
-    ([key]) => !key.startsWith(`${WORKFLOW_CHECKPOINT_STATE_PREFIX}:`),
+    ([key]) =>
+      !key.startsWith(`${WORKFLOW_CHECKPOINT_STATE_PREFIX}:`) &&
+      !isTempStateKey(key),
   );
   return entries.length > 0 ? { stateDelta: Object.fromEntries(entries) } : {};
 }
@@ -1530,6 +1757,68 @@ function agentFailureCause(result: AgentInvocationResult): {
     ...(failedEvent?.errorCode ? { causeCode: failedEvent.errorCode } : {}),
     ...(result.errorKind ? { errorKind: result.errorKind } : {}),
   };
+}
+
+/**
+ * Whether `caught` says the saved checkpoint no longer matches the workflow.
+ * Such an error fails the run in every parallel failure mode: it is not a
+ * step outcome the workflow can carry on from.
+ */
+function isReplayIntegrityError(caught: unknown): boolean {
+  return (
+    caught instanceof WorkflowError &&
+    (caught.code === "WORKFLOW_STEP_MISMATCH" ||
+      caught.code === "WORKFLOW_INPUT_MISMATCH" ||
+      caught.code === "WORKFLOW_VERSION_MISMATCH" ||
+      caught.code === "WORKFLOW_SOURCE_MISMATCH" ||
+      caught.code === "WORKFLOW_ATTEMPT_MISMATCH")
+  );
+}
+
+/**
+ * A nested workflow forwards the events of its own steps, including the error
+ * events of attempts it retried. The gateway keeps the last error event as the
+ * delegation error, so a nested run that completed or is waiting would be
+ * reported as failed. For an agent that runs a workflow of its own, that error
+ * is dropped when the event that set it comes before the nested workflow's
+ * final `workflow_completed` or `workflow_waiting` event. An error after it, a
+ * thrown error, and a nested run that failed (it ends with its own `error`
+ * event) are kept.
+ */
+function withoutSettledNestedErrors(
+  result: AgentInvocationResult,
+  agent: BaseAgent | undefined,
+): AgentInvocationResult {
+  if (!agent || !result.error || !isWorkflowAgent(agent)) return result;
+  const typeOf = (event: Event): string | undefined =>
+    (event.customMetadata?.workflowEvent as WorkflowEvent | undefined)?.type;
+  const finalIndex = result.events.findLastIndex(
+    (event) =>
+      event.author === agent.name &&
+      ["workflow_completed", "workflow_waiting", "error"].includes(
+        typeOf(event) ?? "",
+      ),
+  );
+  const final = result.events[finalIndex];
+  if (
+    !final ||
+    (typeOf(final) !== "workflow_completed" &&
+      typeOf(final) !== "workflow_waiting")
+  ) {
+    return result;
+  }
+  const errorIndex = result.events.findLastIndex(
+    (event) => event.errorMessage !== undefined,
+  );
+  if (
+    errorIndex < 0 ||
+    errorIndex > finalIndex ||
+    result.events[errorIndex]?.errorMessage !== result.error
+  ) {
+    return result;
+  }
+  const { error: _error, errorKind: _errorKind, ...settled } = result;
+  return settled;
 }
 
 function failureFromError(
@@ -1582,6 +1871,72 @@ async function retryDelay(
     MAX_RETRY_DELAY_MS,
   );
   if (delay > 0) await abortableDelay(delay, signal);
+}
+
+/**
+ * Warning code logged when an aborted run could not append its final
+ * checkpoint to the session.
+ */
+const WORKFLOW_CHECKPOINT_ABORT_RECORD_FAILED =
+  "WORKFLOW_CHECKPOINT_ABORT_RECORD_FAILED";
+
+/**
+ * How long, in milliseconds, an aborted root workflow waits for its delegated
+ * workflows to settle before it records their checkpoints as they stand.
+ */
+const DELEGATED_ABORT_GRACE_MS = 500;
+
+/** A workflow run in a gateway child session, as its root sees it. */
+interface DelegatedRun {
+  /** The run's live map of checkpoint values. */
+  readonly checkpoints: ReadonlyMap<string, unknown>;
+  /** Resolves once the run has settled. */
+  readonly settled: Promise<void>;
+  /** Whether the run has settled. */
+  done: boolean;
+  /** Whether a root has read its checkpoints. */
+  collected: boolean;
+}
+
+/**
+ * Delegated workflow runs by root session: those still going, and aborted
+ * ones that settled before their root collected them.
+ */
+const delegatedRuns = new WeakMap<Session, Set<DelegatedRun>>();
+
+/**
+ * Waits until every run in `runs`, including ones added while waiting, has
+ * settled, or until `timeoutMs` has passed.
+ */
+async function settledWithin(
+  runs: ReadonlySet<DelegatedRun>,
+  timeoutMs: number,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    const pending = [...runs].filter((run) => !run.done);
+    const remaining = deadline - Date.now();
+    if (pending.length === 0 || remaining <= 0) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      Promise.all(pending.map((run) => run.settled)),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, remaining);
+      }),
+    ]);
+    clearTimeout(timer);
+  }
+}
+
+/** Compares two checkpoint values by their canonical JSON. */
+function sameCheckpointValue(left: unknown, right: unknown): boolean {
+  if (left === right) return true;
+  if (left === undefined || right === undefined) return false;
+  try {
+    return canonicalJson(left) === canonicalJson(right);
+  } catch {
+    return false;
+  }
 }
 
 function createExecutionAbortScope(
@@ -1804,11 +2159,14 @@ function storedInterruptEvents(
   return interrupt.events as unknown as readonly Event[];
 }
 
-/** JSON form of a gateway interrupt, as persisted in the checkpoint. */
+/**
+ * JSON form of a gateway interrupt, as persisted in the checkpoint. The stored
+ * events keep no `temp:` state keys.
+ */
 function toStepInterrupt(
   interrupt: NonNullable<AgentInvocationResult["interrupt"]>,
 ): WorkflowStepInterrupt {
-  return JSON.parse(
+  const stored = JSON.parse(
     JSON.stringify({
       kind: interrupt.kind,
       functionCallIds: interrupt.functionCallIds,
@@ -1816,6 +2174,13 @@ function toStepInterrupt(
       events: interrupt.events,
     }),
   ) as WorkflowStepInterrupt;
+  for (const event of stored.events) {
+    const actions = (event as { actions?: { stateDelta?: unknown } }).actions;
+    if (actions && isRecord(actions.stateDelta)) {
+      actions.stateDelta = withoutTempStateKeys(actions.stateDelta);
+    }
+  }
+  return stored;
 }
 
 /**

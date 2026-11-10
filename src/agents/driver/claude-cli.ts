@@ -25,6 +25,7 @@ import {
 } from "./claude-isolation.js";
 import { collectTail, type LineSource, readLines } from "./lines.js";
 import {
+  batchCommandRefusal,
   dependencyMissing,
   EXTERNAL_AGENT_OPTION_UNSUPPORTED,
   ExternalAgentPolicyError,
@@ -49,7 +50,11 @@ import {
   stringValue,
   validateDriverConfig,
 } from "./shared.js";
-import { spawnSubprocess, superviseSubprocess } from "./spawn.js";
+import {
+  BatchCommandRefusedError,
+  spawnSubprocess,
+  superviseSubprocess,
+} from "./spawn.js";
 import {
   assertNoPinnedArgOverride,
   type PinnedFlags,
@@ -434,6 +439,11 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
         input: promptFromRequest(request),
       });
     } catch (error) {
+      if (error instanceof BatchCommandRefusedError) {
+        yield policyErrorEvent(batchCommandRefusal(error, "claude"));
+        yield { type: "completed", exitCode: 1, timestamp: Date.now() };
+        return;
+      }
       // Bun.spawn throws when the binary does not exist.
       if (!isCommandNotFound(error)) {
         throw error;

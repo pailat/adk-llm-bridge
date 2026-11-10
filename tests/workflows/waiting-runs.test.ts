@@ -729,3 +729,186 @@ describe("re-entering a waiting step emits nothing the model sees twice", () => 
     ).toBe(true);
   });
 });
+
+/** Runs the workflow again under the waiting run's execution id. */
+async function reenter(
+  workflow: WorkflowAgent,
+  executionId: string,
+  message: Content,
+) {
+  const context = new InvocationContext({
+    pluginManager: new PluginManager(),
+    invocationId: executionId,
+    agent: workflow,
+    userContent: message,
+    session: {
+      id: "s",
+      appName: "app",
+      userId: "u",
+      state: {},
+      events: [],
+      lastUpdateTime: 1,
+    },
+  });
+  const events: Event[] = [];
+  for await (const event of workflow.runAsync(context)) events.push(event);
+  return events;
+}
+
+describe("withWorkflowFailed and the workflow input", () => {
+  test("a failed checkpoint with no waiting step drops the input", async () => {
+    const store = new KeyedStore();
+    const { workflow } = preThenAsk({ store });
+    const turn = await session(workflow);
+    const first = await turn(START);
+    const key = `waiting:${workflowEvents(first.events).at(-1)?.executionId}`;
+    const saved = store.checkpoints.get(key);
+    if (!saved) throw new Error("missing checkpoint");
+    const settled = {
+      ...saved,
+      steps: Object.fromEntries(
+        Object.entries(saved.steps).map(([id, step]) => [
+          id,
+          { ...step, status: "completed" as const },
+        ]),
+      ),
+    } as WorkflowCheckpointV1;
+
+    const failed = withWorkflowFailed(settled, {
+      code: "WORKFLOW_EXECUTION_ERROR",
+      message: "x",
+    });
+
+    expect(saved.input).toBeDefined();
+    expect(failed.input).toBeUndefined();
+    expect(
+      withWorkflowFailed(saved, {
+        code: "WORKFLOW_EXECUTION_ERROR",
+        message: "x",
+      }).input,
+    ).toEqual(saved.input);
+  });
+});
+
+describe("a recorded wait after the run failed", () => {
+  async function waitingThenFailed() {
+    const store = new KeyedStore();
+    const { ask, workflow } = preThenAsk({ store });
+    const turn = await session(workflow);
+    const first = await turn(START);
+    const executionId = workflowEvents(first.events).at(-1)?.executionId ?? "";
+    const key = `waiting:${executionId}`;
+    const saved = store.checkpoints.get(key);
+    if (!saved) throw new Error("missing checkpoint");
+    return { store, ask, workflow, turn, executionId, key, saved };
+  }
+
+  test("a failed run keeps the input its wait needs, so the answer still resumes it", async () => {
+    const { store, ask, turn, key, saved } = await waitingThenFailed();
+    store.checkpoints.set(
+      key,
+      withWorkflowFailed(saved, {
+        code: "WORKFLOW_EXECUTION_ERROR",
+        message: "x",
+      }),
+    );
+
+    const resumed = await turn(answer("ask-ask"));
+
+    expect(resumed.error).toBeUndefined();
+    expect(types(resumed.events)).toContain("workflow_completed");
+    expect(ask.calls).toBe(2);
+  });
+
+  test("re-reaching the wait on a resume stores the input and the running status again", async () => {
+    const { store, ask, workflow, turn, executionId, key, saved } =
+      await waitingThenFailed();
+    // A checkpoint written by an earlier release: failed, with no input.
+    store.checkpoints.set(key, {
+      ...withWorkflowFailed(saved, {
+        code: "WORKFLOW_EXECUTION_ERROR",
+        message: "x",
+      }),
+      input: undefined,
+    });
+
+    const again = await reenter(workflow, executionId, START);
+    expect(types(again).at(-1)).toBe("workflow_waiting");
+    const stored = store.checkpoints.get(key);
+    expect(stored?.status).toBe("running");
+    expect(stored?.input).toBeDefined();
+    expect(stored?.error).toBeUndefined();
+
+    const resumed = await turn(answer("ask-ask"));
+    expect(resumed.error).toBeUndefined();
+    expect(types(resumed.events)).toContain("workflow_completed");
+    expect(ask.calls).toBe(2);
+  });
+
+  test("a run that failed on a step before the wait is resumed and answered end to end", async () => {
+    const store = new KeyedStore();
+    const pre = new PreAgent();
+    const ask = new AskAgent();
+    // The first step's input changes between turns, as a patched script would.
+    let preInput = "a";
+    const workflow = new WorkflowAgent({
+      name: "wf",
+      subAgents: [pre, ask],
+      checkpointStore: store,
+      definition: defineWorkflow({
+        id: "waiting",
+        version: "1",
+        handler: async (ctx) => {
+          await ctx.run({ id: "pre", agentName: "pre", input: preInput });
+          const asked = await ctx.run({
+            id: "ask",
+            agentName: "ask",
+            input: ctx.inputText,
+          });
+          return asked.output;
+        },
+      }),
+    });
+    const turn = await session(workflow);
+    const first = await turn(START);
+    expect(types(first.events).at(-1)).toBe("workflow_waiting");
+    const executionId = workflowEvents(first.events).at(-1)?.executionId ?? "";
+    const key = `waiting:${executionId}`;
+
+    preInput = "changed";
+    const failed = await turn(START);
+    expect(failed.error?.code).toBe("WORKFLOW_STEP_MISMATCH");
+    expect(store.checkpoints.get(key)?.status).toBe("failed");
+
+    preInput = "a";
+    // A failed run is not a waiting run any more, so the default execution id
+    // would start a new one; the resume names the execution explicitly.
+    const again = await reenter(workflow, executionId, START);
+    expect(types(again).at(-1)).toBe("workflow_waiting");
+    expect(store.checkpoints.get(key)?.status).toBe("running");
+
+    const resumed = await turn(answer("ask-ask"));
+    expect(resumed.error).toBeUndefined();
+    expect(types(resumed.events)).toContain("workflow_completed");
+    expect(ask.calls).toBe(2);
+  });
+
+  test("a running checkpoint that lost its input gets it back when the wait is re-reached", async () => {
+    const { store, workflow, executionId, key, saved } =
+      await waitingThenFailed();
+    store.checkpoints.set(key, { ...saved, input: undefined });
+
+    await reenter(workflow, executionId, START);
+
+    expect(store.checkpoints.get(key)?.input).toBeDefined();
+  });
+
+  test("re-reaching a wait that is already stored writes nothing", async () => {
+    const { store, workflow, executionId, key } = await waitingThenFailed();
+    const before = store.checkpoints.get(key);
+
+    await reenter(workflow, executionId, START);
+
+    expect(store.checkpoints.get(key)).toEqual(before);
+  });
+});

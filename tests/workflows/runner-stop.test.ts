@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,7 +7,10 @@ import {
   createEvent,
   type Event,
   InMemoryRunner,
-  type InvocationContext,
+  InMemorySessionService,
+  InvocationContext,
+  logger,
+  PluginManager,
   Workflow,
 } from "@google/adk";
 import { FileSystemWorkflowCheckpointStore } from "../../src/workflows/checkpoint/file-system-checkpoint-store.js";
@@ -15,10 +18,11 @@ import {
   isWorkflowCheckpointV1,
   type WorkflowCheckpointV1,
 } from "../../src/workflows/checkpoint/schema.js";
-import type {
-  LoadWorkflowCheckpointInput,
-  SaveWorkflowCheckpointInput,
-  WorkflowCheckpointStore,
+import {
+  type LoadWorkflowCheckpointInput,
+  type SaveWorkflowCheckpointInput,
+  WORKFLOW_CHECKPOINT_STATE_PREFIX,
+  type WorkflowCheckpointStore,
 } from "../../src/workflows/checkpoint/store.js";
 import type { WorkflowExecutionLimits } from "../../src/workflows/contracts.js";
 import { defineWorkflow } from "../../src/workflows/definition.js";
@@ -203,9 +207,9 @@ describe("stopping a workflow run through an ADK runner", () => {
     });
   });
 
-  test("with the default session store the abort record does not reach session state", async () => {
-    // The runner stops reading events once the signal aborts, so the final
-    // checkpoint's stateDelta is never appended to the session.
+  test("with the default session store the abort record reaches session state", async () => {
+    // The runner stops reading events once the signal aborts; the workflow
+    // appends the final checkpoint to the session itself.
     const worker = new BlockingAgent("worker");
     const runner = new InMemoryRunner({ agent: blockingWorkflow(worker) });
     const session = await newSession(runner);
@@ -217,9 +221,301 @@ describe("stopping a workflow run through an ADK runner", () => {
     const { error } = await withDeadline(running, 5_000, "runAsync hung");
 
     expect(error).toBeUndefined();
+    expectAborted(await sessionCheckpoint(runner, session.id));
+    // The runner still seals the invocation after the checkpoint event.
+    const stored = await runner.sessionService.getSession({
+      appName: runner.appName,
+      userId: "user",
+      sessionId: session.id,
+    });
+    const checkpointEvent = stored?.events.findLastIndex((event) =>
+      Object.keys(event.actions?.stateDelta ?? {}).some((key) =>
+        key.startsWith(WORKFLOW_CHECKPOINT_STATE_PREFIX),
+      ),
+    );
+    expect(checkpointEvent).toBeLessThan((stored?.events.length ?? 0) - 1);
+  });
+
+  test("an abort does not wait long for a delegated workflow that ignores the signal", async () => {
+    let releaseInner: () => void = () => {};
+    const innerReleased = new Promise<void>((resolve) => {
+      releaseInner = resolve;
+    });
+    const quick = new BlockingAgent("quick");
+    const inner = new WorkflowAgent({
+      name: "inner",
+      subAgents: [quick],
+      definition: defineWorkflow({
+        id: "inner",
+        version: "1",
+        handler: async (ctx) => {
+          try {
+            await ctx.run({ id: "slow", agentName: quick.name, input: "x" });
+          } catch {
+            // The abort stops the step; the handler goes on regardless.
+          }
+          // Ignores the signal: only the test releases it.
+          await innerReleased;
+          return "late";
+        },
+      }),
+    });
+    const outer = new WorkflowAgent({
+      name: "outer",
+      subAgents: [inner],
+      definition: defineWorkflow({
+        id: "outer",
+        version: "1",
+        handler: async (ctx) => {
+          await ctx.run({ id: "delegate", agentName: inner.name, input: "x" });
+          return "done";
+        },
+      }),
+    });
+    const runner = new InMemoryRunner({ agent: outer });
+    const session = await newSession(runner);
+    const controller = new AbortController();
+
+    try {
+      const running = drain(runner, session.id, controller.signal);
+      await withDeadline(quick.started, 5_000, "inner step never started");
+      const abortedAt = Date.now();
+      controller.abort(new Error("budget exceeded"));
+      const { error } = await withDeadline(running, 3_000, "runAsync hung");
+
+      expect(error).toBeUndefined();
+      expect(Date.now() - abortedAt).toBeLessThan(2_000);
+      const stored = await runner.sessionService.getSession({
+        appName: runner.appName,
+        userId: "user",
+        sessionId: session.id,
+      });
+      const byWorkflow = new Map(
+        Object.values(stored?.state ?? {})
+          .filter(isWorkflowCheckpointV1)
+          .map((checkpoint) => [checkpoint.workflowId, checkpoint]),
+      );
+      // The root records its own abort. The delegated run, still in its
+      // handler when the grace period ended, contributes what it had recorded
+      // by then: its step `interrupted`, the run itself still `running`.
+      expect(byWorkflow.get("outer")?.status).toBe("cancelled");
+      expect(byWorkflow.get("outer")?.steps.delegate?.status).toBe(
+        "interrupted",
+      );
+      expect(byWorkflow.get("inner")?.status).toBe("running");
+      expect(byWorkflow.get("inner")?.steps.slow?.status).toBe("interrupted");
+    } finally {
+      releaseInner();
+    }
+  });
+
+  test("a consumer that keeps appending after an abort gets no extra checkpoint event", async () => {
+    const worker = new BlockingAgent("worker");
+    const agent = blockingWorkflow(worker);
+    const sessionService = new InMemorySessionService();
+    const session = await sessionService.createSession({
+      appName: "app",
+      userId: "user",
+    });
+    const controller = new AbortController();
+    const context = new InvocationContext({
+      invocationId: "inv-1",
+      agent,
+      session,
+      sessionService,
+      userContent: { role: "user", parts: [{ text: "go" }] },
+      pluginManager: new PluginManager(),
+      abortSignal: controller.signal,
+    });
+
+    // Unlike the Runner, this consumer appends every event, also after the
+    // abort, so the session already holds the final checkpoint.
+    const consuming = (async () => {
+      try {
+        for await (const event of agent.runAsync(context)) {
+          if (!event.partial)
+            await sessionService.appendEvent({ session, event });
+        }
+      } catch {
+        // The terminal error is expected after an abort.
+      }
+    })();
+    await withDeadline(worker.started, 5_000, "step never started");
+    controller.abort(new Error("budget exceeded"));
+    await withDeadline(consuming, 5_000, "runAsync hung");
+
+    const stored = await sessionService.getSession({
+      appName: "app",
+      userId: "user",
+      sessionId: session.id,
+    });
+    expectAborted(
+      Object.values(stored?.state ?? {}).find(
+        isWorkflowCheckpointV1,
+      ) as WorkflowCheckpointV1,
+    );
+    const bareCheckpointEvents = (stored?.events ?? []).filter(
+      (event) =>
+        event.customMetadata === undefined &&
+        Object.keys(event.actions?.stateDelta ?? {}).some((key) =>
+          key.startsWith(WORKFLOW_CHECKPOINT_STATE_PREFIX),
+        ),
+    );
+    expect(bareCheckpointEvents).toEqual([]);
+  });
+
+  test("a session service that rejects the abort record leaves runAsync ending normally and logs a warning", async () => {
+    const worker = new BlockingAgent("worker");
+    const runner = new InMemoryRunner({ agent: blockingWorkflow(worker) });
+    const session = await newSession(runner);
+    const controller = new AbortController();
+    const append = runner.sessionService.appendEvent.bind(
+      runner.sessionService,
+    );
+    const appendSpy = spyOn(
+      runner.sessionService,
+      "appendEvent",
+    ).mockImplementation(async (request) => {
+      if (controller.signal.aborted && !request.event.customMetadata) {
+        const keys = Object.keys(request.event.actions?.stateDelta ?? {});
+        if (
+          keys.some((key) => key.startsWith(WORKFLOW_CHECKPOINT_STATE_PREFIX))
+        ) {
+          throw new Error("session store offline");
+        }
+      }
+      return append(request);
+    });
+    const warnSpy = spyOn(logger, "warn").mockImplementation(() => {});
+    try {
+      const running = drain(runner, session.id, controller.signal);
+      await withDeadline(worker.started, 5_000, "step never started");
+      controller.abort(new Error("budget exceeded"));
+      const { error } = await withDeadline(running, 5_000, "runAsync hung");
+
+      expect(error).toBeUndefined();
+      expect(
+        warnSpy.mock.calls.some((call) =>
+          String(call[0]).includes("[WORKFLOW_CHECKPOINT_ABORT_RECORD_FAILED]"),
+        ),
+      ).toBe(true);
+      expect((await sessionCheckpoint(runner, session.id)).status).toBe(
+        "running",
+      );
+    } finally {
+      appendSpy.mockRestore();
+      warnSpy.mockRestore();
+    }
+  });
+
+  test("after an abort with the default session store the next turn re-runs the interrupted step", async () => {
+    let calls = 0;
+    class BlockOnceAgent extends BlockingAgent {
+      protected override async *runAsyncImpl(context: InvocationContext) {
+        calls += 1;
+        if (calls === 1) {
+          yield* super.runAsyncImpl(context);
+          return;
+        }
+        yield createEvent({
+          invocationId: context.invocationId,
+          author: this.name,
+          content: { role: "model", parts: [{ text: "second" }] },
+        });
+      }
+    }
+    const worker = new BlockOnceAgent("worker");
+    const runner = new InMemoryRunner({
+      agent: blockingWorkflow(worker, {
+        resolveExecutionId: () => "stable",
+        retryFailedSteps: true,
+      }),
+    });
+    const session = await newSession(runner);
+    const controller = new AbortController();
+
+    const first = drain(runner, session.id, controller.signal);
+    await withDeadline(worker.started, 5_000, "step never started");
+    controller.abort(new Error("budget exceeded"));
+    await withDeadline(first, 5_000, "runAsync hung");
+
+    // A step left `running` would be indeterminate here; an `interrupted`
+    // one runs again as the next attempt.
+    const second = await withDeadline(
+      drain(runner, session.id),
+      5_000,
+      "second turn hung",
+    );
+    expect(second.error).toBeUndefined();
+    expect(calls).toBe(2);
     const checkpoint = await sessionCheckpoint(runner, session.id);
-    expect(checkpoint.status).toBe("running");
-    expect(checkpoint.steps.slow?.status).toBe("running");
+    expect(checkpoint.status).toBe("completed");
+    expect(checkpoint.steps.slow?.status).toBe("completed");
+    expect(checkpoint.steps.slow?.attempts).toBe(2);
+  });
+
+  test("an abort records the delegated workflow's checkpoint through the root workflow", async () => {
+    const worker = new BlockingAgent("worker");
+    const inner = new WorkflowAgent({
+      name: "inner",
+      subAgents: [worker],
+      definition: defineWorkflow({
+        id: "inner",
+        version: "1",
+        handler: async (ctx) => {
+          await ctx.run({ id: "slow", agentName: worker.name, input: "x" });
+          return "done";
+        },
+      }),
+    });
+    const outer = new WorkflowAgent({
+      name: "outer",
+      subAgents: [inner],
+      definition: defineWorkflow({
+        id: "outer",
+        version: "1",
+        handler: async (ctx) => {
+          await ctx.run({ id: "delegate", agentName: inner.name, input: "x" });
+          return "done";
+        },
+      }),
+    });
+    const runner = new InMemoryRunner({ agent: outer });
+    const session = await newSession(runner);
+    const controller = new AbortController();
+
+    const running = drain(runner, session.id, controller.signal);
+    await withDeadline(worker.started, 5_000, "step never started");
+    controller.abort(new Error("budget exceeded"));
+    await withDeadline(running, 5_000, "runAsync hung");
+
+    // The delegated workflow's checkpoint reaches the session forwarded by the
+    // root, as on a normal turn; both record the abort.
+    const stored = await runner.sessionService.getSession({
+      appName: runner.appName,
+      userId: "user",
+      sessionId: session.id,
+    });
+    const checkpoints = Object.values(stored?.state ?? {}).filter(
+      isWorkflowCheckpointV1,
+    );
+    const byWorkflow = new Map(
+      checkpoints.map((checkpoint) => [checkpoint.workflowId, checkpoint]),
+    );
+    expect([...byWorkflow.keys()].sort()).toEqual(["inner", "outer"]);
+    expect(byWorkflow.get("outer")?.status).toBe("cancelled");
+    expect(byWorkflow.get("outer")?.steps.delegate?.status).toBe("interrupted");
+    expectAborted(byWorkflow.get("inner") as WorkflowCheckpointV1);
+    // One append after the abort, by the root: the child session is never
+    // written through the parent's session service.
+    const lateAppends = (stored?.events ?? []).filter(
+      (event) =>
+        event.customMetadata === undefined &&
+        Object.keys(event.actions?.stateDelta ?? {}).some((key) =>
+          key.startsWith(WORKFLOW_CHECKPOINT_STATE_PREFIX),
+        ),
+    );
+    expect(lateAppends.map((event) => event.author)).toEqual(["outer"]);
   });
 
   test("a workflow execution timeout records the run cancelled and the step interrupted", async () => {

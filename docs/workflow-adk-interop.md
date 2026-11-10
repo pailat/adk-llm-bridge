@@ -129,6 +129,9 @@ checkpoint are used:
   an abort is returned to the handler as a `WorkflowStepFailure` with
   `status: "failed"` and code `WORKFLOW_ABORTED`, while the checkpoint stores
   it as `interrupted`.
+- A checkpoint that no longer matches the workflow (changed step input, agent,
+  version or source) is not a step outcome. It fails the run at the step that
+  changed, with a `step_failed` event, in every `failureMode`.
 - A step recorded `running` by a crash is still `WORKFLOW_INDETERMINATE_STEP`;
   only recorded failures are retried automatically, and an `interrupted` step
   runs again only on the same opt-in.

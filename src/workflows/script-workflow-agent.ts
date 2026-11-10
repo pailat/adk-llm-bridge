@@ -24,6 +24,7 @@ import type {
 import type { WorkflowEvent } from "./events.js";
 import { isWorkflowEvent } from "./events.js";
 import { attachCause } from "./internal/error-support.js";
+import { WORKFLOW_AGENT_BRAND } from "./internal/workflow-agent-brand.js";
 import {
   invocationContextForNode,
   pickWorkflowNodeConfig,
@@ -84,6 +85,8 @@ export interface ScriptWorkflowAgentConfig extends WorkflowNodeConfig {
  * host only through yielded step, parallel, emit and dynamic-agent operations.
  */
 export class ScriptWorkflowAgent extends BaseAgent {
+  /** @internal */
+  readonly [WORKFLOW_AGENT_BRAND] = true;
   /** The script workflow definition this agent runs. */
   readonly definition: ScriptWorkflowDefinition;
   readonly #scriptRuntime: WorkflowScriptRuntime;
@@ -212,15 +215,25 @@ export class ScriptWorkflowAgent extends BaseAgent {
       description: this.definition.description,
       limits: this.#limits,
       handler: async (context) => {
+        let replayedSteps = 0;
         const execution = await runWorkflowScript(this.#scriptRuntime, {
           source: this.definition.source,
           input: context.input,
           signal: context.signal,
           limits: this.#limits,
           filename: `${this.definition.id}.workflow.js`,
+          replayedSteps: () => replayedSteps,
           host: {
-            run: (step) => context.run(step),
-            parallel: (steps, options) => context.parallel(steps, options),
+            run: async (step) => {
+              const result = await context.run(step);
+              if (result.replayed) replayedSteps += 1;
+              return result;
+            },
+            parallel: async (steps, options) => {
+              const outcomes = await context.parallel(steps, options);
+              replayedSteps += outcomes.filter((o) => o.replayed).length;
+              return outcomes;
+            },
             emit: (event) => context.emit(event),
             ...(dynamicAgents
               ? {

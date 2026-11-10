@@ -1,8 +1,9 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import {
   BaseAgent,
   BaseLlm,
   type BaseLlmConnection,
+  BaseSessionService,
   type BaseTool,
   BaseToolset,
   createEvent,
@@ -21,6 +22,7 @@ import {
   REQUEST_CREDENTIAL_FUNCTION_CALL_NAME,
   REQUEST_INPUT_FUNCTION_CALL_NAME,
   RequestInput,
+  type Session,
   Workflow,
 } from "@google/adk";
 import { z } from "zod";
@@ -47,6 +49,22 @@ class CaptureAgent extends BaseAgent {
   }
 
   protected async *runLiveImpl() {}
+}
+
+/** ADK's own append rules, used as the reference for the child session. */
+class ReferenceSessionService extends BaseSessionService {
+  createSession(): Promise<Session> {
+    throw new Error("unused");
+  }
+  getSession(): Promise<Session | undefined> {
+    throw new Error("unused");
+  }
+  listSessions(): Promise<never> {
+    throw new Error("unused");
+  }
+  deleteSession(): Promise<void> {
+    throw new Error("unused");
+  }
 }
 
 function parentContext(
@@ -673,7 +691,8 @@ describe("AgentInvocationGateway", () => {
         ...extra,
       });
 
-    test("applies stateDelta to the child state, trims temp: keys and skips partials", async () => {
+    /** Runs a worker that writes `k` and `temp:scratch`, after a partial. */
+    async function runTempWriter() {
       let seenByNext: unknown;
       const worker = new ScriptAgent("worker", async function* (context) {
         yield modelEvent([{ text: "typing" }], { partial: true });
@@ -684,27 +703,75 @@ describe("AgentInvocationGateway", () => {
         });
         seenByNext = { ...context.session.state };
       });
-      const root = new CaptureAgent("root");
-      const context = parentContext(root);
+      const context = parentContext(new CaptureAgent("root"));
       const gateway = new AgentInvocationGateway({
         resolveAgent: () => worker,
       });
-
       const result = await gateway.run({
         agentName: "worker",
         input: { role: "user", parts: [{ text: "go" }] },
         parentContext: context,
       });
+      return { worker, context, result, seenByNext };
+    }
 
-      expect(seenByNext).toEqual({ shared: true, k: 1 });
-      expect(result.stateDelta).toEqual({ k: 1 });
-      expect(context.session.state).toEqual({ shared: true });
+    test("applies stateDelta to the child state with ADK's append rules and skips partials", async () => {
+      const { worker, result, seenByNext } = await runTempWriter();
+
+      // The child session follows the installed ADK's appendEvent, whatever it
+      // does with `temp:` keys during the invocation.
+      const reference: Session = {
+        id: "s",
+        appName: "a",
+        userId: "u",
+        state: { shared: true },
+        events: [],
+        lastUpdateTime: 0,
+      };
+      await new ReferenceSessionService().appendEvent({
+        session: reference,
+        event: modelEvent([{ text: "done" }], {
+          actions: createEventActions({
+            stateDelta: { k: 1, "temp:scratch": 2 },
+          }),
+        }),
+      });
+      expect(seenByNext).toEqual(reference.state);
       const childEvents = worker.context?.session.events ?? [];
       expect(childEvents.some((event) => event.partial)).toBe(false);
       // Default history is `replace` (AgentTool-like): input + final only.
       expect(childEvents).toHaveLength(2);
       // The partial still reaches sinks and the result stream.
       expect(result.events).toHaveLength(2);
+    });
+
+    test("returns an aggregate stateDelta without temp: keys and leaves the parent state alone", async () => {
+      const { context, result } = await runTempWriter();
+
+      expect(result.stateDelta).toEqual({ k: 1 });
+      expect(context.session.state).toEqual({ shared: true });
+    });
+
+    test("keeps temp: keys out of the aggregate when the session service does not trim them", async () => {
+      // An appendEvent that keeps `temp:` keys in the event and the state.
+      const append = spyOn(
+        BaseSessionService.prototype,
+        "appendEvent",
+      ).mockImplementation(async ({ session, event }) => {
+        if (event.partial) return event;
+        Object.assign(session.state, event.actions?.stateDelta ?? {});
+        session.events.push(event);
+        return event;
+      });
+      try {
+        const { context, result, seenByNext } = await runTempWriter();
+
+        expect(seenByNext).toEqual({ shared: true, k: 1, "temp:scratch": 2 });
+        expect(result.stateDelta).toEqual({ k: 1 });
+        expect(context.session.state).toEqual({ shared: true });
+      } finally {
+        append.mockRestore();
+      }
     });
 
     test("replace mode keeps the child state frozen while applying deltas", async () => {

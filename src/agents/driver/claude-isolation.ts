@@ -570,6 +570,161 @@ export function assertClaudeMessageIsolated(
   }
 }
 
+/**
+ * How many refused calls to tools the model was not offered a run takes: the
+ * call that reaches this count stops it.
+ */
+export const MAX_REFUSED_TOOL_CALLS = 3;
+
+/**
+ * Checks the runtime messages of one isolated run and waits for the
+ * runtime's answer to a call the model invented.
+ *
+ * @remarks
+ * Security invariant: a tool outside the isolated set that the runtime has,
+ * or that ran, stops the run. Prevention is the offered tool list, the
+ * `PreToolUse` hook and the permission callback; this check detects what got
+ * past them. A `tool_use` outside the set is held, not stopped at once, only
+ * when every signal says the runtime has no such tool: `system/init` was
+ * seen and did not list it, it is not an MCP tool (a server may connect
+ * after start), and it has a name and a call id. The caller stops the run
+ * first when the hook or the permission callback was reached for any tool
+ * outside the set (the tool exists). A held call is then:
+ * - refused, and the run goes on, when its `tool_result` has
+ *   `is_error: true` (the runtime answers an unknown tool before any hook);
+ *   the {@link MAX_REFUSED_TOOL_CALLS}th refused call stops the run;
+ * - a violation when its result is not an error (it ran), or when the run
+ *   ends without one ({@link ClaudeToolUseCheck.finish}).
+ * The error text is never matched; only the message structure is used.
+ */
+export class ClaudeToolUseCheck {
+  readonly #expected: ClaudeIsolationExpectation;
+  readonly #runtime: string;
+  /** Held calls: call id to tool name. */
+  readonly #held = new Map<string, string>();
+  readonly #refused: string[] = [];
+
+  /**
+   * @param expected - The tools and MCP servers the driver configured.
+   * @param runtime - Runtime name used in the error messages.
+   */
+  constructor(expected: ClaudeIsolationExpectation, runtime: string) {
+    this.#expected = expected;
+    this.#runtime = runtime;
+  }
+
+  /**
+   * Checks one runtime message.
+   *
+   * @param message - One runtime message, any type.
+   * @param offered - The tools the session's `system/init` reported;
+   * `undefined` when no `init` was seen yet.
+   * @returns The call ids this message answered with a refusal; empty for
+   * most messages.
+   * @throws {@link ExternalAgentPolicyError} with code
+   * `EXTERNAL_AGENT_ISOLATION_VIOLATED` as described on the class.
+   */
+  check(message: unknown, offered: readonly string[] | undefined): string[] {
+    assertClaudeInitIsolated(message, this.#expected, this.#runtime);
+    const record = asRecord(message);
+    const content = asRecord(record.message).content;
+    if (!Array.isArray(content)) return [];
+    if (record.type === "assistant") {
+      this.#holdInventedCalls(content, offered);
+      return [];
+    }
+    if (record.type !== "user") return [];
+    const refused: string[] = [];
+    for (const block of content.map(asRecord)) {
+      if (block.type !== "tool_result") continue;
+      const id = stringValue(block.tool_use_id);
+      const name = id === undefined ? undefined : this.#held.get(id);
+      if (id === undefined || name === undefined) continue;
+      this.#held.delete(id);
+      if (block.is_error !== true) {
+        throw new ExternalAgentPolicyError(
+          EXTERNAL_AGENT_ISOLATION_VIOLATED,
+          `${this.#runtime}: the model requested ${JSON.stringify(name)}, a tool that was not offered, and the runtime ran it instead of refusing it, so the isolation policy stopped the run. A host or managed setting may be adding tools. Pass inheritHostConfig: true to allow the host configuration.`,
+        );
+      }
+      this.#refused.push(name);
+      refused.push(id);
+      if (this.#refused.length >= MAX_REFUSED_TOOL_CALLS) {
+        throw new ExternalAgentPolicyError(
+          EXTERNAL_AGENT_ISOLATION_VIOLATED,
+          `${this.#runtime}: the model requested ${this.#refused.length} tools it was not offered in one run (${this.#refused.map((tool) => JSON.stringify(tool)).join(", ")}); the runtime refused each one, and the isolation policy stopped the run so a model that keeps asking does not spend the budget.`,
+        );
+      }
+    }
+    return refused;
+  }
+
+  /**
+   * Call at the end of the run (its result message, or the end of the
+   * stream).
+   *
+   * @throws {@link ExternalAgentPolicyError} with code
+   * `EXTERNAL_AGENT_ISOLATION_VIOLATED` when a held call got no result.
+   */
+  finish(): void {
+    if (this.#held.size === 0) return;
+    const names = [...new Set(this.#held.values())]
+      .map((tool) => JSON.stringify(tool))
+      .join(", ");
+    throw new ExternalAgentPolicyError(
+      EXTERNAL_AGENT_ISOLATION_VIOLATED,
+      `${this.#runtime}: the model requested ${names}, a tool that was not offered, and the runtime gave no result for it before the run ended, so the isolation policy stopped the run.`,
+    );
+  }
+
+  #holdInventedCalls(
+    content: readonly unknown[],
+    offered: readonly string[] | undefined,
+  ): void {
+    const outside = content
+      .map(asRecord)
+      .filter((block) => block.type === "tool_use")
+      .map((block) => ({
+        name: typeof block.name === "string" ? block.name : "",
+        id: stringValue(block.id),
+      }))
+      .filter(({ name }) => !isExpectedClaudeTool(name, this.#expected));
+    if (outside.length === 0) return;
+    const holdable = (call: {
+      name: string;
+      id?: string;
+    }): call is { name: string; id: string } =>
+      offered !== undefined &&
+      call.name !== "" &&
+      call.id !== undefined &&
+      !call.name.startsWith("mcp__") &&
+      !wasOffered(call.name, offered);
+    const held = outside.filter(holdable);
+    if (held.length < outside.length) {
+      throw new ExternalAgentPolicyError(
+        EXTERNAL_AGENT_ISOLATION_VIOLATED,
+        toolUseStopMessage(
+          outside.map(({ name }) => name),
+          this.#runtime,
+          offered,
+        ),
+      );
+    }
+    for (const { name, id } of held) {
+      this.#held.set(id, name);
+    }
+  }
+}
+
+/** Whether `system/init` listed `tool`, under its own or its canonical name. */
+function wasOffered(tool: string, offered: readonly string[]): boolean {
+  const canonical = canonicalClaudeToolName(tool);
+  return (
+    offered.includes(tool) ||
+    (canonical !== undefined && offered.includes(canonical))
+  );
+}
+
 /** The stop message for `tool_use` names outside the isolated set. */
 function toolUseStopMessage(
   tools: readonly string[],
@@ -581,14 +736,7 @@ function toolUseStopMessage(
   if (offered === undefined) {
     return `${runtime} tried to use ${names}, outside the isolated set, so the isolation policy stopped the run. The runtime had not reported the tools it offers yet. ${optIn}`;
   }
-  const wasOffered = (tool: string) => {
-    const canonical = canonicalClaudeToolName(tool);
-    return (
-      offered.includes(tool) ||
-      (canonical !== undefined && offered.includes(canonical))
-    );
-  };
-  if (tools.some(wasOffered)) {
+  if (tools.some((tool) => wasOffered(tool, offered))) {
     return `${runtime} tried to use ${names}, outside the isolated set, so the run was stopped. The runtime offered it, so a host or managed setting may be adding tools. ${optIn}`;
   }
   const notOffered = `${runtime}: the model requested ${names}, a tool that was not offered (it is not in the session's system/init tools), so the isolation policy stopped the run.`;
