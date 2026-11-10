@@ -325,193 +325,353 @@ export class AgentInvocationGateway {
       );
     }
 
-    const resumeEvents = request.resume?.events ?? [];
-    if (request.resume) {
-      const pending = findInterrupt(resumeEvents, agent);
-      const answered = new Set(
-        (request.input.parts ?? [])
-          .map((part) => part.functionResponse?.id)
-          .filter((id): id is string => typeof id === "string"),
-      );
-      if (!pending?.functionCallIds.some((id) => answered.has(id))) {
-        return failedResult(
-          request.agentName,
-          startedAt,
-          "Resume input does not answer a pending interrupt",
-          "invalid-resume",
-        );
-      }
+    const rejected = validateResume(request, agent, startedAt);
+    if (rejected) {
+      return rejected;
     }
 
-    const signal = combineAbortSignals([
-      request.parentContext.abortSignal,
-      request.abortSignal,
-    ]);
-    const inputEvent =
-      request.appendInput === false
-        ? undefined
-        : createEvent({
-            invocationId: request.parentContext.invocationId,
-            author: "user",
-            branch: request.branch,
-            content: request.input,
-          });
-    const child = createChildSession({
-      parentSession: request.parentContext.session,
-      inputEvent,
-      priorEvents: resumeEvents,
-      sessionState: request.sessionState,
-      sessionStateMode: request.sessionStateMode ?? "merge",
-      sessionHistoryMode: request.sessionHistoryMode ?? "replace",
-    });
-    // Every delegation hop keeps the caller's permission ceiling, whatever the
-    // state/history modes: the policy is keyed by session object, not by state.
-    inheritSessionPermissions(request.parentContext.session, child.session);
-    const childContext = createChildInvocationContext({
-      agent,
-      parentContext: request.parentContext,
-      input: request.input,
-      branch: request.branch,
-      abortSignal: signal,
-      session: child.session,
-    });
-
-    const events: Event[] = [];
-    const text: string[] = [];
-    const fallbackOutput: string[] = [];
-    const stateDelta: Record<string, unknown> = {};
-    let finalText: string | undefined;
-    let textEvents = 0;
-    let toolCalls = 0;
-    const usage: AgentInvocationUsage = emptyUsage();
-    let errors = 0;
-    let error: string | undefined;
-    let errorKind: AgentInvocationErrorKind | undefined;
-    const fail = (caught: unknown, fallbackKind: AgentInvocationErrorKind) => {
-      errors++;
-      error = errorMessage(caught);
-      errorKind = signal?.aborted
-        ? "aborted"
-        : isLlmCallsLimitExceededError(caught)
-          ? "llm-calls-limit"
-          : fallbackKind;
-    };
+    const delegation = buildChildSession(request, agent);
+    const tally = emptyTally();
 
     await request.validateInvocation?.("before-prepare");
 
     let preparationFailed = false;
     try {
-      throwIfInvocationAborted(signal);
-      await request.prepareContext?.(childContext, agent);
+      throwIfInvocationAborted(delegation.signal);
+      await request.prepareContext?.(delegation.childContext, agent);
     } catch (caught) {
       preparationFailed = true;
-      fail(caught, "preparation");
+      recordFailure(tally, caught, "preparation", delegation.signal);
     }
 
     if (!preparationFailed) {
       await request.validateInvocation?.("before-execute");
+      await this.#driveEvents(request, agent, delegation, tally);
+    }
 
-      const iterator = agent.runAsync(childContext)[Symbol.asyncIterator]();
-      const aborted = abortRejection(signal);
-      let exhausted = false;
-      try {
-        while (true) {
-          const next = await (aborted
-            ? Promise.race([iterator.next(), aborted.promise])
-            : iterator.next());
-          if (next.done) {
-            exhausted = true;
-            break;
-          }
-          const event = next.value;
-          throwIfInvocationAborted(signal);
-          // ADK's BaseSessionService.appendEvent semantics: partial events are
-          // not persisted and deltas are applied in order.
-          const persisted = await child.append(event);
-          events.push(persisted);
-          if (!persisted.partial) {
-            // `temp:` keys stay out of the aggregate even when the installed
-            // ADK keeps them on the event, so they never reach a checkpoint.
-            Object.assign(
-              stateDelta,
-              withoutTempStateKeys(persisted.actions?.stateDelta ?? {}),
-            );
-          }
-          await this.#eventSink?.(persisted, childContext);
-          await request.eventSink?.(persisted, childContext);
+    return aggregateResult(agent, startedAt, delegation, tally);
+  }
 
-          const visible = persisted.partial
-            ? undefined
-            : extractVisibleText(persisted);
-          if (visible) {
-            textEvents++;
-            text.push(visible);
-            if (isFinal(persisted)) {
-              finalText = visible;
-            }
-          } else {
-            const fallback = extractFallbackOutput(persisted);
-            if (fallback) {
-              fallbackOutput.push(fallback);
-            }
-          }
-          if (!persisted.partial) {
-            // A streamed function call is repeated on the final event.
-            toolCalls += getFunctionCalls(persisted).length;
-            addUsage(usage, persisted);
-          }
-          if (persisted.errorMessage) {
-            errors++;
-            error = persisted.errorMessage;
-            errorKind = "agent-error";
-          }
+  /**
+   * Streams the agent's events into the child session and the tally.
+   *
+   * @remarks
+   * Each event is persisted with ADK's append rules, its non-`temp:` state
+   * delta is merged (non-partial events only), the gateway sink and then the
+   * request sink see it, and only then is it counted. A thrown error or an
+   * abort is recorded in the tally, never rethrown. On any exit before the
+   * generator is exhausted the generator is closed; the close is awaited
+   * unless the run was aborted, since an aborted generator may be parked on
+   * an await that `return()` would queue behind.
+   *
+   * @param request - The delegation request (supplies the request sink).
+   * @param agent - The resolved agent to run.
+   * @param delegation - Child session, context and signal of this run.
+   * @param tally - Accumulator updated in place.
+   */
+  async #driveEvents(
+    request: AgentInvocationRequest,
+    agent: BaseAgent,
+    delegation: ChildDelegation,
+    tally: RunTally,
+  ): Promise<void> {
+    const { child, childContext, signal } = delegation;
+    const iterator = agent.runAsync(childContext)[Symbol.asyncIterator]();
+    const aborted = abortRejection(signal);
+    let exhausted = false;
+    try {
+      while (true) {
+        const next = await (aborted
+          ? Promise.race([iterator.next(), aborted.promise])
+          : iterator.next());
+        if (next.done) {
+          exhausted = true;
+          break;
         }
-      } catch (caught) {
-        fail(caught, "agent-error");
-      } finally {
-        aborted?.dispose();
-        if (!exhausted) {
-          // Any abnormal exit (abort, sink/append failure, thrown event) must
-          // close the agent generator, as `for await` does, so its `finally`
-          // blocks (external drivers, workflow runtimes) run. After an abort the
-          // generator may be parked on a pending await and return() would queue
-          // behind it, so only wait when we were not aborted.
-          const closing = Promise.resolve(iterator.return?.()).catch(
-            () => undefined,
+        const event = next.value;
+        throwIfInvocationAborted(signal);
+        // ADK's BaseSessionService.appendEvent semantics: partial events are
+        // not persisted and deltas are applied in order.
+        const persisted = await child.append(event);
+        tally.events.push(persisted);
+        if (!persisted.partial) {
+          // `temp:` keys stay out of the aggregate even when the installed
+          // ADK keeps them on the event, so they never reach a checkpoint.
+          Object.assign(
+            tally.stateDelta,
+            withoutTempStateKeys(persisted.actions?.stateDelta ?? {}),
           );
-          if (!signal?.aborted) {
-            await closing;
-          }
+        }
+        await this.#eventSink?.(persisted, childContext);
+        await request.eventSink?.(persisted, childContext);
+        countEvent(tally, persisted);
+      }
+    } catch (caught) {
+      recordFailure(tally, caught, "agent-error", signal);
+    } finally {
+      aborted?.dispose();
+      if (!exhausted) {
+        // Any abnormal exit (abort, sink/append failure, thrown event) must
+        // close the agent generator, as `for await` does, so its `finally`
+        // blocks (external drivers, workflow runtimes) run. After an abort the
+        // generator may be parked on a pending await and return() would queue
+        // behind it, so only wait when we were not aborted.
+        const closing = Promise.resolve(iterator.return?.()).catch(
+          () => undefined,
+        );
+        if (!signal?.aborted) {
+          await closing;
         }
       }
     }
-
-    const transcript =
-      text.length > 0 ? text.join("\n") : fallbackOutput.join("\n");
-    const interrupt = findInterrupt(
-      [...resumeEvents, ...(inputEvent ? [inputEvent] : []), ...events],
-      agent,
-    );
-
-    return {
-      agentName: agent.name,
-      output: finalText ?? transcript,
-      transcript,
-      events,
-      summary: {
-        events: events.length,
-        textEvents,
-        toolCalls,
-        errors,
-        durationMs: Date.now() - startedAt,
-      },
-      usage: { ...usage, toolCalls },
-      ...(Object.keys(stateDelta).length > 0 ? { stateDelta } : {}),
-      ...(error ? { error } : {}),
-      ...(error && errorKind ? { errorKind } : {}),
-      ...(interrupt ? { interrupt } : {}),
-    };
   }
+}
+
+/**
+ * Checks that a `resume` request answers a pending interrupt of its events.
+ *
+ * @remarks
+ * Passes when the request has no `resume`. Otherwise at least one
+ * `functionResponse` id of `request.input` must be among the pending function
+ * call ids that {@link findInterrupt} reports for `resume.events`.
+ *
+ * @param request - The delegation request.
+ * @param agent - The resolved agent (used to tell `NodeTool` calls apart).
+ * @param startedAt - Start time of the run, for the failed result's duration.
+ * @returns An `invalid-resume` failed result, or `undefined` when the resume is valid or absent.
+ */
+function validateResume(
+  request: AgentInvocationRequest,
+  agent: BaseAgent,
+  startedAt: number,
+): AgentInvocationResult | undefined {
+  if (!request.resume) {
+    return undefined;
+  }
+  const pending = findInterrupt(request.resume.events ?? [], agent);
+  const answered = new Set(
+    (request.input.parts ?? [])
+      .map((part) => part.functionResponse?.id)
+      .filter((id): id is string => typeof id === "string"),
+  );
+  if (pending?.functionCallIds.some((id) => answered.has(id))) {
+    return undefined;
+  }
+  return failedResult(
+    request.agentName,
+    startedAt,
+    "Resume input does not answer a pending interrupt",
+    "invalid-resume",
+  );
+}
+
+/** Child session, context and abort signal of one delegation. */
+interface ChildDelegation {
+  /** Combined parent and request abort signal, if any. */
+  signal: AbortSignal | undefined;
+  /** Events carried by `resume`, or empty. */
+  resumeEvents: readonly Event[];
+  /** The appended input event; absent with `appendInput: false`. */
+  inputEvent: Event | undefined;
+  /** The isolated child session. */
+  child: ChildSession;
+  /** Invocation context the agent runs in. */
+  childContext: InvocationContext;
+}
+
+/**
+ * Builds the isolated child session and invocation context of a delegation.
+ *
+ * @remarks
+ * Combines the parent and request abort signals, creates the input event
+ * (unless `appendInput` is `false`), builds the child session from the
+ * state/history modes and the resume events, gives it the caller's
+ * permission ceiling, and creates the child invocation context.
+ *
+ * @param request - The delegation request.
+ * @param agent - The resolved agent.
+ * @returns The child session, context, signal, input event and resume events.
+ */
+function buildChildSession(
+  request: AgentInvocationRequest,
+  agent: BaseAgent,
+): ChildDelegation {
+  const resumeEvents = request.resume?.events ?? [];
+  const signal = combineAbortSignals([
+    request.parentContext.abortSignal,
+    request.abortSignal,
+  ]);
+  const inputEvent =
+    request.appendInput === false
+      ? undefined
+      : createEvent({
+          invocationId: request.parentContext.invocationId,
+          author: "user",
+          branch: request.branch,
+          content: request.input,
+        });
+  const child = createChildSession({
+    parentSession: request.parentContext.session,
+    inputEvent,
+    priorEvents: resumeEvents,
+    sessionState: request.sessionState,
+    sessionStateMode: request.sessionStateMode ?? "merge",
+    sessionHistoryMode: request.sessionHistoryMode ?? "replace",
+  });
+  // Every delegation hop keeps the caller's permission ceiling, whatever the
+  // state/history modes: the policy is keyed by session object, not by state.
+  inheritSessionPermissions(request.parentContext.session, child.session);
+  const childContext = createChildInvocationContext({
+    agent,
+    parentContext: request.parentContext,
+    input: request.input,
+    branch: request.branch,
+    abortSignal: signal,
+    session: child.session,
+  });
+  return { signal, resumeEvents, inputEvent, child, childContext };
+}
+
+/** Running totals of one delegation, filled while its events stream. */
+interface RunTally {
+  /** Persisted events, partial ones included, in order. */
+  events: Event[];
+  /** Visible text of each non-partial text event. */
+  text: string[];
+  /** Function-response or error output of events without visible text. */
+  fallbackOutput: string[];
+  /** Merged non-`temp:` state delta of the non-partial events. */
+  stateDelta: Record<string, unknown>;
+  /** Visible text of the last final event that had text. */
+  finalText: string | undefined;
+  /** Non-partial events with visible text. */
+  textEvents: number;
+  /** Function calls on non-partial events. */
+  toolCalls: number;
+  /** Token usage summed over non-partial events. */
+  usage: AgentInvocationUsage;
+  /** Errors seen (event errors and thrown errors). */
+  errors: number;
+  /** Message of the last error. */
+  error: string | undefined;
+  /** Classification of the last error. */
+  errorKind: AgentInvocationErrorKind | undefined;
+}
+
+/** A tally with nothing counted yet. */
+function emptyTally(): RunTally {
+  return {
+    events: [],
+    text: [],
+    fallbackOutput: [],
+    stateDelta: {},
+    finalText: undefined,
+    textEvents: 0,
+    toolCalls: 0,
+    usage: emptyUsage(),
+    errors: 0,
+    error: undefined,
+    errorKind: undefined,
+  };
+}
+
+/**
+ * Records a thrown error. An aborted signal classifies it `aborted` and an
+ * LLM call limit error `llm-calls-limit`, whatever `fallbackKind` says.
+ */
+function recordFailure(
+  tally: RunTally,
+  caught: unknown,
+  fallbackKind: AgentInvocationErrorKind,
+  signal: AbortSignal | undefined,
+): void {
+  tally.errors++;
+  tally.error = errorMessage(caught);
+  tally.errorKind = signal?.aborted
+    ? "aborted"
+    : isLlmCallsLimitExceededError(caught)
+      ? "llm-calls-limit"
+      : fallbackKind;
+}
+
+/** Counts one persisted event's text, fallback output, calls, usage and error. */
+function countEvent(tally: RunTally, persisted: Event): void {
+  const visible = persisted.partial ? undefined : extractVisibleText(persisted);
+  if (visible) {
+    tally.textEvents++;
+    tally.text.push(visible);
+    if (isFinal(persisted)) {
+      tally.finalText = visible;
+    }
+  } else {
+    const fallback = extractFallbackOutput(persisted);
+    if (fallback) {
+      tally.fallbackOutput.push(fallback);
+    }
+  }
+  if (!persisted.partial) {
+    // A streamed function call is repeated on the final event.
+    tally.toolCalls += getFunctionCalls(persisted).length;
+    addUsage(tally.usage, persisted);
+  }
+  if (persisted.errorMessage) {
+    tally.errors++;
+    tally.error = persisted.errorMessage;
+    tally.errorKind = "agent-error";
+  }
+}
+
+/**
+ * Builds the public result of a delegation from its tally.
+ *
+ * @remarks
+ * `output` is the last final text, else the transcript; the transcript is the
+ * visible text, else the fallback output. The interrupt is computed over the
+ * resume events, the input event and the run's events, in that order.
+ * Optional keys (`stateDelta`, `error`, `errorKind`, `interrupt`) are present
+ * only when they have a value.
+ *
+ * @param agent - The resolved agent (its name is the result's `agentName`).
+ * @param startedAt - Start time of the run.
+ * @param delegation - Child session data of the run.
+ * @param tally - Totals collected while the events streamed.
+ * @returns The aggregated result.
+ */
+function aggregateResult(
+  agent: BaseAgent,
+  startedAt: number,
+  delegation: ChildDelegation,
+  tally: RunTally,
+): AgentInvocationResult {
+  const { resumeEvents, inputEvent } = delegation;
+  const { events, stateDelta, error, errorKind } = tally;
+  const transcript =
+    tally.text.length > 0
+      ? tally.text.join("\n")
+      : tally.fallbackOutput.join("\n");
+  const interrupt = findInterrupt(
+    [...resumeEvents, ...(inputEvent ? [inputEvent] : []), ...events],
+    agent,
+  );
+
+  return {
+    agentName: agent.name,
+    output: tally.finalText ?? transcript,
+    transcript,
+    events,
+    summary: {
+      events: events.length,
+      textEvents: tally.textEvents,
+      toolCalls: tally.toolCalls,
+      errors: tally.errors,
+      durationMs: Date.now() - startedAt,
+    },
+    usage: { ...tally.usage, toolCalls: tally.toolCalls },
+    ...(Object.keys(stateDelta).length > 0 ? { stateDelta } : {}),
+    ...(error ? { error } : {}),
+    ...(error && errorKind ? { errorKind } : {}),
+    ...(interrupt ? { interrupt } : {}),
+  };
 }
 
 function createChildInvocationContext({
