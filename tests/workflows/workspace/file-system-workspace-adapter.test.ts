@@ -243,21 +243,27 @@ describe("FileSystemWorkspaceAdapter", () => {
 
   test("reads atomic conflict snapshots while heartbeat renewal is active", async () => {
     const directory = await stateDirectory();
-    const owner = adapter(directory, {
-      leaseTtlMs: 80,
-      heartbeatIntervalMs: 10,
-    });
-    const observer = adapter(directory, {
-      leaseTtlMs: 80,
-      heartbeatIntervalMs: 10,
-    });
+    // A long lease with a short heartbeat: renewals rewrite the state file
+    // while the observer reads it, but a slow runner cannot let the lease
+    // expire, so an empty snapshot can only mean a torn read.
+    const options = { leaseTtlMs: 5_000, heartbeatIntervalMs: 10 };
+    const owner = adapter(directory, options);
+    const observer = adapter(directory, options);
     const lease = await owner.acquire(request("agent-a", ["src"]));
+    const initialExpiry = lease.expiresAt;
 
-    for (let index = 0; index < 20; index++) {
+    // Keep reading until at least one renewal has landed.
+    let reads = 0;
+    for (
+      let i = 0;
+      i < 400 && (reads < 20 || lease.expiresAt <= initialExpiry);
+      i++
+    ) {
       expect(observer.conflicts(request("observer", ["src"]))).toHaveLength(1);
+      reads += 1;
       await delay(2);
     }
-    expect(lease.expiresAt).toBeGreaterThan(lease.acquiredAt + 80);
+    expect(lease.expiresAt).toBeGreaterThan(initialExpiry);
     expect(await lease.release()).toBe(true);
   });
 
