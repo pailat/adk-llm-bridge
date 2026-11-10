@@ -57,6 +57,10 @@
       "types": "./dist/workflows/node/index.d.ts",
       "import": "./dist/workflows/node/index.js"
     },
+    "./workflows/spec": {
+      "types": "./dist/workflows/spec/index.d.ts",
+      "import": "./dist/workflows/spec/index.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [

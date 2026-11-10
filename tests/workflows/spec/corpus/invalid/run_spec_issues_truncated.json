@@ -1,0 +1,4970 @@
+{
+  "description": "260 lanes each have an invalid role; the list is cut at 256 issues.",
+  "rules": null,
+  "spec": {
+    "specVersion": 1,
+    "workflowId": "lanes",
+    "workflowVersion": "1",
+    "projectRoot": ".",
+    "budget": {
+      "maxUsd": 5
+    },
+    "maxConcurrency": 2,
+    "lanes": [
+      {
+        "taskId": "lane-0",
+        "title": "Lane 0",
+        "role": "lead",
+        "dependsOn": [],
+        "allowedPaths": ["src/lane-0"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-1",
+        "title": "Lane 1",
+        "role": "lead",
+        "dependsOn": [],
+        "allowedPaths": ["src/lane-1"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-2",
+        "title": "Lane 2",
+        "role": "lead",
+        "dependsOn": [],
+        "allowedPaths": ["src/lane-2"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-3",
+        "title": "Lane 3",
+        "role": "lead",
+        "dependsOn": [],
+        "allowedPaths": ["src/lane-3"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-4",
+        "title": "Lane 4",
+        "role": "lead",
+        "dependsOn": [],
+        "allowedPaths": ["src/lane-4"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-5",
+        "title": "Lane 5",
+        "role": "lead",
+        "dependsOn": [],
+        "allowedPaths": ["src/lane-5"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-6",
+        "title": "Lane 6",
+        "role": "lead",
+        "dependsOn": [],
+        "allowedPaths": ["src/lane-6"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-7",
+        "title": "Lane 7",
+        "role": "lead",
+        "dependsOn": [],
+        "allowedPaths": ["src/lane-7"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-8",
+        "title": "Lane 8",
+        "role": "lead",
+        "dependsOn": [],
+        "allowedPaths": ["src/lane-8"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-9",
+        "title": "Lane 9",
+        "role": "lead",
+        "dependsOn": [],
+        "allowedPaths": ["src/lane-9"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-10",
+        "title": "Lane 10",
+        "role": "lead",
+        "dependsOn": ["lane-0"],
+        "allowedPaths": ["src/lane-10"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-11",
+        "title": "Lane 11",
+        "role": "lead",
+        "dependsOn": ["lane-1"],
+        "allowedPaths": ["src/lane-11"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-12",
+        "title": "Lane 12",
+        "role": "lead",
+        "dependsOn": ["lane-2"],
+        "allowedPaths": ["src/lane-12"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-13",
+        "title": "Lane 13",
+        "role": "lead",
+        "dependsOn": ["lane-3"],
+        "allowedPaths": ["src/lane-13"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-14",
+        "title": "Lane 14",
+        "role": "lead",
+        "dependsOn": ["lane-4"],
+        "allowedPaths": ["src/lane-14"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-15",
+        "title": "Lane 15",
+        "role": "lead",
+        "dependsOn": ["lane-5"],
+        "allowedPaths": ["src/lane-15"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-16",
+        "title": "Lane 16",
+        "role": "lead",
+        "dependsOn": ["lane-6"],
+        "allowedPaths": ["src/lane-16"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-17",
+        "title": "Lane 17",
+        "role": "lead",
+        "dependsOn": ["lane-7"],
+        "allowedPaths": ["src/lane-17"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-18",
+        "title": "Lane 18",
+        "role": "lead",
+        "dependsOn": ["lane-8"],
+        "allowedPaths": ["src/lane-18"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-19",
+        "title": "Lane 19",
+        "role": "lead",
+        "dependsOn": ["lane-9"],
+        "allowedPaths": ["src/lane-19"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-20",
+        "title": "Lane 20",
+        "role": "lead",
+        "dependsOn": ["lane-10"],
+        "allowedPaths": ["src/lane-20"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-21",
+        "title": "Lane 21",
+        "role": "lead",
+        "dependsOn": ["lane-11"],
+        "allowedPaths": ["src/lane-21"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-22",
+        "title": "Lane 22",
+        "role": "lead",
+        "dependsOn": ["lane-12"],
+        "allowedPaths": ["src/lane-22"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-23",
+        "title": "Lane 23",
+        "role": "lead",
+        "dependsOn": ["lane-13"],
+        "allowedPaths": ["src/lane-23"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-24",
+        "title": "Lane 24",
+        "role": "lead",
+        "dependsOn": ["lane-14"],
+        "allowedPaths": ["src/lane-24"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-25",
+        "title": "Lane 25",
+        "role": "lead",
+        "dependsOn": ["lane-15"],
+        "allowedPaths": ["src/lane-25"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-26",
+        "title": "Lane 26",
+        "role": "lead",
+        "dependsOn": ["lane-16"],
+        "allowedPaths": ["src/lane-26"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-27",
+        "title": "Lane 27",
+        "role": "lead",
+        "dependsOn": ["lane-17"],
+        "allowedPaths": ["src/lane-27"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-28",
+        "title": "Lane 28",
+        "role": "lead",
+        "dependsOn": ["lane-18"],
+        "allowedPaths": ["src/lane-28"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-29",
+        "title": "Lane 29",
+        "role": "lead",
+        "dependsOn": ["lane-19"],
+        "allowedPaths": ["src/lane-29"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-30",
+        "title": "Lane 30",
+        "role": "lead",
+        "dependsOn": ["lane-20"],
+        "allowedPaths": ["src/lane-30"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-31",
+        "title": "Lane 31",
+        "role": "lead",
+        "dependsOn": ["lane-21"],
+        "allowedPaths": ["src/lane-31"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-32",
+        "title": "Lane 32",
+        "role": "lead",
+        "dependsOn": ["lane-22"],
+        "allowedPaths": ["src/lane-32"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-33",
+        "title": "Lane 33",
+        "role": "lead",
+        "dependsOn": ["lane-23"],
+        "allowedPaths": ["src/lane-33"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-34",
+        "title": "Lane 34",
+        "role": "lead",
+        "dependsOn": ["lane-24"],
+        "allowedPaths": ["src/lane-34"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-35",
+        "title": "Lane 35",
+        "role": "lead",
+        "dependsOn": ["lane-25"],
+        "allowedPaths": ["src/lane-35"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-36",
+        "title": "Lane 36",
+        "role": "lead",
+        "dependsOn": ["lane-26"],
+        "allowedPaths": ["src/lane-36"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-37",
+        "title": "Lane 37",
+        "role": "lead",
+        "dependsOn": ["lane-27"],
+        "allowedPaths": ["src/lane-37"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-38",
+        "title": "Lane 38",
+        "role": "lead",
+        "dependsOn": ["lane-28"],
+        "allowedPaths": ["src/lane-38"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-39",
+        "title": "Lane 39",
+        "role": "lead",
+        "dependsOn": ["lane-29"],
+        "allowedPaths": ["src/lane-39"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-40",
+        "title": "Lane 40",
+        "role": "lead",
+        "dependsOn": ["lane-30"],
+        "allowedPaths": ["src/lane-40"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-41",
+        "title": "Lane 41",
+        "role": "lead",
+        "dependsOn": ["lane-31"],
+        "allowedPaths": ["src/lane-41"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-42",
+        "title": "Lane 42",
+        "role": "lead",
+        "dependsOn": ["lane-32"],
+        "allowedPaths": ["src/lane-42"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-43",
+        "title": "Lane 43",
+        "role": "lead",
+        "dependsOn": ["lane-33"],
+        "allowedPaths": ["src/lane-43"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-44",
+        "title": "Lane 44",
+        "role": "lead",
+        "dependsOn": ["lane-34"],
+        "allowedPaths": ["src/lane-44"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-45",
+        "title": "Lane 45",
+        "role": "lead",
+        "dependsOn": ["lane-35"],
+        "allowedPaths": ["src/lane-45"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-46",
+        "title": "Lane 46",
+        "role": "lead",
+        "dependsOn": ["lane-36"],
+        "allowedPaths": ["src/lane-46"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-47",
+        "title": "Lane 47",
+        "role": "lead",
+        "dependsOn": ["lane-37"],
+        "allowedPaths": ["src/lane-47"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-48",
+        "title": "Lane 48",
+        "role": "lead",
+        "dependsOn": ["lane-38"],
+        "allowedPaths": ["src/lane-48"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-49",
+        "title": "Lane 49",
+        "role": "lead",
+        "dependsOn": ["lane-39"],
+        "allowedPaths": ["src/lane-49"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-50",
+        "title": "Lane 50",
+        "role": "lead",
+        "dependsOn": ["lane-40"],
+        "allowedPaths": ["src/lane-50"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-51",
+        "title": "Lane 51",
+        "role": "lead",
+        "dependsOn": ["lane-41"],
+        "allowedPaths": ["src/lane-51"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-52",
+        "title": "Lane 52",
+        "role": "lead",
+        "dependsOn": ["lane-42"],
+        "allowedPaths": ["src/lane-52"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-53",
+        "title": "Lane 53",
+        "role": "lead",
+        "dependsOn": ["lane-43"],
+        "allowedPaths": ["src/lane-53"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-54",
+        "title": "Lane 54",
+        "role": "lead",
+        "dependsOn": ["lane-44"],
+        "allowedPaths": ["src/lane-54"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-55",
+        "title": "Lane 55",
+        "role": "lead",
+        "dependsOn": ["lane-45"],
+        "allowedPaths": ["src/lane-55"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-56",
+        "title": "Lane 56",
+        "role": "lead",
+        "dependsOn": ["lane-46"],
+        "allowedPaths": ["src/lane-56"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-57",
+        "title": "Lane 57",
+        "role": "lead",
+        "dependsOn": ["lane-47"],
+        "allowedPaths": ["src/lane-57"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-58",
+        "title": "Lane 58",
+        "role": "lead",
+        "dependsOn": ["lane-48"],
+        "allowedPaths": ["src/lane-58"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-59",
+        "title": "Lane 59",
+        "role": "lead",
+        "dependsOn": ["lane-49"],
+        "allowedPaths": ["src/lane-59"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-60",
+        "title": "Lane 60",
+        "role": "lead",
+        "dependsOn": ["lane-50"],
+        "allowedPaths": ["src/lane-60"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-61",
+        "title": "Lane 61",
+        "role": "lead",
+        "dependsOn": ["lane-51"],
+        "allowedPaths": ["src/lane-61"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-62",
+        "title": "Lane 62",
+        "role": "lead",
+        "dependsOn": ["lane-52"],
+        "allowedPaths": ["src/lane-62"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-63",
+        "title": "Lane 63",
+        "role": "lead",
+        "dependsOn": ["lane-53"],
+        "allowedPaths": ["src/lane-63"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-64",
+        "title": "Lane 64",
+        "role": "lead",
+        "dependsOn": ["lane-54"],
+        "allowedPaths": ["src/lane-64"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-65",
+        "title": "Lane 65",
+        "role": "lead",
+        "dependsOn": ["lane-55"],
+        "allowedPaths": ["src/lane-65"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-66",
+        "title": "Lane 66",
+        "role": "lead",
+        "dependsOn": ["lane-56"],
+        "allowedPaths": ["src/lane-66"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-67",
+        "title": "Lane 67",
+        "role": "lead",
+        "dependsOn": ["lane-57"],
+        "allowedPaths": ["src/lane-67"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-68",
+        "title": "Lane 68",
+        "role": "lead",
+        "dependsOn": ["lane-58"],
+        "allowedPaths": ["src/lane-68"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-69",
+        "title": "Lane 69",
+        "role": "lead",
+        "dependsOn": ["lane-59"],
+        "allowedPaths": ["src/lane-69"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-70",
+        "title": "Lane 70",
+        "role": "lead",
+        "dependsOn": ["lane-60"],
+        "allowedPaths": ["src/lane-70"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-71",
+        "title": "Lane 71",
+        "role": "lead",
+        "dependsOn": ["lane-61"],
+        "allowedPaths": ["src/lane-71"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-72",
+        "title": "Lane 72",
+        "role": "lead",
+        "dependsOn": ["lane-62"],
+        "allowedPaths": ["src/lane-72"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-73",
+        "title": "Lane 73",
+        "role": "lead",
+        "dependsOn": ["lane-63"],
+        "allowedPaths": ["src/lane-73"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-74",
+        "title": "Lane 74",
+        "role": "lead",
+        "dependsOn": ["lane-64"],
+        "allowedPaths": ["src/lane-74"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-75",
+        "title": "Lane 75",
+        "role": "lead",
+        "dependsOn": ["lane-65"],
+        "allowedPaths": ["src/lane-75"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-76",
+        "title": "Lane 76",
+        "role": "lead",
+        "dependsOn": ["lane-66"],
+        "allowedPaths": ["src/lane-76"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-77",
+        "title": "Lane 77",
+        "role": "lead",
+        "dependsOn": ["lane-67"],
+        "allowedPaths": ["src/lane-77"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-78",
+        "title": "Lane 78",
+        "role": "lead",
+        "dependsOn": ["lane-68"],
+        "allowedPaths": ["src/lane-78"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-79",
+        "title": "Lane 79",
+        "role": "lead",
+        "dependsOn": ["lane-69"],
+        "allowedPaths": ["src/lane-79"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-80",
+        "title": "Lane 80",
+        "role": "lead",
+        "dependsOn": ["lane-70"],
+        "allowedPaths": ["src/lane-80"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-81",
+        "title": "Lane 81",
+        "role": "lead",
+        "dependsOn": ["lane-71"],
+        "allowedPaths": ["src/lane-81"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-82",
+        "title": "Lane 82",
+        "role": "lead",
+        "dependsOn": ["lane-72"],
+        "allowedPaths": ["src/lane-82"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-83",
+        "title": "Lane 83",
+        "role": "lead",
+        "dependsOn": ["lane-73"],
+        "allowedPaths": ["src/lane-83"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-84",
+        "title": "Lane 84",
+        "role": "lead",
+        "dependsOn": ["lane-74"],
+        "allowedPaths": ["src/lane-84"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-85",
+        "title": "Lane 85",
+        "role": "lead",
+        "dependsOn": ["lane-75"],
+        "allowedPaths": ["src/lane-85"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-86",
+        "title": "Lane 86",
+        "role": "lead",
+        "dependsOn": ["lane-76"],
+        "allowedPaths": ["src/lane-86"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-87",
+        "title": "Lane 87",
+        "role": "lead",
+        "dependsOn": ["lane-77"],
+        "allowedPaths": ["src/lane-87"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-88",
+        "title": "Lane 88",
+        "role": "lead",
+        "dependsOn": ["lane-78"],
+        "allowedPaths": ["src/lane-88"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-89",
+        "title": "Lane 89",
+        "role": "lead",
+        "dependsOn": ["lane-79"],
+        "allowedPaths": ["src/lane-89"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-90",
+        "title": "Lane 90",
+        "role": "lead",
+        "dependsOn": ["lane-80"],
+        "allowedPaths": ["src/lane-90"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-91",
+        "title": "Lane 91",
+        "role": "lead",
+        "dependsOn": ["lane-81"],
+        "allowedPaths": ["src/lane-91"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-92",
+        "title": "Lane 92",
+        "role": "lead",
+        "dependsOn": ["lane-82"],
+        "allowedPaths": ["src/lane-92"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-93",
+        "title": "Lane 93",
+        "role": "lead",
+        "dependsOn": ["lane-83"],
+        "allowedPaths": ["src/lane-93"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-94",
+        "title": "Lane 94",
+        "role": "lead",
+        "dependsOn": ["lane-84"],
+        "allowedPaths": ["src/lane-94"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-95",
+        "title": "Lane 95",
+        "role": "lead",
+        "dependsOn": ["lane-85"],
+        "allowedPaths": ["src/lane-95"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-96",
+        "title": "Lane 96",
+        "role": "lead",
+        "dependsOn": ["lane-86"],
+        "allowedPaths": ["src/lane-96"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-97",
+        "title": "Lane 97",
+        "role": "lead",
+        "dependsOn": ["lane-87"],
+        "allowedPaths": ["src/lane-97"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-98",
+        "title": "Lane 98",
+        "role": "lead",
+        "dependsOn": ["lane-88"],
+        "allowedPaths": ["src/lane-98"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-99",
+        "title": "Lane 99",
+        "role": "lead",
+        "dependsOn": ["lane-89"],
+        "allowedPaths": ["src/lane-99"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-100",
+        "title": "Lane 100",
+        "role": "lead",
+        "dependsOn": ["lane-90"],
+        "allowedPaths": ["src/lane-100"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-101",
+        "title": "Lane 101",
+        "role": "lead",
+        "dependsOn": ["lane-91"],
+        "allowedPaths": ["src/lane-101"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-102",
+        "title": "Lane 102",
+        "role": "lead",
+        "dependsOn": ["lane-92"],
+        "allowedPaths": ["src/lane-102"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-103",
+        "title": "Lane 103",
+        "role": "lead",
+        "dependsOn": ["lane-93"],
+        "allowedPaths": ["src/lane-103"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-104",
+        "title": "Lane 104",
+        "role": "lead",
+        "dependsOn": ["lane-94"],
+        "allowedPaths": ["src/lane-104"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-105",
+        "title": "Lane 105",
+        "role": "lead",
+        "dependsOn": ["lane-95"],
+        "allowedPaths": ["src/lane-105"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-106",
+        "title": "Lane 106",
+        "role": "lead",
+        "dependsOn": ["lane-96"],
+        "allowedPaths": ["src/lane-106"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-107",
+        "title": "Lane 107",
+        "role": "lead",
+        "dependsOn": ["lane-97"],
+        "allowedPaths": ["src/lane-107"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-108",
+        "title": "Lane 108",
+        "role": "lead",
+        "dependsOn": ["lane-98"],
+        "allowedPaths": ["src/lane-108"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-109",
+        "title": "Lane 109",
+        "role": "lead",
+        "dependsOn": ["lane-99"],
+        "allowedPaths": ["src/lane-109"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-110",
+        "title": "Lane 110",
+        "role": "lead",
+        "dependsOn": ["lane-100"],
+        "allowedPaths": ["src/lane-110"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-111",
+        "title": "Lane 111",
+        "role": "lead",
+        "dependsOn": ["lane-101"],
+        "allowedPaths": ["src/lane-111"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-112",
+        "title": "Lane 112",
+        "role": "lead",
+        "dependsOn": ["lane-102"],
+        "allowedPaths": ["src/lane-112"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-113",
+        "title": "Lane 113",
+        "role": "lead",
+        "dependsOn": ["lane-103"],
+        "allowedPaths": ["src/lane-113"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-114",
+        "title": "Lane 114",
+        "role": "lead",
+        "dependsOn": ["lane-104"],
+        "allowedPaths": ["src/lane-114"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-115",
+        "title": "Lane 115",
+        "role": "lead",
+        "dependsOn": ["lane-105"],
+        "allowedPaths": ["src/lane-115"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-116",
+        "title": "Lane 116",
+        "role": "lead",
+        "dependsOn": ["lane-106"],
+        "allowedPaths": ["src/lane-116"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-117",
+        "title": "Lane 117",
+        "role": "lead",
+        "dependsOn": ["lane-107"],
+        "allowedPaths": ["src/lane-117"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-118",
+        "title": "Lane 118",
+        "role": "lead",
+        "dependsOn": ["lane-108"],
+        "allowedPaths": ["src/lane-118"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-119",
+        "title": "Lane 119",
+        "role": "lead",
+        "dependsOn": ["lane-109"],
+        "allowedPaths": ["src/lane-119"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-120",
+        "title": "Lane 120",
+        "role": "lead",
+        "dependsOn": ["lane-110"],
+        "allowedPaths": ["src/lane-120"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-121",
+        "title": "Lane 121",
+        "role": "lead",
+        "dependsOn": ["lane-111"],
+        "allowedPaths": ["src/lane-121"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-122",
+        "title": "Lane 122",
+        "role": "lead",
+        "dependsOn": ["lane-112"],
+        "allowedPaths": ["src/lane-122"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-123",
+        "title": "Lane 123",
+        "role": "lead",
+        "dependsOn": ["lane-113"],
+        "allowedPaths": ["src/lane-123"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-124",
+        "title": "Lane 124",
+        "role": "lead",
+        "dependsOn": ["lane-114"],
+        "allowedPaths": ["src/lane-124"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-125",
+        "title": "Lane 125",
+        "role": "lead",
+        "dependsOn": ["lane-115"],
+        "allowedPaths": ["src/lane-125"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-126",
+        "title": "Lane 126",
+        "role": "lead",
+        "dependsOn": ["lane-116"],
+        "allowedPaths": ["src/lane-126"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-127",
+        "title": "Lane 127",
+        "role": "lead",
+        "dependsOn": ["lane-117"],
+        "allowedPaths": ["src/lane-127"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-128",
+        "title": "Lane 128",
+        "role": "lead",
+        "dependsOn": ["lane-118"],
+        "allowedPaths": ["src/lane-128"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-129",
+        "title": "Lane 129",
+        "role": "lead",
+        "dependsOn": ["lane-119"],
+        "allowedPaths": ["src/lane-129"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-130",
+        "title": "Lane 130",
+        "role": "lead",
+        "dependsOn": ["lane-120"],
+        "allowedPaths": ["src/lane-130"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-131",
+        "title": "Lane 131",
+        "role": "lead",
+        "dependsOn": ["lane-121"],
+        "allowedPaths": ["src/lane-131"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-132",
+        "title": "Lane 132",
+        "role": "lead",
+        "dependsOn": ["lane-122"],
+        "allowedPaths": ["src/lane-132"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-133",
+        "title": "Lane 133",
+        "role": "lead",
+        "dependsOn": ["lane-123"],
+        "allowedPaths": ["src/lane-133"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-134",
+        "title": "Lane 134",
+        "role": "lead",
+        "dependsOn": ["lane-124"],
+        "allowedPaths": ["src/lane-134"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-135",
+        "title": "Lane 135",
+        "role": "lead",
+        "dependsOn": ["lane-125"],
+        "allowedPaths": ["src/lane-135"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-136",
+        "title": "Lane 136",
+        "role": "lead",
+        "dependsOn": ["lane-126"],
+        "allowedPaths": ["src/lane-136"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-137",
+        "title": "Lane 137",
+        "role": "lead",
+        "dependsOn": ["lane-127"],
+        "allowedPaths": ["src/lane-137"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-138",
+        "title": "Lane 138",
+        "role": "lead",
+        "dependsOn": ["lane-128"],
+        "allowedPaths": ["src/lane-138"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-139",
+        "title": "Lane 139",
+        "role": "lead",
+        "dependsOn": ["lane-129"],
+        "allowedPaths": ["src/lane-139"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-140",
+        "title": "Lane 140",
+        "role": "lead",
+        "dependsOn": ["lane-130"],
+        "allowedPaths": ["src/lane-140"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-141",
+        "title": "Lane 141",
+        "role": "lead",
+        "dependsOn": ["lane-131"],
+        "allowedPaths": ["src/lane-141"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-142",
+        "title": "Lane 142",
+        "role": "lead",
+        "dependsOn": ["lane-132"],
+        "allowedPaths": ["src/lane-142"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-143",
+        "title": "Lane 143",
+        "role": "lead",
+        "dependsOn": ["lane-133"],
+        "allowedPaths": ["src/lane-143"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-144",
+        "title": "Lane 144",
+        "role": "lead",
+        "dependsOn": ["lane-134"],
+        "allowedPaths": ["src/lane-144"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-145",
+        "title": "Lane 145",
+        "role": "lead",
+        "dependsOn": ["lane-135"],
+        "allowedPaths": ["src/lane-145"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-146",
+        "title": "Lane 146",
+        "role": "lead",
+        "dependsOn": ["lane-136"],
+        "allowedPaths": ["src/lane-146"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-147",
+        "title": "Lane 147",
+        "role": "lead",
+        "dependsOn": ["lane-137"],
+        "allowedPaths": ["src/lane-147"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-148",
+        "title": "Lane 148",
+        "role": "lead",
+        "dependsOn": ["lane-138"],
+        "allowedPaths": ["src/lane-148"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-149",
+        "title": "Lane 149",
+        "role": "lead",
+        "dependsOn": ["lane-139"],
+        "allowedPaths": ["src/lane-149"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-150",
+        "title": "Lane 150",
+        "role": "lead",
+        "dependsOn": ["lane-140"],
+        "allowedPaths": ["src/lane-150"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-151",
+        "title": "Lane 151",
+        "role": "lead",
+        "dependsOn": ["lane-141"],
+        "allowedPaths": ["src/lane-151"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-152",
+        "title": "Lane 152",
+        "role": "lead",
+        "dependsOn": ["lane-142"],
+        "allowedPaths": ["src/lane-152"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-153",
+        "title": "Lane 153",
+        "role": "lead",
+        "dependsOn": ["lane-143"],
+        "allowedPaths": ["src/lane-153"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-154",
+        "title": "Lane 154",
+        "role": "lead",
+        "dependsOn": ["lane-144"],
+        "allowedPaths": ["src/lane-154"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-155",
+        "title": "Lane 155",
+        "role": "lead",
+        "dependsOn": ["lane-145"],
+        "allowedPaths": ["src/lane-155"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-156",
+        "title": "Lane 156",
+        "role": "lead",
+        "dependsOn": ["lane-146"],
+        "allowedPaths": ["src/lane-156"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-157",
+        "title": "Lane 157",
+        "role": "lead",
+        "dependsOn": ["lane-147"],
+        "allowedPaths": ["src/lane-157"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-158",
+        "title": "Lane 158",
+        "role": "lead",
+        "dependsOn": ["lane-148"],
+        "allowedPaths": ["src/lane-158"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-159",
+        "title": "Lane 159",
+        "role": "lead",
+        "dependsOn": ["lane-149"],
+        "allowedPaths": ["src/lane-159"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-160",
+        "title": "Lane 160",
+        "role": "lead",
+        "dependsOn": ["lane-150"],
+        "allowedPaths": ["src/lane-160"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-161",
+        "title": "Lane 161",
+        "role": "lead",
+        "dependsOn": ["lane-151"],
+        "allowedPaths": ["src/lane-161"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-162",
+        "title": "Lane 162",
+        "role": "lead",
+        "dependsOn": ["lane-152"],
+        "allowedPaths": ["src/lane-162"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-163",
+        "title": "Lane 163",
+        "role": "lead",
+        "dependsOn": ["lane-153"],
+        "allowedPaths": ["src/lane-163"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-164",
+        "title": "Lane 164",
+        "role": "lead",
+        "dependsOn": ["lane-154"],
+        "allowedPaths": ["src/lane-164"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-165",
+        "title": "Lane 165",
+        "role": "lead",
+        "dependsOn": ["lane-155"],
+        "allowedPaths": ["src/lane-165"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-166",
+        "title": "Lane 166",
+        "role": "lead",
+        "dependsOn": ["lane-156"],
+        "allowedPaths": ["src/lane-166"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-167",
+        "title": "Lane 167",
+        "role": "lead",
+        "dependsOn": ["lane-157"],
+        "allowedPaths": ["src/lane-167"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-168",
+        "title": "Lane 168",
+        "role": "lead",
+        "dependsOn": ["lane-158"],
+        "allowedPaths": ["src/lane-168"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-169",
+        "title": "Lane 169",
+        "role": "lead",
+        "dependsOn": ["lane-159"],
+        "allowedPaths": ["src/lane-169"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-170",
+        "title": "Lane 170",
+        "role": "lead",
+        "dependsOn": ["lane-160"],
+        "allowedPaths": ["src/lane-170"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-171",
+        "title": "Lane 171",
+        "role": "lead",
+        "dependsOn": ["lane-161"],
+        "allowedPaths": ["src/lane-171"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-172",
+        "title": "Lane 172",
+        "role": "lead",
+        "dependsOn": ["lane-162"],
+        "allowedPaths": ["src/lane-172"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-173",
+        "title": "Lane 173",
+        "role": "lead",
+        "dependsOn": ["lane-163"],
+        "allowedPaths": ["src/lane-173"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-174",
+        "title": "Lane 174",
+        "role": "lead",
+        "dependsOn": ["lane-164"],
+        "allowedPaths": ["src/lane-174"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-175",
+        "title": "Lane 175",
+        "role": "lead",
+        "dependsOn": ["lane-165"],
+        "allowedPaths": ["src/lane-175"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-176",
+        "title": "Lane 176",
+        "role": "lead",
+        "dependsOn": ["lane-166"],
+        "allowedPaths": ["src/lane-176"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-177",
+        "title": "Lane 177",
+        "role": "lead",
+        "dependsOn": ["lane-167"],
+        "allowedPaths": ["src/lane-177"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-178",
+        "title": "Lane 178",
+        "role": "lead",
+        "dependsOn": ["lane-168"],
+        "allowedPaths": ["src/lane-178"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-179",
+        "title": "Lane 179",
+        "role": "lead",
+        "dependsOn": ["lane-169"],
+        "allowedPaths": ["src/lane-179"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-180",
+        "title": "Lane 180",
+        "role": "lead",
+        "dependsOn": ["lane-170"],
+        "allowedPaths": ["src/lane-180"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-181",
+        "title": "Lane 181",
+        "role": "lead",
+        "dependsOn": ["lane-171"],
+        "allowedPaths": ["src/lane-181"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-182",
+        "title": "Lane 182",
+        "role": "lead",
+        "dependsOn": ["lane-172"],
+        "allowedPaths": ["src/lane-182"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-183",
+        "title": "Lane 183",
+        "role": "lead",
+        "dependsOn": ["lane-173"],
+        "allowedPaths": ["src/lane-183"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-184",
+        "title": "Lane 184",
+        "role": "lead",
+        "dependsOn": ["lane-174"],
+        "allowedPaths": ["src/lane-184"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-185",
+        "title": "Lane 185",
+        "role": "lead",
+        "dependsOn": ["lane-175"],
+        "allowedPaths": ["src/lane-185"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-186",
+        "title": "Lane 186",
+        "role": "lead",
+        "dependsOn": ["lane-176"],
+        "allowedPaths": ["src/lane-186"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-187",
+        "title": "Lane 187",
+        "role": "lead",
+        "dependsOn": ["lane-177"],
+        "allowedPaths": ["src/lane-187"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-188",
+        "title": "Lane 188",
+        "role": "lead",
+        "dependsOn": ["lane-178"],
+        "allowedPaths": ["src/lane-188"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-189",
+        "title": "Lane 189",
+        "role": "lead",
+        "dependsOn": ["lane-179"],
+        "allowedPaths": ["src/lane-189"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-190",
+        "title": "Lane 190",
+        "role": "lead",
+        "dependsOn": ["lane-180"],
+        "allowedPaths": ["src/lane-190"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-191",
+        "title": "Lane 191",
+        "role": "lead",
+        "dependsOn": ["lane-181"],
+        "allowedPaths": ["src/lane-191"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-192",
+        "title": "Lane 192",
+        "role": "lead",
+        "dependsOn": ["lane-182"],
+        "allowedPaths": ["src/lane-192"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-193",
+        "title": "Lane 193",
+        "role": "lead",
+        "dependsOn": ["lane-183"],
+        "allowedPaths": ["src/lane-193"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-194",
+        "title": "Lane 194",
+        "role": "lead",
+        "dependsOn": ["lane-184"],
+        "allowedPaths": ["src/lane-194"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-195",
+        "title": "Lane 195",
+        "role": "lead",
+        "dependsOn": ["lane-185"],
+        "allowedPaths": ["src/lane-195"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-196",
+        "title": "Lane 196",
+        "role": "lead",
+        "dependsOn": ["lane-186"],
+        "allowedPaths": ["src/lane-196"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-197",
+        "title": "Lane 197",
+        "role": "lead",
+        "dependsOn": ["lane-187"],
+        "allowedPaths": ["src/lane-197"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-198",
+        "title": "Lane 198",
+        "role": "lead",
+        "dependsOn": ["lane-188"],
+        "allowedPaths": ["src/lane-198"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-199",
+        "title": "Lane 199",
+        "role": "lead",
+        "dependsOn": ["lane-189"],
+        "allowedPaths": ["src/lane-199"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-200",
+        "title": "Lane 200",
+        "role": "lead",
+        "dependsOn": ["lane-190"],
+        "allowedPaths": ["src/lane-200"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-201",
+        "title": "Lane 201",
+        "role": "lead",
+        "dependsOn": ["lane-191"],
+        "allowedPaths": ["src/lane-201"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-202",
+        "title": "Lane 202",
+        "role": "lead",
+        "dependsOn": ["lane-192"],
+        "allowedPaths": ["src/lane-202"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-203",
+        "title": "Lane 203",
+        "role": "lead",
+        "dependsOn": ["lane-193"],
+        "allowedPaths": ["src/lane-203"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-204",
+        "title": "Lane 204",
+        "role": "lead",
+        "dependsOn": ["lane-194"],
+        "allowedPaths": ["src/lane-204"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-205",
+        "title": "Lane 205",
+        "role": "lead",
+        "dependsOn": ["lane-195"],
+        "allowedPaths": ["src/lane-205"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-206",
+        "title": "Lane 206",
+        "role": "lead",
+        "dependsOn": ["lane-196"],
+        "allowedPaths": ["src/lane-206"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-207",
+        "title": "Lane 207",
+        "role": "lead",
+        "dependsOn": ["lane-197"],
+        "allowedPaths": ["src/lane-207"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-208",
+        "title": "Lane 208",
+        "role": "lead",
+        "dependsOn": ["lane-198"],
+        "allowedPaths": ["src/lane-208"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-209",
+        "title": "Lane 209",
+        "role": "lead",
+        "dependsOn": ["lane-199"],
+        "allowedPaths": ["src/lane-209"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-210",
+        "title": "Lane 210",
+        "role": "lead",
+        "dependsOn": ["lane-200"],
+        "allowedPaths": ["src/lane-210"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-211",
+        "title": "Lane 211",
+        "role": "lead",
+        "dependsOn": ["lane-201"],
+        "allowedPaths": ["src/lane-211"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-212",
+        "title": "Lane 212",
+        "role": "lead",
+        "dependsOn": ["lane-202"],
+        "allowedPaths": ["src/lane-212"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-213",
+        "title": "Lane 213",
+        "role": "lead",
+        "dependsOn": ["lane-203"],
+        "allowedPaths": ["src/lane-213"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-214",
+        "title": "Lane 214",
+        "role": "lead",
+        "dependsOn": ["lane-204"],
+        "allowedPaths": ["src/lane-214"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-215",
+        "title": "Lane 215",
+        "role": "lead",
+        "dependsOn": ["lane-205"],
+        "allowedPaths": ["src/lane-215"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-216",
+        "title": "Lane 216",
+        "role": "lead",
+        "dependsOn": ["lane-206"],
+        "allowedPaths": ["src/lane-216"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-217",
+        "title": "Lane 217",
+        "role": "lead",
+        "dependsOn": ["lane-207"],
+        "allowedPaths": ["src/lane-217"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-218",
+        "title": "Lane 218",
+        "role": "lead",
+        "dependsOn": ["lane-208"],
+        "allowedPaths": ["src/lane-218"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-219",
+        "title": "Lane 219",
+        "role": "lead",
+        "dependsOn": ["lane-209"],
+        "allowedPaths": ["src/lane-219"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-220",
+        "title": "Lane 220",
+        "role": "lead",
+        "dependsOn": ["lane-210"],
+        "allowedPaths": ["src/lane-220"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-221",
+        "title": "Lane 221",
+        "role": "lead",
+        "dependsOn": ["lane-211"],
+        "allowedPaths": ["src/lane-221"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-222",
+        "title": "Lane 222",
+        "role": "lead",
+        "dependsOn": ["lane-212"],
+        "allowedPaths": ["src/lane-222"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-223",
+        "title": "Lane 223",
+        "role": "lead",
+        "dependsOn": ["lane-213"],
+        "allowedPaths": ["src/lane-223"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-224",
+        "title": "Lane 224",
+        "role": "lead",
+        "dependsOn": ["lane-214"],
+        "allowedPaths": ["src/lane-224"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-225",
+        "title": "Lane 225",
+        "role": "lead",
+        "dependsOn": ["lane-215"],
+        "allowedPaths": ["src/lane-225"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-226",
+        "title": "Lane 226",
+        "role": "lead",
+        "dependsOn": ["lane-216"],
+        "allowedPaths": ["src/lane-226"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-227",
+        "title": "Lane 227",
+        "role": "lead",
+        "dependsOn": ["lane-217"],
+        "allowedPaths": ["src/lane-227"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-228",
+        "title": "Lane 228",
+        "role": "lead",
+        "dependsOn": ["lane-218"],
+        "allowedPaths": ["src/lane-228"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-229",
+        "title": "Lane 229",
+        "role": "lead",
+        "dependsOn": ["lane-219"],
+        "allowedPaths": ["src/lane-229"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-230",
+        "title": "Lane 230",
+        "role": "lead",
+        "dependsOn": ["lane-220"],
+        "allowedPaths": ["src/lane-230"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-231",
+        "title": "Lane 231",
+        "role": "lead",
+        "dependsOn": ["lane-221"],
+        "allowedPaths": ["src/lane-231"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-232",
+        "title": "Lane 232",
+        "role": "lead",
+        "dependsOn": ["lane-222"],
+        "allowedPaths": ["src/lane-232"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-233",
+        "title": "Lane 233",
+        "role": "lead",
+        "dependsOn": ["lane-223"],
+        "allowedPaths": ["src/lane-233"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-234",
+        "title": "Lane 234",
+        "role": "lead",
+        "dependsOn": ["lane-224"],
+        "allowedPaths": ["src/lane-234"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-235",
+        "title": "Lane 235",
+        "role": "lead",
+        "dependsOn": ["lane-225"],
+        "allowedPaths": ["src/lane-235"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-236",
+        "title": "Lane 236",
+        "role": "lead",
+        "dependsOn": ["lane-226"],
+        "allowedPaths": ["src/lane-236"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-237",
+        "title": "Lane 237",
+        "role": "lead",
+        "dependsOn": ["lane-227"],
+        "allowedPaths": ["src/lane-237"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-238",
+        "title": "Lane 238",
+        "role": "lead",
+        "dependsOn": ["lane-228"],
+        "allowedPaths": ["src/lane-238"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-239",
+        "title": "Lane 239",
+        "role": "lead",
+        "dependsOn": ["lane-229"],
+        "allowedPaths": ["src/lane-239"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-240",
+        "title": "Lane 240",
+        "role": "lead",
+        "dependsOn": ["lane-230"],
+        "allowedPaths": ["src/lane-240"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-241",
+        "title": "Lane 241",
+        "role": "lead",
+        "dependsOn": ["lane-231"],
+        "allowedPaths": ["src/lane-241"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-242",
+        "title": "Lane 242",
+        "role": "lead",
+        "dependsOn": ["lane-232"],
+        "allowedPaths": ["src/lane-242"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-243",
+        "title": "Lane 243",
+        "role": "lead",
+        "dependsOn": ["lane-233"],
+        "allowedPaths": ["src/lane-243"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-244",
+        "title": "Lane 244",
+        "role": "lead",
+        "dependsOn": ["lane-234"],
+        "allowedPaths": ["src/lane-244"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-245",
+        "title": "Lane 245",
+        "role": "lead",
+        "dependsOn": ["lane-235"],
+        "allowedPaths": ["src/lane-245"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-246",
+        "title": "Lane 246",
+        "role": "lead",
+        "dependsOn": ["lane-236"],
+        "allowedPaths": ["src/lane-246"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-247",
+        "title": "Lane 247",
+        "role": "lead",
+        "dependsOn": ["lane-237"],
+        "allowedPaths": ["src/lane-247"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-248",
+        "title": "Lane 248",
+        "role": "lead",
+        "dependsOn": ["lane-238"],
+        "allowedPaths": ["src/lane-248"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-249",
+        "title": "Lane 249",
+        "role": "lead",
+        "dependsOn": ["lane-239"],
+        "allowedPaths": ["src/lane-249"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-250",
+        "title": "Lane 250",
+        "role": "lead",
+        "dependsOn": ["lane-240"],
+        "allowedPaths": ["src/lane-250"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-251",
+        "title": "Lane 251",
+        "role": "lead",
+        "dependsOn": ["lane-241"],
+        "allowedPaths": ["src/lane-251"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-252",
+        "title": "Lane 252",
+        "role": "lead",
+        "dependsOn": ["lane-242"],
+        "allowedPaths": ["src/lane-252"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-253",
+        "title": "Lane 253",
+        "role": "lead",
+        "dependsOn": ["lane-243"],
+        "allowedPaths": ["src/lane-253"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-254",
+        "title": "Lane 254",
+        "role": "lead",
+        "dependsOn": ["lane-244"],
+        "allowedPaths": ["src/lane-254"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-255",
+        "title": "Lane 255",
+        "role": "lead",
+        "dependsOn": ["lane-245"],
+        "allowedPaths": ["src/lane-255"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-256",
+        "title": "Lane 256",
+        "role": "lead",
+        "dependsOn": ["lane-246"],
+        "allowedPaths": ["src/lane-256"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-257",
+        "title": "Lane 257",
+        "role": "lead",
+        "dependsOn": ["lane-247"],
+        "allowedPaths": ["src/lane-257"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-258",
+        "title": "Lane 258",
+        "role": "lead",
+        "dependsOn": ["lane-248"],
+        "allowedPaths": ["src/lane-258"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "lane-259",
+        "title": "Lane 259",
+        "role": "lead",
+        "dependsOn": ["lane-249"],
+        "allowedPaths": ["src/lane-259"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      }
+    ],
+    "gates": {
+      "qa": [
+        {
+          "id": "test",
+          "command": ["bun", "run", "test"]
+        }
+      ],
+      "publish": {
+        "kind": "commit",
+        "hitl": true
+      }
+    },
+    "env": ["CI"]
+  },
+  "expectCodes": ["RUN_SPEC_ISSUES_TRUNCATED", "RUN_SPEC_INVALID_VALUE"]
+}

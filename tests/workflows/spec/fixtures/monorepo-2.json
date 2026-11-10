@@ -1,0 +1,143 @@
+{
+  "description": "Two lanes in one package of a monorepo: the project root is packages/bridge, so every allowed path is relative to it. The second lane documents what the first one builds and waits for it. The run commits after QA with human approval.",
+  "rules": {
+    "id": "monorepo-host",
+    "maxBudgetUsd": 10,
+    "maxConcurrency": 2,
+    "maxLanes": 10,
+    "maxStringLength": 4096,
+    "maxArrayLength": 64,
+    "maxChangeRounds": 2,
+    "maxAgentRuns": 100,
+    "allowedProviderIds": ["claude"],
+    "allowedModels": ["claude-opus-5-5", "claude-sonnet-5-5"],
+    "allowedPermissionModes": ["read-only", "workspace-write"],
+    "allowNetwork": false,
+    "allowedTools": [
+      "Bash",
+      "Edit",
+      "Glob",
+      "Grep",
+      "NotebookEdit",
+      "Read",
+      "Write"
+    ],
+    "allowedEnvNames": [],
+    "deniedPathPatterns": [
+      ".env",
+      ".env.*",
+      "*.pem",
+      "*.key",
+      "*.p12",
+      "*.pfx",
+      "*.jks",
+      "*.keystore",
+      "id_rsa*",
+      "id_dsa*",
+      "id_ecdsa*",
+      "id_ed25519*",
+      ".ssh",
+      ".gnupg",
+      ".aws",
+      ".npmrc",
+      ".netrc",
+      ".pypirc",
+      ".git",
+      ".git-credentials",
+      "credentials.json",
+      "secrets.*"
+    ],
+    "allowedQaCommands": [["bun", "run", "test"], ["bun", "run", "typecheck"]],
+    "requireQa": true,
+    "allowedPublishKinds": ["none", "commit"]
+  },
+  "spec": {
+    "specVersion": 1,
+    "workflowId": "monorepo-2",
+    "workflowVersion": "1",
+    "projectRoot": "packages/bridge",
+    "budget": {
+      "maxUsd": 10
+    },
+    "maxConcurrency": 2,
+    "lanes": [
+      {
+        "taskId": "retry-policy",
+        "title": "Add a retry policy to the HTTP transport",
+        "role": "worker",
+        "dependsOn": [],
+        "allowedPaths": ["src/transport", "tests/transport"],
+        "agent": {
+          "providerId": "claude",
+          "model": "claude-sonnet-5-5",
+          "mode": "workspace-write",
+          "tools": [
+            "Bash",
+            "Edit",
+            "Glob",
+            "Grep",
+            "NotebookEdit",
+            "Read",
+            "Write"
+          ]
+        },
+        "steps": {
+          "testsFirst": true,
+          "review": {
+            "kind": "agent",
+            "providerId": "claude",
+            "model": "claude-opus-5-5",
+            "maxChangeRounds": 2
+          }
+        }
+      },
+      {
+        "taskId": "retry-docs",
+        "title": "Document the retry policy",
+        "role": "worker",
+        "dependsOn": ["retry-policy"],
+        "allowedPaths": ["docs/transport.md", "CHANGELOG.md"],
+        "agent": {
+          "providerId": "claude",
+          "model": "claude-sonnet-5-5",
+          "mode": "workspace-write",
+          "tools": [
+            "Bash",
+            "Edit",
+            "Glob",
+            "Grep",
+            "NotebookEdit",
+            "Read",
+            "Write"
+          ]
+        },
+        "steps": {
+          "testsFirst": true,
+          "review": {
+            "kind": "agent",
+            "providerId": "claude",
+            "model": "claude-opus-5-5",
+            "maxChangeRounds": 2
+          }
+        }
+      }
+    ],
+    "gates": {
+      "qa": [
+        {
+          "id": "test",
+          "command": ["bun", "run", "test"]
+        },
+        {
+          "id": "typecheck",
+          "command": ["bun", "run", "typecheck"]
+        }
+      ],
+      "publish": {
+        "kind": "commit",
+        "hitl": true
+      }
+    },
+    "env": []
+  }
+}

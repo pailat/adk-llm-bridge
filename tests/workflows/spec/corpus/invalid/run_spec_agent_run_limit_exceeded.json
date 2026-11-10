@@ -1,0 +1,114 @@
+{
+  "description": "The worst-case agent runs are at least two; the rule set allows one.",
+  "rules": {
+    "id": "test",
+    "maxBudgetUsd": 10,
+    "maxConcurrency": 4,
+    "maxLanes": 1000,
+    "maxStringLength": 4096,
+    "maxArrayLength": 64,
+    "maxChangeRounds": 3,
+    "maxAgentRuns": 1,
+    "allowedProviderIds": ["claude-code", "codex"],
+    "allowedModels": ["claude-sonnet-5", "gpt-5.5"],
+    "allowedPermissionModes": ["read-only", "workspace-write"],
+    "allowNetwork": false,
+    "allowedTools": ["Read", "Edit", "Bash"],
+    "allowedEnvNames": ["CI", "NODE_ENV"],
+    "deniedPathPatterns": [
+      ".env",
+      ".env.*",
+      "*.pem",
+      "*.key",
+      "*.p12",
+      "*.pfx",
+      "*.jks",
+      "*.keystore",
+      "id_rsa*",
+      "id_dsa*",
+      "id_ecdsa*",
+      "id_ed25519*",
+      ".ssh",
+      ".gnupg",
+      ".aws",
+      ".npmrc",
+      ".netrc",
+      ".pypirc",
+      ".git",
+      ".git-credentials",
+      "credentials.json",
+      "secrets.*"
+    ],
+    "allowedQaCommands": [["bun", "run", "test"], ["bun", "run", "lint"]],
+    "requireQa": true,
+    "allowedPublishKinds": ["none", "commit"]
+  },
+  "spec": {
+    "specVersion": 1,
+    "workflowId": "lanes",
+    "workflowVersion": "1",
+    "projectRoot": ".",
+    "budget": {
+      "maxUsd": 5
+    },
+    "maxConcurrency": 2,
+    "lanes": [
+      {
+        "taskId": "api",
+        "title": "Add the health endpoint",
+        "role": "worker",
+        "dependsOn": [],
+        "allowedPaths": ["src/api", "tests/api"],
+        "agent": {
+          "providerId": "claude-code",
+          "model": "claude-sonnet-5",
+          "mode": "workspace-write",
+          "tools": ["Read", "Edit"]
+        },
+        "steps": {
+          "testsFirst": true,
+          "review": {
+            "kind": "agent",
+            "providerId": "codex",
+            "model": "gpt-5.5",
+            "maxChangeRounds": 2
+          }
+        }
+      },
+      {
+        "taskId": "docs",
+        "title": "Document the health endpoint",
+        "role": "worker",
+        "dependsOn": ["api"],
+        "allowedPaths": ["docs/api.md"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "allowNetwork": false,
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      }
+    ],
+    "gates": {
+      "qa": [
+        {
+          "id": "test",
+          "command": ["bun", "run", "test"]
+        }
+      ],
+      "publish": {
+        "kind": "commit",
+        "hitl": true
+      }
+    },
+    "env": ["CI"]
+  },
+  "expectCodes": ["RUN_SPEC_AGENT_RUN_LIMIT_EXCEEDED"]
+}

@@ -23,6 +23,7 @@ Guides and references for `adk-llm-bridge`. The package overview is in the
 | [Workflow control plane](workflow-control-plane.md) | Starting, observing, answering and cancelling executions |
 | [Workflow durability](workflow-durability.md) | Checkpoints, resume and storage |
 | [Workflows and ADK's `Workflow`](workflow-adk-interop.md) | Using workflows with ADK agents, interrupts and delegation |
+| [Workflow run spec](workflow-run-spec.md) | Run specs for lanes jobs: validation, plan, error codes and JSON Schema (experimental, needs zod >= 4) |
 
 ## Contributing
 
