@@ -21,6 +21,7 @@ import {
 } from "@google/adk";
 import type { Content } from "@google/genai";
 import { inheritSessionPermissions } from "../agents/permissions/inheritance.js";
+import { isTempStateKey, withoutTempStateKeys } from "../utils/state.js";
 
 /**
  * Aggregate model usage of one delegated agent run.
@@ -144,7 +145,10 @@ export interface AgentInvocationResult {
   summary: AgentInvocationExecutionSummary;
   /** Aggregate token and tool-call usage of the run; see {@link AgentInvocationUsage}. */
   usage: AgentInvocationUsage;
-  /** Merged state delta of the non-partial events; absent when empty. */
+  /**
+   * Merged state delta of the non-partial events, without ADK `temp:` keys;
+   * absent when empty.
+   */
   stateDelta?: Record<string, unknown>;
   /** Failure message; absent on success. */
   error?: string;
@@ -404,11 +408,16 @@ export class AgentInvocationGateway {
           const event = next.value;
           throwIfInvocationAborted(signal);
           // ADK's BaseSessionService.appendEvent semantics: partial events are
-          // not persisted, `temp:` keys are trimmed and deltas applied in order.
+          // not persisted and deltas are applied in order.
           const persisted = await child.append(event);
           events.push(persisted);
           if (!persisted.partial) {
-            Object.assign(stateDelta, persisted.actions?.stateDelta ?? {});
+            // `temp:` keys stay out of the aggregate even when the installed
+            // ADK keeps them on the event, so they never reach a checkpoint.
+            Object.assign(
+              stateDelta,
+              withoutTempStateKeys(persisted.actions?.stateDelta ?? {}),
+            );
           }
           await this.#eventSink?.(persisted, childContext);
           await request.eventSink?.(persisted, childContext);
@@ -507,6 +516,9 @@ function createChildInvocationContext({
   // (isolationScope, nodeToolDepth, a2aMetadata, workflowInstructionScope, ...)
   // that a hand-written field list would drop. parentContext.clone() is not used
   // because the parent context may be a plain object (see withToolGatewaySession).
+  if (parentContext.session) {
+    delegatedSessionParents.set(session, parentContext.session);
+  }
   return new InvocationContext({
     ...parentContext,
     branch,
@@ -515,6 +527,35 @@ function createChildInvocationContext({
     session,
     abortSignal,
   });
+}
+
+/**
+ * Parent session of each child session built by the gateway. A child context
+ * keeps the parent's `sessionService` (spread above), but its session object
+ * is a private copy that the service does not own.
+ */
+const delegatedSessionParents = new WeakMap<Session, Session>();
+
+/**
+ * The session a delegated run's events finally reach: the session itself, or,
+ * for a child session the gateway built, the first ancestor that is not one.
+ * Nothing may append to a child session through the context's
+ * `sessionService`; the root session is the one that service owns.
+ *
+ * @param session - Session of an invocation context.
+ * @returns The root session, or `session` when it is not a child session.
+ * @internal
+ */
+export function rootSessionOf(session: Session): Session {
+  let current = session;
+  for (
+    let parent = delegatedSessionParents.get(current);
+    parent !== undefined;
+    parent = delegatedSessionParents.get(current)
+  ) {
+    current = parent;
+  }
+  return current;
 }
 
 /**
@@ -574,7 +615,7 @@ function createChildSession({
     for (const [key, value] of Object.entries(
       event.actions?.stateDelta ?? {},
     )) {
-      if (!key.startsWith("temp:")) {
+      if (!isTempStateKey(key)) {
         baseState[key] = value;
       }
     }

@@ -507,7 +507,8 @@ export function withWorkflowCompleted(
  *
  * @remarks
  * The error is stored as a JSON-safe copy, as in
- * {@link withWorkflowStepFailed}, so any error can be recorded.
+ * {@link withWorkflowStepFailed}, so any error can be recorded. The original
+ * input is kept while a step is still `waiting`, so that step stays answerable.
  *
  * @param checkpoint - Checkpoint to update; it is not mutated.
  * @param error - Serialized error describing the end state.
@@ -525,7 +526,14 @@ export function withWorkflowFailed(
     ...checkpoint,
     status,
     output: undefined,
-    input: undefined,
+    // A step still waiting keeps the original input: the turn that answers it
+    // runs on that input, and without it the answer is rejected as a different
+    // input.
+    input: Object.values(checkpoint.steps).some(
+      (step) => step.status === "waiting",
+    )
+      ? checkpoint.input
+      : undefined,
     error: recordableError(error),
     updatedAt: now,
     completedAt: now,

@@ -16,6 +16,7 @@ import {
 } from "../contracts.js";
 import type { WorkflowUserEvent } from "../events.js";
 import { attachCause } from "../internal/error-support.js";
+import { stepLimitExceeded } from "../internal/step-limit.js";
 import {
   WORKFLOW_SCRIPT_PROTOCOL,
   WORKFLOW_SCRIPT_PROTOCOL_VERSION,
@@ -34,6 +35,13 @@ export interface WorkflowScriptExecutionOptions
   extends WorkflowScriptSessionOptions {
   /** Host capabilities the script reaches through yielded operations. */
   host: WorkflowScriptHost;
+  /**
+   * Number of steps the host has replayed from a checkpoint so far, reported in
+   * the step limit error.
+   *
+   * @defaultValue Zero.
+   */
+  replayedSteps?: () => number;
   /**
    * Maximum yielded RPC messages, including emit operations.
    *
@@ -590,9 +598,17 @@ export async function runWorkflowScript(
             : 0;
       steps += requestedSteps;
       if (steps > maxSteps) {
-        throw new WorkflowError(
-          "WORKFLOW_LIMIT_EXCEEDED",
-          `Workflow script exceeded the ${maxSteps} step limit`,
+        // The first step of this request that passes the limit.
+        const over =
+          operation.op === "parallel"
+            ? operation.steps[maxSteps - (steps - requestedSteps)]
+            : operation.op === "run"
+              ? operation.step
+              : undefined;
+        throw stepLimitExceeded(
+          maxSteps,
+          typeof over?.id === "string" ? over.id : "",
+          options.replayedSteps?.() ?? 0,
         );
       }
 
