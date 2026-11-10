@@ -225,14 +225,18 @@ describe("FileSystemWorkspaceAdapter", () => {
 
   test("auto-renews with an unref heartbeat while the adapter is live", async () => {
     const directory = await stateDirectory();
+    // A long lease with a short heartbeat: a slow runner cannot let the lease
+    // expire before the release, so only the renewal is under test.
     const instance = adapter(directory, {
-      leaseTtlMs: 80,
+      leaseTtlMs: 5_000,
       heartbeatIntervalMs: 15,
     });
     const lease = await instance.acquire(request("agent-a", ["src"]));
     const initialExpiry = lease.expiresAt;
 
-    await delay(50);
+    for (let i = 0; i < 200 && lease.expiresAt <= initialExpiry; i++) {
+      await delay(10);
+    }
     expect(lease.expiresAt).toBeGreaterThan(initialExpiry);
     expect(await lease.release()).toBe(true);
   });
