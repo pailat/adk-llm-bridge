@@ -253,12 +253,14 @@ export interface ExternalAgentConfig extends BaseAgentConfig {
    * and `read-only` is never confirmable. Supported by drivers that can
    * intercept prompts (Claude Agent SDK); the Codex SDK exposes no approval hook.
    *
-   * `allowedPaths` is checked on the runtime's blocked path and on the path
-   * inputs of file tools, after normalization and symlink resolution
-   * (dangling links included). The Claude Agent SDK driver also checks every
-   * tool call, not only prompts; the Claude CLI, Codex and Gemini CLI drivers
-   * refuse a run with `allowedPaths` with `EXTERNAL_AGENT_PATHS_UNENFORCEABLE`
-   * unless built with `allowUnenforcedPaths: true`.
+   * `allowedPaths` (and `readPaths`, for read tools) is checked on the
+   * runtime's blocked path and on the path inputs of file tools, after
+   * normalization and symlink resolution (dangling links included). The
+   * Claude Agent SDK driver also checks every tool call, not only prompts,
+   * and approves reads inside `readPaths` itself; the Claude CLI, Codex and
+   * Gemini CLI drivers refuse a run with `allowedPaths` or `readPaths` with
+   * `EXTERNAL_AGENT_PATHS_UNENFORCEABLE` unless built with
+   * `allowUnenforcedPaths: true`.
    * Unless the policy sets `allowNetwork: true`, web tools (`WebFetch`,
    * `WebSearch` and their Codex and Gemini CLI names) are denied, MCP tools
    * other than this run's registered bridge tools are denied too, and a shell call is approved only when the driver runs it
@@ -410,8 +412,10 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
    * @param config - Agent options. The whole object is forwarded to
    * `BaseAgent` so `clone()` can rebuild the agent.
    * @throws InputValidationError (from `@google/adk`) when `permissions` is
-   * set but malformed: an unknown `mode`, a non-boolean `allowNetwork`, or an
-   * `allowedPaths` that is not an array of strings.
+   * set but malformed: an unknown `mode`, a non-boolean `allowNetwork`, an
+   * `allowedPaths` or `readPaths` that is not an array of strings, a
+   * `pathBounds` or `readPathBounds` that is not an array of string arrays,
+   * or `readPaths` without `allowedPaths`.
    */
   constructor(config: ExternalAgentConfig) {
     super(config);

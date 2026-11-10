@@ -7,8 +7,12 @@ import {
   type ExternalAgentRunRequest,
   resolveAbortSignal,
 } from "../external-agent-driver.js";
-import { guardRequestPaths } from "../permissions/confirmation.js";
+import {
+  guardRequestPaths,
+  readPathsReadAllowed,
+} from "../permissions/confirmation.js";
 import { mapPermissionPolicyToFlags } from "../permissions/mapper.js";
+import { policySetsPaths } from "../permissions/paths.js";
 import type { ExternalAgentPermissionPolicy } from "../permissions/schema.js";
 import { CLAUDE_PROVIDER } from "../provider/claude.js";
 import type { AgentRuntimeCapabilities } from "../runtime/capabilities.js";
@@ -33,6 +37,18 @@ import {
   contentsToSdkMessages,
   type SDKUserMessage,
 } from "./claude-message-mapper.js";
+import {
+  applyBackgroundTaskSetting,
+  backgroundTaskPendingEvent,
+  ClaudeBackgroundTaskTracker,
+  type ClaudeRunTempDir,
+  createClaudeRunTempDir,
+} from "./claude-run-env.js";
+import {
+  claudeConfigDir,
+  claudeSessionToolResultsDir,
+  isSessionToolResultsRead,
+} from "./claude-session-files.js";
 import {
   dependencyMissing,
   EXTERNAL_AGENT_ISOLATION_VIOLATED,
@@ -106,6 +122,8 @@ type ClaudeAgentSdkOptions = {
   resume?: string;
   forkSession?: boolean;
   sessionStore?: SessionStore;
+  sessionStoreFlush?: ClaudeSessionStoreFlush;
+  loadTimeoutMs?: number;
   canUseTool?: ClaudeAgentSdkCanUseTool;
   hooks?: Partial<Record<string, ClaudeAgentSdkHookMatcher[]>>;
 };
@@ -264,12 +282,12 @@ export interface ClaudeAgentSdkDriverConfig {
   systemPrompt?: string;
   /**
    * Built-in Claude Code tools the agent gets (the SDK `tools` option).
-   * Defaults to {@link DEFAULT_CLAUDE_SDK_TOOLS}. Under a `read-only` policy
+   * Defaults to {@link DEFAULT_CLAUDE_TOOLS}. Under a `read-only` policy
    * the write and shell tools are removed from it, and the web tools are
    * removed unless the policy sets `allowNetwork: true`. Pass `[]` for no
    * built-in tools.
    *
-   * @defaultValue `DEFAULT_CLAUDE_SDK_TOOLS`
+   * @defaultValue `DEFAULT_CLAUDE_TOOLS`
    */
   tools?: readonly string[];
   /**
@@ -297,6 +315,35 @@ export interface ClaudeAgentSdkDriverConfig {
    * @defaultValue false
    */
   allowUnsandboxedShell?: boolean;
+  /**
+   * Opt-in: in the no-network sandbox, let shell commands bind local
+   * (loopback) ports, for tools that talk to their own workers over a local
+   * port (Turbopack's PostCSS worker, test servers). macOS only: Claude Code
+   * ignores it on Linux. Remote hosts stay denied, but treat it as network
+   * access: binding a local port may let shell commands reach or
+   * impersonate services that listen on loopback ports, and other local
+   * processes can connect to the ports they open. Enable it only where
+   * every local service is trusted. No effect when the sandbox is off
+   * (`allowNetwork: true`, `allowUnsandboxedShell`).
+   *
+   * @defaultValue false
+   */
+  allowLocalBinding?: boolean;
+
+  /**
+   * Opt-out: let Claude Code run tasks in the background (Bash
+   * `run_in_background`, background subagents). Off by default: a headless
+   * run ends at its result, nothing delivers a background task's completion,
+   * and the model would stop while waiting for it. The driver sets
+   * `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` for Claude Code unless this is
+   * true. Either way, a run whose result arrives while a background task is
+   * still running ends with an `EXTERNAL_AGENT_BACKGROUND_TASK_PENDING`
+   * error and exit code 1.
+   *
+   * @defaultValue false
+   */
+  allowBackgroundTasks?: boolean;
+
   /**
    * If set, the driver passes this session id to the Claude SDK
    * `options.resume` field and sends only the current user turn (not the full
@@ -336,11 +383,79 @@ export interface ClaudeAgentSdkDriverConfig {
    * @defaultValue `undefined` (no store: only the local transcript is written)
    */
   sessionStore?: SessionStore;
+  /**
+   * How eagerly the SDK sends transcript entries to {@link sessionStore}
+   * (the SDK `sessionStoreFlush` option): `"batched"` or `"eager"`.
+   *
+   * @remarks
+   * Requires `sessionStore`; the constructor refuses it otherwise.
+   *
+   * @experimental Follows the Claude Agent SDK's `@alpha` option.
+   * @defaultValue the SDK's default (`"batched"`)
+   */
+  sessionStoreFlush?: ClaudeSessionStoreFlush;
+  /**
+   * Milliseconds each `sessionStore.load()` / `listSubkeys()` call may take
+   * when a run resumes (the SDK `loadTimeoutMs` option); a slower store fails
+   * the run instead of hanging it.
+   *
+   * @remarks
+   * Requires `sessionStore`; the constructor refuses it otherwise. A positive
+   * integer.
+   *
+   * @experimental Follows the Claude Agent SDK's `@alpha` option.
+   * @defaultValue the SDK's default (60 000)
+   */
+  sessionStoreLoadTimeoutMs?: number;
 }
 
 /**
- * Built-in Claude Code tools an isolated agent gets by default. Same list as
- * the CLI driver's default; see `DEFAULT_CLAUDE_TOOLS`.
+ * How eagerly the Claude Agent SDK flushes transcript entries to a session
+ * store (its `SessionStoreFlush`).
+ *
+ * @experimental Follows the Claude Agent SDK's `@alpha` `SessionStoreFlush`.
+ */
+export type ClaudeSessionStoreFlush = "batched" | "eager";
+
+/** Refuses session store tuning the SDK would reject or silently ignore. */
+function validateSessionStoreTuning(config: ClaudeAgentSdkDriverConfig): void {
+  const { sessionStoreFlush, sessionStoreLoadTimeoutMs } = config;
+  if (
+    sessionStoreFlush !== undefined &&
+    sessionStoreFlush !== "batched" &&
+    sessionStoreFlush !== "eager"
+  ) {
+    throw new InputValidationError(
+      'ClaudeAgentSdkDriver: sessionStoreFlush must be "batched" or "eager".',
+    );
+  }
+  if (
+    sessionStoreLoadTimeoutMs !== undefined &&
+    !(
+      typeof sessionStoreLoadTimeoutMs === "number" &&
+      Number.isSafeInteger(sessionStoreLoadTimeoutMs) &&
+      sessionStoreLoadTimeoutMs > 0
+    )
+  ) {
+    throw new InputValidationError(
+      "ClaudeAgentSdkDriver: sessionStoreLoadTimeoutMs must be a positive integer of milliseconds.",
+    );
+  }
+  if (
+    config.sessionStore === undefined &&
+    (sessionStoreFlush !== undefined || sessionStoreLoadTimeoutMs !== undefined)
+  ) {
+    throw new InputValidationError(
+      "ClaudeAgentSdkDriver: sessionStoreFlush and sessionStoreLoadTimeoutMs need a sessionStore; without one the SDK ignores them.",
+    );
+  }
+}
+
+/**
+ * Built-in Claude Code tools an isolated agent gets by default.
+ *
+ * @deprecated Use {@link DEFAULT_CLAUDE_TOOLS}: this is the same list, which
+ * both Claude drivers use. This alias stays until the next major version.
  */
 export const DEFAULT_CLAUDE_SDK_TOOLS: readonly string[] = DEFAULT_CLAUDE_TOOLS;
 
@@ -387,7 +502,14 @@ const BRIDGE_SUBAGENT_TOOL = `${BRIDGE_TOOL_PREFIX}run_adk_subagent`;
  *   the path arguments of every tool call, also the edits and reads Claude
  *   Code approves without asking (inside its working directory and
  *   `additionalDirectories`), and denies a path outside them. The bridge's own
- *   tools are left to the bridge.
+ *   tools are left to the bridge. One exception: `Read` of a file in the
+ *   `tool-results` directory of the session this run started, where Claude
+ *   Code saves a tool output too large to return inline (never a write, never
+ *   another session).
+ * - `readPaths` are not passed as `additionalDirectories` and never join the
+ *   sandbox's writable roots. A known read tool may reach them (the hook lets
+ *   it through, and the permission callback approves it without asking the
+ *   host, in every mode); every other tool there is denied by the hook.
  * - The child environment is an allowlist, never the whole parent environment.
  * - Abort: the run's abort signal is bridged to the SDK's `AbortController`;
  *   when the consumer stops early or an error occurs, the driver interrupts the
@@ -416,10 +538,14 @@ export class ClaudeAgentSdkDriver {
   readonly #resumeSessionId?: string;
   readonly #forkSession?: boolean;
   readonly #sessionStore?: SessionStore;
+  readonly #sessionStoreFlush?: ClaudeSessionStoreFlush;
+  readonly #sessionStoreLoadTimeoutMs?: number;
   readonly #systemPrompt?: string;
   readonly #tools?: readonly string[];
   readonly #inheritHostConfig: boolean;
   readonly #allowUnsandboxedShell: boolean;
+  readonly #allowLocalBinding: boolean;
+  readonly #allowBackgroundTasks: boolean;
   // Maps an ADK session id -> the SDK session id captured from the
   // first turn's system/init (or result) message. Subsequent turns of the same
   // ADK session pass it as `options.resume` and send only the newest user turn,
@@ -445,8 +571,10 @@ export class ClaudeAgentSdkDriver {
    *
    * @param config - Driver options; all optional.
    * @throws {@link InputValidationError} when `requiredMcpServers` names a
-   * server other than `adk_bridge` and `inheritHostConfig` is not `true`, or
-   * when `maxTurns` is not a positive integer.
+   * server other than `adk_bridge` and `inheritHostConfig` is not `true`,
+   * when `maxTurns` is not a positive integer, when `sessionStoreFlush` is not
+   * `"batched"` or `"eager"`, when `sessionStoreLoadTimeoutMs` is not a
+   * positive integer, or when either is given without `sessionStore`.
    */
   constructor(config: ClaudeAgentSdkDriverConfig = {}) {
     this.#sdk = config.sdk;
@@ -477,10 +605,15 @@ export class ClaudeAgentSdkDriver {
     this.#resumeSessionId = config.resumeSessionId;
     this.#forkSession = config.forkSession;
     this.#sessionStore = config.sessionStore;
+    validateSessionStoreTuning(config);
+    this.#sessionStoreFlush = config.sessionStoreFlush;
+    this.#sessionStoreLoadTimeoutMs = config.sessionStoreLoadTimeoutMs;
     this.#systemPrompt = config.systemPrompt;
     this.#tools = config.tools ? [...config.tools] : undefined;
     this.#inheritHostConfig = config.inheritHostConfig ?? false;
     this.#allowUnsandboxedShell = config.allowUnsandboxedShell ?? false;
+    this.#allowLocalBinding = config.allowLocalBinding ?? false;
+    this.#allowBackgroundTasks = config.allowBackgroundTasks ?? false;
   }
 
   /** The configured model id (`gen_ai.request.model`), if any. */
@@ -587,6 +720,11 @@ export class ClaudeAgentSdkDriver {
     let offeredTools: string[] | undefined;
     // Out-of-set calls held until the runtime answers them.
     let toolUseCheck: ClaudeToolUseCheck | undefined;
+    // Reads of the session's own tool-results directory under allowedPaths.
+    let sessionReads: SessionToolResultsReads | undefined;
+    // Background tasks still live when the result arrives fail the run.
+    const backgroundTasks = new ClaudeBackgroundTaskTracker();
+    let runTemp: ClaudeRunTempDir | undefined;
     try {
       // Shell writes that the sandbox cannot keep inside allowedPaths: refuse
       // before anything starts.
@@ -645,10 +783,13 @@ export class ClaudeAgentSdkDriver {
             : {}),
         };
       }
-      if (
-        request.permissions?.allowedPaths !== undefined ||
-        request.permissions?.pathBounds !== undefined
-      ) {
+      if (policySetsPaths(request.permissions)) {
+        sessionReads = {
+          sessionId: undefined,
+          configDir: claudeConfigDir(this.buildEnv(request)),
+          workingDirectory: request.workingDirectory ?? process.cwd(),
+          allowedCalls: new Map(),
+        };
         options = {
           ...options,
           hooks: withPathGuardHook(
@@ -656,7 +797,16 @@ export class ClaudeAgentSdkDriver {
             request.permissions,
             request.workingDirectory,
             built.bridgeTools,
+            sessionReads,
           ),
+          ...(options.canUseTool
+            ? {
+                canUseTool: allowSessionToolResultsRead(
+                  options.canUseTool,
+                  sessionReads,
+                ),
+              }
+            : {}),
         };
       }
       if (!expectation && isolation.denyForeignMcpTools) {
@@ -669,6 +819,10 @@ export class ClaudeAgentSdkDriver {
         };
       }
       abortController = options.abortController;
+      runTemp = createClaudeRunTempDir();
+      if (runTemp) {
+        options = { ...options, env: { ...options.env, ...runTemp.env } };
+      }
       query = sdk.query({ prompt, options });
       const iterator = query[Symbol.asyncIterator]();
       stream: while (true) {
@@ -681,6 +835,11 @@ export class ClaudeAgentSdkDriver {
         }
         const message = next.value;
         initModel ??= claudeInitModel(message);
+        if (sessionReads) {
+          // The session the runtime reports, never one the model names.
+          sessionReads.sessionId =
+            initSessionId(message) ?? sessionReads.sessionId;
+        }
         if (!startedEmitted) {
           yield startedEvent(initModel);
         }
@@ -695,6 +854,7 @@ export class ClaudeAgentSdkDriver {
           refusedCalls = toolUseCheck.check(message, offeredTools);
         }
         this.assertRequiredMcpServersConnected(message);
+        backgroundTasks.observe(message);
         // Capture the SDK session id (system/init or result) so the
         // next turn of this ADK session can resume it.
         if (adkSessionId) {
@@ -754,6 +914,11 @@ export class ClaudeAgentSdkDriver {
             if (!event.model && initModel) {
               event = { ...event, model: initModel };
             }
+            const pending = backgroundTasks.pending();
+            if (event.exitCode === 0 && pending.length > 0) {
+              yield backgroundTaskPendingEvent(pending, "Claude Agent SDK");
+              event = { ...event, exitCode: 1 };
+            }
           }
           if (event.type === "output") {
             emittedOutput = true;
@@ -804,10 +969,20 @@ export class ClaudeAgentSdkDriver {
         this.#abortDetach.get(abortController)?.();
         abortController.abort();
       }
+      // After the subprocess is stopped, so nothing still writes there.
+      runTemp?.dispose();
     }
 
     if (!startedEmitted) {
       yield startedEvent();
+    }
+    if (!completed && !failed && backgroundTasks.pending().length > 0) {
+      // The stream ended without a result while tasks still ran.
+      failed = true;
+      yield backgroundTaskPendingEvent(
+        backgroundTasks.pending(),
+        "Claude Agent SDK",
+      );
     }
     if (!completed) {
       yield {
@@ -852,6 +1027,8 @@ export class ClaudeAgentSdkDriver {
       resume,
       forkSession: this.#forkSession,
       sessionStore: this.#sessionStore,
+      sessionStoreFlush: this.#sessionStoreFlush,
+      loadTimeoutMs: this.#sessionStoreLoadTimeoutMs,
       canUseTool: this.buildCanUseTool(request),
       ...this.buildToolIsolation(request),
     };
@@ -870,6 +1047,7 @@ export class ClaudeAgentSdkDriver {
       tools: this.#tools,
       inheritHostConfig: this.#inheritHostConfig,
       allowUnsandboxedShell: this.#allowUnsandboxedShell,
+      allowLocalBinding: this.#allowLocalBinding,
       env: this.#env,
       ...(request.workingDirectory
         ? { workingDirectory: request.workingDirectory }
@@ -919,19 +1097,50 @@ export class ClaudeAgentSdkDriver {
    * host decides within the effective policy: it never grants more than the
    * policy allows and always denies under `read-only`. Never returns
    * `updatedInput` other than the original input, so an approval cannot rewrite
-   * the call. Absent when the host handles no prompts (the SDK then denies
-   * them).
+   * the call. A read inside `readPaths` (see `readPathsReadAllowed`) is
+   * approved here without asking the host. Absent when the host handles no
+   * prompts and the policy sets no `readPaths` (the SDK then denies them).
    */
   private buildCanUseTool(
     request: ExternalAgentRunRequest,
   ): ClaudeAgentSdkCanUseTool | undefined {
     const requestPermission = request.requestPermission;
+    const policy = request.permissions;
+    // Reads inside `readPaths` reach the callback because those roots are not
+    // `additionalDirectories`; the driver answers them itself, in every mode.
+    const readsInReadPaths = (
+      toolName: string,
+      input: Record<string, unknown>,
+      blockedPath: string | undefined,
+    ) =>
+      readPathsReadAllowed(
+        policy,
+        { toolName, input, ...(blockedPath ? { blockedPath } : {}) },
+        request.workingDirectory
+          ? { workingDirectory: request.workingDirectory }
+          : {},
+      );
     if (!requestPermission) {
-      return undefined;
+      if (!policy?.readPaths) {
+        return undefined;
+      }
+      // No host answers prompts: approve the reads inside `readPaths` and
+      // deny the rest, as the SDK does without a callback.
+      return async (toolName, input, options) =>
+        readsInReadPaths(toolName, input, options.blockedPath)
+          ? { behavior: "allow", updatedInput: input }
+          : {
+              behavior: "deny",
+              message:
+                "Denied: this call needs an approval and no host answers permission prompts.",
+            };
     }
     // Tell the guard whether shell commands are kept off the network.
     const { networkSandbox } = this.isolationPlan(request);
     return async (toolName, input, options) => {
+      if (readsInReadPaths(toolName, input, options.blockedPath)) {
+        return { behavior: "allow", updatedInput: input };
+      }
       try {
         const decision = await requestPermission({
           requestId: options.toolUseID ?? `claude-${crypto.randomUUID()}`,
@@ -1075,7 +1284,10 @@ export class ClaudeAgentSdkDriver {
    * Environment of the `claude` subprocess: only `PATH`, `HOME`, `USER`,
    * `SHELL` (with a fallback shell), the Claude config directories and the
    * client-app marker, plus the credential variables the provider allowlists
-   * when the credential is an `env` one. Nothing else is inherited.
+   * when the credential is an `env` one, and
+   * `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` unless `allowBackgroundTasks`.
+   * Nothing else is inherited. {@link ClaudeAgentSdkDriver.run} adds the
+   * run's private temp directory (`CLAUDE_CODE_TMPDIR`, `TMPDIR`).
    *
    * @param request - The run request.
    * @returns The environment to pass to the SDK.
@@ -1101,7 +1313,9 @@ export class ClaudeAgentSdkDriver {
     copyIfPresent(this.#env, env, "XDG_CONFIG_HOME");
     env.CLAUDE_AGENT_SDK_CLIENT_APP = "adk-llm-bridge";
 
-    return Object.assign(env, credentialEnv(request));
+    Object.assign(env, credentialEnv(request));
+    applyBackgroundTaskSetting(env, this.#allowBackgroundTasks);
+    return env;
   }
 
   private assertRequiredMcpServersConnected(
@@ -1643,6 +1857,8 @@ interface PreToolUseGuard {
   deny: (
     toolName: string,
     toolInput: Record<string, unknown>,
+    hookInput: Record<string, unknown>,
+    toolUseID: string | undefined,
   ) => string | undefined;
   /** The reason given when a call names no tool. */
   unnamedReason: string;
@@ -1678,13 +1894,18 @@ function withPreToolUseGuard(
   });
   const matcher: ClaudeAgentSdkHookMatcher = {
     hooks: [
-      async (input) => {
+      async (input, toolUseID) => {
         const toolName = stringValue(input.tool_name);
         if (toolName === undefined) {
           guard.onDenied?.("");
           return denied(guard.unnamedReason);
         }
-        const reason = guard.deny(toolName, asRecord(input.tool_input));
+        const reason = guard.deny(
+          toolName,
+          asRecord(input.tool_input),
+          input,
+          toolUseID,
+        );
         if (reason === undefined) {
           return {};
         }
@@ -1752,19 +1973,40 @@ function withForeignMcpDenyHook(
  * `acceptEdits` mode, reads there, and every call in `bypassPermissions` mode
  * run without asking, so the guard must run here as well. The bridge's own
  * tools take ADK tool arguments, not runtime paths, and are left to the
- * bridge.
+ * bridge. A `Read` of the run's own session `tool-results` directory is let
+ * through (see {@link SessionToolResultsReads}) and its call id recorded.
  */
 function withPathGuardHook(
   hooks: ClaudeAgentSdkOptions["hooks"],
   policy: ExternalAgentPermissionPolicy,
   workingDirectory: string | undefined,
   bridgeTools: readonly string[] | undefined,
+  sessionReads: SessionToolResultsReads,
 ): NonNullable<ClaudeAgentSdkOptions["hooks"]> {
   const bridged = new Set(bridgeTools ?? []);
   return withPreToolUseGuard(hooks, {
     unnamedReason: "Denied: tool call without a name.",
-    deny: (toolName, toolInput) => {
+    deny: (toolName, toolInput, hookInput, toolUseID) => {
       if (bridged.has(toolName)) {
+        return undefined;
+      }
+      const toolResultsDir = claudeSessionToolResultsDir({
+        sessionId: sessionReads.sessionId,
+        hookSessionId: hookInput.session_id,
+        transcriptPath: hookInput.transcript_path,
+        configDir: sessionReads.configDir,
+      });
+      if (
+        isSessionToolResultsRead(
+          toolResultsDir,
+          toolName,
+          toolInput,
+          sessionReads.workingDirectory,
+        )
+      ) {
+        if (toolUseID !== undefined && toolResultsDir !== undefined) {
+          sessionReads.allowedCalls.set(toolUseID, toolResultsDir);
+        }
         return undefined;
       }
       const denial = guardRequestPaths(
@@ -1775,6 +2017,68 @@ function withPathGuardHook(
       return denial?.behavior === "deny" ? denial.message : undefined;
     },
   });
+}
+
+/**
+ * Per-run state of the one read allowed outside `allowedPaths`: `Read` of a
+ * file in the `tool-results` directory of the session this run started.
+ */
+interface SessionToolResultsReads {
+  /** The session id from the runtime's latest `system/init`. */
+  sessionId: string | undefined;
+  /** The runtime's configuration directory, from the child environment. */
+  readonly configDir: string | undefined;
+  /** Base for a relative `file_path`. */
+  readonly workingDirectory: string;
+  /**
+   * For each `Read` the `PreToolUse` hook allowed: its tool-use id and the
+   * directory, so the permission callback answers only those calls.
+   */
+  readonly allowedCalls: Map<string, string>;
+}
+
+/**
+ * Wraps the permission callback so a `Read` that the path hook allowed as a
+ * session tool-results read (same tool-use id, same directory, every path in
+ * it) is allowed without asking the host; every other call goes on to
+ * `canUseTool`.
+ *
+ * @remarks Claude Code may ask about a read outside its working directory.
+ * The host's policy guard would deny that path as outside `allowedPaths`,
+ * so the driver answers it here, only for a call the hook already checked
+ * against the runtime's session.
+ */
+function allowSessionToolResultsRead(
+  canUseTool: ClaudeAgentSdkCanUseTool,
+  sessionReads: SessionToolResultsReads,
+): ClaudeAgentSdkCanUseTool {
+  return (toolName, input, extra) => {
+    const toolUseID = extra.toolUseID;
+    const toolResultsDir =
+      toolUseID === undefined
+        ? undefined
+        : sessionReads.allowedCalls.get(toolUseID);
+    if (
+      toolUseID !== undefined &&
+      isSessionToolResultsRead(
+        toolResultsDir,
+        toolName,
+        input,
+        sessionReads.workingDirectory,
+      ) &&
+      (extra.blockedPath === undefined ||
+        isSessionToolResultsRead(
+          toolResultsDir,
+          toolName,
+          { file_path: extra.blockedPath },
+          sessionReads.workingDirectory,
+        ))
+    ) {
+      sessionReads.allowedCalls.delete(toolUseID);
+      return Promise.resolve({ behavior: "allow", updatedInput: input });
+    }
+    return canUseTool(toolName, input, extra);
+  };
 }
 
 function isolationHookViolation(
@@ -1939,6 +2243,14 @@ function adkSessionIdOf(request: ExternalAgentRunRequest): string | undefined {
   )?.session;
   return typeof session?.id === "string" && session.id.length > 0
     ? session.id
+    : undefined;
+}
+
+/** The session id of a `system`/`init` message only. */
+function initSessionId(message: unknown): string | undefined {
+  const record = asRecord(message);
+  return record.type === "system" && record.subtype === "init"
+    ? stringValue(record.session_id)
     : undefined;
 }
 

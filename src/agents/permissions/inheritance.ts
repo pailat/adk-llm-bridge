@@ -45,6 +45,12 @@ const MODES: readonly ExternalAgentPermissionMode[] = [
  * a kept root that a symlink later points elsewhere still cannot leave the
  * parent's roots.
  *
+ * Read roots (`readPaths`) follow the same rules on each side's whole read
+ * set (`allowedPaths` plus `readPaths`): the child reads only where both may
+ * read, a parent's read root never becomes writable for the child, and both
+ * sides' absolute read roots are kept as `readPathBounds`. Policies without
+ * `readPaths` or `readPathBounds` derive no read fields.
+ *
  * @param parent - Policy of the delegating agent. Defaults to mode `ask`.
  * @param child - Policy the sub-agent asks for. Defaults to the parent's.
  * @returns The effective policy for the sub-agent.
@@ -81,6 +87,12 @@ function derivePolicy(
     childPolicy,
     parentPathsAreChilds,
   );
+  const reads = deriveReads(
+    parentPolicy,
+    childPolicy,
+    parentPathsAreChilds,
+    allowedPaths !== undefined,
+  );
 
   return {
     mode,
@@ -88,8 +100,76 @@ function derivePolicy(
       parentPolicy.allowNetwork && childPolicy.allowNetwork,
     ),
     ...(allowedPaths ? { allowedPaths } : {}),
+    ...(reads?.readPaths ? { readPaths: reads.readPaths } : {}),
     ...(pathBounds.length > 0 ? { pathBounds } : {}),
+    ...(reads && reads.readPathBounds.length > 0
+      ? { readPathBounds: reads.readPathBounds }
+      : {}),
   };
+}
+
+/**
+ * Every root a policy's read tools may reach (`allowedPaths` plus
+ * `readPaths`), or `undefined` when its reads are not restricted by roots.
+ */
+function readRoots(
+  policy: ExternalAgentPermissionPolicy,
+): readonly string[] | undefined {
+  return policy.allowedPaths
+    ? [...policy.allowedPaths, ...(policy.readPaths ?? [])]
+    : policy.readPaths;
+}
+
+/** The bound lists a policy's read tools are checked against. */
+function readBounds(
+  policy: ExternalAgentPermissionPolicy,
+): readonly (readonly string[])[] {
+  return policy.readPathBounds ?? policy.pathBounds ?? [];
+}
+
+/**
+ * The derived `readPaths` and `readPathBounds`, when either side sets
+ * `readPaths` or `readPathBounds`; `undefined` otherwise, so policies without
+ * read roots derive exactly as before (reads then follow `allowedPaths` and
+ * `pathBounds`).
+ *
+ * The read roots are the containment intersection of both sides' read roots,
+ * with the same rules as `allowedPaths` (relative roots of a parent dropped).
+ * The read bounds are both sides' read bounds plus both sides' absolute read
+ * roots, so the child never reads where the parent could not, even after a
+ * symlink is retargeted. Without derived `allowedPaths` there is no
+ * `readPaths` (paths are not restricted then), but the read bounds stay.
+ */
+function deriveReads(
+  parent: ExternalAgentPermissionPolicy,
+  child: ExternalAgentPermissionPolicy,
+  parentPathsAreChilds: boolean,
+  hasAllowedPaths: boolean,
+):
+  | {
+      readPaths: readonly string[] | undefined;
+      readPathBounds: readonly (readonly string[])[];
+    }
+  | undefined {
+  const involved = (policy: ExternalAgentPermissionPolicy) =>
+    policy.readPaths !== undefined || policy.readPathBounds !== undefined;
+  if (!involved(parent) && !involved(child)) {
+    return undefined;
+  }
+  const parentRoots = readRoots(parent);
+  const childRoots = readRoots(child);
+  const readPaths = hasAllowedPaths
+    ? deriveAllowedPaths(parentRoots, childRoots, parentPathsAreChilds)
+    : undefined;
+  const bounds = [...readBounds(parent)];
+  if (child !== parent) {
+    bounds.push(...readBounds(child));
+    if (parentRoots && childRoots && !parentPathsAreChilds) {
+      bounds.push(parentRoots.filter(isAnchoredPath));
+      bounds.push(childRoots.filter(isAnchoredPath));
+    }
+  }
+  return { readPaths, readPathBounds: bounds };
 }
 
 function moreRestrictiveMode(
@@ -237,10 +317,20 @@ function deepFreezePolicy(
     ...(policy.allowedPaths
       ? { allowedPaths: Object.freeze([...policy.allowedPaths]) }
       : {}),
+    ...(policy.readPaths
+      ? { readPaths: Object.freeze([...policy.readPaths]) }
+      : {}),
     ...(policy.pathBounds
       ? {
           pathBounds: Object.freeze(
             policy.pathBounds.map((list) => Object.freeze([...list])),
+          ),
+        }
+      : {}),
+    ...(policy.readPathBounds
+      ? {
+          readPathBounds: Object.freeze(
+            policy.readPathBounds.map((list) => Object.freeze([...list])),
           ),
         }
       : {}),

@@ -119,6 +119,10 @@ const CODES: Readonly<
  * The classifier does not report these codes. Pass a stored or compared code
  * through {@link normalizeRecoverableErrorCode} to match old and new codes
  * alike. As a `subtype`, an old code still classifies as its replacement.
+ *
+ * @deprecated Use {@link normalizeRecoverableErrorCode}, which maps every code
+ * in this table to its replacement. The table stays exported until the next
+ * major version.
  */
 export const LEGACY_RECOVERABLE_ERROR_CODES: Readonly<
   Record<string, RecoverableErrorCode>

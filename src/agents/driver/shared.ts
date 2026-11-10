@@ -4,6 +4,7 @@
  */
 
 import { existsSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { InputValidationError } from "@google/adk";
@@ -604,4 +605,37 @@ export function validateDriverConfig(
       `${driver}: maxTurns must be a positive integer.`,
     );
   }
+}
+
+/**
+ * Directories a runtime sandbox keeps writable whatever the policy says
+ * (the Claude Code sandbox, for one): its temp area (`/tmp`, where it puts `/tmp/claude-<uid>`, the host
+ * temp directory and `TMPDIR`/`CLAUDE_CODE_TMPDIR`), as real paths.
+ *
+ * @remarks Reads the variables from both the host process and the driver's
+ * configured environment, so the result stays a superset whether or not a
+ * driver forwards them to the runtime.
+ *
+ * @param env - The driver's configured environment.
+ * @returns The canonical roots.
+ */
+export function sandboxTempRoots(
+  env: Record<string, string | undefined>,
+): string[] {
+  const candidates = [
+    "/tmp",
+    tmpdir(),
+    process.env.TMPDIR,
+    process.env.CLAUDE_CODE_TMPDIR,
+    env.TMPDIR,
+    env.CLAUDE_CODE_TMPDIR,
+  ];
+  return [
+    ...new Set(
+      candidates
+        .filter((path): path is string => Boolean(path))
+        .map((path) => canonicalPath(path, "/"))
+        .filter((path): path is string => path !== undefined),
+    ),
+  ];
 }

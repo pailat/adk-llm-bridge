@@ -401,7 +401,11 @@ describe("ExternalAgent read-only exposure of ADK tools", () => {
     expect(deleted).toBe(0);
     expect(toolset.calls).toBe(1);
     expect(skipped).toEqual([
-      { name: "FlakyToolset", reason: "toolset-failed" },
+      {
+        name: "FlakyToolset",
+        reason: "toolset-failed",
+        cause: new Error("transient"),
+      },
     ]);
   });
 

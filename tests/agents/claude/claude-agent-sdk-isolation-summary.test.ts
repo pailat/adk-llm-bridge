@@ -1,8 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import {
-  ClaudeAgentSdkDriver,
-  DEFAULT_CLAUDE_SDK_TOOLS,
-} from "../../../src/agents/driver/claude-agent-sdk.js";
+import { ClaudeAgentSdkDriver } from "../../../src/agents/driver/claude-agent-sdk.js";
+import { DEFAULT_CLAUDE_TOOLS } from "../../../src/agents/driver/claude-isolation.js";
 import type { ExternalAgentEvent } from "../../../src/agents/events.js";
 import { ExternalAgent } from "../../../src/agents/external-agent.js";
 import type { ExternalAgentRunRequest } from "../../../src/agents/external-agent-driver.js";
@@ -92,7 +90,7 @@ const RESULT = {
 };
 
 // Network is off by default, so the default run leaves out the web tools.
-const DEFAULT_OFFLINE_TOOLS = DEFAULT_CLAUDE_SDK_TOOLS.filter(
+const DEFAULT_OFFLINE_TOOLS = DEFAULT_CLAUDE_TOOLS.filter(
   (name) => name !== "WebFetch" && name !== "WebSearch",
 );
 
@@ -102,7 +100,7 @@ describe("host configuration isolation", () => {
       request({ mode: "workspace-write", allowNetwork: true }),
     ) as Options;
 
-    expect(options.tools).toEqual([...DEFAULT_CLAUDE_SDK_TOOLS]);
+    expect(options.tools).toEqual([...DEFAULT_CLAUDE_TOOLS]);
     expect(options.strictMcpConfig).toBe(true);
     expect(options.skills).toEqual([]);
     expect(options.managedSettings).toEqual({
@@ -126,9 +124,9 @@ describe("host configuration isolation", () => {
       "ScheduleWakeup",
       "RemoteTrigger",
     ]) {
-      expect(DEFAULT_CLAUDE_SDK_TOOLS).not.toContain(hostTool);
+      expect(DEFAULT_CLAUDE_TOOLS).not.toContain(hostTool);
     }
-    expect(Object.isFrozen(DEFAULT_CLAUDE_SDK_TOOLS)).toBe(true);
+    expect(Object.isFrozen(DEFAULT_CLAUDE_TOOLS)).toBe(true);
   });
 
   test("a configured tools list replaces the default", () => {

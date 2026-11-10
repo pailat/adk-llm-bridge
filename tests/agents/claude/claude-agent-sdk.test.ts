@@ -9,7 +9,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, sep } from "node:path";
 import type { Content } from "@google/genai";
 import { ClaudeAgent } from "../../../src/agents/claude-agent.js";
 import {
@@ -23,6 +23,21 @@ import {
   CODEX_PROVIDER,
 } from "../../../src/agents/provider/schema.js";
 import { withDeadline } from "../helpers.js";
+
+/**
+ * Whether `path` is `root` or inside it.
+ *
+ * The lookup also walks the `node_modules` of this module's ancestors (as
+ * Node's module resolution does), so a checkout nested under a folder with
+ * its own Claude platform package resolves that binary. These tests assert
+ * what the driver promises, never a binary inside the agent-writable
+ * directories, not that nothing is found.
+ */
+function isInside(path: string | undefined, root: string): boolean {
+  return (
+    path !== undefined && (path === root || path.startsWith(`${root}${sep}`))
+  );
+}
 
 async function materializePrompt(prompt: unknown): Promise<string> {
   if (typeof prompt === "string") {
@@ -196,7 +211,7 @@ describe("ClaudeAgentSdkDriver", () => {
           workingDirectory: workingDirectory(),
         });
 
-        expect(resolution.path).toBeUndefined();
+        expect(isInside(resolution.path, workspace)).toBe(false);
         expect(
           resolution.checked.filter((path) => path.startsWith(workspace)),
         ).toEqual([]);
@@ -231,7 +246,8 @@ describe("ClaudeAgentSdkDriver", () => {
       expect(resolution.checked).not.toContain(
         join(outside, "bin", executable),
       );
-      expect(resolution.path).toBeUndefined();
+      expect(isInside(resolution.path, workspace)).toBe(false);
+      expect(isInside(resolution.path, outside)).toBe(false);
     } finally {
       rmSync(workspace, { recursive: true, force: true });
       rmSync(outside, { recursive: true, force: true });
@@ -259,7 +275,9 @@ describe("ClaudeAgentSdkDriver", () => {
         permissions: { mode: "workspace-write", allowedPaths: [extra] },
       });
 
-      expect(resolution.path).toBeUndefined();
+      expect(isInside(resolution.path, extra)).toBe(false);
+      expect(isInside(resolution.path, workspace)).toBe(false);
+      expect(resolution.checked).not.toContain(join(extra, executable));
     } finally {
       rmSync(workspace, { recursive: true, force: true });
       rmSync(extra, { recursive: true, force: true });

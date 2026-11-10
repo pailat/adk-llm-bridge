@@ -1,5 +1,6 @@
 import type {
   ExternalAgentCompletedEvent,
+  ExternalAgentModelUsage,
   ExternalAgentUsage,
 } from "../events.js";
 import { asRecord, stringValue } from "./shared.js";
@@ -10,7 +11,7 @@ export type ExternalAgentRunSummary = Pick<
   "model" | "usage" | "numTurns" | "durationMs"
 >;
 
-type UsageCounts = Omit<ExternalAgentUsage, "byModel">;
+type UsageCounts = ExternalAgentModelUsage;
 
 /**
  * Reads the run facts of a Claude `result` message (Agent SDK or

@@ -143,9 +143,24 @@ export interface ExternalAgentUsage {
    * Absent when the driver does not report it.
    */
   scope?: "run" | "session";
-  /** Per-model breakdown when the runtime reports several models. */
-  byModel?: Record<string, Omit<ExternalAgentUsage, "byModel">>;
+  /**
+   * Per-model breakdown when the runtime reports several models. The entries
+   * cover what `scope` says for the whole usage.
+   */
+  byModel?: Record<string, ExternalAgentModelUsage>;
 }
+
+/**
+ * The counters of one model in {@link ExternalAgentUsage.byModel}.
+ *
+ * @remarks
+ * No `scope` and no nested breakdown: the entries cover what the enclosing
+ * usage's `scope` says.
+ */
+export type ExternalAgentModelUsage = Omit<
+  ExternalAgentUsage,
+  "byModel" | "scope"
+>;
 
 /** The run finished. Drivers emit it once, last. */
 export interface ExternalAgentCompletedEvent {

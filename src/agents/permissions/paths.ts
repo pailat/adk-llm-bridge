@@ -17,6 +17,25 @@ import {
   resolve,
   sep,
 } from "node:path";
+import type { ExternalAgentPermissionPolicy } from "./schema.js";
+
+/**
+ * Whether a policy restricts paths at all: it sets `allowedPaths`,
+ * `readPaths`, `pathBounds` or `readPathBounds`.
+ *
+ * @param policy - The effective policy, if any.
+ * @returns `true` when a path rule applies.
+ */
+export function policySetsPaths(
+  policy: ExternalAgentPermissionPolicy | undefined,
+): policy is ExternalAgentPermissionPolicy {
+  return (
+    policy?.allowedPaths !== undefined ||
+    policy?.readPaths !== undefined ||
+    policy?.pathBounds !== undefined ||
+    policy?.readPathBounds !== undefined
+  );
+}
 
 /** Most symlinks {@link canonicalPath} follows by hand before it gives up. */
 const MAX_SYMLINK_HOPS = 40;

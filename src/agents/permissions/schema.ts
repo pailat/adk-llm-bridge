@@ -55,11 +55,33 @@ export interface ExternalAgentPermissionPolicy {
    * `allowUnenforcedPaths: true`.
    *
    * The same roots apply to reads and writes: an agent confined here cannot
-   * read outside them either. To read more than it may write, split the work
-   * into a `read-only` agent with wider roots and a writer with narrow ones; see
+   * read outside them either, unless {@link readPaths} adds read roots. See
    * docs/external-agent-isolation.md, "Reading wider than you write".
    */
   allowedPaths?: readonly string[];
+  /**
+   * Extra roots for read tools only, on top of `allowedPaths`.
+   *
+   * @remarks
+   * A call to a known read tool (Claude Code `Read`, `Glob`, `Grep`, `LS`,
+   * `NotebookRead`; Gemini CLI `read_file`, `read_many_files`,
+   * `list_directory`, `glob`, `grep_search`, `search_file_content`; names
+   * matched exactly) may target a path under `allowedPaths` or under these
+   * roots. Every other tool, an unknown one included, counts as a write and
+   * stays inside `allowedPaths`, so nothing can write here unless
+   * `allowedPaths` also covers it. Shell commands are not parsed: their
+   * reads are not limited (as with `allowedPaths`), and in the Claude Code
+   * sandbox they can write only to `allowedPaths`.
+   *
+   * Requires `allowedPaths`: without it paths are not restricted, so read
+   * roots would mean nothing. Relative roots resolve against the working
+   * directory. Only `ClaudeAgentSdkDriver` enforces it; the other drivers
+   * refuse a run that sets it with `EXTERNAL_AGENT_PATHS_UNENFORCEABLE`
+   * unless built with `allowUnenforcedPaths: true`. A delegated sub-agent
+   * reads only where both it and its parent may read (see
+   * {@link deriveSubAgentPermissionPolicy}).
+   */
+  readPaths?: readonly string[];
   /**
    * Root lists every path must also stay inside: a path is allowed only when
    * it is under one root of each list, as well as under `allowedPaths`.
@@ -70,8 +92,22 @@ export interface ExternalAgentPermissionPolicy {
    * policy was derived cannot take a kept root outside the parent's roots.
    * The guard resolves both the bounds and the request path when a request
    * arrives. It can only narrow a policy; an empty list allows no path.
+   * Read tools are checked against {@link readPathBounds} instead when it is
+   * set.
    */
   pathBounds?: readonly (readonly string[])[];
+  /**
+   * Root lists every path a read tool targets must stay inside, in place of
+   * `pathBounds` for reads.
+   *
+   * @remarks
+   * {@link deriveSubAgentPermissionPolicy} sets it when either side sets
+   * `readPaths`: the parent's read bounds plus both sides' absolute read
+   * roots (`allowedPaths` and `readPaths`), so a retargeted symlink cannot
+   * take a read root outside the parent's reads. When unset, reads are
+   * checked against `pathBounds`. An empty list allows no read.
+   */
+  readPathBounds?: readonly (readonly string[])[];
 }
 
 /**
@@ -91,4 +127,6 @@ export interface ProviderPermissionFlags {
   network?: boolean;
   /** Allowed roots, copied from `allowedPaths`. */
   paths?: readonly string[];
+  /** Extra read roots, copied from `readPaths`. */
+  readPaths?: readonly string[];
 }
