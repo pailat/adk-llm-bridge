@@ -134,3 +134,41 @@ describe("mergeRunRules input checks", () => {
     expect(RunRulesSchema.safeParse(merged).success).toBe(true);
   });
 });
+
+describe("mergeRunRules denied path pattern bound", () => {
+  const patterns = (count: number) =>
+    Array.from({ length: count }, (_, index) => `denied-${index}`);
+
+  test("throws when the merged list would exceed maxRuleListEntries", () => {
+    const max = RUN_SPEC_LIMITS.maxRuleListEntries;
+    const base = { ...testRules(), deniedPathPatterns: patterns(max) };
+    expect(() =>
+      mergeRunRules(base, { id: "more", deniedPathPatterns: ["extra"] }),
+    ).toThrow(
+      new TypeError(
+        `mergeRunRules: deniedPathPatterns would exceed ${max} entries.`,
+      ),
+    );
+  });
+
+  test("accepts a merged list of exactly maxRuleListEntries, which matches the schema", () => {
+    const max = RUN_SPEC_LIMITS.maxRuleListEntries;
+    const base = { ...testRules(), deniedPathPatterns: patterns(max - 1) };
+    const merged = mergeRunRules(base, {
+      id: "more",
+      deniedPathPatterns: ["extra"],
+    });
+    expect(merged.deniedPathPatterns).toHaveLength(max);
+    expect(RunRulesSchema.safeParse(merged).success).toBe(true);
+  });
+
+  test("a pattern the base already has does not count twice", () => {
+    const max = RUN_SPEC_LIMITS.maxRuleListEntries;
+    const base = { ...testRules(), deniedPathPatterns: patterns(max) };
+    const merged = mergeRunRules(base, {
+      id: "same",
+      deniedPathPatterns: ["denied-0"],
+    });
+    expect(merged.deniedPathPatterns).toHaveLength(max);
+  });
+});

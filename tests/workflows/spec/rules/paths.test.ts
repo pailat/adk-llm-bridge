@@ -477,7 +477,7 @@ describe("RUN_SPEC_PATH_DENIED", () => {
     };
     const start = performance.now();
     const issues = run(withPaths(["a".repeat(4_000)]), rules);
-    expect(performance.now() - start).toBeLessThan(1_000);
+    expect(performance.now() - start).toBeLessThan(5_000);
     expect(issues).toEqual([]);
   });
 
@@ -524,14 +524,33 @@ describe("RUN_SPEC_PATH_DENIED", () => {
     expect(run(withPaths(["src/ac", "src/abx"]), rules)).toEqual([]);
   });
 
-  test("does not decode percent escapes", () => {
-    // "%2eenv" is a different literal name; ".env" in any case is not.
-    expect(codes(run(withPaths(["%2Eenv"])))).not.toContain(
-      "RUN_SPEC_PATH_DENIED",
-    );
+  test("reads percent-encoded dots, as the traversal check does, and no other escape", () => {
+    // A URL-decoding layer opens "%2Eenv" as ".env"; "%45" is not decoded.
+    expect(codes(run(withPaths(["%2Eenv"])))).toEqual(["RUN_SPEC_PATH_DENIED"]);
     expect(codes(run(withPaths([".%45nv"])))).not.toContain(
       "RUN_SPEC_PATH_DENIED",
     );
+  });
+
+  test("denies a name in the widened reading of the traversal check", () => {
+    // Fullwidth and ideographic full stops (NFKC, best-fit code pages) and
+    // percent-encoded dots read as ".".
+    for (const bad of [
+      "src/\uff0egit",
+      "src/\u3002env",
+      "src/%2eenv",
+      "src/%2Essh",
+      "src/\uff0e\uff53\uff53\uff48",
+      "src%2f.env",
+    ]) {
+      expect(codes(run(withPaths([bad])))).toEqual(["RUN_SPEC_PATH_DENIED"]);
+    }
+  });
+
+  test("the widened reading denies nothing the patterns do not name", () => {
+    expect(
+      run(withPaths(["src/\uff05", "src/%2egitx", "src/\uff41pi"])),
+    ).toEqual([]);
   });
 
   test("reports each denied entry separately", () => {

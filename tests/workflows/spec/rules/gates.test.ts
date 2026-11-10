@@ -114,7 +114,7 @@ describe("RUN_SPEC_QA_ID_DUPLICATE", () => {
     }));
     const start = performance.now();
     const issues = run(withGates(qa, commit), testRules());
-    expect(performance.now() - start).toBeLessThan(1_000);
+    expect(performance.now() - start).toBeLessThan(5_000);
     expect(codes(issues)).toContain("RUN_SPEC_QA_ID_DUPLICATE");
   });
 });

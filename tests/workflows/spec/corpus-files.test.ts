@@ -1,16 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import { RUN_SPEC_ISSUE_CODES } from "../../../src/workflows/spec/issues.js";
 import {
   RunRulesSchema,
   RunSpecSchema,
 } from "../../../src/workflows/spec/schema.js";
-
-/** Directory holding the valid and invalid run spec cases. */
-const CORPUS_DIR = fileURLToPath(new URL("./corpus/", import.meta.url));
+import { type CorpusFile, readCorpusFiles } from "./corpus/read.js";
 
 /** Minimum number of valid cases the corpus must hold. */
 const MIN_VALID_CASES = 8;
@@ -63,39 +58,11 @@ function hasKey(value: unknown, key: string): boolean {
 /** One corpus case: a description, the rule set, the spec and expected codes. */
 type CorpusCase = z.infer<typeof CorpusCaseSchema>;
 
-/** The corpus folder a case belongs to. */
-type Group = "valid" | "invalid";
-
-/** A corpus file read from disk, before it is parsed. */
-interface CorpusFile {
-  readonly group: Group;
-  readonly name: string;
-  readonly text: string;
-}
-
 /** A corpus file that parsed as a case. */
 interface ParsedCase {
-  readonly group: Group;
+  readonly group: CorpusFile["group"];
   readonly name: string;
   readonly case: CorpusCase;
-}
-
-/** Reads every `.json` file of both groups. A missing group yields none. */
-function readCorpusFiles(): CorpusFile[] {
-  const files: CorpusFile[] = [];
-  for (const group of ["valid", "invalid"] as const) {
-    const dir = join(CORPUS_DIR, group);
-    if (!existsSync(dir)) {
-      continue;
-    }
-    const names = readdirSync(dir)
-      .filter((name) => name.endsWith(".json"))
-      .sort();
-    for (const name of names) {
-      files.push({ group, name, text: readFileSync(join(dir, name), "utf8") });
-    }
-  }
-  return files;
 }
 
 /** Problems of the files that do not parse as a case, one line each. */

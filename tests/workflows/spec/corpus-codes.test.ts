@@ -1,12 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import type { RunRules } from "../../../src/workflows/spec/schema.js";
 import { validateRunSpec } from "../../../src/workflows/spec/validate.js";
+import { readCorpusFiles } from "./corpus/read.js";
 import { testRules } from "./helpers.js";
-
-const CORPUS_DIR = fileURLToPath(new URL("./corpus/", import.meta.url));
 
 interface CorpusCase {
   readonly description: string;
@@ -16,14 +12,10 @@ interface CorpusCase {
 }
 
 function load(group: "valid" | "invalid"): [string, CorpusCase][] {
-  const dir = join(CORPUS_DIR, group);
-  return readdirSync(dir)
-    .filter((name) => name.endsWith(".json"))
-    .sort()
-    .map((name) => [
-      name,
-      JSON.parse(readFileSync(join(dir, name), "utf8")) as CorpusCase,
-    ]);
+  return readCorpusFiles([group]).map((file) => [
+    file.name,
+    JSON.parse(file.text) as CorpusCase,
+  ]);
 }
 
 describe("run spec corpus through validateRunSpec", () => {

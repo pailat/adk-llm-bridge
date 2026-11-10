@@ -1,7 +1,4 @@
 import { describe, expect, test } from "bun:test";
-import { readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import { RUN_SPEC_SCHEMA_ISSUE_CODES } from "../../../src/workflows/spec/issues.js";
 import { runSpecJsonSchema } from "../../../src/workflows/spec/json-schema.js";
@@ -11,10 +8,9 @@ import {
   RunSpecSchema,
 } from "../../../src/workflows/spec/schema.js";
 import { parseRunSpecShape } from "../../../src/workflows/spec/shape.js";
+import { readCorpusFiles } from "./corpus/read.js";
 import { validSpec, wideSpec } from "./helpers.js";
 import { EVALUATED_KEYWORDS, jsonSchemaAccepts } from "./json-schema-eval.js";
-
-const CORPUS_DIR = fileURLToPath(new URL("./corpus/", import.meta.url));
 
 /** Codes of the input guard: the schema cannot express them. */
 const GUARD_CODES: readonly string[] = [
@@ -29,19 +25,16 @@ interface Sample {
   readonly spec: unknown;
 }
 
-/** Every `spec` of the valid and invalid corpus files. */
+/** Every `spec` of the valid and invalid corpus cases. */
 function corpusSamples(): Sample[] {
   const samples: Sample[] = [];
-  for (const group of ["valid", "invalid"]) {
-    const dir = join(CORPUS_DIR, group);
-    for (const name of readdirSync(dir).filter((n) => n.endsWith(".json"))) {
-      const json: unknown = JSON.parse(readFileSync(join(dir, name), "utf8"));
-      const spec =
-        typeof json === "object" && json !== null && "spec" in json
-          ? (json as { spec: unknown }).spec
-          : undefined;
-      samples.push({ name: `${group}/${name}`, spec });
-    }
+  for (const file of readCorpusFiles()) {
+    const json: unknown = JSON.parse(file.text);
+    const spec =
+      typeof json === "object" && json !== null && "spec" in json
+        ? (json as { spec: unknown }).spec
+        : undefined;
+    samples.push({ name: `${file.group}/${file.name}`, spec });
   }
   return samples;
 }
@@ -727,30 +720,23 @@ describe("schema and shape parser parity", () => {
   test("rejects every invalid corpus case that lists a schema-scope code", () => {
     const scope: readonly string[] = RUN_SPEC_SCHEMA_ISSUE_CODES;
     const missed: string[] = [];
-    for (const group of ["invalid"]) {
-      const dir = join(CORPUS_DIR, group);
-      for (const name of readdirSync(dir).filter((n) => n.endsWith(".json"))) {
-        const json = JSON.parse(readFileSync(join(dir, name), "utf8")) as {
-          spec: unknown;
-          expectCodes: string[];
-        };
-        if (!json.expectCodes.some((code) => scope.includes(code))) continue;
-        if (json.expectCodes.some((code) => GUARD_CODES.includes(code)))
-          continue;
-        if (jsonSchemaAccepts(schema, json.spec)) missed.push(name);
-      }
+    for (const file of readCorpusFiles(["invalid"])) {
+      const json = JSON.parse(file.text) as {
+        spec: unknown;
+        expectCodes: string[];
+      };
+      if (!json.expectCodes.some((code) => scope.includes(code))) continue;
+      if (json.expectCodes.some((code) => GUARD_CODES.includes(code))) continue;
+      if (jsonSchemaAccepts(schema, json.spec)) missed.push(file.name);
     }
     expect(missed).toEqual([]);
   });
 
   test("accepts every valid corpus case", () => {
     const rejected: string[] = [];
-    const dir = join(CORPUS_DIR, "valid");
-    for (const name of readdirSync(dir).filter((n) => n.endsWith(".json"))) {
-      const json = JSON.parse(readFileSync(join(dir, name), "utf8")) as {
-        spec: unknown;
-      };
-      if (!jsonSchemaAccepts(schema, json.spec)) rejected.push(name);
+    for (const file of readCorpusFiles(["valid"])) {
+      const json = JSON.parse(file.text) as { spec: unknown };
+      if (!jsonSchemaAccepts(schema, json.spec)) rejected.push(file.name);
     }
     expect(rejected).toEqual([]);
   });

@@ -609,3 +609,56 @@ describe("runSpecHash", () => {
     }
   });
 });
+
+describe("resolveRunPlan denied paths", () => {
+  test("the plan carries the effective denied path patterns of the checked rule set", () => {
+    const rules = testRules();
+    const p = plan(validSpec(), rules);
+    expect(p.deniedPathPatterns).toEqual(rules.deniedPathPatterns);
+    expect(p.deniedPathPatterns.length).toBeGreaterThan(0);
+    expect(p.deniedPathPatterns).not.toBe(rules.deniedPathPatterns);
+  });
+
+  test("the plan's patterns come from the validated copy, not a second read of the host's rules", () => {
+    const rules = testRules();
+    const first = [...rules.deniedPathPatterns];
+    let reads = 0;
+    Object.defineProperty(rules, "deniedPathPatterns", {
+      enumerable: true,
+      configurable: true,
+      get: () => {
+        reads += 1;
+        return reads === 1 ? first : ["SWAPPED"];
+      },
+    });
+    const p = plan(validSpec(), rules);
+    expect(reads).toBe(1);
+    expect(p.deniedPathPatterns).toEqual(first);
+  });
+
+  test("the topology has the run-spec.denied-paths invariant, enforced by the host", () => {
+    for (const rules of [
+      testRules(),
+      { ...testRules(), deniedPathPatterns: [] },
+    ]) {
+      const invariant = plan(validSpec(), rules).topology.invariants.find(
+        (entry) => entry.invariantId === "run-spec.denied-paths",
+      );
+      expect(invariant?.enforcedBy).toBe("host");
+      expect(invariant?.appliesTo).toBe("workflow");
+    }
+  });
+
+  test("a subtree claim that holds a denied name below it still plans, and the plan names the pattern", () => {
+    const spec = validSpec();
+    spec.lanes = [
+      { ...(spec.lanes[0] as RunSpecLane), allowedPaths: ["packages"] },
+    ];
+    spec.lanes[0] = { ...(spec.lanes[0] as RunSpecLane), dependsOn: [] };
+    const p = plan(spec);
+    expect(p.topology.lanes[0]?.ownedPaths).toEqual([
+      { path: "packages", scope: "subtree" },
+    ]);
+    expect(p.deniedPathPatterns).toContain(".env");
+  });
+});

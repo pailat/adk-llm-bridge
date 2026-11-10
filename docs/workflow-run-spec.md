@@ -402,7 +402,16 @@ that the JSON Schema agrees with.
 - Denied patterns match segment by segment. Comparison folds case and Unicode
   composition. `*` stands for any run of characters inside one segment. The
   text after the first `:` is dropped, and trailing dots and spaces are
-  ignored, so an alternate data stream or `.env.` does not evade `.env`.
+  ignored, so an alternate data stream or `.env.` does not evade `.env`. Each
+  path is also matched in the widened reading of the traversal check (NFKC,
+  ideographic full stops, percent-encoded dots and separators), so
+  `src/．git`, `src/。env` and `src/%2eenv` are denied like `src/.git` and
+  `src/.env`.
+- Denied patterns are checked against the paths a spec names, not against the
+  files below them. An allowed path `packages` passes even though
+  `packages/app/.env` matches `.env`. The plan carries the effective patterns
+  in `deniedPathPatterns`, and the host enforces them on every write (see
+  [What the host must do at run time](#what-the-host-must-do-at-run-time)).
 - Overlap is checked among all allowed paths of all lanes, ignoring case and
   Unicode composition. Each segment is also compared as Windows opens it:
   the text from the first `:` and trailing dots and spaces are ignored, so
@@ -435,6 +444,9 @@ without running anything:
   `maxConcurrency`, the rule set's `maxConcurrency` and the widest wave.
 - `startInput`: `inline` when the spec fits the size limits of an execution
   input, otherwise `reference`. See [Mapping](#mapping).
+- `deniedPathPatterns`: the effective denied path patterns, from the rule set
+  copy that was validated. The host enforces them on writes
+  (`run-spec.denied-paths`).
 - `topology`: the plan fields the spec determines.
 
 `layerRunSpecLanes(lanes)` groups lanes into waves with Kahn's algorithm. A
@@ -491,8 +503,9 @@ The topology maps each part of the spec as follows:
   `projectRoot`, is an owned path with scope `subtree`. `mayCreateUnder` and
   `acceptance` are empty.
 - `waves`: from `layerRunSpecLanes`.
-- `invariants`: `run-spec.budget` always, and `run-spec.human-approval` when
-  the spec publishes. Both are enforced by the host.
+- `invariants`: `run-spec.budget` and `run-spec.denied-paths` always, and
+  `run-spec.human-approval` when the spec publishes. All are enforced by the
+  host.
 - `reservedPaths`: empty.
 
 Provider, model, permission mode, tools, steps, gates and budget have no place
@@ -565,6 +578,46 @@ The library is pure. It decides what a spec may ask for. The host enforces it.
     equal ids only). A host that derives log or file names from QA ids must
     not fold case, or must add something that keeps two such ids apart, such
     as the command's index.
+13. **Enforce the denied paths on writes.** A `subtree` claim covers every
+    file below an allowed path, and the validator checks only the paths the
+    spec names. Reject every write, and every read you gate, whose path has a
+    segment that matches one of the plan's `deniedPathPatterns` or is shaped
+    like a Windows short name (`run-spec.denied-paths`). Use the same fold as
+    the validator: control, format and invisible characters dropped (HFS+
+    ignores them, so `.g\u200cit` opens `.git`), case, NFC, the text from the
+    first `:` dropped, trailing dots and spaces ignored, and the widened
+    reading of [Path semantics](#path-semantics).
+
+## Exports
+
+Everything `adk-llm-bridge/workflows/spec` exports. Each export has TSDoc and
+is `@experimental`.
+
+- Functions: `validateRunSpec`, `resolveRunPlan`, `mergeRunRules`,
+  `layerRunSpecLanes`, `runSpecHash`, `runSpecJsonSchema`,
+  `runSpecWorkflowPlan`, `runSpecWorkspacePath`, `runSpecIssueFamily`.
+- Constants: `DEFAULT_DENIED_PATH_PATTERNS`, `RUN_RULE_KEYS`,
+  `RUN_SPEC_DRY_RUN_BINDING`, `RUN_SPEC_EXTENSION_LIMITS`,
+  `RUN_SPEC_INPUT_LIMITS`, `RUN_SPEC_LIMITS`, `RUN_SPEC_ISSUE_CODES`,
+  `RUN_SPEC_ISSUE_FAMILIES`, `RUN_SPEC_ISSUE_FAMILY_NAMES`,
+  `RUN_SPEC_MAX_ISSUES`, `RUN_SPEC_MAX_ISSUE_MESSAGE_LENGTH`,
+  `RUN_SPEC_SCHEMA_ISSUE_CODES`.
+- Schemas (zod): `RunSpecSchema`, `RunSpecV1Schema`, `RunRulesSchema`,
+  `RunRulesOverrideSchema`, `RunSpecIssueSchema`, and the component schemas
+  `RunSpecAgentSchema`, `RunSpecBudgetSchema`, `RunSpecExtensionsSchema`,
+  `RunSpecGatesSchema`, `RunSpecLaneSchema`, `RunSpecPermissionModeSchema`,
+  `RunSpecPublishSchema`, `RunSpecQaCommandSchema`, `RunSpecReviewSchema`,
+  `RunSpecRoleSchema`, `RunSpecStepsPolicySchema`.
+- Types: `RunSpec`, `RunSpecV1`, `RunSpecInput`, `RunSpecAgent`,
+  `RunSpecBudget`, `RunSpecExtensions`, `RunSpecGates`, `RunSpecLane`,
+  `RunSpecPermissionMode`, `RunSpecPublish`, `RunSpecQaCommand`,
+  `RunSpecReview`, `RunSpecRole`, `RunSpecStepsPolicy`, `RunRules`,
+  `RunRulesOverride`, `RunRuleKey`, `RunSpecLayering`, `RunSpecTopology`,
+  `RunSpecPlanBinding`, `RunSpecIssue`, `RunSpecIssueCode`,
+  `RunSpecIssueFamily`, `RunSpecIssuePath`, `RunSpecValidationResult`,
+  `RunPlan`, `RunPlanAgent`, `RunPlanAgentPurpose`, `RunPlanCostBound`,
+  `RunPlanLane`, `RunPlanLimit`, `RunPlanLimits`, `RunPlanResult`,
+  `RunPlanStartInput`, `RunPlanWave`.
 
 ## Next
 

@@ -82,8 +82,9 @@ function startInput(spec: RunSpec): RunPlanStartInput {
  * second read of the host's object. For a valid spec the plan lists the
  * lanes in dependency order (by wave, then spec order), the waves, the
  * agents of each lane, the
- * effective limits with the rule sets behind each ceiling, and the worst-case
- * cost bound. The result depends only on the arguments: it reads no clock and
+ * effective limits with the rule sets behind each ceiling, the worst-case
+ * cost bound, and the effective denied path patterns the host enforces on
+ * writes. The result depends only on the arguments: it reads no clock and
  * no random source, and the input is not modified.
  *
  * @param spec - The value to plan.
@@ -180,6 +181,7 @@ export function resolveRunPlan(spec: unknown, rules: RunRules): RunPlanResult {
       ),
     },
     startInput: startInput(valid),
+    deniedPathPatterns: [...checked.rules.deniedPathPatterns],
     topology,
   };
   return { ok: true, plan };

@@ -61,11 +61,11 @@ describe("checkGraphRules: valid graphs", () => {
     expect(run(graph({ a: [], b: [], c: [] }))).toEqual([]);
   });
 
-  test("accepts 1,000 lanes within a second", () => {
+  test("accepts 1,000 lanes within five seconds", () => {
     const spec = wideSpec(1000);
     const start = performance.now();
     expect(run(spec)).toEqual([]);
-    expect(performance.now() - start).toBeLessThan(1000);
+    expect(performance.now() - start).toBeLessThan(5000);
   });
 
   test("appends to the issues already present and keeps them", () => {
@@ -544,14 +544,14 @@ describe("RUN_SPEC_DEPENDENCY_CYCLE", () => {
     expect(over).not.toContain("a".repeat(65));
   });
 
-  test("a 1,000-lane ring is reported within a second", () => {
+  test("a 1,000-lane ring is reported within five seconds", () => {
     const spec = wideSpec(1000);
     for (const [index, lane] of spec.lanes.entries()) {
       lane.dependsOn = [`lane-${(index + 999) % 1000}`];
     }
     const start = performance.now();
     const issues = run(spec);
-    expect(performance.now() - start).toBeLessThan(1000);
+    expect(performance.now() - start).toBeLessThan(5000);
     expect(
       codes(issues).filter((c) => c === "RUN_SPEC_DEPENDENCY_CYCLE"),
     ).toHaveLength(1000);

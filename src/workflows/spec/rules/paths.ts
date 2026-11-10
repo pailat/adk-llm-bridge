@@ -273,17 +273,25 @@ function hiddenCharacterProblem(path: string): string | undefined {
  * readings listed on {@link checkPathRules}.
  */
 function traversalAliasProblem(path: string): string | undefined {
-  const widened = path
+  for (const segment of widenedReading(path).split("/")) {
+    if (PARENT_ALIAS.test(segment)) return TRAVERSAL_PROBLEM;
+  }
+  return undefined;
+}
+
+/**
+ * A path as a host that maps text to a legacy code page, or decodes percent
+ * escapes, could read it: NFKC, dot and slash look-alikes, percent-encoded
+ * dots and separators, and backslashes as separators.
+ */
+function widenedReading(path: string): string {
+  return path
     .normalize("NFKC")
     .replace(SEPARATOR_LOOK_ALIKES, "/")
     .replace(DOT_LOOK_ALIKES, ".")
     .replace(PERCENT_DOT, ".")
     .replace(PERCENT_SEPARATOR, "/")
     .replaceAll("\\", "/");
-  for (const segment of widened.split("/")) {
-    if (PARENT_ALIAS.test(segment)) return TRAVERSAL_PROBLEM;
-  }
-  return undefined;
 }
 
 /** Reports a path with more segments than `RUN_SPEC_LIMITS.maxPathSegments`. */
@@ -453,14 +461,31 @@ function deniedMatcher(patterns: readonly string[]): DeniedMatcher {
  * A segment that cannot be matched within the call's work budget makes the
  * path `"unchecked"`, which is reported as denied; the paths after it skip
  * the patterns, since the spec is already rejected.
+ *
+ * The path is checked as written and, when it differs, in the widened
+ * reading the traversal check uses ({@link widenedReading}), so `src/．git`,
+ * `src/。env` and `src/%2eenv` are denied like `src/.git` and `src/.env`.
  */
 function deniedReason(
   path: string,
   matcher: DeniedMatcher,
 ): DeniedReason | undefined {
+  const visible = path.replace(HIDDEN_CHARACTERS, "");
+  const reason = deniedSegmentsReason(fold(visible).split("/"), matcher);
+  if (reason !== undefined) return reason;
+  const widened = widenedReading(visible).replace(HIDDEN_CHARACTERS, "");
+  if (widened === visible) return undefined;
+  return deniedSegmentsReason(fold(widened).split("/"), matcher);
+}
+
+/** {@link deniedReason} for the folded segments of one reading of a path. */
+function deniedSegmentsReason(
+  segments: readonly string[],
+  matcher: DeniedMatcher,
+): DeniedReason | undefined {
   const patterns =
     !matcher.exhausted && (matcher.exact.size > 0 || matcher.globs.length > 0);
-  for (const segment of fold(path.replace(HIDDEN_CHARACTERS, "")).split("/")) {
+  for (const segment of segments) {
     if (segment === "" || segment === ".") continue;
     if (isShortName(segment)) return "short name";
     if (!patterns) continue;

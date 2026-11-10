@@ -206,6 +206,14 @@ export type RunPlan = {
   /** How the spec travels in the start request. */
   startInput: RunPlanStartInput;
   /**
+   * Effective denied path patterns, from the rule set copy that was
+   * validated. The validator checks only the paths a spec names; the host
+   * must reject every write below a claim whose path has a segment that
+   * matches one of these, with the same fold as the validator
+   * (`run-spec.denied-paths`).
+   */
+  deniedPathPatterns: string[];
+  /**
    * Plan fields the spec determines, accepted by the existing plan
    * validator. The host completes them with `runSpecWorkflowPlan`.
    */

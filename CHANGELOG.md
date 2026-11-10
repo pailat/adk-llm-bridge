@@ -618,7 +618,9 @@ from the 0.6.0 tag.
   planning and the JSON Schema of a lanes job submitted as data: `validateRunSpec`,
   `resolveRunPlan`, `mergeRunRules`, `layerRunSpecLanes`, `runSpecHash` and
   `runSpecJsonSchema`, with documented `RUN_SPEC_*` issue codes (stability
-  policy in the doc). Rule sets also name the workflows a spec may run
+  policy in the doc), the zod schemas, limits and constants listed under
+  "Exports" in the doc. The plan carries the effective `deniedPathPatterns`,
+  which the host enforces on writes (`run-spec.denied-paths`). Rule sets also name the workflows a spec may run
   (`allowedWorkflows`) and the refs it may merge into (`allowedTargetRefs`);
   both are required and an empty list allows nothing. Needs `zod` >= 4; no
   other subpath changes. Conservative by design: lane ids that differ only in

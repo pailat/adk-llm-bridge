@@ -201,3 +201,42 @@ describe("run spec links and entry points", () => {
     expect(added).toMatch(/experimental/i);
   });
 });
+
+describe("workflow run spec documentation: denied paths and exports", () => {
+  test("the host duties name the plan's deniedPathPatterns and the invariant", () => {
+    const duties = section(doc(), "What the host must do at run time");
+    expect(duties).toContain("deniedPathPatterns");
+    expect(duties).toContain("run-spec.denied-paths");
+  });
+
+  test("the plan and path sections say denied patterns reach the host", () => {
+    expect(section(doc(), "Plan")).toContain("`deniedPathPatterns`");
+    expect(section(doc(), "Path semantics")).toMatch(
+      /not against the\s+files below them/,
+    );
+  });
+
+  test("every runtime export of the subpath appears in the Exports section", () => {
+    const exports = section(doc(), "Exports");
+    expect(exports).not.toBe("");
+    for (const name of Object.keys(spec)) {
+      expect(exports).toContain(`\`${name}\``);
+    }
+  });
+
+  test("every type export of the subpath appears in the Exports section", () => {
+    const exports = section(doc(), "Exports");
+    const index = read("src/workflows/spec/index.ts");
+    const names = [...index.matchAll(/export type \{([^}]*)\}/g)].flatMap(
+      (match) =>
+        (match[1] ?? "")
+          .split(",")
+          .map((name) => name.trim())
+          .filter((name) => name !== ""),
+    );
+    expect(names.length).toBeGreaterThan(30);
+    for (const name of names) {
+      expect(exports).toContain(`\`${name}\``);
+    }
+  });
+});

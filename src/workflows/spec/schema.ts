@@ -1200,8 +1200,10 @@ export function readRuleSet<Schema extends z.ZodType>(
  * @param overrides - Partial rule sets, applied in order.
  * @returns A new complete rule set that matches {@link RunRulesSchema}.
  * @throws `TypeError` when `base` does not match {@link RunRulesSchema}, an
- * override does not match {@link RunRulesOverrideSchema}, or a rule would
- * record more than `RUN_SPEC_LIMITS.maxRuleOrigins` origins.
+ * override does not match {@link RunRulesOverrideSchema}, a rule would
+ * record more than `RUN_SPEC_LIMITS.maxRuleOrigins` origins, or the merged
+ * `deniedPathPatterns` would have more than
+ * `RUN_SPEC_LIMITS.maxRuleListEntries` entries.
  * @experimental
  */
 export function mergeRunRules(
@@ -1224,6 +1226,11 @@ export function mergeRunRules(
     return checked;
   });
   const merged = mergeCheckedRunRules(checkedBase, checkedOverrides);
+  if (merged.deniedPathPatterns.length > RUN_SPEC_LIMITS.maxRuleListEntries) {
+    throw new TypeError(
+      `mergeRunRules: deniedPathPatterns would exceed ${RUN_SPEC_LIMITS.maxRuleListEntries} entries.`,
+    );
+  }
   for (const key of RUN_RULE_KEYS) {
     if ((merged.origins?.[key]?.length ?? 0) > RUN_SPEC_LIMITS.maxRuleOrigins) {
       throw new TypeError(
@@ -1521,7 +1528,8 @@ export function layerRunSpecLanes(
  *   project root with {@link runSpecWorkspacePath}, becomes an owned path
  *   with scope `subtree`; `mayCreateUnder` and `acceptance` are empty.
  * - `waves`: the waves passed in, normally from {@link layerRunSpecLanes}.
- * - `invariants`: the budget, and human approval when the spec publishes.
+ * - `invariants`: the budget, the denied paths, and human approval when the
+ *   spec publishes.
  * - `reservedPaths`: empty.
  *
  * The provider, model, permission mode, tools, steps, gates and budget have
@@ -1561,6 +1569,13 @@ export function runSpecPlanTopology(
       invariantId: "run-spec.budget",
       description:
         "No agent run starts once the metered cost reaches the budget of the run spec.",
+      appliesTo: "workflow",
+      enforcedBy: "host",
+    },
+    {
+      invariantId: "run-spec.denied-paths",
+      description:
+        "No write lands on a path with a segment that matches a denied path pattern of the rule set or is shaped like a Windows short name, even inside an owned subtree.",
       appliesTo: "workflow",
       enforcedBy: "host",
     },
