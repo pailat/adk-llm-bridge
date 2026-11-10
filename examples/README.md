@@ -12,6 +12,7 @@ Examples of using `adk-llm-bridge` with Google ADK and multiple LLM providers.
 | [basic-agent-anthropic](./basic-agent-anthropic) | Anthropic | Multi-agent HelpDesk with Claude models |
 | [basic-agent-xai](./basic-agent-xai) | xAI | Multi-agent HelpDesk with Grok models |
 | [basic-agent-lmstudio](./basic-agent-lmstudio) | LM Studio | Multi-agent HelpDesk with local models |
+| [keyless](./keyless) | Custom (local fake endpoint) | One agent end to end with no API key and no network |
 | [basic-agent-claude](./basic-agent-claude) | Claude Agent SDK | Claude as an external ADK agent |
 | [basic-agent-codex](./basic-agent-codex) | OpenAI Codex | Codex as an external ADK agent |
 | [basic-agent-gemini](./basic-agent-gemini) | Gemini CLI | Gemini CLI as an external ADK agent |

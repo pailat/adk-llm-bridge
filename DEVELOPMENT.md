@@ -31,7 +31,9 @@ adk-llm-bridge/
 ### Prerequisites
 
 - [Bun](https://bun.sh/) >= 1.4.4
-- Node.js >= 22.0.0 (CI tests 22, 24 and 26; `mise.toml` pins 26.13.0 for local dev)
+- Node.js >= 22.0.0 (CI tests 22, 24 and 26; `mise.toml` pins 26.13.0 for local dev).
+  The tests need a real `node` on `PATH`, even under Bun: the external-agent
+  interpreter tests in `tests/agents` start Node processes.
 
 ### Initial setup
 

@@ -2,7 +2,7 @@
 
 `adk-llm-bridge/workflows` has two persistence modes:
 
-- The default `ADKSessionCheckpointStore` emits ADK `stateDelta` values and
+- The default `AdkSessionCheckpointStore` emits ADK `stateDelta` values and
   coordinates pending revisions inside one process.
 - `FileSystemWorkflowCheckpointStore` commits checkpoint revisions to a local
   filesystem and performs compare-and-swap under a cross-process lock.
@@ -64,7 +64,7 @@ carry `details.causeCode` (the system error code) and, when available,
 | `details.reason` | Meaning |
 | --- | --- |
 | `checkpoint_revision_conflict` | A compare-and-swap write found another revision (`WorkflowCheckpointConflictError`, with `expectedRevision` and `actualRevision`). Reload and retry. |
-| `checkpoint_size_limit_exceeded` | The checkpoint is larger than the configured limit (`maxBytes`, `actualBytes`, `direction`). |
+| `checkpoint_size_limit_exceeded` | The checkpoint is larger than the configured limit (`maxBytes`, `actualBytes`, `direction`; on a save during a run also `stepId` and `largestContributors`). See [Checkpoint size](#checkpoint-size). |
 | `checkpoint_revision_invalid` | The supplied revision does not match the checkpoint, or a stored file carries an invalid revision. |
 | `checkpoint_schema_invalid` | A save was given an invalid checkpoint. |
 | `checkpoint_file_corrupt` | A stored file is not valid JSON or not a valid checkpoint file. |
@@ -74,6 +74,126 @@ carry `details.causeCode` (the system error code) and, when available,
 | `checkpoint_lock_corrupt` | The lock is not a safe directory or has no valid owner; it is never taken over automatically. |
 | `checkpoint_lock_ownership_lost` | Another writer took the lock, before the commit or before the release that follows it; the save fails. |
 | `checkpoint_lock_acquire_failed`, `checkpoint_lock_candidate_failed`, `checkpoint_lock_candidate_cleanup_failed`, `checkpoint_lock_read_failed`, `checkpoint_lock_recovery_failed`, `checkpoint_lock_release_failed`, `checkpoint_lock_cleanup_failed` | A file system call on the lock failed. A `checkpoint_lock_release_failed` after a committed write is only logged (see above). |
+
+## Checkpoint size
+
+One execution has one checkpoint, and it grows with every step that
+completes: each step result is kept in full, so a later step can be
+replayed without running again. A step that returns N bytes of text adds
+about N bytes: its text is stored once, in `result.output`. Step inputs are
+stored as hashes only, and
+step events and replay markers are removed before a save. The original
+workflow input is kept only while a step waits for input. Both bundled stores
+refuse a checkpoint larger than `maxCheckpointBytes` (4 MiB by default,
+`DEFAULT_WORKFLOW_CHECKPOINT_MAX_BYTES`), on save and on load.
+
+### How a step's text is stored
+
+A completed step result carries the text as `output` and the final model
+message as `content`. When `content` is exactly
+`{ role: "model", parts: [{ text: output }] }` (the usual case for a step that
+answers with text), the checkpoint stores `contentFromOutput: true` instead of
+`content`. On replay the runtime rebuilds `content` from `output`, so
+`ctx.run()` returns the same result as when the step ran. Any other `content`
+(several parts, a function call, another role, extra fields) is stored as is.
+
+Code that reads a checkpoint directly (a custom store, an inspection tool)
+reads a step result with `workflowStepResultFromCheckpoint(step.result)`,
+which rebuilds `content` and drops the marker. A checkpoint written before
+this form (an earlier 0.7.0 build) stores both fields; it loads and replays
+unchanged, and the next save stores it in the compact form, with a new
+revision. A build that does not know `contentFromOutput` reads such a step as
+having no `content`.
+
+### When the limit is hit
+
+The size is checked when the step's result is saved, after the step has run.
+Whatever the step did (files written, tools called, money spent) has happened,
+but its result is not stored: the step is recorded as `failed` with the size
+error, and the run fails with `WORKFLOW_EXECUTION_ERROR`,
+`details.reason: "checkpoint_size_limit_exceeded"`. The error names the step
+(`details.stepId`), the sizes (`actualBytes`, `maxBytes`) and the five largest
+parts of the checkpoint (`details.largestContributors`, each
+`{ path, bytes }`, such as `["steps", "diff", "result", "output"]`); the
+message repeats them. The store's original error is kept as the error's
+`cause` (not serialized). The step's recorded failure carries the same details.
+
+A resume after raising the limit cannot recover the lost result:
+
+- with the same store configuration and no retry option, the recorded failure
+  is replayed and the step does not run again;
+- with a larger `maxCheckpointBytes` and no retry option, the same: the
+  failure is replayed, the run fails again with the same error;
+- with a larger `maxCheckpointBytes` and `retryFailedSteps: true` or the
+  step's `resumePolicy: "retry"`, the step runs again as its next attempt (its
+  side effects happen again) and the run continues. Steps completed before it
+  are replayed from the checkpoint.
+
+A checkpoint that is already larger than the limit of the store that loads
+it fails on load (`direction: "load"`); load it with a store whose limit is at
+least as large.
+
+### Warning at 80%
+
+When the store exposes its limit (`WorkflowCheckpointStore.maxCheckpointBytes`;
+`ADKSessionCheckpointStore` and `FileSystemWorkflowCheckpointStore` do), a
+run emits one `checkpoint_size_warning` event the first time a saved
+checkpoint reaches 80% of it (`WORKFLOW_CHECKPOINT_SIZE_WARNING_RATIO`). The
+event follows that save's `checkpoint_saved` event and carries
+`checkpointKey`, `stepId` (when a step triggered the save), `bytes`,
+`maxBytes` and `largestContributors`. It is emitted at most once per
+checkpoint key per run (one `WorkflowAgent` invocation); a resumed run can
+emit it again. The run is not stopped. A custom store without
+`maxCheckpointBytes` gets no warning, and its own size error is still enriched
+with `stepId` and `largestContributors` when it uses
+`workflowCheckpointSizeLimitError`.
+
+### Keeping checkpoints small
+
+- Return a reference, not the payload. A step that produces a large result (a
+  full diff, a corpus, a log, a binary) should write it to an artifact (ADK's
+  artifact service, a file, an object store) and return its name, path or
+  URL, with a digest when the content must be verified later. The checkpoint
+  then stays small and the payload survives a failed run.
+- Cap what a step returns. Truncate text that is only read by a later prompt,
+  and say where the rest is.
+- Watch for `checkpoint_size_warning` and treat it as a design signal, not a
+  number to raise.
+- Raise the limit only when large results are expected:
+  `new FileSystemWorkflowCheckpointStore({ root, maxCheckpointBytes })` or
+  `new ADKSessionCheckpointStore({ maxCheckpointBytes })`. Every checkpoint is
+  written in full on every save, so a larger limit means more I/O per step, and
+  an ADK session service may have its own size limit on state.
+- To resume a run that failed on the limit, raise the limit and re-run the
+  same execution id with `retryFailedSteps: true` (or give the failed step
+  `resumePolicy: "retry"`), accepting that the step runs again.
+
+### Writing your own checkpoint store
+
+A store over another backend implements `WorkflowCheckpointStore`. These
+exports from `adk-llm-bridge/workflows` keep it consistent with the bundled
+stores:
+
+- `workflowCheckpointRevision(checkpoint)` computes the revision to store with
+  a checkpoint, and `workflowCheckpointRevisionMatches(checkpoint, stored)`
+  checks a stored revision on load (it also accepts the digest form written
+  by 0.7.0 pre-release builds). Throw `WorkflowCheckpointConflictError` when a save's
+  `expectedRevision` does not match.
+- `assertWorkflowCheckpointSize(checkpoint, key, maxBytes, direction)` rejects
+  a checkpoint over the limit, on save and on load.
+  `DEFAULT_WORKFLOW_CHECKPOINT_MAX_BYTES` is the bundled stores' 4 MiB
+  default. When the store measures the size itself:
+  - `workflowCheckpointByteLength(checkpoint)` is the size the limit applies
+    to: the UTF-8 byte length of `JSON.stringify(checkpoint)`.
+  - `workflowCheckpointSizeLimitError(key, maxBytes, actualBytes, direction)`
+    builds the error the bundled stores throw: `WorkflowError` with code
+    `WORKFLOW_EXECUTION_ERROR` and `details.reason`
+    `checkpoint_size_limit_exceeded`, so callers handle every store alike.
+- `stableSerializeWorkflowValue(value)` returns the canonical JSON the
+  workflow hashes are computed from (keys sorted by UTF-16 code unit). Use it
+  where the store needs a byte-stable form of a JSON value, for example to
+  compare two values or as a database key. It throws `WorkflowError`
+  (`WORKFLOW_EXECUTION_ERROR`) for a value that is not JSON.
 
 ## Stopping a run
 
@@ -138,9 +258,9 @@ An ADK node `timeout` rejects `runAsync` with ADK's `NodeTimeoutError` before
 the workflow has recorded the abort. The `interrupted` record is written
 shortly after, so do not exit the process right after that error.
 
-Any abort reason is accepted, except a `WorkflowError` with another code,
-which is rethrown as is and ends the execution and step as `failed`. Once the
-workflow has settled:
+Any abort reason is accepted. A `WorkflowError` with another code becomes
+`WORKFLOW_ABORTED` and keeps its code as `details.reasonCode`, so it is
+recorded like any other abort. Once the workflow has settled:
 
 - The checkpoint is `cancelled` with `completedAt` and a `WORKFLOW_ABORTED`
   error.
@@ -158,6 +278,18 @@ workflow has settled:
 - An abort during the delay before an in-run retry records no new attempt: the
   step keeps the previous attempt's `failed` record and error, and a resume
   without opt-in replays that failure.
+
+`ctx.parallel` in `failureMode: "fail-fast"` (the default) stops the other
+steps the same way when one step fails. The run fails with that step's error
+and the checkpoint is `failed`, not `cancelled`; the failing step is `failed`,
+and each sibling still in flight is `interrupted` with `WORKFLOW_ABORTED`
+(`details.reasonCode` is the failing step's code, `details.failedStepId` its
+id) and a `step_interrupted` event. A step still queued behind `concurrency`
+is not started and not recorded, so a resume runs it as a first attempt. A resume therefore needs `retryFailedSteps` or
+`resumePolicy: "retry"`: with it, the failed step and the interrupted
+siblings run again as their next attempt; without it, the resume fails with
+`WORKFLOW_INDETERMINATE_STEP` for the interrupted sibling, which may have had
+side effects.
 
 If the turn that fails with `WORKFLOW_INDETERMINATE_STEP` was answering a
 waiting step, do not send the same answer again: it fails the same way. First
@@ -215,6 +347,11 @@ checkpoint it wrote before the kill:
   to a `running` one.
 - A step input hash is checked on resume for every recorded step, so a step
   cannot be resumed with a corrected input; give the step a new id instead.
+  The `WORKFLOW_STEP_MISMATCH` error's details name the saved step's
+  `savedStatus` and `savedAttempts` next to the saved and current agent,
+  revision and input hash, so you can see whether the old step was left
+  `running` (its side effects are unknown) before you replace it. There is no
+  API to drop a recorded step.
 
 ## Waiting steps
 
@@ -234,21 +371,75 @@ resuming reads from each stored event (`author`, `branch`, `longRunningToolIds`,
 `actions.stateDelta`) must have their ADK types; a
 checkpoint that fails this check is rejected as `checkpoint_file_corrupt`.
 
+An answer resumes the waiting step once. If the resumed delegation then
+throws instead of finishing (the run is aborted or times out, the workspace
+lease is lost, or a checkpoint save or a hook fails), the step stays `waiting`
+with the same interrupt, so the answer can be sent again. The tool the answer
+approved may already have run by then: sending the same answer again resumes
+the delegation from the same interrupt and can run that tool a second time.
+A delegation that finishes with an error is different: the step is recorded
+as failed. Before re-sending an answer after such a failure, check whether the
+approved action took effect, or make the tool idempotent (see
+[Attempt idempotency and durable outboxes](#attempt-idempotency-and-durable-outboxes)).
+
+### Who can write the checkpoint
+
+The default `AdkSessionCheckpointStore` keeps the checkpoint, including the
+stored interrupt events of a waiting step, in ADK session state. Session
+state is not private to the workflow. The events of a step's sub-agent reach
+the Runner with their `stateDelta` unchanged, which nested workflows rely on;
+only the step's result has the checkpoint keys removed. A tool that runs in a
+step can therefore write any state key, including the parent workflow's
+checkpoint key, and replace the checkpoint or its stored interrupt. The
+checkpoint's revision does not prevent this: a tool can write a valid
+checkpoint with a matching revision.
+
+The key is `WORKFLOW_CHECKPOINT_STATE_PREFIX`, the workflow id and the
+execution id, joined by `:`. Code has to choose that key to write it: a model
+cannot reach it unless a tool lets the model choose state keys, so do not give
+steps such a tool. When steps run tools you do not trust, use
+`FileSystemWorkflowCheckpointStore` or your own store: they load the
+checkpoint from their own storage, so a write to session state does not change
+what a resume reads. (The file system store also puts a copy in session state;
+a resume ignores it.)
+
 ## Step limit on a resumed run
 
-`limits.maxSteps` bounds the steps one turn of the workflow may invoke. Steps
-replayed from the checkpoint count too. A resumed turn replays every recorded
-step through the handler, so in effect the limit bounds every step the
-execution has ever run, and a long-lived run reaches `WORKFLOW_LIMIT_EXCEEDED`
-on a later resume even though each turn ran few new steps. The error details
-carry `limit`, `stepId` and `replayedSteps`, for handler and script workflows
-alike, and the execution summary reports `steps` and `replayedSteps`. A script
-workflow also bounds its yielded messages at twice `maxSteps` plus one, so a
-raised limit raises that bound too.
+A turn has two step bounds, and both are checked before a step is saved
+`running` or its agent starts, also inside `ctx.parallel`:
 
-To continue the run, raise `limits.maxSteps` in the definition (the limit is not
-part of the checkpoint identity) and resume the same execution id: finished
-steps replay and the run goes on from where it stopped.
+| Limit | Counts | Default |
+| --- | --- | --- |
+| `limits.maxSteps` | Steps whose agent may run in this turn: a new or retried step, a waiting step that continues with the turn's answer, and a step a `beforeStep` or `beforeAttempt` hook answers (it is admitted before the hook runs). | 100 |
+| `limits.maxReplayedSteps` | Steps answered from the checkpoint: a recorded result, or a recorded failure replayed as that failure. | Ten times the effective `maxSteps` (1000 with the default) |
+
+A resumed turn replays every step the execution recorded before, so a
+long-lived run needs no larger `maxSteps` on a later resume: only the steps it
+executes in that turn count. The replay bound still grows with the life of the
+run and guards against a script that loops over recorded steps.
+
+On `WORKFLOW_LIMIT_EXCEEDED` the details carry `limit` (the bound that was
+passed), `limitName` (`"maxSteps"` or `"maxReplayedSteps"`), `stepId` (the
+first step over it), `executedSteps` and `replayedSteps` (the counts before
+that step), `maxSteps` and `maxReplayedSteps`, for handler and script
+workflows alike. The execution summary reports `steps` and `replayedSteps`;
+its `replayedSteps` also counts the steps a hook answered.
+
+A script workflow follows the same rule: `ScriptWorkflowAgent` with a
+checkpoint store lets the workflow runtime count each step, and bounds the
+guest's yielded messages at twice `maxSteps + maxReplayedSteps` plus one
+(twice `maxSteps` plus one without a checkpoint store). Called directly,
+`runWorkflowScript` counts every requested step toward `maxSteps` before the
+host runs it, unless the host passes `replaysFromCheckpoint: true`. Then the
+runner cannot know which steps replay, so it only refuses a request that would
+take the turn past `maxSteps + maxReplayedSteps` (`limitName:
+"maxSteps + maxReplayedSteps"`, with `requestedSteps` instead of the per-kind
+counts), and the host must enforce each bound before running a step's agent,
+as the workflow runtime does.
+
+To continue a run stopped by either bound, raise that limit in the definition
+(limits are not part of the checkpoint identity) and resume the same execution
+id: finished steps replay and the run goes on from where it stopped.
 
 ## Re-entered steps
 
@@ -317,6 +508,57 @@ meets `i`), but never fewer. Leases keep the caller's spelling. Every
 `FileSystemWorkspaceAdapter` that shares a `stateDirectory` must use the same
 setting. Write paths follow the
 [portable path grammar](./workflow-orchestration.md#identifiers-and-paths).
+
+## Host sleep and wall-clock steps
+
+A run on a host that sleeps (a closed laptop lid, macOS or Linux suspend) looks
+hung: no JavaScript timer fires and no heartbeat renews anything until the host
+wakes. The wall clock keeps moving, so on wake `Date.now()` has jumped forward
+by the time spent asleep. Whether that time also counts toward a pending timer
+delay depends on the runtime and the operating system; do not rely on either.
+The bridge uses two clocks on purpose:
+
+- Durable expiry shared between processes is wall time (epoch milliseconds),
+  because it is persisted and compared by other processes. Time asleep counts.
+- Waits and budgets that start and end in one process use a monotonic clock, so
+  a wall-clock step (an NTP correction, a manual change, or the jump on wake)
+  neither ends them early nor stretches them. That covers the workspace state
+  lock wait (`lockAcquireTimeoutMs`), the checkpoint lock wait
+  (`lockTimeoutMs`), the repository mutation lock wait (`acquireTimeoutMs`),
+  the 500 ms grace for delegated runs after an abort, and the sandbox CPU
+  budget (`cpuTimeMs`).
+
+What a sleep longer than the relevant limit does:
+
+| Mechanism | Clock | After wake |
+| --- | --- | --- |
+| `FileSystemWorkspaceAdapter` lease (`leaseTtlMs`) | wall | Expired. The next heartbeat or expiry timer finds it purged and aborts `lossSignal` with `WORKSPACE_LEASE_LOST`; the step fails with `WORKFLOW_WORKSPACE_LEASE_LOST`. Another process may already hold the paths with a higher `fencingToken`. |
+| Task claim lease (`WorkflowTaskController`, `leaseDurationMs`) | wall | Expired. The next heartbeat or settle fails with `WORKFLOW_TASK_LEASE_EXPIRED`, and a dispatcher sweep returns the task to the queue. |
+| Mutation reservation (`WorkflowLiveChangeReceiptAuthority`, `reservationTtlMs`, default 60 s) | wall | Expired after a sleep longer than the TTL. On wake the reservation is marked `expired` and the change is reconciled as `ambiguous`; the ownership and plan controllers no longer count it as active. Raise `reservationTtlMs` on hosts that sleep, at the cost of slower recovery from a crashed holder. |
+| Checkpoint lock and repository mutation lock | none | Not time-based: a lock is held while its owner process is alive, so sleep does not release it. |
+| Lock wait timeouts, delegated-run grace, sandbox `cpuTimeMs` | monotonic | Unaffected by the wall-clock jump. |
+| Execution `timeoutMs`, node `timeout`, retry backoff delays | runtime timers | Fire on wake at the earliest, possibly later. An execution or node timeout that fires aborts the run as described in [Stopping a run](#stopping-a-run). |
+| External agent runs (Claude, Codex, Gemini CLIs) | none of the bridge's | The bridge sets no run timeout of its own; the CLI process is suspended with the host. On wake it continues, or fails if its provider connection dropped, and the step fails or retries by its policy. |
+
+Between wake and the first heartbeat, local code can still run with a
+workspace lease that durable state already dropped. That is the same window as
+any paused process, and a writer that enforces `fencingToken` (see
+[Workspace leases and fencing](#workspace-leases-and-fencing)) rejects its
+writes.
+
+What the operator should do:
+
+- Keep the host awake for long runs. On macOS run the host under
+  `caffeinate -i` (for example `caffeinate -i bun run my-workflow.ts`); on
+  Linux use `systemd-inhibit --what=sleep`; on Windows keep the power plan from
+  sleeping while the run lasts.
+- After a sleep, resume with the same execution id, as after any interruption.
+  Completed steps replay from the checkpoint. A step that was in flight is
+  recorded `interrupted` (or left `running` if the process ended), so the resume
+  needs `retryFailedSteps` or `resumePolicy: "retry"`; see
+  [Re-entered steps](#re-entered-steps).
+- Size `leaseTtlMs` for process death, not for sleep: a TTL long enough to cover
+  a closed lid also delays recovery from a crashed writer by that long.
 
 ## Retired lock tombstones
 

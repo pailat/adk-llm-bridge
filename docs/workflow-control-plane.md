@@ -252,6 +252,14 @@ or wakes when a new message arrives.
 
 ## Error codes
 
+Each workflow error class carries the codes of one type, named after it:
+`WorkflowControlPlaneError` (`WorkflowControlPlaneErrorCode`) is thrown by
+`dispatch` itself, and each service throws its own `*ControlError`:
+`WorkflowExecutionControlError`, `WorkflowTaskControlError` and
+`WorkflowOrchestrationControlError`, each with the matching `*ErrorCode`
+type. The workflow runtime throws `WorkflowError` (`WorkflowErrorCode`).
+Branch on `error.code`, not on the message.
+
 `dispatch` throws `WorkflowControlPlaneError` with one of these codes
 (`WorkflowControlPlaneErrorCode`):
 

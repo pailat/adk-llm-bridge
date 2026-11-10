@@ -62,6 +62,10 @@ The `register*()` functions (for example `registerAIGateway()`) do the same and
 also store global provider options. The factory functions (`AIGateway(...)`)
 need no registration.
 
+`LLMRegistry` matches the whole model name and caches each result, so register
+every class at startup; see
+[How `LLMRegistry` finds a class](provider-requests-and-responses.md#how-llmregistry-finds-a-class).
+
 ## 2. Provider errors are thrown by default
 
 In 0.5.3, a failed provider call came back as an `LlmResponse` with
@@ -151,6 +155,20 @@ Related behavior changes:
   `temperature`, `top_p`, stop sequences, penalties and logprobs are dropped
   for them, and `thinkingConfig` maps to `reasoning_effort`.
 
+### Model and response fields
+
+- A `beforeModelCallback` that sets `llmRequest.model` now changes the model
+  sent, when the id is one the provider accepts (for example `o4-mini` on
+  `OpenAILlm`, `claude-*` on `AnthropicLlm`). Before, the provider always sent
+  its own model. An id the provider does not accept is ignored with a
+  `[REQUEST_MODEL_IGNORED]` warning. See
+  [Provider requests and responses](provider-requests-and-responses.md#which-model-is-sent).
+- Responses carry `modelVersion`, and the last streamed response has
+  `partial: false`.
+- A content-filter finish with no content now has `errorCode: "SAFETY"`. Code
+  that treats any `errorCode` as a failed call will see these turns as
+  failures, which is what they are.
+
 ## 4. Usage metadata
 
 - Anthropic `promptTokenCount` now includes cache-read and cache-creation
@@ -196,6 +214,12 @@ When the `OTEL_...` variable is not set, the bridge's spans follow
 puts content on the bridge's spans. As on ADK main, it means `EVENT_ONLY`. To
 keep content on spans, set `SPAN_ONLY` or `SPAN_AND_EVENT`.
 
+`gen_ai.provider.name` uses the OpenTelemetry semantic-convention value where
+one exists: xAI is `x_ai`, not `xai`. OpenAI is `openai`, Anthropic is
+`anthropic`, and OpenRouter, AI Gateway and custom providers keep the bridge id
+(`openrouter`, `ai-gateway`, `custom`). Update dashboards that filter on
+`xai`.
+
 ADK always writes the agent's `description` to `gen_ai.agent.description` on
 its `invoke_agent` spans, whatever these variables say: it is agent
 configuration, not message content. Do not put prompt text or secrets in
@@ -222,6 +246,22 @@ new in 0.7.0. If you already use them, these changes apply:
   results under 64 KiB of UTF-8 JSON (256 KiB per turn), or the turn ends
   with `EXTERNAL_AGENT_TOOL_RESULT_TOO_LARGE`.
   A tool that finishes at once should be a plain `FunctionTool`.
+- **ADK tools an external runtime cannot use are logged.** In-model tools
+  (`GOOGLE_SEARCH`, `URL_CONTEXT`) are reported in `skipped` as `in-model`
+  (was `no-declaration`) and logged as `ADK_TOOL_IN_MODEL_SKIPPED`. A tool
+  without a declaration that only edits the model request (`PRELOAD_MEMORY`)
+  is skipped as `request-processor` and logged as
+  `ADK_TOOL_REQUEST_PROCESSING_SKIPPED`; a declared tool or toolset with its
+  own `processLlmRequest` (`LoadArtifactsTool`, a skill toolset) is exposed
+  without it and logged with the same code. A toolset whose `getTools`
+  throws is logged as `ADK_TOOLSET_FAILED`, and its `skipped` entry has the
+  error as `cause`. Each warning is logged once per tool for each run;
+  silence them with ADK's `setLogLevel` or a custom logger. Code that
+  switches on `SkippedTool.reason` must handle `in-model` and
+  `request-processor`.
+- **`ExternalAgentUsage.byModel` entries have no `scope`** (type
+  `ExternalAgentModelUsage`); the usage's own `scope` covers them. The
+  drivers never set one there.
 - **Array tool results** are `{ results: [...] }` (as in ADK), not
   `{ result: [...] }`, in function responses of bridged ADK tools and of the
   runtime's own tools. Update code that reads them.
@@ -321,6 +361,21 @@ new in 0.7.0. If you already use them, these changes apply:
   `Bash`. `Glob` and `Grep` without a search path, and any relative glob
   without one (such as Gemini `read_many_files` `include`), are now checked
   against the working directory. The sandbox confines Bash writes, not reads.
+  One read outside `allowedPaths` is allowed: `Read` of the run's own
+  session `tool-results` directory, where Claude Code saves a tool output
+  too large to return inline. Nothing to change; see
+  [External agent isolation](external-agent-isolation.md).
+- **Reading wider than you write (`readPaths`, new).** A writer confined
+  with `allowedPaths` could not read outside it. Give it
+  `readPaths: [...]` next to `allowedPaths` to add roots that read tools
+  (`Read`, `Glob`, `Grep`, `read_file`, ...) may reach and nothing may write.
+  On `ClaudeAgentSdkDriver` this replaces the split into a `read-only` reader
+  and a narrow writer. The other drivers refuse it unless built with
+  `allowUnenforcedPaths: true`. `readPaths` without `allowedPaths` throws
+  `InputValidationError`. A hand-built policy that sets `readPathBounds` is
+  checked against it for reads instead of `pathBounds`. Policies without
+  `readPaths` behave as before. See docs/external-agent-isolation.md,
+  "Reading wider than you write".
 - **Bridge tools and the MCP network denial.** With the network off, only the
   tools `ExternalAgent` bridged for the run are exempt from the `mcp__*`
   denial. A host MCP server whose name starts with `adk_bridge` is no longer
@@ -398,7 +453,11 @@ new in 0.7.0. If you already use them, these changes apply:
     at start where the sandbox cannot run. On Linux install bubblewrap (and
     socat). On Windows the sandbox is not available: set
     `allowNetwork: true`, or pass `allowUnsandboxedShell: true` to the
-    driver. Either remedy also works on Linux.
+    driver. Either remedy also works on Linux. The sandbox also forbids
+    binding local ports (Turbopack's PostCSS worker, test servers); pass
+    `allowLocalBinding: true` to the Claude driver to allow loopback ports
+    only (macOS only; Claude Code ignores it on Linux). Treat it as network
+    access: loopback services may become reachable.
   - Codex agents in `full-access` mode are refused: use `workspace-write` or
     `ask`, set `allowNetwork: true`, or pass `allowUnenforcedNetwork: true`.
     In the other modes Codex turns off the MCP servers of your Codex config
@@ -445,11 +504,24 @@ new in 0.7.0. If you already use them, these changes apply:
   `--ask-for-approval`, `--full-auto`, `--yolo`, `--add-dir`, `--cd`,
   `--profile`, `--enable`, `--disable`, `--search`, or a `-c` override of the
   sandbox, approval, web search, tools, MCP server, feature or profile keys.
+  Also refused, because they widen the run: Claude `--agents`, `--agent`,
+  `--plugin-url`, `--permission-prompts`, `--worktree`/`-w`,
+  `--remote-control`, `--cloud`, `--teleport`, `--environment`; Codex
+  `--approve-for-me`, `--dangerously-bypass-hook-trust`, `--worktree`, and a
+  `-c` override of `approvals_reviewer`, `default_permissions`, `permissions`
+  or `agents`. One-letter flag clusters such as `-pw` are split first. See
+  [External agent isolation](./external-agent-isolation.md#extra-args).
   Express the setting through the permission policy or a driver option
   instead, or build the driver with `allowPolicyOverrideArgs: true` to keep
   passing it (the CLI's handling of the repeated flag then decides, and the
   run may not keep the policy). A non-string entry throws
   `InputValidationError`.
+- **Codex approvals reviewer.** `CodexCliDriver` and `CodexSdkDriver` pass
+  `-c approvals_reviewer="user"` outside `full-access`, so an
+  `approvals_reviewer = "auto_review"` in `~/.codex/config.toml` no longer
+  turns a `never` approval policy into automatic model approval. A host that
+  wants the model reviewer passes `-c approvals_reviewer=...` in `args` with
+  `allowPolicyOverrideArgs: true` (CLI driver; it comes after the pin).
 - **Claude CLI driver.** New `model`, `maxTurns` and `systemPrompt` options
   replace `args: ["--model", ...]`. A failed run reports the error code from
   its `result` line (`MAX_TURNS_EXCEEDED`, `INVALID_REQUEST`, ...) instead of
@@ -483,12 +555,34 @@ new in 0.7.0. If you already use them, these changes apply:
   (for example `resolve("node_modules/.bin/claude")`), or install the CLI
   outside the workspace. See
   [Missing dependencies](external-agent-isolation.md#missing-dependencies).
+- **Background tasks are off for Claude runs.** `ClaudeAgentSdkDriver` and
+  `ClaudeCliDriver` set `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`: a headless
+  run ends at its result, and nothing would deliver a background task's
+  completion, so a model that backgrounded a command stopped while waiting
+  for it and the run reported success with the work undone. Bash no longer
+  offers `run_in_background`, and subagents run in the foreground. A run
+  whose result arrives while Claude Code still reports a background task now
+  ends with `EXTERNAL_AGENT_BACKGROUND_TASK_PENDING` (not recoverable) and
+  exit code 1. To keep background tasks, pass `allowBackgroundTasks: true`
+  (for example `new ClaudeAgent({ driverOptions: { allowBackgroundTasks:
+  true } })`); the check stays on.
+- **Private temp directory per Claude run.** Both Claude drivers create a
+  fresh `0700` directory under `/tmp` for each run and set
+  `CLAUDE_CODE_TMPDIR` to it and `TMPDIR` to the `claude-<uid>` directory
+  inside it; the directory is removed when the run ends. Temp files an agent
+  makes do not outlive the run: write anything the host needs inside the
+  working directory. Not used on Windows. On macOS, tell agents to use
+  `mktemp -p "$TMPDIR"` (a bare `mktemp` writes to `/var/folders/.../T`) and
+  not to pass pipes to `diff` (it copies them to `/tmp`); both fail in the
+  sandbox, which does not make shared temp directories writable.
 - **Session store (new, experimental).** `driverOptions.sessionStore` mirrors
   Claude Agent SDK sessions to durable storage, and `SqliteSessionStore`
   (`adk-llm-bridge/agents/session-store/sqlite`) is a ready adapter; see
   [Persisting Claude sessions](claude-session-store.md). Nothing changes
-  without it. `ClaudeCliDriver` throws `EXTERNAL_AGENT_OPTION_UNSUPPORTED`
-  when given a `sessionStore`.
+  without it. `sessionStoreFlush` and `sessionStoreLoadTimeoutMs` tune it, and
+  the SDK's `importSessionToStore` copies existing local sessions into it.
+  `ClaudeCliDriver` throws `EXTERNAL_AGENT_OPTION_UNSUPPORTED` when given any
+  of the three options.
 - **Cancel.** CLI processes get `killGraceMs` (default 2000 ms) to exit after
   SIGTERM before SIGKILL. On macOS and Linux the whole process group of the
   CLI is killed, and host signals are forwarded to it.
@@ -497,9 +591,22 @@ new in 0.7.0. If you already use them, these changes apply:
   run a `.cmd` or `.bat` file (it would go through `cmd.exe` and re-parse the
   prompt). A shim such as `gemini.cmd` ends the run with
   `EXTERNAL_AGENT_BATCH_COMMAND_REFUSED`. Use the native `claude.exe` or
-  `codex.exe`, or, for Gemini CLI, a custom `spawn` that runs Node with the
-  package's entry; see
+  `codex.exe`, or, for Gemini CLI, `interpreter` (a native `node.exe`) and
+  `entry` (the package's JavaScript entry); see
   [Windows: batch files and npm installs](./external-agent-isolation.md#windows-batch-files-and-npm-installs).
+- **`interpreter` and `entry` (new, optional).** The three CLI drivers can
+  run `<interpreter> <entry> <flags>` instead of `command`. Nothing changes
+  without them. If you used a custom `spawn` only to run Gemini CLI through
+  Node on Windows, you can replace it with these two options; the custom
+  `spawn` keeps working. The interpreter must be the native Node binary (its
+  real path named `node` or `node.exe` and a native executable; not Bun, and
+  not a version-manager shim such as mise, volta, asdf or nodenv), and the entry (and
+  an interpreter given as a path) must be outside the run's working directory
+  and `allowedPaths` (and not in a temp directory), or the run ends with
+  `EXTERNAL_AGENT_INTERPRETER_UNSAFE`. The interpreter starts in the entry's
+  directory and Node changes into the run's working directory before the
+  entry runs; a custom `spawn` must keep the `cwd` and `env` it receives; see
+  [Interpreter and entry](./external-agent-isolation.md#interpreter-and-entry).
 
 ## 7. Agent invocation gateway
 
@@ -508,6 +615,8 @@ If you call `AgentInvocationGateway` (or `ToolGateway`) directly:
 - `result.output` is now the text of the **last final response**, as with
   ADK's Runner and `AgentTool`. The previous concatenation of all text is in
   `result.transcript`.
+- The text parts of one event are joined with a newline, as `AgentTool` does
+  (they were joined with nothing).
 - `sessionHistoryMode` defaults to `replace` (was `inherit`), so the child
   sees only the delegated message. Pass `sessionHistoryMode: "inherit"` to
   share the parent's history.
@@ -515,7 +624,9 @@ If you call `AgentInvocationGateway` (or `ToolGateway`) directly:
   that cannot be cloned (such as functions) are omitted.
 - A child that stops on an ADK interrupt (for example a confirmation) is
   reported in `result.interrupt`. Resume it with
-  `resume: { events: result.interrupt.events }`.
+  `resume: { events: result.interrupt.events }`. The gateway trusts those
+  events as given and does not guard against replay: resume each interrupt
+  once, and keep the events where tools cannot write them.
 
 ## 8. Workflows (`adk-llm-bridge/workflows`)
 
@@ -529,6 +640,15 @@ checkpoints:
   `waiting`, and it resumes when the user answers.
 - Import `BaseAgent` from `@google/adk`; the workflows entry point does not
   re-export it.
+- `WorkflowAgent` and `ScriptWorkflowAgent` now take ADK's `waitForOutput`,
+  `beforeAgentCallback`, `afterAgentCallback` and `parentAgent`, and
+  `clone()` works (it threw before). A `beforeAgentCallback` that returns
+  content skips the whole workflow, as for any ADK agent.
+- `WORKFLOW_STEP_MISMATCH` details also carry `savedStatus` and
+  `savedAttempts`, so a caller can tell a step left `running` by a crash from
+  a completed one before giving the changed step a new id.
+- A workflow step span whose event stream was abandoned ends with
+  `adk.node.status` `cancelled`, not `completed`.
 - `ExternalAgentWorkflowFactory` checks `workingDirectoryRoots` on real
   paths: a `workingDirectory` or `allowedPaths` entry that leaves the roots
   through a symlink is rejected with `WORKFLOW_AGENT_POLICY_EXCEEDED`.
@@ -538,8 +658,8 @@ checkpoints:
 - If you call a custom `QuickJSModuleLoader` yourself, its result is typed as
   `QuickJSModuleLike`; cast it if you need the full `QuickJSWASMModule` API.
 - If you upgrade with workflow change operations in flight: a commit or
-  integration journaled before 0.7.0 and retried afterwards fails closed with an
-  intent mismatch. Let `WorkflowValidatedCommitter` /
+  integration journaled by a 0.7.0 pre-release build and retried afterwards
+  fails closed with an intent mismatch. Let `WorkflowValidatedCommitter` /
   `WorkflowValidatedIntegrator` operations finish first. If you retry one with
   a new `operationId` instead, check the target ref first: the earlier attempt
   may already have applied the change. Checkpoints,
@@ -553,6 +673,12 @@ checkpoints:
   `withWorkflowStepFailed`) are copied the same way, with an empty message
   replaced by `Workflow error <code>`. Read optional detail keys with `?.` or
   `in`, not by comparing to `undefined` after a JSON round trip.
+- **Run spec rule sets** (`adk-llm-bridge/workflows/spec`, experimental) need
+  the key `allowedMcpProviders`. Add `allowedMcpProviders: []` to a rule set
+  written for an earlier 0.7.0 build (deny every MCP provider), or list the
+  provider ids your host resolves. A rule set without it is
+  `RUN_SPEC_RULES_INVALID`, and `mergeRunRules` throws on it. `RunPlanAgent`
+  has a new `mcp` field.
 - **Registry.** Replace `registry.get(id)` / `require(id)` / `has(id)` /
   `delete(id)` with the `(id, version)` form; catch
   `WORKFLOW_DEFINITION_NOT_FOUND` for an unknown workflow.
@@ -645,11 +771,34 @@ checkpoints:
   `WorkflowError` with another code now fails the run with `WORKFLOW_ABORTED`;
   read that code from `details.reasonCode`.
   Add the `"interrupted"` member of `WorkflowCheckpointStepStatus` and the
-  `step_interrupted` member of `WorkflowEvent` to exhaustive switches.
-  0.6.0 cannot read a checkpoint that holds an `interrupted` step.
-  Checkpoints written before this change keep an aborted step as `failed`
-  with `WORKFLOW_ABORTED`; they still load, and the step is replayed as that
-  failure.
+  `step_interrupted` member of `WorkflowEvent` to exhaustive switches (and the
+  `checkpoint_size_warning` member, see docs/workflow-durability.md).
+  Workflow checkpoints are new in 0.7.0, so no earlier release reads them.
+  Checkpoints written by 0.7.0 pre-release builds before this change keep an
+  aborted step as `failed` with `WORKFLOW_ABORTED`; they still load, and the
+  step is replayed as that failure.
+- **A fail-fast sibling is `interrupted`, not `failed`.** When a step fails in
+  `ctx.parallel` with `failureMode: "fail-fast"` (the default), a sibling still
+  in flight is stored as `interrupted` with `WORKFLOW_ABORTED`
+  (`details.reasonCode` is the failing step's code, `details.failedStepId` its
+  id) and emits `step_interrupted`, instead of `failed` with the other step's
+  error. A resume of such a run now needs `retryFailedSteps` or
+  `resumePolicy: "retry"`; without them it fails with
+  `WORKFLOW_INDETERMINATE_STEP` instead of replaying the failure. A step still
+  queued behind `concurrency` when the failure happens is no longer started:
+  before, it ran once a slot was free and was then recorded `failed` with the
+  other step's error. Now it is not recorded, so a resume runs it fresh as its
+  first attempt. These changes only affect the resume of fail-fast runs
+  checkpointed by a 0.7.0 pre-release build: their siblings stay `failed` and
+  are replayed as that failure, as before. Read the failing step's code from
+  the run's error, not from a sibling's record.
+- **A step's text is stored once.** A completed step result in a stored
+  checkpoint may have no `content` and `contentFromOutput: true` instead.
+  Code that reads checkpoints directly should read step results with
+  `workflowStepResultFromCheckpoint()`, which rebuilds `content`; replay does
+  this for you. Checkpoints written by an earlier 0.7.0 build load and replay
+  unchanged. A build from before this change reads a compact step as having
+  no `content`, so do not roll back across it with checkpoints in flight.
 - **Checkpoint mismatch details.** Read `details.checkpoint` (stored value)
   and `details.current` (this turn) instead of `details.actual` /
   `details.expected` on `WORKFLOW_INPUT_MISMATCH`, `WORKFLOW_VERSION_MISMATCH`
@@ -674,6 +823,48 @@ checkpoints:
   final status to the parent. Before, an error event of a retried inner
   attempt could turn a completed nested run into a failed parent step. Code
   that worked around it (for example by re-running the "failed" step) can go.
+- **Step limits on a resumed run.** `limits.maxSteps` counts only the steps
+  a turn executes; steps replayed from the checkpoint count toward the new
+  `limits.maxReplayedSteps` (default ten times `maxSteps`). A run that hit
+  `WORKFLOW_LIMIT_EXCEEDED` on resume only because of its replays now
+  resumes. Read `details.limitName` (`"maxSteps"` or `"maxReplayedSteps"`) to
+  tell which bound stopped the run; the details also carry `executedSteps`,
+  `replayedSteps`, `maxSteps` and `maxReplayedSteps`. A step a `beforeStep` or
+  `beforeAttempt` hook answers still counts as executed. Callers of
+  `runWorkflowScript` replace the `replayedSteps` callback with
+  `replaysFromCheckpoint: true`; the host then enforces both bounds and the
+  runner only their sum.
+- **Host sleep.** Lock wait timeouts (`lockAcquireTimeoutMs`, `lockTimeoutMs`,
+  `acquireTimeoutMs`) and the sandbox `cpuTimeMs` budget ignore wall-clock
+  steps now, so waking from sleep no longer fails a lock wait at once.
+  Workspace and task leases still expire by wall time: a sleep longer than
+  `leaseTtlMs` loses the lease (`WORKFLOW_WORKSPACE_LEASE_LOST`). Keep long
+  runs awake (`caffeinate -i` on macOS) and resume with the same execution id;
+  see
+  [Host sleep and wall-clock steps](./workflow-durability.md#host-sleep-and-wall-clock-steps).
+
+## 9. Deprecated names
+
+These names still work: each is a `@deprecated` alias of the same type, class
+or value, kept until the next major version. Rename them when convenient; the
+new names have the same shape, so the change is a find-and-replace.
+
+| Deprecated | Use | Entry point |
+| --- | --- | --- |
+| `AIGatewayConfig` | `AIGatewayProviderConfig` | `adk-llm-bridge` |
+| `RegisterOptions` | `AIGatewayRegisterOptions` | `adk-llm-bridge` |
+| `OpenRouterConfig` | `OpenRouterProviderConfig` | `adk-llm-bridge` |
+| `CustomLlmConfig`, `CustomLlmProviderConfig` | `CustomProviderConfig` | `adk-llm-bridge` |
+| `CustomProviderRegistrationConfig` | `CustomRegisterOptions` | `adk-llm-bridge` |
+| `ADKSessionCheckpointStore` | `AdkSessionCheckpointStore` | `adk-llm-bridge/workflows` |
+| `ADKSessionCheckpointStoreOptions` | `AdkSessionCheckpointStoreOptions` | `adk-llm-bridge/workflows` |
+| `DEFAULT_CLAUDE_SDK_TOOLS` | `DEFAULT_CLAUDE_TOOLS` | `adk-llm-bridge/agents` |
+| `LEGACY_RECOVERABLE_ERROR_CODES` | `normalizeRecoverableErrorCode()` | `adk-llm-bridge/agents` |
+
+The config types now follow one scheme: `<Provider>ProviderConfig` for a
+model's config and `<Provider>RegisterOptions` for a `register*()` function.
+`setConfig`, `getConfig` and `resetConfig` were already deprecated in favor
+of `setProviderConfig`, `getProviderConfig` and `resetProviderConfig`.
 
 ## Coming from the 0.6.0 tag
 

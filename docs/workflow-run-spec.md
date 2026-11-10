@@ -49,7 +49,7 @@ already exists. It adds only what a plan does not describe.
 | Merge | `WorkflowMutationReservationPhase`, phase `integration` | `gates.publish.kind` is `integration` |
 | Plan validation | `validateWorkflowPlan` | Called by `validateRunSpec` on the full plan of every spec the rule families accept, on the plan without paths once the graph rules pass, and by `resolveRunPlan`. Its failure is reported as `RUN_SPEC_PLAN_REJECTED` |
 | Hash and JSON bounds | `canonicalDigest`, `freezeJson`, `immutableJson` | Called, not copied |
-| Added by the spec | none | Budget, model, tool and environment allowlists, denied path patterns, step policy, QA and publish gates, human approval, `extensions` |
+| Added by the spec | none | Budget, model, tool, MCP provider and environment allowlists, denied path patterns, step policy, QA and publish gates, human approval, `extensions` |
 
 Differences from a plan and a start request, on purpose:
 
@@ -189,6 +189,7 @@ limit and allowlist, so a missing rule never means "allowed". The rule set's
 | `allowNetwork` | Whether an agent may ask for network access |
 | `allowedTools` | Tool names an agent may list, compared exactly |
 | `allowedEnvNames` | Environment variable names a spec may list, compared exactly |
+| `allowedMcpProviders` | MCP provider ids a lane's agent may list in `agent.mcp`, compared exactly. An empty list allows none |
 | `deniedPathPatterns` | File name patterns no path may contain |
 | `allowedQaCommands` | QA commands a spec may declare, each as the full argument list |
 | `requireQa` | Whether a spec that publishes must declare a QA command |
@@ -229,7 +230,7 @@ rule set, and the library does not apply it on its own.
 | shape | `shape.ts` | The input is plain JSON within the input bounds, then the zod schema. Runs right after the rule set check and alone: a spec with a shape issue reaches no family |
 | paths | `rules/paths.ts` | Path grammar, root, denied patterns, duplicate and overlapping paths |
 | budget | `rules/budget.ts` | Budget, concurrency, lane count, agent runs, change rounds, string and array caps, `extensions`, plan size |
-| models | `rules/models.ts` | Workflow, providers, models, permission modes, network, tools and environment names |
+| models | `rules/models.ts` | Workflow, providers, models, permission modes, network, tools, MCP providers and environment names |
 | graph | `rules/graph.ts` | Lane ids, dependencies, cycles, then the existing plan validator |
 | gates | `rules/gates.ts` | QA ids and commands, QA requirement, publish kind, merge target and human approval |
 | full plan | `rules/graph.ts` | Only when every family above accepts the spec: the existing plan validator on the full plan, owned paths included |
@@ -327,6 +328,9 @@ family order.
 | `RUN_SPEC_NETWORK_NOT_ALLOWED` | An agent sets `allowNetwork` to true and the rule set's `allowNetwork` is false |
 | `RUN_SPEC_TOOL_NOT_ALLOWED` | An agent lists a tool outside `allowedTools` |
 | `RUN_SPEC_TOOL_DUPLICATE` | An agent lists the same tool twice |
+| `RUN_SPEC_MCP_PROVIDER_NOT_ALLOWED` | An agent lists an MCP provider id outside `allowedMcpProviders` |
+| `RUN_SPEC_MCP_PROVIDER_DUPLICATE` | An agent lists the same MCP provider id twice, or two ids that differ only in case |
+| `RUN_SPEC_MCP_TOOL_NOT_GRANTED` | An agent lists a tool that reaches an MCP server for a provider outside its own `mcp`: a name with the prefix `mcp__` in any case other than `mcp__<id>` or `mcp__<id>__<tool>` with `<id>` in its `mcp` exactly, or `ListMcpResourcesTool` / `ReadMcpResourceTool` (any case) with an empty `mcp` |
 | `RUN_SPEC_ENV_NAME_NOT_ALLOWED` | `env` lists a name outside `allowedEnvNames` |
 | `RUN_SPEC_ENV_NAME_DUPLICATE` | `env` lists the same name twice |
 
@@ -435,7 +439,10 @@ without running anything:
 - Agents of a lane, in order of first run: `tests` when `testsFirst` is set,
   then `implement`, then `review` when the lane is reviewed. `implement` and
   `review` each allow `1 + maxChangeRounds` runs. A reviewer always runs
-  `read-only`, without network and without tools.
+  `read-only`, without network, without tools and without MCP providers.
+- Each agent's `mcp` is the lane's MCP grant: the provider ids of
+  `agent.mcp`, or an empty list. It is the only place the plan names MCP;
+  see [MCP providers](#mcp-providers).
 - `limits`: each effective limit with its `value`, its `ceiling`, the rule that
   sets it and the rule sets behind it. A spec above a ceiling is rejected, not
   reduced.
@@ -503,13 +510,55 @@ The topology maps each part of the spec as follows:
   `projectRoot`, is an owned path with scope `subtree`. `mayCreateUnder` and
   `acceptance` are empty.
 - `waves`: from `layerRunSpecLanes`.
-- `invariants`: `run-spec.budget` and `run-spec.denied-paths` always, and
-  `run-spec.human-approval` when the spec publishes. All are enforced by the
-  host.
+- `invariants`: `run-spec.budget`, `run-spec.denied-paths` and
+  `run-spec.mcp-providers` always, and `run-spec.human-approval` when the spec
+  publishes. All are enforced by the host.
 - `reservedPaths`: empty.
 
-Provider, model, permission mode, tools, steps, gates and budget have no place
-in a plan. They reach the workflow through the start request.
+Provider, model, permission mode, tools, MCP providers, steps, gates and
+budget have no place in a plan. They reach the workflow through the start request.
+
+## MCP providers
+
+A lane's agent may list MCP providers by id in `agent.mcp`. An id is a name
+the host has configured, never a location or a secret:
+
+- The grammar is ASCII letters and digits in runs joined by one `-` or `_`,
+  at most 64 characters (`github`, `docs-search`, `reui`). A URL, a host and
+  port, a path, an `@`, a `%` escape, whitespace, a control or invisible
+  character, a non-ASCII look-alike and `__` are all
+  `RUN_SPEC_INVALID_FORMAT`. `__` is refused because Claude Code names an MCP
+  tool `mcp__<server>__<tool>`, so an id with `__` could name another
+  provider's tools.
+- At most `RUN_SPEC_LIMITS.maxMcpProviders` (16) ids per agent, unique
+  ignoring case (`RUN_SPEC_MCP_PROVIDER_DUPLICATE`), like lane ids.
+- Deny by default: each id must be in the rule set's `allowedMcpProviders`,
+  compared exactly. A rule set that lists none allows none, and
+  `mergeRunRules` keeps only the ids every rule set allows.
+- The agent object is closed: a spec cannot carry a server URL, a command, a
+  header or a token anywhere (`RUN_SPEC_UNKNOWN_KEY`, or a format code).
+- MCP access is granted only through `mcp`. A tool name in `tools` that
+  reaches an MCP server is valid only for a provider in the same agent's
+  `mcp`: `mcp__<id>` (every tool of the provider) or `mcp__<id>__<tool>`,
+  with `<id>` compared exactly. Any other name whose prefix is `mcp__` in any
+  case (`MCP__x__t`, `mcp__x__`, `mcp____t`, another provider) is
+  `RUN_SPEC_MCP_TOOL_NOT_GRANTED`, and so are the Claude Code resource tools
+  `ListMcpResourcesTool` and `ReadMcpResourceTool` when `mcp` is empty. The
+  tool must still be in `allowedTools`, so a host can narrow a granted
+  provider to some of its tools.
+- A reviewer never gets an MCP provider.
+- `agent.mcp: []` and no `agent.mcp` mean the same thing and hash the same.
+
+The plan lists the grant on each agent (`RunPlanAgent.mcp`). The host turns it
+into servers (see [host duty 14](#what-the-host-must-do-at-run-time)). In
+this release the library only validates and plans the grant: an isolated
+`ClaudeAgent` loads no MCP server but the bridge's own, and without
+`allowNetwork: true` the confirmation guard denies every other MCP tool (see
+[External agent isolation](external-agent-isolation.md)). A host that grants
+MCP providers must attach the resolved servers itself and keep the
+credentials out of the agent. Until the host can attach declared servers to
+a confined agent, it should refuse a lane whose `mcp` is not empty, or run
+that lane with network access allowed and its own checks.
 
 ## JSON Schema
 
@@ -587,6 +636,16 @@ The library is pure. It decides what a spec may ask for. The host enforces it.
     ignores them, so `.g\u200cit` opens `.git`), case, NFC, the text from the
     first `:` dropped, trailing dots and spaces ignored, and the widened
     reading of [Path semantics](#path-semantics).
+14. **Resolve MCP provider ids in the host.** For each agent of the plan,
+    attach exactly the MCP servers its `mcp` list names, resolved from the
+    host's own configuration, and no other; an empty list means no MCP server
+    (`run-spec.mcp-providers`). The host owns the server address and every
+    credential: never accept a URL, header, command or token from a spec,
+    and never pass a credential to the agent, its environment, its arguments
+    or its prompt. Keep the credential in a process the agent cannot read,
+    such as a proxy on a loopback address that adds the header itself.
+    Expose to an agent only the tools of its granted providers, whatever
+    other MCP servers the host runs.
 
 ## Exports
 

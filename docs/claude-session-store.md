@@ -50,7 +50,40 @@ Things to know:
   `delete`. Transcripts can hold tool output and file contents.
 - **Claude Agent SDK only.** `ClaudeCliDriver` cannot mirror transcripts: it
   throws `ExternalAgentPolicyError` with code
-  `EXTERNAL_AGENT_OPTION_UNSUPPORTED` when built with a `sessionStore`.
+  `EXTERNAL_AGENT_OPTION_UNSUPPORTED` when built with a `sessionStore`,
+  `sessionStoreFlush` or `sessionStoreLoadTimeoutMs`.
+
+### Tuning
+
+Two more driver options pass straight to the SDK. Both need a
+`sessionStore`; the driver throws `InputValidationError` without one (the SDK
+would ignore them) or for an invalid value.
+
+| Option | SDK option | Meaning |
+| --- | --- | --- |
+| `sessionStoreFlush` | `sessionStoreFlush` | `"batched"` (SDK default) or `"eager"`: how soon transcript entries reach `append`. |
+| `sessionStoreLoadTimeoutMs` | `loadTimeoutMs` | Positive integer, milliseconds each `load` / `listSubkeys` call may take on resume (SDK default 60 000); a slower store fails the run instead of hanging it. |
+
+```ts
+driverOptions: { sessionStore, sessionStoreFlush: "eager", sessionStoreLoadTimeoutMs: 10_000 }
+```
+
+### Importing existing sessions
+
+To copy sessions that were written locally before you added a store, call the
+SDK's `importSessionToStore` with the store. It reads the local transcript
+under `CLAUDE_CONFIG_DIR` and appends it in batches; no model call is made.
+
+```ts
+import { importSessionToStore } from "@anthropic-ai/claude-agent-sdk";
+
+await importSessionToStore(sessionId, sessionStore, { dir: projectDir });
+```
+
+`dir` is the working directory the session ran in (the store's `projectKey`
+is derived from it). The bridge does not wrap this function: it is part of
+the SDK's `@alpha` session store API, and a test pins that it works with
+`SqliteSessionStore`.
 
 ## `SqliteSessionStore`
 

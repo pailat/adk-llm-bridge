@@ -1,0 +1,17 @@
+{
+  "name": "keyless",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "main": "index.ts",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "start": "bun run index.ts"
+  },
+  "dependencies": {
+    "@google/adk": "^2.4.0",
+    "adk-llm-bridge": "file:../.."
+  }
+}

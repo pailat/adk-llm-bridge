@@ -62,9 +62,12 @@ What you get:
   final text is parsed as JSON (kept as text if it is not valid JSON), like an
   ADK `LlmAgent`, so the handler should return JSON text; a `Content` without
   text skips schema validation.
-- `timeout`, `retryConfig`, `rerunOnResume`, `inputSchema`, `outputSchema`,
-  `stateSchema` and `isolationScope` in the agent config are forwarded to ADK. They only apply when the agent runs
-  as a node, not as the Runner's root agent.
+- `timeout`, `retryConfig`, `rerunOnResume`, `waitForOutput`, `inputSchema`,
+  `outputSchema`, `stateSchema` and `isolationScope` in the agent config are
+  forwarded to ADK. They only apply when the agent runs as a node, not as the
+  Runner's root agent. `beforeAgentCallback`, `afterAgentCallback` and
+  `parentAgent` work as for any ADK agent, in both cases, and `clone()`
+  rebuilds the agent from its whole config.
 - Inside a `Workflow`, ADK aborts the node's invocation signal when the graph
   fails or a node `timeout` expires. When the consumer closes the event stream
   (`break`, `iterator.return()`) or the agent runs through `ctx.runNode` without
@@ -128,7 +131,10 @@ checkpoint are used:
   `failureMode: "all-settled"` returns the same outcome. A sibling stopped by
   an abort is returned to the handler as a `WorkflowStepFailure` with
   `status: "failed"` and code `WORKFLOW_ABORTED`, while the checkpoint stores
-  it as `interrupted`.
+  it as `interrupted`. With `failureMode: "fail-fast"`, a sibling stopped
+  because another step failed is `interrupted` the same way
+  (`details.reasonCode` is the failing step's code), so it needs the same
+  opt-in to run again.
 - A checkpoint that no longer matches the workflow (changed step input, agent,
   version or source) is not a step outcome. It fails the run at the step that
   changed, with a `step_failed` event, in every `failureMode`.
