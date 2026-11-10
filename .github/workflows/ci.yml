@@ -68,6 +68,8 @@ jobs:
       - run: bun install --frozen-lockfile
       - name: Fake .cmd shims and the interpreter + entry route under Bun
         run: bun test tests/agents/driver/windows-command.test.ts tests/agents/driver/cli-interpreter-entry.test.ts
+      - name: Lock protocol (EPERM, EBUSY, lock-path trace) on NTFS
+        run: bun test tests/workflows/internal/directory-lock.test.ts tests/workflows/checkpoint/file-system-checkpoint-store-faults.test.ts tests/workflows/wall-clock-step.test.ts
       - run: bun run build
       - name: Fake .cmd shims and the interpreter + entry route under Node
         run: node scripts/windows-shim-smoke.mjs

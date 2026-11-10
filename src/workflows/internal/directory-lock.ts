@@ -101,9 +101,7 @@ export function tryAcquireDirectoryLock(
       fsyncDirectorySync(resolve(lockPath, ".."));
       return owner;
     } catch (error) {
-      if (hasErrorCode(error, "EEXIST") || hasErrorCode(error, "ENOTEMPTY")) {
-        return undefined;
-      }
+      if (isLockContention(error, lockPath)) return undefined;
       throw error;
     }
   } finally {
@@ -148,12 +146,13 @@ export function recoverDeadDirectoryLock(lockPath: string): void {
  * @param token - Token returned by {@link tryAcquireDirectoryLock}.
  * @returns True when this call retired the lock; false when the token no
  * longer owns it.
- * @throws The file-system error when the rename fails for another reason.
+ * @throws The file-system error when the rename fails for another reason, or
+ * stays blocked (`EPERM`, `EBUSY`, `EACCES`) after a few short retries.
  * @internal
  */
 export function releaseDirectoryLock(lockPath: string, token: string): boolean {
   if (!directoryLockTokenMatches(lockPath, token)) return false;
-  if (!retireDirectoryLock(lockPath, token)) return false;
+  if (!retireDirectoryLock(lockPath, token, true)) return false;
   try {
     rmSync(retiredDirectoryLockPath(lockPath, token), {
       recursive: true,
@@ -295,22 +294,70 @@ export function retiredDirectoryLockPath(
   return `${lockPath}.retired.${directoryLockTokenKey(token)}`;
 }
 
-function retireDirectoryLock(lockPath: string, observedToken: string): boolean {
+/** Attempts of a release rename that a Windows open file blocks. */
+const RELEASE_RENAME_ATTEMPTS = 5;
+const RELEASE_RENAME_PAUSE_MS = 20;
+
+function retireDirectoryLock(
+  lockPath: string,
+  observedToken: string,
+  retryBlocked = false,
+): boolean {
   const retired = retiredDirectoryLockPath(lockPath, observedToken);
-  try {
-    renameSync(lockPath, retired);
-  } catch (error) {
-    if (
-      hasErrorCode(error, "ENOENT") ||
-      hasErrorCode(error, "EEXIST") ||
-      hasErrorCode(error, "ENOTEMPTY")
-    ) {
-      return false;
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      renameSync(lockPath, retired);
+      break;
+    } catch (error) {
+      if (
+        hasErrorCode(error, "ENOENT") ||
+        hasErrorCode(error, "EEXIST") ||
+        hasErrorCode(error, "ENOTEMPTY")
+      ) {
+        return false;
+      }
+      // Windows refuses to rename a directory while another process has a
+      // file inside it open, such as a waiter reading `owner.json`. Only the
+      // owner's own release waits that out: a blocked recovery just fails.
+      if (
+        !retryBlocked ||
+        attempt >= RELEASE_RENAME_ATTEMPTS ||
+        !(
+          hasErrorCode(error, "EPERM") ||
+          hasErrorCode(error, "EBUSY") ||
+          hasErrorCode(error, "EACCES")
+        )
+      ) {
+        throw error;
+      }
+      Atomics.wait(
+        new Int32Array(new SharedArrayBuffer(4)),
+        0,
+        0,
+        RELEASE_RENAME_PAUSE_MS,
+      );
     }
-    throw error;
   }
   fsyncDirectorySync(resolve(lockPath, ".."));
   return true;
+}
+
+/**
+ * Whether a failed publishing rename means another owner holds the lock.
+ * Windows reports a rename onto a non-empty directory as `EPERM`, not
+ * `EEXIST`: it is contention when the lock path now exists.
+ */
+function isLockContention(error: unknown, lockPath: string): boolean {
+  if (hasErrorCode(error, "EEXIST") || hasErrorCode(error, "ENOTEMPTY")) {
+    return true;
+  }
+  if (!hasErrorCode(error, "EPERM")) return false;
+  try {
+    lstatSync(lockPath);
+    return true;
+  } catch (statError) {
+    return !hasErrorCode(statError, "ENOENT");
+  }
 }
 
 function pathOccupied(path: string): boolean {

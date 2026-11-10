@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import {
   mkdir,
@@ -22,6 +23,25 @@ import {
 /** Above the default `pid_max` of Linux and macOS, so no process has it. */
 const DEAD_PID = 2_147_483_646;
 const roots: string[] = [];
+const FIXTURE = join(import.meta.dir, "fixtures", "directory-lock-fault.ts");
+
+/** Runs the lock under an injected fault in a child process. */
+async function runFault(
+  mode: "eperm-held" | "eperm-free" | "busy-release" | "busy-recover" | "trace",
+): Promise<Record<string, unknown>> {
+  const root = await mkdtemp(join(tmpdir(), "adk-directory-lock-fault-"));
+  roots.push(root);
+  const child = spawnSync(process.execPath, [FIXTURE, mode, root], {
+    encoding: "utf8",
+    timeout: 30_000,
+  });
+  const line = child.stdout.trim().split("\n").at(-1) ?? "";
+  try {
+    return JSON.parse(line) as Record<string, unknown>;
+  } catch {
+    throw new Error(`no result from the fault fixture: ${child.stderr}`);
+  }
+}
 
 afterEach(async () => {
   for (const root of roots.splice(0)) {
@@ -164,5 +184,36 @@ describe("directory lock", () => {
     recoverDeadDirectoryLock(corrupt);
     expect(await readdir(corrupt)).toEqual([DIRECTORY_LOCK_OWNER_FILE]);
     expect(tryAcquireDirectoryLock(corrupt)).toBeUndefined();
+  });
+
+  // Windows reports a rename onto a non-empty directory as EPERM, not EEXIST.
+  test("a lock published between the occupancy check and the rename is held, not an error (Windows EPERM)", async () => {
+    expect(await runFault("eperm-held")).toEqual({ held: true });
+  });
+
+  test("an EPERM from the publishing rename with no lock present is rethrown", async () => {
+    expect(await runFault("eperm-free")).toEqual({ code: "EPERM" });
+  });
+
+  test("a release retries a rename a waiter's open file blocks (Windows EBUSY)", async () => {
+    expect(await runFault("busy-release")).toEqual({
+      released: true,
+      left: [],
+    });
+  });
+
+  test("a recovery does not retry a blocked rename", async () => {
+    expect(await runFault("busy-recover")).toEqual({ code: "EBUSY" });
+  });
+
+  // The claim behind the wall-clock fix: the lock path is only ever replaced
+  // by a whole-directory rename. An in-place write or delete would let a
+  // reader see a lock without its owner.
+  test("only the publishing and retiring renames touch the lock path, and the owner is complete before it is published", async () => {
+    expect(await runFault("trace")).toEqual({
+      violations: [],
+      publishes: 2,
+      incompleteOwnerAtPublish: 0,
+    });
   });
 });

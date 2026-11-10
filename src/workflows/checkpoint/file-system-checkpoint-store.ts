@@ -989,7 +989,7 @@ async function releaseLock(
   await assertLockOwnership(lockPath, token, checkpointKey);
   const retiredPath = retiredDirectoryLockPath(lockPath, token);
   try {
-    await rename(lockPath, retiredPath);
+    await renameRetryingBlocked(lockPath, retiredPath);
     await syncDirectory(dirname(lockPath));
   } catch (error) {
     throw ioError("checkpoint_lock_release_failed", checkpointKey, error);
@@ -999,6 +999,32 @@ async function releaseLock(
   // Removing it keeps the root from growing on every save; a leftover after a
   // crash is collected offline.
   await rm(retiredPath, { recursive: true, force: true }).catch(() => {});
+}
+
+/**
+ * Renames, waiting out a Windows open file a few times: a directory cannot be
+ * renamed while another process has a file inside it open, such as a waiter
+ * reading `owner.json`.
+ */
+async function renameRetryingBlocked(from: string, to: string): Promise<void> {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      await rename(from, to);
+      return;
+    } catch (error) {
+      if (
+        attempt >= 5 ||
+        !(
+          hasErrorCode(error, "EPERM") ||
+          hasErrorCode(error, "EBUSY") ||
+          hasErrorCode(error, "EACCES")
+        )
+      ) {
+        throw error;
+      }
+      await new Promise((done) => setTimeout(done, 20));
+    }
+  }
 }
 
 async function recoverAbandonedLock(

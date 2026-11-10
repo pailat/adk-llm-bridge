@@ -1600,6 +1600,15 @@ from the 0.6.0 tag.
   TypeError: the agents passed only part of their config to `BaseAgent`. The
   whole config is forwarded now, so a clone keeps the definition and adapters.
 
+- Windows: a workspace or repository mutation lock taken by another process
+  between the occupancy check and the publishing rename is waited for instead
+  of failing the mutation. Windows reports a rename onto a non-empty directory
+  as `EPERM`, which the checkpoint store already treated as contention.
+- Windows: releasing a lock (the checkpoint store, and the workspace and
+  repository mutation locks) retries a rename that a waiter's open `owner.json`
+  blocks (`EPERM`, `EBUSY`, `EACCES`; 5 tries over about 100 ms) instead of
+  leaving the lock behind under a live process.
+
 
 ### Docs
 
@@ -1620,6 +1629,10 @@ from the 0.6.0 tag.
   case-insensitive built-in name match also applies to the start check, the
   `PreToolUse` hook and the `canUseTool` wrapper.
 - `docs/workflow-control-plane.md`: which error class carries which code type.
+- `docs/workflow-durability.md`: how to clear a stuck checkpoint lock while
+  writers may run (rename the `.lock` directory away, then delete it; a
+  recursive delete in place makes a concurrent writer fail with
+  `checkpoint_lock_corrupt`).
 
 ## [0.6.0] - 2026-06-20
 

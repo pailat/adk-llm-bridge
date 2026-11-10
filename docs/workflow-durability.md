@@ -44,10 +44,19 @@ logger. If the lock now belongs to another owner, `save` rejects with
 have written the same checkpoint, so the revision check no longer holds. A
 lock with no valid owner at that point rejects with `checkpoint_lock_corrupt`.
 A lock left behind by a live process makes the next save of that execution
-fail with `checkpoint_lock_timeout`. A load opens the checkpoint file
-once without following symlinks (`O_NOFOLLOW`, where the platform has it) and
-checks and reads it through that handle, so a path swapped for a symlink after
-the check is never read.
+fail with `checkpoint_lock_timeout`. The store publishes a lock by renaming a
+directory that already holds its owner file onto the lock path, and retires it
+by renaming the whole directory away, so a concurrent writer never sees a lock
+without its owner. To clear a stuck lock by hand while writers may run, rename
+the `.lock` directory away first and delete it afterwards: a recursive delete
+of the lock path removes the owner file before the directory, and a writer
+that looks in between fails with `checkpoint_lock_corrupt`. On Windows a
+directory cannot be renamed while another process has a file inside it open,
+so a release retries a blocked rename a few times (5 tries over about 100 ms)
+before it gives up with the `checkpoint_lock_release_failed` warning. A load
+opens the checkpoint file once without following symlinks (`O_NOFOLLOW`, where
+the platform has it) and checks and reads it through that handle, so a path
+swapped for a symlink after the check is never read.
 Checkpoint contents and their deterministic revision are validated on load.
 New writes remove runtime-only step events and replay markers before hashing or
 persistence. Both bundled checkpoint stores reject malformed durable graphs
