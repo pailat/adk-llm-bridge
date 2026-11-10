@@ -51,6 +51,7 @@ bun install
 | `bun run typecheck:all` | Type check `src/` and `tests/` |
 | `bun run typecheck:conformance` | Type check the runtime conformance runner |
 | `bun run typecheck:compat:nodenext` | Build, then type check a NodeNext consumer |
+| `bun run check:compat:nodenext` | Type check the NodeNext consumer against the current `dist/` (no build) |
 | `bun run lint` | Run the Biome linter (whole repo) |
 | `bun run lint:fix` | Auto-fix lint issues |
 | `bun run format` | Check formatting |
@@ -61,7 +62,7 @@ bun install
 | `bun run check:export-docs` | After a build, check that every public export has a TSDoc summary |
 | `bun run check:links` | Check relative links and anchors in Markdown files (offline) |
 | `bun run lint:publish` | Check the package with `publint` and `attw` |
-| `bun run ci` | Full CI: typechecks, Biome check, comment check, link check, tests, build, package checks |
+| `bun run ci` | Full CI: typechecks, Biome check, comment check, link check, tests, one build, package checks and the NodeNext consumer check on that build |
 
 Run a single test file with `bun test <file>`.
 
