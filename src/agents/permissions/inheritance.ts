@@ -53,14 +53,34 @@ export function deriveSubAgentPermissionPolicy(
   parent?: ExternalAgentPermissionPolicy,
   child?: ExternalAgentPermissionPolicy,
 ): ExternalAgentPermissionPolicy {
+  return derivePolicy(parent, child, false);
+}
+
+/**
+ * {@link deriveSubAgentPermissionPolicy}, where `parentPathsAreChilds` says
+ * that the parent's `allowedPaths` are the child's own roots, delegated to it
+ * by a parent that set none. They are then not a bound from a parent: a
+ * relative root on both sides is the same directory (both are relative to the
+ * child's working directory) and is kept, and they add no `pathBounds`.
+ */
+function derivePolicy(
+  parent: ExternalAgentPermissionPolicy | undefined,
+  child: ExternalAgentPermissionPolicy | undefined,
+  parentPathsAreChilds: boolean,
+): ExternalAgentPermissionPolicy {
   const parentPolicy = parent ?? { mode: "ask" as const };
   const childPolicy = child ?? parentPolicy;
   const mode = moreRestrictiveMode(parentPolicy.mode, childPolicy.mode);
   const allowedPaths = deriveAllowedPaths(
     parentPolicy.allowedPaths,
     childPolicy.allowedPaths,
+    parentPathsAreChilds,
   );
-  const pathBounds = derivePathBounds(parentPolicy, childPolicy);
+  const pathBounds = derivePathBounds(
+    parentPolicy,
+    childPolicy,
+    parentPathsAreChilds,
+  );
 
   return {
     mode,
@@ -80,8 +100,9 @@ function moreRestrictiveMode(
 }
 
 function deriveAllowedPaths(
-  parent?: readonly string[],
-  child?: readonly string[],
+  parent: readonly string[] | undefined,
+  child: readonly string[] | undefined,
+  parentPathsAreChilds: boolean,
 ): readonly string[] | undefined {
   if (!child) {
     // A parent's relative root is relative to the parent's working directory;
@@ -107,6 +128,12 @@ function deriveAllowedPaths(
       const canonical = canonicalPath(path, base);
       return canonical === undefined ? [] : [{ path, canonical }];
     });
+  if (parentPathsAreChilds) {
+    // The same relative string on both sides names the same directory here.
+    for (const path of child) {
+      if (!isAnchoredPath(path) && parent.includes(path)) keep(path, path);
+    }
+  }
   const parentRoots = anchored(parent);
   const childRoots = anchored(child);
   for (const root of childRoots) {
@@ -125,13 +152,14 @@ function deriveAllowedPaths(
 function derivePathBounds(
   parent: ExternalAgentPermissionPolicy,
   child: ExternalAgentPermissionPolicy,
+  parentPathsAreChilds: boolean,
 ): readonly (readonly string[])[] {
   const bounds = [...(parent.pathBounds ?? [])];
   // A child without a policy inherits the parent's whole policy, bounds
   // included, so they are not added twice.
   if (child === parent) return bounds;
   bounds.push(...(child.pathBounds ?? []));
-  if (parent.allowedPaths && child.allowedPaths) {
+  if (parent.allowedPaths && child.allowedPaths && !parentPathsAreChilds) {
     bounds.push(parent.allowedPaths.filter(isAnchoredPath));
     bounds.push(child.allowedPaths.filter(isAnchoredPath));
   }
@@ -266,6 +294,8 @@ export function setInheritedPermissions(
   session: object,
   policy: ExternalAgentPermissionPolicy,
 ): void {
+  // Narrowed by someone else: the stored roots may no longer be the agent's.
+  delegatedOwnRoots.delete(session);
   const registry = policyRegistry();
   const existing = weakMapGet.call(registry, session);
   weakMapSet.call(
@@ -275,6 +305,46 @@ export function setInheritedPermissions(
       existing ? deriveSubAgentPermissionPolicy(existing, policy) : policy,
     ),
   );
+}
+
+/**
+ * Sessions whose inherited `allowedPaths` are the delegated agent's own roots,
+ * keyed to that agent: the delegating parent set no `allowedPaths`. Only
+ * {@link delegatePermissions} adds an entry and every other write to the
+ * session removes it. It is a module-level map on purpose: a copy of this
+ * module that does not see the entry derives as if it were absent, which
+ * drops the agent's relative roots (fails closed).
+ */
+const delegatedOwnRoots = new WeakMap<object, object>();
+
+/**
+ * Records the policy delegated to `agent` running on its new `session`: the
+ * {@link deriveSubAgentPermissionPolicy} of `parent` and the agent's own
+ * `child` policy, narrowed by whatever `session` already carries.
+ *
+ * @remarks
+ * When neither `parent` nor `session` sets `allowedPaths`, the stored roots
+ * are the agent's own. The agent derives its policy again when it runs (see
+ * {@link resolveEffectivePermissions}); this record lets that second pass keep
+ * its own relative roots instead of dropping them as a parent's. It holds only
+ * for `agent` on this `session`.
+ *
+ * @internal
+ */
+export function delegatePermissions(
+  session: object,
+  parent: ExternalAgentPermissionPolicy | undefined,
+  child: ExternalAgentPermissionPolicy | undefined,
+  agent: object,
+): void {
+  const before = getInheritedPermissions(session);
+  setInheritedPermissions(
+    session,
+    deriveSubAgentPermissionPolicy(parent, child),
+  );
+  if (child?.allowedPaths && !parent?.allowedPaths && !before?.allowedPaths) {
+    delegatedOwnRoots.set(session, agent);
+  }
 }
 
 /**
@@ -318,15 +388,29 @@ export function getInheritedPermissions(
  * policy at all stays `undefined`; drivers read it as no network too (see
  * `networkAllowed`).
  *
+ * The inherited `allowedPaths` bound the agent as a parent's would, except
+ * when {@link delegatePermissions} recorded them as `agent`'s own roots: then
+ * a relative root that both they and `own` name is kept, since both are
+ * relative to the agent's working directory.
+ *
+ * @param session - The session the agent runs on.
+ * @param own - The agent's own policy, already capped by its static ancestors.
+ * @param agent - The agent that runs, matched against the delegation record.
+ * @returns The effective policy, or `undefined` when there is none.
  * @internal
  */
 export function resolveEffectivePermissions(
   session: object | undefined,
   own: ExternalAgentPermissionPolicy | undefined,
+  agent?: object,
 ): ExternalAgentPermissionPolicy | undefined {
   const inherited = getInheritedPermissions(session);
   if (inherited) {
-    return deepFreezePolicy(deriveSubAgentPermissionPolicy(inherited, own));
+    const ownRoots =
+      session !== undefined &&
+      agent !== undefined &&
+      delegatedOwnRoots.get(session) === agent;
+    return deepFreezePolicy(derivePolicy(inherited, own, ownRoots));
   }
   return own && typeof own.allowNetwork !== "boolean"
     ? { ...own, allowNetwork: false }

@@ -1,3 +1,4 @@
+import { parseJson } from "../../utils/json.js";
 import { warn } from "../../utils/log.js";
 import {
   EXTERNAL_AGENT_ERROR,
@@ -41,7 +42,51 @@ import {
   validateDriverConfig,
 } from "./shared.js";
 import { spawnSubprocess, superviseSubprocess } from "./spawn.js";
-import { SubprocessJsonlDriver } from "./subprocess-jsonl.js";
+import {
+  assertNoPinnedArgOverride,
+  type PinnedFlags,
+  resolveCliCommand,
+  SubprocessJsonlDriver,
+} from "./subprocess-jsonl.js";
+
+/**
+ * Flags and config keys the Codex CLI driver sets from the policy, or that
+ * would widen it (a profile, writable directories, a different working
+ * directory, feature switches). `args` may not pass them unless
+ * `allowPolicyOverrideArgs` is set.
+ */
+const CODEX_CLI_PINNED_FLAGS: PinnedFlags = {
+  flags: [
+    "--sandbox",
+    "-s",
+    "--ask-for-approval",
+    "-a",
+    "--full-auto",
+    "--dangerously-bypass-approvals-and-sandbox",
+    "--yolo",
+    "--add-dir",
+    "--cd",
+    "-C",
+    "--profile",
+    "-p",
+    "--enable",
+    "--disable",
+    "--search",
+  ],
+  configFlags: ["-c", "--config"],
+  configKeys: [
+    "sandbox_mode",
+    "sandbox_workspace_write",
+    "sandbox_permissions",
+    "approval_policy",
+    "web_search",
+    "tools",
+    "mcp_servers",
+    "features",
+    "profile",
+    "profiles",
+  ],
+};
 
 /** Warning code of a stderr line from a Codex CLI run that exited 0. */
 const CODEX_CLI_STDERR = "CODEX_CLI_STDERR";
@@ -98,10 +143,36 @@ export interface CodexCliDriverConfig {
    * @defaultValue The command of the Codex provider (`codex`).
    */
   command?: string;
-  /** Extra arguments placed after the policy flags and before the prompt. */
+  /**
+   * Extra arguments placed after the policy flags and before the prompt.
+   *
+   * @remarks
+   * Security invariant: an entry that would override a flag the driver pins
+   * from the policy is refused when the driver is built, unless
+   * `allowPolicyOverrideArgs` is set. That covers `--sandbox`/`-s`,
+   * `--ask-for-approval`/`-a`, `--full-auto`,
+   * `--dangerously-bypass-approvals-and-sandbox`, `--add-dir`, `--cd`/`-C`,
+   * `--profile`/`-p`, `--enable`, `--disable`, `--search`, and any
+   * `-c`/`--config` override of `sandbox_mode`, `sandbox_workspace_write`,
+   * `sandbox_permissions`, `approval_policy`, `web_search`, `tools`,
+   * `mcp_servers`, `features`, `profile` or `profiles`.
+   */
   args?: readonly string[];
   /**
+   * Opt-in: let `args` pass flags that override the policy flags (see
+   * `args`). They are placed last, so with it the CLI's own handling of a
+   * repeated flag decides, and the run may not keep the policy.
+   *
+   * @defaultValue false
+   */
+  allowPolicyOverrideArgs?: boolean;
+  /**
    * Starts the process.
+   *
+   * With the built-in spawn a bare `command` is looked up on the child's
+   * `PATH`, skipping every entry inside the run's working directory or
+   * `allowedPaths` (see the class remarks). A custom spawn receives `command`
+   * as given and does its own lookup.
    *
    * @defaultValue The built-in spawn, which works on Bun and Node.
    */
@@ -191,11 +262,19 @@ function codexCliMissing(): ExternalAgentPolicyError {
  *   `EXTERNAL_AGENT_PATHS_UNENFORCEABLE` unless `allowUnenforcedPaths` is set.
  * - The process gets an allowlisted environment, never the whole of
  *   `process.env`.
+ * - With the built-in spawn a bare `command` never resolves through a `PATH`
+ *   entry inside the run's working directory or `allowedPaths`, or a
+ *   relative one (see `resolveCliCommand`); when nothing is left the run ends
+ *   with `MISSING_BINARY`.
+ * - `args` come after the policy flags, so an entry that would override one of
+ *   them makes the constructor throw `EXTERNAL_AGENT_OPTION_UNSUPPORTED`,
+ *   unless `allowPolicyOverrideArgs` is set.
  * - Aborting the run sends SIGTERM, then SIGKILL after `killGraceMs`; the
  *   process is also killed if the consumer stops reading.
  */
 export class CodexCliDriver extends SubprocessJsonlDriver {
   readonly #spawn: CodexCliSpawn;
+  readonly #builtInSpawn: boolean;
   readonly #env: Record<string, string | undefined>;
   readonly #killGraceMs: number | undefined;
   readonly #skipGitRepoCheck: boolean;
@@ -207,17 +286,28 @@ export class CodexCliDriver extends SubprocessJsonlDriver {
    * Creates a driver that runs the `codex` CLI.
    *
    * @param config - Driver options; all optional.
-   * @throws InputValidationError (from `@google/adk`) when `command` is empty or
-   * `killGraceMs` is not a finite number of at least 0.
+   * @throws InputValidationError (from `@google/adk`) when `command` is empty,
+   * `killGraceMs` is not a finite number of at least 0, or `args` is not an
+   * array of strings.
+   * @throws {@link ExternalAgentPolicyError} with code
+   * `EXTERNAL_AGENT_OPTION_UNSUPPORTED` when an `args` entry overrides a
+   * policy flag and `allowPolicyOverrideArgs` is not set.
    */
   constructor(config: CodexCliDriverConfig = {}) {
     validateDriverConfig("CodexCliDriver", config);
+    assertNoPinnedArgOverride(
+      "CodexCliDriver",
+      config.args,
+      CODEX_CLI_PINNED_FLAGS,
+      config.allowPolicyOverrideArgs ?? false,
+    );
     super({
       providerId: CODEX_PROVIDER.id,
       command: config.command ?? CODEX_PROVIDER.command ?? "codex",
       args: config.args,
     });
     this.#spawn = config.spawn ?? spawnSubprocess;
+    this.#builtInSpawn = config.spawn === undefined;
     this.#env = config.env ?? process.env;
     this.#killGraceMs = config.killGraceMs;
     this.#skipGitRepoCheck = config.skipGitRepoCheck ?? false;
@@ -275,8 +365,15 @@ export class CodexCliDriver extends SubprocessJsonlDriver {
       yield* refuse(shellRefusal);
       return;
     }
+    const command = this.#builtInSpawn
+      ? resolveCliCommand(this.command, env, request)
+      : this.command;
+    if (command === undefined) {
+      yield* refuse(codexCliMissing());
+      return;
+    }
     const mcp = await codexMcpDisableOverrides(request.permissions, {
-      command: this.command,
+      command,
       env,
       cwd: request.workingDirectory,
       lister:
@@ -296,7 +393,7 @@ export class CodexCliDriver extends SubprocessJsonlDriver {
     const args = this.buildArgs(request, mcp.overrides);
     let child: CodexCliSubprocess;
     try {
-      child = this.#spawn(this.command, args, {
+      child = this.#spawn(command, args, {
         cwd: request.workingDirectory,
         env,
       });
@@ -495,10 +592,8 @@ export class CodexCliDriver extends SubprocessJsonlDriver {
   }
 
   #parse(line: string): ParsedCodexLine | undefined {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(line);
-    } catch {
+    const result = parseJson(line);
+    if (!result.ok) {
       // A stray non-JSON line (a CLI banner, a debug print) must not end
       // the run. Log it and keep reading.
       warn(
@@ -509,7 +604,7 @@ export class CodexCliDriver extends SubprocessJsonlDriver {
     }
     // Codex's own `{"type":"error","message":...}` is also bridge-shaped, so
     // error lines are always normalized and classified below.
-    const record = asRecord(parsed);
+    const record = asRecord(result.value);
     if (record.type !== "error") {
       // A bridge-shaped line without its fields has no Codex meaning either.
       const bridged = bridgeEvent(record, "drop");
@@ -520,11 +615,11 @@ export class CodexCliDriver extends SubprocessJsonlDriver {
         return { event: bridged, sourceType: bridged.type };
       }
     }
-    const event = normalizeCodexEvent(parsed);
+    const event = normalizeCodexEvent(result.value);
     if (!event) {
       return undefined;
     }
-    return { event, sourceType: codexEventType(asRecord(parsed)) };
+    return { event, sourceType: codexEventType(record) };
   }
 }
 

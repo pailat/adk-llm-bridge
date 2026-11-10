@@ -337,7 +337,10 @@ function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-/** Agent tool callbacks, run after the plugins' (see {@link createAdkToolBridge}). */
+/**
+ * Agent tool callbacks for bridged ADK tools, run after the plugins' callbacks
+ * (`ExternalAgent` passes its `beforeToolCallback` / `afterToolCallback`).
+ */
 export interface AdkToolCallbacks {
   /** Run before each call, in order; the first response returned wins. */
   beforeToolCallbacks?: readonly SingleBeforeToolCallback[];

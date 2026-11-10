@@ -1,4 +1,5 @@
 import { InputValidationError } from "@google/adk";
+import { parseJson } from "../../utils/json.js";
 import { warn } from "../../utils/log.js";
 import type { ExternalAgentEvent } from "../events.js";
 import {
@@ -49,7 +50,38 @@ import {
   validateDriverConfig,
 } from "./shared.js";
 import { spawnSubprocess, superviseSubprocess } from "./spawn.js";
-import { SubprocessJsonlDriver } from "./subprocess-jsonl.js";
+import {
+  assertNoPinnedArgOverride,
+  type PinnedFlags,
+  resolveCliCommand,
+  SubprocessJsonlDriver,
+} from "./subprocess-jsonl.js";
+
+/**
+ * Flags the Claude CLI driver sets from the policy and its isolation, or that
+ * would widen them (extra MCP servers, tools, directories, host integrations).
+ * `args` may not pass them unless `allowPolicyOverrideArgs` is set.
+ */
+const CLAUDE_CLI_PINNED_FLAGS: PinnedFlags = {
+  flags: [
+    "--permission-mode",
+    "--dangerously-skip-permissions",
+    "--allow-dangerously-skip-permissions",
+    "--permission-prompt-tool",
+    "--add-dir",
+    "--tools",
+    "--allowedTools",
+    "--allowed-tools",
+    "--disallowedTools",
+    "--disallowed-tools",
+    "--mcp-config",
+    "--settings",
+    "--setting-sources",
+    "--plugin-dir",
+    "--ide",
+    "--chrome",
+  ],
+};
 
 /** The running `claude` process as the driver sees it. */
 export interface ClaudeCliSubprocess {
@@ -105,8 +137,28 @@ export interface ClaudeCliDriverConfig {
    * @defaultValue `"claude"`
    */
   command?: string;
-  /** Extra arguments appended after the ones the driver builds. */
+  /**
+   * Extra arguments appended after the ones the driver builds.
+   *
+   * @remarks
+   * Security invariant: an entry that would override a flag the driver sets
+   * from the policy or its isolation (`--permission-mode`,
+   * `--dangerously-skip-permissions`, `--settings`, `--setting-sources`,
+   * `--tools`, `--allowedTools`, `--disallowedTools`, `--mcp-config`,
+   * `--add-dir`, `--plugin-dir`, `--ide`, `--chrome` and their spellings) is
+   * refused when the driver is built, unless `allowPolicyOverrideArgs` is
+   * set. Use `model`, `maxTurns`, `systemPrompt`, `tools` and the permission
+   * policy instead.
+   */
   args?: readonly string[];
+  /**
+   * Opt-in: let `args` pass flags that override the policy and isolation
+   * flags (see `args`). They are placed last, so with it the CLI's own
+   * handling of a repeated flag decides, and the run may not keep the policy.
+   *
+   * @defaultValue false
+   */
+  allowPolicyOverrideArgs?: boolean;
   /**
    * Model id (`--model`); also reported as `gen_ai.request.model`.
    *
@@ -129,6 +181,11 @@ export interface ClaudeCliDriverConfig {
   systemPrompt?: string;
   /**
    * Custom process starter.
+   *
+   * With the built-in spawn a bare `command` is looked up on the child's
+   * `PATH`, skipping every entry inside the run's working directory or
+   * `allowedPaths` (see the class remarks). A custom spawn receives `command`
+   * as given and does its own lookup.
    *
    * @defaultValue a subprocess spawn that supports abort and kill
    */
@@ -217,12 +274,20 @@ function claudeCliMissing(): ExternalAgentPolicyError {
  * - Without `allowNetwork: true` Bash runs in a no-network sandbox that fails
  *   the run at start where it cannot run, unless `allowUnsandboxedShell` is set.
  * - The child environment is an allowlist, never the whole parent environment.
+ * - `args` come after the policy and isolation flags, so an entry that would
+ *   override one of them makes the constructor throw
+ *   `EXTERNAL_AGENT_OPTION_UNSUPPORTED`, unless `allowPolicyOverrideArgs` is
+ *   set.
  * - A policy with `allowedPaths` (or inherited path bounds) is refused with
  *   `EXTERNAL_AGENT_PATHS_UNENFORCEABLE`, since the CLI runs file tools without
  *   asking the bridge, unless `allowUnenforcedPaths` is set.
  * - Abort stops the run: the process gets SIGTERM and, after `killGraceMs`,
  *   SIGKILL; the supervisor is always released.
  * - A missing binary becomes a policy error event with exit code 1.
+ * - With the built-in spawn a bare `command` never resolves through a `PATH`
+ *   entry inside the run's working directory or `allowedPaths`, or a
+ *   relative one (see `resolveCliCommand`); when nothing is left the run ends
+ *   with `MISSING_BINARY`.
  * - A failed `result` line (for example `error_max_turns`) or an assistant
  *   message with an `error` becomes one `error` event classified from its
  *   subtype, as in `ClaudeAgentSdkDriver`. Any other non-zero exit becomes an
@@ -233,6 +298,7 @@ function claudeCliMissing(): ExternalAgentPolicyError {
  */
 export class ClaudeCliDriver extends SubprocessJsonlDriver {
   readonly #spawn: ClaudeCliSpawn;
+  readonly #builtInSpawn: boolean;
   readonly #env: Record<string, string | undefined>;
   readonly #killGraceMs: number | undefined;
   readonly #tools: readonly string[] | undefined;
@@ -250,8 +316,11 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
    * @throws InputValidationError (from `@google/adk`) when `command` or `model`
    * is empty, `killGraceMs` is not a finite number of at least 0, or
    * `maxTurns` is not a positive integer.
+   * @throws InputValidationError when `args` is not an array of strings.
    * @throws {@link ExternalAgentPolicyError} with code
-   * `EXTERNAL_AGENT_OPTION_UNSUPPORTED` when `sessionStore` is given.
+   * `EXTERNAL_AGENT_OPTION_UNSUPPORTED` when `sessionStore` is given, or when
+   * an `args` entry overrides a policy or isolation flag and
+   * `allowPolicyOverrideArgs` is not set.
    */
   constructor(config: ClaudeCliDriverConfig = {}) {
     if ((config as { sessionStore?: unknown }).sessionStore !== undefined) {
@@ -261,6 +330,12 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
       );
     }
     validateDriverConfig("ClaudeCliDriver", config);
+    assertNoPinnedArgOverride(
+      "ClaudeCliDriver",
+      config.args,
+      CLAUDE_CLI_PINNED_FLAGS,
+      config.allowPolicyOverrideArgs ?? false,
+    );
     if (
       config.model !== undefined &&
       (typeof config.model !== "string" || config.model.trim() === "")
@@ -275,6 +350,7 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
       args: config.args,
     });
     this.#spawn = config.spawn ?? spawnSubprocess;
+    this.#builtInSpawn = config.spawn === undefined;
     this.#env = config.env ?? process.env;
     this.#killGraceMs = config.killGraceMs;
     this.#tools = config.tools ? [...config.tools] : undefined;
@@ -342,9 +418,17 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
       return;
     }
 
+    const command = this.#builtInSpawn
+      ? resolveCliCommand(this.command, env, request)
+      : this.command;
+    if (command === undefined) {
+      yield policyErrorEvent(claudeCliMissing());
+      yield { type: "completed", exitCode: 1, timestamp: Date.now() };
+      return;
+    }
     let child: ClaudeCliSubprocess;
     try {
-      child = this.#spawn(this.command, args, {
+      child = this.#spawn(command, args, {
         cwd: request.workingDirectory,
         env,
         input: promptFromRequest(request),
@@ -578,6 +662,7 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
       tools: this.#tools,
       inheritHostConfig: this.#inheritHostConfig,
       allowUnsandboxedShell: this.#allowUnsandboxedShell,
+      env: this.#env,
       ...(request.workingDirectory
         ? { workingDirectory: request.workingDirectory }
         : {}),
@@ -618,11 +703,14 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
       return undefined;
     }
 
-    const parsed: unknown = JSON.parse(trimmed);
-    if (!isJsonObject(parsed)) {
+    const parsed = parseJson(trimmed);
+    if (!parsed.ok) {
+      throw new SyntaxError(parsed.error);
+    }
+    if (!isJsonObject(parsed.value)) {
       return undefined;
     }
-    return normalizeClaudeEvent(parsed as ClaudeStreamEvent);
+    return normalizeClaudeEvent(parsed.value as ClaudeStreamEvent);
   }
 
   private parseClaudeStreamLine(raw: unknown):
@@ -717,15 +805,15 @@ function parseJsonLine(line: string): unknown {
   if (!trimmed) {
     return undefined;
   }
-  try {
-    return JSON.parse(trimmed) as unknown;
-  } catch {
-    warn(
-      "CLAUDE_CLI_NON_JSON_LINE",
-      `Ignoring a non-JSON line from claude --output-format stream-json: ${trimmed.slice(0, 200)}`,
-    );
-    return undefined;
+  const parsed = parseJson(trimmed);
+  if (parsed.ok) {
+    return parsed.value;
   }
+  warn(
+    "CLAUDE_CLI_NON_JSON_LINE",
+    `Ignoring a non-JSON line from claude --output-format stream-json: ${trimmed.slice(0, 200)}`,
+  );
+  return undefined;
 }
 
 type ClaudeStreamEvent = {

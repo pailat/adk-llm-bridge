@@ -27,7 +27,7 @@ import {
   errorTitle,
   isPlainRecord,
   itemTitle,
-  stringValue,
+  stringOrEmpty,
   textTitle,
   toolCallTitle,
   toolResponseTitle,
@@ -508,6 +508,7 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
     const permissions = resolveEffectivePermissions(
       context.session,
       ancestryPermissions(this),
+      this,
     );
 
     // Own controller so abandoning the generator (iterator.return(), e.g. a
@@ -1442,12 +1443,12 @@ function readableExternalEventTitle(
 ): string {
   switch (event.type) {
     case "output": {
-      const itemType = stringValue(event.metadata?.itemType);
+      const itemType = stringOrEmpty(event.metadata?.itemType);
       if (itemType) {
         return itemTitle(
           agentName,
           itemType,
-          stringValue(event.metadata?.status),
+          stringOrEmpty(event.metadata?.status),
         );
       }
       return textTitle(agentName, Boolean(event.partial));

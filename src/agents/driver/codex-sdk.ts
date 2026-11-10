@@ -29,6 +29,7 @@ import {
 } from "./policy-errors.js";
 import { codexTurnUsage } from "./run-summary.js";
 import {
+  agentWritableRoots,
   asRecord,
   candidateBaseDirectories,
   contextText,
@@ -37,6 +38,7 @@ import {
   describeMissingExecutable,
   executableCandidates,
   findExecutable,
+  isSearchableExecutable,
   readCredentialEnv,
   removeUndefined,
   stringValue,
@@ -404,22 +406,29 @@ export class CodexSdkDriver {
         return;
       }
       const binary = this.resolveCodexBinary(request);
-      const mcp = await codexMcpDisableOverrides(request.permissions, {
-        command: binary.path ?? "codex",
-        env: this.runEnv(request, binary),
-        cwd: request.workingDirectory,
-        lister: this.#listMcpServers,
-        configuredNames: configuredMcpServerNames(this.#config),
-        allowUnenforcedNetwork: this.#allowUnenforcedNetwork,
-        runtime: "Codex",
-        commandNotFound: () =>
-          dependencyMissing(
-            "binary",
-            "The codex binary (needed to list MCP servers while the network is off)",
-            "npm install -g @openai/codex",
-            "set CODEX_EXECUTABLE to its path",
-          ),
-      });
+      const missingBinary = () =>
+        dependencyMissing(
+          "binary",
+          "The codex binary (needed to list MCP servers while the network is off)",
+          "npm install -g @openai/codex",
+          "set CODEX_EXECUTABLE to its path",
+        );
+      // Without a binary outside the workspace the listing is refused: a
+      // bare `codex` would be looked up on PATH, which can name a directory
+      // inside the workspace.
+      const mcp =
+        binary.path === undefined && !networkAllowed(request.permissions)
+          ? { refusal: missingBinary() }
+          : await codexMcpDisableOverrides(request.permissions, {
+              command: binary.path ?? "codex",
+              env: this.runEnv(request, binary),
+              cwd: request.workingDirectory,
+              lister: this.#listMcpServers,
+              configuredNames: configuredMcpServerNames(this.#config),
+              allowUnenforcedNetwork: this.#allowUnenforcedNetwork,
+              runtime: "Codex",
+              commandNotFound: missingBinary,
+            });
       if (mcp.refusal) {
         yield policyErrorEvent(mcp.refusal);
         yield { type: "completed", exitCode: 1, timestamp: Date.now() };
@@ -655,14 +664,23 @@ export class CodexSdkDriver {
    * Order: `codexPathOverride`, `CODEX_EXECUTABLE`, `CODEX_CLI_PATH` (driver
    * env, then the run credential), `PATH` and `node_modules/.bin`, then the
    * npm-installed `@openai/codex` package, both under the host process
-   * directory and this package's install. The run's working directory is
-   * never searched, since the agent can write there. It only checks that
-   * files exist.
+   * directory and this package's install. It only checks that files exist.
    *
-   * @param request - The run, for its credential.
+   * Security invariant: no candidate at or under a directory the agent may
+   * write is searched or returned: the run's working directory (the process
+   * directory when it is unset) and its `allowedPaths`, symlinks resolved.
+   * The explicit paths above are used as given. When nothing is found, a run
+   * that needs the MCP listing is refused with `MISSING_BINARY`; otherwise
+   * the SDK looks for its own bundled binary next to its install, which the
+   * agent can change if that install is inside the workspace (see the
+   * isolation guide).
+   *
+   * @param request - The run, for its credential, working directory and
+   * permissions.
    * @returns The binary path (when found) and every location tried.
    */
   resolveCodexBinary(request: ExternalAgentRunRequest): CodexBinaryResolution {
+    const excluded = agentWritableRoots(request);
     const found = findExecutable(
       [
         this.#codexPathOverride,
@@ -671,7 +689,7 @@ export class CodexSdkDriver {
         readCredentialEnv(request, "CODEX_EXECUTABLE"),
         readCredentialEnv(request, "CODEX_CLI_PATH"),
       ],
-      codexBinaryCandidates({ env: this.#env }),
+      codexBinaryCandidates({ env: this.#env, excluded }),
     );
     if (found.path) {
       return found;
@@ -680,7 +698,7 @@ export class CodexSdkDriver {
 
     // The npm-installed binary, found the way @openai/codex-sdk finds it.
     for (const base of candidateBaseDirectories()) {
-      const found = findNpmCodexBinary(base, checked);
+      const found = findNpmCodexBinary(base, checked, excluded);
       if (found) {
         return { ...found, checked };
       }
@@ -1251,13 +1269,16 @@ function readSavedThreadId(
 
 function codexBinaryCandidates({
   env,
+  excluded,
 }: {
   env: Record<string, string | undefined>;
+  excluded: readonly string[];
 }): string[] {
   const executable = process.platform === "win32" ? "codex.exe" : "codex";
   return executableCandidates({
     executable,
     env,
+    excluded,
     packagePaths: (base) =>
       platformCodexPackages().map(([platformPackage, targetTriple]) =>
         join(
@@ -1285,6 +1306,7 @@ function codexBinaryCandidates({
 function findNpmCodexBinary(
   base: string,
   checked: string[],
+  excluded: readonly string[],
 ): { path: string; pathDirs: string[] } | undefined {
   const [platform] = platformCodexPackages();
   if (!platform) {
@@ -1318,6 +1340,10 @@ function findNpmCodexBinary(
       continue;
     }
     const root = join(vendorRoot, targetTriple);
+    // The package resolution can follow a symlink into the workspace.
+    if (!isSearchableExecutable(root, excluded)) {
+      continue;
+    }
     const current = join(root, "bin", executable);
     checked.push(current);
     if (isFile(current) && isFile(join(root, "codex-package.json"))) {

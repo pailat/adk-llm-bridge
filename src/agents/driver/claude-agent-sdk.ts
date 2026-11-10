@@ -48,6 +48,7 @@ import {
   claudeResultSummary,
 } from "./run-summary.js";
 import {
+  agentWritableRoots,
   asRecord,
   contextText,
   copyIfPresent,
@@ -200,7 +201,11 @@ export interface ClaudeAgentSdkDriverConfig {
    * search paths.
    */
   pathToClaudeCodeExecutable?: string;
-  /** Extra directories searched for the `claude` executable. */
+  /**
+   * Extra directories searched for the `claude` executable. A directory at
+   * or under the run's working directory or `allowedPaths` is skipped; use
+   * `pathToClaudeCodeExecutable` for a binary there.
+   */
   executableSearchPaths?: string[];
   /**
    * Environment that `PATH`, `HOME`, `USER`, `SHELL` and the Claude config
@@ -273,6 +278,10 @@ export interface ClaudeAgentSdkDriverConfig {
    * the `init` listing or each `tool_use` against the isolated set. Use it only when
    * the host's tools, MCP servers and connectors are trusted for this agent.
    * `settingSources` stays a separate opt-in.
+   *
+   * Security invariant: under `read-only`, and without `allowNetwork: true`
+   * in every mode, host MCP tools are still denied by a `PreToolUse` hook
+   * (pre-approved ones too); only the bridge's own tools run.
    *
    * @defaultValue false
    */
@@ -643,8 +652,9 @@ export class ClaudeAgentSdkDriver {
         };
       }
       if (!expectation && isolation.denyForeignMcpTools) {
-        // read-only with inheritHostConfig: host settings may pre-approve an
-        // MCP tool, which then skips canUseTool. The hook denies it anyway.
+        // inheritHostConfig under read-only or with the network off: host
+        // settings may pre-approve an MCP tool, which then skips canUseTool.
+        // The hook denies it anyway.
         options = {
           ...options,
           hooks: withForeignMcpDenyHook(options.hooks, built.bridgeTools),
@@ -833,6 +843,7 @@ export class ClaudeAgentSdkDriver {
       tools: this.#tools,
       inheritHostConfig: this.#inheritHostConfig,
       allowUnsandboxedShell: this.#allowUnsandboxedShell,
+      env: this.#env,
       ...(request.workingDirectory
         ? { workingDirectory: request.workingDirectory }
         : {}),
@@ -1000,10 +1011,18 @@ export class ClaudeAgentSdkDriver {
    * environment, then the run's credential), then the first existing candidate
    * under `PATH`, the home directory, `executableSearchPaths` and the
    * `node_modules` of the host process directory and of this package's
-   * install. The run's working directory is never searched, since the agent
-   * can write there.
+   * install.
    *
-   * @param request - The run request, for its credential.
+   * Security invariant: no candidate at or under a directory the agent may
+   * write is searched: the run's working directory (the process directory
+   * when it is unset) and its `allowedPaths`, symlinks resolved. The
+   * explicit paths above are used as given. When nothing is found the SDK
+   * looks for its own bundled binary next to its install; if that install
+   * is inside the workspace, the agent can change it (see the isolation
+   * guide).
+   *
+   * @param request - The run request, for its credential, working directory
+   * and permissions.
    * @returns The path, if any, and every candidate that was checked.
    */
   resolveClaudeExecutable(
@@ -1020,6 +1039,7 @@ export class ClaudeAgentSdkDriver {
       claudeExecutableCandidates({
         env: this.#env,
         executableSearchPaths: this.#executableSearchPaths,
+        excluded: agentWritableRoots(request),
       }),
     );
   }
@@ -1587,47 +1607,62 @@ export class ClaudeAgentSdkDriver {
   }
 }
 
+/** What {@link withPreToolUseGuard} decides for each tool call. */
+interface PreToolUseGuard {
+  /**
+   * The reason to deny a named call, or `undefined` to let it through to the
+   * next hook.
+   */
+  deny: (
+    toolName: string,
+    toolInput: Record<string, unknown>,
+  ) => string | undefined;
+  /** The reason given when a call names no tool. */
+  unnamedReason: string;
+  /** Called for each denied call, with `""` for one that names no tool. */
+  onDenied?: (toolName: string) => void;
+}
+
 /**
- * Adds a `PreToolUse` hook that denies every tool outside the isolated set.
+ * Puts a `PreToolUse` hook in front of the existing ones.
  *
- * @remarks The SDK calls `canUseTool` only for tools that need permission,
- * so in `bypassPermissions` mode, or for a tool already in `allowedTools`, a
- * late connector tool would run. A `PreToolUse` deny blocks it in every
- * permission mode. Programmatic hooks are not a setting source, so the
- * isolation (no host settings) keeps them.
+ * @remarks
+ * Security invariant: a call whose `tool_name` is missing or not a
+ * non-empty string is denied (fail closed), since it cannot be checked. The
+ * SDK calls `canUseTool` only for tools that need permission, so a
+ * `PreToolUse` deny is what blocks a call in every permission mode, also a
+ * tool in `allowedTools` or one host settings pre-approve. Programmatic hooks
+ * are not a setting source, so an isolated run (no host settings) keeps them.
+ *
+ * @param hooks - The hooks already configured.
+ * @param guard - The decision and the reason for a call without a name.
+ * @returns The hooks with the guard first under `PreToolUse`.
  */
-function withIsolationHook(
+function withPreToolUseGuard(
   hooks: ClaudeAgentSdkOptions["hooks"],
-  expectation: ClaudeIsolationExpectation,
-  onBlocked: (toolName: string) => void,
+  guard: PreToolUseGuard,
 ): NonNullable<ClaudeAgentSdkOptions["hooks"]> {
+  const denied = (reason: string) => ({
+    hookSpecificOutput: {
+      hookEventName: "PreToolUse",
+      permissionDecision: "deny",
+      permissionDecisionReason: reason,
+    },
+  });
   const matcher: ClaudeAgentSdkHookMatcher = {
     hooks: [
       async (input) => {
         const toolName = stringValue(input.tool_name);
         if (toolName === undefined) {
-          // Fail closed: a call that names no tool cannot be checked.
-          onBlocked("");
-          return {
-            hookSpecificOutput: {
-              hookEventName: "PreToolUse",
-              permissionDecision: "deny",
-              permissionDecisionReason:
-                "A tool call with no tool name is outside this agent's isolated tool set.",
-            },
-          };
+          guard.onDenied?.("");
+          return denied(guard.unnamedReason);
         }
-        if (isExpectedClaudeTool(toolName, expectation)) {
+        const reason = guard.deny(toolName, asRecord(input.tool_input));
+        if (reason === undefined) {
           return {};
         }
-        onBlocked(toolName);
-        return {
-          hookSpecificOutput: {
-            hookEventName: "PreToolUse",
-            permissionDecision: "deny",
-            permissionDecisionReason: `${toolName} is outside this agent's isolated tool set.`,
-          },
-        };
+        guard.onDenied?.(toolName);
+        return denied(reason);
       },
     ],
   };
@@ -1638,48 +1673,47 @@ function withIsolationHook(
 }
 
 /**
+ * Adds a `PreToolUse` hook that denies every tool outside the isolated set.
+ *
+ * @remarks Without it, in `bypassPermissions` mode or for a tool already in
+ * `allowedTools`, a late connector tool would run.
+ */
+function withIsolationHook(
+  hooks: ClaudeAgentSdkOptions["hooks"],
+  expectation: ClaudeIsolationExpectation,
+  onBlocked: (toolName: string) => void,
+): NonNullable<ClaudeAgentSdkOptions["hooks"]> {
+  return withPreToolUseGuard(hooks, {
+    unnamedReason:
+      "A tool call with no tool name is outside this agent's isolated tool set.",
+    deny: (toolName) =>
+      isExpectedClaudeTool(toolName, expectation)
+        ? undefined
+        : `${toolName} is outside this agent's isolated tool set.`,
+    onDenied: onBlocked,
+  });
+}
+
+/**
  * Adds a `PreToolUse` hook that denies every MCP tool except the bridge's own
- * registered tools. Used for `read-only` runs that inherit the host config,
- * where a host `permissions.allow` rule would let a host MCP tool (which may
- * write) run without reaching the permission callback.
+ * registered tools. Used for runs that inherit the host config under
+ * `read-only` or with the network off, where a host `permissions.allow` rule
+ * would let a host MCP tool (which may write, or reach the network) run
+ * without reaching the permission callback.
  */
 function withForeignMcpDenyHook(
   hooks: ClaudeAgentSdkOptions["hooks"],
   bridgeTools: readonly string[] | undefined,
 ): NonNullable<ClaudeAgentSdkOptions["hooks"]> {
   const allowed = new Set(bridgeTools ?? []);
-  const matcher: ClaudeAgentSdkHookMatcher = {
-    hooks: [
-      async (input) => {
-        const toolName = stringValue(input.tool_name);
-        if (toolName === undefined) {
-          // Fail closed: a call that names no tool may be a foreign MCP tool.
-          return {
-            hookSpecificOutput: {
-              hookEventName: "PreToolUse",
-              permissionDecision: "deny",
-              permissionDecisionReason:
-                "A tool call with no tool name cannot be checked; a read-only agent cannot use it.",
-            },
-          };
-        }
-        if (!toolName.startsWith("mcp__") || allowed.has(toolName)) {
-          return {};
-        }
-        return {
-          hookSpecificOutput: {
-            hookEventName: "PreToolUse",
-            permissionDecision: "deny",
-            permissionDecisionReason: `${toolName} is an MCP tool outside the bridge; a read-only agent cannot use it.`,
-          },
-        };
-      },
-    ],
-  };
-  return {
-    ...(hooks ?? {}),
-    PreToolUse: [matcher, ...(hooks?.PreToolUse ?? [])],
-  };
+  return withPreToolUseGuard(hooks, {
+    unnamedReason:
+      "A tool call with no tool name cannot be checked, so it may be an MCP tool outside the bridge, which this agent cannot use.",
+    deny: (toolName) =>
+      !toolName.startsWith("mcp__") || allowed.has(toolName)
+        ? undefined
+        : `${toolName} is an MCP tool outside the bridge; this agent cannot use it (read-only, or the network is off).`,
+  });
 }
 
 /**
@@ -1700,45 +1734,20 @@ function withPathGuardHook(
   bridgeTools: readonly string[] | undefined,
 ): NonNullable<ClaudeAgentSdkOptions["hooks"]> {
   const bridged = new Set(bridgeTools ?? []);
-  const matcher: ClaudeAgentSdkHookMatcher = {
-    hooks: [
-      async (input) => {
-        const toolName = stringValue(input.tool_name);
-        if (toolName === undefined) {
-          return {
-            hookSpecificOutput: {
-              hookEventName: "PreToolUse",
-              permissionDecision: "deny",
-              permissionDecisionReason: "Denied: tool call without a name.",
-            },
-          };
-        }
-        if (bridged.has(toolName)) {
-          return {};
-        }
-        const toolInput = asRecord(input.tool_input);
-        const denial = guardRequestPaths(
-          policy,
-          { toolName, input: toolInput },
-          workingDirectory ? { workingDirectory } : {},
-        );
-        if (denial?.behavior !== "deny") {
-          return {};
-        }
-        return {
-          hookSpecificOutput: {
-            hookEventName: "PreToolUse",
-            permissionDecision: "deny",
-            permissionDecisionReason: denial.message,
-          },
-        };
-      },
-    ],
-  };
-  return {
-    ...(hooks ?? {}),
-    PreToolUse: [matcher, ...(hooks?.PreToolUse ?? [])],
-  };
+  return withPreToolUseGuard(hooks, {
+    unnamedReason: "Denied: tool call without a name.",
+    deny: (toolName, toolInput) => {
+      if (bridged.has(toolName)) {
+        return undefined;
+      }
+      const denial = guardRequestPaths(
+        policy,
+        { toolName, input: toolInput },
+        workingDirectory ? { workingDirectory } : {},
+      );
+      return denial?.behavior === "deny" ? denial.message : undefined;
+    },
+  });
 }
 
 function isolationHookViolation(
@@ -1836,15 +1845,18 @@ export function mapPolicyToClaudeSdkPermission(
 function claudeExecutableCandidates({
   env,
   executableSearchPaths,
+  excluded,
 }: {
   env: Record<string, string | undefined>;
   executableSearchPaths?: string[];
+  excluded: readonly string[];
 }): string[] {
   const executable = process.platform === "win32" ? "claude.exe" : "claude";
   const home = env.HOME;
   return executableCandidates({
     executable,
     env,
+    excluded,
     extraDirs: [
       ...(home
         ? [join(home, ".local", "bin"), join(home, ".claude", "local")]

@@ -14,6 +14,8 @@ export type RemovedAgentTypes = [
   Agents.ProviderPermissionFlags,
   // @ts-expect-error removed: never used by any driver
   Agents.AgentRuntimeRequestMetadata,
+  // @ts-expect-error internal: options of the internal tool bridge factory
+  Agents.AdkToolCallbacks,
 ];
 
 describe("./agents type exports", () => {

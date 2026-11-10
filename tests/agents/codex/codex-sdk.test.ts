@@ -3,6 +3,7 @@ import {
   chmodSync,
   mkdirSync,
   mkdtempSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -143,6 +144,67 @@ describe("CodexSdkDriver", () => {
         path.startsWith(join(workspace, "node_modules")),
       ),
     ).toBe(false);
+  });
+
+  for (const [label, workingDirectory] of [
+    ["unset", () => undefined],
+    ["the process directory", () => process.cwd()],
+  ] as const) {
+    test(`skips a binary planted in the process directory when workingDirectory is ${label}`, () => {
+      // The host runs from a directory the agent can write (the default
+      // setup): neither its node_modules nor a PATH entry inside it may
+      // supply the next run's binary.
+      const workspace = realpathSync(
+        mkdtempSync(join(tmpdir(), "codex-sdk-cwd-")),
+      );
+      const executable = process.platform === "win32" ? "codex.exe" : "codex";
+      const bin = join(workspace, "node_modules", ".bin");
+      const planted = join(bin, executable);
+      mkdirSync(bin, { recursive: true });
+      writeFileSync(planted, "#!/bin/sh\nexit 0\n");
+      chmodSync(planted, 0o755);
+      const previous = process.cwd();
+      process.chdir(workspace);
+      try {
+        const driver = new CodexSdkDriver({
+          env: { PATH: bin, HOME: join(workspace, "home") },
+        });
+        const resolution = driver.resolveCodexBinary({
+          provider: CODEX_PROVIDER,
+          context: {} as never,
+          workingDirectory: workingDirectory(),
+        });
+
+        expect(resolution.path).toBeUndefined();
+        expect(
+          resolution.checked.filter((path) => path.startsWith(workspace)),
+        ).toEqual([]);
+      } finally {
+        process.chdir(previous);
+        rmSync(workspace, { recursive: true, force: true });
+      }
+    });
+  }
+
+  test("an explicit binary inside the working directory is still used", () => {
+    const workspace = realpathSync(
+      mkdtempSync(join(tmpdir(), "codex-sdk-explicit-")),
+    );
+    const executable = join(workspace, "codex");
+    try {
+      const driver = new CodexSdkDriver({
+        env: { PATH: "", CODEX_EXECUTABLE: executable },
+      });
+      expect(
+        driver.resolveCodexBinary({
+          provider: CODEX_PROVIDER,
+          context: {} as never,
+          workingDirectory: workspace,
+        }).path,
+      ).toBe(executable);
+    } finally {
+      rmSync(workspace, { recursive: true, force: true });
+    }
   });
 
   test("emits actionable Codex binary lookup errors", async () => {

@@ -27,7 +27,7 @@ export function isPlainRecord(
  * @param value - Anything.
  * @returns `value` when it is a string, else `""`.
  */
-export function stringValue(value: unknown): string {
+export function stringOrEmpty(value: unknown): string {
   return typeof value === "string" ? value : "";
 }
 
@@ -56,10 +56,10 @@ export function toolDetail(value: unknown): string {
     return "";
   }
   const detail =
-    stringValue(value.command) ||
-    stringValue(value.query) ||
-    stringValue(value.toolName) ||
-    stringValue(value.status);
+    stringOrEmpty(value.command) ||
+    stringOrEmpty(value.query) ||
+    stringOrEmpty(value.toolName) ||
+    stringOrEmpty(value.status);
   return detail ? `: ${truncate(detail, TOOL_DETAIL_CHARS)}` : "";
 }
 

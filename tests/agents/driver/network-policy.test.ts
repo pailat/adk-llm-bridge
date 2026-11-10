@@ -4,7 +4,9 @@ import {
   mkdirSync,
   mkdtempSync,
   realpathSync,
+  renameSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -607,13 +609,20 @@ describe.if(PLATFORM !== undefined)(
       chmodSync(binary, 0o755);
       const previous = process.cwd();
       if (!asWorkspace) process.chdir(root);
+      // The run works in a separate directory, so the host's own tree is
+      // outside what the agent can write.
+      const elsewhere = realpathSync(
+        mkdtempSync(join(tmpdir(), "codex-npm-run-")),
+      );
       return {
         root: realpathSync(root),
         binary: realpathSync(binary),
         pathDir: realpathSync(join(vendor, "codex-path")),
+        elsewhere,
         cleanup: () => {
           process.chdir(previous);
           rmSync(root, { recursive: true, force: true });
+          rmSync(elsewhere, { recursive: true, force: true });
         },
       };
     }
@@ -622,11 +631,96 @@ describe.if(PLATFORM !== undefined)(
       const tree = npmTree();
       try {
         const driver = new CodexSdkDriver({ env: { PATH: "/nonexistent" } });
-        const resolution = driver.resolveCodexBinary(request(NO_NETWORK));
+        const resolution = driver.resolveCodexBinary({
+          ...request(NO_NETWORK),
+          workingDirectory: tree.elsewhere,
+        });
         expect(realpathSync(resolution.path ?? "")).toBe(tree.binary);
         expect(resolution.pathDirs?.map((dir) => realpathSync(dir))).toEqual([
           tree.pathDir,
         ]);
+      } finally {
+        tree.cleanup();
+      }
+    });
+
+    for (const [label, workingDirectory] of [
+      ["unset", () => undefined],
+      ["the process directory", () => process.cwd()],
+    ] as const) {
+      test(`the host's npm tree is not used when workingDirectory is ${label}`, () => {
+        // The process runs from the tree and the run works there too, so
+        // the agent could have planted the package.
+        const tree = npmTree();
+        try {
+          const driver = new CodexSdkDriver({
+            env: { PATH: "/nonexistent" },
+          });
+          const resolution = driver.resolveCodexBinary({
+            ...request(NO_NETWORK),
+            workingDirectory: workingDirectory(),
+          });
+          expect(resolution.path).toBeUndefined();
+          expect(
+            resolution.checked.filter((path) => path.startsWith(tree.root)),
+          ).toEqual([]);
+        } finally {
+          tree.cleanup();
+        }
+      });
+    }
+
+    test("without a binary outside the workspace the listing is refused, not run from PATH", async () => {
+      // The bare name would be resolved through PATH, which may list a
+      // directory inside the workspace (package-manager scripts add
+      // node_modules/.bin).
+      const tree = npmTree();
+      try {
+        const listed: string[] = [];
+        const events = await collect(
+          new CodexSdkDriver({
+            Codex: class {} as never,
+            env: { PATH: join(tree.root, "node_modules", ".bin") },
+            listMcpServers: async (options) => {
+              listed.push(options.command);
+              return [];
+            },
+          }).run(request(NO_NETWORK)),
+        );
+        expect(listed).toEqual([]);
+        expect(events.find((event) => event.type === "error")).toMatchObject({
+          code: "MISSING_BINARY",
+        });
+        expect(events.at(-1)).toMatchObject({ type: "completed", exitCode: 1 });
+      } finally {
+        tree.cleanup();
+      }
+    });
+
+    test("a host package that links into the workspace is not used", () => {
+      // The host tree is outside the workspace, but its platform package is
+      // a symlink into it, where the agent could replace the binary.
+      const tree = npmTree();
+      try {
+        const [platformPackage] = PLATFORM as [string, string];
+        const linked = join(
+          tree.root,
+          "node_modules",
+          "@openai",
+          platformPackage,
+        );
+        const moved = join(tree.elsewhere, platformPackage);
+        renameSync(linked, moved);
+        symlinkSync(moved, linked);
+        const driver = new CodexSdkDriver({ env: { PATH: "/nonexistent" } });
+        const resolution = driver.resolveCodexBinary({
+          ...request(NO_NETWORK),
+          workingDirectory: tree.elsewhere,
+        });
+        expect(resolution.path).toBeUndefined();
+        expect(
+          resolution.checked.filter((path) => path.startsWith(tree.elsewhere)),
+        ).toEqual([]);
       } finally {
         tree.cleanup();
       }
@@ -682,7 +776,7 @@ describe.if(PLATFORM !== undefined)(
               listed.push(options);
               return [];
             },
-          }).run(request(NO_NETWORK)),
+          }).run({ ...request(NO_NETWORK), workingDirectory: tree.elsewhere }),
         );
         expect(realpathSync(listed[0]?.command ?? "")).toBe(tree.binary);
         const listingPath = (listed[0]?.env.PATH ?? "").split(":");

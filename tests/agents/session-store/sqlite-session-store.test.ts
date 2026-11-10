@@ -1,5 +1,15 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
@@ -479,3 +489,138 @@ describe("SqliteSessionStore edge cases", () => {
     expect(await store.load(key)).toEqual([{ type: "user", uuid: "ok" }]);
   });
 });
+
+describe.skipIf(process.platform === "win32")(
+  "SqliteSessionStore refuses an unsafe database path",
+  () => {
+    test("a symlink planted at the database path is refused and its target is left alone", () => {
+      const dir = tempDir();
+      const target = join(dir, "victim.txt");
+      writeFileSync(target, "keep me");
+      const path = join(dir, "sessions.db");
+      symlinkSync(target, path);
+
+      const error = openError({ path });
+
+      expect(error).toBeInstanceOf(SqliteSessionStoreError);
+      expect((error as SqliteSessionStoreError).code).toBe(
+        "SESSION_STORE_UNSAFE_PATH",
+      );
+      expect(readFileSync(target, "utf8")).toBe("keep me");
+    });
+
+    test("a dangling symlink at the database path is refused and nothing is created", () => {
+      const dir = tempDir();
+      const target = join(dir, "created-through-link.db");
+      const path = join(dir, "sessions.db");
+      symlinkSync(target, path);
+
+      expect((openError({ path }) as SqliteSessionStoreError).code).toBe(
+        "SESSION_STORE_UNSAFE_PATH",
+      );
+      expect(existsSync(target)).toBe(false);
+    });
+
+    test("a new file is 0600 whatever the umask", async () => {
+      const path = join(tempDir(), "sessions.db");
+      const previous = process.umask(0o277);
+      let store: SqliteSessionStore;
+      try {
+        store = open(path);
+      } finally {
+        process.umask(previous);
+      }
+      await store.append(key, [{ type: "user", uuid: "u1" }]);
+      expect(statSync(path).mode & 0o777).toBe(0o600);
+    });
+
+    test("a directory others can write is refused", () => {
+      const dir = join(tempDir(), "shared");
+      mkdirSync(dir);
+      chmodSync(dir, 0o777);
+
+      expect(
+        (
+          openError({
+            path: join(dir, "sessions.db"),
+          }) as SqliteSessionStoreError
+        ).code,
+      ).toBe("SESSION_STORE_UNSAFE_PATH");
+      expect(existsSync(join(dir, "sessions.db"))).toBe(false);
+    });
+
+    test("a directory its group can write is refused", () => {
+      for (const mode of [0o770, 0o775]) {
+        const dir = join(tempDir(), `group-${mode.toString(8)}`);
+        mkdirSync(dir);
+        chmodSync(dir, mode);
+
+        expect(
+          (
+            openError({
+              path: join(dir, "sessions.db"),
+            }) as SqliteSessionStoreError
+          ).code,
+        ).toBe("SESSION_STORE_UNSAFE_PATH");
+        expect(existsSync(join(dir, "sessions.db"))).toBe(false);
+      }
+    });
+
+    test("a path that is not a regular file is refused", () => {
+      const before = statSync("/dev/null");
+
+      const error = openError({ path: "/dev/null" });
+
+      expect(error).toBeInstanceOf(SqliteSessionStoreError);
+      expect((error as SqliteSessionStoreError).code).toBe(
+        "SESSION_STORE_UNSAFE_PATH",
+      );
+      expect((error as Error).message).toContain("not a regular file");
+      const after = statSync("/dev/null");
+      expect(after.isCharacterDevice()).toBe(true);
+      expect(after.mode).toBe(before.mode);
+    });
+
+    test("a sticky shared directory and an existing 0755 directory are accepted unchanged", async () => {
+      const sticky = join(tempDir(), "sticky");
+      mkdirSync(sticky);
+      chmodSync(sticky, 0o1777);
+      const plain = join(tempDir(), "plain");
+      mkdirSync(plain);
+      chmodSync(plain, 0o755);
+
+      for (const dir of [sticky, plain]) {
+        const store = open(join(dir, "sessions.db"));
+        await store.append(key, [{ type: "user", uuid: "u1" }]);
+      }
+      expect(statSync(sticky).mode & 0o7777).toBe(0o1777);
+      expect(statSync(plain).mode & 0o777).toBe(0o755);
+    });
+
+    test("a directory reached through a symlink is checked at its real path", async () => {
+      const real = join(tempDir(), "real");
+      mkdirSync(real, { mode: 0o700 });
+      const link = join(tempDir(), "link");
+      symlinkSync(real, link);
+
+      const store = open(join(link, "sessions.db"));
+      await store.append(key, [{ type: "user", uuid: "u1" }]);
+      expect(existsSync(join(real, "sessions.db"))).toBe(true);
+
+      chmodSync(real, 0o777);
+      expect(
+        (openError({ path: join(link, "other.db") }) as SqliteSessionStoreError)
+          .code,
+      ).toBe("SESSION_STORE_UNSAFE_PATH");
+    });
+
+    test("an existing database keeps its mode", async () => {
+      const path = join(tempDir(), "sessions.db");
+      open(path).close();
+      chmodSync(path, 0o640);
+      const store = open(path);
+      await store.append(key, [{ type: "user", uuid: "u1" }]);
+      expect(statSync(path).mode & 0o777).toBe(0o640);
+    });
+  },
+);

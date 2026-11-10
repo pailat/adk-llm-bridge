@@ -1,3 +1,4 @@
+import { parseJson } from "../../utils/json.js";
 import { warn } from "../../utils/log.js";
 import type { ExternalAgentEvent } from "../events.js";
 import {
@@ -29,7 +30,10 @@ import {
   validateDriverConfig,
 } from "./shared.js";
 import { spawnSubprocess, superviseSubprocess } from "./spawn.js";
-import { SubprocessJsonlDriver } from "./subprocess-jsonl.js";
+import {
+  resolveCliCommand,
+  SubprocessJsonlDriver,
+} from "./subprocess-jsonl.js";
 
 /** A running `gemini` process, as the driver sees it. */
 export interface GeminiCliSubprocess {
@@ -87,6 +91,11 @@ export interface GeminiCliDriverConfig {
   command?: string;
   /**
    * Starts the process.
+   *
+   * With the built-in spawn a bare `command` is looked up on the child's
+   * `PATH`, skipping every entry inside the run's working directory or
+   * `allowedPaths` (see the class remarks). A custom spawn receives `command`
+   * as given and does its own lookup.
    *
    * @defaultValue The built-in spawn, which works on Bun and Node.
    */
@@ -172,6 +181,10 @@ function geminiNetworkRefusal(
  *   `EXTERNAL_AGENT_PATHS_UNENFORCEABLE` unless `allowUnenforcedPaths` is set.
  * - The permission policy becomes approval-mode and sandbox flags (see
  *   {@link mapGeminiPermissionArgs}).
+ * - With the built-in spawn a bare `command` never resolves through a `PATH`
+ *   entry inside the run's working directory or `allowedPaths`, or a
+ *   relative one (see `resolveCliCommand`); when nothing is left the run ends
+ *   with `MISSING_BINARY`.
  * - The process gets an allowlisted environment (`PATH`, `HOME` and the
  *   credential keys the provider allows), never the whole of `process.env`.
  * - Aborting the run sends SIGTERM, then SIGKILL after `killGraceMs`; the
@@ -179,6 +192,7 @@ function geminiNetworkRefusal(
  */
 export class GeminiCliDriver extends SubprocessJsonlDriver {
   readonly #spawn: GeminiCliSpawn;
+  readonly #builtInSpawn: boolean;
   readonly #env: Record<string, string | undefined>;
   readonly #killGraceMs: number | undefined;
   readonly #allowUnenforcedNetwork: boolean;
@@ -198,6 +212,7 @@ export class GeminiCliDriver extends SubprocessJsonlDriver {
       command: config.command ?? GEMINI_CLI_PROVIDER.command ?? "gemini",
     });
     this.#spawn = config.spawn ?? spawnSubprocess;
+    this.#builtInSpawn = config.spawn === undefined;
     this.#env = config.env ?? process.env;
     this.#killGraceMs = config.killGraceMs;
     this.#allowUnenforcedNetwork = config.allowUnenforcedNetwork ?? false;
@@ -254,9 +269,17 @@ export class GeminiCliDriver extends SubprocessJsonlDriver {
       return;
     }
 
+    const command = this.#builtInSpawn
+      ? resolveCliCommand(this.command, env, request)
+      : this.command;
+    if (command === undefined) {
+      yield policyErrorEvent(geminiCliMissing());
+      yield { type: "completed", exitCode: 1, timestamp: Date.now() };
+      return;
+    }
     let child: GeminiCliSubprocess;
     try {
-      child = this.#spawn(this.command, args, {
+      child = this.#spawn(command, args, {
         cwd: request.workingDirectory,
         env,
       });
@@ -348,12 +371,8 @@ export class GeminiCliDriver extends SubprocessJsonlDriver {
       return undefined;
     }
 
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(trimmed);
-    } catch {
-      parsed = undefined;
-    }
+    const result = parseJson(trimmed);
+    const parsed = result.ok ? result.value : undefined;
     // A non-JSON line (a banner, a sandbox notice) or a JSON value that is not
     // an object (`null`, a number) must not end the run.
     if (!isJsonObject(parsed)) {

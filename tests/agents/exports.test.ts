@@ -178,9 +178,14 @@ describe("agents public exports", () => {
       "externalAgentDefinitionRegistry",
       // replaced by createExternalAgentConfig's driverOptions
       "applyDriverOptions",
+      // run by ExternalAgent itself on every run, for every driver
+      "guardPermissionRequest",
+      "createAdkToolBridge",
+      "assertPermissionPolicy",
     ];
     for (const name of internal) {
       expect(name in agents).toBe(false);
+      expect(name in root).toBe(false);
     }
   });
 

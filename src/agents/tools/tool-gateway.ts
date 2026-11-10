@@ -17,16 +17,13 @@ import {
 import {
   errorTitle,
   itemTitle,
-  stringValue,
+  stringOrEmpty,
   textTitle,
   toolCallTitle,
   toolResponseTitle,
 } from "../event-titles.js";
 import { EXTERNAL_AGENT_TRANSFER_FAILED } from "../events.js";
-import {
-  deriveSubAgentPermissionPolicy,
-  setInheritedPermissions,
-} from "../permissions/inheritance.js";
+import { delegatePermissions } from "../permissions/inheritance.js";
 import { snapshotPermissionPolicy } from "../permissions/policy.js";
 import type { ExternalAgentPermissionPolicy } from "../permissions/schema.js";
 
@@ -429,12 +426,11 @@ export class ToolGateway {
         ? this.#parentContext.branch
         : childBranch(this.#parentContext.branch, agent.name),
       prepareContext: (childContext) => {
-        setInheritedPermissions(
+        delegatePermissions(
           childContext.session,
-          deriveSubAgentPermissionPolicy(
-            this.#parentPermissions,
-            readAgentPermissions(agent),
-          ),
+          this.#parentPermissions,
+          readAgentPermissions(agent),
+          agent,
         );
         if (!this.#nativeDelegationShape) {
           const delegatedTaskEvent = childContext.session.events.at(-1) as
@@ -841,9 +837,9 @@ function readableSubAgentEventTitle(
   const metadata =
     (event as { customMetadata?: Record<string, unknown> }).customMetadata ??
     {};
-  const itemType = stringValue(metadata.itemType);
+  const itemType = stringOrEmpty(metadata.itemType);
   if (itemType) {
-    return itemTitle(subAgentName, itemType, stringValue(metadata.status));
+    return itemTitle(subAgentName, itemType, stringOrEmpty(metadata.status));
   }
 
   if (event.errorMessage) {

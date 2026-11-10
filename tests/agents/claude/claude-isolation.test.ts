@@ -795,13 +795,13 @@ describe("isolated SDK runs block outside tools with a PreToolUse hook", () => {
     });
   });
 
-  test("inheritHostConfig passes no isolation hook", async () => {
+  test("inheritHostConfig with the network on passes no isolation hook", async () => {
     const { sdk, state } = hookSdk();
     await collect(
       new ClaudeAgentSdkDriver({
         sdk: sdk as never,
         inheritHostConfig: true,
-      }).run(request({ mode: "full-access" })),
+      }).run(request({ mode: "full-access", allowNetwork: true })),
     );
     expect(state.options?.hooks).toBeUndefined();
   });
@@ -877,9 +877,9 @@ describe("read-only holds with inheritHostConfig", () => {
     }
   });
 
-  test("the CLI keeps host MCP tools when inheriting outside read-only", () => {
+  test("the CLI keeps host MCP tools when inheriting outside read-only with the network on", () => {
     const args = new ClaudeCliDriver({ inheritHostConfig: true }).buildArgs(
-      request({ mode: "workspace-write" }),
+      request({ mode: "workspace-write", allowNetwork: true }),
     );
     expect(args.some((arg) => arg.includes("mcp__*"))).toBe(false);
   });
@@ -914,6 +914,50 @@ describe("read-only holds with inheritHostConfig", () => {
     }
     expect(await decide("mcp__adk_bridge__lookup")).toEqual({});
     expect(await decide("Read")).toEqual({});
+  });
+});
+
+describe("network off holds for MCP tools with inheritHostConfig", () => {
+  // A host MCP server runs outside the shell sandbox, so with the network
+  // off its tools are denied in every mode, even when host settings
+  // pre-approve them (which skips the permission prompt).
+  const modes = ["ask", "workspace-write", "full-access"] as const;
+
+  test("the CLI denies every MCP tool", () => {
+    for (const mode of modes) {
+      for (const permissions of [{ mode }, { mode, allowNetwork: false }]) {
+        const args = new ClaudeCliDriver({ inheritHostConfig: true }).buildArgs(
+          request(permissions),
+        );
+        const settings = args.find((arg) => arg.startsWith("--settings="));
+        const parsed = JSON.parse(
+          settings?.slice("--settings=".length) ?? "{}",
+        );
+        expect(parsed.permissions).toEqual({ deny: ["mcp__*"] });
+      }
+    }
+  });
+
+  test("the SDK hook denies host MCP tools and keeps the bridge's", async () => {
+    for (const mode of modes) {
+      const { sdk, state } = hookSdk();
+      await collect(
+        new ClaudeAgentSdkDriver({
+          sdk: sdk as never,
+          inheritHostConfig: true,
+        }).run(request({ mode }, LOOKUP_TOOL)),
+      );
+      const hook = preToolUse(state.options);
+      const decide = (toolName: string) =>
+        hook({ hook_event_name: "PreToolUse", tool_name: toolName }, "tu", {
+          signal: new AbortController().signal,
+        });
+      expect(await decide("mcp__github__create_issue")).toMatchObject({
+        hookSpecificOutput: { permissionDecision: "deny" },
+      });
+      expect(await decide("mcp__adk_bridge__lookup")).toEqual({});
+      expect(await decide("Read")).toEqual({});
+    }
   });
 });
 
@@ -1301,5 +1345,158 @@ describe("the tool_use stop message names what the bridge observed", () => {
         'the model requested "CronCreate", a tool that was not offered',
       ),
     });
+  });
+});
+
+describe("the always-writable temp area follows the runtime's environment", () => {
+  // The workspace is outside every host temp directory, so only the
+  // driver's configured TMPDIR / CLAUDE_CODE_TMPDIR can put it inside.
+  const workingDirectory = "/opt/adk-bridge-s7-workspace";
+  const policy = {
+    mode: "workspace-write" as const,
+    allowedPaths: [workingDirectory],
+  };
+  const plan = (env?: Record<string, string | undefined>) =>
+    planClaudeIsolation(policy, {
+      inheritHostConfig: false,
+      allowUnsandboxedShell: false,
+      workingDirectory,
+      ...(env ? { env } : {}),
+    });
+
+  test("without a configured temp directory the shell is confined", () => {
+    expect(plan().shellPathsUnenforceable).toBeUndefined();
+    expect(plan({ PATH: "/usr/bin" }).shellPathsUnenforceable).toBeUndefined();
+  });
+
+  for (const key of ["TMPDIR", "CLAUDE_CODE_TMPDIR"]) {
+    test(`a configured ${key} around the workspace is refused`, () => {
+      expect(plan({ [key]: "/opt" }).shellPathsUnenforceable).toContain(
+        "temp directory",
+      );
+    });
+  }
+
+  test("the SDK driver passes its env to the plan", () => {
+    const driver = new ClaudeAgentSdkDriver({ env: { TMPDIR: "/opt" } });
+    expect(
+      driver.isolationPlan({
+        provider: CLAUDE_PROVIDER,
+        context: {} as never,
+        workingDirectory,
+        permissions: policy,
+      }).shellPathsUnenforceable,
+    ).toContain("temp directory");
+  });
+});
+
+describe("shell tools are recognized whatever their case", () => {
+  // Claude Code matches tool names case-insensitively, so a lower-case
+  // shell name still offers a shell and must get the no-network sandbox.
+  for (const [name, canonical] of [
+    ["bash", "Bash"],
+    ["BASH", "Bash"],
+    ["powershell", "PowerShell"],
+    ["POWERSHELL", "PowerShell"],
+  ] as const) {
+    test(`${name} gets the no-network sandbox and is passed on as ${canonical}`, () => {
+      const plan = planClaudeIsolation(
+        { mode: "workspace-write" },
+        {
+          tools: [name, "Read"],
+          inheritHostConfig: false,
+          allowUnsandboxedShell: false,
+          workingDirectory: "/repo",
+        },
+      );
+      expect(plan.sandbox).toBeDefined();
+      expect(plan.networkSandbox).toBe("enforced");
+      expect(plan.tools).toEqual([canonical, "Read"]);
+    });
+  }
+
+  test("an unknown name is passed on unchanged and offers no shell", () => {
+    const plan = planClaudeIsolation(
+      { mode: "workspace-write" },
+      {
+        tools: ["Read", "MyTool"],
+        inheritHostConfig: false,
+        allowUnsandboxedShell: false,
+        workingDirectory: "/repo",
+      },
+    );
+    expect(plan.tools).toEqual(["Read", "MyTool"]);
+    expect(plan.sandbox).toBeUndefined();
+  });
+
+  test("duplicate spellings collapse to one tool", () => {
+    const plan = planClaudeIsolation(
+      { mode: "workspace-write" },
+      {
+        tools: ["bash", "Bash", "read"],
+        inheritHostConfig: false,
+        allowUnsandboxedShell: false,
+        workingDirectory: "/repo",
+      },
+    );
+    expect(plan.tools).toEqual(["Bash", "Read"]);
+  });
+
+  test("the CLI gets the sandbox settings for a lower-case shell name", () => {
+    const args = new ClaudeCliDriver({ tools: ["bash"] }).buildArgs(
+      request({ mode: "workspace-write" }),
+    );
+    expect(args).toContain("--tools=Bash");
+    const settings = args.find((arg) => arg.startsWith("--settings="));
+    const parsed = JSON.parse(settings?.slice("--settings=".length) ?? "{}");
+    expect(parsed.sandbox).toMatchObject({ enabled: true });
+  });
+});
+
+describe("each PreToolUse guard is put in front of the hooks already set", () => {
+  // A guard decides before the hooks configured earlier; a hook that lets a
+  // call through must not run ahead of it.
+  test("the path guard comes first and the isolation hook stays after it", async () => {
+    const { sdk, state } = hookSdk();
+    await collect(
+      new ClaudeAgentSdkDriver({ sdk: sdk as never, tools: ["Read"] }).run(
+        request(
+          { mode: "workspace-write", allowedPaths: ["/repo"] },
+          LOOKUP_TOOL,
+        ),
+      ),
+    );
+    const matchers = (
+      state.options?.hooks as
+        | { PreToolUse?: Array<{ hooks: HookFn[] }> }
+        | undefined
+    )?.PreToolUse;
+    expect(matchers).toHaveLength(2);
+    const [first, second] = (matchers ?? []).map((matcher) => {
+      const hook = matcher.hooks[0];
+      if (!hook) throw new Error("matcher without a hook");
+      return hook;
+    });
+    const call = (hook: HookFn | undefined, input: Record<string, unknown>) =>
+      hook?.({ hook_event_name: "PreToolUse", ...input }, "tu", {
+        signal: new AbortController().signal,
+      });
+    const outside = {
+      tool_name: "Read",
+      tool_input: { file_path: "/etc/passwd" },
+    };
+    const connector = { tool_name: "mcp__github__create_issue" };
+
+    // First: the path guard (added last). It denies a path outside the
+    // roots and leaves other tools to the next hook.
+    expect(await call(first, outside)).toMatchObject({
+      hookSpecificOutput: { permissionDecision: "deny" },
+    });
+    expect(await call(first, connector)).toEqual({});
+    // Second: the isolation hook, kept as it was.
+    expect(await call(second, connector)).toMatchObject({
+      hookSpecificOutput: { permissionDecision: "deny" },
+    });
+    expect(await call(second, outside)).toEqual({});
   });
 });

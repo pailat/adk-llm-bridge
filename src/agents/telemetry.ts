@@ -14,7 +14,7 @@ import {
 import { shouldCaptureMessageContent } from "../core/telemetry.js";
 import {
   itemTitle,
-  stringValue,
+  stringOrEmpty,
   toolDetail,
   truncate,
 } from "./event-titles.js";
@@ -112,7 +112,7 @@ export class ExternalAgentRunTracer {
         if (event.timestamp !== undefined) this.#turnStart = time;
         return;
       case "output": {
-        const itemType = stringValue(event.metadata?.itemType);
+        const itemType = stringOrEmpty(event.metadata?.itemType);
         if (isToolProgressItemType(itemType)) {
           // Codex tool progress (item.started/updated): the model chose a
           // tool, so its call is over. The tool span itself comes from the
@@ -120,7 +120,7 @@ export class ExternalAgentRunTracer {
           // item.completed; the first progress event of an item (matched by
           // `metadata.itemId`) gives that span its start time.
           this.#endModelCall(time, adkEvent);
-          const itemId = stringValue(event.metadata?.itemId);
+          const itemId = stringOrEmpty(event.metadata?.itemId);
           if (itemId && !this.#progressStart.has(itemId)) {
             this.#progressStart.set(itemId, time);
           }
@@ -424,9 +424,11 @@ export class ExternalAgentRunTracer {
         ? readableEventTitle(event, capture)
         : (author ?? "external_agent"),
       "gcp.vertex.agent.branch": event?.branch ?? this.#context.branch ?? "",
-      "gcp.vertex.agent.subagent.name": stringValue(metadata.subAgentName),
-      "gcp.vertex.agent.parent_tool.name": stringValue(metadata.parentToolName),
-      "gcp.vertex.agent.parent_tool.call_id": stringValue(
+      "gcp.vertex.agent.subagent.name": stringOrEmpty(metadata.subAgentName),
+      "gcp.vertex.agent.parent_tool.name": stringOrEmpty(
+        metadata.parentToolName,
+      ),
+      "gcp.vertex.agent.parent_tool.call_id": stringOrEmpty(
         metadata.parentToolCallId,
       ),
     };
@@ -557,7 +559,7 @@ function eventTime(timestamp: number | undefined): number {
 }
 
 function applyToolAttributes(span: Span, event: Event, capture: boolean): void {
-  const metadataSubAgentName = stringValue(
+  const metadataSubAgentName = stringOrEmpty(
     readCustomMetadata(event).subAgentName,
   );
   const functionCall = event.content?.parts?.find(
@@ -575,7 +577,7 @@ function applyToolAttributes(span: Span, event: Event, capture: boolean): void {
         capture,
       ),
       "gcp.vertex.agent.subagent.name":
-        stringValue(delegationTarget(functionCall.args)) ||
+        stringOrEmpty(delegationTarget(functionCall.args)) ||
         metadataSubAgentName,
     });
   }
@@ -660,7 +662,7 @@ function readableEventTitle(event: Event, capture: boolean): string {
   const metadata = readCustomMetadata(event);
   // Driver-provided titles embed tool arguments, and text titles embed the
   // model output, so neither is used when content capture is off.
-  const metadataTitle = capture ? stringValue(metadata.title) : "";
+  const metadataTitle = capture ? stringOrEmpty(metadata.title) : "";
   if (metadataTitle) {
     return metadataTitle;
   }
@@ -690,10 +692,10 @@ function readableEventTitle(event: Event, capture: boolean): string {
       : `${event.author ?? "external_agent"}: response`;
   }
 
-  const itemType = stringValue(metadata.itemType);
-  const subAgentName = stringValue(metadata.subAgentName) || event.author;
+  const itemType = stringOrEmpty(metadata.itemType);
+  const subAgentName = stringOrEmpty(metadata.subAgentName) || event.author;
   if (itemType && subAgentName) {
-    return itemTitle(subAgentName, itemType, stringValue(metadata.status));
+    return itemTitle(subAgentName, itemType, stringOrEmpty(metadata.status));
   }
 
   return event.errorMessage
@@ -715,7 +717,7 @@ function readSessionId(context: InvocationContext): string {
 /** Sub-agent named by a delegation call: `agent_name` (native) or `agentName` (metadata-rich shape). */
 function delegationTarget(args: unknown): string {
   const record = (args ?? {}) as { agent_name?: unknown; agentName?: unknown };
-  return stringValue(record.agent_name) || stringValue(record.agentName);
+  return stringOrEmpty(record.agent_name) || stringOrEmpty(record.agentName);
 }
 
 function captureJson(value: unknown, capture: boolean): string {

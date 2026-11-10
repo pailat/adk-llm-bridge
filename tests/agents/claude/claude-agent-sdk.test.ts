@@ -1,5 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { Content } from "@google/genai";
@@ -156,6 +164,127 @@ describe("ClaudeAgentSdkDriver", () => {
         path.startsWith(join(workspace, "node_modules")),
       ),
     ).toBe(false);
+  });
+
+  for (const [label, workingDirectory] of [
+    ["unset", () => undefined],
+    ["the process directory", () => process.cwd()],
+  ] as const) {
+    test(`skips a binary planted in the process directory when workingDirectory is ${label}`, () => {
+      // The host runs from a directory the agent can write (the default
+      // setup): neither its node_modules nor a PATH entry inside it may
+      // supply the next run's binary.
+      const workspace = realpathSync(
+        mkdtempSync(join(tmpdir(), "claude-sdk-cwd-")),
+      );
+      const executable = process.platform === "win32" ? "claude.exe" : "claude";
+      const bin = join(workspace, "node_modules", ".bin");
+      const planted = join(bin, executable);
+      mkdirSync(bin, { recursive: true });
+      writeFileSync(planted, "#!/bin/sh\nexit 0\n");
+      chmodSync(planted, 0o755);
+      const previous = process.cwd();
+      process.chdir(workspace);
+      try {
+        const driver = new ClaudeAgentSdkDriver({
+          env: { PATH: bin, HOME: join(workspace, "home") },
+          executableSearchPaths: [bin],
+        });
+        const resolution = driver.resolveClaudeExecutable({
+          provider: CLAUDE_PROVIDER,
+          context: {} as never,
+          workingDirectory: workingDirectory(),
+        });
+
+        expect(resolution.path).toBeUndefined();
+        expect(
+          resolution.checked.filter((path) => path.startsWith(workspace)),
+        ).toEqual([]);
+      } finally {
+        process.chdir(previous);
+        rmSync(workspace, { recursive: true, force: true });
+      }
+    });
+  }
+
+  test("skips a PATH entry that links into the working directory", () => {
+    const workspace = realpathSync(
+      mkdtempSync(join(tmpdir(), "claude-sdk-link-ws-")),
+    );
+    const outside = realpathSync(
+      mkdtempSync(join(tmpdir(), "claude-sdk-link-out-")),
+    );
+    const executable = process.platform === "win32" ? "claude.exe" : "claude";
+    writeFileSync(join(workspace, executable), "#!/bin/sh\nexit 0\n");
+    chmodSync(join(workspace, executable), 0o755);
+    symlinkSync(workspace, join(outside, "bin"));
+    try {
+      const driver = new ClaudeAgentSdkDriver({
+        env: { PATH: join(outside, "bin"), HOME: join(outside, "home") },
+      });
+      const resolution = driver.resolveClaudeExecutable({
+        provider: CLAUDE_PROVIDER,
+        context: {} as never,
+        workingDirectory: workspace,
+      });
+
+      expect(resolution.checked).not.toContain(
+        join(outside, "bin", executable),
+      );
+      expect(resolution.path).toBeUndefined();
+    } finally {
+      rmSync(workspace, { recursive: true, force: true });
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  test("skips a binary inside an allowed path", () => {
+    const workspace = realpathSync(
+      mkdtempSync(join(tmpdir(), "claude-sdk-allowed-ws-")),
+    );
+    const extra = realpathSync(
+      mkdtempSync(join(tmpdir(), "claude-sdk-allowed-extra-")),
+    );
+    const executable = process.platform === "win32" ? "claude.exe" : "claude";
+    writeFileSync(join(extra, executable), "#!/bin/sh\nexit 0\n");
+    chmodSync(join(extra, executable), 0o755);
+    try {
+      const driver = new ClaudeAgentSdkDriver({
+        env: { PATH: extra, HOME: join(workspace, "home") },
+      });
+      const resolution = driver.resolveClaudeExecutable({
+        provider: CLAUDE_PROVIDER,
+        context: {} as never,
+        workingDirectory: workspace,
+        permissions: { mode: "workspace-write", allowedPaths: [extra] },
+      });
+
+      expect(resolution.path).toBeUndefined();
+    } finally {
+      rmSync(workspace, { recursive: true, force: true });
+      rmSync(extra, { recursive: true, force: true });
+    }
+  });
+
+  test("an explicit executable inside the working directory is still used", () => {
+    const workspace = realpathSync(
+      mkdtempSync(join(tmpdir(), "claude-sdk-explicit-")),
+    );
+    const executable = join(workspace, "claude");
+    try {
+      const driver = new ClaudeAgentSdkDriver({
+        env: { PATH: "", CLAUDE_CODE_EXECUTABLE: executable },
+      });
+      expect(
+        driver.resolveClaudeExecutable({
+          provider: CLAUDE_PROVIDER,
+          context: {} as never,
+          workingDirectory: workspace,
+        }).path,
+      ).toBe(executable);
+    } finally {
+      rmSync(workspace, { recursive: true, force: true });
+    }
   });
 
   test("detects Claude Code executable from configurable search paths", () => {
