@@ -50,7 +50,9 @@ function scanExtensionValue(value: unknown): string | undefined {
     if (nodes > maxNodes) return "has too many values";
     if (depth > maxDepth) return "is nested too deeply";
     if (typeof candidate !== "object" || candidate === null) continue;
-    if (Array.isArray(candidate) && candidate.length > maxNodes) {
+    // Each item is one more value: reject an array whose items cannot fit
+    // the values left before reading any of its descriptors.
+    if (Array.isArray(candidate) && nodes + candidate.length > maxNodes) {
       return "has too many values";
     }
     // A null prototype is accepted by `freezeJson`; a spec must not carry one.

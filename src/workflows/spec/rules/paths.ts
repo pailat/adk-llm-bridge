@@ -85,15 +85,17 @@ const SHORT_NAME_BASE_LENGTH = 8;
 const MAX_REMEMBERED_SEGMENTS = 4_096;
 
 /**
- * Most units of glob matching work per call: one per segment and glob
- * pattern pair, plus one per pattern part scanned in a full match.
+ * Most units of glob matching work per call: one per name tried against a
+ * glob pattern, plus one per pattern part scanned in a full match.
  *
  * @remarks
- * One unit per pair for a spec at the plan limits (1,024 paths of 64 distinct
- * segments) against the most glob patterns a rule set may hold (1,024), so
- * such a spec is never denied for its size alone; full matches use the rest.
- * Spending it takes under a second. A path that would exceed it is denied
- * unchecked.
+ * A segment is tried once, or twice when it has trailing dots or spaces (as
+ * written and without them). The budget covers one try of every segment of
+ * a spec at the plan limits (1,024 paths of 64 segments) against the most
+ * glob patterns a rule set may hold (1,024). Second tries and full matches
+ * spend more, so such a spec whose segments contain the patterns' literals
+ * can run out. A path that would exceed it is denied unchecked, never
+ * accepted.
  *
  * @internal
  */

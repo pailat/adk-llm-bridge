@@ -65,9 +65,6 @@ export {
   RunSpecSchema,
   RunSpecStepsPolicySchema,
   RunSpecV1Schema,
-  runSpecCommandKey,
-  runSpecLaneMaxAgentRuns,
-  runSpecPlanTopology,
   runSpecWorkflowPlan,
   runSpecWorkspacePath,
 } from "./schema.js";

@@ -3,11 +3,14 @@ import {
   type RunSpecIssue,
   runSpecIssue,
 } from "../../../src/workflows/spec/issues.js";
+import { resolveRunPlan } from "../../../src/workflows/spec/plan.js";
 import {
+  DEFAULT_DENIED_PATH_PATTERNS,
   mergeRunRules,
   type RunRules,
   type RunSpec,
 } from "../../../src/workflows/spec/schema.js";
+import type { RunPlan } from "../../../src/workflows/spec/types.js";
 import {
   type RunSpecRuleFamily,
   validateRunSpec,
@@ -225,5 +228,166 @@ describe("mergeRunRules reads its inputs once", () => {
       { id: "override" },
     );
     expect(() => mergeRunRules(refRules(), override)).toThrow(TypeError);
+  });
+});
+
+/** The keys `resolveRunPlan` copies into the plan's limits. */
+const PLAN_RULE_KEYS = [
+  "id",
+  "maxBudgetUsd",
+  "maxConcurrency",
+  "maxLanes",
+  "maxAgentRuns",
+  "maxChangeRounds",
+] as const;
+
+/** The plan of `spec` under `rules`, or a failure naming the issues. */
+function planOf(spec: unknown, rules: RunRules): RunPlan {
+  const result = resolveRunPlan(spec, rules);
+  if (!result.ok) {
+    throw new Error(`expected a plan, got ${JSON.stringify(result.errors)}`);
+  }
+  return result.plan;
+}
+
+/** A spec whose concurrency cap and widest wave are both 4. */
+function fourWideSpec(): RunSpec {
+  const spec = validSpec();
+  const [first] = spec.lanes;
+  if (first === undefined) throw new Error("validSpec has no lanes");
+  spec.lanes = ["a", "b", "c", "d"].map((taskId) => ({
+    ...first,
+    taskId,
+    title: taskId,
+    dependsOn: [],
+    allowedPaths: [`src/${taskId}`],
+  }));
+  spec.maxConcurrency = 4;
+  return spec;
+}
+
+describe("resolveRunPlan reads the rule set once", () => {
+  test("getters that answer differently on the second read do not change the plan", () => {
+    const spec = fourWideSpec();
+    const expected = planOf(spec, testRules());
+    const rules = testRules();
+    const counters = [
+      answering(rules, "id", ["test", "widened"]),
+      answering(rules, "maxBudgetUsd", [10, 1_000_000]),
+      answering(rules, "maxConcurrency", [4, 1]),
+      answering(rules, "maxLanes", [1_000, 1]),
+      answering(rules, "maxAgentRuns", [10_000, 1]),
+      answering(rules, "maxChangeRounds", [3, 0]),
+    ];
+    const resolved = planOf(spec, rules);
+    expect(resolved).toEqual(expected);
+    expect(resolved.limits.budgetUsd.ceiling).toBe(10);
+    expect(resolved.limits.budgetUsd.ruleSets).toEqual(["test"]);
+    expect(resolved.costBound.peakConcurrency).toBe(4);
+    expect(counters.map((counter) => counter.reads)).toEqual(
+      PLAN_RULE_KEYS.map(() => 1),
+    );
+  });
+
+  test("an origins getter that answers differently on the second read does not change the plan's rule sets", () => {
+    const merged = mergeRunRules(testRules(), {
+      id: "org",
+      maxBudgetUsd: 8,
+    });
+    const origins = merged.origins;
+    if (origins === undefined) throw new Error("expected origins");
+    const counter = answering(merged, "origins", [
+      origins,
+      { ...origins, maxBudgetUsd: ["someone-else"] },
+    ]);
+    const resolved = planOf(validSpec(), merged);
+    expect(resolved.limits.budgetUsd.ruleSets).toEqual(["org"]);
+    expect(counter.reads).toBe(1);
+  });
+
+  test("getters that throw on the second read give a result, never a throw", () => {
+    const spec = fourWideSpec();
+    const expected = planOf(spec, testRules());
+    const rules: RunRules = testRules();
+    const host = rules as unknown as Record<string, unknown>;
+    let reads = 0;
+    for (const key of PLAN_RULE_KEYS) {
+      const value = host[key];
+      let keyReads = 0;
+      Object.defineProperty(rules, key, {
+        enumerable: true,
+        get() {
+          keyReads += 1;
+          reads += 1;
+          if (keyReads > 1) throw new Error("host getter failed");
+          return value;
+        },
+      });
+    }
+    let result: ReturnType<typeof resolveRunPlan> | undefined;
+    expect(() => {
+      result = resolveRunPlan(spec, rules);
+    }).not.toThrow();
+    expect(result).toEqual({ ok: true, plan: expected });
+    expect(reads).toBe(PLAN_RULE_KEYS.length);
+  });
+});
+
+describe("a rule set whose getter throws on its second read", () => {
+  // The rule set is read once, so a later throw never happens: the spec is
+  // checked against the first answers. It is neither a host error nor an
+  // internal error.
+  function throwingOnSecondRead(answer: string[]): {
+    rules: RunRules;
+    counter: { reads: number };
+  } {
+    const rules = testRules();
+    const counter = { reads: 0 };
+    Object.defineProperty(rules, "deniedPathPatterns", {
+      enumerable: true,
+      get() {
+        counter.reads += 1;
+        if (counter.reads > 1) throw new Error("host getter failed");
+        return answer;
+      },
+    });
+    return { rules, counter };
+  }
+
+  test.each([
+    ["an empty list", [] as string[]],
+    ["the default patterns", [...DEFAULT_DENIED_PATH_PATTERNS]],
+  ])(
+    "answering %s first is validated with that answer by validateRunSpec",
+    (_name, answer) => {
+      const { rules, counter } = throwingOnSecondRead(answer);
+      expect(codesOf(validSpec(), rules)).toEqual([]);
+      expect(counter.reads).toBe(1);
+    },
+  );
+
+  test.each([
+    ["an empty list", [] as string[]],
+    ["the default patterns", [...DEFAULT_DENIED_PATH_PATTERNS]],
+  ])("answering %s first gives a plan from resolveRunPlan", (_name, answer) => {
+    const { rules, counter } = throwingOnSecondRead(answer);
+    const result = resolveRunPlan(validSpec(), rules);
+    expect(result.ok).toBe(true);
+    expect(counter.reads).toBe(1);
+  });
+
+  test("still denies what the first answer denies", () => {
+    const spec = validSpec();
+    const [first] = spec.lanes;
+    if (first === undefined) throw new Error("validSpec has no lanes");
+    first.allowedPaths = ["secrets/keys"];
+    const forValidate = throwingOnSecondRead(["secrets"]);
+    expect(codesOf(spec, forValidate.rules)).toContain("RUN_SPEC_PATH_DENIED");
+    const forPlan = throwingOnSecondRead(["secrets"]);
+    const result = resolveRunPlan(spec, forPlan.rules);
+    expect(result.ok === false && result.errors.map((i) => i.code)).toContain(
+      "RUN_SPEC_PATH_DENIED",
+    );
+    expect([forValidate.counter.reads, forPlan.counter.reads]).toEqual([1, 1]);
   });
 });

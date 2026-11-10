@@ -563,6 +563,41 @@ describe("RUN_SPEC_EXTENSION_TOO_LARGE", () => {
     expect(run(withExtension(edge))).toEqual([]);
   });
 
+  test("rejects an array whose items cannot fit the value budget before inspecting them", () => {
+    // The array itself is one value, so 256 items at the root make 257
+    // values. Inside an object, 255 items make 257 with the object and the
+    // array. The check needs only the length and the values counted so far.
+    for (const [extension, length, wrap] of [
+      ["at the root", 256, (array: unknown[]) => array],
+      ["inside an object", 255, (array: unknown[]) => ({ list: array })],
+    ] as const) {
+      let inspected = 0;
+      const items = new Proxy(
+        Array.from({ length }, () => 1),
+        {
+          ownKeys(target) {
+            inspected += 1;
+            return Reflect.ownKeys(target);
+          },
+          getOwnPropertyDescriptor(target, key) {
+            if (key !== "length") inspected += 1;
+            return Reflect.getOwnPropertyDescriptor(target, key);
+          },
+        },
+      );
+      const issues = only(
+        run(withExtension(wrap(items))),
+        "RUN_SPEC_EXTENSION_TOO_LARGE",
+      );
+      expect({ extension, issues: issues.length, inspected }).toEqual({
+        extension,
+        issues: 1,
+        inspected: 0,
+      });
+      expect(issues[0]?.message).toContain("has too many values");
+    }
+  });
+
   test("is reported for 257 values and accepted for fewer", () => {
     const big = Array.from({ length: 257 }, () => 1);
     expect(codes(run(withExtension(big)))).toEqual([

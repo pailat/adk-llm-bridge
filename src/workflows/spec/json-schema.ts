@@ -41,7 +41,19 @@ function describeRefProperties(root: JsonObject): void {
   visit(root);
 }
 
-/** Generates the schema from zod and fills the missing reference descriptions. */
+/** Freezes a JSON value and everything inside it. */
+function deepFreeze<Value>(value: Value): Value {
+  if (typeof value === "object" && value !== null) {
+    for (const child of Object.values(value)) deepFreeze(child);
+    Object.freeze(value);
+  }
+  return value;
+}
+
+/**
+ * Generates the schema from zod, fills the missing reference descriptions
+ * and freezes the result, so a consumer cannot change the shared document.
+ */
 function buildRunSpecJsonSchema(): Record<string, unknown> {
   const generated: Record<string, unknown> = z.toJSONSchema(RunSpecSchema, {
     target: "draft-2020-12",
@@ -49,7 +61,7 @@ function buildRunSpecJsonSchema(): Record<string, unknown> {
     metadata: runSpecRegistry,
   });
   describeRefProperties(generated);
-  return generated;
+  return deepFreeze(generated);
 }
 
 /**
@@ -59,7 +71,8 @@ function buildRunSpecJsonSchema(): Record<string, unknown> {
  * Generated from the zod schema, so the two cannot drift. It carries the
  * shape rules only: types, required keys, closed objects, grammars and
  * bounds. Rules that compare fields with each other or with host rules are
- * checked by `validateRunSpec`.
+ * checked by `validateRunSpec`. The document is deeply frozen; copy it
+ * before changing it.
  *
  * @experimental
  */

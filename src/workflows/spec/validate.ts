@@ -8,7 +8,12 @@ import { checkGateRules } from "./rules/gates.js";
 import { checkFullWorkflowPlan, checkGraphRules } from "./rules/graph.js";
 import { checkModelRules } from "./rules/models.js";
 import { checkPathRules } from "./rules/paths.js";
-import { type RunRules, RunRulesSchema, readRuleSet } from "./schema.js";
+import {
+  type RunRules,
+  RunRulesSchema,
+  type RunSpec,
+  readRuleSet,
+} from "./schema.js";
 import { parseRunSpecShape } from "./shape.js";
 import type { RunSpecValidationResult } from "./types.js";
 
@@ -20,6 +25,16 @@ import type { RunSpecValidationResult } from "./types.js";
 export type RunSpecRuleFamily = (
   spec: Parameters<typeof checkPathRules>[0],
   rules: RunRules,
+  issues: RunSpecIssue[],
+) => void;
+
+/**
+ * The check of the full plan that runs after every family accepted a spec.
+ *
+ * @internal
+ */
+export type FullPlanCheck = (
+  spec: Parameters<typeof checkPathRules>[0],
   issues: RunSpecIssue[],
 ) => void;
 
@@ -69,6 +84,7 @@ export function validateRunSpec(
  * @param spec - The value to validate.
  * @param rules - The host's rules.
  * @param families - The rule families, in report order.
+ * @param fullPlan - The full plan check.
  * @returns The typed spec, or every issue found.
  * @internal
  */
@@ -76,7 +92,44 @@ export function validateRunSpecWith(
   spec: unknown,
   rules: RunRules,
   families: readonly RunSpecRuleFamily[],
+  fullPlan: FullPlanCheck = checkFullWorkflowPlan,
 ): RunSpecValidationResult {
+  const checked = checkRunSpecWith(spec, rules, families, fullPlan);
+  return checked.ok ? { ok: true, spec: checked.spec } : checked;
+}
+
+/**
+ * The result of {@link checkRunSpec}: the validated spec with the checked
+ * copy of the rule set it was validated against, or every issue found.
+ *
+ * @internal
+ */
+export type CheckedRunSpec =
+  | { ok: true; spec: RunSpec; rules: RunRules }
+  | { ok: false; errors: RunSpecIssue[] };
+
+/**
+ * {@link validateRunSpec} that also returns the checked copy of the rules.
+ *
+ * @remarks
+ * Callers that need the rules after validation use this copy, so the host's
+ * object is read once and what they use is what was validated.
+ *
+ * @param spec - The value to validate.
+ * @param rules - The host's rules.
+ * @returns The typed spec and the rule copy, or every issue found.
+ * @internal
+ */
+export function checkRunSpec(spec: unknown, rules: RunRules): CheckedRunSpec {
+  return checkRunSpecWith(spec, rules, FAMILIES, checkFullWorkflowPlan);
+}
+
+function checkRunSpecWith(
+  spec: unknown,
+  rules: RunRules,
+  families: readonly RunSpecRuleFamily[],
+  fullPlan: FullPlanCheck,
+): CheckedRunSpec {
   // The families read this copy, never the host's object.
   const checkedRules = readRuleSet(RunRulesSchema, rules);
   if (checkedRules === undefined) {
@@ -112,7 +165,7 @@ export function validateRunSpecWith(
   }
   if (issues.length === 0) {
     try {
-      checkFullWorkflowPlan(parsed, issues);
+      fullPlan(parsed, issues);
     } catch {
       issues.push(
         runSpecIssue(
@@ -124,7 +177,7 @@ export function validateRunSpecWith(
     }
   }
   return issues.length === 0
-    ? { ok: true, spec: parsed }
+    ? { ok: true, spec: parsed, rules: checkedRules }
     : { ok: false, errors: truncate(issues) };
 }
 

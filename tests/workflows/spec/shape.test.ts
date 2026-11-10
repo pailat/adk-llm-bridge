@@ -574,15 +574,30 @@ describe("parseRunSpecShape: array length pre-check", () => {
     }
   });
 
-  test("a proxy over 5,000,000 items that reports length 1 or 1.5 is rejected within the time budget", () => {
+  test("a proxy over 5,000,000 items that reports length 1 or 1.5 is rejected without listing or reading its items", () => {
     const huge = new Array(5_000_000).fill(0);
     for (const length of [1, 1.5]) {
+      let listed = 0;
+      let itemReads = 0;
+      const lying = lyingLength(huge, length);
+      const counted = new Proxy(lying, {
+        ownKeys(inner) {
+          listed += 1;
+          return Reflect.ownKeys(inner);
+        },
+        get(inner, key, receiver) {
+          if (key !== "length") itemReads += 1;
+          return Reflect.get(inner, key, receiver);
+        },
+      });
       const spec: Loose = validSpec();
-      spec.env = lyingLength(huge, length);
-      const started = performance.now();
+      spec.env = counted;
       const { value } = run(spec);
-      expect(performance.now() - started).toBeLessThan(500);
       expect(value).toBeUndefined();
+      expect({ listed, fewReads: itemReads < 10 }).toEqual({
+        listed: 0,
+        fewReads: true,
+      });
     }
   });
 

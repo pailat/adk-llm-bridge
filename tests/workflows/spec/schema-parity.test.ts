@@ -526,6 +526,22 @@ function keywordsUsed(node: unknown, into: Set<string>): void {
 }
 
 describe("runSpecJsonSchema document", () => {
+  test("is deeply frozen, so a consumer cannot change the shared document", () => {
+    const unfrozen: string[] = [];
+    const visit = (value: unknown, at: string): void => {
+      if (typeof value !== "object" || value === null) return;
+      if (!Object.isFrozen(value)) unfrozen.push(at);
+      for (const [key, child] of Object.entries(value)) {
+        visit(child, `${at}/${key}`);
+      }
+    };
+    visit(runSpecJsonSchema, "#");
+    expect(unfrozen).toEqual([]);
+    expect(() => {
+      (runSpecJsonSchema as Record<string, unknown>).title = "changed";
+    }).toThrow(TypeError);
+  });
+
   test("declares draft 2020-12, a title and a description at the root", () => {
     expect(schema.$schema).toBe("https://json-schema.org/draft/2020-12/schema");
     expect(typeof schema.title).toBe("string");

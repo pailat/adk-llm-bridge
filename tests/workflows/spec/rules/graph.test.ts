@@ -157,6 +157,35 @@ describe("RUN_SPEC_LANE_ID_DUPLICATE", () => {
     expect(issues[0]?.path).toEqual(["lanes", 2, "taskId"]);
   });
 
+  test("names the lane that first used an exactly equal id, not a case difference", () => {
+    const issues = run(
+      ordered([
+        ["a", []],
+        ["b", []],
+        ["a", []],
+      ]),
+    );
+    expect(issues[0]?.message).toContain("is already used by lane 0");
+    expect(issues[0]?.message).not.toContain("differs only in case");
+  });
+
+  test("reports a cycle on the first lane with a repeated id, not on its copy", () => {
+    const issues = run(
+      ordered([
+        ["a", ["b"]],
+        ["b", ["a"]],
+        ["a", []],
+      ]),
+    );
+    const cycles = issues.filter(
+      (issue) =>
+        issue.code === "RUN_SPEC_DEPENDENCY_CYCLE" && issue.path[1] !== 1,
+    );
+    expect(cycles.map((issue) => issue.path)).toEqual([
+      ["lanes", 0, "dependsOn"],
+    ]);
+  });
+
   test("is reported once per later copy", () => {
     const issues = run(
       ordered([

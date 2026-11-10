@@ -1,17 +1,13 @@
 import { immutableJson } from "../execution/json.js";
 import { canonicalDigest } from "../internal/canonical-hash.js";
-import { validateWorkflowPlan } from "../orchestration/json.js";
-import { type RunSpecIssue, runSpecIssue } from "./issues.js";
 import {
   layerRunSpecLanes,
-  RUN_SPEC_DRY_RUN_BINDING,
   type RunRuleKey,
   type RunRules,
   type RunSpec,
   type RunSpecLane,
   runSpecLaneMaxAgentRuns,
   runSpecPlanTopology,
-  runSpecWorkflowPlan,
 } from "./schema.js";
 import type {
   RunPlan,
@@ -21,7 +17,7 @@ import type {
   RunPlanResult,
   RunPlanStartInput,
 } from "./types.js";
-import { validateRunSpec } from "./validate.js";
+import { checkRunSpec } from "./validate.js";
 
 function limit(
   rules: RunRules,
@@ -81,8 +77,11 @@ function startInput(spec: RunSpec): RunPlanStartInput {
  *
  * @remarks
  * Validates first with `validateRunSpec` and returns its issues unchanged
- * when the spec is invalid. Otherwise the plan lists the lanes in dependency
- * order (by wave, then spec order), the waves, the agents of each lane, the
+ * when the spec is invalid. The rule set is read once: the ceilings and rule
+ * set ids in the plan come from the copy that was validated, never from a
+ * second read of the host's object. For a valid spec the plan lists the
+ * lanes in dependency order (by wave, then spec order), the waves, the
+ * agents of each lane, the
  * effective limits with the rule sets behind each ceiling, and the worst-case
  * cost bound. The result depends only on the arguments: it reads no clock and
  * no random source, and the input is not modified.
@@ -93,9 +92,9 @@ function startInput(spec: RunSpec): RunPlanStartInput {
  * @experimental
  */
 export function resolveRunPlan(spec: unknown, rules: RunRules): RunPlanResult {
-  const validated = validateRunSpec(spec, rules);
-  if (!validated.ok) return { ok: false, errors: validated.errors };
-  const valid = validated.spec;
+  const checked = checkRunSpec(spec, rules);
+  if (!checked.ok) return { ok: false, errors: checked.errors };
+  const valid = checked.spec;
 
   const layering = layerRunSpecLanes(valid.lanes);
   const waves = layering.waves;
@@ -131,22 +130,6 @@ export function resolveRunPlan(spec: unknown, rules: RunRules): RunPlanResult {
   }
 
   const topology = runSpecPlanTopology(valid, waves);
-  try {
-    validateWorkflowPlan(
-      runSpecWorkflowPlan(topology, RUN_SPEC_DRY_RUN_BINDING),
-    );
-  } catch (error) {
-    const errors: RunSpecIssue[] = [
-      runSpecIssue(
-        "RUN_SPEC_PLAN_REJECTED",
-        ["lanes"],
-        `The workflow plan validator rejected the plan: ${
-          error instanceof Error ? error.message : "unknown error"
-        }`,
-      ),
-    ];
-    return { ok: false, errors };
-  }
 
   const plan: RunPlan = {
     specVersion: valid.specVersion,
@@ -157,24 +140,34 @@ export function resolveRunPlan(spec: unknown, rules: RunRules): RunPlanResult {
     waves,
     limits: {
       budgetUsd: limit(
-        rules,
+        checked.rules,
         "maxBudgetUsd",
         valid.budget.maxUsd,
-        rules.maxBudgetUsd,
+        checked.rules.maxBudgetUsd,
       ),
       maxConcurrency: limit(
-        rules,
+        checked.rules,
         "maxConcurrency",
         valid.maxConcurrency,
-        rules.maxConcurrency,
+        checked.rules.maxConcurrency,
       ),
-      lanes: limit(rules, "maxLanes", valid.lanes.length, rules.maxLanes),
-      agentRuns: limit(rules, "maxAgentRuns", totalRuns, rules.maxAgentRuns),
+      lanes: limit(
+        checked.rules,
+        "maxLanes",
+        valid.lanes.length,
+        checked.rules.maxLanes,
+      ),
+      agentRuns: limit(
+        checked.rules,
+        "maxAgentRuns",
+        totalRuns,
+        checked.rules.maxAgentRuns,
+      ),
       changeRounds: limit(
-        rules,
+        checked.rules,
         "maxChangeRounds",
         rounds,
-        rules.maxChangeRounds,
+        checked.rules.maxChangeRounds,
       ),
     },
     costBound: {
@@ -182,7 +175,7 @@ export function resolveRunPlan(spec: unknown, rules: RunRules): RunPlanResult {
       maxAgentRuns: totalRuns,
       peakConcurrency: Math.min(
         valid.maxConcurrency,
-        rules.maxConcurrency,
+        checked.rules.maxConcurrency,
         widest,
       ),
     },

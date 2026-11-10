@@ -24,8 +24,9 @@ const BROKEN_RULES_CODE = "RUN_SPEC_RULES_INVALID";
 /**
  * Codes no JSON document can produce, so they have no corpus file.
  * `RUN_SPEC_INTERNAL_ERROR` reports a defect of the library: a rule family
- * that throws on a spec whose shape and rule set are valid. The validator
- * tests reach it with a rule set whose getter throws on its second read.
+ * that throws on a spec whose shape and rule set are valid, or a defect while
+ * building the plan the plan validator checks. The tests reach it by giving
+ * `validateRunSpecWith` a family or a projection that throws.
  */
 const CODES_WITHOUT_CORPUS_CASE: readonly string[] = [
   "RUN_SPEC_INTERNAL_ERROR",

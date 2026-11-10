@@ -1,3 +1,4 @@
+import type { WorkflowPlan } from "../../orchestration/contracts.js";
 import { validateWorkflowPlan } from "../../orchestration/json.js";
 import { type RunSpecIssue, runSpecIssue } from "../issues.js";
 import {
@@ -44,6 +45,69 @@ function describeCycle(
 }
 
 /**
+ * The full dry-run plan of a spec, owned paths included.
+ *
+ * @param spec - A spec that passed every rule family.
+ * @returns The plan the existing plan validator checks.
+ * @internal
+ */
+export function fullWorkflowPlan(spec: RunSpec): WorkflowPlan {
+  const { waves } = layerRunSpecLanes(spec.lanes);
+  return runSpecWorkflowPlan(
+    runSpecPlanTopology(spec, waves),
+    RUN_SPEC_DRY_RUN_BINDING,
+  );
+}
+
+/**
+ * The dry-run plan of a spec's lane graph, with no owned paths, because path
+ * failures belong to the paths family.
+ *
+ * @param spec - A spec whose graph family found nothing so far.
+ * @returns The plan the existing plan validator checks.
+ * @internal
+ */
+export function laneGraphWorkflowPlan(spec: RunSpec): WorkflowPlan {
+  const topology = runSpecPlanTopology(
+    spec,
+    layerRunSpecLanes(spec.lanes).waves,
+  );
+  return runSpecWorkflowPlan(
+    {
+      ...topology,
+      lanes: topology.lanes.map((lane) => ({ ...lane, ownedPaths: [] })),
+    },
+    RUN_SPEC_DRY_RUN_BINDING,
+  );
+}
+
+/**
+ * Runs the existing plan validator on `plan` and appends
+ * `RUN_SPEC_PLAN_REJECTED` when it objects. Only the validator is guarded:
+ * building the plan happens before this call, so a defect there is thrown
+ * and reported as `RUN_SPEC_INTERNAL_ERROR` by the caller.
+ */
+function checkPlanValidator(
+  plan: WorkflowPlan,
+  what: string,
+  issues: RunSpecIssue[],
+): void {
+  try {
+    validateWorkflowPlan(plan);
+  } catch (error) {
+    issues.push(
+      runSpecIssue(
+        "RUN_SPEC_PLAN_REJECTED",
+        ["lanes"],
+        `The workflow plan validator rejected ${what}: ${
+          error instanceof Error ? error.message : "unknown error"
+        }`,
+      ),
+    );
+  }
+}
+
+/**
  * Runs the existing plan validator on the full plan of a spec, owned paths
  * included, and appends `RUN_SPEC_PLAN_REJECTED` when it objects.
  *
@@ -51,35 +115,20 @@ function describeCycle(
  * Call it only on a spec every rule family accepted: the paths and budget
  * families then guarantee valid, non-overlapping paths and at most
  * `RUN_SPEC_LIMITS.maxTotalAllowedPaths` claims, which bounds the validator's
- * pairwise ownership check.
+ * pairwise ownership check. A defect while building the plan is thrown, not
+ * reported as a rejection.
  *
  * @param spec - A spec that passed every rule family.
  * @param issues - Receives the issue, if any.
+ * @param project - Builds the plan; tests replace it.
  * @internal
  */
 export function checkFullWorkflowPlan(
   spec: RunSpec,
   issues: RunSpecIssue[],
+  project: (spec: RunSpec) => WorkflowPlan = fullWorkflowPlan,
 ): void {
-  try {
-    const { waves } = layerRunSpecLanes(spec.lanes);
-    validateWorkflowPlan(
-      runSpecWorkflowPlan(
-        runSpecPlanTopology(spec, waves),
-        RUN_SPEC_DRY_RUN_BINDING,
-      ),
-    );
-  } catch (error) {
-    issues.push(
-      runSpecIssue(
-        "RUN_SPEC_PLAN_REJECTED",
-        ["lanes"],
-        `The workflow plan validator rejected the plan: ${
-          error instanceof Error ? error.message : "unknown error"
-        }`,
-      ),
-    );
-  }
+  checkPlanValidator(project(spec), "the plan", issues);
 }
 
 /**
@@ -100,12 +149,14 @@ export function checkFullWorkflowPlan(
  * @param spec - The spec, already shape-checked.
  * @param _rules - The host's rules; no graph rule depends on them.
  * @param issues - Receives the issues found.
+ * @param project - Builds the lane graph plan; tests replace it.
  * @experimental
  */
 export function checkGraphRules(
   spec: RunSpec,
   _rules: RunRules,
   issues: RunSpecIssue[],
+  project: (spec: RunSpec) => WorkflowPlan = laneGraphWorkflowPlan,
 ): void {
   const before = issues.length;
   const firstIndex = new Map<string, number>();
@@ -236,29 +287,9 @@ export function checkGraphRules(
   }
 
   // The existing validator is the authority; it sees no paths here because
-  // path failures belong to the paths family.
+  // path failures belong to the paths family. A defect while building the
+  // plan is thrown, so the caller reports it as an internal error.
   if (issues.length === before) {
-    try {
-      const topology = runSpecPlanTopology(spec, layering.waves);
-      validateWorkflowPlan(
-        runSpecWorkflowPlan(
-          {
-            ...topology,
-            lanes: topology.lanes.map((lane) => ({ ...lane, ownedPaths: [] })),
-          },
-          RUN_SPEC_DRY_RUN_BINDING,
-        ),
-      );
-    } catch (error) {
-      issues.push(
-        runSpecIssue(
-          "RUN_SPEC_PLAN_REJECTED",
-          ["lanes"],
-          `The workflow plan validator rejected the lane graph: ${
-            error instanceof Error ? error.message : "unknown error"
-          }`,
-        ),
-      );
-    }
+    checkPlanValidator(project(spec), "the lane graph", issues);
   }
 }

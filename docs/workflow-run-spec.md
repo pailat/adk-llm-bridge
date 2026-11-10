@@ -226,7 +226,7 @@ rule set, and the library does not apply it on its own.
 | Family | Module | Checks |
 | --- | --- | --- |
 | rule set | `validate.ts` | `rules` is read once into a plain JSON copy (own keys only, each getter called once) and the copy matches `RunRulesSchema`. Otherwise the call returns `RUN_SPEC_RULES_INVALID` and nothing else. The families read the copy, never the host's object |
-| shape | `shape.ts` | The input is plain JSON within the input bounds, then the zod schema. Runs first and alone |
+| shape | `shape.ts` | The input is plain JSON within the input bounds, then the zod schema. Runs right after the rule set check and alone: a spec with a shape issue reaches no family |
 | paths | `rules/paths.ts` | Path grammar, root, denied patterns, duplicate and overlapping paths |
 | budget | `rules/budget.ts` | Budget, concurrency, lane count, agent runs, change rounds, string and array caps, `extensions`, plan size |
 | models | `rules/models.ts` | Workflow, providers, models, permission modes, network, tools and environment names |
@@ -249,6 +249,13 @@ array lengths are checked before any item is read. Listing the keys of an
 object or array still calls a proxy's `ownKeys` trap, and a getter runs
 whatever code it holds, so their cost is theirs: a host must not pass proxies
 or getters it does not control. Parsed JSON has neither.
+
+`resolveRunPlan` takes the ceilings, the rule set ids and the concurrency of
+its cost bound from the same checked copy of the rule set. A getter that would
+answer differently, or throw, on a second read is never read a second time:
+the spec is checked, and the plan built, from its first answer. Such a rule
+set gives neither `RUN_SPEC_RULES_INVALID` nor `RUN_SPEC_INTERNAL_ERROR`; only
+a getter that throws on its first (and only) read is `RUN_SPEC_RULES_INVALID`.
 
 ## Error codes
 
@@ -290,8 +297,8 @@ family order.
 | `RUN_SPEC_PATH_BACKSLASH` | A path contains a backslash |
 | `RUN_SPEC_PATH_NOT_CANONICAL` | A path has an empty segment, a `.` segment or a trailing slash |
 | `RUN_SPEC_PATH_ROOT_NOT_ALLOWED` | A lane's allowed path names the project root itself |
-| `RUN_SPEC_PATH_INVALID` | A path is blank, contains a NUL character, a control, format or other invisible character (such as a newline, a bidi override, a zero-width mark or a byte order mark) or a lone surrogate, or fails the portable path grammar for another reason |
-| `RUN_SPEC_PATH_DENIED` | A segment of a path, or of `projectRoot`, matches a denied pattern, after invisible characters are dropped, or the path could not be matched within the glob matching budget |
+| `RUN_SPEC_PATH_INVALID` | A path is blank, contains a NUL character, a control, format or other invisible character (such as a newline, a bidi override, a zero-width mark or a byte order mark) or a lone surrogate, has more than `RUN_SPEC_LIMITS.maxPathSegments` (64) segments, is too long once joined to `projectRoot`, or fails the portable path grammar for another reason |
+| `RUN_SPEC_PATH_DENIED` | A segment of a path, or of `projectRoot`, matches a denied pattern, after invisible characters, an alternate data stream suffix and trailing dots and spaces are dropped; a segment is shaped like a Windows 8.3 short name such as `GIT~1`; or the path could not be matched within the glob matching budget |
 | `RUN_SPEC_PATH_DUPLICATE` | Two allowed paths of one lane are equal, or one contains the other |
 | `RUN_SPEC_PATH_OVERLAP` | Allowed paths of two lanes are equal, or one contains the other |
 
@@ -374,13 +381,18 @@ that the JSON Schema agrees with.
   Lane titles and QA arguments are counted in code points too.
 - A path has at most `RUN_SPEC_LIMITS.maxPathSegments` (64) segments; a deeper
   path is `RUN_SPEC_PATH_INVALID`.
-- Matching against glob patterns (those with `*`) is bounded per call: one
-  unit per distinct segment and glob pattern pair, plus one unit per pattern
-  part when the pattern's longest literal part is in the segment. The budget
-  is 1,024 paths x 64 segments x 1,024 patterns units, the most a spec at the
-  plan limits can need for the pairs alone, and takes under a second to spend.
-  A path reached after the budget is spent is `RUN_SPEC_PATH_DENIED`, reported
-  once; it is never accepted unchecked. Exact patterns are a set lookup.
+- Matching against glob patterns (those with `*`) is bounded per call. Each
+  name tried against a glob pattern costs one unit; a segment with trailing
+  dots or spaces is tried twice, as written and without them. When the
+  pattern's longest literal part is in the name, the full match costs one
+  more unit per pattern part. A segment name already matched is not tried
+  again while the memo (4,096 names) has room. The budget is 1,024 paths x 64
+  segments x 1,024 patterns units: enough for one try of every segment of a
+  spec at the plan limits against every pattern. Trailing dots or spaces and
+  full matches spend more, so a spec at the limits whose segments contain the
+  patterns' literals can run out. A path reached after the budget is spent is
+  `RUN_SPEC_PATH_DENIED`, reported once; it is never accepted unchecked.
+  Exact patterns are a set lookup.
 - A segment shaped like a Windows 8.3 short name, such as `GIT~1`, `PROGRA~2`
   or `ENV~1.TXT` (one to six characters, `~`, digits, an optional extension of
   up to three characters, eight characters before the extension at most), is
@@ -548,6 +560,11 @@ The library is pure. It decides what a spec may ask for. The host enforces it.
     worktree or file names. The validator rejects ids that differ only in
     case, so a host may fold case when it derives names; it must not derive a
     name that two different ids can map to in another way.
+12. **Keep QA ids apart without folding case.** QA ids are compared exactly:
+    `Test` and `test` are two commands (`RUN_SPEC_QA_ID_DUPLICATE` covers
+    equal ids only). A host that derives log or file names from QA ids must
+    not fold case, or must add something that keeps two such ids apart, such
+    as the command's index.
 
 ## Next
 

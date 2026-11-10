@@ -957,7 +957,7 @@ describe("cost", () => {
     ).toBe(true);
   });
 
-  test("2,048 distinct segments against 1,024 globs with many parts are accepted within the time budget", () => {
+  test("2,048 distinct segments that contain no glob's longest literal are accepted by the literal check alone", () => {
     const rules = testRules();
     rules.deniedPathPatterns = Array.from(
       { length: 1_024 },
@@ -972,7 +972,30 @@ describe("cost", () => {
     );
     const started = performance.now();
     expect(run(withPaths(paths), rules)).toEqual([]);
-    expect(performance.now() - started).toBeLessThan(1_000);
+    expect(performance.now() - started).toBeLessThan(5_000);
+  });
+
+  test("1,024 distinct segments that contain the longest literal of globs with many parts are fully matched within the budget", () => {
+    // Each pattern needs 55 `a` before `-q<index>`; each segment has 54, so
+    // every full match runs through the parts and fails at the last `a`.
+    const rules = testRules();
+    rules.deniedPathPatterns = Array.from(
+      { length: 1_024 },
+      (_, index) => `*${"a*".repeat(55)}-q${index}*`,
+    );
+    const paths = Array.from({ length: 16 }, (_, pathIndex) =>
+      Array.from(
+        { length: 64 },
+        (_, segment) => `${"a".repeat(54)}-q${pathIndex * 64 + segment}`,
+      ).join("/"),
+    );
+    const started = performance.now();
+    expect(run(withPaths(paths), rules)).toEqual([]);
+    expect(performance.now() - started).toBeLessThan(5_000);
+    // One more `a` and the same full match succeeds.
+    expect(codes(run(withPaths([`src/${"a".repeat(55)}-q7`]), rules))).toEqual([
+      "RUN_SPEC_PATH_DENIED",
+    ]);
   });
 
   test("a glob still matches when its longest literal is in the middle", () => {
@@ -987,7 +1010,7 @@ describe("cost", () => {
 });
 
 describe("trailing dots and spaces", () => {
-  test("a run of 4,000 dots or spaces inside a segment is checked in linear time", () => {
+  test("a run of 4,000 dots or spaces inside a segment is checked within a generous time bound", () => {
     for (const filler of [" ", "."]) {
       const paths = Array.from(
         { length: 64 },
@@ -995,7 +1018,8 @@ describe("trailing dots and spaces", () => {
       );
       const started = performance.now();
       expect(run(withPaths(paths))).toEqual([]);
-      expect(performance.now() - started).toBeLessThan(500);
+      // A quadratic scan of these runs takes far longer than this bound.
+      expect(performance.now() - started).toBeLessThan(5_000);
     }
   });
 

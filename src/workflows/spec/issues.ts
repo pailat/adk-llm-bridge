@@ -114,7 +114,8 @@ export const RUN_SPEC_ISSUE_FAMILIES = {
    * A segment of a path, or of `projectRoot`, matches one of the rule set's
    * denied patterns, such as `.env` or `*.pem`, after invisible characters,
    * an alternate data stream suffix and trailing dots and spaces are dropped;
-   * or a segment is shaped like a Windows 8.3 short name such as `GIT~1`.
+   * a segment is shaped like a Windows 8.3 short name such as `GIT~1`; or
+   * the path could not be matched within the glob matching budget.
    */
   RUN_SPEC_PATH_DENIED: "paths",
   /**

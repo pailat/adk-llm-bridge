@@ -268,6 +268,21 @@ describe("workflows public exports", () => {
     expect(workflowSpec.validateRunSpec).toBeFunction();
   });
 
+  test("the spec subpath keeps its internal projection helpers private", () => {
+    // resolveRunPlan already returns their results: the topology, each
+    // lane's agent runs and the QA command allowlist check.
+    for (const name of [
+      "runSpecPlanTopology",
+      "runSpecLaneMaxAgentRuns",
+      "runSpecCommandKey",
+    ]) {
+      expect({ name, exported: name in workflowSpec }).toEqual({
+        name,
+        exported: false,
+      });
+    }
+  });
+
   test("the spec values do not leak into the other entries", () => {
     for (const name of Object.keys(workflowSpec)) {
       expect({ name, inWorkflows: name in workflows }).toEqual({
