@@ -465,7 +465,11 @@ function unsupportedAgentOperation(operation: string): never {
   );
 }
 
-function throwIfAborted(signal: AbortSignal | undefined): void {
+/**
+ * Throws `WORKFLOW_ABORTED` when the script's signal aborted; the signal's
+ * reason is not used.
+ */
+function throwIfScriptAborted(signal: AbortSignal | undefined): void {
   if (signal?.aborted) {
     throw new WorkflowError("WORKFLOW_ABORTED", "Workflow script was aborted");
   }
@@ -475,7 +479,7 @@ async function abortable<T>(
   operation: Promise<T>,
   signal: AbortSignal | undefined,
 ): Promise<T> {
-  throwIfAborted(signal);
+  throwIfScriptAborted(signal);
   if (!signal) {
     return operation;
   }
@@ -559,7 +563,7 @@ export async function runWorkflowScript(
   const activeAgents = new Set<string>();
   try {
     while (true) {
-      throwIfAborted(options.signal);
+      throwIfScriptAborted(options.signal);
       const operation = decodeTurn(session.next(projectHostResponse(response)));
       if (operation.op === "final") {
         return {

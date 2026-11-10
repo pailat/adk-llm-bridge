@@ -22,6 +22,7 @@ import {
   type InvocationContext,
   REQUEST_CONFIRMATION_FUNCTION_CALL_NAME,
 } from "@google/adk";
+import { parseJson } from "../../utils/json.js";
 import { isPlainRecord } from "../event-titles.js";
 import { networkAllowed } from "./network.js";
 import { canonicalPath, expandHome, isUnderAny } from "./paths.js";
@@ -816,12 +817,9 @@ function parseConfirmationResponse(value: unknown): Record<string, unknown> {
   if (typeof wrapped !== "string") {
     return {};
   }
-  try {
-    const parsed: unknown = JSON.parse(wrapped);
-    return isPlainRecord(parsed) ? parsed : {};
-  } catch {
-    return {};
-  }
+  // Large integers in the payload stay exact (strings of their digits).
+  const parsed = parseJson(wrapped);
+  return parsed.ok && isPlainRecord(parsed.value) ? parsed.value : {};
 }
 
 /**

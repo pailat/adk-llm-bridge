@@ -97,6 +97,20 @@ export interface ProviderDefinition {
   requireApiKey?: boolean;
 
   /**
+   * Whether the API key from the environment belongs to the base URL from the
+   * environment only.
+   *
+   * @remarks
+   * Security: when true, the env API key is used only when the base URL also
+   * comes from the environment (no instance or global `baseURL`). A base URL
+   * set in configuration gets only a configured key, so the env key never
+   * reaches a host it was not issued for.
+   *
+   * @defaultValue false
+   */
+  envApiKeyOnlyWithEnvBaseURL?: boolean;
+
+  /**
    * Declarative reasoning capability for this provider.
    *
    * When omitted, the strict `"openai-effort"` behavior applies (model-name

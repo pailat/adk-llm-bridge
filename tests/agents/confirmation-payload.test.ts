@@ -88,6 +88,18 @@ describe("readConfirmationAnswers", () => {
     ).toMatchObject({ confirmed: true, payload: [1, 2] });
   });
 
+  test("a wrapped JSON answer keeps a large integer in its payload exact", () => {
+    expect(
+      answer({
+        response:
+          '{"confirmed":true,"payload":{"ticketId":12345678901234567890,"count":3}}',
+      }),
+    ).toMatchObject({
+      confirmed: true,
+      payload: { ticketId: "12345678901234567890", count: 3 },
+    });
+  });
+
   test("a wrapped answer that does not parse is a rejection", () => {
     for (const response of [
       { response: "{not json" },
@@ -96,6 +108,15 @@ describe("readConfirmationAnswers", () => {
       { response: { confirmed: true } },
     ]) {
       expect(answer(response)?.confirmed).toBe(false);
+    }
+  });
+
+  test("a wrapped answer that parses to a non-object is a rejection", () => {
+    for (const wrapped of ["7", "[]", '"yes"', "null"]) {
+      const result = answer({ response: wrapped });
+      expect(result?.confirmed).toBe(false);
+      expect(result && "payload" in result).toBe(false);
+      expect(result && "hint" in result).toBe(false);
     }
   });
 

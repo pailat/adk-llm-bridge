@@ -119,7 +119,9 @@ function resolveBaseURL(
  * definition sets `requireApiKey`, a blank `apiKey` counts as unset at the
  * instance and global levels too (otherwise an explicit `""` sends no
  * credential). An instance key set to `undefined` does not override the
- * global value passed to the definition's `buildHeaders`.
+ * global value passed to the definition's `buildHeaders`. With
+ * `envApiKeyOnlyWithEnvBaseURL`, the env API key is used only when the base
+ * URL also comes from the environment.
  *
  * @param definition - The provider definition with defaults and env var names
  * @param instanceConfig - Instance-level configuration
@@ -145,10 +147,19 @@ export function resolveConfig(
   const explicitKey = definition.requireApiKey
     ? nonBlank
     : (value: unknown) => value as string | undefined;
+  // A base URL set in configuration (instance or global, `null` counting as
+  // unset as in `resolveBaseURL`) means the URL does not come from the
+  // environment, so such a definition takes no env key for it.
+  const configuredBaseURL =
+    instanceConfig.baseURL != null || globalConfig.baseURL != null;
+  const envKey =
+    definition.envApiKeyOnlyWithEnvBaseURL && configuredBaseURL
+      ? undefined
+      : resolveEnvVar(definition.envKeys.apiKey);
   const apiKey =
     explicitKey(instanceConfig.apiKey) ??
     explicitKey(globalConfig.apiKey) ??
-    resolveEnvVar(definition.envKeys.apiKey) ??
+    envKey ??
     "";
 
   if (definition.requireApiKey && !apiKey) {

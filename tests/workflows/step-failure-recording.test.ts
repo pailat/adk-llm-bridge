@@ -14,6 +14,7 @@ import type {
   WorkflowContext,
   WorkflowStep,
 } from "../../src/workflows/contracts.js";
+import { WorkflowError } from "../../src/workflows/contracts.js";
 import { defineWorkflow } from "../../src/workflows/definition.js";
 import type { WorkflowRuntimeHooks } from "../../src/workflows/runtime/workflow-runtime.js";
 import { WorkflowAgent } from "../../src/workflows/workflow-agent.js";
@@ -218,6 +219,31 @@ describe("step failure recording", () => {
     expect(store.checkpoint?.status).toBe("cancelled");
     expect(store.checkpoint?.steps.s?.status).toBe("interrupted");
   });
+
+  for (const behavior of ["block", "block-rethrow"] as const) {
+    test(`an abort whose reason is a WorkflowError with another code is interrupted (${behavior})`, async () => {
+      const store = new MemoryStore();
+      const events: WorkflowEventRecord[] = [];
+      const reason = new WorkflowError(
+        "WORKFLOW_LIMIT_EXCEEDED",
+        "budget spent",
+        { budget: 1 },
+      );
+      const { error } = await abortFirstRun(store, {
+        behavior,
+        reason,
+        events,
+      });
+      expect(error?.code).toBe("WORKFLOW_ABORTED");
+      expect(error).toMatchObject({
+        message: "budget spent",
+        details: { reasonCode: "WORKFLOW_LIMIT_EXCEEDED", budget: 1 },
+      });
+      expect(store.checkpoint?.status).toBe("cancelled");
+      expect(store.checkpoint?.steps.s?.status).toBe("interrupted");
+      expect(types(events)).toContain("step_interrupted");
+    });
+  }
 
   test("re-entering an interrupted step without opt-in is indeterminate", async () => {
     const store = new MemoryStore();

@@ -63,6 +63,7 @@ describe("registerCustomProvider", () => {
       environmentApiKey: string;
       explicitBaseURL: string;
       explicitApiKey: string;
+      explicitUrlOnlyApiKey: string;
     }>("issue85-configuration");
 
     expect(result.environmentBaseURL).toBe(
@@ -71,6 +72,8 @@ describe("registerCustomProvider", () => {
     expect(result.environmentApiKey).toBe("captured-environment-key");
     expect(result.explicitBaseURL).toBe("https://explicit.example.test/v1");
     expect(result.explicitApiKey).toBe("explicit-key");
+    // An explicit URL without an explicit key never gets CUSTOM_LLM_API_KEY.
+    expect(result.explicitUrlOnlyApiKey).toBe("adk-llm-bridge-custom-provider");
   });
 
   it("fails unresolved or invalid registration URLs without exposing secrets", () => {

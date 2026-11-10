@@ -279,6 +279,10 @@ export class OpenAICompatibleLlm extends BaseProviderLlm {
    * @returns An async generator yielding LLM responses
    * @throws {@link ProviderLlmError} in `"throw"` mode, with one of the codes
    *   above.
+   * @throws `InputValidationError` (from `@google/adk`) in every `errorMode`
+   *   when request conversion rejects the request as invalid, such as a
+   *   `candidateCount` other than 1, before any provider call. Other
+   *   conversion failures follow `errorMode` like provider failures.
    */
   async *generateContentAsync(
     llmRequest: LlmRequest,
@@ -287,6 +291,7 @@ export class OpenAICompatibleLlm extends BaseProviderLlm {
   ): AsyncGenerator<LlmResponse, void> {
     let noChoice: LlmResponse | undefined;
     let incomplete = false;
+    let converted = false;
     try {
       // Identify the provider/endpoint on the span up front so even a failed
       // call is attributable; model and response id are added on response.
@@ -299,6 +304,7 @@ export class OpenAICompatibleLlm extends BaseProviderLlm {
         this.model,
         { reasoning: this._reasoning, maxTokensParam: this._maxTokensParam },
       );
+      converted = true;
 
       if (stream) {
         const completed = yield* this.streamResponse(
@@ -324,6 +330,10 @@ export class OpenAICompatibleLlm extends BaseProviderLlm {
         }
       }
     } catch (error) {
+      // An invalid request is the caller's mistake: thrown as is in every
+      // `errorMode`, not wrapped as a provider failure that `RoutedLlm` would
+      // fail over on. Any other conversion failure follows `errorMode`.
+      if (!converted && error instanceof InputValidationError) throw error;
       if (abortSignal?.aborted) return;
       recordLlmError(error);
       yield this.handleProviderError(error, {

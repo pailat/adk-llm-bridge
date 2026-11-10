@@ -190,6 +190,85 @@ describe("AgentInvocationGateway", () => {
     });
   });
 
+  for (const sessionStateMode of ["merge", "replace"] as const) {
+    test(`sessionState shares no nested object with the caller (${sessionStateMode})`, async () => {
+      let resume: () => void = () => {};
+      const resumed = new Promise<void>((resolve) => {
+        resume = resolve;
+      });
+      let started: () => void = () => {};
+      const running = new Promise<void>((resolve) => {
+        started = resolve;
+      });
+      let seenByChild: unknown;
+      class NestedStateAgent extends BaseAgent {
+        protected async *runAsyncImpl(context: InvocationContext) {
+          started();
+          await resumed;
+          const task = context.session.state.task as {
+            id: string;
+            tags: string[];
+          };
+          seenByChild = structuredClone(task);
+          task.tags.push("from-child");
+          yield createEvent({
+            invocationId: context.invocationId,
+            author: this.name,
+            content: { role: "model", parts: [{ text: "done" }] },
+          });
+        }
+
+        protected async *runLiveImpl() {}
+      }
+      const worker = new NestedStateAgent({ name: "worker" });
+      const sessionState = { task: { id: "t-1", tags: ["caller"] } };
+      const gateway = new AgentInvocationGateway({
+        resolveAgent: () => worker,
+      });
+
+      const result = gateway.run({
+        agentName: "worker",
+        input: { role: "user", parts: [{ text: "task" }] },
+        parentContext: parentContext(new CaptureAgent("root")),
+        sessionState,
+        sessionStateMode,
+      });
+      await running;
+      sessionState.task.id = "changed-by-caller";
+      sessionState.task.tags.push("from-caller");
+      resume();
+
+      expect((await result).error).toBeUndefined();
+      expect(seenByChild).toEqual({ id: "t-1", tags: ["caller"] });
+      expect(sessionState.task).toEqual({
+        id: "changed-by-caller",
+        tags: ["caller", "from-caller"],
+      });
+    });
+  }
+
+  test("a frozen sessionState value stays frozen in the child's copy", async () => {
+    const worker = new CaptureAgent();
+    const grant = Object.freeze({ id: "g-1", scopes: Object.freeze(["read"]) });
+    const gateway = new AgentInvocationGateway({ resolveAgent: () => worker });
+
+    await gateway.run({
+      agentName: "worker",
+      input: { role: "user", parts: [{ text: "task" }] },
+      parentContext: parentContext(new CaptureAgent("root")),
+      sessionState: { grant, open: { n: 1 } },
+    });
+
+    const state = worker.context?.session.state;
+    expect(state?.grant).toEqual(grant);
+    expect(state?.grant).not.toBe(grant);
+    expect(Object.isFrozen(state?.grant)).toBe(true);
+    expect(
+      Object.isFrozen((state?.grant as typeof grant | undefined)?.scopes),
+    ).toBe(true);
+    expect(Object.isFrozen(state?.open)).toBe(false);
+  });
+
   test("replace history mode hides parent events without mutating them", async () => {
     const worker = new CaptureAgent();
     const root = new CaptureAgent("root");

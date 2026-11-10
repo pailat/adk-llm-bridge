@@ -1,4 +1,12 @@
-import { closeSync, mkdirSync, openSync } from "node:fs";
+import {
+  closeSync,
+  constants,
+  fchmodSync,
+  fstatSync,
+  mkdirSync,
+  openSync,
+  statSync,
+} from "node:fs";
 import { createRequire } from "node:module";
 import { dirname } from "node:path";
 import type { SessionKey, SessionStore, SessionStoreEntry } from "./types.js";
@@ -9,7 +17,8 @@ export type SqliteSessionStoreErrorCode =
   | "SESSION_STORE_INVALID_KEY"
   | "SESSION_STORE_INVALID_ENTRY"
   | "SESSION_STORE_INVALID_OPTION"
-  | "SESSION_STORE_SCHEMA_UNSUPPORTED";
+  | "SESSION_STORE_SCHEMA_UNSUPPORTED"
+  | "SESSION_STORE_UNSAFE_PATH";
 
 /**
  * Error raised by {@link SqliteSessionStore}, discriminated by
@@ -29,6 +38,10 @@ export type SqliteSessionStoreErrorCode =
  *   from 0 to 2147483647.
  * - `SESSION_STORE_SCHEMA_UNSUPPORTED`: the database was written by a newer
  *   version of the store.
+ * - `SESSION_STORE_UNSAFE_PATH`: the database path is a symlink or not a
+ *   regular file, the file is owned by another user, or its directory is
+ *   not a directory, is owned by another user (other than root), or can be
+ *   written by others without the sticky bit.
  *
  * @experimental
  */
@@ -99,6 +112,104 @@ const MAIN = "";
 const MAX_BUSY_TIMEOUT_MS = 2 ** 31 - 1;
 
 /**
+ * Creates or checks the database file before SQLite opens it.
+ *
+ * @remarks
+ * Security invariant (POSIX): session transcripts never go to a file another
+ * user controls or reads.
+ * - The directory is created `0700` when missing. An existing one is checked
+ *   at its real path and left as it is: it must be a directory owned by this
+ *   user or root, and not writable by others unless it has the sticky bit
+ *   (like `/tmp`). It is not tightened, since it may be a directory the user
+ *   chose, such as the project directory.
+ * - The file is opened with `O_NOFOLLOW`, so a symlink planted at the path
+ *   (dangling or not) is refused instead of followed. A new file is created
+ *   with `O_EXCL` and set to `0600` with `fchmod`, whatever the umask;
+ *   SQLite gives the `-wal` and `-shm` files the database file's mode. An
+ *   existing file keeps its mode and must be a regular file owned by this
+ *   user.
+ * - On Windows, where there is no `O_NOFOLLOW` or POSIX owner, only the
+ *   file is created.
+ *
+ * @param path - The database path.
+ * @throws {@link SqliteSessionStoreError} with code
+ * `SESSION_STORE_UNSAFE_PATH` when a check fails.
+ */
+function prepareDatabaseFile(path: string): void {
+  const directory = dirname(path);
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const uid =
+    typeof process.getuid === "function" ? process.getuid() : undefined;
+  const unsafe = (reason: string, cause?: unknown) =>
+    new SqliteSessionStoreError(
+      "SESSION_STORE_UNSAFE_PATH",
+      `Refusing the session store database ${path}: ${reason}.`,
+      cause === undefined ? undefined : { cause },
+    );
+  if (uid !== undefined) {
+    // statSync follows symlinks, so the checks apply to the real directory.
+    const dir = statSync(directory);
+    if (!dir.isDirectory()) {
+      throw unsafe(`${directory} is not a directory`);
+    }
+    if (dir.uid !== uid && dir.uid !== 0) {
+      throw unsafe(`its directory ${directory} is owned by another user`);
+    }
+    if ((dir.mode & 0o022) !== 0 && (dir.mode & 0o1000) === 0) {
+      throw unsafe(
+        `its directory ${directory} can be written by other users and has no sticky bit`,
+      );
+    }
+  }
+
+  const noFollow = constants.O_NOFOLLOW ?? 0;
+  let fd: number;
+  try {
+    fd = openSync(
+      path,
+      constants.O_RDWR | constants.O_CREAT | constants.O_EXCL | noFollow,
+      0o600,
+    );
+    fchmodSync(fd, 0o600);
+  } catch (error) {
+    if (errorCode(error) !== "EEXIST") throw wrapOpenError(error, unsafe);
+    try {
+      fd = openSync(path, constants.O_RDWR | noFollow);
+    } catch (reopenError) {
+      throw wrapOpenError(reopenError, unsafe);
+    }
+  }
+  try {
+    const file = fstatSync(fd);
+    if (!file.isFile()) {
+      throw unsafe("it is not a regular file");
+    }
+    if (uid !== undefined && file.uid !== uid) {
+      throw unsafe("the file is owned by another user");
+    }
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function errorCode(error: unknown): string | undefined {
+  return typeof error === "object" && error !== null && "code" in error
+    ? String((error as { code: unknown }).code)
+    : undefined;
+}
+
+/** `ELOOP` (and `EMLINK` on some BSDs) is how `O_NOFOLLOW` refuses a symlink. */
+function wrapOpenError(
+  error: unknown,
+  unsafe: (reason: string, cause?: unknown) => SqliteSessionStoreError,
+): unknown {
+  const code = errorCode(error);
+  return code === "ELOOP" || code === "EMLINK"
+    ? unsafe("the path is a symlink", error)
+    : error;
+}
+
+/**
  * A {@link SessionStore} that keeps Claude session transcripts in a SQLite
  * file, through the runtime's built-in `node:sqlite`.
  *
@@ -139,7 +250,10 @@ export class SqliteSessionStore implements SessionStore {
    * @throws {@link SqliteSessionStoreError} with code
    * `SESSION_STORE_INVALID_OPTION` for a bad `busyTimeoutMs` (checked before
    * any file is created), `SESSION_STORE_SQLITE_UNAVAILABLE` when the runtime
-   * has no `node:sqlite`, or `SESSION_STORE_SCHEMA_UNSUPPORTED` when a newer
+   * has no `node:sqlite`, `SESSION_STORE_UNSAFE_PATH` when the path or its
+   * directory fails the safety checks (a symlink at the path, a file or
+   * directory owned by another user, a directory others can write without
+   * the sticky bit), or `SESSION_STORE_SCHEMA_UNSUPPORTED` when a newer
    * store wrote the file. A file that is not a SQLite database, and any use
    * after {@link SqliteSessionStore.close}, throw the plain `node:sqlite`
    * error.
@@ -158,10 +272,7 @@ export class SqliteSessionStore implements SessionStore {
     }
     const { DatabaseSync } = loadSqlite();
     if (options.path !== ":memory:") {
-      mkdirSync(dirname(options.path), { recursive: true, mode: 0o700 });
-      // SQLite creates new files 0644; create it first so the mode is ours.
-      // SQLite gives the -wal and -shm files the mode of the database file.
-      closeSync(openSync(options.path, "a", 0o600));
+      prepareDatabaseFile(options.path);
     }
     this.#db = new DatabaseSync(options.path, { timeout });
     try {

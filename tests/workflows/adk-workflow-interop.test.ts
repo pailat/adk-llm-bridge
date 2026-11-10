@@ -272,6 +272,27 @@ describe("ADK Workflow interop", () => {
     }
   });
 
+  test("outputSchema keeps integers beyond MAX_SAFE_INTEGER exact", async () => {
+    const structured = new WorkflowAgent({
+      name: "structured",
+      outputSchema: z.object({ id: z.string(), n: z.number() }),
+      definition: defineWorkflow({
+        id: "structured",
+        version: "1",
+        handler: () => '{"id":12345678901234567890,"n":7}',
+      }),
+    });
+
+    const result = await run(
+      new Workflow({ name: "ids", edges: [["START", structured]] }),
+    );
+    expect(result.error).toBeUndefined();
+    expect(result.events.find((e) => e.output !== undefined)?.output).toEqual({
+      id: "12345678901234567890",
+      n: 7,
+    });
+  });
+
   test("distinct run ids keep separate checkpoints with a branch-aware execution id", async () => {
     const worker = new ReplyAgent("w");
     const durable = trustedWorkflow("durable", worker, {

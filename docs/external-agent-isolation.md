@@ -28,7 +28,10 @@ come from the model or from a server or connector that connected after start.
 A tool call seen before `system/init` gets a neutral message. The code and
 recoverability are the same in every case.
 
-The per-message check compares built-in tool names by canonical name, so an
+Built-in names in `tools` are passed on in their canonical spelling (`bash`
+becomes `Bash`), so the shell sandbox, the web-tool refusal and the
+`read-only` removals see a shell or web tool named in any case. The
+per-message check compares built-in tool names by canonical name, so an
 offered tool reported as `bash` for `Bash` is never flagged. Everything else
 outside the offered set is flagged and stops the run: a built-in that was not
 offered, any `mcp__` tool outside the expected servers (MCP names are never
@@ -59,7 +62,9 @@ at construction.
 A `read-only` Claude agent never uses MCP tools other than the bridge's own,
 also with `inheritHostConfig: true`: `ClaudeCliDriver` denies `mcp__*` and
 `ClaudeAgentSdkDriver` adds a `PreToolUse` hook that denies them. A host
-`permissions.allow` rule cannot let one through. `ClaudeCliDriver` runs
+`permissions.allow` rule cannot let one through. The same denial applies in
+every mode while the policy does not set `allowNetwork: true`, because a host
+MCP server runs outside the shell sandbox. `ClaudeCliDriver` runs
 `read-only` with `--permission-mode dontAsk` (not `plan`, which runs a
 different model than `--model`).
 
@@ -191,9 +196,10 @@ never pass to a delegated agent: each is relative to its own agent's working
 directory, so `src` of a parent in `/a` is not `src` of a child in `/b`. A
 child of a parent with only relative roots therefore gets `[]`, even when it
 sets no `allowedPaths`. A child's own relative roots stay only when the
-parent sets no `allowedPaths`. Use absolute or `~` roots for delegated
-agents. An empty intersection, or an empty list on either side, allows no
-path.
+parent sets no `allowedPaths`, and only for that child: a session created
+from the child's session (a workflow step, for example) gets `[]` for them.
+Use absolute or `~` roots for delegated agents. An empty intersection, or an
+empty list on either side, allows no path.
 
 The derived policy also keeps both sides' absolute roots as `pathBounds`, and
 the guard checks every bound when a request arrives. A kept root that a
@@ -242,12 +248,43 @@ event with `EXTERNAL_AGENT_DEPENDENCY_MISSING`. A missing `claude`, `codex` or
 throws out of the agent.
 
 The SDK drivers look for the `claude` or `codex` binary under `PATH`, the home
-directory, and the `node_modules` of the host process directory and of the
-bridge's own install. They never look in the run's `workingDirectory`: the
-agent can write there, so a binary it left behind would start the next run
-outside the runtime's sandbox. If the only copy is inside the workspace, set
-`CLAUDE_CODE_EXECUTABLE` or `CODEX_EXECUTABLE` to it. The CLI drivers start
-`command` as given, found on `PATH` without a shell.
+directory, `executableSearchPaths` (Claude), and the `node_modules` of the
+host process directory and of the bridge's own install. They skip every
+candidate whose real path (symlinks resolved) is at or under a directory the
+agent may write: the run's `workingDirectory` (the process directory when it
+is unset) and its `allowedPaths`, whatever the mode. The agent can write
+there, so a binary it left behind would start the next run outside the
+runtime's sandbox. This also skips a `PATH` entry inside the workspace (a
+package-manager script adds `node_modules/.bin`). Without a binary found
+this way, `CodexSdkDriver` with the network off refuses with
+`MISSING_BINARY` rather than list MCP servers through a bare `codex`.
+
+Explicit paths (`CLAUDE_CODE_EXECUTABLE`, `CLAUDE_CODE_PATH`,
+`pathToClaudeCodeExecutable`, `CODEX_EXECUTABLE`, `CODEX_CLI_PATH`,
+`codexPathOverride`) are used as given; set one if the only copy is inside
+the workspace.
+
+What the lookup cannot protect:
+
+- When it finds nothing, each SDK falls back to the binary bundled with its
+  own install. If the host, and so the bridge and the SDKs, is installed
+  inside a directory the agent can write (a host started from the repository
+  the agent edits, with the default `workingDirectory`), the agent can change
+  that binary or the installed packages themselves. Install the host outside
+  the workspace, or give the run a separate `workingDirectory`.
+- With `full-access` the agent can write anywhere the host user can.
+
+The CLI drivers start `command` without a shell. With the built-in spawn a
+bare `command` (no path separator) is looked up on the child's `PATH`, but
+an entry whose real path is at or under the run's working directory (the
+process directory when it is unset) or an `allowedPaths` entry is skipped, and
+so is every relative or empty entry: under `npm run` / `bun run` `PATH`
+starts with `<cwd>/node_modules/.bin`, which the agent can write. When nothing
+is left the run ends with `MISSING_BINARY`; pass an absolute `command` to
+choose the binary yourself. A `command` with a path separator is used as
+given, so a relative one (`./claude`, `node_modules/.bin/claude`) resolves in
+the run's working directory, which the agent can write: pass an absolute
+path instead. A custom `spawn` gets `command` as given.
 
 ## Error codes
 

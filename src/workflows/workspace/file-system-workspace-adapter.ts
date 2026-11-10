@@ -23,6 +23,7 @@ import {
   writeDurableFileSync,
 } from "../internal/directory-lock.js";
 import { attachCleanupErrors } from "../internal/error-support.js";
+import { hasErrorCode, isRecord } from "../internal/guards.js";
 import { portablePathProblem } from "../internal/portable-path.js";
 import {
   findWorkspacePathOverlaps,
@@ -981,17 +982,4 @@ function abortableDelay(delayMs: number, signal?: AbortSignal): Promise<void> {
     };
     signal?.addEventListener("abort", onAbort, { once: true });
   });
-}
-
-function hasErrorCode(error: unknown, code: string): boolean {
-  return Boolean(
-    error &&
-      typeof error === "object" &&
-      "code" in error &&
-      (error as { code?: unknown }).code === code,
-  );
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }

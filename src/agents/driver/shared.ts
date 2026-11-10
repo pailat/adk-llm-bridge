@@ -4,7 +4,7 @@
  */
 
 import { existsSync } from "node:fs";
-import { delimiter, dirname, isAbsolute, join } from "node:path";
+import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { InputValidationError } from "@google/adk";
 import { readAllowedEnv } from "../auth/env.js";
@@ -16,6 +16,7 @@ import type {
   ExternalAgentToolResultEvent,
 } from "../events.js";
 import type { ExternalAgentRunRequest } from "../external-agent-driver.js";
+import { canonicalPath, expandHome, isUnderAny } from "../permissions/paths.js";
 import { classifyRecoverable } from "../runtime/error-classification.js";
 
 /**
@@ -112,12 +113,60 @@ export function copyIfPresent(
 }
 
 /**
+ * Canonical directories the run's agent may write, which the executable
+ * lookup never searches.
+ *
+ * @remarks
+ * Security invariant: a binary the agent planted in one run must not start
+ * the next run on the host, outside the runtime's sandbox. The roots are the
+ * run's working directory (the process directory when it is unset, as the
+ * runtimes then work there) and each `allowedPaths` entry resolved against
+ * it, whatever the mode. A root whose symlinks cannot be resolved is kept as
+ * its absolute path.
+ *
+ * @param request - The run, for its working directory and permissions.
+ * @returns Absolute, canonical roots.
+ */
+export function agentWritableRoots(
+  request: Pick<ExternalAgentRunRequest, "workingDirectory" | "permissions">,
+): string[] {
+  const workingDirectory = resolve(request.workingDirectory ?? process.cwd());
+  const roots = [canonicalPath(workingDirectory, "/") ?? workingDirectory];
+  for (const path of request.permissions?.allowedPaths ?? []) {
+    roots.push(
+      canonicalPath(path, workingDirectory) ??
+        resolve(workingDirectory, expandHome(path)),
+    );
+  }
+  return [...new Set(roots)];
+}
+
+/**
+ * Whether the executable lookup may probe or use `path`: a candidate, or a
+ * path a package resolution returned.
+ *
+ * @param path - The path, absolute or relative to the process directory.
+ * @param excluded - Canonical roots the agent may write
+ * ({@link agentWritableRoots}).
+ * @returns `false` when the canonical path (symlinks resolved) is inside a
+ * root, or cannot be resolved.
+ */
+export function isSearchableExecutable(
+  path: string,
+  excluded: readonly string[],
+): boolean {
+  const canonical = canonicalPath(path, process.cwd());
+  return canonical !== undefined && !isUnderAny(canonical, excluded);
+}
+
+/**
  * Directories to search for locally installed CLI packages.
  *
  * @remarks
- * The run's working directory is never searched: the agent can write there,
- * so a binary planted in one run would start the next one outside the
- * runtime's sandbox.
+ * Callers drop every path they find under these that is inside the run's
+ * {@link agentWritableRoots} ({@link isSearchableExecutable}), so the run's
+ * working directory is never searched, including when it is this process
+ * directory.
  *
  * @returns Absolute, de-duplicated paths: the process directory and up to
  * eight parents of this module.
@@ -441,8 +490,15 @@ export function findExecutable(
  * {@link candidateBaseDirectories} entry its `node_modules/.bin` and the
  * paths `packagePaths` returns for it. Duplicates are dropped.
  *
+ * Security invariant: every candidate whose canonical path is at or under
+ * one of `excluded` is dropped, wherever it comes from (a `PATH` entry such
+ * as the `node_modules/.bin` a package-manager script adds, an extra
+ * directory, or a symlink into the root). Explicit executable paths are not
+ * candidates and are never filtered.
+ *
  * @param options - The executable name, the parent environment, extra
- * directories and a per-base package path builder.
+ * directories, a per-base package path builder and the roots the agent may
+ * write ({@link agentWritableRoots}).
  * @returns Absolute candidate paths.
  */
 export function executableCandidates(options: {
@@ -450,6 +506,7 @@ export function executableCandidates(options: {
   env: Record<string, string | undefined>;
   extraDirs?: ReadonlyArray<string | undefined>;
   packagePaths?: (base: string) => readonly string[];
+  excluded: readonly string[];
 }): string[] {
   const candidates = new Set<string>();
   const dirs = [
@@ -467,7 +524,9 @@ export function executableCandidates(options: {
       candidates.add(path);
     }
   }
-  return [...candidates];
+  return [...candidates].filter((path) =>
+    isSearchableExecutable(path, options.excluded),
+  );
 }
 
 /**

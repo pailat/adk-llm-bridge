@@ -6,6 +6,10 @@ import {
   resolveEnvVar,
 } from "../../src/core/config-resolver.js";
 import type { ProviderDefinition } from "../../src/core/provider-definition.js";
+import { AI_GATEWAY_DEFINITION } from "../../src/providers/ai-gateway/definition.js";
+import { OPENAI_DEFINITION } from "../../src/providers/openai/definition.js";
+import { OPENROUTER_DEFINITION } from "../../src/providers/openrouter/definition.js";
+import { XAI_DEFINITION } from "../../src/providers/xai/definition.js";
 
 const TEST_DEFINITION: ProviderDefinition = {
   id: "ai-gateway",
@@ -317,4 +321,83 @@ describe("blank and undefined instance values", () => {
     } as never);
     expect(resolved.headers).toEqual({ "X-Org": "instance-org" });
   });
+});
+
+describe("env API key with a configured base URL", () => {
+  beforeEach(() => {
+    resetProviderConfig("ai-gateway");
+    delete process.env.ISSUE85_TEST_API_KEY;
+  });
+
+  afterEach(() => {
+    resetProviderConfig("ai-gateway");
+    delete process.env.ISSUE85_TEST_API_KEY;
+  });
+
+  it("keeps the env key for a definition without envApiKeyOnlyWithEnvBaseURL (proxy auth)", () => {
+    process.env.ISSUE85_TEST_API_KEY = "environment-key";
+
+    const explicit = resolveConfig(TEST_DEFINITION, {
+      model: "test-model",
+      baseURL: "https://proxy.example.test/v1",
+    });
+    setProviderConfig("ai-gateway", {
+      baseURL: "https://global-proxy.example.test/v1",
+    });
+    const global = resolveConfig(TEST_DEFINITION, { model: "test-model" });
+
+    expect(explicit.apiKey).toBe("environment-key");
+    expect(global.apiKey).toBe("environment-key");
+  });
+
+  it("drops the env key for a configured base URL only with envApiKeyOnlyWithEnvBaseURL", () => {
+    process.env.ISSUE85_TEST_API_KEY = "environment-key";
+    const definition = {
+      ...TEST_DEFINITION,
+      envApiKeyOnlyWithEnvBaseURL: true,
+    };
+
+    expect(
+      resolveConfig(definition, {
+        model: "test-model",
+        baseURL: "https://proxy.example.test/v1",
+      }).apiKey,
+    ).toBe("");
+    expect(resolveConfig(definition, { model: "test-model" }).apiKey).toBe(
+      "environment-key",
+    );
+  });
+
+  for (const definition of [
+    OPENAI_DEFINITION,
+    XAI_DEFINITION,
+    OPENROUTER_DEFINITION,
+    AI_GATEWAY_DEFINITION,
+  ]) {
+    it(`${definition.id} sends its own env key to an explicit or global base URL`, () => {
+      const [envKey] = definition.envKeys.apiKey;
+      if (!envKey) throw new Error("definition without an env key");
+      const id = definition.id as Parameters<typeof setProviderConfig>[0];
+      const saved = process.env[envKey];
+      process.env[envKey] = "own-environment-key";
+      try {
+        const explicit = resolveConfig(definition, {
+          model: "test-model",
+          baseURL: "https://proxy.example.test/v1",
+        });
+        setProviderConfig(id, {
+          baseURL: "https://global-proxy.example.test/v1",
+        });
+        const global = resolveConfig(definition, { model: "test-model" });
+
+        expect(explicit.apiKey).toBe("own-environment-key");
+        expect(global.baseURL).toBe("https://global-proxy.example.test/v1");
+        expect(global.apiKey).toBe("own-environment-key");
+      } finally {
+        resetProviderConfig(id);
+        if (saved === undefined) delete process.env[envKey];
+        else process.env[envKey] = saved;
+      }
+    });
+  }
 });

@@ -65,7 +65,9 @@ from the 0.6.0 tag.
 - Anthropic `promptTokenCount` now includes cache-read and cache-creation
   tokens.
 - `candidateCount` other than `1` is rejected on OpenAI-compatible providers
-  ([#88](https://github.com/pailat/adk-llm-bridge/issues/88)).
+  ([#88](https://github.com/pailat/adk-llm-bridge/issues/88)) with
+  `InputValidationError`, thrown before any provider call in every
+  `errorMode` (never a `ProviderLlmError` or an error response).
 - `timeout`, `maxRetries` and Anthropic's `maxTokens` must be integers: a
   fraction, `NaN`, `Infinity` or a non-number throws `InputValidationError`
   (from the model constructor and from `register*()`) instead of being passed
@@ -227,7 +229,8 @@ from the 0.6.0 tag.
     agent; a child of a parent with only relative roots gets `[]`, and a
     child's own relative roots stay only when the parent sets no
     `allowedPaths`. `ExternalAgentPermissionPolicy` has a new optional
-    `pathBounds` field, which `assertPermissionPolicy` validates;
+    `pathBounds` field, validated with the rest of the policy (a malformed
+    value throws `InputValidationError`);
   - `adk-llm-bridge/agents` no longer exports `SubprocessJsonlDriver`,
     `SubprocessJsonlDriverConfig`, `contentsToSdkMessages`,
     `summarizeHistoryForColdStart`, `userContentToCodexInput`,
@@ -340,11 +343,10 @@ from the 0.6.0 tag.
   `allowedPaths`; the Codex sub-agent of `external-agents` opts in, because it
   inherits the Claude root's paths.
 - **The guard exempts only registered bridge tools from the MCP network
-  denial.** Without `allowNetwork: true`, `guardPermissionRequest` denied every
+  denial.** Without `allowNetwork: true`, the confirmation guard denied every
   `mcp__*` tool except names starting with `mcp__adk_bridge__`, so a host
-  server named `adk_bridge__x` was exempt. It now exempts only the names in
-  the new `bridgeToolNames` option; `ExternalAgent` passes its run's bridged
-  tools. A direct caller that passes no names gets every MCP tool denied.
+  server named `adk_bridge__x` was exempt. It now exempts only the tools
+  `ExternalAgent` bridged for the run.
 - **New `interrupted` workflow step status and `step_interrupted` event.**
   `WorkflowCheckpointStepStatus` and `WorkflowEvent` each gain a member, so an
   exhaustive `switch` over either stops compiling until it handles the new
@@ -359,13 +361,50 @@ from the 0.6.0 tag.
 
 ### Security
 
+- **A shell tool named in any case gets the no-network sandbox.** Claude Code
+  matches built-in tool names case-insensitively, but the Claude drivers
+  checked for a shell by exact name, so `tools: ["bash"]` (or `"BASH"`,
+  `"powershell"`) ran shell commands without the sandbox while the network was
+  off. Built-in names in `tools` are now passed on in their canonical
+  spelling (`bash` becomes `Bash`, duplicates collapse), and every check sees
+  that spelling.
+- **`SqliteSessionStore` refuses an unsafe database path.** A symlink at the
+  path (dangling or not) is refused instead of followed, a new file is
+  `0600` whatever the umask, and the store refuses a file owned by another
+  user or a directory owned by another user (root excepted) or writable by
+  others without the sticky bit, with the new `SESSION_STORE_UNSAFE_PATH`.
+  An existing directory or file is not re-moded.
 - **The SDK drivers no longer run a `claude` or `codex` binary from the run's
   working directory.** `ClaudeAgentSdkDriver` and `CodexSdkDriver` searched
   `<workingDirectory>/node_modules` for the runtime binary before the bridge's
   own install. The agent can write its working directory, so a binary left
   there by one run would start the next run outside the runtime's sandbox.
-  The working directory is no longer searched; set `CLAUDE_CODE_EXECUTABLE` or
-  `CODEX_EXECUTABLE` if the only copy lives there.
+  The lookup now skips every candidate whose real path (symlinks resolved) is
+  at or under a directory the agent may write: the run's `workingDirectory`
+  (the process directory when it is unset, the default setup) and its
+  `allowedPaths`. That covers `PATH` entries such as the `node_modules/.bin`
+  a package-manager script adds, `executableSearchPaths`, and the bridge's
+  own install when it lies inside the workspace. `CodexSdkDriver` with the
+  network off refuses with `MISSING_BINARY` instead of listing MCP servers
+  through a bare `codex` on `PATH`. Explicit paths (`CLAUDE_CODE_EXECUTABLE`,
+  `CODEX_EXECUTABLE`, `pathToClaudeCodeExecutable`, `codexPathOverride`) are
+  used as given; set one if the only copy lives in the workspace. When the
+  bridge finds nothing, the SDK still falls back to the binary bundled with
+  its own install, so a host installed inside a workspace the agent can
+  write remains exposed: install it outside, or give the run another
+  `workingDirectory`.
+- **The CLI drivers no longer start a `claude`, `codex` or `gemini` from the
+  run's working directory.** `ClaudeCliDriver`, `CodexCliDriver` and
+  `GeminiCliDriver` started a bare `command` through the child's `PATH`,
+  which under `npm run` / `bun run` starts with `<cwd>/node_modules/.bin`, so
+  with the default `workingDirectory` a binary the agent planted there ran
+  on the host the next run. With the built-in spawn a bare `command` is now
+  resolved to an absolute path, skipping every `PATH` entry whose real path
+  is at or under the run's `workingDirectory` (the process directory when it
+  is unset) or `allowedPaths`, and every relative or empty entry; the Codex
+  MCP listing uses the same path. When nothing is left the run ends with
+  `MISSING_BINARY`. A `command` with a path separator and a custom `spawn`
+  get `command` as given.
 - **A prompt cannot set CLI flags or run a CLI subcommand.** `CodexCliDriver`
   and `ClaudeCliDriver` passed the prompt as a bare argument, so a user
   message such as `--dangerously-skip-permissions` (Claude) or
@@ -375,6 +414,15 @@ from the 0.6.0 tag.
   argument, because Claude Code runs a subcommand named by its first operand
   even after `--` (a prompt of `update` ran `claude update`). `GeminiCliDriver`
   passes `--prompt=<prompt>` instead of `-p <prompt>`, so `--yolo` stays text.
+- **Driver `args` cannot override the policy flags.** `ClaudeCliDriver` and
+  `CodexCliDriver` append `args` after the flags they set from the permission
+  policy and isolation, so an entry such as `--permission-mode
+  bypassPermissions`, `--settings`, `--mcp-config` (Claude) or
+  `-c sandbox_workspace_write.network_access=true`, `--sandbox`, `--profile`
+  (Codex) could undo them. Such an entry now makes the constructor throw an
+  `ExternalAgentPolicyError` with code `EXTERNAL_AGENT_OPTION_UNSUPPORTED`,
+  unless the driver is built with `allowPolicyOverrideArgs: true`. A non-string
+  `args` entry throws `InputValidationError`.
 - **Dangling symlinks no longer pass the path guard.** A link inside an
   allowed root whose target does not exist yet was compared by its own path,
   so a write through it could land outside the root. The guard now follows
@@ -387,7 +435,8 @@ from the 0.6.0 tag.
   with Write and `<repo>/components/...` with Bash. A `PreToolUse` hook now
   runs the path guard on every tool call (Write, Edit, MultiEdit,
   NotebookEdit and the rest), in every permission mode, and the sandbox may
-  write only to the allowed roots. Claude Code always lets the sandbox write
+  write only to the allowed roots and the temp directories it always keeps
+  writable (below). Claude Code always lets the sandbox write
   to the working directory, so with a shell tool on offer a run whose working
   directory is outside `allowedPaths`, or whose shell runs unsandboxed
   (`allowNetwork: true`, `allowUnsandboxedShell`), is refused with
@@ -412,7 +461,11 @@ from the 0.6.0 tag.
   `ClaudeCliDriver` now always denies `mcp__*` under `read-only`, and
   `ClaudeAgentSdkDriver` adds a `PreToolUse` hook that denies every MCP tool
   except the bridge's own. A `read-only` agent with `requiredMcpServers`
-  cannot call those servers' tools.
+  cannot call those servers' tools. The same denial now applies with
+  `inheritHostConfig: true` in `ask`, `workspace-write` and `full-access`
+  whenever the policy does not set `allowNetwork: true`: a host MCP server
+  runs outside the shell sandbox, so its tools (pre-approved ones too) would
+  have reached the network. Set `allowNetwork: true` to use them.
 - **AI Gateway no longer sends an OpenAI key to Vercel.** With only
   `OPENAI_API_KEY` set, the gateway sent that key to `ai-gateway.vercel.sh`, a
   host it was not issued for (and `OPENAI_BASE_URL` could redirect gateway
@@ -429,8 +482,9 @@ from the 0.6.0 tag.
   `Workflow` edges, `runNode`, `NodeTool`, workflow steps, nested gateways,
   state-writing tools and the separate dist bundles. A nested `ExternalAgent`
   never runs wider than the `ExternalAgent`s above it, even when ADK resumes it
-  directly. Inherited and derived policies are frozen, and the policy registry
-  rejects look-alike objects. ADK `AgentTool` still starts a new permission
+  directly. Policies inherited through a session, and the effective policy
+  derived from them, are deep-frozen, and the policy registry rejects
+  look-alike objects. ADK `AgentTool` still starts a new permission
   chain (documented).
 - **Confirmations (human in the loop):**
   - a confirmation never widens the effective policy;
@@ -568,7 +622,8 @@ from the 0.6.0 tag.
   `SqliteSessionStore` from the new `adk-llm-bridge/agents/session-store/sqlite`
   subpath keeps transcripts in a SQLite file through the built-in
   `node:sqlite` (Node 22.13+, Bun; no new dependency): uuid-idempotent appends
-  in order, a `0600` file, WAL mode, safe across processes. The
+  in order, a new database file created `0600` (an existing file keeps its
+  mode), WAL mode, safe across processes. The
   `SessionStore`, `SessionKey` and `SessionStoreEntry` types are exported from
   `adk-llm-bridge/agents`. A batch the SDK drops after its retries is reported
   as a recoverable `CLAUDE_SESSION_STORE_MIRROR_ERROR` event, and
@@ -591,8 +646,7 @@ from the 0.6.0 tag.
   `WorkflowStepUsage` are exported from `adk-llm-bridge/workflows`.
 - **`ExternalAgentConfig.beforeToolCallback` and `afterToolCallback`** for
   bridged ADK tools, with the same types and order as on `LlmAgent` (after the
-  plugins' callbacks). New `AdkToolCallbacks` type and
-  `createAdkToolBridge` options `beforeToolCallbacks` / `afterToolCallbacks`.
+  plugins' callbacks).
 - **`AdkToolExecutionResult` status `"pending"`** (with `pending.functionCallId`
   and `pending.toolName`) for a long-running tool that returned no result, and
   error codes `CALLBACK_FAILED` and `CREDENTIAL_REQUIRED` in
@@ -675,6 +729,9 @@ from the 0.6.0 tag.
   configuration from `CUSTOM_LLM_BASE_URL`, `CUSTOM_LLM_API_KEY` and
   `OPENAI_BASE_URL`
   ([#85](https://github.com/pailat/adk-llm-bridge/issues/85)).
+  `CUSTOM_LLM_API_KEY` is sent only to the `CUSTOM_LLM_BASE_URL` host: a
+  custom provider with an explicit `baseURL` and no `apiKey` sends no key, as
+  before.
 - `ProviderLlmError` (`code`, `status`, `provider`, `detail`, `cause`) and the
   `errorMode` option (per model or through `setProviderConfig`). `provider` is
   the provider id (`openai`, `anthropic`, `custom`, ...); the prefix is in
@@ -777,7 +834,9 @@ from the 0.6.0 tag.
 - Reasoning round trips: OpenAI-compatible `reasoning_details` with ADK
   planners, and namespaced Anthropic thought signatures
   (`adk-llm-bridge:anthropic:v1:`). Sessions stored with older signatures still
-  replay, and foreign signatures are never sent.
+  replay, and foreign signatures are never sent. An integer beyond
+  `Number.MAX_SAFE_INTEGER` in an echoed `reasoning_details` entry is sent as a
+  string of its exact digits, not rounded.
 - `AgentInvocationGateway` shares the `maxLlmCalls` counter and the ADK 2
   context fields (`isolationScope`, `nodeToolDepth`, ...) between a parent and
   its child agents, and writes child events through ADK session semantics.
@@ -882,7 +941,10 @@ from the 0.6.0 tag.
   interrupt is rejected as corrupt. A resume re-runs the step when
   `retryFailedSteps` or `resumePolicy: "retry"` is set; otherwise, and on a
   turn that answers a waiting step, it fails with
-  `WORKFLOW_INDETERMINATE_STEP`. `docs/workflow-durability.md` documents the
+  `WORKFLOW_INDETERMINATE_STEP`. An abort whose reason is a `WorkflowError`
+  with another code is handled the same way and fails the run with
+  `WORKFLOW_ABORTED`, keeping the reason's code as `details.reasonCode` and
+  its details. `docs/workflow-durability.md` documents the
   supported way to stop a run (abort the signal, wait for the workflow to
   record it, then exit) and how to recover an answer turn.
 - **A `read-only` agent with `allowNetwork: true` can use its web tools.**
@@ -1153,7 +1215,9 @@ from the 0.6.0 tag.
   group on macOS and Linux (shells, MCP servers and other children it
   started), with SIGKILL after `killGraceMs` (default 2000 ms) if SIGTERM is
   ignored. Ctrl-C, SIGTERM and SIGHUP of the host reach the CLI's group, and
-  the host still ends by that signal unless it handles it itself. Process
+  the host still ends by that signal unless it handles it itself, with
+  `process.on` or `process.once` (a `once` listener no longer made the bridge
+  re-raise the signal and end the host before it drained). Process
   groups still running when the host exits are killed too. On Windows only
   the CLI process is signaled.
 - `CodexCliDriver`: an empty `turn.failed` has a readable message; a non-JSON
@@ -1228,6 +1292,9 @@ from the 0.6.0 tag.
 - With an `outputSchema`, integers beyond `Number.MAX_SAFE_INTEGER` in the
   agent's JSON answer (object, array or scalar) arrive as strings of their
   exact digits; declare such fields as `z.string()` or a union.
+- The Claude, Codex and Gemini CLI drivers and `SubprocessJsonlDriver.parseLine`
+  keep integers beyond `Number.MAX_SAFE_INTEGER` exact, as strings, in the
+  tool inputs and results they read from stdout.
 - Sub-agent event titles show the query or tool name like the other titles.
 - CLI and Claude SDK drivers validate `command`, `killGraceMs` and `maxTurns`
   at construction (`InputValidationError`).

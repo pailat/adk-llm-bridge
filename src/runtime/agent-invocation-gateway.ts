@@ -169,9 +169,12 @@ export interface AgentInvocationRequest {
   /** JSON-safe state projected into the isolated child session only. */
   sessionState?: Readonly<Record<string, unknown>>;
   /**
-   * `merge` (default) starts from a deep copy of the parent state (so the child
-   * never shares mutable objects with it) plus `sessionState`; `replace` uses
-   * only `sessionState` and freezes the child state.
+   * `merge` (default) starts from a deep copy of the parent state plus a deep
+   * copy of `sessionState`, so the child never shares mutable objects with the
+   * parent or the caller; `replace` uses only the copy of `sessionState` and
+   * freezes the child state (its top-level keys). A value that is frozen in
+   * the input stays frozen in the copy; a value that cannot be structured-cloned
+   * is left out.
    *
    * @defaultValue `"merge"`
    */
@@ -376,7 +379,7 @@ export class AgentInvocationGateway {
 
     let preparationFailed = false;
     try {
-      throwIfAborted(signal);
+      throwIfInvocationAborted(signal);
       await request.prepareContext?.(childContext, agent);
     } catch (caught) {
       preparationFailed = true;
@@ -399,7 +402,7 @@ export class AgentInvocationGateway {
             break;
           }
           const event = next.value;
-          throwIfAborted(signal);
+          throwIfInvocationAborted(signal);
           // ADK's BaseSessionService.appendEvent semantics: partial events are
           // not persisted, `temp:` keys are trimmed and deltas applied in order.
           const persisted = await child.append(event);
@@ -558,9 +561,12 @@ function createChildSession({
   sessionHistoryMode: "inherit" | "replace";
 }): ChildSession {
   const frozen = sessionStateMode === "replace";
+  // `sessionState` is the caller's object: copy it deeply as well, so no
+  // nested value is shared with the caller in either mode.
+  const projected = cloneState(sessionState ?? {});
   const baseState = frozen
-    ? { ...sessionState }
-    : { ...cloneState(parentSession.state), ...sessionState };
+    ? projected
+    : { ...cloneState(parentSession.state), ...projected };
   // Deltas recorded by the events of an interrupted run are part of the
   // delegation's state (they were applied to the previous child session).
   for (const event of priorEvents) {
@@ -620,12 +626,40 @@ function cloneState(
   const copy: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(state)) {
     try {
-      copy[key] = structuredClone(value);
+      const cloned = structuredClone(value);
+      keepFrozen(value, cloned, new WeakSet());
+      copy[key] = cloned;
     } catch {
       // Not cloneable: omit rather than share a mutable reference.
     }
   }
   return copy;
+}
+
+/**
+ * Freezes each object of `copy` whose counterpart in `source` is frozen, so a
+ * deep copy keeps the immutability the caller gave its value (a task
+ * projection stays frozen in the child session).
+ */
+function keepFrozen(source: unknown, copy: unknown, seen: WeakSet<object>) {
+  if (
+    typeof source !== "object" ||
+    source === null ||
+    typeof copy !== "object" ||
+    copy === null ||
+    seen.has(copy)
+  ) {
+    return;
+  }
+  seen.add(copy);
+  for (const key of Object.keys(copy)) {
+    keepFrozen(
+      (source as Record<string, unknown>)[key],
+      (copy as Record<string, unknown>)[key],
+      seen,
+    );
+  }
+  if (Object.isFrozen(source)) Object.freeze(copy);
 }
 
 /** `isFinalResponse` tolerant of externally built events without `actions`. */
@@ -872,7 +906,11 @@ function abortError(signal: AbortSignal): Error {
   );
 }
 
-function throwIfAborted(signal: AbortSignal | undefined): void {
+/**
+ * Throws the gateway's abort error for the signal (see `abortError`) when it
+ * aborted.
+ */
+function throwIfInvocationAborted(signal: AbortSignal | undefined): void {
   if (signal?.aborted) {
     throw abortError(signal);
   }

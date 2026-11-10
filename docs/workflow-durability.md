@@ -103,6 +103,11 @@ await running.catch(() => undefined);
 process.exit(0); // safe now
 ```
 
+While a Claude, Codex or Gemini CLI agent runs, the bridge forwards the host's
+SIGINT, SIGTERM and SIGHUP to the CLI's process group. A host listener for the
+signal, registered with `process.on` or `process.once`, keeps control: abort
+from it and drain as above. Without one, the host ends by the signal as usual.
+
 `runner.runAsync` ends normally after an abort (no `WORKFLOW_ABORTED`
 rejection), and the runner stops forwarding events once the signal aborts, so
 `step_interrupted` and the terminal `error` event reach only a consumer of

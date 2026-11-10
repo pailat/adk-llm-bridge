@@ -159,7 +159,6 @@ export type {
 export type {
   AdkToolActions,
   AdkToolBridge,
-  AdkToolCallbacks,
   AdkToolErrorCode,
   AdkToolExecuteOptions,
   AdkToolExecutionResult,

@@ -157,7 +157,11 @@ function installHostHooks(): void {
   for (const signal of FORWARDED_SIGNALS) {
     const listener = () => onHostSignal(signal);
     signalListeners.set(signal, listener);
-    process.on(signal, listener);
+    // First in line: Node and Bun remove a `once` listener before calling
+    // it, so a host `process.once` registered earlier would already be gone
+    // when a later listener counts the others, and the bridge would re-raise
+    // the signal and end a host that meant to handle it.
+    process.prependListener(signal, listener);
   }
 }
 
@@ -176,8 +180,15 @@ function removeHostHooks(): void {
  * Forwards a host signal to every live CLI group, which the terminal would
  * not do for a detached group. When the bridge's listener is the only one,
  * it then removes its hooks and re-raises the signal, so the default action
- * (ending the host) still happens. When the host has its own listener, that
- * listener decides, and the `exit` hook still sweeps the groups.
+ * (ending the host) still happens. When the host has its own listener
+ * (`process.on` or `process.once`), that listener decides, and the `exit`
+ * hook still sweeps the groups.
+ *
+ * @remarks
+ * The listener is prepended, so it runs before the host's and counts a host
+ * `once` listener that has not fired yet. A second signal after a host `once`
+ * fired finds no host listener and ends the host, as it would without the
+ * bridge.
  */
 function onHostSignal(signal: NodeJS.Signals): void {
   for (const group of liveGroups) {

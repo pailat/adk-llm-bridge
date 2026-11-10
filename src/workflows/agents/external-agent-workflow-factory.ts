@@ -1,7 +1,7 @@
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { isAbsolute, resolve } from "node:path";
 import type { ExternalAgentDefinitionRegistry } from "../../agents/agent-registry.js";
 import type { ExternalAgentDefinitionConfig } from "../../agents/agent-schema.js";
-import { canonicalPath } from "../../agents/permissions/paths.js";
+import { canonicalPath, isUnderAny } from "../../agents/permissions/paths.js";
 import type { ExternalAgentPermissionPolicy } from "../../agents/permissions/schema.js";
 import { rememberLegacyDigest } from "../internal/canonical-hash.js";
 import {
@@ -552,19 +552,9 @@ function safeString(
 function isWithinRoots(path: string, roots: readonly string[]): boolean {
   const real = canonicalPath(path, "/");
   if (real === undefined) return false;
-  return roots.some((root) => {
-    const realRoot = canonicalPath(root, "/");
-    return realRoot !== undefined && isPathWithin(realRoot, real);
-  });
-}
-
-function isPathWithin(root: string, candidate: string): boolean {
-  const pathFromRoot = relative(root, candidate);
-  return (
-    pathFromRoot === "" ||
-    (pathFromRoot !== ".." &&
-      !pathFromRoot.startsWith(`..${sep}`) &&
-      !isAbsolute(pathFromRoot))
+  return isUnderAny(
+    real,
+    roots.flatMap((root) => canonicalPath(root, "/") ?? []),
   );
 }
 

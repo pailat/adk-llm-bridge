@@ -147,6 +147,11 @@ async function main(): Promise<void> {
         models: ["model"],
       });
 
+      registerCustomProvider("issue85-explicit-url-only", {
+        baseURL: "https://explicit-url-only.example.test/v1",
+        models: ["model"],
+      });
+
       process.env.CUSTOM_LLM_BASE_URL =
         "https://mutated-environment.example.test/v1";
       process.env.CUSTOM_LLM_API_KEY = "mutated-environment-key";
@@ -158,12 +163,18 @@ async function main(): Promise<void> {
       ).client;
       const explicitClient = (explicitLlm as CustomLlm & { client: OpenAI })
         .client;
+      const explicitUrlOnlyClient = (
+        LLMRegistry.newLlm("issue85-explicit-url-only/model") as CustomLlm & {
+          client: OpenAI;
+        }
+      ).client;
 
       writeResult({
         environmentBaseURL: environmentClient.baseURL,
         environmentApiKey: environmentClient.apiKey,
         explicitBaseURL: explicitClient.baseURL,
         explicitApiKey: explicitClient.apiKey,
+        explicitUrlOnlyApiKey: explicitUrlOnlyClient.apiKey,
       });
       return;
     }

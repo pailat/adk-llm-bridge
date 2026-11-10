@@ -131,7 +131,7 @@ const agent = new LlmAgent({ name: "assistant", model: "claude-sonnet-5-5" });
 | [OpenAI](https://openai.com/) | `OpenAI(model, options?)` | `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_ORGANIZATION`, `OPENAI_PROJECT` (the SDK's `OPENAI_ORG_ID` / `OPENAI_PROJECT_ID` also work) | Registry patterns `gpt-*`, `o<n>*`, `chatgpt-*`. `maxOutputTokens` is sent as `max_completion_tokens`. Other providers never send the OpenAI organization or project headers. |
 | [Anthropic](https://www.anthropic.com/) | `Anthropic(model, options?)` | `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL` | Native Anthropic SDK, not OpenAI-compatible. `maxTokens` defaults to 4096. |
 | [xAI](https://x.ai/) | `XAI(model, options?)` | `XAI_API_KEY` | Registry pattern `grok-*`. |
-| Custom (OpenAI-compatible) | `Custom(model, options?)`, `registerCustomProvider(name, config)` | `CUSTOM_LLM_BASE_URL`, `CUSTOM_LLM_API_KEY` | No default URL: set `baseURL` or `CUSTOM_LLM_BASE_URL`. The API key may be empty for local servers. |
+| Custom (OpenAI-compatible) | `Custom(model, options?)`, `registerCustomProvider(name, config)` | `CUSTOM_LLM_BASE_URL`, `CUSTOM_LLM_API_KEY` | No default URL: set `baseURL` or `CUSTOM_LLM_BASE_URL`. The API key may be empty for local servers. `CUSTOM_LLM_API_KEY` is used only with `CUSTOM_LLM_BASE_URL`; with an explicit `baseURL`, pass `apiKey`. |
 | Local (LM Studio, Ollama, vLLM) | `Custom(model, { baseURL })` | as Custom | LM Studio: `http://localhost:1234/v1`. Ollama: `http://localhost:11434/v1`. |
 
 Configuration resolves in this order: options passed to the factory, then

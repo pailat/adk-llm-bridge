@@ -353,6 +353,7 @@ describe("driver executable lookup", () => {
       env: { PATH: ["/a", "", "/b", "/a"].join(delimiter) },
       extraDirs: ["/extra", undefined],
       packagePaths: (base) => [`${base}/pkg/tool`],
+      excluded: ["/elsewhere"],
     });
     expect(candidates.slice(0, 3)).toEqual([
       "/a/tool",

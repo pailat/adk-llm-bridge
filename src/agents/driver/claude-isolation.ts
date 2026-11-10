@@ -99,6 +99,14 @@ export interface ClaudeIsolationOptions {
    * @defaultValue `process.cwd()`
    */
   workingDirectory?: string;
+  /**
+   * The environment the driver builds the runtime's environment from. Its
+   * `TMPDIR` and `CLAUDE_CODE_TMPDIR` count as always-writable temp
+   * directories, next to the host process's own.
+   *
+   * @defaultValue `process.env`
+   */
+  env?: Record<string, string | undefined>;
 }
 
 /** {@link CLAUDE_NO_NETWORK_SANDBOX} with its writable roots pinned. */
@@ -112,8 +120,9 @@ export interface ClaudeIsolationPlan {
   isolated: boolean;
   /**
    * Deny MCP tools other than the bridge's own: always when isolated, and
-   * under `read-only` even with `inheritHostConfig`, because a tool the host
-   * pre-approves would otherwise run without a prompt.
+   * with `inheritHostConfig` under `read-only` or, in every mode, when the
+   * policy does not set `allowNetwork: true`. A host MCP server runs outside the shell sandbox,
+   * and a tool the host pre-approves would otherwise run without a prompt.
    */
   denyForeignMcpTools: boolean;
   /** Built-in tools to pass; `undefined` keeps the runtime default. */
@@ -165,7 +174,9 @@ export interface ClaudeIsolationPlan {
  *   prompt (`readOnlyWebTools`).
  * - Web tools named in the configured `tools` while the network is off are
  *   reported in `unenforceableWebTools`, so the driver refuses the run.
- *   Removals match tool names case-insensitively.
+ *   Built-in tool names are matched case-insensitively and passed on in
+ *   their canonical spelling (`bash` becomes `Bash`), so a shell named in
+ *   any case gets the sandbox.
  * - Without `allowNetwork: true`, a shell tool on offer turns on the
  *   no-network sandbox, unless `allowUnsandboxedShell` is set.
  * - With `allowedPaths` or `pathBounds` and a shell tool on offer, the
@@ -197,9 +208,15 @@ export function planClaudeIsolation(
   const base =
     options.tools ??
     (options.inheritHostConfig ? undefined : DEFAULT_CLAUDE_TOOLS);
-  const tools = base?.filter(
-    (name) => !removed.has(canonicalClaudeToolName(name) ?? name),
-  );
+  // Built-in names are passed on in their canonical spelling: Claude Code
+  // matches them case-insensitively, so `bash` offers the shell, and the
+  // checks below (shell, web, removals) must see it as `Bash`.
+  const tools =
+    base === undefined
+      ? undefined
+      : [
+          ...new Set(base.map((name) => canonicalClaudeToolName(name) ?? name)),
+        ].filter((name) => !removed.has(name));
   const webTools = (list: readonly string[] | undefined): string[] =>
     CLAUDE_NETWORK_TOOLS.filter(
       (tool) =>
@@ -242,6 +259,7 @@ export function planClaudeIsolation(
       sandbox,
       options.workingDirectory ?? process.cwd(),
       options.inheritHostConfig,
+      options.env ?? process.env,
     );
     if (typeof confinement === "string") {
       shellPathsUnenforceable = confinement;
@@ -253,7 +271,9 @@ export function planClaudeIsolation(
   return {
     isolated: !options.inheritHostConfig,
     denyForeignMcpTools:
-      !options.inheritHostConfig || policy?.mode === "read-only",
+      !options.inheritHostConfig ||
+      policy?.mode === "read-only" ||
+      !networkAllowed(policy),
     tools,
     disallowedTools: removed.size > 0 ? [...removed] : undefined,
     sandbox: confined ?? sandbox,
@@ -270,13 +290,24 @@ export function planClaudeIsolation(
  * Directories the Claude Code sandbox keeps writable whatever `allowWrite`
  * says: its temp area (`/tmp`, where it puts `/tmp/claude-<uid>`, the host
  * temp directory and `TMPDIR`/`CLAUDE_CODE_TMPDIR`), as real paths.
+ *
+ * @remarks Reads the variables from both the host process and the driver's
+ * configured environment, so the result stays a superset whether or not a
+ * driver forwards them to the runtime.
+ *
+ * @param env - The driver's configured environment.
+ * @returns The canonical roots.
  */
-function alwaysWritableRoots(): string[] {
+function alwaysWritableRoots(
+  env: Record<string, string | undefined>,
+): string[] {
   const candidates = [
     "/tmp",
     tmpdir(),
     process.env.TMPDIR,
     process.env.CLAUDE_CODE_TMPDIR,
+    env.TMPDIR,
+    env.CLAUDE_CODE_TMPDIR,
   ];
   return [
     ...new Set(
@@ -304,6 +335,7 @@ function confineShellWrites(
   sandbox: ClaudeNoNetworkSandbox | undefined,
   workingDirectory: string,
   inheritHostConfig: boolean,
+  env: Record<string, string | undefined>,
 ): ClaudeConfinedSandbox | string {
   if (!sandbox) {
     return "shell commands run without the Claude Code sandbox (allowNetwork: true or allowUnsandboxedShell), so nothing keeps their writes inside allowedPaths";
@@ -331,7 +363,7 @@ function confineShellWrites(
       ),
     ),
   ];
-  const temp = alwaysWritableRoots();
+  const temp = alwaysWritableRoots(env);
   const inTemp = [cwd, ...allowWrite].find((path) => isUnderAny(path, temp));
   if (inTemp !== undefined) {
     return `${inTemp} is inside a temp directory that the Claude Code sandbox always keeps writable, so the paths around allowedPaths there stay writable`;

@@ -5,7 +5,7 @@
  * OpenAI-compatible chat completion request format.
  */
 
-import type { LlmRequest } from "@google/adk";
+import { InputValidationError, type LlmRequest } from "@google/adk";
 import {
   type Content,
   FunctionCallingConfigMode,
@@ -13,6 +13,7 @@ import {
 } from "@google/genai";
 import type OpenAI from "openai";
 import type { ReasoningCapability } from "../core/provider-definition.js";
+import { parseJson } from "../utils/json.js";
 import { LogCode, WarningScope, warn } from "../utils/log.js";
 import { uriScheme } from "../utils/uri.js";
 import { normalizeSchema } from "./schema.js";
@@ -314,7 +315,9 @@ export function convertGenerationConfig(
  * one choice.
  *
  * @param candidateCount - Requested number of ADK response candidates
- * @throws {@link Error} When a provided value is anything other than integer `1`
+ * @throws {@link InputValidationError} When a provided value is anything other
+ *   than integer `1` (a caller mistake, so providers raise it as is, never as a
+ *   `ProviderLlmError` or an error response)
  * @internal
  */
 function assertSupportedCandidateCount(candidateCount: unknown): void {
@@ -325,7 +328,7 @@ function assertSupportedCandidateCount(candidateCount: unknown): void {
     !Number.isInteger(candidateCount) ||
     candidateCount !== 1
   ) {
-    throw new Error(
+    throw new InputValidationError(
       "candidateCount must be exactly 1 when provided: adk-llm-bridge returns one ADK LlmResponse per provider response and cannot represent multiple Chat Completions choices. Set candidateCount to 1 or omit it.",
     );
   }
@@ -648,8 +651,10 @@ export function convertStructuredOutput(
  * `reasoning_details` array.
  *
  * The response converter stores the entire `reasoning_details` array verbatim as
- * a JSON string on `thoughtSignature` (so the signed reasoning round-trips
- * byte-for-byte). Here we parse it back. Display-only thought parts (no parseable
+ * a JSON string on `thoughtSignature` (so the signed reasoning round-trips).
+ * Here we parse it back with the safe parser: an integer beyond
+ * `Number.MAX_SAFE_INTEGER` comes back as a string of its exact digits instead
+ * of a rounded number. Display-only thought parts (no parseable
  * array — e.g. glm/deepseek string reasoning) return undefined, in which case the
  * thought text is simply dropped from the assistant turn.
  *
@@ -662,12 +667,9 @@ function parseReasoningDetails(
   signature: string | undefined,
 ): unknown[] | undefined {
   if (!signature) return undefined;
-  try {
-    const parsed = JSON.parse(signature);
-    return Array.isArray(parsed) ? parsed : undefined;
-  } catch {
-    return undefined;
-  }
+  // The safe parser keeps integers beyond 2^53 exact (as digit strings).
+  const parsed = parseJson(signature);
+  return parsed.ok && Array.isArray(parsed.value) ? parsed.value : undefined;
 }
 
 /**

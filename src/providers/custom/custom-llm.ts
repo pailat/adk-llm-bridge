@@ -21,9 +21,11 @@ import type { CustomLlmConfig } from "../../types.js";
  * Configuration for custom providers.
  *
  * `baseURL` may be supplied explicitly or through `CUSTOM_LLM_BASE_URL`.
- * `apiKey` is optional for unauthenticated local servers and otherwise falls
- * back to `CUSTOM_LLM_API_KEY`. Explicit values, including an explicitly empty
- * API key, take precedence over environment variables.
+ * `apiKey` is optional for unauthenticated local servers. `CUSTOM_LLM_API_KEY`
+ * is the credential of the `CUSTOM_LLM_BASE_URL` endpoint only: it is used
+ * when the base URL also comes from the environment, and never sent to an
+ * explicit `baseURL` (pass `apiKey` for that host). Explicit values, including
+ * an explicitly empty API key, take precedence over environment variables.
  */
 export type CustomLlmProviderConfig = CustomLlmConfig;
 
@@ -36,9 +38,18 @@ const CUSTOM_DEFINITION: ProviderDefinition = {
     baseURL: ["CUSTOM_LLM_BASE_URL"],
   },
   modelPatterns: [/.*/],
+  envApiKeyOnlyWithEnvBaseURL: true,
 };
 
-/** Resolve endpoint settings using the shared provider precedence model. */
+/**
+ * Resolve endpoint settings using the shared provider precedence model.
+ *
+ * @remarks
+ * Security: `CUSTOM_LLM_API_KEY` is used only when the base URL itself comes
+ * from `CUSTOM_LLM_BASE_URL`. A base URL set in configuration without a
+ * configured `apiKey` (absent, `undefined` or `null`) resolves to no
+ * credential, so the env key never reaches another host.
+ */
 export function resolveCustomConfig(
   config: CustomLlmProviderConfig,
 ): ResolvedConfig {
