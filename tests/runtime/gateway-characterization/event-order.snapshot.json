@@ -1,0 +1,2464 @@
+{
+  "success: hooks, sinks and aggregation in order": {
+    "trace": [
+      "req:validate:before-resolve",
+      "gw:resolve:worker",
+      "req:validate:before-prepare",
+      "req:prepare:worker",
+      "req:validate:before-execute",
+      "agent:worker:start",
+      "gw:sink:worker:thought:thinking",
+      "req:sink:worker:thought:thinking",
+      "gw:sink:worker:text:typ:partial",
+      "req:sink:worker:text:typ:partial",
+      "gw:sink:worker:text:narration",
+      "req:sink:worker:text:narration",
+      "gw:sink:worker:call:lookup#c1",
+      "req:sink:worker:call:lookup#c1",
+      "gw:sink:worker:response:lookup#c1",
+      "req:sink:worker:response:lookup#c1",
+      "gw:sink:worker:text:final answer",
+      "req:sink:worker:text:final answer",
+      "agent:worker:finally",
+      "run:resolved:ok"
+    ],
+    "results": [
+      {
+        "keys": [
+          "agentName",
+          "output",
+          "transcript",
+          "events",
+          "summary",
+          "usage",
+          "stateDelta"
+        ],
+        "agentName": "worker",
+        "output": "final answer",
+        "transcript": "narration\nfinal answer",
+        "events": [
+          {
+            "author": "worker",
+            "type": "thought:thinking",
+            "partial": false,
+            "actions": []
+          },
+          {
+            "author": "worker",
+            "type": "text:typ",
+            "partial": true,
+            "actions": []
+          },
+          {
+            "author": "worker",
+            "type": "text:narration",
+            "partial": false,
+            "actions": [],
+            "usage": {
+              "promptTokenCount": 3,
+              "candidatesTokenCount": 2,
+              "totalTokenCount": 5
+            }
+          },
+          {
+            "author": "worker",
+            "type": "call:lookup#c1",
+            "partial": false,
+            "actions": [],
+            "usage": {
+              "promptTokenCount": 4,
+              "candidatesTokenCount": 1
+            }
+          },
+          {
+            "author": "worker",
+            "type": "response:lookup#c1",
+            "partial": false,
+            "actions": []
+          },
+          {
+            "author": "worker",
+            "type": "text:final answer",
+            "partial": false,
+            "actions": ["stateDelta{result}"],
+            "usage": {
+              "promptTokenCount": 10,
+              "candidatesTokenCount": 5,
+              "totalTokenCount": 15,
+              "cachedContentTokenCount": 4
+            }
+          }
+        ],
+        "summary": {
+          "events": 6,
+          "textEvents": 2,
+          "toolCalls": 1,
+          "errors": 0
+        },
+        "durationIsNumber": true,
+        "usage": {
+          "promptTokens": 17,
+          "completionTokens": 8,
+          "totalTokens": 25,
+          "cachedTokens": 4,
+          "toolCalls": 1,
+          "llmCalls": 3
+        },
+        "stateDelta": {
+          "result": "x"
+        },
+        "error": null,
+        "errorKind": null,
+        "interrupt": null
+      }
+    ]
+  },
+  "success: agentName comes from the resolved agent": {
+    "trace": ["agent:worker:start", "agent:worker:finally", "run:resolved:ok"],
+    "results": [
+      {
+        "keys": [
+          "agentName",
+          "output",
+          "transcript",
+          "events",
+          "summary",
+          "usage"
+        ],
+        "agentName": "worker",
+        "output": "hi",
+        "transcript": "hi",
+        "events": [
+          {
+            "author": "worker",
+            "type": "text:hi",
+            "partial": false,
+            "actions": []
+          }
+        ],
+        "summary": {
+          "events": 1,
+          "textEvents": 1,
+          "toolCalls": 0,
+          "errors": 0
+        },
+        "durationIsNumber": true,
+        "usage": {
+          "promptTokens": 0,
+          "completionTokens": 0,
+          "totalTokens": 0,
+          "cachedTokens": 0,
+          "toolCalls": 0,
+          "llmCalls": 0
+        },
+        "stateDelta": null,
+        "error": null,
+        "errorKind": null,
+        "interrupt": null
+      }
+    ]
+  },
+  "output: function-response and error fallbacks": {
+    "trace": [
+      "gw:resolve:responder",
+      "agent:responder:start",
+      "gw:sink:responder:response:t#a",
+      "gw:sink:responder:response:t#b",
+      "gw:sink:responder:response:t#c",
+      "agent:responder:finally",
+      "run:resolved:ok",
+      "gw:resolve:errorer",
+      "agent:errorer:start",
+      "gw:sink:errorer:error:first failure",
+      "gw:sink:errorer:error:second failure",
+      "agent:errorer:finally",
+      "run:resolved:agent-error",
+      "gw:resolve:nonfinal",
+      "agent:nonfinal:start",
+      "gw:sink:nonfinal:text:a|text:|text:b",
+      "gw:sink:nonfinal:text:calling|call:tool#z",
+      "agent:nonfinal:finally",
+      "run:resolved:ok"
+    ],
+    "results": [
+      {
+        "keys": [
+          "agentName",
+          "output",
+          "transcript",
+          "events",
+          "summary",
+          "usage"
+        ],
+        "agentName": "responder",
+        "output": "out\n{\"n\":2}",
+        "transcript": "out\n{\"n\":2}",
+        "events": [
+          {
+            "author": "responder",
+            "type": "response:t#a",
+            "partial": false,
+            "actions": []
+          },
+          {
+            "author": "responder",
+            "type": "response:t#b",
+            "partial": false,
+            "actions": []
+          },
+          {
+            "author": "responder",
+            "type": "response:t#c",
+            "partial": false,
+            "actions": []
+          }
+        ],
+        "summary": {
+          "events": 3,
+          "textEvents": 0,
+          "toolCalls": 0,
+          "errors": 0
+        },
+        "durationIsNumber": true,
+        "usage": {
+          "promptTokens": 0,
+          "completionTokens": 0,
+          "totalTokens": 0,
+          "cachedTokens": 0,
+          "toolCalls": 0,
+          "llmCalls": 0
+        },
+        "stateDelta": null,
+        "error": null,
+        "errorKind": null,
+        "interrupt": null
+      },
+      {
+        "keys": [
+          "agentName",
+          "output",
+          "transcript",
+          "events",
+          "summary",
+          "usage",
+          "error",
+          "errorKind"
+        ],
+        "agentName": "errorer",
+        "output": "first failure\nsecond failure",
+        "transcript": "first failure\nsecond failure",
+        "events": [
+          {
+            "author": "errorer",
+            "type": "error:first failure",
+            "partial": false,
+            "actions": []
+          },
+          {
+            "author": "errorer",
+            "type": "error:second failure",
+            "partial": false,
+            "actions": []
+          }
+        ],
+        "summary": {
+          "events": 2,
+          "textEvents": 0,
+          "toolCalls": 0,
+          "errors": 2
+        },
+        "durationIsNumber": true,
+        "usage": {
+          "promptTokens": 0,
+          "completionTokens": 0,
+          "totalTokens": 0,
+          "cachedTokens": 0,
+          "toolCalls": 0,
+          "llmCalls": 0
+        },
+        "stateDelta": null,
+        "error": "second failure",
+        "errorKind": "agent-error",
+        "interrupt": null
+      },
+      {
+        "keys": [
+          "agentName",
+          "output",
+          "transcript",
+          "events",
+          "summary",
+          "usage"
+        ],
+        "agentName": "nonfinal",
+        "output": "a\nb",
+        "transcript": "a\nb\ncalling",
+        "events": [
+          {
+            "author": "nonfinal",
+            "type": "text:a|text:|text:b",
+            "partial": false,
+            "actions": []
+          },
+          {
+            "author": "nonfinal",
+            "type": "text:calling|call:tool#z",
+            "partial": false,
+            "actions": []
+          }
+        ],
+        "summary": {
+          "events": 2,
+          "textEvents": 2,
+          "toolCalls": 1,
+          "errors": 0
+        },
+        "durationIsNumber": true,
+        "usage": {
+          "promptTokens": 0,
+          "completionTokens": 0,
+          "totalTokens": 0,
+          "cachedTokens": 0,
+          "toolCalls": 1,
+          "llmCalls": 0
+        },
+        "stateDelta": null,
+        "error": null,
+        "errorKind": null,
+        "interrupt": null
+      }
+    ]
+  },
+  "resolution: throw, unknown and validator ordering": {
+    "trace": [
+      "req:validate:before-resolve",
+      "gw:resolve:throw",
+      "run:resolved:agent-error",
+      "req:validate:before-resolve",
+      "gw:resolve:throw-string",
+      "run:resolved:agent-error",
+      "req:validate:before-resolve",
+      "gw:resolve:ghost",
+      "run:resolved:agent-error"
+    ],
+    "results": [
+      {
+        "keys": [
+          "agentName",
+          "output",
+          "transcript",
+          "events",
+          "summary",
+          "usage",
+          "error",
+          "errorKind"
+        ],
+        "agentName": "w",
+        "output": "",
+        "transcript": "",
+        "events": [],
+        "summary": {
+          "events": 0,
+          "textEvents": 0,
+          "toolCalls": 0,
+          "errors": 1
+        },
+        "durationIsNumber": true,
+        "usage": {
+          "promptTokens": 0,
+          "completionTokens": 0,
+          "totalTokens": 0,
+          "cachedTokens": 0,
+          "toolCalls": 0,
+          "llmCalls": 0
+        },
+        "stateDelta": null,
+        "error": "registry offline",
+        "errorKind": "agent-error",
+        "interrupt": null
+      },
+      {
+        "keys": [
+          "agentName",
+          "output",
+          "transcript",
+          "events",
+          "summary",
+          "usage",
+          "error",
+          "errorKind"
+        ],
+        "agentName": "w",
+        "output": "",
+        "transcript": "",
+        "events": [],
+        "summary": {
+          "events": 0,
+          "textEvents": 0,
+          "toolCalls": 0,
+          "errors": 1
+        },
+        "durationIsNumber": true,
+        "usage": {
+          "promptTokens": 0,
+          "completionTokens": 0,
+          "totalTokens": 0,
+          "cachedTokens": 0,
+          "toolCalls": 0,
+          "llmCalls": 0
+        },
+        "stateDelta": null,
+        "error": "plain string",
+        "errorKind": "agent-error",
+        "interrupt": null
+      },
+      {
+        "keys": [
+          "agentName",
+          "output",
+          "transcript",
+          "events",
+          "summary",
+          "usage",
+          "error",
+          "errorKind"
+        ],
+        "agentName": "ghost",
+        "output": "",
+        "transcript": "",
+        "events": [],
+        "summary": {
+          "events": 0,
+          "textEvents": 0,
+          "toolCalls": 0,
+          "errors": 1
+        },
+        "durationIsNumber": true,
+        "usage": {
+          "promptTokens": 0,
+          "completionTokens": 0,
+          "totalTokens": 0,
+          "cachedTokens": 0,
+          "toolCalls": 0,
+          "llmCalls": 0
+        },
+        "stateDelta": null,
+        "error": "Unknown ADK agent: ghost",
+        "errorKind": "agent-error",
+        "interrupt": null
+      }
+    ]
+  },
+  "validator: a rejection at each phase escapes": {
+    "trace": [
+      "req:validate:before-resolve",
+      "run:rejected:denied before-resolve",
+      "caught:TypeError",
+      "req:validate:before-resolve",
+      "gw:resolve:worker",
+      "req:validate:before-prepare",
+      "run:rejected:denied before-prepare",
+      "caught:TypeError",
+      "req:validate:before-resolve",
+      "gw:resolve:worker",
+      "req:validate:before-prepare",
+      "req:prepare:worker",
+      "req:validate:before-execute",
+      "run:rejected:denied before-execute",
+      "caught:TypeError"
+    ],
+    "results": []
+  },
+  "resume validation: every rejection path": {
+    "trace": [
+      "case:no pending interrupt",
+      "req:validate:before-resolve",
+      "gw:resolve:alias-of-worker",
+      "run:resolved:invalid-resume",
+      "case:empty resume events",
+      "req:validate:before-resolve",
+      "gw:resolve:alias-of-worker",
+      "run:resolved:invalid-resume",
+      "case:text input",
+      "req:validate:before-resolve",
+      "gw:resolve:alias-of-worker",
+      "run:resolved:invalid-resume",
+      "case:input without parts",
+      "req:validate:before-resolve",
+      "gw:resolve:alias-of-worker",
+      "run:resolved:invalid-resume",
+      "case:unrelated id",
+      "req:validate:before-resolve",
+      "gw:resolve:alias-of-worker",
+      "run:resolved:invalid-resume",
+      "case:non-string id",
+      "req:validate:before-resolve",
+      "gw:resolve:alias-of-worker",
+      "run:resolved:invalid-resume",
+      "case:pending only on a partial event",
+      "req:validate:before-resolve",
+      "gw:resolve:alias-of-worker",
+      "run:resolved:invalid-resume",
+      "case:already answered in the resume events",
+      "req:validate:before-resolve",
+      "gw:resolve:alias-of-worker",
+      "run:resolved:invalid-resume",
+      "case:unknown agent with a bad resume",
+      "req:validate:before-resolve",
+      "gw:resolve:ghost",
+      "run:resolved:agent-error"
+    ],
+    "results": [
+      {
+        "keys": [
+          "agentName",
+          "output",
+          "transcript",
+          "events",
+          "summary",
+          "usage",
+          "error",
+          "errorKind"
+        ],
+        "agentName": "alias-of-worker",
+        "output": "",
+        "transcript": "",
+        "events": [],
+        "summary": {
+          "events": 0,
+          "textEvents": 0,
+          "toolCalls": 0,
+          "errors": 1
+        },
+        "durationIsNumber": true,
+        "usage": {
+          "promptTokens": 0,
+          "completionTokens": 0,
+          "totalTokens": 0,
+          "cachedTokens": 0,
+          "toolCalls": 0,
+          "llmCalls": 0
+        },
+        "stateDelta": null,
+        "error": "Resume input does not answer a pending interrupt",
+        "errorKind": "invalid-resume",
+        "interrupt": null
+      },
+      {
+        "keys": [
+          "agentName",
+          "output",
+          "transcript",
+          "events",
+          "summary",
+          "usage",
+          "error",
+          "errorKind"
+        ],
+        "agentName": "alias-of-worker",
+        "output": "",
+        "transcript": "",
+        "events": [],
+        "summary": {
+          "events": 0,
+          "textEvents": 0,
+          "toolCalls": 0,
+          "errors": 1
+        },
+        "durationIsNumber": true,
+        "usage": {
+          "promptTokens": 0,
+          "completionTokens": 0,
+          "totalTokens": 0,
+          "cachedTokens": 0,
+          "toolCalls": 0,
+          "llmCalls": 0
+        },
+        "stateDelta": null,
+        "error": "Resume input does not answer a pending interrupt",
+        "errorKind": "invalid-resume",
+        "interrupt": null
+      },
+      {
+        "keys": [
+          "agentName",
+          "output",
+          "transcript",
+          "events",
+          "summary",
+          "usage",
+          "error",
+          "errorKind"
+        ],
+        "agentName": "alias-of-worker",
+        "output": "",
+        "transcript": "",
+        "events": [],
+        "summary": {
+          "events": 0,
+          "textEvents": 0,
+          "toolCalls": 0,
+          "errors": 1
+        },
+        "durationIsNumber": true,
+        "usage": {
+          "promptTokens": 0,
+          "completionTokens": 0,
+          "totalTokens": 0,
+          "cachedTokens": 0,
+          "toolCalls": 0,
+          "llmCalls": 0
+        },
+        "stateDelta": null,
+        "error": "Resume input does not answer a pending interrupt",
+        "errorKind": "invalid-resume",
+        "interrupt": null
+      },
+      {
+        "keys": [
+          "agentName",
+          "output",
+          "transcript",
+          "events",
+          "summary",
+          "usage",
+          "error",
+          "errorKind"
+        ],
+        "agentName": "alias-of-worker",
+        "output": "",
+        "transcript": "",
+        "events": [],
+        "summary": {
+          "events": 0,
+          "textEvents": 0,
+          "toolCalls": 0,
+          "errors": 1
+        },
+        "durationIsNumber": true,
+        "usage": {
+          "promptTokens": 0,
+          "completionTokens": 0,
+          "totalTokens": 0,
+          "cachedTokens": 0,
+          "toolCalls": 0,
+          "llmCalls": 0
+        },
+        "stateDelta": null,
+        "error": "Resume input does not answer a pending interrupt",
+        "errorKind": "invalid-resume",
+        "interrupt": null
+      },
+      {
+        "keys": [
+          "agentName",
+          "output",
+          "transcript",
+          "events",
+          "summary",
+          "usage",
+          "error",
+          "errorKind"
+        ],
+        "agentName": "alias-of-worker",
+        "output": "",
+        "transcript": "",
+        "events": [],
+        "summary": {
+          "events": 0,
+          "textEvents": 0,
+          "toolCalls": 0,
+          "errors": 1
+        },
+        "durationIsNumber": true,
+        "usage": {
+          "promptTokens": 0,
+          "completionTokens": 0,
+          "totalTokens": 0,
+          "cachedTokens": 0,
+          "toolCalls": 0,
+          "llmCalls": 0
+        },
+        "stateDelta": null,
+        "error": "Resume input does not answer a pending interrupt",
+        "errorKind": "invalid-resume",
+        "interrupt": null
+      },
+      {
+        "keys": [
+          "agentName",
+          "output",
+          "transcript",
+          "events",
+          "summary",
+          "usage",
+          "error",
+          "errorKind"
+        ],
+        "agentName": "alias-of-worker",
+        "output": "",
+        "transcript": "",
+        "events": [],
+        "summary": {
+          "events": 0,
+          "textEvents": 0,
+          "toolCalls": 0,
+          "errors": 1
+        },
+        "durationIsNumber": true,
+        "usage": {
+          "promptTokens": 0,
+          "completionTokens": 0,
+          "totalTokens": 0,
+          "cachedTokens": 0,
+          "toolCalls": 0,
+          "llmCalls": 0
+        },
+        "stateDelta": null,
+        "error": "Resume input does not answer a pending interrupt",
+        "errorKind": "invalid-resume",
+        "interrupt": null
+      },
+      {
+        "keys": [
+          "agentName",
+          "output",
+          "transcript",
+          "events",
+          "summary",
+          "usage",
+          "error",
+          "errorKind"
+        ],
+        "agentName": "alias-of-worker",
+        "output": "",
+        "transcript": "",
+        "events": [],
+        "summary": {
+          "events": 0,
+          "textEvents": 0,
+          "toolCalls": 0,
+          "errors": 1
+        },
+        "durationIsNumber": true,
+        "usage": {
+          "promptTokens": 0,
+          "completionTokens": 0,
+          "totalTokens": 0,
+          "cachedTokens": 0,
+          "toolCalls": 0,
+          "llmCalls": 0
+        },
+        "stateDelta": null,
+        "error": "Resume input does not answer a pending interrupt",
+        "errorKind": "invalid-resume",
+        "interrupt": null
+      },
+      {
+        "keys": [
+          "agentName",
+          "output",
+          "transcript",
+          "events",
+          "summary",
+          "usage",
+          "error",
+          "errorKind"
+        ],
+        "agentName": "alias-of-worker",
+        "output": "",
+        "transcript": "",
+        "events": [],
+        "summary": {
+          "events": 0,
+          "textEvents": 0,
+          "toolCalls": 0,
+          "errors": 1
+        },
+        "durationIsNumber": true,
+        "usage": {
+          "promptTokens": 0,
+          "completionTokens": 0,
+          "totalTokens": 0,
+          "cachedTokens": 0,
+          "toolCalls": 0,
+          "llmCalls": 0
+        },
+        "stateDelta": null,
+        "error": "Resume input does not answer a pending interrupt",
+        "errorKind": "invalid-resume",
+        "interrupt": null
+      },
+      {
+        "keys": [
+          "agentName",
+          "output",
+          "transcript",
+          "events",
+          "summary",
+          "usage",
+          "error",
+          "errorKind"
+        ],
+        "agentName": "ghost",
+        "output": "",
+        "transcript": "",
+        "events": [],
+        "summary": {
+          "events": 0,
+          "textEvents": 0,
+          "toolCalls": 0,
+          "errors": 1
+        },
+        "durationIsNumber": true,
+        "usage": {
+          "promptTokens": 0,
+          "completionTokens": 0,
+          "totalTokens": 0,
+          "cachedTokens": 0,
+          "toolCalls": 0,
+          "llmCalls": 0
+        },
+        "stateDelta": null,
+        "error": "Unknown ADK agent: ghost",
+        "errorKind": "agent-error",
+        "interrupt": null
+      }
+    ]
+  },
+  "resume: answering one of two pending calls": {
+    "trace": [
+      "req:validate:before-resolve",
+      "gw:resolve:worker",
+      "req:validate:before-prepare",
+      "req:prepare:worker",
+      "req:validate:before-execute",
+      "agent:worker:start",
+      "history:user/text:go,worker/call:slow#a|call:slow#b,user/response:slow#b",
+      "gw:sink:worker:text:half done",
+      "req:sink:worker:text:half done",
+      "agent:worker:finally",
+      "run:resolved:ok"
+    ],
+    "results": [
+      {
+        "keys": [
+          "agentName",
+          "output",
+          "transcript",
+          "events",
+          "summary",
+          "usage",
+          "interrupt"
+        ],
+        "agentName": "worker",
+        "output": "half done",
+        "transcript": "half done",
+        "events": [
+          {
+            "author": "worker",
+            "type": "text:half done",
+            "partial": false,
+            "actions": []
+          }
+        ],
+        "summary": {
+          "events": 1,
+          "textEvents": 1,
+          "toolCalls": 0,
+          "errors": 0
+        },
+        "durationIsNumber": true,
+        "usage": {
+          "promptTokens": 0,
+          "completionTokens": 0,
+          "totalTokens": 0,
+          "cachedTokens": 0,
+          "toolCalls": 0,
+          "llmCalls": 0
+        },
+        "stateDelta": null,
+        "error": null,
+        "errorKind": null,
+        "interrupt": {
+          "kind": "long-running",
+          "functionCallIds": ["a"],
+          "requests": [],
+          "events": [
+            {
+              "author": "user",
+              "type": "text:go",
+              "partial": false,
+              "actions": []
+            },
+            {
+              "author": "worker",
+              "type": "call:slow#a|call:slow#b",
+              "partial": false,
+              "actions": [],
+              "longRunning": ["a", "b"]
+            },
+            {
+              "author": "user",
+              "type": "response:slow#b",
+              "partial": false,
+              "actions": []
+            },
+            {
+              "author": "worker",
+              "type": "text:half done",
+              "partial": false,
+              "actions": []
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "interrupt and resume: ordering of history and events": {
+    "trace": [
+      "req:validate:before-resolve",
+      "gw:resolve:worker",
+      "req:validate:before-prepare",
+      "req:prepare:worker",
+      "req:validate:before-execute",
+      "agent:worker:start",
+      "round1:history:user/text:go",
+      "round1:state:{\"shared\":true}",
+      "gw:sink:worker:text:asking",
+      "req:sink:worker:text:asking",
+      "gw:sink:worker:text:ask:partial",
+      "req:sink:worker:text:ask:partial",
+      "gw:sink:worker:call:adk_request_confirmation#req-1",
+      "req:sink:worker:call:adk_request_confirmation#req-1",
+      "agent:worker:finally",
+      "run:resolved:ok",
+      "req:validate:before-resolve",
+      "gw:resolve:worker",
+      "req:validate:before-prepare",
+      "req:prepare:worker",
+      "req:validate:before-execute",
+      "agent:worker:start",
+      "round2:history:user/text:go,worker/text:asking,worker/call:adk_request_confirmation#req-1,user/response:adk_request_confirmation#req-1",
+      "round2:state:{\"shared\":true,\"stage\":\"asked\"}",
+      "gw:sink:worker:text:need input",
+      "req:sink:worker:text:need input",
+      "gw:sink:worker:call:adk_request_input#in-1",
+      "req:sink:worker:call:adk_request_input#in-1",
+      "agent:worker:finally",
+      "run:resolved:ok",
+      "req:validate:before-resolve",
+      "gw:resolve:worker",
+      "req:validate:before-prepare",
+      "req:prepare:worker",
+      "req:validate:before-execute",
+      "agent:worker:start",
+      "round3:history:user/text:previous task,user/text:go,worker/text:asking,worker/call:adk_request_confirmation#req-1,user/response:adk_request_confirmation#req-1,worker/text:need input,worker/call:adk_request_input#in-1,user/response:adk_request_input#in-1",
+      "round3:state:{\"shared\":true,\"stage\":\"second\"}",
+      "gw:sink:worker:text:all done",
+      "req:sink:worker:text:all done",
+      "agent:worker:finally",
+      "run:resolved:ok"
+    ],
+    "results": [
+      {
+        "keys": [
+          "agentName",
+          "output",
+          "transcript",
+          "events",
+          "summary",
+          "usage",
+          "stateDelta",
+          "interrupt"
+        ],
+        "agentName": "worker",
+        "output": "asking",
+        "transcript": "asking",
+        "events": [
+          {
+            "author": "worker",
+            "type": "text:asking",
+            "partial": false,
+            "actions": ["stateDelta{stage}"]
+          },
+          {
+            "author": "worker",
+            "type": "text:ask",
+            "partial": true,
+            "actions": []
+          },
+          {
+            "author": "worker",
+            "type": "call:adk_request_confirmation#req-1",
+            "partial": false,
+            "actions": [],
+            "longRunning": ["req-1"]
+          }
+        ],
+        "summary": {
+          "events": 3,
+          "textEvents": 1,
+          "toolCalls": 1,
+          "errors": 0
+        },
+        "durationIsNumber": true,
+        "usage": {
+          "promptTokens": 0,
+          "completionTokens": 0,
+          "totalTokens": 0,
+          "cachedTokens": 0,
+          "toolCalls": 1,
+          "llmCalls": 0
+        },
+        "stateDelta": {
+          "stage": "asked"
+        },
+        "error": null,
+        "errorKind": null,
+        "interrupt": {
+          "kind": "confirmation",
+          "functionCallIds": ["req-1"],
+          "requests": [
+            {
+              "interruptId": "req-1",
+              "kind": "confirmation"
+            }
+          ],
+          "events": [
+            {
+              "author": "user",
+              "type": "text:go",
+              "partial": false,
+              "actions": []
+            },
+            {
+              "author": "worker",
+              "type": "text:asking",
+              "partial": false,
+              "actions": ["stateDelta{stage}"]
+            },
+            {
+              "author": "worker",
+              "type": "call:adk_request_confirmation#req-1",
+              "partial": false,
+              "actions": [],
+              "longRunning": ["req-1"]
+            }
+          ]
+        }
+      },
+      {
+        "keys": [
+          "agentName",
+          "output",
+          "transcript",
+          "events",
+          "summary",
+          "usage",
+          "stateDelta",
+          "interrupt"
+        ],
+        "agentName": "worker",
+        "output": "need input",
+        "transcript": "need input",
+        "events": [
+          {
+            "author": "worker",
+            "type": "text:need input",
+            "partial": false,
+            "actions": ["stateDelta{stage}"]
+          },
+          {
+            "author": "worker",
+            "type": "call:adk_request_input#in-1",
+            "partial": false,
+            "actions": [],
+            "longRunning": ["in-1"]
+          }
+        ],
+        "summary": {
+          "events": 2,
+          "textEvents": 1,
+          "toolCalls": 1,
+          "errors": 0
+        },
+        "durationIsNumber": true,
+        "usage": {
+          "promptTokens": 0,
+          "completionTokens": 0,
+          "totalTokens": 0,
+          "cachedTokens": 0,
+          "toolCalls": 1,
+          "llmCalls": 0
+        },
+        "stateDelta": {
+          "stage": "second"
+        },
+        "error": null,
+        "errorKind": null,
+        "interrupt": {
+          "kind": "input",
+          "functionCallIds": ["in-1"],
+          "requests": [
+            {
+              "interruptId": "in-1",
+              "kind": "input"
+            }
+          ],
+          "events": [
+            {
+              "author": "user",
+              "type": "text:go",
+              "partial": false,
+              "actions": []
+            },
+            {
+              "author": "worker",
+              "type": "text:asking",
+              "partial": false,
+              "actions": ["stateDelta{stage}"]
+            },
+            {
+              "author": "worker",
+              "type": "call:adk_request_confirmation#req-1",
+              "partial": false,
+              "actions": [],
+              "longRunning": ["req-1"]
+            },
+            {
+              "author": "user",
+              "type": "response:adk_request_confirmation#req-1",
+              "partial": false,
+              "actions": []
+            },
+            {
+              "author": "worker",
+              "type": "text:need input",
+              "partial": false,
+              "actions": ["stateDelta{stage}"]
+            },
+            {
+              "author": "worker",
+              "type": "call:adk_request_input#in-1",
+              "partial": false,
+              "actions": [],
+              "longRunning": ["in-1"]
+            }
+          ]
+        }
+      },
+      {
+        "keys": [
+          "agentName",
+          "output",
+          "transcript",
+          "events",
+          "summary",
+          "usage",
+          "stateDelta"
+        ],
+        "agentName": "worker",
+        "output": "all done",
+        "transcript": "all done",
+        "events": [
+          {
+            "author": "worker",
+            "type": "text:all done",
+            "partial": false,
+            "actions": ["stateDelta{stage}"]
+          }
+        ],
+        "summary": {
+          "events": 1,
+          "textEvents": 1,
+          "toolCalls": 0,
+          "errors": 0
+        },
+        "durationIsNumber": true,
+        "usage": {
+          "promptTokens": 0,
+          "completionTokens": 0,
+          "totalTokens": 0,
+          "cachedTokens": 0,
+          "toolCalls": 0,
+          "llmCalls": 0
+        },
+        "stateDelta": {
+          "stage": "done"
+        },
+        "error": null,
+        "errorKind": null,
+        "interrupt": null
+      }
+    ],
+    "facts": {
+      "parentEventsAfter": 1,
+      "parentStateAfter": {
+        "shared": true
+      }
+    }
+  },
+  "resume with appendInput false": {
+    "trace": [
+      "req:validate:before-resolve",
+      "gw:resolve:worker",
+      "req:validate:before-prepare",
+      "req:prepare:worker",
+      "req:validate:before-execute",
+      "agent:worker:start",
+      "history:user/text:previous task",
+      "userContent:{\"role\":\"user\",\"parts\":[{\"text\":\"previous task\"}]}",
+      "gw:sink:worker:call:slow#s1",
+      "req:sink:worker:call:slow#s1",
+      "agent:worker:finally",
+      "run:resolved:ok"
+    ],
+    "results": [
+      {
+        "keys": [
+          "agentName",
+          "output",
+          "transcript",
+          "events",
+          "summary",
+          "usage",
+          "interrupt"
+        ],
+        "agentName": "worker",
+        "output": "",
+        "transcript": "",
+        "events": [
+          {
+            "author": "worker",
+            "type": "call:slow#s1",
+            "partial": false,
+            "actions": [],
+            "longRunning": ["s1"]
+          }
+        ],
+        "summary": {
+          "events": 1,
+          "textEvents": 0,
+          "toolCalls": 1,
+          "errors": 0
+        },
+        "durationIsNumber": true,
+        "usage": {
+          "promptTokens": 0,
+          "completionTokens": 0,
+          "totalTokens": 0,
+          "cachedTokens": 0,
+          "toolCalls": 1,
+          "llmCalls": 0
+        },
+        "stateDelta": null,
+        "error": null,
+        "errorKind": null,
+        "interrupt": {
+          "kind": "long-running",
+          "functionCallIds": ["s1"],
+          "requests": [],
+          "events": [
+            {
+              "author": "worker",
+              "type": "call:slow#s1",
+              "partial": false,
+              "actions": [],
+              "longRunning": ["s1"]
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "stateDelta: merge order, temp: and partial filtering": {
+    "trace": [
+      "gw:resolve:worker",
+      "agent:worker:start",
+      "gw:sink:worker:text:one",
+      "gw:sink:worker:text:p:partial",
+      "gw:sink:worker:text:two",
+      "childState:{\"a\":2,\"b\":{\"nested\":true},\"c\":null,\"projected\":1,\"shared\":true}",
+      "agent:worker:finally",
+      "run:resolved:ok",
+      "gw:resolve:worker",
+      "agent:worker:start",
+      "gw:sink:worker:text:one",
+      "gw:sink:worker:text:p:partial",
+      "gw:sink:worker:text:two",
+      "childState:{\"a\":2,\"b\":{\"nested\":true},\"c\":null,\"projected\":2}",
+      "agent:worker:finally",
+      "run:resolved:ok",
+      "gw:resolve:temponly",
+      "agent:temponly:start",
+      "gw:sink:temponly:text:t",
+      "agent:temponly:finally",
+      "run:resolved:ok"
+    ],
+    "results": [
+      {
+        "keys": [
+          "agentName",
+          "output",
+          "transcript",
+          "events",
+          "summary",
+          "usage",
+          "stateDelta"
+        ],
+        "agentName": "worker",
+        "output": "two",
+        "transcript": "one\ntwo",
+        "events": [
+          {
+            "author": "worker",
+            "type": "text:one",
+            "partial": false,
+            "actions": ["stateDelta{a,b}"]
+          },
+          {
+            "author": "worker",
+            "type": "text:p",
+            "partial": true,
+            "actions": ["stateDelta{a,p}"]
+          },
+          {
+            "author": "worker",
+            "type": "text:two",
+            "partial": false,
+            "actions": ["stateDelta{a,c}"]
+          }
+        ],
+        "summary": {
+          "events": 3,
+          "textEvents": 2,
+          "toolCalls": 0,
+          "errors": 0
+        },
+        "durationIsNumber": true,
+        "usage": {
+          "promptTokens": 0,
+          "completionTokens": 0,
+          "totalTokens": 0,
+          "cachedTokens": 0,
+          "toolCalls": 0,
+          "llmCalls": 0
+        },
+        "stateDelta": {
+          "a": 2,
+          "b": {
+            "nested": true
+          },
+          "c": null
+        },
+        "error": null,
+        "errorKind": null,
+        "interrupt": null
+      },
+      {
+        "keys": [
+          "agentName",
+          "output",
+          "transcript",
+          "events",
+          "summary",
+          "usage",
+          "stateDelta"
+        ],
+        "agentName": "worker",
+        "output": "two",
+        "transcript": "one\ntwo",
+        "events": [
+          {
+            "author": "worker",
+            "type": "text:one",
+            "partial": false,
+            "actions": ["stateDelta{a,b}"]
+          },
+          {
+            "author": "worker",
+            "type": "text:p",
+            "partial": true,
+            "actions": ["stateDelta{a,p}"]
+          },
+          {
+            "author": "worker",
+            "type": "text:two",
+            "partial": false,
+            "actions": ["stateDelta{a,c}"]
+          }
+        ],
+        "summary": {
+          "events": 3,
+          "textEvents": 2,
+          "toolCalls": 0,
+          "errors": 0
+        },
+        "durationIsNumber": true,
+        "usage": {
+          "promptTokens": 0,
+          "completionTokens": 0,
+          "totalTokens": 0,
+          "cachedTokens": 0,
+          "toolCalls": 0,
+          "llmCalls": 0
+        },
+        "stateDelta": {
+          "a": 2,
+          "b": {
+            "nested": true
+          },
+          "c": null
+        },
+        "error": null,
+        "errorKind": null,
+        "interrupt": null
+      },
+      {
+        "keys": [
+          "agentName",
+          "output",
+          "transcript",
+          "events",
+          "summary",
+          "usage"
+        ],
+        "agentName": "temponly",
+        "output": "t",
+        "transcript": "t",
+        "events": [
+          {
+            "author": "temponly",
+            "type": "text:t",
+            "partial": false,
+            "actions": []
+          }
+        ],
+        "summary": {
+          "events": 1,
+          "textEvents": 1,
+          "toolCalls": 0,
+          "errors": 0
+        },
+        "durationIsNumber": true,
+        "usage": {
+          "promptTokens": 0,
+          "completionTokens": 0,
+          "totalTokens": 0,
+          "cachedTokens": 0,
+          "toolCalls": 0,
+          "llmCalls": 0
+        },
+        "stateDelta": null,
+        "error": null,
+        "errorKind": null,
+        "interrupt": null
+      }
+    ],
+    "facts": {
+      "parentState": {
+        "shared": true
+      },
+      "replacedChildFrozen": true
+    }
+  },
+  "stateDelta: resume events seed the child state": {
+    "trace": [
+      "req:validate:before-resolve",
+      "gw:resolve:worker",
+      "req:validate:before-prepare",
+      "req:prepare:worker",
+      "req:validate:before-execute",
+      "agent:worker:start",
+      "childState:{\"fromUser\":1,\"shared\":\"overridden\",\"stage\":\"asked\"}",
+      "gw:sink:worker:text:resumed",
+      "req:sink:worker:text:resumed",
+      "agent:worker:finally",
+      "run:resolved:ok"
+    ],
+    "results": [
+      {
+        "keys": [
+          "agentName",
+          "output",
+          "transcript",
+          "events",
+          "summary",
+          "usage"
+        ],
+        "agentName": "worker",
+        "output": "resumed",
+        "transcript": "resumed",
+        "events": [
+          {
+            "author": "worker",
+            "type": "text:resumed",
+            "partial": false,
+            "actions": []
+          }
+        ],
+        "summary": {
+          "events": 1,
+          "textEvents": 1,
+          "toolCalls": 0,
+          "errors": 0
+        },
+        "durationIsNumber": true,
+        "usage": {
+          "promptTokens": 0,
+          "completionTokens": 0,
+          "totalTokens": 0,
+          "cachedTokens": 0,
+          "toolCalls": 0,
+          "llmCalls": 0
+        },
+        "stateDelta": null,
+        "error": null,
+        "errorKind": null,
+        "interrupt": null
+      }
+    ]
+  },
+  "errors: event errors, thrown errors and preparation": {
+    "trace": [
+      "req:validate:before-resolve",
+      "gw:resolve:events",
+      "req:validate:before-prepare",
+      "req:prepare:events",
+      "req:validate:before-execute",
+      "agent:events:start",
+      "gw:sink:events:text:before",
+      "req:sink:events:text:before",
+      "gw:sink:events:error:first",
+      "req:sink:events:error:first",
+      "gw:sink:events:text:between",
+      "req:sink:events:text:between",
+      "gw:sink:events:error:second",
+      "req:sink:events:error:second",
+      "gw:sink:events:text:after",
+      "req:sink:events:text:after",
+      "agent:events:finally",
+      "run:resolved:agent-error",
+      "req:validate:before-resolve",
+      "gw:resolve:thrower",
+      "req:validate:before-prepare",
+      "req:prepare:thrower",
+      "req:validate:before-execute",
+      "agent:thrower:start",
+      "gw:sink:thrower:error:event error",
+      "req:sink:thrower:error:event error",
+      "agent:thrower:finally",
+      "run:resolved:agent-error",
+      "req:validate:before-resolve",
+      "gw:resolve:limit",
+      "req:validate:before-prepare",
+      "req:prepare:limit",
+      "req:validate:before-execute",
+      "agent:limit:start",
+      "gw:sink:limit:text:one call",
+      "req:sink:limit:text:one call",
+      "agent:limit:finally",
+      "run:resolved:llm-calls-limit",
+      "req:validate:before-resolve",
+      "gw:resolve:prepared",
+      "req:validate:before-prepare",
+      "req:prepare:throw",
+      "run:resolved:preparation"
+    ],
+    "results": [
+      {
+        "keys": [
+          "agentName",
+          "output",
+          "transcript",
+          "events",
+          "summary",
+          "usage",
+          "error",
+          "errorKind"
+        ],
+        "agentName": "events",
+        "output": "after",
+        "transcript": "before\nbetween\nafter",
+        "events": [
+          {
+            "author": "events",
+            "type": "text:before",
+            "partial": false,
+            "actions": []
+          },
+          {
+            "author": "events",
+            "type": "error:first",
+            "partial": false,
+            "actions": []
+          },
+          {
+            "author": "events",
+            "type": "text:between",
+            "partial": false,
+            "actions": []
+          },
+          {
+            "author": "events",
+            "type": "error:second",
+            "partial": false,
+            "actions": []
+          },
+          {
+            "author": "events",
+            "type": "text:after",
+            "partial": false,
+            "actions": []
+          }
+        ],
+        "summary": {
+          "events": 5,
+          "textEvents": 3,
+          "toolCalls": 0,
+          "errors": 2
+        },
+        "durationIsNumber": true,
+        "usage": {
+          "promptTokens": 0,
+          "completionTokens": 0,
+          "totalTokens": 0,
+          "cachedTokens": 0,
+          "toolCalls": 0,
+          "llmCalls": 0
+        },
+        "stateDelta": null,
+        "error": "second",
+        "errorKind": "agent-error",
+        "interrupt": null
+      },
+      {
+        "keys": [
+          "agentName",
+          "output",
+          "transcript",
+          "events",
+          "summary",
+          "usage",
+          "error",
+          "errorKind"
+        ],
+        "agentName": "thrower",
+        "output": "event error",
+        "transcript": "event error",
+        "events": [
+          {
+            "author": "thrower",
+            "type": "error:event error",
+            "partial": false,
+            "actions": []
+          }
+        ],
+        "summary": {
+          "events": 1,
+          "textEvents": 0,
+          "toolCalls": 0,
+          "errors": 2
+        },
+        "durationIsNumber": true,
+        "usage": {
+          "promptTokens": 0,
+          "completionTokens": 0,
+          "totalTokens": 0,
+          "cachedTokens": 0,
+          "toolCalls": 0,
+          "llmCalls": 0
+        },
+        "stateDelta": null,
+        "error": "thrown later",
+        "errorKind": "agent-error",
+        "interrupt": null
+      },
+      {
+        "keys": [
+          "agentName",
+          "output",
+          "transcript",
+          "events",
+          "summary",
+          "usage",
+          "error",
+          "errorKind"
+        ],
+        "agentName": "limit",
+        "output": "one call",
+        "transcript": "one call",
+        "events": [
+          {
+            "author": "limit",
+            "type": "text:one call",
+            "partial": false,
+            "actions": []
+          }
+        ],
+        "summary": {
+          "events": 1,
+          "textEvents": 1,
+          "toolCalls": 0,
+          "errors": 1
+        },
+        "durationIsNumber": true,
+        "usage": {
+          "promptTokens": 0,
+          "completionTokens": 0,
+          "totalTokens": 0,
+          "cachedTokens": 0,
+          "toolCalls": 0,
+          "llmCalls": 0
+        },
+        "stateDelta": null,
+        "error": "budget exhausted",
+        "errorKind": "llm-calls-limit",
+        "interrupt": null
+      },
+      {
+        "keys": [
+          "agentName",
+          "output",
+          "transcript",
+          "events",
+          "summary",
+          "usage",
+          "error",
+          "errorKind"
+        ],
+        "agentName": "prepared",
+        "output": "",
+        "transcript": "",
+        "events": [],
+        "summary": {
+          "events": 0,
+          "textEvents": 0,
+          "toolCalls": 0,
+          "errors": 1
+        },
+        "durationIsNumber": true,
+        "usage": {
+          "promptTokens": 0,
+          "completionTokens": 0,
+          "totalTokens": 0,
+          "cachedTokens": 0,
+          "toolCalls": 0,
+          "llmCalls": 0
+        },
+        "stateDelta": null,
+        "error": "binder refused",
+        "errorKind": "preparation",
+        "interrupt": null
+      }
+    ]
+  },
+  "errors: a throwing sink closes the generator": {
+    "trace": [
+      "gw:resolve:worker",
+      "agent:worker:start",
+      "gw:sink:worker:text:one",
+      "req:sink:text:one",
+      "agent:worker:finally",
+      "run:resolved:agent-error"
+    ],
+    "results": [
+      {
+        "keys": [
+          "agentName",
+          "output",
+          "transcript",
+          "events",
+          "summary",
+          "usage",
+          "error",
+          "errorKind"
+        ],
+        "agentName": "worker",
+        "output": "",
+        "transcript": "",
+        "events": [
+          {
+            "author": "worker",
+            "type": "text:one",
+            "partial": false,
+            "actions": []
+          }
+        ],
+        "summary": {
+          "events": 1,
+          "textEvents": 0,
+          "toolCalls": 0,
+          "errors": 1
+        },
+        "durationIsNumber": true,
+        "usage": {
+          "promptTokens": 0,
+          "completionTokens": 0,
+          "totalTokens": 0,
+          "cachedTokens": 0,
+          "toolCalls": 0,
+          "llmCalls": 0
+        },
+        "stateDelta": null,
+        "error": "sink boom",
+        "errorKind": "agent-error",
+        "interrupt": null
+      }
+    ]
+  },
+  "abort: in the middle of an event stream": {
+    "trace": [
+      "case:error",
+      "gw:resolve:worker",
+      "agent:worker:start",
+      "gw:sink:worker:text:one",
+      "req:sink:text:one",
+      "run:resolved:aborted",
+      "agent:worker:finally",
+      "case:string",
+      "gw:resolve:worker",
+      "agent:worker:start",
+      "gw:sink:worker:text:one",
+      "req:sink:text:one",
+      "run:resolved:aborted",
+      "agent:worker:finally",
+      "case:undefined",
+      "gw:resolve:worker",
+      "agent:worker:start",
+      "gw:sink:worker:text:one",
+      "req:sink:text:one",
+      "run:resolved:aborted",
+      "agent:worker:finally"
+    ],
+    "results": [
+      {
+        "keys": [
+          "agentName",
+          "output",
+          "transcript",
+          "events",
+          "summary",
+          "usage",
+          "stateDelta",
+          "error",
+          "errorKind"
+        ],
+        "agentName": "worker",
+        "output": "one",
+        "transcript": "one",
+        "events": [
+          {
+            "author": "worker",
+            "type": "text:one",
+            "partial": false,
+            "actions": ["stateDelta{a}"]
+          }
+        ],
+        "summary": {
+          "events": 1,
+          "textEvents": 1,
+          "toolCalls": 0,
+          "errors": 1
+        },
+        "durationIsNumber": true,
+        "usage": {
+          "promptTokens": 0,
+          "completionTokens": 0,
+          "totalTokens": 0,
+          "cachedTokens": 0,
+          "toolCalls": 0,
+          "llmCalls": 0
+        },
+        "stateDelta": {
+          "a": 1
+        },
+        "error": "stop now",
+        "errorKind": "aborted",
+        "interrupt": null
+      },
+      {
+        "keys": [
+          "agentName",
+          "output",
+          "transcript",
+          "events",
+          "summary",
+          "usage",
+          "stateDelta",
+          "error",
+          "errorKind"
+        ],
+        "agentName": "worker",
+        "output": "one",
+        "transcript": "one",
+        "events": [
+          {
+            "author": "worker",
+            "type": "text:one",
+            "partial": false,
+            "actions": ["stateDelta{a}"]
+          }
+        ],
+        "summary": {
+          "events": 1,
+          "textEvents": 1,
+          "toolCalls": 0,
+          "errors": 1
+        },
+        "durationIsNumber": true,
+        "usage": {
+          "promptTokens": 0,
+          "completionTokens": 0,
+          "totalTokens": 0,
+          "cachedTokens": 0,
+          "toolCalls": 0,
+          "llmCalls": 0
+        },
+        "stateDelta": {
+          "a": 1
+        },
+        "error": "string reason",
+        "errorKind": "aborted",
+        "interrupt": null
+      },
+      {
+        "keys": [
+          "agentName",
+          "output",
+          "transcript",
+          "events",
+          "summary",
+          "usage",
+          "stateDelta",
+          "error",
+          "errorKind"
+        ],
+        "agentName": "worker",
+        "output": "<omitted>",
+        "transcript": "<omitted>",
+        "events": [
+          {
+            "author": "worker",
+            "type": "text:one",
+            "partial": false,
+            "actions": ["stateDelta{a}"]
+          }
+        ],
+        "summary": {
+          "events": 1,
+          "textEvents": 1,
+          "toolCalls": 0,
+          "errors": 1
+        },
+        "durationIsNumber": true,
+        "usage": {
+          "promptTokens": 0,
+          "completionTokens": 0,
+          "totalTokens": 0,
+          "cachedTokens": 0,
+          "toolCalls": 0,
+          "llmCalls": 0
+        },
+        "stateDelta": {
+          "a": 1
+        },
+        "error": "<string>",
+        "errorKind": "aborted",
+        "interrupt": null
+      }
+    ]
+  },
+  "abort: parent signal, before preparation": {
+    "trace": [
+      "req:validate:before-resolve",
+      "gw:resolve:worker",
+      "req:validate:before-prepare",
+      "run:resolved:aborted",
+      "req:validate:before-resolve",
+      "gw:resolve:worker",
+      "req:validate:before-prepare",
+      "req:prepare:abort-then-throw",
+      "run:resolved:aborted",
+      "gw:resolve:inner-thrower",
+      "agent:inner-thrower:start",
+      "gw:sink:inner-thrower:text:x",
+      "req:sink:abort-then-throw",
+      "run:resolved:aborted",
+      "agent:inner-thrower:finally"
+    ],
+    "results": [
+      {
+        "keys": [
+          "agentName",
+          "output",
+          "transcript",
+          "events",
+          "summary",
+          "usage",
+          "error",
+          "errorKind"
+        ],
+        "agentName": "worker",
+        "output": "",
+        "transcript": "",
+        "events": [],
+        "summary": {
+          "events": 0,
+          "textEvents": 0,
+          "toolCalls": 0,
+          "errors": 1
+        },
+        "durationIsNumber": true,
+        "usage": {
+          "promptTokens": 0,
+          "completionTokens": 0,
+          "totalTokens": 0,
+          "cachedTokens": 0,
+          "toolCalls": 0,
+          "llmCalls": 0
+        },
+        "stateDelta": null,
+        "error": "parent cancelled",
+        "errorKind": "aborted",
+        "interrupt": null
+      },
+      {
+        "keys": [
+          "agentName",
+          "output",
+          "transcript",
+          "events",
+          "summary",
+          "usage",
+          "error",
+          "errorKind"
+        ],
+        "agentName": "worker",
+        "output": "",
+        "transcript": "",
+        "events": [],
+        "summary": {
+          "events": 0,
+          "textEvents": 0,
+          "toolCalls": 0,
+          "errors": 1
+        },
+        "durationIsNumber": true,
+        "usage": {
+          "promptTokens": 0,
+          "completionTokens": 0,
+          "totalTokens": 0,
+          "cachedTokens": 0,
+          "toolCalls": 0,
+          "llmCalls": 0
+        },
+        "stateDelta": null,
+        "error": "preparation saw the abort",
+        "errorKind": "aborted",
+        "interrupt": null
+      },
+      {
+        "keys": [
+          "agentName",
+          "output",
+          "transcript",
+          "events",
+          "summary",
+          "usage",
+          "error",
+          "errorKind"
+        ],
+        "agentName": "inner-thrower",
+        "output": "",
+        "transcript": "",
+        "events": [
+          {
+            "author": "inner-thrower",
+            "type": "text:x",
+            "partial": false,
+            "actions": []
+          }
+        ],
+        "summary": {
+          "events": 1,
+          "textEvents": 0,
+          "toolCalls": 0,
+          "errors": 1
+        },
+        "durationIsNumber": true,
+        "usage": {
+          "promptTokens": 0,
+          "completionTokens": 0,
+          "totalTokens": 0,
+          "cachedTokens": 0,
+          "toolCalls": 0,
+          "llmCalls": 0
+        },
+        "stateDelta": null,
+        "error": "sink error after abort",
+        "errorKind": "aborted",
+        "interrupt": null
+      }
+    ]
+  },
+  "abort: a stalled agent releases run()": {
+    "trace": [
+      "gw:resolve:stall",
+      "agent:stall:start",
+      "gw:sink:stall:text:started",
+      "run:resolved:aborted"
+    ],
+    "results": [
+      {
+        "keys": [
+          "agentName",
+          "output",
+          "transcript",
+          "events",
+          "summary",
+          "usage",
+          "error",
+          "errorKind"
+        ],
+        "agentName": "stall",
+        "output": "started",
+        "transcript": "started",
+        "events": [
+          {
+            "author": "stall",
+            "type": "text:started",
+            "partial": false,
+            "actions": []
+          }
+        ],
+        "summary": {
+          "events": 1,
+          "textEvents": 1,
+          "toolCalls": 0,
+          "errors": 1
+        },
+        "durationIsNumber": true,
+        "usage": {
+          "promptTokens": 0,
+          "completionTokens": 0,
+          "totalTokens": 0,
+          "cachedTokens": 0,
+          "toolCalls": 0,
+          "llmCalls": 0
+        },
+        "stateDelta": null,
+        "error": "stop stalled",
+        "errorKind": "aborted",
+        "interrupt": null
+      }
+    ]
+  },
+  "maxLlmCalls: one budget shared by parent and children": {
+    "trace": [
+      "parent:llm-call",
+      "gw:resolve:first",
+      "gw:sink:first:text:first says hi",
+      "run:resolved:ok",
+      "gw:resolve:second",
+      "gw:sink:second:text:second says hi",
+      "run:resolved:ok",
+      "gw:resolve:third",
+      "gw:sink:third:error:Max number of llm calls limit of 3 exceeded",
+      "run:resolved:agent-error"
+    ],
+    "results": [
+      {
+        "keys": [
+          "agentName",
+          "output",
+          "transcript",
+          "events",
+          "summary",
+          "usage"
+        ],
+        "agentName": "first",
+        "output": "first says hi",
+        "transcript": "first says hi",
+        "events": [
+          {
+            "author": "first",
+            "type": "text:first says hi",
+            "partial": false,
+            "actions": [],
+            "usage": {
+              "promptTokenCount": 2,
+              "candidatesTokenCount": 1,
+              "totalTokenCount": 3
+            }
+          }
+        ],
+        "summary": {
+          "events": 1,
+          "textEvents": 1,
+          "toolCalls": 0,
+          "errors": 0
+        },
+        "durationIsNumber": true,
+        "usage": {
+          "promptTokens": 2,
+          "completionTokens": 1,
+          "totalTokens": 3,
+          "cachedTokens": 0,
+          "toolCalls": 0,
+          "llmCalls": 1
+        },
+        "stateDelta": null,
+        "error": null,
+        "errorKind": null,
+        "interrupt": null
+      },
+      {
+        "keys": [
+          "agentName",
+          "output",
+          "transcript",
+          "events",
+          "summary",
+          "usage"
+        ],
+        "agentName": "second",
+        "output": "second says hi",
+        "transcript": "second says hi",
+        "events": [
+          {
+            "author": "second",
+            "type": "text:second says hi",
+            "partial": false,
+            "actions": [],
+            "usage": {
+              "promptTokenCount": 2,
+              "candidatesTokenCount": 1,
+              "totalTokenCount": 3
+            }
+          }
+        ],
+        "summary": {
+          "events": 1,
+          "textEvents": 1,
+          "toolCalls": 0,
+          "errors": 0
+        },
+        "durationIsNumber": true,
+        "usage": {
+          "promptTokens": 2,
+          "completionTokens": 1,
+          "totalTokens": 3,
+          "cachedTokens": 0,
+          "toolCalls": 0,
+          "llmCalls": 1
+        },
+        "stateDelta": null,
+        "error": null,
+        "errorKind": null,
+        "interrupt": null
+      },
+      {
+        "keys": [
+          "agentName",
+          "output",
+          "transcript",
+          "events",
+          "summary",
+          "usage",
+          "error",
+          "errorKind"
+        ],
+        "agentName": "third",
+        "output": "Max number of llm calls limit of 3 exceeded",
+        "transcript": "Max number of llm calls limit of 3 exceeded",
+        "events": [
+          {
+            "author": "third",
+            "type": "error:Max number of llm calls limit of 3 exceeded",
+            "partial": false,
+            "actions": []
+          }
+        ],
+        "summary": {
+          "events": 1,
+          "textEvents": 0,
+          "toolCalls": 0,
+          "errors": 1
+        },
+        "durationIsNumber": true,
+        "usage": {
+          "promptTokens": 0,
+          "completionTokens": 0,
+          "totalTokens": 0,
+          "cachedTokens": 0,
+          "toolCalls": 0,
+          "llmCalls": 0
+        },
+        "stateDelta": null,
+        "error": "Max number of llm calls limit of 3 exceeded",
+        "errorKind": "agent-error",
+        "interrupt": null
+      }
+    ],
+    "facts": {
+      "parentThrowsAfterChildren": true
+    }
+  },
+  "nested gateways: two delegation hops": {
+    "trace": [
+      "outerReq:validate:before-resolve",
+      "outer:resolve:middle",
+      "outerReq:validate:before-prepare",
+      "outerReq:prepare:middle",
+      "outerReq:validate:before-execute",
+      "agent:middle:start",
+      "outer:sink:middle:text:delegating",
+      "outerReq:sink:middle:text:delegating",
+      "innerReq:validate:before-resolve",
+      "inner:resolve:leaf",
+      "innerReq:validate:before-prepare",
+      "innerReq:prepare:leaf",
+      "innerReq:validate:before-execute",
+      "agent:leaf:start",
+      "inner:sink:leaf:text:leaf done",
+      "innerReq:sink:leaf:text:leaf done",
+      "agent:leaf:finally",
+      "run:resolved:ok",
+      "outer:sink:leaf:text:leaf done",
+      "outerReq:sink:leaf:text:leaf done",
+      "outer:sink:middle:text:middle got leaf done",
+      "outerReq:sink:middle:text:middle got leaf done",
+      "agent:middle:finally",
+      "run:resolved:ok"
+    ],
+    "results": [
+      {
+        "keys": [
+          "agentName",
+          "output",
+          "transcript",
+          "events",
+          "summary",
+          "usage",
+          "stateDelta"
+        ],
+        "agentName": "middle",
+        "output": "middle got leaf done",
+        "transcript": "delegating\nleaf done\nmiddle got leaf done",
+        "events": [
+          {
+            "author": "middle",
+            "type": "text:delegating",
+            "partial": false,
+            "actions": ["stateDelta{middle}"]
+          },
+          {
+            "author": "leaf",
+            "type": "text:leaf done",
+            "partial": false,
+            "actions": ["stateDelta{leaf}"],
+            "usage": {
+              "promptTokenCount": 1,
+              "candidatesTokenCount": 1
+            }
+          },
+          {
+            "author": "middle",
+            "type": "text:middle got leaf done",
+            "partial": false,
+            "actions": [],
+            "usage": {
+              "promptTokenCount": 5,
+              "candidatesTokenCount": 2
+            }
+          }
+        ],
+        "summary": {
+          "events": 3,
+          "textEvents": 3,
+          "toolCalls": 0,
+          "errors": 0
+        },
+        "durationIsNumber": true,
+        "usage": {
+          "promptTokens": 6,
+          "completionTokens": 3,
+          "totalTokens": 9,
+          "cachedTokens": 0,
+          "toolCalls": 0,
+          "llmCalls": 2
+        },
+        "stateDelta": {
+          "middle": 1,
+          "leaf": 1
+        },
+        "error": null,
+        "errorKind": null,
+        "interrupt": null
+      }
+    ],
+    "facts": {
+      "leafRootIsParentSession": true,
+      "leafPermissions": {
+        "mode": "read-only",
+        "allowNetwork": false
+      },
+      "leafState": {
+        "shared": true,
+        "middle": 1,
+        "fromMiddle": true
+      },
+      "leafSecondCallThrows": true,
+      "innerResult": {
+        "keys": [
+          "agentName",
+          "output",
+          "transcript",
+          "events",
+          "summary",
+          "usage",
+          "stateDelta"
+        ],
+        "agentName": "leaf",
+        "output": "leaf done",
+        "transcript": "leaf done",
+        "events": [
+          {
+            "author": "leaf",
+            "type": "text:leaf done",
+            "partial": false,
+            "actions": ["stateDelta{leaf}"],
+            "usage": {
+              "promptTokenCount": 1,
+              "candidatesTokenCount": 1
+            }
+          }
+        ],
+        "summary": {
+          "events": 1,
+          "textEvents": 1,
+          "toolCalls": 0,
+          "errors": 0
+        },
+        "durationIsNumber": true,
+        "usage": {
+          "promptTokens": 1,
+          "completionTokens": 1,
+          "totalTokens": 2,
+          "cachedTokens": 0,
+          "toolCalls": 0,
+          "llmCalls": 1
+        },
+        "stateDelta": {
+          "leaf": 1
+        },
+        "error": null,
+        "errorKind": null,
+        "interrupt": null
+      },
+      "rootThrowsAfterLeaf": true
+    }
+  }
+}
