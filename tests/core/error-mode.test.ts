@@ -535,3 +535,100 @@ describe("errorMode with ADK", () => {
     expect(events.at(-1)?.errorMessage).toBe("rate limited");
   });
 });
+
+describe("invalid request configuration", () => {
+  function candidateRequest(): LlmRequest {
+    return { ...req(), config: { candidateCount: 2 } } as LlmRequest;
+  }
+
+  for (const errorMode of ["throw", "response"] as const) {
+    for (const stream of [false, true]) {
+      it(`throws InputValidationError for candidateCount (errorMode ${errorMode}, stream ${stream})`, async () => {
+        let calls = 0;
+        const llm = llmWith(
+          () => {
+            calls++;
+            throw apiError();
+          },
+          { errorMode },
+        );
+        const outcome = await drain(
+          llm.generateContentAsync(candidateRequest(), stream),
+        ).then(
+          (responses) => ({ responses }),
+          (error: unknown) => ({ error }),
+        );
+
+        expect("error" in outcome).toBe(true);
+        const error = "error" in outcome ? outcome.error : undefined;
+        expect(error).toBeInstanceOf(InputValidationError);
+        expect(error).not.toBeInstanceOf(ProviderLlmError);
+        expect((error as Error).message).toContain(
+          "Set candidateCount to 1 or omit it",
+        );
+        expect(calls).toBe(0);
+      });
+    }
+  }
+});
+
+describe("request conversion failures other than validation", () => {
+  function cyclicArgsRequest(): LlmRequest {
+    const args: Record<string, unknown> = {};
+    args.self = args;
+    return {
+      ...req(),
+      contents: [
+        { role: "user", parts: [{ text: "hi" }] },
+        { role: "model", parts: [{ functionCall: { name: "f", args } }] },
+      ],
+    } as LlmRequest;
+  }
+
+  it("follow errorMode response: an error LlmResponse, not a raw throw", async () => {
+    let calls = 0;
+    const llm = llmWith(
+      () => {
+        calls++;
+        throw apiError();
+      },
+      { errorMode: "response" },
+    );
+    const responses = await drain(
+      llm.generateContentAsync(cyclicArgsRequest()),
+    );
+
+    expect(responses).toHaveLength(1);
+    expect(responses[0]?.errorCode).toBeString();
+    expect(calls).toBe(0);
+  });
+
+  it("follow errorMode throw: a ProviderLlmError", async () => {
+    const llm = llmWith(() => {
+      throw apiError();
+    });
+    const error = await drain(
+      llm.generateContentAsync(cyclicArgsRequest()),
+    ).catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(ProviderLlmError);
+    expect(error).not.toBeInstanceOf(InputValidationError);
+  });
+});
+
+describe("validation errors raised after request conversion", () => {
+  it("follow errorMode response like any provider-call failure", async () => {
+    const llm = llmWith(
+      () => {
+        throw new InputValidationError("raised inside the provider call");
+      },
+      { errorMode: "response" },
+    );
+    const responses = await drain(llm.generateContentAsync(req()));
+
+    expect(responses).toHaveLength(1);
+    expect(responses[0]?.errorMessage).toContain(
+      "raised inside the provider call",
+    );
+  });
+});

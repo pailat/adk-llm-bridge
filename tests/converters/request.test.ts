@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import type { LlmRequest } from "@google/adk";
+import { InputValidationError, type LlmRequest } from "@google/adk";
 import { FunctionCallingConfigMode, Type } from "@google/genai";
 import type {
   ChatCompletionFunctionTool,
@@ -737,6 +737,14 @@ describe("convertRequest", () => {
 
         expect(() => convertRequest(request, "gpt-4.1")).toThrow(
           /Set candidateCount to 1 or omit it/,
+        );
+      });
+
+      it("rejects with InputValidationError, a caller mistake and not a provider failure", () => {
+        const request = createLlmRequest({ config: { candidateCount: 2 } });
+
+        expect(() => convertRequest(request, "gpt-4.1")).toThrow(
+          InputValidationError,
         );
       });
 
@@ -1514,6 +1522,68 @@ describe("convertRequest", () => {
         expect(msg.role).toBe("assistant");
         expect(msg.content).toBe("The answer is 782.");
         expect(msg.reasoning_details).toEqual(details);
+      });
+
+      it("sends no reasoning_details for a signature that is JSON but not an array", () => {
+        for (const signature of [
+          "{}",
+          '{"type":"reasoning.text"}',
+          "7",
+          '"x"',
+        ]) {
+          const request = createLlmRequest({
+            contents: [
+              {
+                role: "model",
+                parts: [
+                  {
+                    text: "thinking...",
+                    thought: true,
+                    thoughtSignature: signature,
+                  },
+                  { text: "done" },
+                ],
+              },
+            ],
+          });
+          const result = convertRequest(
+            request,
+            "anthropic/claude-sonnet-4.5",
+            OR,
+          );
+          const msg = messageFields(result.messages[0]);
+          expect(msg.content).toBe("done");
+          expect(msg).not.toHaveProperty("reasoning_details");
+        }
+      });
+
+      it("keeps integers beyond 2^53 in echoed reasoning_details exact", () => {
+        const signature =
+          '[{"type":"reasoning.encrypted","data":"enc","id":9007199254740993123}]';
+        const request = createLlmRequest({
+          contents: [
+            {
+              role: "model",
+              parts: [
+                { text: "", thought: true, thoughtSignature: signature },
+                { text: "done" },
+              ],
+            },
+          ],
+        });
+        const result = convertRequest(
+          request,
+          "anthropic/claude-sonnet-4.5",
+          OR,
+        );
+        const msg = messageFields(result.messages[0]);
+        expect(msg.reasoning_details).toEqual([
+          {
+            type: "reasoning.encrypted",
+            data: "enc",
+            id: "9007199254740993123",
+          },
+        ]);
       });
 
       it("still echoes reasoning_details when a planner cleared the thought flag", () => {

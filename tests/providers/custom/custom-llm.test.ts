@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import type OpenAI from "openai";
+import { resetProviderConfig, setProviderConfig } from "../../../src/config.js";
 import { CustomLlm } from "../../../src/providers/custom/custom-llm.js";
 import { useCleanEnv } from "../../helpers/env.js";
 
@@ -93,6 +94,78 @@ describe("CustomLlm", () => {
 
       expect(client.baseURL).toBe("http://localhost:8000/v1");
       expect(client.apiKey).toBe("explicit-key");
+    });
+
+    it("does not send CUSTOM_LLM_API_KEY to an explicit base URL", () => {
+      process.env.CUSTOM_LLM_BASE_URL = "https://environment.example.test/v1";
+      process.env.CUSTOM_LLM_API_KEY = "environment-key";
+
+      for (const config of [
+        { model: "llama3", baseURL: "https://other-host.example.test/v1" },
+        {
+          model: "llama3",
+          baseURL: "https://other-host.example.test/v1",
+          apiKey: undefined,
+        },
+      ]) {
+        const client = getClient(new CustomLlm(config));
+        expect(client.baseURL).toBe("https://other-host.example.test/v1");
+        expect(client.apiKey).toBe("adk-llm-bridge-custom-provider");
+      }
+    });
+
+    it("does not send CUSTOM_LLM_API_KEY when apiKey is null", () => {
+      process.env.CUSTOM_LLM_BASE_URL = "https://environment.example.test/v1";
+      process.env.CUSTOM_LLM_API_KEY = "environment-key";
+
+      // A JSON-loaded config can carry null where the type says string.
+      const config = JSON.parse(
+        '{"model":"llama3","baseURL":"https://other-host.example.test/v1","apiKey":null}',
+      ) as ConstructorParameters<typeof CustomLlm>[0];
+      const client = getClient(new CustomLlm(config));
+
+      expect(client.baseURL).toBe("https://other-host.example.test/v1");
+      expect(client.apiKey).toBe("adk-llm-bridge-custom-provider");
+    });
+
+    it("treats a null baseURL as unset: the environment pair applies", () => {
+      process.env.CUSTOM_LLM_BASE_URL = "https://environment.example.test/v1";
+      process.env.CUSTOM_LLM_API_KEY = "environment-key";
+
+      const config = JSON.parse(
+        '{"model":"llama3","baseURL":null}',
+      ) as ConstructorParameters<typeof CustomLlm>[0];
+      const client = getClient(new CustomLlm(config));
+
+      expect(client.baseURL).toBe("https://environment.example.test/v1");
+      expect(client.apiKey).toBe("environment-key");
+    });
+
+    it("does not send CUSTOM_LLM_API_KEY to a global base URL", () => {
+      process.env.CUSTOM_LLM_BASE_URL = "https://environment.example.test/v1";
+      process.env.CUSTOM_LLM_API_KEY = "environment-key";
+      // `custom` is not a typed provider id, but a JS caller can store it.
+      const id = "custom" as Parameters<typeof setProviderConfig>[0];
+      setProviderConfig(id, { baseURL: "https://global-host.example.test/v1" });
+      try {
+        const client = getClient(new CustomLlm({ model: "llama3" }));
+        expect(client.baseURL).toBe("https://global-host.example.test/v1");
+        expect(client.apiKey).toBe("adk-llm-bridge-custom-provider");
+      } finally {
+        resetProviderConfig(id);
+      }
+    });
+
+    it("keeps an explicit key for an explicit base URL", () => {
+      process.env.CUSTOM_LLM_API_KEY = "environment-key";
+
+      const llm = new CustomLlm({
+        model: "llama3",
+        baseURL: "https://other-host.example.test/v1",
+        apiKey: process.env.CUSTOM_LLM_API_KEY,
+      });
+
+      expect(getClient(llm).apiKey).toBe("environment-key");
     });
 
     it("allows an explicitly empty credential for local servers", () => {
