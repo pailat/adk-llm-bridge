@@ -17,6 +17,16 @@ export const EXTERNAL_AGENT_ISOLATION_VIOLATED =
   "EXTERNAL_AGENT_ISOLATION_VIOLATED";
 
 /**
+ * Not an error: the value of `metadata.isolation` on the `tool_result` event
+ * of a call to a tool the model was not offered, which the runtime refused
+ * without running it. `ClaudeAgentSdkDriver` reports such a call and goes on;
+ * the third one in a run stops it with
+ * {@link EXTERNAL_AGENT_ISOLATION_VIOLATED}.
+ */
+export const EXTERNAL_AGENT_TOOL_NOT_OFFERED =
+  "EXTERNAL_AGENT_TOOL_NOT_OFFERED";
+
+/**
  * The policy does not set `allowNetwork: true` (network is off), and the
  * runtime cannot keep its
  * tools (shell commands, web tools, MCP servers) off the network in the
@@ -64,6 +74,16 @@ export const EXTERNAL_AGENT_CREDENTIAL_UNSUPPORTED =
 export const EXTERNAL_AGENT_OPTION_UNSUPPORTED =
   "EXTERNAL_AGENT_OPTION_UNSUPPORTED";
 
+/**
+ * On Windows, the command resolves to a batch file (`.cmd` or `.bat`), for
+ * example an npm shim such as `gemini.cmd`. Running one means going through
+ * `cmd.exe`, which re-parses the arguments (a prompt with `&` or `|` would
+ * run as a command), so the driver never runs it. Point `command` at the
+ * native `.exe` or, for Gemini CLI, use a custom `spawn` that runs Node.
+ */
+export const EXTERNAL_AGENT_BATCH_COMMAND_REFUSED =
+  "EXTERNAL_AGENT_BATCH_COMMAND_REFUSED";
+
 /** Codes of {@link ExternalAgentPolicyError}. */
 export type ExternalAgentPolicyErrorCode =
   | typeof EXTERNAL_AGENT_ISOLATION_VIOLATED
@@ -71,6 +91,7 @@ export type ExternalAgentPolicyErrorCode =
   | typeof EXTERNAL_AGENT_PATHS_UNENFORCEABLE
   | typeof EXTERNAL_AGENT_DEPENDENCY_MISSING
   | typeof EXTERNAL_AGENT_MISSING_BINARY
+  | typeof EXTERNAL_AGENT_BATCH_COMMAND_REFUSED
   | typeof EXTERNAL_AGENT_CREDENTIAL_UNSUPPORTED
   | typeof EXTERNAL_AGENT_OPTION_UNSUPPORTED;
 
@@ -218,6 +239,34 @@ export function dependencyMissing(
       ? EXTERNAL_AGENT_DEPENDENCY_MISSING
       : EXTERNAL_AGENT_MISSING_BINARY,
     `${what} is not installed. Install it with \`${install}\`${alternative ? `, or ${alternative}` : ""}.`,
+  );
+}
+
+/** What to do instead, per CLI, when a Windows command resolved to a batch file. */
+const BATCH_REMEDY = {
+  claude:
+    "Set `command` to the native claude.exe from Claude's native installer.",
+  codex:
+    "Set `command` to the codex.exe inside the @openai/codex package, for example node_modules\\@openai\\codex-win32-x64\\vendor\\x86_64-pc-windows-msvc\\bin\\codex.exe (win32-arm64 uses codex-win32-arm64 and aarch64-pc-windows-msvc).",
+  gemini:
+    "Gemini CLI has no native .exe: pass a `spawn` option that runs process.execPath with the package's JavaScript entry.",
+} as const;
+
+/**
+ * The policy error for a Windows command that resolved to a batch file.
+ *
+ * @param error - The error the spawn threw (an `Error` with the code
+ * `EXTERNAL_AGENT_BATCH_COMMAND_REFUSED`).
+ * @param cli - The CLI the driver runs, for the advice in the message.
+ * @returns The error to report with {@link policyErrorEvent}.
+ */
+export function batchCommandRefusal(
+  error: Error,
+  cli: keyof typeof BATCH_REMEDY,
+): ExternalAgentPolicyError {
+  return new ExternalAgentPolicyError(
+    EXTERNAL_AGENT_BATCH_COMMAND_REFUSED,
+    `${error.message} ${BATCH_REMEDY[cli]} See docs/external-agent-isolation.md, "Windows: batch files and npm installs".`,
   );
 }
 

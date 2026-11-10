@@ -1303,17 +1303,18 @@ describe("the tool_use stop message names what the bridge observed", () => {
     expect(message).not.toContain("host or managed setting");
   });
 
-  test("Claude Agent SDK: an invented tool after init is reported as not offered", async () => {
+  test("Claude Agent SDK: an invented tool after init with no answer is reported as not offered", async () => {
+    // The driver waits for the runtime's answer to an invented call; with
+    // none before the result, the run stops.
     const { sdk } = fakeSdk([init(["Read"]), toolUse("CronCreate"), RESULT]);
     const events = await collect(
       new ClaudeAgentSdkDriver({ sdk }).run(request({ mode: "ask" })),
     );
-    expect(events[1]).toMatchObject({
-      type: "error",
+    expect(events.find((event) => event.type === "error")).toMatchObject({
       code: EXTERNAL_AGENT_ISOLATION_VIOLATED,
       recoverable: false,
       message: expect.stringContaining(
-        'the model requested "CronCreate", a tool that was not offered',
+        'the model requested "CronCreate", a tool that was not offered, and the runtime gave no result',
       ),
     });
   });

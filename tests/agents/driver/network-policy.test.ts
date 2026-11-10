@@ -399,6 +399,8 @@ describe("Codex host MCP servers under allowNetwork: false", () => {
     const events = await collect(
       new CodexSdkDriver({
         Codex: FakeCodex as never,
+        // A given path, so the listing (a fake) is reached without a host binary.
+        codexPathOverride: "/opt/codex",
         listMcpServers: async () => {
           throw new Error("exit 1");
         },
@@ -692,6 +694,53 @@ describe.if(PLATFORM !== undefined)(
           code: "MISSING_BINARY",
         });
         expect(events.at(-1)).toMatchObject({ type: "completed", exitCode: 1 });
+      } finally {
+        tree.cleanup();
+      }
+    });
+
+    test("with the network on, a run with no binary found is not refused: the SDK uses its bundled binary", async () => {
+      // No listing is needed, so nothing is looked up on PATH; the SDK finds
+      // the binary it ships next to its own install.
+      const tree = npmTree();
+      try {
+        const listed: string[] = [];
+        const constructed: Array<Record<string, unknown>> = [];
+        let threads = 0;
+        class FakeCodex {
+          constructor(options: Record<string, unknown>) {
+            constructed.push(options);
+          }
+          startThread() {
+            threads++;
+            return {
+              runStreamed: async () => ({
+                events: (async function* () {
+                  yield { type: "turn.completed" };
+                })(),
+              }),
+            };
+          }
+          resumeThread() {
+            return this.startThread();
+          }
+        }
+        const events = await collect(
+          new CodexSdkDriver({
+            Codex: FakeCodex as never,
+            env: { PATH: join(tree.root, "node_modules", ".bin") },
+            listMcpServers: async (options) => {
+              listed.push(options.command);
+              return [];
+            },
+          }).run(request({ mode: "workspace-write", allowNetwork: true })),
+        );
+        expect(events.find((event) => event.type === "error")).toBeUndefined();
+        expect(listed).toEqual([]);
+        expect(constructed).toHaveLength(1);
+        expect(constructed[0]?.codexPathOverride).toBeUndefined();
+        expect(threads).toBe(1);
+        expect(events.at(-1)).toMatchObject({ type: "completed", exitCode: 0 });
       } finally {
         tree.cleanup();
       }

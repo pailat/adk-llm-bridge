@@ -17,11 +17,13 @@ import { networkAllowed } from "../permissions/network.js";
 import type { ExternalAgentPermissionPolicy } from "../permissions/schema.js";
 import { type LineSource, readAll } from "./lines.js";
 import {
+  batchCommandRefusal,
   type ExternalAgentPolicyError,
   isCommandNotFound,
   networkUnenforceable,
 } from "./policy-errors.js";
 import {
+  BatchCommandRefusedError,
   type SupervisedSubprocess,
   spawnSubprocess,
   superviseSubprocess,
@@ -183,6 +185,9 @@ export async function codexMcpDisableOverrides(
       cwd: options.cwd,
     });
   } catch (error) {
+    if (error instanceof BatchCommandRefusedError) {
+      return { refusal: batchCommandRefusal(error, "codex") };
+    }
     if (options.commandNotFound && isCommandNotFound(error)) {
       return { refusal: options.commandNotFound() };
     }

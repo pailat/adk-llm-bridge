@@ -1,5 +1,5 @@
 import { accessSync, constants as fsConstants, statSync } from "node:fs";
-import { delimiter, isAbsolute, join } from "node:path";
+import { posix, win32 } from "node:path";
 import { InputValidationError } from "@google/adk";
 import { parseJson } from "../../utils/json.js";
 import { type ExternalAgentEvent, isExternalAgentEvent } from "../events.js";
@@ -12,6 +12,7 @@ import {
   ExternalAgentPolicyError,
 } from "./policy-errors.js";
 import { agentWritableRoots, isSearchableExecutable } from "./shared.js";
+import { windowsExecutableKind } from "./spawn.js";
 
 /** Options for {@link SubprocessJsonlDriver}. */
 export interface SubprocessJsonlDriverConfig {
@@ -188,9 +189,17 @@ function isExecutableFile(path: string): boolean {
  * directory) are never searched. A command with a path separator was chosen
  * by the host and is returned unchanged.
  *
+ * On Windows only a native `.exe`/`.com` file is an answer: a `.cmd` or
+ * `.bat` file, an extensionless npm shell shim and a `.ps1` are skipped in
+ * favor of a native file later in `PATH` (the spawn never runs a batch file);
+ * when only a batch file
+ * exists it is returned, and the spawn refuses it with
+ * `EXTERNAL_AGENT_BATCH_COMMAND_REFUSED`.
+ *
  * @param command - The configured command.
  * @param env - The child's environment, for `PATH` (and `PATHEXT` on Windows).
  * @param request - The run, for its working directory and `allowedPaths`.
+ * @param host - Platform and file probes, for tests.
  * @returns The absolute path to start, the command itself when it has a path
  * separator, or `undefined` when no usable executable is left (the caller
  * reports `MISSING_BINARY`).
@@ -200,35 +209,62 @@ export function resolveCliCommand(
   command: string,
   env: Record<string, string | undefined>,
   request: Pick<ExternalAgentRunRequest, "workingDirectory" | "permissions">,
+  host: CliCommandHost = {},
 ): string | undefined {
-  if (
-    command.includes("/") ||
-    (process.platform === "win32" && command.includes("\\"))
-  ) {
+  const platform = host.platform ?? process.platform;
+  const windows = platform === "win32";
+  const pathApi = windows ? win32 : posix;
+  if (command.includes("/") || (windows && command.includes("\\"))) {
     return command;
   }
   const excluded = agentWritableRoots(request);
-  const extensions =
-    process.platform === "win32"
-      ? [...(env.PATHEXT ?? ".EXE;.CMD;.BAT;.COM").split(";"), ""]
-      : [""];
-  for (const dir of (env.PATH ?? "").split(delimiter)) {
+  const isFile = host.isExecutableFile ?? isExecutableFile;
+  const searchable = host.isSearchable ?? isSearchableExecutable;
+  const extensions = windows
+    ? [...(env.PATHEXT ?? ".EXE;.CMD;.BAT;.COM").split(";"), ""]
+    : [""];
+  // A batch file is never the answer while a native one is on offer later in
+  // `PATH`; the first one seen is kept, and returned only when no native file
+  // exists, so the spawn refuses it with the Windows remedy instead of the
+  // run reporting a missing binary.
+  let batch: string | undefined;
+  for (const dir of (env.PATH ?? "").split(pathApi.delimiter)) {
     // A relative or empty entry names a directory relative to the child's
     // working directory, which the agent controls: never searched.
-    if (!isAbsolute(dir)) {
+    if (!pathApi.isAbsolute(dir)) {
       continue;
     }
     for (const extension of extensions) {
-      const candidate = join(dir, `${command}${extension}`);
-      if (
-        isSearchableExecutable(candidate, excluded) &&
-        isExecutableFile(candidate)
-      ) {
-        return candidate;
+      const candidate = pathApi.join(dir, `${command}${extension}`);
+      if (!searchable(candidate, excluded) || !isFile(candidate)) {
+        continue;
       }
+      if (windows) {
+        // Only a native file is an answer; an extensionless npm shell shim or
+        // a `.ps1` is not runnable by itself and must not hide a native file
+        // later in `PATH`. The spawn lookup applies the same filter.
+        const kind = windowsExecutableKind(candidate);
+        if (kind === "batch") {
+          batch ??= candidate;
+        }
+        if (kind !== "native") {
+          continue;
+        }
+      }
+      return candidate;
     }
   }
-  return undefined;
+  return batch;
+}
+
+/** The parts of {@link resolveCliCommand} that depend on the host, for tests. @internal */
+export interface CliCommandHost {
+  /** The platform to behave as. Defaults to `process.platform`. */
+  platform?: NodeJS.Platform;
+  /** Whether a path is an executable file. Defaults to a file-system check. */
+  isExecutableFile?: (path: string) => boolean;
+  /** Whether the lookup may use a candidate (outside the excluded roots). */
+  isSearchable?: (path: string, excluded: readonly string[]) => boolean;
 }
 
 /**

@@ -16,7 +16,9 @@ import {
   spawn as nodeSpawn,
   type SpawnOptions,
 } from "node:child_process";
+import { existsSync, realpathSync } from "node:fs";
 import { constants as osConstants } from "node:os";
+import { win32 } from "node:path";
 import { Readable } from "node:stream";
 
 /** Options for {@link spawnSubprocess}. */
@@ -105,6 +107,223 @@ export interface SpawnRuntime {
   bun?: BunSpawnLike | null;
   /** The Node spawn to use. */
   nodeSpawn?: NodeSpawnLike;
+  /** The platform to behave as. Defaults to `process.platform`. */
+  platform?: NodeJS.Platform;
+  /** Whether a file exists, for the Windows command lookup. Defaults to `fs.existsSync`. */
+  fileExists?: (path: string) => boolean;
+}
+
+// Windows command lookup. A runtime or a PATHEXT-aware resolver can turn
+// `gemini` into `gemini.cmd` (the shim npm installs) and run it through
+// `cmd.exe`, which parses the arguments again, so a prompt with `&` or `|`
+// would run as a command. The drivers find the executable themselves, over
+// `.exe` and `.com` only, and refuse a batch file.
+
+// Windows' default PATHEXT order for the two native kinds, then the batch kinds.
+const NATIVE_EXTENSIONS = [".com", ".exe"] as const;
+const BATCH_EXTENSIONS = [".bat", ".cmd"] as const;
+
+/**
+ * What a Windows file name can be to the CLI lookups: `native` (`.com`,
+ * `.exe`: runs directly), `batch` (`.bat`, `.cmd`: never run, only reported),
+ * or `other` (no extension, `.ps1`, anything else: not runnable by itself, so
+ * never an answer). The drivers' lookup and the spawn lookup share it.
+ *
+ * @param fileName - A file name or path.
+ * @returns The kind.
+ */
+export function windowsExecutableKind(
+  fileName: string,
+): "native" | "batch" | "other" {
+  const extension = win32.extname(fileName.replace(/[. ]+$/, "")).toLowerCase();
+  if ((NATIVE_EXTENSIONS as readonly string[]).includes(extension)) {
+    return "native";
+  }
+  return (BATCH_EXTENSIONS as readonly string[]).includes(extension)
+    ? "batch"
+    : "other";
+}
+
+/** What {@link resolveWindowsCommand} reads from the host. */
+export interface WindowsCommandHost {
+  /** The environment whose `PATH` (any letter case) is searched. */
+  env: Readonly<Record<string, string | undefined>>;
+  /** Whether a file exists at an absolute path. */
+  exists(path: string): boolean;
+  /**
+   * Canonical absolute directories the lookup never searches (the run's
+   * working directory): a `PATH` entry at or under one, or a candidate that
+   * resolves into one through a symlink, is skipped.
+   */
+  excluded?: readonly string[];
+}
+
+/** Symlinks resolved when the path exists, otherwise just made absolute. */
+function windowsCanonical(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return win32.resolve(path);
+  }
+}
+
+/** Whether `path` is at or under one of `roots` (Windows paths compare without case). */
+function isUnderRoots(path: string, roots: readonly string[]): boolean {
+  const lower = win32.resolve(path).toLowerCase();
+  return roots.some((root) => {
+    const base = win32
+      .resolve(root)
+      .toLowerCase()
+      .replace(/[\\/]+$/, "");
+    return lower === base || lower.startsWith(`${base}\\`);
+  });
+}
+
+/** `PATH` entries that are absolute; a relative entry would depend on a working directory. */
+function pathDirectories(env: WindowsCommandHost["env"]): string[] {
+  const key = Object.keys(env).find((name) => name.toLowerCase() === "path");
+  const value = key === undefined ? undefined : env[key];
+  return (value ?? "")
+    .split(";")
+    .map((entry) => entry.trim().replace(/^"(.*)"$/, "$1"))
+    .filter((entry) => entry.length > 0 && win32.isAbsolute(entry));
+}
+
+/**
+ * A Windows command that is, or resolves first to, a `.cmd` or `.bat` file.
+ * The drivers report it as an `EXTERNAL_AGENT_BATCH_COMMAND_REFUSED` policy
+ * error. It lives here, with no import from the other driver modules, because
+ * this file is loadable on its own.
+ */
+export class BatchCommandRefusedError extends Error {
+  /** Always `EXTERNAL_AGENT_BATCH_COMMAND_REFUSED`. */
+  readonly code = "EXTERNAL_AGENT_BATCH_COMMAND_REFUSED";
+
+  /** @param message - Which command resolved to which batch file, and why it is refused. */
+  constructor(message: string) {
+    super(message);
+    this.name = "BatchCommandRefusedError";
+  }
+}
+
+function refusal(command: string, batch: string): BatchCommandRefusedError {
+  return new BatchCommandRefusedError(
+    `The command "${command}" resolves to the batch file ${batch}, which would run through cmd.exe and re-parse the prompt and arguments, so the driver never runs it.`,
+  );
+}
+
+function notFound(command: string): Error {
+  const error = new Error(`spawn ${command} ENOENT`) as Error & {
+    code: string;
+  };
+  error.code = "ENOENT";
+  return error;
+}
+
+/** What `base` is in `directory`: the first native file, and the first batch file. */
+function withinDirectory(
+  directory: string,
+  base: string,
+  exists: (path: string) => boolean,
+): { native?: string; batch?: string } {
+  const found: { native?: string; batch?: string } = {};
+  for (const extension of NATIVE_EXTENSIONS) {
+    const candidate = win32.join(directory, base + extension);
+    if (exists(candidate)) {
+      found.native = candidate;
+      return found;
+    }
+  }
+  for (const extension of BATCH_EXTENSIONS) {
+    const candidate = win32.join(directory, base + extension);
+    if (exists(candidate)) {
+      found.batch = candidate;
+      return found;
+    }
+  }
+  return found;
+}
+
+/**
+ * Finds the native executable for `command`: `PATHEXT` order, batch files
+ * skipped, relative `PATH` entries skipped, the working directory skipped.
+ *
+ * @remarks
+ * One rule with the drivers' own lookup (`resolveCliCommand`), which runs
+ * first when they use this spawn: a native file anywhere on `PATH` wins over
+ * a batch file earlier on it, and a batch file is the answer only when no
+ * native file exists, so that it is refused with the remedy instead of
+ * reported as missing. `host.excluded` drops `PATH` entries at or under the
+ * run's working directory (and candidates that resolve into it), here as a
+ * backstop for a bare command that reaches this lookup unresolved.
+ *
+ * An explicit path (one with a directory) is the caller's choice: the
+ * exclusion does not apply to it, with or without an extension.
+ *
+ * The result is always an absolute path, so the runtime that spawns it does
+ * no lookup of its own (libuv would try the child's working directory first
+ * for a bare name). A relative `command` that names a directory is resolved
+ * against the host process's working directory.
+ *
+ * @param command - A bare name (`gemini`, `claude.exe`), or a path with or
+ * without extension.
+ * @param host - Environment and file-existence probe.
+ * @returns The absolute path to spawn.
+ * @throws BatchCommandRefusedError (`EXTERNAL_AGENT_BATCH_COMMAND_REFUSED`) when
+ * the command is a `.cmd` or `.bat` file, or only a batch file was found.
+ * @throws Error with `code: "ENOENT"` when nothing runnable is found, so the
+ * driver reports a missing binary.
+ */
+export function resolveWindowsCommand(
+  command: string,
+  host: WindowsCommandHost,
+): string {
+  const excluded = host.excluded ?? [];
+  // A candidate inside an excluded root, directly or through a symlink, does
+  // not exist as far as a PATH lookup is concerned.
+  const searchExists = (path: string): boolean =>
+    host.exists(path) &&
+    !isUnderRoots(windowsCanonical(path), excluded) &&
+    !isUnderRoots(path, excluded);
+  // Windows ignores trailing dots and spaces in a file name.
+  const trimmed = command.replace(/[. ]+$/, "");
+  const extension = win32.extname(trimmed).toLowerCase();
+  if ((BATCH_EXTENSIONS as readonly string[]).includes(extension)) {
+    throw refusal(command, command);
+  }
+  const native = (NATIVE_EXTENSIONS as readonly string[]).includes(extension);
+  // `claude.exe` names the file; `claude` and `tool.v2` name a base.
+  const base = native
+    ? win32.basename(trimmed, extension)
+    : win32.basename(trimmed);
+  const hasDirectory = /[\\/]/.test(trimmed) || win32.isAbsolute(trimmed);
+  if (hasDirectory) {
+    const absolute = win32.resolve(trimmed);
+    if (native) return absolute;
+    const found = withinDirectory(win32.dirname(absolute), base, host.exists);
+    if (found.native) return found.native;
+    if (found.batch) throw refusal(command, found.batch);
+    throw notFound(command);
+  }
+  let batch: string | undefined;
+  for (const directory of pathDirectories(host.env)) {
+    if (
+      isUnderRoots(directory, excluded) ||
+      isUnderRoots(windowsCanonical(directory), excluded)
+    ) {
+      continue;
+    }
+    if (native) {
+      const candidate = win32.join(directory, base + extension);
+      if (searchExists(candidate)) return candidate;
+      continue;
+    }
+    const found = withinDirectory(directory, base, searchExists);
+    if (found.native) return found.native;
+    batch ??= found.batch;
+  }
+  if (batch) throw refusal(command, batch);
+  throw notFound(command);
 }
 
 /** Whether CLIs get their own process group (every platform but Windows). */
@@ -250,7 +469,10 @@ function detectBun(): BunSpawnLike | undefined {
  * its children. The module forwards host `SIGINT`, `SIGTERM` and `SIGHUP` to
  * live groups and kills them when the host exits, so no CLI outlives the
  * host. A missing binary surfaces as a rejection of `exited` on Node and as a
- * synchronous throw on Bun.
+ * synchronous throw on Bun. On Windows the command is looked up over `.exe`
+ * and `.com` only: a missing one throws an `ENOENT` error, and a command that
+ * is or resolves to a `.cmd` or `.bat` file throws an
+ * `EXTERNAL_AGENT_BATCH_COMMAND_REFUSED` policy error, in both runtimes.
  *
  * @param command - The executable.
  * @param args - Its arguments.
@@ -265,10 +487,28 @@ export function spawnSubprocess(
   runtime: SpawnRuntime = {},
 ): DriverSubprocess {
   const bun = runtime.bun === null ? undefined : (runtime.bun ?? detectBun());
+  // On Windows the command is resolved here, over .exe and .com only, so
+  // neither runtime can turn it into a batch file run through cmd.exe.
+  const executable =
+    (runtime.platform ?? process.platform) === "win32"
+      ? resolveWindowsCommand(command, {
+          env: options.env ?? process.env,
+          exists: runtime.fileExists ?? existsSync,
+          // Same rule as the drivers' own lookup: nothing the run's agent can
+          // write is searched. The drivers apply it first, with the
+          // `allowedPaths` roots too, when they use this spawn.
+          excluded: [windowsCanonical(options.cwd ?? process.cwd())],
+        })
+      : command;
   if (bun) {
-    return spawnWithBun(bun, command, args, options);
+    return spawnWithBun(bun, executable, args, options);
   }
-  return spawnWithNode(runtime.nodeSpawn ?? nodeSpawn, command, args, options);
+  return spawnWithNode(
+    runtime.nodeSpawn ?? nodeSpawn,
+    executable,
+    args,
+    options,
+  );
 }
 
 function spawnWithBun(

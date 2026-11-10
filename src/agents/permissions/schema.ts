@@ -53,6 +53,11 @@ export interface ExternalAgentPermissionPolicy {
    * bridge, so they refuse a run with `allowedPaths` (or inherited
    * `pathBounds`) with `EXTERNAL_AGENT_PATHS_UNENFORCEABLE` unless built with
    * `allowUnenforcedPaths: true`.
+   *
+   * The same roots apply to reads and writes: an agent confined here cannot
+   * read outside them either. To read more than it may write, split the work
+   * into a `read-only` agent with wider roots and a writer with narrow ones; see
+   * docs/external-agent-isolation.md, "Reading wider than you write".
    */
   allowedPaths?: readonly string[];
   /**

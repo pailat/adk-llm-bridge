@@ -24,6 +24,7 @@ import {
 } from "./codex-mcp.js";
 import { collectTail, type LineSource, readLines } from "./lines.js";
 import {
+  batchCommandRefusal,
   dependencyMissing,
   type ExternalAgentPolicyError,
   isCommandNotFound,
@@ -41,7 +42,11 @@ import {
   stringValue,
   validateDriverConfig,
 } from "./shared.js";
-import { spawnSubprocess, superviseSubprocess } from "./spawn.js";
+import {
+  BatchCommandRefusedError,
+  spawnSubprocess,
+  superviseSubprocess,
+} from "./spawn.js";
 import {
   assertNoPinnedArgOverride,
   type PinnedFlags,
@@ -398,6 +403,10 @@ export class CodexCliDriver extends SubprocessJsonlDriver {
         env,
       });
     } catch (error) {
+      if (error instanceof BatchCommandRefusedError) {
+        yield* refuse(batchCommandRefusal(error, "codex"));
+        return;
+      }
       // Bun.spawn throws when the binary does not exist.
       if (!isCommandNotFound(error)) {
         throw error;

@@ -32,6 +32,9 @@ describe("agents public exports", () => {
     expect(agents.EXTERNAL_AGENT_NETWORK_UNENFORCEABLE).toBe(
       "EXTERNAL_AGENT_NETWORK_UNENFORCEABLE",
     );
+    expect(agents.EXTERNAL_AGENT_BATCH_COMMAND_REFUSED).toBe(
+      "EXTERNAL_AGENT_BATCH_COMMAND_REFUSED",
+    );
     expect(agents.EXTERNAL_AGENT_DEPENDENCY_MISSING).toBe(
       "EXTERNAL_AGENT_DEPENDENCY_MISSING",
     );
@@ -44,6 +47,12 @@ describe("agents public exports", () => {
     expect(error).toBeInstanceOf(Error);
     expect(error.code).toBe("EXTERNAL_AGENT_NETWORK_UNENFORCEABLE");
     expect(error.recoverable).toBe(false);
+  });
+
+  test("./agents exposes the tag a refused tool call's result carries", () => {
+    expect(agents.EXTERNAL_AGENT_TOOL_NOT_OFFERED).toBe(
+      "EXTERNAL_AGENT_TOOL_NOT_OFFERED",
+    );
   });
 
   test("./agents exposes the external agent error codes", () => {
