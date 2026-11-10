@@ -15,12 +15,22 @@
  * A live owner that releases its lock removes its own tombstone: a recoverer
  * re-reads the owner after finding its process dead and retires only a lock
  * that still carries the dead token, and a dead owner can no longer release.
+ *
+ * The file-system checkpoint store runs the same protocol with asynchronous
+ * I/O (an abortable wait and typed failure reasons). It shares the owner file,
+ * the owner format ({@link parseDirectoryLockOwner}) and the tombstone name
+ * ({@link retiredDirectoryLockPath}) from this module. Two differences are
+ * deliberate: its candidates are named after the creating pid, so a crashed
+ * process's candidate is removed on the next acquire, and it reports a lock
+ * without a valid owner as `checkpoint_lock_corrupt` at once, where these
+ * locks wait for the owner until the caller's timeout.
  */
 
 import { createHash, randomUUID } from "node:crypto";
 import {
   closeSync,
   fsyncSync,
+  lstatSync,
   mkdirSync,
   openSync,
   readFileSync,
@@ -30,6 +40,7 @@ import {
 } from "node:fs";
 import { join, resolve } from "node:path";
 import { isProcessAlive } from "./error-support.js";
+import { hasErrorCode } from "./guards.js";
 
 /**
  * Name of the owner file inside a lock directory.
@@ -37,6 +48,8 @@ import { isProcessAlive } from "./error-support.js";
  * @internal
  */
 export const DIRECTORY_LOCK_OWNER_FILE = "owner.json";
+
+const SAFE_LOCK_TOKEN = /^[A-Za-z0-9_-]{1,128}$/u;
 
 /**
  * Contents of a lock's owner file.
@@ -56,14 +69,21 @@ export interface DirectoryLockOwner {
  * Tries once to publish a new lock at `lockPath`.
  *
  * @param lockPath - Lock directory; its parent must exist.
- * @returns The new owner, or `undefined` when another owner holds the lock.
- * @throws The file-system error when the candidate cannot be written or
- * renamed for another reason than an existing lock.
+ * @returns The new owner, or `undefined` when the path is occupied: another
+ * owner holds the lock, or an owner-less directory is there (never taken over).
+ * @throws The file-system error when the path cannot be inspected, or the
+ * candidate cannot be written or renamed for another reason than an existing
+ * lock.
  * @internal
  */
 export function tryAcquireDirectoryLock(
   lockPath: string,
 ): DirectoryLockOwner | undefined {
+  // `rename` replaces an empty directory, so an owner-less empty lock would be
+  // taken over silently; an occupied path is held. Only an external writer
+  // creates an empty lock, and one created between this check and the rename
+  // is still replaced.
+  if (pathOccupied(lockPath)) return undefined;
   const owner: DirectoryLockOwner = {
     token: randomUUID(),
     pid: process.pid,
@@ -173,7 +193,9 @@ export function directoryLockTokenMatches(
  *
  * @param input - File contents.
  * @returns The owner.
- * @throws `Error` when the contents are not a valid owner.
+ * @throws `Error` when the contents are not a valid owner: the token must be
+ * 1-128 characters of `[A-Za-z0-9_-]`, and `pid` and `acquiredAt` positive
+ * safe integers.
  * @internal
  */
 export function parseDirectoryLockOwner(input: string): DirectoryLockOwner {
@@ -184,20 +206,20 @@ export function parseDirectoryLockOwner(input: string): DirectoryLockOwner {
     Array.isArray(value) ||
     !("token" in value) ||
     typeof value.token !== "string" ||
-    !value.token ||
+    !SAFE_LOCK_TOKEN.test(value.token) ||
     !("pid" in value) ||
     !Number.isSafeInteger(value.pid) ||
     (value.pid as number) <= 0 ||
     !("acquiredAt" in value) ||
-    typeof value.acquiredAt !== "number" ||
-    !Number.isFinite(value.acquiredAt)
+    !Number.isSafeInteger(value.acquiredAt) ||
+    (value.acquiredAt as number) <= 0
   ) {
-    throw new Error("Invalid workspace lock owner");
+    throw new Error("Invalid directory lock owner");
   }
   return {
     token: value.token,
     pid: value.pid as number,
-    acquiredAt: value.acquiredAt,
+    acquiredAt: value.acquiredAt as number,
   };
 }
 
@@ -258,7 +280,18 @@ export function fsyncDirectorySync(directory: string): void {
   }
 }
 
-function retiredDirectoryLockPath(lockPath: string, token: string): string {
+/**
+ * Path a lock is retired to.
+ *
+ * @param lockPath - Lock directory.
+ * @param token - Token of the owner the retiring process observed.
+ * @returns `<lock>.retired.<sha256(token)>`.
+ * @internal
+ */
+export function retiredDirectoryLockPath(
+  lockPath: string,
+  token: string,
+): string {
   return `${lockPath}.retired.${directoryLockTokenKey(token)}`;
 }
 
@@ -280,11 +313,12 @@ function retireDirectoryLock(lockPath: string, observedToken: string): boolean {
   return true;
 }
 
-function hasErrorCode(error: unknown, code: string): boolean {
-  return Boolean(
-    error &&
-      typeof error === "object" &&
-      "code" in error &&
-      (error as { code?: unknown }).code === code,
-  );
+function pathOccupied(path: string): boolean {
+  try {
+    lstatSync(path);
+    return true;
+  } catch (error) {
+    if (hasErrorCode(error, "ENOENT")) return false;
+    throw error;
+  }
 }

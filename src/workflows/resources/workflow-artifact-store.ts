@@ -16,7 +16,13 @@ import {
 } from "./json.js";
 
 const DEFAULT_LIST_LIMIT = 50;
-const MAX_LIST_LIMIT = 200;
+/**
+ * Largest accepted page size for artifact listings.
+ *
+ * @internal
+ */
+export const MAX_WORKFLOW_ARTIFACT_LIST_LIMIT = 200;
+const MAX_LIST_LIMIT = MAX_WORKFLOW_ARTIFACT_LIST_LIMIT;
 
 /**
  * Identifies one artifact: artifact ids are unique within an execution, so

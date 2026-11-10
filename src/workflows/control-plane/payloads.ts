@@ -6,6 +6,11 @@ import type {
   WorkflowExecutionResumeRequest,
   WorkflowExecutionStatus,
 } from "../execution/contracts.js";
+import {
+  MAX_WORKFLOW_EVENT_READ_LIMIT,
+  MAX_WORKFLOW_EXECUTION_LIST_LIMIT,
+} from "../execution/stores.js";
+import { isPlainRecord } from "../internal/guards.js";
 import type { WorkflowOwnershipChangeSetValidationRequest } from "../orchestration/change-set-validator.js";
 import {
   WORKFLOW_PLAN_PROTOCOL,
@@ -36,11 +41,12 @@ import type {
   WorkflowOwnershipTransferRequest,
 } from "../orchestration/ownership-controller.js";
 import type { IntegrationGateRequest } from "../resources/integration-gate.js";
-import type {
-  WorkflowArtifactInput,
-  WorkflowArtifactKey,
-  WorkflowArtifactListInput,
-  WorkflowArtifactReference,
+import {
+  MAX_WORKFLOW_ARTIFACT_LIST_LIMIT,
+  type WorkflowArtifactInput,
+  type WorkflowArtifactKey,
+  type WorkflowArtifactListInput,
+  type WorkflowArtifactReference,
 } from "../resources/workflow-artifact-store.js";
 import type {
   WorkflowTaskHandle,
@@ -50,7 +56,14 @@ import type {
   WorkflowTaskResumeRequest,
   WorkflowTaskStatus,
 } from "../tasks/contracts.js";
-import type { WorkflowTaskSweepRequest } from "../tasks/dispatcher.js";
+import {
+  MAX_WORKFLOW_TASK_SWEEP_LIMIT,
+  type WorkflowTaskSweepRequest,
+} from "../tasks/dispatcher.js";
+import {
+  MAX_WORKFLOW_TASK_LIST_LIMIT,
+  MAX_WORKFLOW_TASK_MESSAGE_READ_LIMIT,
+} from "../tasks/stores.js";
 import type {
   WorkflowChangeEntry,
   WorkflowChangeEntryKind,
@@ -234,7 +247,7 @@ export function controlRequest(request: unknown): {
   payload: ControlPayload;
 } {
   if (
-    !isRecord(request) ||
+    !isPlainRecord(request) ||
     Object.keys(request).some(
       (key) =>
         key !== "protocol" &&
@@ -246,7 +259,7 @@ export function controlRequest(request: unknown): {
     request.version !== WORKFLOW_CONTROL_PROTOCOL_VERSION ||
     typeof request.operation !== "string" ||
     !Object.hasOwn(request, "payload") ||
-    !isRecord(request.payload)
+    !isPlainRecord(request.payload)
   ) {
     invalid(
       "Workflow control request has an invalid protocol, version, operation, or payload",
@@ -335,7 +348,7 @@ export function executionResumePayload(
  */
 export function executionIdPayload(payload: unknown): string {
   if (
-    !isRecord(payload) ||
+    !isPlainRecord(payload) ||
     Object.keys(payload).some((key) => key !== "executionId") ||
     typeof payload.executionId !== "string" ||
     payload.executionId.length === 0
@@ -363,7 +376,11 @@ export function executionListPayload(
     "execution list status",
   );
   const cursor = optionalOpaqueString(payload.cursor, "execution list cursor");
-  const limit = optionalPositiveInteger(payload.limit, "execution list limit");
+  const limit = optionalPageLimit(
+    payload.limit,
+    MAX_WORKFLOW_EXECUTION_LIST_LIMIT,
+    "execution list limit",
+  );
   return {
     ...(status === undefined ? {} : { status }),
     ...(cursor === undefined ? {} : { cursor }),
@@ -409,8 +426,9 @@ export function executionEventsPayload(
       invalid("Workflow control execution events cursor is invalid");
     }
   }
-  const limit = optionalPositiveInteger(
+  const limit = optionalPageLimit(
     payload.limit,
+    MAX_WORKFLOW_EVENT_READ_LIMIT,
     "execution events limit",
   );
   return {
@@ -534,7 +552,11 @@ export function taskListPayload(
     TASK_STATUSES,
     "task list status",
   );
-  const limit = optionalPositiveInteger(payload.limit, "task list limit");
+  const limit = optionalPageLimit(
+    payload.limit,
+    MAX_WORKFLOW_TASK_LIST_LIMIT,
+    "task list limit",
+  );
   return {
     executionId,
     ...(parentTaskId === undefined ? {} : { parentTaskId }),
@@ -589,8 +611,9 @@ export function taskMailboxReadPayload(
       invalid("Workflow control task mailbox cursor is invalid");
     }
   }
-  const limit = optionalPositiveInteger(
+  const limit = optionalPageLimit(
     payload.limit,
+    MAX_WORKFLOW_TASK_MESSAGE_READ_LIMIT,
     "task mailbox read limit",
   );
   return {
@@ -691,7 +714,11 @@ export function taskSweepPayload(
   );
   // The sweep cursor is opaque and is passed through unchanged.
   const cursor = optionalOpaqueString(payload.cursor, "task sweep cursor");
-  const limit = optionalPositiveInteger(payload.limit, "task sweep limit");
+  const limit = optionalPageLimit(
+    payload.limit,
+    MAX_WORKFLOW_TASK_SWEEP_LIMIT,
+    "task sweep limit",
+  );
   return {
     executionId,
     ...(cursor === undefined ? {} : { cursor }),
@@ -790,7 +817,11 @@ export function artifactListPayload(
   const taskId = optionalString(payload.taskId, "artifact list taskId");
   const type = optionalString(payload.type, "artifact list type");
   const cursor = optionalOpaqueString(payload.cursor, "artifact list cursor");
-  const limit = optionalPositiveInteger(payload.limit, "artifact list limit");
+  const limit = optionalPageLimit(
+    payload.limit,
+    MAX_WORKFLOW_ARTIFACT_LIST_LIMIT,
+    "artifact list limit",
+  );
   return {
     executionId,
     ...(taskId === undefined ? {} : { taskId }),
@@ -1339,7 +1370,7 @@ function changeSetPayload(value: unknown): WorkflowChangeSet {
 
 function changeEntry(value: unknown): WorkflowChangeEntry {
   const label = "ownership validation change entry";
-  if (!isRecord(value) || typeof value.kind !== "string") {
+  if (!isPlainRecord(value) || typeof value.kind !== "string") {
     invalid(`Workflow control ${label} is invalid`);
   }
   const renamed = value.kind === "renamed";
@@ -1414,7 +1445,7 @@ export function exactPayload(
   label: string,
 ): asserts payload is ControlPayload {
   if (
-    !isRecord(payload) ||
+    !isPlainRecord(payload) ||
     Object.keys(payload).some((key) => !allowed.includes(key))
   ) {
     invalid(`Workflow control ${label} payload is invalid`);
@@ -1461,6 +1492,21 @@ function optionalPositiveInteger(
   label: string,
 ): number | undefined {
   return value === undefined ? undefined : positiveInteger(value, label);
+}
+
+/**
+ * An optional page size: a positive integer no larger than `maximum`, the
+ * bound the services document for that listing.
+ */
+function optionalPageLimit(
+  value: unknown,
+  maximum: number,
+  label: string,
+): number | undefined {
+  const limit = optionalPositiveInteger(value, label);
+  if (limit !== undefined && limit > maximum)
+    invalid(`Workflow control ${label} is invalid`);
+  return limit;
 }
 
 function nonNegativeInteger(value: unknown, label: string): number {
@@ -1544,13 +1590,7 @@ function optionalJsonObject(
 function isJsonObject(
   value: WorkflowOrchestrationJsonValue,
 ): value is ControlJsonObject {
-  return isRecord(value);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const prototype = Object.getPrototypeOf(value);
-  return prototype === Object.prototype || prototype === null;
+  return isPlainRecord(value);
 }
 
 // --- results --------------------------------------------------------------
@@ -1645,7 +1685,7 @@ export function controlResult(
     }
     throw error;
   }
-  const matches = shape === "array" ? Array.isArray(copy) : isRecord(copy);
+  const matches = shape === "array" ? Array.isArray(copy) : isPlainRecord(copy);
   if (!matches)
     invalidResult(
       operation,

@@ -655,6 +655,20 @@ describe("WorkflowControlPlane payload validation", () => {
     ["execution.list", { status: "paused" }, /execution list status/],
     ["execution.list", { limit: 0 }, /execution list limit/],
     ["execution.list", { limit: 1.5 }, /execution list limit/],
+    ["execution.list", { limit: 501 }, /execution list limit/],
+    [
+      "execution.events",
+      { executionId: "e", limit: 1_001 },
+      /execution events limit/,
+    ],
+    ["task.list", { executionId: "e", limit: 501 }, /task list limit/],
+    [
+      "task.mailbox.read",
+      { ...handle, limit: 1_001 },
+      /task mailbox read limit/,
+    ],
+    ["task.sweep", { executionId: "e", limit: 501 }, /task sweep limit/],
+    ["artifact.list", { executionId: "e", limit: 201 }, /artifact list limit/],
     ["execution.list", { cursor: 3 }, /execution list cursor/],
     ["execution.list", { executionId: "e" }, /execution list payload/],
     [

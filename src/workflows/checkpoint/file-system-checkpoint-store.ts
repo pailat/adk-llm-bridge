@@ -14,10 +14,18 @@ import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { warn } from "../../utils/log.js";
 import { WorkflowError } from "../contracts.js";
 import {
+  DIRECTORY_LOCK_OWNER_FILE,
+  type DirectoryLockOwner,
+  directoryLockTokenKey,
+  parseDirectoryLockOwner,
+  retiredDirectoryLockPath,
+} from "../internal/directory-lock.js";
+import {
   attachCause,
   attachCleanupErrors,
   isProcessAlive,
 } from "../internal/error-support.js";
+import { hasErrorCode, isRecord } from "../internal/guards.js";
 import type { WorkflowCheckpointV1 } from "./schema.js";
 import {
   isWorkflowCheckpointV1,
@@ -47,14 +55,13 @@ const CHECKPOINT_LOCK_RELEASE_FAILED =
   "WORKFLOW_CHECKPOINT_LOCK_RELEASE_FAILED";
 const FILE_FORMAT = "adk-llm-bridge/workflow-checkpoint-file";
 const FILE_FORMAT_VERSION = 1;
-const LOCK_OWNER_FILE = "owner.json";
-const SAFE_LOCK_TOKEN = /^[A-Za-z0-9_-]{1,128}$/u;
+const LOCK_OWNER_FILE = DIRECTORY_LOCK_OWNER_FILE;
 const SAFE_CHECKPOINT_SHARD = /^[a-f0-9]{2}$/u;
 const SAFE_CHECKPOINT_LOCK = /^[a-f0-9]{64}\.json\.lock$/u;
 const SAFE_CHECKPOINT_CANDIDATE =
   /^\.[a-f0-9]{64}\.json\.lock\.candidate\.[1-9][0-9]*\.[A-Za-z0-9_-]{1,128}$/u;
 const SAFE_CHECKPOINT_TOMBSTONE =
-  /^[a-f0-9]{64}\.json\.lock\.retired\.([A-Za-z0-9_-]{1,128})$/u;
+  /^[a-f0-9]{64}\.json\.lock\.retired\.([a-f0-9]{64})$/u;
 
 /** Options for {@link FileSystemWorkflowCheckpointStore}. */
 export interface FileSystemWorkflowCheckpointStoreOptions {
@@ -104,11 +111,7 @@ interface CheckpointFileV1 {
   checkpoint: WorkflowCheckpointV1;
 }
 
-interface LockMetadata {
-  pid: number;
-  createdAt: number;
-  token: string;
-}
+type LockMetadata = DirectoryLockOwner;
 
 interface HeldCheckpointLock {
   assertOwned(): Promise<void>;
@@ -131,8 +134,10 @@ interface OfflineCheckpointTombstone {
  *
  * @param options - Checkpoint root and the `confirmNoActiveWriters` acknowledgement.
  * @returns The number of tombstones removed.
- * @throws `TypeError` or `Error` (not {@link WorkflowError}) when the root or acknowledgement is invalid, or when the
- * tree contains a symlink, an active lock or candidate, or an unsafe entry; nothing is removed in those cases.
+ * @throws {@link WorkflowError} with code `WORKFLOW_DEFINITION_INVALID` when the root or acknowledgement is invalid.
+ * @throws {@link WorkflowError} with code `WORKFLOW_EXECUTION_ERROR` and `details.reason` `checkpoint_file_unsafe`
+ * when the root is not a safe directory, or the tree contains a symlink, an active lock or candidate, an unsafe entry
+ * or a malformed tombstone; nothing is removed in those cases. File-system errors of the scan are thrown as they are.
  */
 export async function collectFileSystemCheckpointTombstonesOffline(
   options: OfflineCheckpointTombstoneCollectionOptions,
@@ -282,7 +287,6 @@ export class FileSystemWorkflowCheckpointStore
       throw ioError("checkpoint_directory_create_failed", checkpointKey, error);
     }
     const lock = await this.#acquireLock(checkpointPath, checkpointKey);
-    let failed = false;
     try {
       const current = await readCheckpointFile(
         checkpointPath,
@@ -315,7 +319,6 @@ export class FileSystemWorkflowCheckpointStore
         lock.assertOwned,
       );
     } catch (error) {
-      failed = true;
       try {
         await lock.release();
       } catch (releaseError) {
@@ -324,29 +327,28 @@ export class FileSystemWorkflowCheckpointStore
       }
       throw error;
     }
-    if (!failed) {
-      try {
-        await lock.release();
-      } catch (releaseError) {
-        // A lost lock means another process took it over and may have written
-        // this checkpoint too, so the revision check above guarantees nothing:
-        // fail the save. Only an I/O failure of the release itself (rename or
-        // directory sync) leaves a durable, uncontested save; a lock left
-        // behind then makes the next save on this key fail with
-        // `checkpoint_lock_timeout`.
-        if (
-          !(releaseError instanceof WorkflowError) ||
-          releaseError.details?.reason !== "checkpoint_lock_release_failed"
-        ) {
-          throw releaseError;
-        }
-        warn(
-          CHECKPOINT_LOCK_RELEASE_FAILED,
-          `Workflow checkpoint was saved but its lock could not be released: ${checkpointKey} (${String(
-            releaseError.details?.causeCode,
-          )})`,
-        );
+    // Reached only when the write succeeded: the catch above rethrows.
+    try {
+      await lock.release();
+    } catch (releaseError) {
+      // A lost lock means another process took it over and may have written
+      // this checkpoint too, so the revision check above guarantees nothing:
+      // fail the save. Only an I/O failure of the release itself (rename or
+      // directory sync) leaves a durable, uncontested save; a lock left
+      // behind then makes the next save on this key fail with
+      // `checkpoint_lock_timeout`.
+      if (
+        !(releaseError instanceof WorkflowError) ||
+        releaseError.details?.reason !== "checkpoint_lock_release_failed"
+      ) {
+        throw releaseError;
       }
+      warn(
+        CHECKPOINT_LOCK_RELEASE_FAILED,
+        `Workflow checkpoint was saved but its lock could not be released: ${checkpointKey} (${String(
+          releaseError.details?.causeCode,
+        )})`,
+      );
     }
 
     return {
@@ -368,33 +370,44 @@ export class FileSystemWorkflowCheckpointStore
     const startedAt = Date.now();
     await cleanupAbandonedCandidates(lockPath, checkpointKey);
     while (true) {
-      throwIfAborted(this.#signal, checkpointKey);
-      const token = randomUUID();
-      const candidatePath = await createLockCandidate(
-        lockPath,
-        token,
-        checkpointKey,
-      );
-      try {
-        await rename(candidatePath, lockPath);
-        return {
-          assertOwned: async () =>
-            await assertLockOwnership(lockPath, token, checkpointKey),
-          release: async () =>
-            await releaseLock(lockPath, token, checkpointKey),
-        };
-      } catch (error) {
+      throwIfLockWaitAborted(this.#signal, checkpointKey);
+      // `rename` replaces an empty directory, so an owner-less empty lock would
+      // be taken over silently. An occupied path goes to the contention branch,
+      // where it is reported `checkpoint_lock_corrupt`. Only an external writer
+      // creates an empty lock, and one created between this check and the
+      // rename is still replaced.
+      if (!(await lockPathOccupied(lockPath, checkpointKey))) {
+        const token = randomUUID();
+        const candidatePath = await createLockCandidate(
+          lockPath,
+          token,
+          checkpointKey,
+        );
         try {
-          await rm(candidatePath, { recursive: true, force: true });
-        } catch (cleanupError) {
-          throw ioError(
-            "checkpoint_lock_candidate_cleanup_failed",
-            checkpointKey,
-            cleanupError,
-          );
-        }
-        if (!(await isLockContention(error, lockPath))) {
-          throw ioError("checkpoint_lock_acquire_failed", checkpointKey, error);
+          await rename(candidatePath, lockPath);
+          return {
+            assertOwned: async () =>
+              await assertLockOwnership(lockPath, token, checkpointKey),
+            release: async () =>
+              await releaseLock(lockPath, token, checkpointKey),
+          };
+        } catch (error) {
+          try {
+            await rm(candidatePath, { recursive: true, force: true });
+          } catch (cleanupError) {
+            throw ioError(
+              "checkpoint_lock_candidate_cleanup_failed",
+              checkpointKey,
+              cleanupError,
+            );
+          }
+          if (!(await isLockContention(error, lockPath))) {
+            throw ioError(
+              "checkpoint_lock_acquire_failed",
+              checkpointKey,
+              error,
+            );
+          }
         }
       }
 
@@ -418,19 +431,19 @@ async function checkpointOfflineRoot(
   options: OfflineCheckpointTombstoneCollectionOptions | undefined,
 ): Promise<string> {
   if (options?.confirmNoActiveWriters !== true) {
-    throw new TypeError(
+    throw offlineOptionsError(
       "Offline checkpoint tombstone collection requires confirmNoActiveWriters: true",
     );
   }
   if (typeof options.root !== "string" || !isAbsolute(options.root)) {
-    throw new TypeError(
+    throw offlineOptionsError(
       "Offline checkpoint tombstone collection root must be absolute",
     );
   }
   const root = resolve(options.root);
   const info = await lstat(root);
   if (info.isSymbolicLink() || !info.isDirectory()) {
-    throw new Error(
+    throw offlineTreeError(
       "Offline checkpoint tombstone collection root is not a safe directory",
     );
   }
@@ -446,7 +459,7 @@ async function scanCheckpointOfflineTree(
     const path = join(directory, entry);
     const info = await lstat(path);
     if (info.isSymbolicLink()) {
-      throw new Error(
+      throw offlineTreeError(
         `Offline checkpoint tombstone collection rejects symlinks: ${path}`,
       );
     }
@@ -455,12 +468,12 @@ async function scanCheckpointOfflineTree(
       SAFE_CHECKPOINT_CANDIDATE.test(entry) ||
       entry.includes(".json.lock.candidate.")
     ) {
-      throw new Error(
+      throw offlineTreeError(
         `Offline checkpoint tombstone collection found an active lock or candidate: ${path}`,
       );
     }
     if (!info.isDirectory() && !info.isFile()) {
-      throw new Error(
+      throw offlineTreeError(
         `Offline checkpoint tombstone collection found an unsafe entry: ${path}`,
       );
     }
@@ -471,13 +484,13 @@ async function scanCheckpointOfflineTree(
       dirname(directory) === root &&
       SAFE_CHECKPOINT_SHARD.test(basename(directory))
     ) {
-      const token = match[1] as string;
-      await assertValidCheckpointTombstone(path, token);
+      const tokenKey = match[1] as string;
+      await assertValidCheckpointTombstone(path, tokenKey);
       tombstones.push({ path, device: info.dev, inode: info.ino });
       continue;
     }
     if (entry.includes(".json.lock.retired.")) {
-      throw new Error(
+      throw offlineTreeError(
         `Offline checkpoint tombstone is malformed or misplaced: ${path}`,
       );
     }
@@ -489,24 +502,24 @@ async function scanCheckpointOfflineTree(
 
 async function assertValidCheckpointTombstone(
   tombstonePath: string,
-  expectedToken: string,
+  expectedTokenKey: string,
 ): Promise<void> {
   const entries = await readdir(tombstonePath);
   if (entries.length !== 1 || entries[0] !== LOCK_OWNER_FILE) {
-    throw new Error(
+    throw offlineTreeError(
       `Offline checkpoint tombstone has unsafe contents: ${tombstonePath}`,
     );
   }
   const ownerPath = join(tombstonePath, LOCK_OWNER_FILE);
   const ownerInfo = await lstat(ownerPath);
   if (ownerInfo.isSymbolicLink() || !ownerInfo.isFile()) {
-    throw new Error(
+    throw offlineTreeError(
       `Offline checkpoint tombstone has an unsafe owner: ${tombstonePath}`,
     );
   }
   const owner = parseLockMetadata(await readFile(ownerPath, "utf8"));
-  if (owner?.token !== expectedToken) {
-    throw new Error(
+  if (!owner || directoryLockTokenKey(owner.token) !== expectedTokenKey) {
+    throw offlineTreeError(
       `Offline checkpoint tombstone token does not match its owner: ${tombstonePath}`,
     );
   }
@@ -522,19 +535,29 @@ async function removeCheckpointTombstone(
     current.dev !== tombstone.device ||
     current.ino !== tombstone.inode
   ) {
-    throw new Error(
+    throw offlineTreeError(
       `Offline checkpoint tombstone changed during collection: ${tombstone.path}`,
     );
   }
   const match = SAFE_CHECKPOINT_TOMBSTONE.exec(basename(tombstone.path));
   if (!match) {
-    throw new Error(
+    throw offlineTreeError(
       `Offline checkpoint tombstone became unsafe: ${tombstone.path}`,
     );
   }
   await assertValidCheckpointTombstone(tombstone.path, match[1] as string);
   await rm(tombstone.path, { recursive: true });
   await syncDirectory(dirname(tombstone.path));
+}
+
+function offlineOptionsError(message: string): WorkflowError {
+  return new WorkflowError("WORKFLOW_DEFINITION_INVALID", message);
+}
+
+function offlineTreeError(message: string): WorkflowError {
+  return new WorkflowError("WORKFLOW_EXECUTION_ERROR", message, {
+    reason: "checkpoint_file_unsafe" satisfies WorkflowCheckpointFailureReason,
+  });
 }
 
 async function readCheckpointFile(
@@ -801,9 +824,9 @@ async function createLockCandidate(
     );
     try {
       const metadata: LockMetadata = {
-        pid: process.pid,
-        createdAt: Date.now(),
         token,
+        pid: process.pid,
+        acquiredAt: Date.now(),
       };
       await ownerHandle.writeFile(`${JSON.stringify(metadata)}\n`, "utf8");
       await ownerHandle.sync();
@@ -846,6 +869,19 @@ async function cleanupAbandonedCandidates(
     await rm(join(directory, entry), { recursive: true, force: true }).catch(
       () => {},
     );
+  }
+}
+
+async function lockPathOccupied(
+  lockPath: string,
+  checkpointKey: string,
+): Promise<boolean> {
+  try {
+    await lstat(lockPath);
+    return true;
+  } catch (error) {
+    if (hasErrorCode(error, "ENOENT")) return false;
+    throw ioError("checkpoint_lock_read_failed", checkpointKey, error);
   }
 }
 
@@ -945,7 +981,7 @@ async function releaseLock(
   checkpointKey: string,
 ): Promise<void> {
   await assertLockOwnership(lockPath, token, checkpointKey);
-  const retiredPath = `${lockPath}.retired.${token}`;
+  const retiredPath = retiredDirectoryLockPath(lockPath, token);
   try {
     await rename(lockPath, retiredPath);
     await syncDirectory(dirname(lockPath));
@@ -978,7 +1014,7 @@ async function recoverAbandonedLock(
   if (current?.token !== metadata.token) {
     return true;
   }
-  const retiredPath = `${lockPath}.retired.${metadata.token}`;
+  const retiredPath = retiredDirectoryLockPath(lockPath, metadata.token);
   try {
     await rename(lockPath, retiredPath);
     await syncDirectory(dirname(lockPath));
@@ -996,23 +1032,7 @@ async function recoverAbandonedLock(
 
 function parseLockMetadata(value: string): LockMetadata | undefined {
   try {
-    const parsed: unknown = JSON.parse(value);
-    if (
-      !isRecord(parsed) ||
-      !Number.isSafeInteger(parsed.pid) ||
-      (parsed.pid as number) <= 0 ||
-      !Number.isSafeInteger(parsed.createdAt) ||
-      (parsed.createdAt as number) <= 0 ||
-      typeof parsed.token !== "string" ||
-      !SAFE_LOCK_TOKEN.test(parsed.token)
-    ) {
-      return undefined;
-    }
-    return {
-      pid: parsed.pid as number,
-      createdAt: parsed.createdAt as number,
-      token: parsed.token,
-    };
+    return parseDirectoryLockOwner(value);
   } catch {
     return undefined;
   }
@@ -1029,7 +1049,11 @@ function positiveInteger(name: string, value: number): number {
   return value;
 }
 
-function throwIfAborted(
+/**
+ * Throws `WORKFLOW_ABORTED` naming the checkpoint key when the store's signal
+ * aborted while it waits for a lock; the signal's reason is not used.
+ */
+function throwIfLockWaitAborted(
   signal: AbortSignal | undefined,
   checkpointKey: string,
 ): void {
@@ -1047,7 +1071,7 @@ async function abortableDelay(
   signal: AbortSignal | undefined,
   checkpointKey: string,
 ): Promise<void> {
-  throwIfAborted(signal, checkpointKey);
+  throwIfLockWaitAborted(signal, checkpointKey);
   if (!signal) {
     await new Promise((resolve) => setTimeout(resolve, delayMs));
     return;
@@ -1120,12 +1144,4 @@ function errorCode(error: unknown): string {
   return isRecord(error) && typeof error.code === "string"
     ? error.code
     : "UNKNOWN";
-}
-
-function hasErrorCode(error: unknown, code: string): boolean {
-  return errorCode(error) === code;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

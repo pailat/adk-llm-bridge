@@ -54,6 +54,16 @@ describe("directory lock", () => {
     expect(await readdir(join(path, ".."))).toEqual(["lock"]);
   });
 
+  test("never takes over an empty, owner-less lock directory", async () => {
+    const path = await lockPath();
+    await mkdir(path);
+
+    expect(tryAcquireDirectoryLock(path)).toBeUndefined();
+    recoverDeadDirectoryLock(path);
+    expect(await readdir(path)).toEqual([]);
+    expect(await readdir(join(path, ".."))).toEqual(["lock"]);
+  });
+
   test("releases only for the owning token and removes its own tombstone", async () => {
     const path = await lockPath();
     const owner = tryAcquireDirectoryLock(path);

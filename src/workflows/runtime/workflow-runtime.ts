@@ -13,6 +13,7 @@ import type {
   AgentInvocationGateway,
   AgentInvocationResult,
 } from "../../runtime/agent-invocation-gateway.js";
+import { parseJson } from "../../utils/json.js";
 import { hashWorkflowValue } from "../checkpoint/hash.js";
 import type {
   WorkflowCheckpointStore,
@@ -65,6 +66,7 @@ import type {
   WorkflowWaitingEvent,
 } from "../events.js";
 import { isWorkflowEvent } from "../events.js";
+import { isRecord } from "../internal/guards.js";
 import { withStepSpan, withWorkflowSpan } from "../telemetry.js";
 import type {
   WorkflowWorkspaceConfig,
@@ -279,7 +281,7 @@ export class WorkflowRuntime {
     let checkpointInitialized = false;
 
     try {
-      throwIfAborted(abortScope.signal);
+      throwIfRunAborted(abortScope.signal);
       this.#executionId = await this.#resolveExecutionId(this.#parentContext);
       validateExecutionId(this.#executionId);
       this.#inputOverride = await this.restoreWaitingInput();
@@ -301,7 +303,7 @@ export class WorkflowRuntime {
       } satisfies WorkflowStartedEvent);
 
       const output = await this.#definition.handler(this.createContext());
-      throwIfAborted(abortScope.signal);
+      throwIfRunAborted(abortScope.signal);
       await this.#checkpointCoordinator.completeWorkflow(output);
       if (output !== undefined) await this.emitOutput(output);
       const summary = this.summary("completed", startedAt);
@@ -420,7 +422,7 @@ export class WorkflowRuntime {
     requestedStep: WorkflowStep,
     signal: AbortSignal,
   ): Promise<WorkflowStepResult> {
-    throwIfAborted(signal);
+    throwIfRunAborted(signal);
     validateStep(requestedStep);
     const step =
       this.checkpointCoordinator().withStoredAgentRevision(requestedStep);
@@ -457,7 +459,7 @@ export class WorkflowRuntime {
     const prepared = await this.checkpointCoordinator().prepareStep(step);
     // A step about to execute is already saved `running`, so its abort check
     // runs inside the try below, where the abort is recorded as `interrupted`.
-    if (prepared.resolution.action !== "execute") throwIfAborted(signal);
+    if (prepared.resolution.action !== "execute") throwIfRunAborted(signal);
     if (prepared.resolution.action === "replay") {
       const result = {
         ...prepared.resolution.result,
@@ -506,11 +508,11 @@ export class WorkflowRuntime {
       ? undefined
       : prepared.resolution.attempt;
     try {
-      throwIfAborted(signal);
+      throwIfRunAborted(signal);
       const hookResult = resume
         ? undefined
         : await this.#hooks?.beforeStep?.(hookContext);
-      throwIfAborted(signal);
+      throwIfRunAborted(signal);
       if (hookResult) {
         const result = {
           ...hookResult,
@@ -856,7 +858,7 @@ export class WorkflowRuntime {
     );
     if (signal.aborted) {
       await lease.release();
-      throwIfAborted(signal);
+      throwIfRunAborted(signal);
     }
     return lease;
   }
@@ -1261,7 +1263,7 @@ function throwIfAttemptAborted(
       leaseLossReason: isJsonSafe(reason) ? reason : { message: reasonMessage },
     });
   }
-  throwIfAborted(signal);
+  throwIfRunAborted(signal);
 }
 
 /** Content with an optional string `role` and object `parts`, as ADK reads it. */
@@ -1294,10 +1296,6 @@ function isJsonSafe(value: unknown, seen = new Set<object>()): boolean {
       Object.values(value).every((item) => isJsonSafe(item, seen));
   seen.delete(value);
   return safe;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function validateLimits(
@@ -1594,11 +1592,7 @@ function createExecutionAbortScope(
   const listeners = new Map<AbortSignal, () => void>();
   for (const signal of sourceSignals) {
     if (!signal) continue;
-    const abort = () =>
-      controller.abort(
-        signal.reason ??
-          new WorkflowError("WORKFLOW_ABORTED", "Workflow execution aborted"),
-      );
+    const abort = () => controller.abort(abortReasonOf(signal.reason));
     if (signal.aborted) {
       abort();
       break;
@@ -1629,10 +1623,34 @@ function createExecutionAbortScope(
 }
 
 /**
+ * The reason a run's execution signal aborts with. A `WorkflowError` whose code
+ * is not `WORKFLOW_ABORTED` becomes one, with its code kept as
+ * `details.reasonCode`: an abort always records the step in flight as
+ * `interrupted` and the run as `cancelled`, whatever error the caller aborted
+ * with. Other reasons are kept and mapped by `throwIfRunAborted`.
+ */
+function abortReasonOf(reason: unknown): unknown {
+  if (reason === undefined) {
+    return new WorkflowError("WORKFLOW_ABORTED", "Workflow execution aborted");
+  }
+  if (
+    !(reason instanceof WorkflowError) ||
+    reason.code === "WORKFLOW_ABORTED"
+  ) {
+    return reason;
+  }
+  return new WorkflowError("WORKFLOW_ABORTED", reason.message, {
+    ...reason.details,
+    reasonCode: reason.code,
+  });
+}
+
+/**
  * Node output of a workflow result, following ADK's `maybeSetOutput`
  * (`run_llm_agent_as_node`): visible (non-thought) text joined with `""`; with
  * `structured`, non-blank text is parsed as JSON and kept as text if that
- * fails. A `Content` without text is passed through unchanged.
+ * fails. Integers beyond `Number.MAX_SAFE_INTEGER` stay exact, as strings, as
+ * in `ExternalAgent`. A `Content` without text is passed through unchanged.
  */
 function nodeOutputOf(
   output: Exclude<WorkflowOutput, undefined>,
@@ -1649,16 +1667,18 @@ function nodeOutputOf(
     if (text === "") return output;
   }
   if (structured && text.trim() !== "") {
-    try {
-      return JSON.parse(text);
-    } catch {
-      return text;
-    }
+    const parsed = parseJson(text);
+    return parsed.ok ? parsed.value : text;
   }
   return text;
 }
 
-function throwIfAborted(signal: AbortSignal): void {
+/**
+ * Throws the run's abort as a `WorkflowError`: the reason itself when it is
+ * one, otherwise `WORKFLOW_ABORTED` with the reason's message. Unlike
+ * `internal/abort.ts`, a non-workflow reason is never thrown as it is.
+ */
+function throwIfRunAborted(signal: AbortSignal): void {
   if (!signal.aborted) return;
   if (signal.reason instanceof WorkflowError) throw signal.reason;
   throw new WorkflowError(
@@ -1672,7 +1692,7 @@ function throwIfAborted(signal: AbortSignal): void {
 }
 
 function abortableDelay(delayMs: number, signal: AbortSignal): Promise<void> {
-  throwIfAborted(signal);
+  throwIfRunAborted(signal);
   return new Promise<void>((resolve, reject) => {
     const timeout = setTimeout(() => {
       signal.removeEventListener("abort", abort);
@@ -1681,7 +1701,7 @@ function abortableDelay(delayMs: number, signal: AbortSignal): Promise<void> {
     const abort = () => {
       clearTimeout(timeout);
       try {
-        throwIfAborted(signal);
+        throwIfRunAborted(signal);
       } catch (error) {
         reject(error);
       }
