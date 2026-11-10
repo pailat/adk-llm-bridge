@@ -80,9 +80,15 @@ Behavior:
   time (epoch milliseconds); `listSubkeys` lists subagent transcripts so a
   resume restores them; `delete` of a main transcript also deletes its
   subagent transcripts.
-- The database file is created with mode `0600` and its directory with
-  `0700`; SQLite gives the `-wal` and `-shm` files the same mode. An existing
-  file keeps its mode.
+- The database file is created with mode `0600` (set explicitly, so the
+  umask cannot change it) and a missing directory with `0700`; SQLite gives
+  the `-wal` and `-shm` files the same mode. An existing file or directory
+  keeps its mode.
+- The path is checked before SQLite opens it (POSIX): a symlink at the path
+  is refused, not followed; the file must be a regular file owned by you; its
+  directory (symlinks followed) must be owned by you or root and must not be
+  writable by others unless it has the sticky bit, like `/tmp`. A failed
+  check throws `SESSION_STORE_UNSAFE_PATH` and nothing is written.
 - WAL mode, a busy timeout (`busyTimeoutMs`, an integer from 0 to
   2147483647, default 5000) and one transaction per `append`, so several
   processes can share one file. A failed `append` stores nothing and
@@ -97,6 +103,7 @@ Behavior:
 | `SESSION_STORE_INVALID_ENTRY` | An entry that is not a JSON object, that JSON cannot represent (a `bigint`, a cycle; `cause` holds the error), or whose `toJSON()` gives something other than a JSON object; nothing of the batch is stored. |
 | `SESSION_STORE_INVALID_OPTION` | A `busyTimeoutMs` that is not an integer from 0 to 2147483647; checked before any file is created. |
 | `SESSION_STORE_SCHEMA_UNSUPPORTED` | The file was written by a newer version of the store. |
+| `SESSION_STORE_UNSAFE_PATH` | A symlink at the database path, a file that is not a regular file or is owned by another user, or a directory owned by another user (not root) or writable by others without the sticky bit. |
 
 ## Your own store
 

@@ -28,8 +28,8 @@ can pick 3.x, which is outside the supported range.
 The package is ESM only. Use `import`, or `await import()` from CommonJS.
 Shared code and its type declarations now live in `dist/shared/` chunks
 (`.js` and `.d.ts`). Import only the documented
-subpaths (`adk-llm-bridge`, `/agents`, `/workflows`, `/workflows/node`,
-`/package.json`), never a file under `dist/`: chunk names change between
+subpaths (`adk-llm-bridge`, `/agents`, `/agents/session-store/sqlite`,
+`/workflows`, `/workflows/node`, `/package.json`), never a file under `dist/`: chunk names change between
 builds. The package declares `"sideEffects": false`, so bundlers can drop the
 modules you do not import.
 
@@ -100,7 +100,9 @@ Related behavior changes:
   `finishReason: MALFORMED_FUNCTION_CALL` (and an `errorCode`), instead of
   calling the tool with `{}`. ADK's `ReflectAndRetryModelPlugin` can retry
   them.
-- `candidateCount` other than `1` is rejected on OpenAI-compatible providers.
+- `candidateCount` other than `1` is rejected on OpenAI-compatible providers
+  with `InputValidationError`, thrown in every `errorMode` before any request.
+  A `RoutedLlm` router receives it as `lastError`; do not fail over on it.
   Send separate requests if you need several candidates.
 - **Streams cut short now fail.** A stream that ends before its final chunk
   reports `INCOMPLETE_STREAM` (`PROVIDER_ERROR_INCOMPLETE_STREAM`). Discard the
@@ -138,6 +140,10 @@ Related behavior changes:
   custom providers no longer send `OPENAI_ORG_ID` / `OPENAI_PROJECT_ID` as
   `OpenAI-Organization` / `OpenAI-Project` headers. A custom endpoint that
   needs them can set them in its `headers` option.
+- Custom providers may take their endpoint from `CUSTOM_LLM_BASE_URL` and
+  `CUSTOM_LLM_API_KEY`. The key goes only with the URL from the environment:
+  `Custom(model, { baseURL })` and `registerCustomProvider` with a `baseURL`
+  but no `apiKey` still send no key. Pass `apiKey` for such an endpoint.
 - The OpenAI provider sends `maxOutputTokens` as `max_completion_tokens` for
   every model. A proxy behind `OPENAI_BASE_URL` that only knows `max_tokens`
   needs `registerCustomProvider` instead. `gpt-<N>` with N of 5 or more
@@ -315,11 +321,10 @@ new in 0.7.0. If you already use them, these changes apply:
   `Bash`. `Glob` and `Grep` without a search path, and any relative glob
   without one (such as Gemini `read_many_files` `include`), are now checked
   against the working directory. The sandbox confines Bash writes, not reads.
-- **Bridge tools in `guardPermissionRequest`.** If you call
-  `guardPermissionRequest` yourself, pass the run's bridge tool names as
-  `bridgeToolNames`; without them every `mcp__*` tool is denied when the
-  network is off. A host MCP server whose name starts with `adk_bridge` is no
-  longer exempt.
+- **Bridge tools and the MCP network denial.** With the network off, only the
+  tools `ExternalAgent` bridged for the run are exempt from the `mcp__*`
+  denial. A host MCP server whose name starts with `adk_bridge` is no longer
+  exempt.
 - **Isolated Claude agents.** `ClaudeAgent` no longer inherits the host's
   Claude Code setup. If your agent relied on host tools (Task sub-agents,
   Skill, cron, worktrees...), on MCP servers from your user or project
@@ -355,8 +360,10 @@ new in 0.7.0. If you already use them, these changes apply:
   `~/.claude/projects/.../memory/` directory. A `read-only` agent now runs
   with `--permission-mode dontAsk` instead of `plan`, so it uses the model you
   configured. Its write and shell tools are removed, and MCP tools are
-  denied, also with `inheritHostConfig: true` (both Claude drivers). Give a
-  host MCP server's tools to an `ask` or `workspace-write` agent instead.
+  denied, also with `inheritHostConfig: true` (both Claude drivers). The same
+  denial applies in every mode while the network is off, since a host MCP
+  server runs outside the shell sandbox: give a host MCP server's tools to an
+  `ask`, `workspace-write` or `full-access` agent with `allowNetwork: true`.
 - **Isolation check.** If a run stops with `EXTERNAL_AGENT_ISOLATION_VIOLATED`,
   a tool outside the isolated set appeared. The message says which case the
   bridge saw: a host or managed setting added tools or MCP servers (remove
@@ -425,6 +432,21 @@ new in 0.7.0. If you already use them, these changes apply:
   gets no prompt and the run fails. A prompt that starts with `-` is text,
   never a flag. If you append your own `args`, they still come after the
   driver's flags (and, for Codex, before the prompt).
+- **CLI `args` that override the policy flags.** `ClaudeCliDriver` and
+  `CodexCliDriver` now throw `EXTERNAL_AGENT_OPTION_UNSUPPORTED` at
+  construction when an `args` entry would override a flag they set from the
+  permission policy or isolation: for Claude `--permission-mode`,
+  `--dangerously-skip-permissions`, `--settings`, `--setting-sources`,
+  `--tools`, `--allowedTools`, `--disallowedTools`, `--mcp-config`,
+  `--add-dir`, `--plugin-dir`, `--ide` or `--chrome`; for Codex `--sandbox`,
+  `--ask-for-approval`, `--full-auto`, `--yolo`, `--add-dir`, `--cd`,
+  `--profile`, `--enable`, `--disable`, `--search`, or a `-c` override of the
+  sandbox, approval, web search, tools, MCP server, feature or profile keys.
+  Express the setting through the permission policy or a driver option
+  instead, or build the driver with `allowPolicyOverrideArgs: true` to keep
+  passing it (the CLI's handling of the repeated flag then decides, and the
+  run may not keep the policy). A non-string entry throws
+  `InputValidationError`.
 - **Claude CLI driver.** New `model`, `maxTurns` and `systemPrompt` options
   replace `args: ["--model", ...]`. A failed run reports the error code from
   its `result` line (`MAX_TURNS_EXCEEDED`, `INVALID_REQUEST`, ...) instead of
@@ -442,6 +464,22 @@ new in 0.7.0. If you already use them, these changes apply:
   checks for its package before it lists Codex's MCP servers, so a missing
   package reports `EXTERNAL_AGENT_DEPENDENCY_MISSING` even when no `codex`
   binary is installed.
+- **Binary lookup skips the workspace.** The SDK drivers no longer use a
+  `claude` or `codex` binary found at or under the run's `workingDirectory`
+  (the process directory when unset) or its `allowedPaths`, including through
+  `PATH`, `executableSearchPaths` or a symlink. If your only copy is there
+  (for example `node_modules/.bin` of the project the host runs from), set
+  `CLAUDE_CODE_EXECUTABLE` or `CODEX_EXECUTABLE` to it, or install the binary
+  outside the workspace. `CodexSdkDriver` with the network off now reports
+  `MISSING_BINARY` when it finds no binary outside the workspace. The CLI
+  drivers (`ClaudeCliDriver`, `CodexCliDriver`, `GeminiCliDriver`) follow
+  the same rule for a bare `command` on `PATH`, and also skip relative `PATH`
+  entries. A CLI installed as a devDependency of the host's project and found
+  through `<cwd>/node_modules/.bin` under `npm run` / `bun run` now ends the
+  run with `MISSING_BINARY`. To keep it working, pass an absolute `command`
+  (for example `resolve("node_modules/.bin/claude")`), or install the CLI
+  outside the workspace. See
+  [Missing dependencies](external-agent-isolation.md#missing-dependencies).
 - **Session store (new, experimental).** `driverOptions.sessionStore` mirrors
   Claude Agent SDK sessions to durable storage, and `SqliteSessionStore`
   (`adk-llm-bridge/agents/session-store/sqlite`) is a ready adapter; see
@@ -592,7 +630,9 @@ checkpoints:
   stopped by an abort (a closed ADK run, a node `timeout` or the workflow
   execution timeout) is stored as `interrupted` and a `step_interrupted` event
   is emitted. A re-entry without `retryFailedSteps` or `resumePolicy: "retry"`
-  fails with `WORKFLOW_INDETERMINATE_STEP`.
+  fails with `WORKFLOW_INDETERMINATE_STEP`. An abort whose reason is a
+  `WorkflowError` with another code now fails the run with `WORKFLOW_ABORTED`;
+  read that code from `details.reasonCode`.
   Add the `"interrupted"` member of `WorkflowCheckpointStepStatus` and the
   `step_interrupted` member of `WorkflowEvent` to exhaustive switches.
   0.6.0 cannot read a checkpoint that holds an `interrupted` step.

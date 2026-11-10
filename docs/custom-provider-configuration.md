@@ -17,8 +17,11 @@ URL.
 The Custom-specific environment variables are:
 
 - `CUSTOM_LLM_BASE_URL` — fallback OpenAI-compatible API base URL.
-- `CUSTOM_LLM_API_KEY` — optional fallback credential. It may be absent for
-  unauthenticated local servers such as Ollama, LM Studio, or vLLM.
+- `CUSTOM_LLM_API_KEY` — optional credential of the `CUSTOM_LLM_BASE_URL`
+  endpoint. It may be absent for unauthenticated local servers such as Ollama,
+  LM Studio, or vLLM. It is used only when the base URL also comes from
+  `CUSTOM_LLM_BASE_URL`: a provider with an explicit `baseURL` and no `apiKey`
+  sends no key, so this credential never reaches another host.
 
 For example:
 

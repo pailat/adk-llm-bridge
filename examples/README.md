@@ -349,7 +349,7 @@ bun run examples/basic-agent-ai-gateway/agent.ts
 | `OPENROUTER_SITE_URL` | OpenRouter | Your site URL (for ranking) |
 | `OPENROUTER_APP_NAME` | OpenRouter | Your app name (for ranking) |
 | `CUSTOM_LLM_BASE_URL` | Custom | Fallback endpoint; required when `baseURL` is omitted |
-| `CUSTOM_LLM_API_KEY` | Custom | Optional fallback credential |
+| `CUSTOM_LLM_API_KEY` | Custom | Optional credential, sent only with `CUSTOM_LLM_BASE_URL` (not to an explicit `baseURL`) |
 | `LMSTUDIO_BASE_URL` | LM Studio | Local server URL (default: http://localhost:1234/v1) |
 
 For Custom and direct OpenAI, explicit configuration wins over global
