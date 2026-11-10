@@ -178,6 +178,33 @@ async function settledCheckpoint(
   return store.last;
 }
 
+/**
+ * Holds the one timer armed with `delayMs` so a test fires it at a chosen
+ * point instead of racing the wall clock. Other timers run normally.
+ */
+function holdTimer(delayMs: number) {
+  let callback: (() => void) | undefined;
+  const realSetTimeout = globalThis.setTimeout;
+  const spy = spyOn(globalThis, "setTimeout").mockImplementation(((
+    handler: () => void,
+    delay?: number,
+    ...args: unknown[]
+  ) => {
+    if (delay === delayMs && callback === undefined) {
+      callback = handler;
+      return realSetTimeout(() => {}, 0);
+    }
+    return realSetTimeout(handler, delay, ...args);
+  }) as unknown as typeof setTimeout);
+  return {
+    fire() {
+      if (!callback) throw new Error(`no ${delayMs}ms timer was armed`);
+      callback();
+    },
+    restore: () => spy.mockRestore(),
+  };
+}
+
 function expectAborted(checkpoint: WorkflowCheckpointV1) {
   expect(checkpoint.status).toBe("cancelled");
   expect(checkpoint.completedAt).toBeNumber();
@@ -521,54 +548,173 @@ describe("stopping a workflow run through an ADK runner", () => {
   test("a workflow execution timeout records the run cancelled and the step interrupted", async () => {
     await withStore(async (store) => {
       const worker = new BlockingAgent("worker");
-      const runner = new InMemoryRunner({
-        agent: blockingWorkflow(
-          worker,
-          { checkpointStore: store },
-          { timeoutMs: 100 },
-        ),
-      });
-      const session = await newSession(runner);
+      const timer = holdTimer(60_000);
+      try {
+        const runner = new InMemoryRunner({
+          agent: blockingWorkflow(
+            worker,
+            { checkpointStore: store },
+            { timeoutMs: 60_000 },
+          ),
+        });
+        const session = await newSession(runner);
 
-      // The worker only returns once aborted, so only the timeout ends it.
-      const { error } = await withDeadline(
-        drain(runner, session.id),
-        5_000,
-        "runAsync hung",
-      );
+        const running = drain(runner, session.id);
+        // The worker only returns once aborted, so only the timeout ends it,
+        // and it fires once the step is in flight.
+        await withDeadline(worker.started, 5_000, "step never started");
+        timer.fire();
+        const { error } = await withDeadline(running, 5_000, "runAsync hung");
 
-      // Unlike a caller abort, the timeout is reported to the caller.
-      expect(error).toMatchObject({ code: "WORKFLOW_ABORTED" });
-      expectAborted(store.last as WorkflowCheckpointV1);
+        // Unlike a caller abort, the timeout is reported to the caller.
+        expect(error).toMatchObject({ code: "WORKFLOW_ABORTED" });
+        expectAborted(store.last as WorkflowCheckpointV1);
+      } finally {
+        timer.restore();
+      }
+    });
+  });
+
+  test("a timeout that fires before the step starts records the run cancelled with no step", async () => {
+    await withStore(async (store) => {
+      const worker = new BlockingAgent("worker");
+      const timer = holdTimer(60_000);
+      try {
+        // The first load holds the run before its step, so the timeout fires
+        // while no step is in flight: the case the wall-clock timeout hit
+        // when a loaded machine delayed the step by more than its timeout.
+        let release!: () => void;
+        const gate = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        let reached!: () => void;
+        const loading = new Promise<void>((resolve) => {
+          reached = resolve;
+        });
+        const gated: WorkflowCheckpointStore = {
+          load: async (input) => {
+            reached();
+            await gate;
+            return await store.load(input);
+          },
+          save: (input) => store.save(input),
+        };
+        const runner = new InMemoryRunner({
+          agent: blockingWorkflow(
+            worker,
+            { checkpointStore: gated },
+            { timeoutMs: 60_000 },
+          ),
+        });
+        const session = await newSession(runner);
+
+        const running = drain(runner, session.id);
+        await withDeadline(loading, 5_000, "run never loaded its checkpoint");
+        timer.fire();
+        release();
+        const { error } = await withDeadline(running, 5_000, "runAsync hung");
+
+        expect(error).toMatchObject({ code: "WORKFLOW_ABORTED" });
+        const checkpoint = store.last as WorkflowCheckpointV1;
+        expect(checkpoint.status).toBe("cancelled");
+        expect(checkpoint.completedAt).toBeNumber();
+        expect(checkpoint.error?.code).toBe("WORKFLOW_ABORTED");
+        expect(Object.keys(checkpoint.steps)).toEqual([]);
+      } finally {
+        timer.restore();
+      }
+    });
+  });
+
+  test("a timeout while the step's running record is being saved records the step interrupted and never starts the worker", async () => {
+    await withStore(async (store) => {
+      const worker = new BlockingAgent("worker");
+      const timer = holdTimer(60_000);
+      try {
+        // The save that records the step `running` is held, so the timeout
+        // fires after the step exists but before its worker is called.
+        let release!: () => void;
+        const gate = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        let reached!: () => void;
+        const saving = new Promise<void>((resolve) => {
+          reached = resolve;
+        });
+        let held = false;
+        const gated: WorkflowCheckpointStore = {
+          load: (input) => store.load(input),
+          save: async (input) => {
+            if (!held && input.checkpoint.steps.slow?.status === "running") {
+              held = true;
+              reached();
+              await gate;
+            }
+            return await store.save(input);
+          },
+        };
+        const runner = new InMemoryRunner({
+          agent: blockingWorkflow(
+            worker,
+            { checkpointStore: gated },
+            { timeoutMs: 60_000 },
+          ),
+        });
+        const session = await newSession(runner);
+
+        const running = drain(runner, session.id);
+        await withDeadline(saving, 5_000, "step was never saved running");
+        timer.fire();
+        release();
+        const { error } = await withDeadline(running, 5_000, "runAsync hung");
+
+        expect(error).toMatchObject({ code: "WORKFLOW_ABORTED" });
+        expectAborted(store.last as WorkflowCheckpointV1);
+        const started = await Promise.race([
+          worker.started.then(() => true),
+          Promise.resolve(false),
+        ]);
+        expect(started).toBe(false);
+      } finally {
+        timer.restore();
+      }
     });
   });
 
   test("a node timeout records the step interrupted once the workflow settles", async () => {
     await withStore(async (store) => {
       const worker = new BlockingAgent("worker");
-      const graph = new Workflow({
-        name: "graph",
-        edges: [
-          [
-            "START",
-            blockingWorkflow(worker, { checkpointStore: store, timeout: 0.1 }),
+      const timer = holdTimer(61_000);
+      try {
+        const graph = new Workflow({
+          name: "graph",
+          edges: [
+            [
+              "START",
+              blockingWorkflow(worker, {
+                checkpointStore: store,
+                timeout: 61,
+              }),
+            ],
           ],
-        ],
-      });
-      const runner = new InMemoryRunner({ agent: graph });
-      const session = await newSession(runner);
+        });
+        const runner = new InMemoryRunner({ agent: graph });
+        const session = await newSession(runner);
 
-      // The worker only returns once aborted, so only the timeout ends it.
-      const { error } = await withDeadline(
-        drain(runner, session.id),
-        5_000,
-        "runAsync hung",
-      );
+        const running = drain(runner, session.id);
+        // The worker only returns once aborted, so only the timeout ends it,
+        // and it fires once the step is in flight.
+        await withDeadline(worker.started, 5_000, "step never started");
+        timer.fire();
+        const { error } = await withDeadline(running, 5_000, "runAsync hung");
 
-      // ADK reports the node timeout as an error and does not wait for the
-      // workflow to wind down, so the record is written shortly after.
-      expect(String(error)).toContain("timed out");
-      expectAborted(await settledCheckpoint(store, "cancelled"));
+        // ADK reports the node timeout as an error and does not wait for the
+        // workflow to wind down, so the record is written shortly after.
+        expect(String(error)).toContain("timed out");
+        expectAborted(await settledCheckpoint(store, "cancelled"));
+      } finally {
+        timer.restore();
+      }
     });
   });
 });
