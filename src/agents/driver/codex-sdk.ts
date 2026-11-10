@@ -18,7 +18,11 @@ import {
   summarizeHistoryForColdStart,
   userContentToCodexInput,
 } from "./codex-input-mapper.js";
-import { type CodexMcpLister, codexMcpDisableOverrides } from "./codex-mcp.js";
+import {
+  type CodexMcpLister,
+  codexApprovalsReviewerOverrides,
+  codexMcpDisableOverrides,
+} from "./codex-mcp.js";
 import {
   dependencyMissing,
   ExternalAgentPolicyError,
@@ -595,13 +599,18 @@ export class CodexSdkDriver {
     configOverrides: readonly string[] = [],
   ): CodexSdkOptions {
     const binary = this.resolveCodexBinary(request);
+    // The reviewer pin comes last, so neither `config` nor a host
+    // config.toml can turn approvals over to a model reviewer.
+    const overrides = [
+      ...configOverrides,
+      ...codexApprovalsReviewerOverrides(request.permissions),
+    ];
     return removeUndefined({
       codexPathOverride: binary.path,
       baseUrl: this.#baseUrl,
       apiKey: this.#apiKey ?? readCredentialEnv(request, "CODEX_API_KEY"),
       config: this.#config,
-      configOverrides:
-        configOverrides.length > 0 ? [...configOverrides] : undefined,
+      configOverrides: overrides.length > 0 ? overrides : undefined,
       env: this.runEnv(request, binary),
     }) as CodexSdkOptions;
   }

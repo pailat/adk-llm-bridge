@@ -111,6 +111,41 @@ export interface WorkflowCheckpointSavedEvent extends WorkflowEventBase {
   stepId?: string;
 }
 
+/** One part of a checkpoint and its UTF-8 JSON size. */
+export interface WorkflowCheckpointSizeContributor {
+  /**
+   * Keys from the checkpoint root, for example
+   * `["steps", "review", "result", "output"]`.
+   */
+  path: readonly string[];
+  /** UTF-8 JSON size of the value at `path`. */
+  bytes: number;
+}
+
+/**
+ * A saved checkpoint reached 80% of the store's `maxCheckpointBytes`.
+ *
+ * @remarks
+ * Emitted at most once per checkpoint key per run, after the
+ * `checkpoint_saved` event of the save that crossed the threshold, and only
+ * for stores that expose `maxCheckpointBytes`. The run continues; a later save
+ * above the limit fails with `checkpoint_size_limit_exceeded`.
+ */
+export interface WorkflowCheckpointSizeWarningEvent extends WorkflowEventBase {
+  /** Event discriminator. */
+  type: "checkpoint_size_warning";
+  /** Key of the checkpoint. */
+  checkpointKey: string;
+  /** Step whose transition triggered the save, if any. */
+  stepId?: string;
+  /** UTF-8 JSON size of the saved checkpoint. */
+  bytes: number;
+  /** The store's limit. */
+  maxBytes: number;
+  /** Largest parts of the checkpoint (at most five), largest first. */
+  largestContributors: readonly WorkflowCheckpointSizeContributor[];
+}
+
 /** Output produced by the workflow. */
 export interface WorkflowOutputEvent extends WorkflowEventBase {
   /** Event discriminator. */
@@ -177,6 +212,7 @@ export type WorkflowEvent =
   | WorkflowStepReplayedEvent
   | WorkflowStepWaitingEvent
   | WorkflowCheckpointSavedEvent
+  | WorkflowCheckpointSizeWarningEvent
   | WorkflowOutputEvent
   | WorkflowErrorEvent
   | WorkflowCompletedEvent
@@ -192,6 +228,7 @@ const WORKFLOW_EVENT_TYPES = new Set<WorkflowEvent["type"]>([
   "step_replayed",
   "step_waiting",
   "checkpoint_saved",
+  "checkpoint_size_warning",
   "output",
   "error",
   "workflow_completed",

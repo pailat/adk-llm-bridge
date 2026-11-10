@@ -23,6 +23,7 @@ import {
   type WorkflowIdentifierGrammar,
 } from "../internal/identifiers.js";
 import { workflowIntegrationIntentDigest } from "../internal/integration-intent.js";
+import { monotonicNow } from "../internal/monotonic-clock.js";
 import { portablePathProblem } from "../internal/portable-path.js";
 import { optionalJsonObject } from "../resources/json.js";
 import type {
@@ -280,7 +281,7 @@ export class FileSystemWorkflowRepositoryMutationLock
       this.#lockRoot,
       `.repository-${createHash("sha256").update(repositoryId).digest("hex")}.lock`,
     );
-    const startedAt = Date.now();
+    const startedAt = monotonicNow();
     await mkdir(this.#lockRoot, { recursive: true });
     while (true) {
       throwIfAborted(options.signal, ABORTED_MESSAGE);
@@ -297,7 +298,7 @@ export class FileSystemWorkflowRepositoryMutationLock
         });
       }
       recoverDeadDirectoryLock(lockPath);
-      if (Date.now() - startedAt >= this.#acquireTimeoutMs) {
+      if (monotonicNow() - startedAt >= this.#acquireTimeoutMs) {
         throw new NodeGitWorktreeError(
           "GIT_MUTATION_AMBIGUOUS",
           "Timed out waiting for the shared repository mutation lock",

@@ -9,7 +9,26 @@ import type { BaseLlmConnection, LlmRequest, LlmResponse } from "@google/adk";
 import { BaseLlm, InputValidationError } from "@google/adk";
 import { getProviderConfig } from "../config.js";
 import type { BaseProviderConfig, ErrorMode } from "../types.js";
+import { LogCode, warnOnce } from "../utils/log.js";
 import { httpStatusOf, ProviderLlmError } from "./provider-llm-error.js";
+
+/**
+ * Whether `model` matches one of `patterns` on the whole name, the way ADK's
+ * `LLMRegistry.resolve` matches: each pattern is wrapped as `^(?:source)$`
+ * with its own flags. `undefined` patterns accept any model.
+ */
+function matchesModelPatterns(
+  model: string,
+  patterns: readonly (string | RegExp)[] | undefined,
+): boolean {
+  if (patterns === undefined) return true;
+  return patterns.some((pattern) =>
+    new RegExp(
+      `^(?:${pattern instanceof RegExp ? pattern.source : pattern})$`,
+      pattern instanceof RegExp ? pattern.flags : undefined,
+    ).test(model),
+  );
+}
 
 /**
  * Abstract base class for all LLM providers in adk-llm-bridge.
@@ -102,6 +121,41 @@ export abstract class BaseProviderLlm extends BaseLlm {
     };
     this.maybeAppendUserContent(request);
     return request;
+  }
+
+  /**
+   * The model id to send for a request.
+   *
+   * @remarks
+   * ADK sets `llmRequest.model` to the agent's model (this instance's
+   * `model`), and a `beforeModelCallback` or plugin may rewrite it. The
+   * rewrite is honored only when the id is one this provider accepts: it
+   * matches one of `patterns` on the whole name, as ADK's `LLMRegistry`
+   * matches (`^(?:pattern)$`). A prefixed id (`openai/gpt-4o` on OpenAI) or
+   * another provider's id (`gpt-4o` on Anthropic) is never sent: this
+   * instance's own `model` is sent instead and a
+   * `[REQUEST_MODEL_IGNORED]` warning is logged once per process. A blank or
+   * missing `llmRequest.model` silently means this instance's `model`.
+   *
+   * @param llmRequest - The request from ADK.
+   * @param patterns - The provider's model patterns; `undefined` accepts any
+   *   non-blank id (a provider configured by hand, such as `CustomLlm`).
+   * @returns The id to put in the provider request.
+   */
+  protected requestModel(
+    llmRequest: LlmRequest,
+    patterns: readonly (string | RegExp)[] | undefined,
+  ): string {
+    const requested = llmRequest.model;
+    if (typeof requested !== "string" || !requested.trim()) return this.model;
+    if (requested === this.model) return this.model;
+    if (matchesModelPatterns(requested, patterns)) return requested;
+    warnOnce(
+      LogCode.REQUEST_MODEL_IGNORED,
+      `llmRequest.model ${JSON.stringify(requested)} is not a model id this ` +
+        `provider accepts; sending ${JSON.stringify(this.model)} instead.`,
+    );
+    return this.model;
   }
 
   /**

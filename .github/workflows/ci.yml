@@ -44,6 +44,9 @@ jobs:
 
   # Fake `.cmd` shims on PATH must never run: the CLI drivers refuse a batch
   # file (or report a missing binary) on Windows, under Bun and under Node.
+  # The `interpreter` + `entry` route runs a fake JavaScript entry through the
+  # native node.exe (the only interpreter accepted), under Bun and under Node,
+  # with a prompt cmd.exe would re-parse.
   # Only Windows-safe checks run here: the rest of the driver tests assume POSIX.
   windows-shims:
     name: windows shims (Bun and Node)
@@ -63,10 +66,10 @@ jobs:
         with:
           bun-version: 1.4.4
       - run: bun install --frozen-lockfile
-      - name: Fake .cmd shims under Bun
-        run: bun test tests/agents/driver/windows-command.test.ts
+      - name: Fake .cmd shims and the interpreter + entry route under Bun
+        run: bun test tests/agents/driver/windows-command.test.ts tests/agents/driver/cli-interpreter-entry.test.ts
       - run: bun run build
-      - name: Fake .cmd shims under Node
+      - name: Fake .cmd shims and the interpreter + entry route under Node
         run: node scripts/windows-shim-smoke.mjs
 
   # Installs the packed tarball with npm into an empty project, which pulls in

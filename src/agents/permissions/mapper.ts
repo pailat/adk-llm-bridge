@@ -10,7 +10,8 @@ import type {
  *
  * @param policy - Policy to translate.
  * @returns Flags for the policy's mode, plus `network` (`true` only for
- * `allowNetwork: true`) and `paths` copied from `allowedPaths`. An unknown
+ * `allowNetwork: true`), `paths` copied from `allowedPaths` and `readPaths`
+ * copied from `readPaths` (when set). An unknown
  * mode maps to the read-only flags.
  */
 export function mapPermissionPolicyToFlags(
@@ -19,6 +20,7 @@ export function mapPermissionPolicyToFlags(
   const common = {
     network: networkAllowed(policy),
     paths: policy.allowedPaths,
+    ...(policy.readPaths ? { readPaths: policy.readPaths } : {}),
   };
 
   switch (policy.mode) {

@@ -14,6 +14,7 @@ import {
   WORKFLOW_CHECKPOINT_SCHEMA_VERSION,
   type WorkflowCheckpointV1,
   type WorkflowStepResumeReason,
+  workflowStepResultFromCheckpoint,
 } from "./schema.js";
 
 /** Input to {@link createWorkflowCheckpoint}. */
@@ -183,7 +184,9 @@ export type WorkflowStepResolution =
  * waiting step of this execution.
  * @returns The resolution for the step.
  * @throws {@link WorkflowError} with code `WORKFLOW_STEP_MISMATCH` when the
- * saved step used a different agent, agent revision or input;
+ * saved step used a different agent, agent revision or input (details: the
+ * saved and current agent name, revision and input hash, and the saved
+ * step's `savedStatus` and `savedAttempts`);
  * `WORKFLOW_EXECUTION_ERROR` for a completed step without a result or a failed
  * step without a recorded error; `WORKFLOW_INDETERMINATE_STEP` for a `running`
  * or `interrupted` step that cannot be re-run safely (an `interrupted` step
@@ -215,6 +218,8 @@ export function resolveWorkflowStep(
         agentRevision: step.agentRevision,
         savedInputHash: saved.inputHash,
         inputHash,
+        savedStatus: saved.status,
+        savedAttempts: saved.attempts,
       },
     );
   }
@@ -228,7 +233,10 @@ export function resolveWorkflowStep(
     }
     return {
       action: "replay",
-      result: { ...saved.result, replayed: true },
+      result: {
+        ...workflowStepResultFromCheckpoint(saved.result),
+        replayed: true,
+      },
     };
   }
   if (saved.status === "waiting" && saved.interrupt) {

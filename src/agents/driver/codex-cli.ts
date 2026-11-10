@@ -19,9 +19,11 @@ import {
 } from "../runtime/error-classification.js";
 import {
   type CodexMcpLister,
+  codexApprovalsReviewerOverrides,
   codexMcpDisableOverrides,
   listCodexMcpServers,
 } from "./codex-mcp.js";
+import { resolveCliLaunch, validateLaunchConfig } from "./launch.js";
 import { collectTail, type LineSource, readLines } from "./lines.js";
 import {
   batchCommandRefusal,
@@ -50,15 +52,16 @@ import {
 import {
   assertNoPinnedArgOverride,
   type PinnedFlags,
-  resolveCliCommand,
   SubprocessJsonlDriver,
 } from "./subprocess-jsonl.js";
 
 /**
  * Flags and config keys the Codex CLI driver sets from the policy, or that
  * would widen it (a profile, writable directories, a different working
- * directory, feature switches). `args` may not pass them unless
- * `allowPolicyOverrideArgs` is set.
+ * root, feature switches, automatic approval, untrusted hooks, agent roles
+ * with their own config). `args` may not pass them unless
+ * `allowPolicyOverrideArgs` is set. Reviewed against the Codex version in
+ * {@link CODEX_CLI_PINNED_FLAGS_REVIEW}.
  */
 const CODEX_CLI_PINNED_FLAGS: PinnedFlags = {
   flags: [
@@ -67,11 +70,14 @@ const CODEX_CLI_PINNED_FLAGS: PinnedFlags = {
     "--ask-for-approval",
     "-a",
     "--full-auto",
+    "--approve-for-me",
     "--dangerously-bypass-approvals-and-sandbox",
+    "--dangerously-bypass-hook-trust",
     "--yolo",
     "--add-dir",
     "--cd",
     "-C",
+    "--worktree",
     "--profile",
     "-p",
     "--enable",
@@ -83,15 +89,38 @@ const CODEX_CLI_PINNED_FLAGS: PinnedFlags = {
     "sandbox_mode",
     "sandbox_workspace_write",
     "sandbox_permissions",
+    "default_permissions",
+    "permissions",
     "approval_policy",
+    "approvals_reviewer",
     "web_search",
     "tools",
     "mcp_servers",
     "features",
+    "agents",
     "profile",
     "profiles",
   ],
+  // Clap reads `-hs x` as `-h -s x`.
+  booleanShortFlags: ["-h", "-V"],
 };
+
+/**
+ * What the pinned `args` flags and config keys were last reviewed against:
+ * the `codex exec --help` of `reviewedCliVersion`, and the SDK release (with
+ * the `@openai/codex` version it bundles) installed at the time. A test
+ * compares these with the installed SDK and the peer range, so any bump
+ * fails until the list is reviewed again.
+ *
+ * @internal
+ */
+export const CODEX_CLI_PINNED_FLAGS_REVIEW = Object.freeze({
+  reviewedCliVersion: "0.167.0",
+  sdkPackage: "@openai/codex-sdk",
+  sdkPeerRange: ">=0.167.0 <0.168",
+  reviewedSdkVersion: "0.167.0",
+  reviewedBundledCliVersion: "0.167.0",
+});
 
 /** Warning code of a stderr line from a Codex CLI run that exited 0. */
 const CODEX_CLI_STDERR = "CODEX_CLI_STDERR";
@@ -149,6 +178,51 @@ export interface CodexCliDriverConfig {
    */
   command?: string;
   /**
+   * Runs the CLI as `<interpreter> <entry> <flags>` instead of `command`, for
+   * a CLI that ships as a JavaScript package (Gemini CLI on Windows, where
+   * the npm `.cmd` shim is refused). Set it with `entry`, and leave
+   * `command` unset.
+   *
+   * @remarks
+   * Security invariants: with the built-in spawn a bare name is looked up
+   * like a bare `command` (no `PATH` entry inside the run's working
+   * directory or `allowedPaths`, no relative entry; on Windows a native
+   * `.exe`/`.com` only, never a `.cmd` or `.bat`). An absolute path is used
+   * as given, unless it is inside the run's working directory or an
+   * `allowedPaths` root, which refuses the run with
+   * `EXTERNAL_AGENT_INTERPRETER_UNSAFE`. A relative path is rejected by the
+   * constructor. Only Node is accepted: the interpreter's real path
+   * (symlinks resolved) must be named `node` (`node.exe` on Windows) and be a
+   * native executable (PE, Mach-O or ELF header; a script shim such as
+   * asdf's or nodenv's is not), or the run is refused with
+   * `EXTERNAL_AGENT_INTERPRETER_UNSAFE` before any spawn, because other
+   * interpreters (Bun, version-manager shims) load configuration from the
+   * run's working directory, which the agent writes. The interpreter starts
+   * in the entry's directory, never in the run's working directory, and a
+   * fixed `--import` preload changes into it before the entry runs; a
+   * custom spawn receives that `cwd`, the preload arguments and the
+   * `ADK_LLM_BRIDGE_AGENT_CWD` variable and must keep them.
+   *
+   * @defaultValue unset: the driver runs `command`
+   */
+  interpreter?: string;
+  /**
+   * The script `interpreter` runs, as an absolute path: the file the CLI
+   * package's `package.json` names under `bin`. It goes before every flag.
+   *
+   * @remarks
+   * Security invariant: a run whose entry is at or under its working
+   * directory, an `allowedPaths` root or a temp directory a runtime sandbox
+   * keeps writable (symlinks resolved) is refused with
+   * `EXTERNAL_AGENT_INTERPRETER_UNSAFE` before anything starts, with the
+   * built-in spawn or a custom one: the agent could rewrite it and run code
+   * on the host at the next run. With the built-in spawn a missing file is
+   * `MISSING_BINARY`.
+   *
+   * @defaultValue unset
+   */
+  entry?: string;
+  /**
    * Extra arguments placed after the policy flags and before the prompt.
    *
    * @remarks
@@ -157,10 +231,15 @@ export interface CodexCliDriverConfig {
    * `allowPolicyOverrideArgs` is set. That covers `--sandbox`/`-s`,
    * `--ask-for-approval`/`-a`, `--full-auto`,
    * `--dangerously-bypass-approvals-and-sandbox`, `--add-dir`, `--cd`/`-C`,
-   * `--profile`/`-p`, `--enable`, `--disable`, `--search`, and any
-   * `-c`/`--config` override of `sandbox_mode`, `sandbox_workspace_write`,
-   * `sandbox_permissions`, `approval_policy`, `web_search`, `tools`,
-   * `mcp_servers`, `features`, `profile` or `profiles`.
+   * `--profile`/`-p`, `--enable`, `--disable`, `--search`, `--approve-for-me`,
+   * `--dangerously-bypass-hook-trust`, `--worktree` (it moves the working
+   * root under `CODEX_HOME`), and any `-c`/`--config` override of
+   * `sandbox_mode`, `sandbox_workspace_write`, `sandbox_permissions`,
+   * `default_permissions`, `permissions`, `approval_policy`,
+   * `approvals_reviewer`, `web_search`, `tools`, `mcp_servers`, `features`,
+   * `agents` (agent roles load their own config files), `profile` or
+   * `profiles`. A cluster of one-letter flags is split first (`-hs x` is
+   * `-h -s x`).
    */
   args?: readonly string[];
   /**
@@ -177,7 +256,8 @@ export interface CodexCliDriverConfig {
    * With the built-in spawn a bare `command` is looked up on the child's
    * `PATH`, skipping every entry inside the run's working directory or
    * `allowedPaths` (see the class remarks). A custom spawn receives `command`
-   * as given and does its own lookup.
+   * (or `interpreter`, with `entry` as the first argument) as given and does
+   * its own lookup.
    *
    * @defaultValue The built-in spawn, which works on Bun and Node.
    */
@@ -300,6 +380,7 @@ export class CodexCliDriver extends SubprocessJsonlDriver {
    */
   constructor(config: CodexCliDriverConfig = {}) {
     validateDriverConfig("CodexCliDriver", config);
+    validateLaunchConfig("CodexCliDriver", config);
     assertNoPinnedArgOverride(
       "CodexCliDriver",
       config.args,
@@ -308,7 +389,12 @@ export class CodexCliDriver extends SubprocessJsonlDriver {
     );
     super({
       providerId: CODEX_PROVIDER.id,
-      command: config.command ?? CODEX_PROVIDER.command ?? "codex",
+      command:
+        config.interpreter ??
+        config.command ??
+        CODEX_PROVIDER.command ??
+        "codex",
+      entry: config.entry,
       args: config.args,
     });
     this.#spawn = config.spawn ?? spawnSubprocess;
@@ -370,17 +456,24 @@ export class CodexCliDriver extends SubprocessJsonlDriver {
       yield* refuse(shellRefusal);
       return;
     }
-    const command = this.#builtInSpawn
-      ? resolveCliCommand(this.command, env, request)
-      : this.command;
-    if (command === undefined) {
-      yield* refuse(codexCliMissing());
+    const resolved = resolveCliLaunch({
+      command: this.command,
+      entry: this.entry,
+      env,
+      request,
+      builtInSpawn: this.#builtInSpawn,
+      missing: codexCliMissing,
+    });
+    if ("refusal" in resolved) {
+      yield* refuse(resolved.refusal);
       return;
     }
+    const { launch } = resolved;
     const mcp = await codexMcpDisableOverrides(request.permissions, {
-      command,
-      env,
-      cwd: request.workingDirectory,
+      command: launch.command,
+      ...(launch.prefix.length > 0 ? { prefixArgs: launch.prefix } : {}),
+      env: launch.env ? { ...env, ...launch.env } : env,
+      cwd: launch.cwd ?? request.workingDirectory,
       lister:
         this.#listMcpServers ??
         ((options) => listCodexMcpServers(options, this.#spawn)),
@@ -398,9 +491,9 @@ export class CodexCliDriver extends SubprocessJsonlDriver {
     const args = this.buildArgs(request, mcp.overrides);
     let child: CodexCliSubprocess;
     try {
-      child = this.#spawn(command, args, {
-        cwd: request.workingDirectory,
-        env,
+      child = this.#spawn(launch.command, [...launch.prefix, ...args], {
+        cwd: launch.cwd ?? request.workingDirectory,
+        env: launch.env ? { ...env, ...launch.env } : env,
       });
     } catch (error) {
       if (error instanceof BatchCommandRefusedError) {
@@ -661,7 +754,14 @@ async function* refusedRun(
 export function mapPolicyToCodexArgs(
   policy: ExternalAgentPermissionPolicy = { mode: "read-only" },
 ): readonly string[] {
-  return [...codexModeArgs(policy), ...codexNetworkArgs(policy)];
+  return [
+    ...codexModeArgs(policy),
+    ...codexApprovalsReviewerOverrides(policy).flatMap((override) => [
+      "-c",
+      override,
+    ]),
+    ...codexNetworkArgs(policy),
+  ];
 }
 
 /**

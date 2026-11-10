@@ -19,8 +19,9 @@ const PERMISSION_MODES: ReadonlySet<string> = new Set([
  * @remarks
  * Only the known fields are copied, so extra or accessor-backed fields cannot
  * leak through. `mode` must be a known mode, `allowNetwork` a boolean,
- * `allowedPaths` an array of strings and `pathBounds` an array of string
- * arrays.
+ * `allowedPaths` and `readPaths` arrays of strings and `pathBounds` and
+ * `readPathBounds` arrays of string arrays. `readPaths` needs `allowedPaths`:
+ * without it paths are not restricted, so read roots would mean nothing.
  *
  * @param value - Anything.
  * @returns The copy; `null` when `value` is not a well-formed policy;
@@ -33,39 +34,59 @@ export function snapshotPermissionPolicy(
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return null;
   }
-  const { mode, allowNetwork, allowedPaths, pathBounds } = value as Record<
-    string,
-    unknown
-  >;
+  const {
+    mode,
+    allowNetwork,
+    allowedPaths,
+    readPaths,
+    pathBounds,
+    readPathBounds,
+  } = value as Record<string, unknown>;
   if (typeof mode !== "string" || !PERMISSION_MODES.has(mode)) return null;
   if (allowNetwork !== undefined && typeof allowNetwork !== "boolean") {
     return null;
   }
-  let paths: readonly string[] | undefined;
-  if (allowedPaths !== undefined) {
-    if (!Array.isArray(allowedPaths)) return null;
-    const copy = [...allowedPaths];
-    if (!copy.every((path) => typeof path === "string")) return null;
-    paths = Object.freeze(copy);
-  }
-  let bounds: readonly (readonly string[])[] | undefined;
-  if (pathBounds !== undefined) {
-    if (!Array.isArray(pathBounds)) return null;
-    const lists: (readonly string[])[] = [];
-    for (const list of [...pathBounds]) {
-      if (!Array.isArray(list)) return null;
-      const copy = [...list];
-      if (!copy.every((path) => typeof path === "string")) return null;
-      lists.push(Object.freeze(copy));
-    }
-    bounds = Object.freeze(lists);
-  }
+  const paths = snapshotPathList(allowedPaths);
+  const reads = snapshotPathList(readPaths);
+  const bounds = snapshotBoundLists(pathBounds);
+  const readBounds = snapshotBoundLists(readPathBounds);
+  if (paths === null || reads === null || bounds === null) return null;
+  if (readBounds === null) return null;
+  if (reads !== undefined && paths === undefined) return null;
   return Object.freeze({
     mode: mode as ExternalAgentPermissionPolicy["mode"],
     ...(allowNetwork !== undefined ? { allowNetwork } : {}),
     ...(paths ? { allowedPaths: paths } : {}),
+    ...(reads ? { readPaths: reads } : {}),
     ...(bounds ? { pathBounds: bounds } : {}),
+    ...(readBounds ? { readPathBounds: readBounds } : {}),
   });
+}
+
+/** A frozen copy of a string array; `null` when it is not one. */
+function snapshotPathList(
+  value: unknown,
+): readonly string[] | undefined | null {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) return null;
+  const copy = [...value];
+  if (!copy.every((path) => typeof path === "string")) return null;
+  return Object.freeze(copy);
+}
+
+/** A frozen copy of an array of string arrays; `null` when it is not one. */
+function snapshotBoundLists(
+  value: unknown,
+): readonly (readonly string[])[] | undefined | null {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) return null;
+  const lists: (readonly string[])[] = [];
+  for (const list of [...value]) {
+    const copy = snapshotPathList(list);
+    if (!copy) return null;
+    lists.push(copy);
+  }
+  return Object.freeze(lists);
 }
 
 /**
@@ -81,8 +102,9 @@ export function snapshotPermissionPolicy(
  * {@link snapshotPermissionPolicy}); `undefined` when there is no policy.
  * @throws InputValidationError (from `@google/adk`) when `value` is set but is
  * not a well-formed policy: an unknown `mode`, a non-boolean `allowNetwork`,
- * an `allowedPaths` that is not an array of strings or a `pathBounds` that is
- * not an array of string arrays.
+ * an `allowedPaths` or `readPaths` that is not an array of strings, a
+ * `pathBounds` or `readPathBounds` that is not an array of string arrays, or
+ * `readPaths` without `allowedPaths`.
  */
 export function assertPermissionPolicy(
   value: unknown,
@@ -91,7 +113,7 @@ export function assertPermissionPolicy(
   const policy = snapshotPermissionPolicy(value);
   if (policy === null) {
     throw new InputValidationError(
-      `${owner}: permissions must be { mode: "read-only" | "ask" | "workspace-write" | "full-access", allowNetwork?: boolean, allowedPaths?: string[], pathBounds?: string[][] }.`,
+      `${owner}: permissions must be { mode: "read-only" | "ask" | "workspace-write" | "full-access", allowNetwork?: boolean, allowedPaths?: string[], readPaths?: string[] (needs allowedPaths), pathBounds?: string[][], readPathBounds?: string[][] }.`,
     );
   }
   return policy;

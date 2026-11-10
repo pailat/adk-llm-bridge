@@ -10,6 +10,7 @@ import { networkAllowed } from "../permissions/network.js";
 import type { ExternalAgentPermissionPolicy } from "../permissions/schema.js";
 import { GEMINI_CLI_PROVIDER } from "../provider/gemini-cli.js";
 import type { AgentRuntimeCapabilities } from "../runtime/capabilities.js";
+import { resolveCliLaunch, validateLaunchConfig } from "./launch.js";
 import { collectTail, type LineSource, readLines } from "./lines.js";
 import {
   batchCommandRefusal,
@@ -35,10 +36,7 @@ import {
   spawnSubprocess,
   superviseSubprocess,
 } from "./spawn.js";
-import {
-  resolveCliCommand,
-  SubprocessJsonlDriver,
-} from "./subprocess-jsonl.js";
+import { SubprocessJsonlDriver } from "./subprocess-jsonl.js";
 
 /** A running `gemini` process, as the driver sees it. */
 export interface GeminiCliSubprocess {
@@ -95,12 +93,58 @@ export interface GeminiCliDriverConfig {
    */
   command?: string;
   /**
+   * Runs the CLI as `<interpreter> <entry> <flags>` instead of `command`, for
+   * a CLI that ships as a JavaScript package (Gemini CLI on Windows, where
+   * the npm `.cmd` shim is refused). Set it with `entry`, and leave
+   * `command` unset.
+   *
+   * @remarks
+   * Security invariants: with the built-in spawn a bare name is looked up
+   * like a bare `command` (no `PATH` entry inside the run's working
+   * directory or `allowedPaths`, no relative entry; on Windows a native
+   * `.exe`/`.com` only, never a `.cmd` or `.bat`). An absolute path is used
+   * as given, unless it is inside the run's working directory or an
+   * `allowedPaths` root, which refuses the run with
+   * `EXTERNAL_AGENT_INTERPRETER_UNSAFE`. A relative path is rejected by the
+   * constructor. Only Node is accepted: the interpreter's real path
+   * (symlinks resolved) must be named `node` (`node.exe` on Windows) and be a
+   * native executable (PE, Mach-O or ELF header; a script shim such as
+   * asdf's or nodenv's is not), or the run is refused with
+   * `EXTERNAL_AGENT_INTERPRETER_UNSAFE` before any spawn, because other
+   * interpreters (Bun, version-manager shims) load configuration from the
+   * run's working directory, which the agent writes. The interpreter starts
+   * in the entry's directory, never in the run's working directory, and a
+   * fixed `--import` preload changes into it before the entry runs; a
+   * custom spawn receives that `cwd`, the preload arguments and the
+   * `ADK_LLM_BRIDGE_AGENT_CWD` variable and must keep them.
+   *
+   * @defaultValue unset: the driver runs `command`
+   */
+  interpreter?: string;
+  /**
+   * The script `interpreter` runs, as an absolute path: the file the CLI
+   * package's `package.json` names under `bin`. It goes before every flag.
+   *
+   * @remarks
+   * Security invariant: a run whose entry is at or under its working
+   * directory, an `allowedPaths` root or a temp directory a runtime sandbox
+   * keeps writable (symlinks resolved) is refused with
+   * `EXTERNAL_AGENT_INTERPRETER_UNSAFE` before anything starts, with the
+   * built-in spawn or a custom one: the agent could rewrite it and run code
+   * on the host at the next run. With the built-in spawn a missing file is
+   * `MISSING_BINARY`.
+   *
+   * @defaultValue unset
+   */
+  entry?: string;
+  /**
    * Starts the process.
    *
    * With the built-in spawn a bare `command` is looked up on the child's
    * `PATH`, skipping every entry inside the run's working directory or
    * `allowedPaths` (see the class remarks). A custom spawn receives `command`
-   * as given and does its own lookup.
+   * (or `interpreter`, with `entry` as the first argument) as given and does
+   * its own lookup.
    *
    * @defaultValue The built-in spawn, which works on Bun and Node.
    */
@@ -212,9 +256,15 @@ export class GeminiCliDriver extends SubprocessJsonlDriver {
    */
   constructor(config: GeminiCliDriverConfig = {}) {
     validateDriverConfig("GeminiCliDriver", config);
+    validateLaunchConfig("GeminiCliDriver", config);
     super({
       providerId: GEMINI_CLI_PROVIDER.id,
-      command: config.command ?? GEMINI_CLI_PROVIDER.command ?? "gemini",
+      command:
+        config.interpreter ??
+        config.command ??
+        GEMINI_CLI_PROVIDER.command ??
+        "gemini",
+      entry: config.entry,
     });
     this.#spawn = config.spawn ?? spawnSubprocess;
     this.#builtInSpawn = config.spawn === undefined;
@@ -274,19 +324,25 @@ export class GeminiCliDriver extends SubprocessJsonlDriver {
       return;
     }
 
-    const command = this.#builtInSpawn
-      ? resolveCliCommand(this.command, env, request)
-      : this.command;
-    if (command === undefined) {
-      yield policyErrorEvent(geminiCliMissing());
+    const resolved = resolveCliLaunch({
+      command: this.command,
+      entry: this.entry,
+      env,
+      request,
+      builtInSpawn: this.#builtInSpawn,
+      missing: geminiCliMissing,
+    });
+    if ("refusal" in resolved) {
+      yield policyErrorEvent(resolved.refusal);
       yield { type: "completed", exitCode: 1, timestamp: Date.now() };
       return;
     }
+    const { launch } = resolved;
     let child: GeminiCliSubprocess;
     try {
-      child = this.#spawn(command, args, {
-        cwd: request.workingDirectory,
-        env,
+      child = this.#spawn(launch.command, [...launch.prefix, ...args], {
+        cwd: launch.cwd ?? request.workingDirectory,
+        env: launch.env ? { ...env, ...launch.env } : env,
       });
     } catch (error) {
       if (error instanceof BatchCommandRefusedError) {

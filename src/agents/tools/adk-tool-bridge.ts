@@ -48,10 +48,12 @@
 import {
   type AuthConfig,
   type BaseTool,
+  type BaseToolset,
   Context,
   type InvocationContext,
   isBaseTool,
   isBaseToolset,
+  isInModelTool,
   ReadonlyContext,
   type SingleAfterToolCallback,
   type SingleBeforeToolCallback,
@@ -59,6 +61,7 @@ import {
   type ToolUnion,
 } from "@google/adk";
 import { normalizeSchema } from "../../converters/schema.js";
+import { LogCode, WarningScope } from "../../utils/log.js";
 import { isPlainRecord } from "../event-titles.js";
 
 /** Prefix added to every exposed tool name. */
@@ -107,17 +110,55 @@ export interface PortableToolDeclaration {
   description: string;
   /** Standard JSON Schema (`type: "object"`) of the tool arguments. */
   inputSchema: Record<string, unknown>;
+  /**
+   * Standard JSON Schema of the tool's result, when its declaration has one
+   * (`responseJsonSchema`, or a Gemini-style `response` such as a
+   * `FunctionTool`'s `response` option, normalized).
+   *
+   * @remarks
+   * Informational: the built-in drivers do not advertise it. MCP requires a
+   * tool that declares an output schema to return structured content
+   * matching it, and an ADK tool's result is not checked against its
+   * declared schema.
+   */
+  outputSchema?: Record<string, unknown>;
 }
 
-/** A tool that was found but cannot be exposed. */
+/**
+ * A tool that was found but cannot be exposed.
+ *
+ * @remarks
+ * Reasons:
+ * - `in-model`: a tool the model runs itself (ADK's `GOOGLE_SEARCH`,
+ *   `URL_CONTEXT` and other built-in Gemini tools). An external runtime has
+ *   no such tool to call; give the agent the runtime's own equivalent.
+ *   Logged as `ADK_TOOL_IN_MODEL_SKIPPED`.
+ * - `request-processor`: a tool without a declaration that only changes the
+ *   model request in `processLlmRequest` (such as `PRELOAD_MEMORY`). External
+ *   runtimes build their own model requests, so it has no effect. Logged as
+ *   `ADK_TOOL_REQUEST_PROCESSING_SKIPPED`.
+ * - `no-declaration`: any other tool without a declaration; it does nothing
+ *   under an `LlmAgent` either, so it is not logged.
+ * - `not-a-tool`: an entry that is not an ADK tool or toolset (such as a
+ *   workflow node).
+ * - `toolset-failed`: a toolset's `getTools` threw; `cause` holds the error.
+ *   Logged as `ADK_TOOLSET_FAILED`.
+ *
+ * Each warning is logged once per tool for each bridge, that is once per
+ * `ExternalAgent` run.
+ */
 export interface SkippedTool {
-  /** Original tool name (or a placeholder for non-tools). */
+  /** Original tool name, the toolset class name, or a placeholder. */
   name: string;
   /** Why it was skipped. */
   reason:
-    | "no-declaration" // built-in / in-model tool: nothing to advertise
-    | "not-a-tool" // e.g. a workflow node in the agent's tool list
-    | "toolset-failed"; // a toolset could not list its tools
+    | "in-model"
+    | "request-processor"
+    | "no-declaration"
+    | "not-a-tool"
+    | "toolset-failed";
+  /** What a toolset's `getTools` threw; set for `toolset-failed`. */
+  cause?: unknown;
 }
 
 /** Subset of ADK `EventActions` produced by a tool call. */
@@ -268,11 +309,37 @@ function declarationFor(tool: BaseTool): PortableToolDeclaration | undefined {
           properties: {},
         });
 
+  const responseJsonSchema = declaration.responseJsonSchema;
+  const outputSchema =
+    responseJsonSchema &&
+    typeof responseJsonSchema === "object" &&
+    !Array.isArray(responseJsonSchema)
+      ? (responseJsonSchema as Record<string, unknown>)
+      : normalizeSchema(declaration.response);
+
   return {
     name: tool.name,
     description: declaration.description ?? tool.description ?? "",
     inputSchema,
+    ...(outputSchema ? { outputSchema } : {}),
   };
+}
+
+/**
+ * Whether `value` replaces the default `processLlmRequest` of ADK's
+ * `BaseTool` / `BaseToolset`.
+ *
+ * @remarks
+ * The default lives on the root class of the prototype chain. Comparing
+ * with that chain, not with this package's `BaseTool`, keeps the check right
+ * when the application loads its own copy of ADK.
+ */
+function overridesProcessLlmRequest(value: object): boolean {
+  let owner: object | null = value;
+  while (owner && !Object.hasOwn(owner, "processLlmRequest")) {
+    owner = Object.getPrototypeOf(owner);
+  }
+  return owner !== null && Object.getPrototypeOf(owner) !== Object.prototype;
 }
 
 function exposedName(original: string, taken: Set<string>): string {
@@ -465,9 +532,14 @@ export function toResponseObject(value: unknown): Record<string, unknown> {
  *
  * Toolsets are listed with `getTools(new ReadonlyContext(invocationContext))`,
  * so their filters and prefixes apply. Closing toolsets stays with their
- * owner. Entries that are not tools (such as workflow nodes) and tools without
- * a model-facing declaration (built-in or in-model tools) are reported in
- * {@link AdkToolBridge.skipped}.
+ * owner. Entries that are not tools (such as workflow nodes), in-model tools,
+ * tools without a model-facing declaration and toolsets whose `getTools`
+ * threw are reported in {@link AdkToolBridge.skipped} (see
+ * {@link SkippedTool}). `processLlmRequest` of tools and toolsets is never
+ * called, because the external runtime builds its own model requests: a
+ * declared tool that has one is exposed without it, and a warning names it.
+ * Warnings go through ADK's logger with a stable code, once per tool for each
+ * call.
  *
  * @param tools - The agent's tool list.
  * @param invocationContext - Context used to list toolsets.
@@ -489,23 +561,29 @@ export async function createAdkToolBridge(
   options: { filter?: (tool: BaseTool) => boolean } & AdkToolCallbacks = {},
 ): Promise<AdkToolBridge> {
   const skipped: SkippedTool[] = [];
-  const resolved: BaseTool[] = [];
+  const resolved: { tool: BaseTool; toolset?: BaseToolset }[] = [];
   const beforeCallbacks = options.beforeToolCallbacks ?? [];
   const afterCallbacks = options.afterToolCallbacks ?? [];
+  const warnings = new WarningScope();
 
   for (const entry of tools) {
     if (isBaseTool(entry)) {
-      resolved.push(entry);
+      resolved.push({ tool: entry });
     } else if (isBaseToolset(entry)) {
       try {
-        resolved.push(
-          ...(await entry.getTools(new ReadonlyContext(invocationContext))),
+        const listed = await entry.getTools(
+          new ReadonlyContext(invocationContext),
         );
-      } catch {
-        skipped.push({
-          name: entry.constructor.name,
-          reason: "toolset-failed",
-        });
+        resolved.push(...listed.map((tool) => ({ tool, toolset: entry })));
+      } catch (error) {
+        const name = entry.constructor.name;
+        skipped.push({ name, reason: "toolset-failed", cause: error });
+        // No subject: every failing toolset warns, each with its own error.
+        warnings.warnOnce(
+          LogCode.ADK_TOOLSET_FAILED,
+          `ADK toolset ${name} could not list its tools (${messageOf(error)}); none of its tools are exposed in this run.`,
+          `toolset#${skipped.length}`,
+        );
       }
     } else {
       skipped.push({
@@ -519,14 +597,48 @@ export async function createAdkToolBridge(
   const byName = new Map<string, BaseTool>();
   const taken = new Set<string>();
 
-  for (const tool of resolved) {
+  for (const { tool, toolset } of resolved) {
     if (options.filter && !options.filter(tool)) {
       continue;
     }
-    const declaration = declarationFor(tool);
-    if (!declaration) {
-      skipped.push({ name: tool.name, reason: "no-declaration" });
+    if (isInModelTool(tool)) {
+      skipped.push({ name: tool.name, reason: "in-model" });
+      warnings.warnOnce(
+        LogCode.ADK_TOOL_IN_MODEL_SKIPPED,
+        `ADK tool "${tool.name}" runs inside the Gemini model; an external agent runtime cannot call it, so it is not exposed. Use the runtime's own equivalent tool.`,
+        `tool:${tool.name}`,
+      );
       continue;
+    }
+    const declaration = declarationFor(tool);
+    const processesRequest = overridesProcessLlmRequest(tool);
+    if (!declaration) {
+      if (processesRequest) {
+        skipped.push({ name: tool.name, reason: "request-processor" });
+        warnings.warnOnce(
+          LogCode.ADK_TOOL_REQUEST_PROCESSING_SKIPPED,
+          `ADK tool "${tool.name}" only changes the model request (processLlmRequest), which an external agent runtime builds itself; it is not exposed and has no effect.`,
+          `tool:${tool.name}`,
+        );
+      } else {
+        skipped.push({ name: tool.name, reason: "no-declaration" });
+      }
+      continue;
+    }
+    if (processesRequest) {
+      warnings.warnOnce(
+        LogCode.ADK_TOOL_REQUEST_PROCESSING_SKIPPED,
+        `ADK tool "${tool.name}" is exposed, but its processLlmRequest (for example instructions it adds to the model request) does not run under an external agent runtime.`,
+        `tool:${tool.name}`,
+      );
+    }
+    if (toolset && overridesProcessLlmRequest(toolset)) {
+      const toolsetName = toolset.constructor.name;
+      warnings.warnOnce(
+        LogCode.ADK_TOOL_REQUEST_PROCESSING_SKIPPED,
+        `ADK toolset ${toolsetName} has a processLlmRequest (for example instructions it adds to the model request) that does not run under an external agent runtime; its tools are exposed without it.`,
+        `toolset:${toolsetName}`,
+      );
     }
     const name = exposedName(tool.name, taken);
     declarations.push({ ...declaration, name });

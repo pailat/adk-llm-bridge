@@ -25,7 +25,12 @@ import {
 import { parseJson } from "../../utils/json.js";
 import { isPlainRecord } from "../event-titles.js";
 import { networkAllowed } from "./network.js";
-import { canonicalPath, expandHome, isUnderAny } from "./paths.js";
+import {
+  canonicalPath,
+  expandHome,
+  isUnderAny,
+  policySetsPaths,
+} from "./paths.js";
 import type { ExternalAgentPermissionPolicy } from "./schema.js";
 
 /** A permission prompt raised by an external runtime for one tool call. */
@@ -200,6 +205,28 @@ const SEARCH_TOOLS = new Set([
   "search_file_content",
 ]);
 
+/**
+ * Tools that only read files, by their exact runtime names: Claude Code
+ * `Read`, `Glob`, `Grep`, `LS`, `NotebookRead` and Gemini CLI `read_file`,
+ * `read_many_files`, `list_directory`, `glob`, `grep`, `grep_search`,
+ * `search_file_content`. Only these may reach `readPaths`; any other name,
+ * another spelling or an MCP tool with the same suffix counts as a write.
+ */
+const READ_TOOLS: ReadonlySet<string> = new Set([
+  "Read",
+  "Glob",
+  "Grep",
+  "LS",
+  "NotebookRead",
+  "read_file",
+  "read_many_files",
+  "list_directory",
+  "glob",
+  "grep",
+  "grep_search",
+  "search_file_content",
+]);
+
 /** Container keys whose entries are scanned for {@link PATH_KEYS}. */
 const NESTED_KEYS = new Set(["changes", "edits", "files"]);
 
@@ -321,9 +348,15 @@ export function guardPermissionRequest(
 
 /**
  * The path rule of {@link guardPermissionRequest} alone: denies a request
- * whose path arguments leave `allowedPaths` or a `pathBounds` list.
+ * whose path arguments leave the roots the policy gives that tool.
  *
  * @remarks
+ * A read tool (an exact name from the known set) may target `allowedPaths`
+ * or `readPaths` and must stay inside each `readPathBounds` list (each
+ * `pathBounds` list when `readPathBounds` is unset). Every other tool, an
+ * unknown one included, counts as a write: it must stay inside
+ * `allowedPaths` and each `pathBounds` list.
+ *
  * A driver whose runtime auto-approves some file tools (so they never become
  * a permission request) runs this on every tool call, for example from a
  * `PreToolUse` hook.
@@ -341,20 +374,11 @@ export function guardRequestPaths(
   request: Pick<PermissionRequest, "toolName" | "input" | "blockedPath">,
   options: Pick<GuardPermissionOptions, "workingDirectory"> = {},
 ): PermissionDecision | undefined {
-  if (!policy?.allowedPaths && !policy?.pathBounds) {
+  if (!policySetsPaths(policy)) {
     return undefined;
   }
   const base = options.workingDirectory ?? process.cwd();
-  // Every root list is resolved now, when the request arrives, so a symlink
-  // changed after the policy was set is followed to where it points today.
-  const lists = [
-    ...(policy.allowedPaths ? [policy.allowedPaths] : []),
-    ...(policy.pathBounds ?? []),
-  ].map((list) =>
-    list
-      .map((root) => canonicalPath(root, base))
-      .filter((root): root is string => root !== undefined),
-  );
+  const lists = rootLists(policy, READ_TOOLS.has(request.toolName), base);
   for (const candidate of requestPaths(request)) {
     const path = canonicalPath(candidate, base);
     if (
@@ -368,6 +392,74 @@ export function guardRequestPaths(
     }
   }
   return undefined;
+}
+
+/**
+ * Whether a driver may approve a call without asking anyone because it only
+ * reads inside the policy's read roots: the policy sets `readPaths`, the tool
+ * is a known read tool, the call names at least one path, and every path
+ * passes {@link guardRequestPaths}.
+ *
+ * @remarks
+ * Claude Code reads inside its working directory and `additionalDirectories`
+ * without asking, but `readPaths` are not passed there (that would let its
+ * sandbox and edit rules treat them as writable). Its reads there arrive as
+ * permission prompts instead, and the driver answers them with this check, so
+ * a read root reads like an allowed root, in every mode.
+ *
+ * @param policy - Effective policy of the agent.
+ * @param request - The tool call; only `toolName`, `input` and `blockedPath`
+ * are read.
+ * @param options - Base directory for relative paths.
+ * @returns `true` only for such a read.
+ * @internal
+ */
+export function readPathsReadAllowed(
+  policy: ExternalAgentPermissionPolicy | undefined,
+  request: Pick<PermissionRequest, "toolName" | "input" | "blockedPath">,
+  options: Pick<GuardPermissionOptions, "workingDirectory"> = {},
+): boolean {
+  if (!policy?.readPaths || !READ_TOOLS.has(request.toolName)) {
+    return false;
+  }
+  if (requestPaths(request).length === 0) {
+    return false;
+  }
+  return guardRequestPaths(policy, request, options) === undefined;
+}
+
+/**
+ * The root lists a path must be inside, each resolved now (when the request
+ * arrives), so a symlink changed after the policy was set is followed to
+ * where it points today. A read tool gets `allowedPaths` plus `readPaths` as
+ * one list and `readPathBounds` (or `pathBounds`); any other tool
+ * `allowedPaths` and `pathBounds`.
+ */
+function rootLists(
+  policy: ExternalAgentPermissionPolicy,
+  read: boolean,
+  base: string,
+): string[][] {
+  const roots: (readonly string[])[] = [];
+  if (read) {
+    if (policy.allowedPaths || policy.readPaths) {
+      roots.push([...(policy.allowedPaths ?? []), ...(policy.readPaths ?? [])]);
+    }
+    roots.push(...(policy.readPathBounds ?? policy.pathBounds ?? []));
+  } else {
+    if (policy.allowedPaths) roots.push(policy.allowedPaths);
+    roots.push(...(policy.pathBounds ?? []));
+    if (!policy.allowedPaths && !policy.pathBounds) {
+      // Read rules alone (only reachable from a hand-built policy): a write
+      // has no root, so it is denied.
+      roots.push([]);
+    }
+  }
+  return roots.map((list) =>
+    list
+      .map((root) => canonicalPath(root, base))
+      .filter((root): root is string => root !== undefined),
+  );
 }
 
 /**

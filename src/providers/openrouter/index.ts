@@ -4,7 +4,7 @@ import {
 } from "../../core/create-provider.js";
 import { createRegisterFunction } from "../../core/create-register.js";
 import type {
-  OpenRouterConfig,
+  OpenRouterProviderConfig,
   OpenRouterRegisterOptions,
 } from "../../types.js";
 import { OPENROUTER_DEFINITION } from "./definition.js";
@@ -18,17 +18,17 @@ export { OPENROUTER_DEFINITION } from "./definition.js";
  * The API key is resolved from the instance config, then the global config,
  * then `OPENROUTER_API_KEY`.
  */
-export const OpenRouterLlm = createProviderClass<OpenRouterConfig>(
+export const OpenRouterLlm = createProviderClass<OpenRouterProviderConfig>(
   OPENROUTER_DEFINITION,
 );
 /**
  * Creates an ADK model backed by OpenRouter.
  *
  * @param model - Model id accepted by the provider.
- * @param options - Per-instance options: any `OpenRouterConfig` field except `model`.
+ * @param options - Per-instance options: any `OpenRouterProviderConfig` field except `model`.
  * @returns An ADK `BaseLlm` instance.
  */
-export const OpenRouter = createProviderFactory<OpenRouterConfig>(
+export const OpenRouter = createProviderFactory<OpenRouterProviderConfig>(
   OPENROUTER_DEFINITION,
 );
 

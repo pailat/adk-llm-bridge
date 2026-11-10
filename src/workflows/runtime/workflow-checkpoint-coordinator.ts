@@ -25,7 +25,10 @@ import type {
   WorkflowCheckpointStore,
   WorkflowCheckpointWrite,
 } from "../checkpoint/store.js";
-import { workflowCheckpointRevision } from "../checkpoint/store.js";
+import {
+  workflowCheckpointByteLength,
+  workflowCheckpointRevision,
+} from "../checkpoint/store.js";
 import type {
   WorkflowSerializedError,
   WorkflowStep,
@@ -35,11 +38,36 @@ import type {
 } from "../contracts.js";
 import { WorkflowError } from "../contracts.js";
 import type { WorkflowDefinition } from "../definition.js";
+import type { WorkflowCheckpointSizeContributor } from "../events.js";
 import {
   isRememberedLegacyDigest,
   legacyDigest,
   resolveStoredDigest,
 } from "../internal/canonical-hash.js";
+import {
+  enrichCheckpointSizeError,
+  isCheckpointSizeSaveError,
+  largestCheckpointContributors,
+  reachesCheckpointSizeWarning,
+} from "./checkpoint-size.js";
+
+/**
+ * A saved checkpoint that reached the size warning threshold.
+ *
+ * @internal
+ */
+export interface WorkflowCheckpointSizeWarning {
+  /** Key of the checkpoint. */
+  checkpointKey: string;
+  /** Step whose transition triggered the save, if any. */
+  stepId?: string;
+  /** UTF-8 JSON size of the saved checkpoint. */
+  bytes: number;
+  /** The store's limit. */
+  maxBytes: number;
+  /** Largest parts of the checkpoint, largest first. */
+  largestContributors: WorkflowCheckpointSizeContributor[];
+}
 
 /**
  * Dependencies and options for {@link WorkflowCheckpointCoordinator}.
@@ -65,6 +93,14 @@ export interface WorkflowCheckpointCoordinatorConfig {
   onWrite: (
     write: WorkflowCheckpointWrite,
     stepId?: string,
+  ) => void | Promise<void>;
+  /**
+   * Called once per coordinator, after `onWrite`, for the first saved
+   * checkpoint that reaches 80% of the store's `maxCheckpointBytes`. Never
+   * called for a store that does not expose the limit.
+   */
+  onSizeWarning?: (
+    warning: WorkflowCheckpointSizeWarning,
   ) => void | Promise<void>;
 }
 
@@ -95,6 +131,7 @@ export class WorkflowCheckpointCoordinator {
   #checkpoint?: WorkflowCheckpointV1;
   #revision: WorkflowCheckpointRevision | null | undefined;
   #tail: Promise<void> = Promise.resolve();
+  #sizeWarned = false;
 
   constructor(config: WorkflowCheckpointCoordinatorConfig) {
     this.#config = config;
@@ -213,9 +250,14 @@ export class WorkflowCheckpointCoordinator {
    * as running when it will execute.
    *
    * @param step - Step about to run.
+   * @param admit - Called with the resolution before anything is persisted; a
+   * throw rejects the step and leaves the checkpoint unchanged.
    * @returns The input hash and the chosen resolution.
    */
-  async prepareStep(step: WorkflowStep): Promise<PreparedWorkflowStep> {
+  async prepareStep(
+    step: WorkflowStep,
+    admit?: (resolution: WorkflowStepResolution) => void,
+  ): Promise<PreparedWorkflowStep> {
     const currentHash = await hashWorkflowInput(step.input);
     return this.#exclusive(async () => {
       const checkpoint = this.checkpoint();
@@ -229,6 +271,7 @@ export class WorkflowCheckpointCoordinator {
         retryFailed: this.#config.retryFailedSteps,
         answerTurn: this.#config.answerTurn,
       });
+      admit?.(resolution);
       if (resolution.action === "execute") {
         const candidate = withWorkflowStepRunning(
           checkpoint,
@@ -380,18 +423,54 @@ export class WorkflowCheckpointCoordinator {
   ): Promise<void> {
     const durableCandidate = toDurableWorkflowCheckpoint(candidate);
     const revision = await workflowCheckpointRevision(durableCandidate);
-    const write = await this.#config.store.save({
-      context: this.#config.context,
-      checkpoint: durableCandidate,
-      expectedRevision,
-      revision,
-    });
+    let write: WorkflowCheckpointWrite;
+    try {
+      write = await this.#config.store.save({
+        context: this.#config.context,
+        checkpoint: durableCandidate,
+        expectedRevision,
+        revision,
+      });
+    } catch (caught) {
+      if (isCheckpointSizeSaveError(caught)) {
+        throw enrichCheckpointSizeError(caught, durableCandidate, stepId);
+      }
+      throw caught;
+    }
 
     // A successful store write is the commit boundary. The notification hook
     // may fail, but it cannot roll back the durable checkpoint or its revision.
     this.#checkpoint = durableCandidate;
     this.#revision = revision;
     await this.#config.onWrite(write, stepId);
+    await this.#warnOnSize(write.checkpointKey, durableCandidate, stepId);
+  }
+
+  async #warnOnSize(
+    checkpointKey: string,
+    checkpoint: WorkflowCheckpointV1,
+    stepId: string | undefined,
+  ): Promise<void> {
+    const maxBytes = this.#config.store.maxCheckpointBytes;
+    if (
+      this.#sizeWarned ||
+      !this.#config.onSizeWarning ||
+      typeof maxBytes !== "number" ||
+      !Number.isSafeInteger(maxBytes) ||
+      maxBytes <= 0
+    ) {
+      return;
+    }
+    const bytes = workflowCheckpointByteLength(checkpoint);
+    if (!reachesCheckpointSizeWarning(bytes, maxBytes)) return;
+    this.#sizeWarned = true;
+    await this.#config.onSizeWarning({
+      checkpointKey,
+      ...(stepId === undefined ? {} : { stepId }),
+      bytes,
+      maxBytes,
+      largestContributors: largestCheckpointContributors(checkpoint),
+    });
   }
 
   async #exclusive<T>(operation: () => Promise<T>): Promise<T> {

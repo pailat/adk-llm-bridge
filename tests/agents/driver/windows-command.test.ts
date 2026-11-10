@@ -609,7 +609,7 @@ describe("the CLI drivers on Windows with only a .cmd shim on PATH", () => {
       "gemini",
       () => new GeminiCliDriver({ spawn: spawn as never }),
       true,
-      /process\.execPath/,
+      /`interpreter`.*`entry`/,
     ],
     [
       "claude",

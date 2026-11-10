@@ -29,10 +29,10 @@
  */
 
 import type {
+  AIGatewayRegisterOptions,
   AnthropicRegisterOptions,
   OpenAIRegisterOptions,
   OpenRouterRegisterOptions,
-  RegisterOptions,
   XAIRegisterOptions,
 } from "./types.js";
 
@@ -42,7 +42,7 @@ import type {
  * @internal
  */
 type ProviderConfigMap = {
-  "ai-gateway": RegisterOptions;
+  "ai-gateway": AIGatewayRegisterOptions;
   openrouter: OpenRouterRegisterOptions;
   openai: OpenAIRegisterOptions;
   xai: XAIRegisterOptions;
@@ -177,7 +177,7 @@ export function resetAllConfigs(): void {
  * setProviderConfig("ai-gateway", { apiKey: "..." });
  * ```
  */
-export function setConfig(options: RegisterOptions): void {
+export function setConfig(options: AIGatewayRegisterOptions): void {
   setProviderConfig("ai-gateway", options);
 }
 
@@ -189,7 +189,7 @@ export function setConfig(options: RegisterOptions): void {
  * @deprecated Use {@link getProviderConfig | getProviderConfig("ai-gateway")} instead.
  * This function will be removed in a future major version.
  */
-export function getConfig(): Readonly<RegisterOptions> {
+export function getConfig(): Readonly<AIGatewayRegisterOptions> {
   return getProviderConfig("ai-gateway") ?? {};
 }
 

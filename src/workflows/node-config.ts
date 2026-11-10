@@ -1,4 +1,5 @@
 import {
+  type BaseAgent,
   type BaseAgentConfig,
   InvocationContext,
   type NodeContext,
@@ -14,17 +15,29 @@ import {
  * same execution (same invocation id): completed steps replay and steps whose
  * last attempt failed run again (see `retryFailedSteps`). `rerunOnResume`
  * defaults to `true` here (ADK's default is `false`) because a step waiting for
- * input is resumed by re-entering the workflow.
+ * input is resumed by re-entering the workflow. `waitForOutput` (ADK's join
+ * semantics: wait until every predecessor that could trigger the node has
+ * finished) is forwarded as is.
+ *
+ * The agent fields of ADK's `BaseAgentConfig` are accepted too and behave as
+ * in any ADK agent: `beforeAgentCallback` and `afterAgentCallback` run around
+ * the whole workflow (a before callback that returns content skips it), and
+ * `parentAgent` is the agent's parent (normally set by the parent agent that
+ * lists it in `subAgents`).
  */
 export type WorkflowNodeConfig = Pick<
   BaseAgentConfig,
   | "timeout"
   | "retryConfig"
   | "rerunOnResume"
+  | "waitForOutput"
   | "inputSchema"
   | "outputSchema"
   | "stateSchema"
   | "isolationScope"
+  | "beforeAgentCallback"
+  | "afterAgentCallback"
+  | "parentAgent"
 > & {
   /**
    * Re-execute steps whose last attempt failed or was interrupted when the
@@ -46,32 +59,33 @@ export type WorkflowNodeConfig = Pick<
 };
 
 /**
- * Picks the node settings to forward to the `BaseAgent` constructor.
+ * Builds the config a workflow agent passes to the `BaseAgent` constructor.
  *
+ * @remarks
+ * The whole config is forwarded, not only the fields ADK reads: `BaseAgent`
+ * stores it, and `clone()` rebuilds the agent by calling the concrete
+ * constructor with that stored config, so the definition and every adapter
+ * must be in it.
+ *
+ * @param config - The workflow agent's config.
+ * @param defaults - The `description` to use when the config has none.
+ * @returns The config for `super()`.
  * @internal
  */
-export function pickWorkflowNodeConfig(
-  config: WorkflowNodeConfig,
-): Omit<WorkflowNodeConfig, "retryFailedSteps"> {
-  const {
-    timeout,
-    retryConfig,
-    rerunOnResume,
-    inputSchema,
-    outputSchema,
-    stateSchema,
-    isolationScope,
-  } = config;
+export function workflowAgentBaseConfig<
+  T extends WorkflowNodeConfig & {
+    name: string;
+    description?: string;
+    subAgents?: BaseAgent[];
+  },
+>(config: T, defaults: { description?: string }): T {
   return {
-    timeout,
-    retryConfig,
+    ...config,
+    description: config.description ?? defaults.description,
+    subAgents: config.subAgents ?? [],
     // The agent resumes its own waiting steps, so ADK must re-enter it on
     // resume instead of treating the reply as the node's output.
-    rerunOnResume: rerunOnResume ?? true,
-    inputSchema,
-    outputSchema,
-    stateSchema,
-    isolationScope,
+    rerunOnResume: config.rerunOnResume ?? true,
   };
 }
 

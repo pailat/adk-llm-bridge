@@ -41,7 +41,7 @@ The TSDoc syntax of every `/** */` block in `src/` must parse without errors
  * @returns An ADK `BaseLlm` instance.
  * @throws {@link InputValidationError} when `model` is empty.
  */
-export function AIGateway(model: string, options?: AIGatewayConfig): BaseLlm;
+export function AIGateway(model: string, options?: AIGatewayProviderConfig): BaseLlm;
 ```
 
 ### Common TSDoc fixes

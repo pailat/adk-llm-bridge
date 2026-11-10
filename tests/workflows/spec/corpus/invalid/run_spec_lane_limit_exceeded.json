@@ -15,6 +15,7 @@
     "allowNetwork": false,
     "allowedTools": ["Read", "Edit", "Bash"],
     "allowedEnvNames": ["CI", "NODE_ENV"],
+    "allowedMcpProviders": [],
     "deniedPathPatterns": [
       ".env",
       ".env.*",

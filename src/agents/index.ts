@@ -25,7 +25,10 @@ export type { ClaudeAgentConfig } from "./claude-agent.js";
 export { CLAUDE_AGENT_DEFINITION, ClaudeAgent } from "./claude-agent.js";
 export type { CodexAgentConfig } from "./codex-agent.js";
 export { CODEX_AGENT_DEFINITION, CodexAgent } from "./codex-agent.js";
-export type { ClaudeAgentSdkDriverConfig } from "./driver/claude-agent-sdk.js";
+export type {
+  ClaudeAgentSdkDriverConfig,
+  ClaudeSessionStoreFlush,
+} from "./driver/claude-agent-sdk.js";
 export {
   CLAUDE_SESSION_STORE_MIRROR_ERROR,
   ClaudeAgentSdkDriver,
@@ -69,9 +72,11 @@ export type {
 export { GeminiCliDriver } from "./driver/gemini-cli.js";
 export type { ExternalAgentPolicyErrorCode } from "./driver/policy-errors.js";
 export {
+  EXTERNAL_AGENT_BACKGROUND_TASK_PENDING,
   EXTERNAL_AGENT_BATCH_COMMAND_REFUSED,
   EXTERNAL_AGENT_CREDENTIAL_UNSUPPORTED,
   EXTERNAL_AGENT_DEPENDENCY_MISSING,
+  EXTERNAL_AGENT_INTERPRETER_UNSAFE,
   EXTERNAL_AGENT_ISOLATION_VIOLATED,
   EXTERNAL_AGENT_MISSING_BINARY,
   EXTERNAL_AGENT_NETWORK_UNENFORCEABLE,
@@ -84,6 +89,7 @@ export type {
   ExternalAgentCompletedEvent,
   ExternalAgentErrorEvent,
   ExternalAgentEvent,
+  ExternalAgentModelUsage,
   ExternalAgentOutputEvent,
   ExternalAgentStartedEvent,
   ExternalAgentStateDeltaEvent,

@@ -180,6 +180,8 @@ describe("Codex CLI network flags", () => {
       "--sandbox",
       "workspace-write",
       "-c",
+      'approvals_reviewer="user"',
+      "-c",
       "sandbox_workspace_write.network_access=false",
       "-c",
       'web_search="disabled"',
@@ -385,6 +387,7 @@ describe("Codex host MCP servers under allowNetwork: false", () => {
       "mcp_servers.web-srv.enabled=false",
       "mcp_servers.docs_api.enabled=false",
       "mcp_servers.own.enabled=false",
+      'approvals_reviewer="user"',
     ]);
     expect(events.at(-1)).toMatchObject({ type: "completed", exitCode: 0 });
   });
@@ -413,7 +416,7 @@ describe("Codex host MCP servers under allowNetwork: false", () => {
     expect(events.at(-1)).toMatchObject({ type: "completed", exitCode: 1 });
   });
 
-  test("the SDK adds no overrides when the network is allowed", async () => {
+  test("the SDK adds no MCP disables when the network is allowed", async () => {
     const constructed: Array<Record<string, unknown>> = [];
     let listed = 0;
     class FakeCodex {
@@ -443,7 +446,10 @@ describe("Codex host MCP servers under allowNetwork: false", () => {
       }).run(request({ mode: "workspace-write", allowNetwork: true })),
     );
     expect(listed).toBe(0);
-    expect(constructed[0]?.configOverrides).toBeUndefined();
+    // Only the approvals reviewer pin, which every sandboxed mode carries.
+    expect(constructed[0]?.configOverrides).toEqual([
+      'approvals_reviewer="user"',
+    ]);
   });
 });
 

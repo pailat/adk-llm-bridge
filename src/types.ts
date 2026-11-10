@@ -97,7 +97,7 @@ export interface BaseProviderConfig {
  *
  * @example
  * ```typescript
- * const config: AIGatewayConfig = {
+ * const config: AIGatewayProviderConfig = {
  *   model: "anthropic/claude-sonnet-5.5",
  *   apiKey: process.env.AI_GATEWAY_API_KEY
  * };
@@ -105,7 +105,7 @@ export interface BaseProviderConfig {
  *
  * @see {@link BaseProviderConfig} for inherited options
  */
-export interface AIGatewayConfig extends BaseProviderConfig {}
+export interface AIGatewayProviderConfig extends BaseProviderConfig {}
 
 /**
  * Options every `register*()` function accepts. They are stored as the
@@ -141,7 +141,7 @@ export interface BaseRegisterOptions {
  * });
  * ```
  */
-export interface RegisterOptions extends BaseRegisterOptions {
+export interface AIGatewayRegisterOptions extends BaseRegisterOptions {
   /**
    * How a failed provider call is reported to ADK.
    *
@@ -260,7 +260,7 @@ export interface OpenRouterProviderPreferences {
  *
  * @example
  * ```typescript
- * const config: OpenRouterConfig = {
+ * const config: OpenRouterProviderConfig = {
  *   model: "anthropic/claude-sonnet-5.5",
  *   apiKey: process.env.OPENROUTER_API_KEY,
  *   siteUrl: "https://myapp.com",
@@ -275,7 +275,7 @@ export interface OpenRouterProviderPreferences {
  * @see {@link BaseProviderConfig} for inherited options
  * @see {@link OpenRouterProviderPreferences} for routing options
  */
-export interface OpenRouterConfig extends BaseProviderConfig {
+export interface OpenRouterProviderConfig extends BaseProviderConfig {
   /**
    * Your site URL for OpenRouter leaderboard rankings.
    *
@@ -374,10 +374,17 @@ export interface OpenRouterRegisterOptions extends BaseRegisterOptions {
  * Use this to connect any API that implements the OpenAI chat completions
  * interface, such as Ollama, LM Studio, vLLM, Azure OpenAI, or self-hosted models.
  *
+ * `baseURL` may be supplied explicitly or through `CUSTOM_LLM_BASE_URL`.
+ * `apiKey` is optional for unauthenticated local servers. `CUSTOM_LLM_API_KEY`
+ * is the credential of the `CUSTOM_LLM_BASE_URL` endpoint only: it is used
+ * when the base URL also comes from the environment, and never sent to an
+ * explicit `baseURL` (pass `apiKey` for that host). Explicit values, including
+ * an explicitly empty API key, take precedence over environment variables.
+ *
  * @example
  * ```typescript
  * // Ollama
- * const config: CustomLlmConfig = {
+ * const config: CustomProviderConfig = {
  *   name: "ollama",
  *   model: "llama3",
  *   baseURL: "http://localhost:11434/v1"
@@ -387,7 +394,7 @@ export interface OpenRouterRegisterOptions extends BaseRegisterOptions {
  * @example
  * ```typescript
  * // Azure OpenAI
- * const config: CustomLlmConfig = {
+ * const config: CustomProviderConfig = {
  *   name: "azure",
  *   model: "gpt-6.1-sol",
  *   baseURL: "https://my-resource.openai.azure.com/openai/deployments/gpt-6.1-sol",
@@ -399,7 +406,7 @@ export interface OpenRouterRegisterOptions extends BaseRegisterOptions {
  * @see {@link BaseProviderConfig} for inherited options
  * @see {@link createCustomLlm} for the factory function
  */
-export interface CustomLlmConfig extends BaseProviderConfig {
+export interface CustomProviderConfig extends BaseProviderConfig {
   /**
    * Provider name for identification in logs and error messages.
    *
@@ -816,6 +823,12 @@ export interface StreamAccumulator {
   toolCalls: Map<number, ToolCallAccumulator>;
 
   /**
+   * Model the provider reports on its chunks (the last non-empty `model`
+   * seen). Emitted as `modelVersion` on the final response.
+   */
+  model?: string;
+
+  /**
    * Token usage captured from the final OpenAI streaming chunk.
    *
    * Populated when `stream_options.include_usage` is enabled; emitted as
@@ -848,3 +861,43 @@ export interface StreamChunkResult {
    */
   isComplete: boolean;
 }
+
+// =============================================================================
+// Deprecated aliases
+// =============================================================================
+
+/**
+ * Former name of {@link AIGatewayProviderConfig}.
+ *
+ * @deprecated Use {@link AIGatewayProviderConfig}, the same type under the
+ * `<Provider>ProviderConfig` naming scheme. This alias stays until the next
+ * major version.
+ */
+export type AIGatewayConfig = AIGatewayProviderConfig;
+
+/**
+ * Former name of {@link AIGatewayRegisterOptions}.
+ *
+ * @deprecated Use {@link AIGatewayRegisterOptions}, the same type under the
+ * `<Provider>RegisterOptions` naming scheme. This alias stays until the next
+ * major version.
+ */
+export type RegisterOptions = AIGatewayRegisterOptions;
+
+/**
+ * Former name of {@link OpenRouterProviderConfig}.
+ *
+ * @deprecated Use {@link OpenRouterProviderConfig}, the same type under the
+ * `<Provider>ProviderConfig` naming scheme. This alias stays until the next
+ * major version.
+ */
+export type OpenRouterConfig = OpenRouterProviderConfig;
+
+/**
+ * Former name of {@link CustomProviderConfig}.
+ *
+ * @deprecated Use {@link CustomProviderConfig}, the same type under the
+ * `<Provider>ProviderConfig` naming scheme. This alias stays until the next
+ * major version.
+ */
+export type CustomLlmConfig = CustomProviderConfig;

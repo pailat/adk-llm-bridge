@@ -63,6 +63,8 @@ export const RUN_SPEC_LIMITS = Object.freeze({
   maxTotalAllowedPaths: 1_024,
   /** Most tool names for one agent. */
   maxTools: 64,
+  /** Most MCP provider ids for one agent. */
+  maxMcpProviders: 16,
   /** Most environment variable names in one spec. */
   maxEnvNames: 64,
   /** Most QA commands in one spec. */
@@ -213,6 +215,11 @@ const PROVIDER_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/u;
 const MODEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:+/@-]{0,255}$/u;
 const TOOL_NAME_PATTERN = /^[A-Za-z0-9_][A-Za-z0-9_.:/-]{0,127}$/u;
 const ENV_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/u;
+// An MCP provider id is a name the host resolves, never a location: ASCII
+// letters and digits in runs joined by one `-` or `_`. No `:`, `/`, `.`, `@`,
+// `%` or whitespace, so no URL, host, port, path, credential or header fits,
+// and no `__`, so `mcp__<id>__<tool>` names one provider only.
+const MCP_PROVIDER_ID_PATTERN = /^[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)*$/u;
 const EXTENSION_KEY_PATTERN = /^x-[a-z0-9]+(?:-[a-z0-9]+)*$/u;
 const PATH_PATTERN_PATTERN = /^[A-Za-z0-9._*~@+-]{1,128}$/u;
 const NO_CONTROL_CHARACTERS_PATTERN = /^\P{Cc}+$/u;
@@ -223,6 +230,8 @@ const providerId = () => z.string().min(1).max(64).regex(PROVIDER_ID_PATTERN);
 const modelId = () => z.string().min(1).max(256).regex(MODEL_PATTERN);
 const toolName = () => z.string().min(1).max(128).regex(TOOL_NAME_PATTERN);
 const envName = () => z.string().min(1).max(128).regex(ENV_NAME_PATTERN);
+const mcpProviderId = () =>
+  z.string().min(1).max(64).regex(MCP_PROVIDER_ID_PATTERN);
 /**
  * Number of Unicode code points in a string, the unit JSON Schema
  * `maxLength` counts. A lone surrogate counts as one.
@@ -391,12 +400,26 @@ export const RunSpecAgentSchema = z
         description:
           "Names of the tools the agent may use. Each must be in the host's tool allowlist; an empty list means no optional tool.",
       }),
+    mcp: z
+      .array(
+        mcpProviderId().clone().register(runSpecRegistry, {
+          description:
+            "Id of an MCP provider the host has configured. A name only: never a URL, a command, a header or a token.",
+        }),
+      )
+      .max(RUN_SPEC_LIMITS.maxMcpProviders)
+      .optional()
+      .clone()
+      .register(runSpecRegistry, {
+        description:
+          "Ids of the MCP providers the agent may use, each unique ignoring case and in the host's MCP provider allowlist. The host resolves each id to a server and its credentials. Absent or empty means no MCP provider.",
+      }),
   })
   .clone()
   .register(runSpecRegistry, {
     id: "RunSpecAgent",
     description:
-      "Agent of a lane: provider, model, permission mode, network access and tools. It carries no credential and no host handle.",
+      "Agent of a lane: provider, model, permission mode, network access, tools and MCP providers. It carries no credential and no host handle.",
   });
 
 /**
@@ -742,6 +765,7 @@ export const RUN_RULE_KEYS = [
   "allowNetwork",
   "allowedTools",
   "allowedEnvNames",
+  "allowedMcpProviders",
   "deniedPathPatterns",
   "allowedQaCommands",
   "requireQa",
@@ -846,6 +870,12 @@ const RULE_FIELDS = {
     description:
       "Environment variable names a spec may list. Compared exactly.",
   }),
+  allowedMcpProviders: ruleList(mcpProviderId())
+    .clone()
+    .register(runSpecRegistry, {
+      description:
+        "MCP provider ids a lane's agent may list. Compared exactly. An empty list allows none.",
+    }),
   deniedPathPatterns: ruleList(z.string().regex(PATH_PATTERN_PATTERN))
     .clone()
     .register(runSpecRegistry, {
@@ -1183,9 +1213,9 @@ export function readRuleSet<Schema extends z.ZodType>(
  * Overrides apply in order. For each rule an override names:
  *
  * - numeric caps: the smaller value;
- * - allowlists (including `allowedWorkflows`, compared by id and version, and
- *   `allowedTargetRefs`): the entries present in both lists, in the base
- *   order;
+ * - allowlists (including `allowedWorkflows`, compared by id and version,
+ *   `allowedTargetRefs` and `allowedMcpProviders`): the entries present in
+ *   both lists, in the base order;
  * - `deniedPathPatterns`: the entries of both lists, base first;
  * - `allowNetwork`: true only when both are true;
  * - `requireQa`: true when either is true.
@@ -1257,6 +1287,7 @@ function mergeCheckedRunRules(
     allowedPermissionModes: [...base.allowedPermissionModes],
     allowedTools: [...base.allowedTools],
     allowedEnvNames: [...base.allowedEnvNames],
+    allowedMcpProviders: [...base.allowedMcpProviders],
     deniedPathPatterns: [...base.deniedPathPatterns],
     allowedQaCommands: base.allowedQaCommands.map((command) => [...command]),
     allowedPublishKinds: [...base.allowedPublishKinds],
@@ -1325,6 +1356,12 @@ function mergeCheckedRunRules(
       "allowedEnvNames",
       merged.allowedEnvNames,
       override.allowedEnvNames,
+      String,
+    );
+    merged.allowedMcpProviders = narrow(
+      "allowedMcpProviders",
+      merged.allowedMcpProviders,
+      override.allowedMcpProviders,
       String,
     );
     merged.allowedPublishKinds = narrow(
@@ -1528,8 +1565,8 @@ export function layerRunSpecLanes(
  *   project root with {@link runSpecWorkspacePath}, becomes an owned path
  *   with scope `subtree`; `mayCreateUnder` and `acceptance` are empty.
  * - `waves`: the waves passed in, normally from {@link layerRunSpecLanes}.
- * - `invariants`: the budget, the denied paths, and human approval when the
- *   spec publishes.
+ * - `invariants`: the budget, the denied paths, the MCP providers, and human
+ *   approval when the spec publishes.
  * - `reservedPaths`: empty.
  *
  * The provider, model, permission mode, tools, steps, gates and budget have
@@ -1576,6 +1613,13 @@ export function runSpecPlanTopology(
       invariantId: "run-spec.denied-paths",
       description:
         "No write lands on a path with a segment that matches a denied path pattern of the rule set or is shaped like a Windows short name, even inside an owned subtree.",
+      appliesTo: "workflow",
+      enforcedBy: "host",
+    },
+    {
+      invariantId: "run-spec.mcp-providers",
+      description:
+        "Each agent connects only to the MCP servers the host resolves from the provider ids of its lane, and to none when the lane lists none. No server location or credential comes from the spec.",
       appliesTo: "workflow",
       enforcedBy: "host",
     },

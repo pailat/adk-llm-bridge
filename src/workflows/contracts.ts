@@ -220,6 +220,14 @@ export type WorkflowStepOutcome = WorkflowStepResult | WorkflowStepFailure;
 /**
  * How `WorkflowContext.parallel` reacts to a failing step: `fail-fast` rejects
  * on the first failure, `all-settled` returns every outcome.
+ *
+ * @remarks
+ * In `fail-fast` mode the first failure aborts the remaining steps. A step
+ * still in flight is checkpointed `interrupted` with `WORKFLOW_ABORTED`
+ * (`details.reasonCode` is the failing step's code, `details.failedStepId` its
+ * id), so a resume re-runs it only with `retryFailedSteps` or
+ * `resumePolicy: "retry"`; otherwise it fails with
+ * `WORKFLOW_INDETERMINATE_STEP`. A step that had not started is not recorded.
  */
 export type WorkflowParallelFailureMode = "fail-fast" | "all-settled";
 
@@ -239,25 +247,46 @@ export interface WorkflowParallelOptions {
  */
 export interface WorkflowExecutionLimits {
   /**
-   * Maximum number of steps one turn of the workflow may invoke.
+   * Maximum number of steps one turn of the workflow may execute.
    *
    * @remarks
-   * Steps replayed from the checkpoint count too. A resumed turn replays every
-   * recorded step through the handler, so in effect the limit bounds every
-   * step the execution has ever run. When a resume fails with
-   * `WORKFLOW_LIMIT_EXCEEDED`, raise this limit and resume the same execution
-   * id. The error details carry `limit`, `stepId` and `replayedSteps`, for
-   * handler and script workflows alike, and the execution summary reports
-   * `steps` and `replayedSteps`. A script workflow also bounds its yielded
-   * messages at twice this limit plus one, so a raised limit raises that bound
-   * too.
+   * A step counts when its agent runs in this turn, including a waiting step
+   * that continues with the turn's answer and a step a `beforeStep` or
+   * `beforeAttempt` hook answers (admitted before the hook runs). Steps
+   * replayed from the checkpoint do not count here;
+   * {@link WorkflowExecutionLimits.maxReplayedSteps} bounds them. The check
+   * runs before the step is saved `running` or its agent starts, also inside
+   * `ctx.parallel`. On `WORKFLOW_LIMIT_EXCEEDED` the details carry `limit`,
+   * `limitName`, `stepId`, `executedSteps`, `replayedSteps`, `maxSteps` and
+   * `maxReplayedSteps`, for handler and script workflows alike.
    */
   maxSteps?: number;
+  /**
+   * Maximum number of steps one turn of the workflow may replay without
+   * executing their agent.
+   *
+   * @remarks
+   * A resumed turn replays every step the execution recorded before, so this
+   * bound grows with the life of the run, and it guards against a script that
+   * loops over recorded steps. When a resume fails with
+   * `WORKFLOW_LIMIT_EXCEEDED` and `limitName: "maxReplayedSteps"`, raise it and
+   * resume the same execution id. A script workflow bounds its yielded messages
+   * at twice the sum of both step limits plus one.
+   *
+   * @defaultValue Ten times the effective `maxSteps` (1000 with the default
+   * `maxSteps`). {@link DEFAULT_WORKFLOW_EXECUTION_LIMITS} lists the value for
+   * the default `maxSteps`.
+   */
+  maxReplayedSteps?: number;
   /** Maximum parallel steps in flight. */
   maxConcurrency?: number;
   /** Upper bound for `WorkflowRetryPolicy.maxAttempts`. */
   maxAttemptsPerStep?: number;
-  /** Wall-clock budget for the whole execution, in milliseconds. */
+  /**
+   * Time budget for the whole execution, in milliseconds, measured by a
+   * runtime timer. A timer does not fire while the host sleeps, and whether
+   * time asleep counts toward it depends on the runtime and operating system.
+   */
   timeoutMs?: number;
   /** Sandboxed runtime CPU budget per uninterrupted guest turn. */
   cpuTimeMs?: number;
@@ -276,6 +305,7 @@ export const DEFAULT_WORKFLOW_EXECUTION_LIMITS: Readonly<
   Required<WorkflowExecutionLimits>
 > = Object.freeze({
   maxSteps: 100,
+  maxReplayedSteps: 1000,
   maxConcurrency: 4,
   maxAttemptsPerStep: 1,
   timeoutMs: 5 * 60 * 1000,

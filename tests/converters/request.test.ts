@@ -1683,6 +1683,30 @@ describe("convertRequest", () => {
         expect(msg.content).toBe("answer");
       });
 
+      it("sends no empty assistant message for a signature-only part outside OpenRouter", () => {
+        // A planner (PlanReActPlanner) clears `thought` and `text`, leaving a
+        // part with only a thoughtSignature. Without OpenRouter reasoning
+        // details nothing is pushed for that turn.
+        for (const options of [
+          undefined,
+          { reasoning: { style: "openai-effort" as const } },
+        ]) {
+          const request = createLlmRequest({
+            contents: [
+              { role: "user", parts: [{ text: "hi" }] },
+              {
+                role: "model",
+                parts: [{ thoughtSignature: JSON.stringify(details) }],
+              },
+              { role: "user", parts: [{ text: "again" }] },
+            ],
+          });
+          const { messages } = convertRequest(request, "gpt-5", options);
+          expect(messages.map((m) => m.role)).toEqual(["user", "user"]);
+          expect(messages.some((m) => m.role === "assistant")).toBe(false);
+        }
+      });
+
       it("round-trips an encrypted-only thought part that has no text", () => {
         const encrypted = [
           { type: "reasoning.encrypted", data: "gAAAA-opaque", index: 0 },

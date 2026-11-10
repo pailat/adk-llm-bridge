@@ -26,6 +26,7 @@ import {
   isProcessAlive,
 } from "../internal/error-support.js";
 import { hasErrorCode, isRecord } from "../internal/guards.js";
+import { monotonicNow } from "../internal/monotonic-clock.js";
 import type { WorkflowCheckpointV1 } from "./schema.js";
 import {
   isWorkflowCheckpointV1,
@@ -195,6 +196,11 @@ export class FileSystemWorkflowCheckpointStore
       "maxCheckpointBytes",
       options.maxCheckpointBytes ?? DEFAULT_WORKFLOW_CHECKPOINT_MAX_BYTES,
     );
+  }
+
+  /** Largest checkpoint, in UTF-8 JSON bytes, that this store saves or loads. */
+  get maxCheckpointBytes(): number {
+    return this.#maxCheckpointBytes;
   }
 
   /**
@@ -367,7 +373,7 @@ export class FileSystemWorkflowCheckpointStore
     checkpointKey: string,
   ): Promise<HeldCheckpointLock> {
     const lockPath = `${checkpointPath}.lock`;
-    const startedAt = Date.now();
+    const startedAt = monotonicNow();
     await cleanupAbandonedCandidates(lockPath, checkpointKey);
     while (true) {
       throwIfLockWaitAborted(this.#signal, checkpointKey);
@@ -414,7 +420,7 @@ export class FileSystemWorkflowCheckpointStore
       if (await recoverAbandonedLock(lockPath, checkpointKey)) {
         continue;
       }
-      if (Date.now() - startedAt >= this.#lockTimeoutMs) {
+      if (monotonicNow() - startedAt >= this.#lockTimeoutMs) {
         throw checkpointFileError(
           "checkpoint_lock_timeout",
           checkpointKey,

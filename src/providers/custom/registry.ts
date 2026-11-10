@@ -7,17 +7,14 @@
  */
 
 import { InputValidationError, LLMRegistry } from "@google/adk";
-import {
-  CustomLlm,
-  type CustomLlmProviderConfig,
-  resolveCustomConfig,
-} from "./custom-llm.js";
+import type { CustomProviderConfig } from "../../types.js";
+import { CustomLlm, resolveCustomConfig } from "./custom-llm.js";
 
-/** Configuration captured by a named custom-provider registration. */
-export type CustomProviderRegistrationConfig = Omit<
-  CustomLlmProviderConfig,
-  "model"
-> & {
+/**
+ * Options of {@link registerCustomProvider}: the endpoint configuration
+ * captured by a named custom-provider registration, and its model routes.
+ */
+export type CustomRegisterOptions = Omit<CustomProviderConfig, "model"> & {
   /**
    * Complete remote model IDs exposed by this registration.
    *
@@ -174,7 +171,7 @@ function resolvesInAdk(model: string): boolean {
  */
 export function registerCustomProvider(
   prefix: string,
-  config: CustomProviderRegistrationConfig,
+  config: CustomRegisterOptions,
 ): void {
   validatePrefix(prefix);
 
@@ -257,3 +254,12 @@ export function registerCustomProvider(
   LLMRegistry.register(NamedCustomLlm);
   registeredPrefixes.add(prefix);
 }
+
+/**
+ * Former name of {@link CustomRegisterOptions}.
+ *
+ * @deprecated Use {@link CustomRegisterOptions}, the same type under the
+ * `<Provider>RegisterOptions` naming scheme. This alias stays until the next
+ * major version.
+ */
+export type CustomProviderRegistrationConfig = CustomRegisterOptions;

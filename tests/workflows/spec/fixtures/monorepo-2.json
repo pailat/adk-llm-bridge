@@ -27,6 +27,7 @@
       "Write"
     ],
     "allowedEnvNames": [],
+    "allowedMcpProviders": [],
     "deniedPathPatterns": [
       ".env",
       ".env.*",

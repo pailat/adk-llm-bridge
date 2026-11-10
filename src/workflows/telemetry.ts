@@ -11,7 +11,8 @@
  *   `gen_ai.conversation.id`, `adk.workflow.name`, `adk.node.path`.
  * - `execute_node <name>`: `gen_ai.operation.name=execute_node`,
  *   `adk.node.path`, `adk.node.run_id`, `adk.node.attempt`, `adk.node.status`
- *   (`completed` | `waiting` | `failed`), `adk.node.interrupt_count`.
+ *   (`completed` | `waiting` | `failed`, and `cancelled` for an abandoned
+ *   event stream), `adk.node.interrupt_count`.
  *
  * Spans use the same tracer name as ADK (`gcp.vertex.agent`) and run the
  * wrapped work inside the span's context, so spans created by ADK underneath
@@ -38,11 +39,17 @@ const TRACER_NAME = "gcp.vertex.agent";
 const TRACER_VERSION = "adk-llm-bridge";
 
 /**
- * Outcome of one workflow step, as ADK reports it in `adk.node.status`.
+ * Outcome of one workflow step, as ADK reports it in `adk.node.status`
+ * (`cancelled` is ADK's `NodeStatus.CANCELLED`: a step whose event stream
+ * was abandoned before it ended).
  *
  * @internal
  */
-export type WorkflowStepStatus = "completed" | "waiting" | "failed";
+export type WorkflowStepStatus =
+  | "completed"
+  | "waiting"
+  | "failed"
+  | "cancelled";
 
 /**
  * Identifies a workflow run for {@link withWorkflowSpan}.
@@ -257,7 +264,9 @@ export function withStepSpan<T>(
  * iterable returned by `factory` so the step span stays open until the
  * iteration finishes, fails or is abandoned (`return()`), and every `next()`
  * runs in the span's context (the pattern of ADK's
- * `runAsyncGeneratorWithOtelContext`).
+ * `runAsyncGeneratorWithOtelContext`). An abandoned stream ends with
+ * `adk.node.status` `cancelled`, without an error status, unless the handle
+ * marked the step `waiting`.
  *
  * @param meta - Step identity recorded on the span.
  * @param factory - Creates the event stream; receives a handle to refine the span.
@@ -299,7 +308,15 @@ export async function* withStepSpanStream<T>(
         await iterator?.return?.();
       });
     }
-    step.finish(failed ? "failed" : step.status);
+    // A stream abandoned before it ended did not complete, unless the step
+    // was waiting for input, which ends the stream on purpose.
+    step.finish(
+      failed
+        ? "failed"
+        : exhausted || step.status === "waiting"
+          ? step.status
+          : "cancelled",
+    );
     step.span.end();
   }
 }

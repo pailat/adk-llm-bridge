@@ -24,6 +24,7 @@ import {
 } from "../internal/directory-lock.js";
 import { attachCleanupErrors } from "../internal/error-support.js";
 import { hasErrorCode, isRecord } from "../internal/guards.js";
+import { monotonicNow } from "../internal/monotonic-clock.js";
 import { portablePathProblem } from "../internal/portable-path.js";
 import {
   findWorkspacePathOverlaps,
@@ -729,13 +730,13 @@ async function acquireLock(
   options: NormalizedOptions,
   signal?: AbortSignal,
 ): Promise<DirectoryLockOwner> {
-  const deadline = Date.now() + options.lockAcquireTimeoutMs;
+  const deadline = monotonicNow() + options.lockAcquireTimeoutMs;
   while (true) {
     throwIfAborted(signal, "Workspace acquisition aborted");
     const owner = tryAcquireDirectoryLock(lockPath);
     if (owner) return owner;
     recoverDeadDirectoryLock(lockPath);
-    if (Date.now() >= deadline) {
+    if (monotonicNow() >= deadline) {
       throw new Error(`Timed out acquiring workspace lock: ${lockPath}`);
     }
     await abortableDelay(options.pollIntervalMs, signal);

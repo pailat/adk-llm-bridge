@@ -186,10 +186,18 @@ export interface WorkflowCheckpointStore {
    * @throws {@link WorkflowError} with code `WORKFLOW_EXECUTION_ERROR` for an invalid or oversized checkpoint.
    */
   save(input: SaveWorkflowCheckpointInput): Promise<WorkflowCheckpointWrite>;
+  /**
+   * Largest checkpoint, in UTF-8 JSON bytes, that `save` accepts.
+   *
+   * @remarks
+   * Optional. When a store exposes it, a run emits one
+   * `checkpoint_size_warning` event once a saved checkpoint reaches 80% of it.
+   */
+  readonly maxCheckpointBytes?: number;
 }
 
-/** Options for {@link ADKSessionCheckpointStore}. */
-export interface ADKSessionCheckpointStoreOptions {
+/** Options for {@link AdkSessionCheckpointStore}. */
+export interface AdkSessionCheckpointStoreOptions {
   /**
    * Maximum UTF-8 JSON size of one durable checkpoint.
    *
@@ -215,7 +223,7 @@ export async function workflowCheckpointRevision(
  *
  * @remarks
  * Accepts the canonical digest and the `localeCompare`-based digest written by
- * releases before 0.7.0. Legacy acceptance lives only here and in
+ * 0.7.0 pre-release builds (no earlier release wrote checkpoints). Legacy acceptance lives only here and in
  * `src/workflows/internal/canonical-hash.ts`.
  *
  * @param checkpoint - Checkpoint to digest.
@@ -329,18 +337,23 @@ export function workflowCheckpointKey(
  * instances sharing the same ADK session object, but it is not an atomic
  * cross-process compare-and-swap guarantee.
  */
-export class ADKSessionCheckpointStore implements WorkflowCheckpointStore {
+export class AdkSessionCheckpointStore implements WorkflowCheckpointStore {
   readonly #maxCheckpointBytes: number;
 
   /**
    * @param options - Size limit options.
    * @throws {@link WorkflowError} with code `WORKFLOW_DEFINITION_INVALID` when `maxCheckpointBytes` is not a positive safe integer.
    */
-  constructor(options: ADKSessionCheckpointStoreOptions = {}) {
+  constructor(options: AdkSessionCheckpointStoreOptions = {}) {
     this.#maxCheckpointBytes = positiveSafeInteger(
       "maxCheckpointBytes",
       options.maxCheckpointBytes ?? DEFAULT_WORKFLOW_CHECKPOINT_MAX_BYTES,
     );
+  }
+
+  /** Largest checkpoint, in UTF-8 JSON bytes, that this store saves or loads. */
+  get maxCheckpointBytes(): number {
+    return this.#maxCheckpointBytes;
   }
 
   /**
@@ -464,6 +477,26 @@ export class ADKSessionCheckpointStore implements WorkflowCheckpointStore {
     return existing;
   }
 }
+
+/**
+ * Former name of {@link AdkSessionCheckpointStoreOptions}.
+ *
+ * @deprecated Use {@link AdkSessionCheckpointStoreOptions}, the same type
+ * with `Adk` cased like the package's other names. This alias stays until the
+ * next major version.
+ */
+export type ADKSessionCheckpointStoreOptions = AdkSessionCheckpointStoreOptions;
+
+/**
+ * Former name of {@link AdkSessionCheckpointStore}.
+ *
+ * @deprecated Use {@link AdkSessionCheckpointStore}, the same class with `Adk`
+ * cased like the package's other names. This alias stays until the next
+ * major version.
+ */
+export const ADKSessionCheckpointStore = AdkSessionCheckpointStore;
+/** Instance type of {@link ADKSessionCheckpointStore}. */
+export type ADKSessionCheckpointStore = AdkSessionCheckpointStore;
 
 interface CheckpointObservation {
   /** Last revision observed directly in ADK session state. */

@@ -60,6 +60,15 @@ case-folded), an unknown name in any case, a near-miss spelling such as
 `"Bash "` or `" Bash"`, and a `tool_use` with an empty or missing name. `ClaudeAgentSdkDriver`'s
 `PreToolUse` hooks also deny a call whose hook input has no tool name.
 
+The same canonical comparison decides every isolation check, not only the
+per-message one: the start check on the tools the runtime lists at
+`system/init`, and, on `ClaudeAgentSdkDriver`, the `PreToolUse` hook that
+denies tools outside the set and the wrapper around your `canUseTool`. An
+offered built-in reported in another case (`bash` for `Bash`) passes all of
+them. The wrapper then calls your `canUseTool` with the name as the runtime
+reported it, so a callback that decides by tool name should compare built-in
+names without regard to case.
+
 ### Host context the runtime still adds
 
 An isolated Claude run sets `autoMemoryEnabled: false` in the flag settings
@@ -114,11 +123,46 @@ guarantee below applies to every run without `allowNetwork: true`:
 
 | Driver | Shell commands | Web tools | MCP tools | Where it cannot be enforced |
 |---|---|---|---|---|
-| Claude Agent SDK | Bash runs in the Claude Code sandbox with every host denied, in every permission mode, `bypassPermissions` included. | Removed from the default tool list, and denied by the guard. Naming `WebFetch` or `WebSearch` in `tools` refuses the run with `EXTERNAL_AGENT_NETWORK_UNENFORCEABLE`. | Only the bridge server exists. The guard denies other `mcp__*` tools. | If the sandbox cannot start (Windows, Linux without bubblewrap), the run fails at start. `allowUnsandboxedShell: true` skips the sandbox; shell calls then reach the approver. |
+| Claude Agent SDK | Bash runs in the Claude Code sandbox with every host denied, in every permission mode, `bypassPermissions` included. | Removed from the default tool list, and denied by the guard. Naming `WebFetch` or `WebSearch` in `tools` refuses the run with `EXTERNAL_AGENT_NETWORK_UNENFORCEABLE`. | Only the bridge server exists. The guard denies other `mcp__*` tools. | If the sandbox cannot start (Windows, Linux without bubblewrap), the run fails at start. `allowUnsandboxedShell: true` skips the sandbox; shell calls then reach the approver. The sandbox also forbids binding local ports; see [Local ports](#local-ports-in-the-no-network-sandbox). |
 | Claude CLI | Same sandbox, through `--settings`. | Same as the SDK driver. | No MCP server; `permissions.deny` for `mcp__*`. | Same as the SDK driver. |
 | Codex SDK | Codex sandbox with no network in `read-only`, `ask` and `workspace-write`. | Web search disabled, so a host `config.toml` cannot turn it on. | Host MCP servers are listed with `codex mcp list --json` and each one is turned off for the run. | `full-access`, a failed listing, a server name that cannot be written as an override, or a prebuilt `sdk` client: refused with `EXTERNAL_AGENT_NETWORK_UNENFORCEABLE`. Opt in with `allowUnenforcedNetwork: true`. |
 | Codex CLI | `sandbox_workspace_write.network_access=false` is pinned. | `web_search="disabled"` is pinned. | Same listing; each server gets `mcp_servers.<name>.enabled=false`. | Same as the Codex SDK driver. |
 | Gemini CLI | Not enforceable. | Not enforceable: `google_web_search` and `web_fetch` run without the guard. | Not enforceable: servers from `~/.gemini/settings.json` run without the guard. | Every run without `allowNetwork: true` is refused with `EXTERNAL_AGENT_NETWORK_UNENFORCEABLE`, in every mode, so a Gemini CLI agent needs `allowNetwork: true` (or a driver built with `allowUnenforcedNetwork: true`). |
+
+### Local ports in the no-network sandbox
+
+The Claude sandbox without network also forbids binding local (loopback)
+ports, so a tool that talks to its own worker over a local port fails inside
+it: Turbopack's PostCSS worker (`next build`) stops with `binding to a port:
+Operation not permitted`, and test servers cannot listen. A failed Next.js
+build may also leave the failure in `.next`, so the next build outside the
+sandbox fails the same way until `.next` is removed.
+
+Build the Claude driver with `allowLocalBinding: true` to allow it
+(`sandbox.network.allowLocalBinding` in Claude Code). The setting is macOS
+only: Claude Code ignores it on Linux. The failure above was seen on macOS;
+the behavior under the Linux sandbox has not been verified. The default is
+`false`, and the option has no effect when the sandbox is off
+(`allowNetwork: true`, `allowUnsandboxedShell: true`).
+
+Treat the opt-in as network access. Remote hosts stay denied, but binding a
+local port may let shell commands reach services that already listen on
+loopback ports (local databases, a Docker TCP socket, model servers), or
+impersonate one by taking its port, and other local processes can connect
+to the ports the agent opens. Enable it only where every local service is
+trusted.
+
+```ts
+new ClaudeAgent({
+  name: "builder",
+  description: "Builds the web app",
+  permissions: { mode: "workspace-write", allowNetwork: false },
+  driverOptions: { allowLocalBinding: true },
+});
+```
+
+Another way is to run the build outside the agent, in a workflow step of the
+host process.
 
 ### Read-only agents with network
 
@@ -163,7 +207,7 @@ confirmation sees it. Its denials are final; no approval overrides them.
   tools registered for the run (matched by exact name, so a host server
   named `adk_bridge__x` gets no exemption), and shell calls that the driver
   did not run in a no-network sandbox.
-- Path guard (with `allowedPaths` or inherited `pathBounds`): path arguments
+- Path guard (with `allowedPaths`, `readPaths` or inherited path bounds): path arguments
   of file tools (Claude Code, Codex and Gemini CLI argument names, nested
   file changes, `apply_patch` file headers), and the base of globs that leave
   the allowed paths. Brace alternatives are expanded (at most 64; more is
@@ -194,7 +238,28 @@ confirmation sees it. Its denials are final; no approval overrides them.
     around the allowed roots there would stay writable.
 
   Without a shell tool any working directory works; the hook checks the file
-  and search tools. The Claude
+  and search tools.
+
+  One read outside the allowed paths is let through: `Read` of a file in the
+  `tool-results` directory of the run's own Claude Code session. When a tool
+  output is too large to return inline, Claude Code saves it to
+  `<config dir>/projects/<project>/<session id>/tool-results/<id>.txt` and
+  tells the model to `Read` it; without the exception the agent would lose
+  its own command output. The directory comes from the runtime, never from
+  the model: the session id from `system/init`, the transcript path from the
+  hook input, and the config directory from the child's `CLAUDE_CONFIG_DIR`
+  (else `HOME/.claude`). It must match exactly (a UUID session id, the
+  transcript `<session id>.jsonl` directly in a project directory of
+  `<config dir>/projects`, no symlinked session or `tool-results`
+  directory), or the read is checked like any other. Only `Read` qualifies
+  (with `file_path` and the paging keys), only a file inside the directory
+  after symlinks are resolved, and only that session: `Write`, `Edit`,
+  `Glob`, `Grep`, Bash and another session's directory stay denied. When
+  Claude Code asks about the read, the driver allows it without the
+  approver, for that tool call only. A custom `sessionStore` that keeps
+  transcripts elsewhere gets no exception.
+
+  The Claude
   CLI, Codex SDK, Codex CLI and Gemini CLI drivers run file tools without
   asking the bridge, so they refuse a run with `allowedPaths` or `pathBounds`
   with `EXTERNAL_AGENT_PATHS_UNENFORCEABLE`. Build the driver with
@@ -203,7 +268,18 @@ confirmation sees it. Its denials are final; no approval overrides them.
 - It does not check paths inside shell commands. Those rely on the runtime
   sandbox or the `read-only` mode. The Claude Code sandbox confines writes
   only: a shell command can still read files outside `allowedPaths`, and it
-  can still write to the sandbox's own temp directories. Under
+  can still write to the sandbox's own temp directories. Both Claude drivers
+  point those at a fresh `0700` directory per run (`CLAUDE_CODE_TMPDIR`, and
+  its `claude-<uid>` directory as `TMPDIR`), removed when the run ends, so
+  runs do not share `/tmp/claude-<uid>`. The sandbox does not make the
+  shared host temp directories writable, so on macOS two tools that ignore
+  `TMPDIR` fail with "Operation not permitted": a bare `mktemp` (it uses the
+  per-user `/var/folders/.../T`; use `mktemp -p "$TMPDIR"` or a file in the
+  working directory) and `diff` with a pipe or process substitution input
+  (`diff <(...)`; Apple's `diff` copies such input to a fixed `/tmp` path; use
+  `cmp`, or write the inputs to files first). Process substitution itself
+  works: other commands read `/dev/fd/N`. On Linux, `mktemp` honors
+  `TMPDIR`. Under
   `workspace-write` (and `ask`) a Bash call also needs an approver
   (`confirmation.approver` or `confirmation: { adk: true }`); without one
   every Bash call is denied.
@@ -229,27 +305,172 @@ after delegation) is therefore still denied.
 
 ### Reading wider than you write
 
-`allowedPaths` is one list for reads and writes. The path guard checks the
-path arguments of read tools (`Read`, `Glob`, `Grep`, `read_file`,
-`read_many_files`) against it exactly as it checks write tools, so a writer
-confined to `out/` cannot read `src/`: the call is denied with "outside the
-paths allowed by this agent's policy". There is no separate read root, and a
-delegated agent cannot get roots wider than its parent's (the intersection
-in the previous paragraphs). The only reads the guard does not see are the ones inside a shell
-command, which is a gap, not a way to grant read access.
+`allowedPaths` holds the roots an agent may read and write. `readPaths` adds
+roots for read tools only:
 
-To give a step more read access than write access:
+```ts
+new ClaudeAgent({
+  name: "porter",
+  workingDirectory: "/work/new-app",
+  permissions: {
+    mode: "workspace-write",
+    allowedPaths: ["/work/new-app"], // read and write
+    readPaths: ["/work/old-app"], // read only
+  },
+});
+```
+
+- **Read tools are an explicit list.** Claude Code `Read`, `Glob`, `Grep`,
+  `LS`, `NotebookRead` and Gemini CLI `read_file`, `read_many_files`,
+  `list_directory`, `glob`, `grep`, `grep_search`, `search_file_content`,
+  matched by exact name. Only these may target a path under `readPaths`.
+  Every other tool counts as a write and must stay inside `allowedPaths`.
+  This includes `Write`, `Edit`, `apply_patch`, an MCP tool, another
+  spelling (`read`) and a tool the bridge does not know. So the guard fails
+  closed: a new runtime tool cannot write into a read root.
+- **`readPaths` needs `allowedPaths`.** Without `allowedPaths`, paths are not
+  restricted at all, so a policy with `readPaths` alone is rejected
+  (`InputValidationError`). Relative roots resolve against the working
+  directory, like `allowedPaths`.
+- **Claude Agent SDK.** `readPaths` are not passed as
+  `additionalDirectories`, and they never join the sandbox's writable roots,
+  so Bash cannot write there either. Claude Code asks before it reads
+  outside its own directories. The driver approves such a read when the tool
+  is a read tool and every path is under the read roots. It does this in
+  every mode, `read-only` included, and without asking the host. The
+  `PreToolUse` hook still checks every call.
+- **Shell commands are not parsed.** As with `allowedPaths`, the sandbox
+  limits where shell commands write (only `allowedPaths`), not what they
+  read.
+- **Other drivers.** The Claude CLI, Codex and Gemini CLI drivers cannot check
+  tool paths. They refuse a run whose policy sets `readPaths` with
+  `EXTERNAL_AGENT_PATHS_UNENFORCEABLE`, unless they are built with
+  `allowUnenforcedPaths: true`. The runtime's own sandbox then decides what
+  is read and written.
+- **Delegation.** A delegated agent reads only where both it and its parent
+  may read. The bridge takes each side's whole read set (`allowedPaths` plus
+  `readPaths`) and intersects them by containment, as it does for
+  `allowedPaths`. A parent's read root never becomes writable for the child,
+  since writes still follow the `allowedPaths` intersection. Both sides'
+  absolute read roots are kept as `readPathBounds`, which the guard checks
+  for read tools in place of `pathBounds`. A read root that a symlink later
+  points elsewhere therefore still cannot leave the parent's reads. A
+  parent's relative read roots are not passed to a child.
+
+Without `readPaths`, nothing changes: reads stay inside `allowedPaths`, and a
+read outside it is denied with "outside the paths allowed by this agent's
+policy". Other ways to read more than you write:
 
 - **Split the step.** Run a `read-only` agent whose `allowedPaths` cover what it
   must read (it can write nothing), and pass what the writer needs as the
-  writer's step input or session state. The writer keeps roots that cover only
-  what it may change.
-- **Put the material inside the writer's roots.** Copy (not symlink: a link
-  that leaves the roots is denied) what it must read into a directory that its
-  `allowedPaths` include. The guard does not make that copy read-only, so use
-  the first option when the writer must not change it.
-- **One agent with wide roots.** If its `allowedPaths` cover both, it can also
-  write everywhere they cover. Choose this only when that is acceptable.
+  writer's step input or session state. This works on every driver.
+- **Put the material inside the writer's roots.** Copy what it must read into
+  a directory that its `allowedPaths` include. Copy it; do not symlink it,
+  because a link that leaves the roots is denied. The copy stays writable.
+
+Declarative workflow agents (`permissions` in a workflow definition) accept
+only `mode`, `allowNetwork` and `allowedPaths`, and reject `readPaths`. Give
+such a step a code-defined agent instead.
+
+## Bridged ADK tools
+
+ADK tools given to an external agent (`tools`) are hosted by the Claude Agent
+SDK driver on an in-process MCP server. Two things differ from an `LlmAgent`.
+
+### Exposed tool names
+
+The model does not see a tool's own name. Each name is rewritten so that every
+runtime accepts it and no two tools collide:
+
+1. `adk_tool__` is put before it (`ADK_TOOL_PREFIX`): `get_weather` becomes
+   `adk_tool__get_weather`.
+2. Every character other than `a-z`, `A-Z`, `0-9`, `_` and `-` becomes `_`.
+3. The result is cut to 64 characters.
+4. A name already taken gets `_2`, `_3`, ... (the name is cut further to keep
+   64 characters). ADK throws on duplicate tool names; the bridge renames
+   instead.
+
+The runtime then reports the tool as `mcp__adk_bridge__<exposed name>`, the
+name its permission prompts and `PreToolUse` hooks see. An instruction that names `get_weather` therefore
+does not match any tool the model sees: describe what the tool does, or use
+the exposed name. Read-only filters (`readOnlyTools`) match the tool's own
+name, before it is rewritten.
+
+### Confirmations compared with ADK
+
+A tool's `requireConfirmation` and a `toolContext.requestConfirmation()` call
+go through the agent's `confirmation` option (an approver, or
+`confirmation: { adk: true }` for ADK's protocol). With ADK's protocol the
+agent emits an `adk_request_confirmation` call and ends the invocation, as an
+`LlmAgent` does, with these differences:
+
+- **Ids.** `originalFunctionCall.id` is an id the bridge generates for the
+  call, not the id of a function call event in the session, and
+  `originalFunctionCall.name` is the exposed name.
+- **Hint and payload.** For `requestConfirmation()`, the tool's own hint is
+  kept. For `requireConfirmation`, the hint is
+  `Please approve or reject the tool call <name>().`, and for a runtime's own
+  permission prompt (a built-in tool under `ask`), the prompt's title or
+  `The agent wants to run <tool>. Approve or reject this call.` The
+  `toolConfirmation.payload` of the request is always the bridge's
+  `{ toolName, description?, reason? }`, not a payload the tool passed. The
+  human's answer may carry its own `payload`, which the tool gets in
+  `toolContext.toolConfirmation` when it runs again.
+- **Matching.** ADK runs the original call again itself. Here the runtime has
+  to make the call again on the answer turn, and the answer applies to the
+  first call with the same tool name and the same arguments (key order does
+  not matter), once. An approved call that the runtime does not make again
+  ends the turn with `EXTERNAL_AGENT_CONFIRMATION_UNUSED`.
+- **One request per turn.** The turn pauses on the first request; any other
+  call that needs a confirmation in the same turn is denied with
+  `Another confirmation is already pending.`
+- **Answers are checked.** An answer counts only on the turn it is sent and
+  only for a request this agent emitted; a forged id or a re-sent answer is
+  ignored.
+
+## Extra args
+
+`ClaudeCliDriver` and `CodexCliDriver` place `args` after the flags they set
+from the policy, so an entry could override them. The constructor refuses
+such an entry with `EXTERNAL_AGENT_OPTION_UNSUPPORTED` unless the driver is
+built with `allowPolicyOverrideArgs: true`. It also refuses an entry that
+would widen the run another way:
+
+| Driver | Refused besides the policy flags |
+|---|---|
+| `ClaudeCliDriver` | `--agents` and `--agent` (a subagent definition carries its own tools, permission mode, MCP servers and hooks), `--plugin-url`, `--permission-prompts`, `--worktree`/`-w` (the session root moves to the repository's `.claude/worktrees`, outside a working directory below the repository root), `--remote-control`, `--cloud`, `--teleport` and `--environment` (the session runs or is driven somewhere else). |
+| `CodexCliDriver` | `--approve-for-me`, `--dangerously-bypass-hook-trust`, `--worktree` (the working root moves under `CODEX_HOME`), and a `-c` override of `approvals_reviewer`, `default_permissions`, `permissions` or `agents` (agent roles load their own config files). |
+
+A cluster of one-letter flags is split the way the CLI parses it, so `-pw`
+(Claude) and `-hs danger-full-access` (Codex) are refused too, while a flag
+that takes a value keeps the rest of the cluster as its value (`-nwork`).
+
+The list is a denylist: a flag a later CLI adds is not on it. It was
+reviewed against Claude Code 2.1.322 and codex-cli 0.167.0 (the `--help` of
+each), with `@anthropic-ai/claude-agent-sdk` 0.3.319 (bundling Claude Code
+2.1.319) and `@openai/codex-sdk` 0.167.0 (bundling `@openai/codex` 0.167.0)
+installed. A test fails when the installed SDKs, the CLIs they bundle or the
+peer ranges in `package.json` change, so the list is reviewed again on each
+bump. Two limits remain:
+
+- The CLI drivers run the `claude` or `codex` they find (or the `command`
+  you set), not the SDK's bundled copy, and nothing checks its version. A
+  newer CLI can accept a widening flag the list does not know. Pin the CLI
+  version you run to one the list was reviewed against, or review its
+  `--help` before upgrading.
+- The default Claude tool lists do not include `Agent` (`Task`), so the
+  built-in subagents (`general-purpose`, `Explore`, ...) cannot start. When
+  `tools` adds `Agent`, the driver passes `--tools` and `--disallowedTools`
+  as usual, but whether a built-in subagent stays inside them, the
+  permission mode and the sandbox has not been verified against a live run.
+  Do not offer `Agent` under `read-only`, `allowedPaths` or another
+  restrictive policy until that is verified.
+
+Both Codex drivers also pin `approvals_reviewer="user"` outside
+`full-access`. With codex-cli 0.167.0, `approvals_reviewer = "auto_review"`
+in `~/.codex/config.toml` turns `--ask-for-approval never` into
+`on-request` with a model reviewer, which could grant a command outside the
+sandbox.
 
 ## Credentials
 
@@ -359,9 +580,135 @@ What to run instead depends on the CLI:
 |---|---|
 | Claude | The native `claude.exe` from Claude's native installer. Put it on `PATH` or set `command` to its path. |
 | Codex | The native `codex.exe` inside the `@openai/codex` package: `<npm root -g>\@openai\codex\node_modules\@openai\codex-win32-x64\vendor\x86_64-pc-windows-msvc\bin\codex.exe` (`codex-win32-arm64` and `aarch64-pc-windows-msvc` on ARM). That is the layout of `@openai/codex` 0.167.0, read from the `@openai/codex-sdk` 0.167.0 lookup this package pins; older versions keep it at `vendor\<triple>\codex\codex.exe`. It was not checked on a Windows machine. To find it for another version, search `npm root -g` for `codex.exe`. Set `command` to its path. |
-| Gemini | Gemini CLI ships only as an npm package, so there is no `.exe`. Pass a `spawn` that runs `process.execPath` (Node) with the package's JavaScript entry, the file named by `bin.gemini` in `@google/gemini-cli`'s `package.json`. A custom `spawn` does not go through the bridge's own spawn, so nothing runs through `cmd.exe`. |
+| Gemini | Gemini CLI ships only as an npm package, so there is no `.exe`. Set `interpreter` to Node and `entry` to the package's JavaScript entry, the file named by `bin.gemini` in `@google/gemini-cli`'s `package.json`. The driver runs `<interpreter> <entry> <flags>`; see [Interpreter and entry](#interpreter-and-entry). |
 
-The Gemini route, as code:
+### Interpreter and entry
+
+`ClaudeCliDriver`, `CodexCliDriver` and `GeminiCliDriver` take `interpreter`
+and `entry` (both or neither, and not with `command`). The driver then runs
+`<interpreter> <entry> <its flags> <args>` instead of `<command> <its flags>
+<args>`, on every platform. It is meant for a CLI that ships as a JavaScript
+package, Gemini CLI on Windows above all:
+
+```ts
+import { GeminiCliDriver } from "adk-llm-bridge/agents";
+
+const driver = new GeminiCliDriver({
+  // Node only. A bare name is looked up on PATH like `command`; an absolute path is used as given.
+  interpreter: String.raw`C:\Program Files\nodejs\node.exe`,
+  // The file named by `bin.gemini` in @google/gemini-cli's package.json.
+  entry: String.raw`C:\Users\me\AppData\Roaming\npm\node_modules\@google\gemini-cli\bundle\gemini.js`,
+});
+```
+
+The rules, all fail closed:
+
+- The interpreter never starts in the run's working directory. The CLI
+  process runs on the host, outside the runtime's sandbox, and that
+  directory is the agent's: an interpreter or a version-manager shim that
+  reads configuration from its working directory, or from the directories
+  above it, would read files the agent wrote. Bun reads `bunfig.toml` (its
+  `preload` runs code) and `.env`; asdf reads `.tool-versions`, where
+  `nodejs path:<dir>` makes it run `<dir>/bin/node`, a program the agent
+  chose; proto's native shims read `.prototools`; Volta's Windows `node.exe`
+  reads the version pin from `package.json`. So the driver starts the
+  interpreter in the entry's own directory (canonical, symlinks resolved),
+  and Node changes into the workspace itself before the entry runs:
+
+  ```text
+  cwd: <the entry's directory>
+  env: ADK_LLM_BRIDGE_AGENT_CWD=<the run's working directory>, plus the run's environment
+  run: <interpreter> --import data:text/javascript,<fixed preload> <entry> <its flags> <args>
+  ```
+
+  `<entry>` is the entry's canonical path, the one the checks below saw,
+  not the path as configured: a symlink on the way that passes through a
+  directory the agent can write cannot be re-pointed between the check and
+  the start (the interpreter is likewise started by its checked real path).
+  The preload reads the workspace from `ADK_LLM_BRIDGE_AGENT_CWD`, removes
+  the variable, and calls `process.chdir` (and sets `PWD`), so the CLI sees
+  the workspace as `process.cwd()`, as with `command`. The preload's URL is a
+  constant: the workspace path never becomes part of code. A missing
+  variable or a failed `chdir` throws, and Node exits non-zero before the
+  entry runs; the run ends with the CLI's exit error. The entry's directory
+  must not be at or under an agent-writable root or a temp directory a
+  runtime sandbox keeps writable (`/tmp`, the host temp directory, `TMPDIR`,
+  `CLAUDE_CODE_TMPDIR`), which also means no directory above it is one;
+  otherwise the run is refused with `EXTERNAL_AGENT_INTERPRETER_UNSAFE`.
+  This closes configuration reads from the working directory for every kind
+  of interpreter and shim, including ones the checks below would not catch.
+- Only the native Node binary runs an entry (defense in depth). The
+  interpreter's real path (symlinks resolved) must be named `node`
+  (`node.exe` on Windows, any letter case), and that file must be a native
+  executable for the platform: its first bytes are read through one open
+  file descriptor and must be PE (`MZ`) on Windows, Mach-O (thin or
+  fat/universal, either byte order) on macOS, or ELF elsewhere. A script
+  (`#!`), an empty or truncated file, any other name, or a real file inside
+  an agent-writable root or a sandbox temp directory is refused with
+  `EXTERNAL_AGENT_INTERPRETER_UNSAFE` before any spawn. Symlink shims
+  (`mise`, `volta`) fail the name check; script shims (`asdf`, `nodenv`)
+  fail the native-executable check; `nvm` puts the real binary on `PATH` and
+  passes. With a custom `spawn` the same checks apply to a path that exists
+  on this host; a bare name must be `node`. The built-in spawn starts the
+  real path it checked, not the name or symlink that led to it. Use the real
+  binary, for example the output of `node -p process.execPath`.
+- Node itself reads no configuration file from its working directory
+  without a flag: with a planted `bunfig.toml`, `.env`, `node.config.json`,
+  `.npmrc`, `package.json` and `node_modules`, none was read, and a bare
+  `require` from the entry searched only the entry's parent directories,
+  never the working directory. Its environment comes from the driver's
+  allowlist, so `NODE_OPTIONS` cannot reach it. Bare `require` from the
+  entry also searches `~/.node_modules` and `~/.node_libraries`: do not put
+  the home directory in a run's `allowedPaths` (it is not, by default).
+- Residuals, host-only: a non-Node native program the host installed under
+  the name `node` passes the checks (it still starts outside the workspace);
+  and Node cannot start a process from an open file descriptor, so the file
+  is opened again by path at spawn time, after the check. It is outside
+  every directory the agent can write, so only the host can change it in
+  between.
+- `interpreter` follows the `command` rule. A bare name is looked up over the
+  absolute `PATH` entries outside the run's working directory and
+  `allowedPaths`; on Windows only a native `.exe` or `.com` is an answer, and
+  a `node.cmd` is refused with `EXTERNAL_AGENT_BATCH_COMMAND_REFUSED`, so
+  nothing runs through `cmd.exe`. A relative path (`bin/node`) is rejected
+  when the driver is built.
+- `entry` must be an absolute path (checked when the driver is built). With
+  the built-in spawn it must be an existing file, or the run ends with
+  `MISSING_BINARY` naming it.
+- Neither the entry nor an interpreter given as a path may be at or under
+  the run's working directory, an `allowedPaths` root or a sandbox temp
+  directory, symlinks resolved: the agent could rewrite the file in one run
+  and have the next run execute it on the host, outside the runtime's
+  sandbox. Such a run is refused with `EXTERNAL_AGENT_INTERPRETER_UNSAFE`
+  before anything starts. Install the CLI package outside every directory an
+  agent can write (a global npm root, a tools directory), not under a temp
+  directory. Unlike `command`, this check applies to an explicit path too,
+  and also with a custom `spawn`.
+- The driver's own flags and the `args` checks are unchanged; the preload
+  and the entry only come first. `CodexCliDriver` lists its MCP servers the
+  same way (`<interpreter> --import <preload> <entry> mcp list --json`, same
+  `cwd` and variable); a custom `listMcpServers` receives them as
+  `prefixArgs`, `cwd` and `env` and must run the listing the same way.
+- A custom `spawn` receives the interpreter as `command` (its checked real
+  path when the configured path exists on this host), the preload and the
+  entry's canonical path as the first arguments, the entry's directory as `cwd`, and the
+  variable in `env`. It must keep all three, or the CLI starts in the wrong
+  directory or not at all.
+
+The Windows CI job runs a fake JavaScript entry through the native
+`node.exe` (from `tests/agents/driver/cli-interpreter-entry.test.ts` under Bun
+and `scripts/windows-shim-smoke.mjs` under Node) with a prompt `cmd.exe`
+would re-parse, and checks that the prompt arrives intact and that the CLI
+starts in the workspace. The same tests check that Bun as the interpreter is
+refused, that a planted `bunfig.toml` preload never runs, that a script shim
+named `node` (`node.exe` on Windows) is refused, that an entry in a temp
+directory is refused, and that a failed `chdir` fails the run. On macOS and
+Linux a compiled proto-style shim named `node`, which reads `.tool-versions`
+from its working directory and the directories above it, never sees the
+workspace's file.
+
+A custom `spawn` remains possible, for example to run the CLI in a
+container:
 
 ```ts
 import { spawn as nodeSpawn } from "node:child_process";
@@ -391,13 +738,37 @@ const driver = new GeminiCliDriver({ spawn });
 ```
 
 `tests/agents/driver/windows-command.test.ts` runs this rerouting against a
-fake process. The policy (`allowNetwork`, paths) applies as for any other
+fake process. Prefer `interpreter` and `entry`: they keep the bridge's
+lookup and the writable-root check. The policy (`allowNetwork`, paths) applies as for any other
 run; the custom `spawn` only replaces how the process starts.
 
 ## Error codes
 
 An error event's code lands on the ADK event's `errorCode`. The constants are
-exported from `adk-llm-bridge/agents`.
+exported from `adk-llm-bridge/agents`. They come from two places, and
+`EXTERNAL_AGENT_` alone does not tell them apart:
+
+- **Policy refusals** (`ExternalAgentPolicyErrorCode`, the `code` of
+  `ExternalAgentPolicyError`): `EXTERNAL_AGENT_ISOLATION_VIOLATED`,
+  `EXTERNAL_AGENT_NETWORK_UNENFORCEABLE`, `EXTERNAL_AGENT_PATHS_UNENFORCEABLE`,
+  `EXTERNAL_AGENT_DEPENDENCY_MISSING`, `EXTERNAL_AGENT_MISSING_BINARY`
+  (value `MISSING_BINARY`), `EXTERNAL_AGENT_BATCH_COMMAND_REFUSED`,
+  `EXTERNAL_AGENT_CREDENTIAL_UNSUPPORTED` and
+  `EXTERNAL_AGENT_OPTION_UNSUPPORTED`. A driver raises them; during a run the
+  agent turns them into a non-recoverable error event, so you read them from
+  `errorCode`. Only `EXTERNAL_AGENT_OPTION_UNSUPPORTED` is thrown to you, by
+  the driver's constructor.
+- **Agent event codes**: `EXTERNAL_AGENT_ERROR`,
+  `EXTERNAL_AGENT_TRANSFER_FAILED`, `EXTERNAL_AGENT_NOT_CONFIGURED`,
+  `EXTERNAL_AGENT_CONFIRMATION_UNUSED`,
+  `EXTERNAL_AGENT_TOOL_CREDENTIAL_REQUIRED` and
+  `EXTERNAL_AGENT_TOOL_RESULT_TOO_LARGE`. `ExternalAgent` emits them as error
+  events; they are never thrown.
+
+`EXTERNAL_AGENT_TOOL_NOT_OFFERED` is not an error code: it is the value of
+`metadata.isolation` on the `tool_result` of a call the runtime refused
+because the tool was not offered. The other codes in the table (`CLAUDE_*`,
+`CODEX_*`, `GEMINI_*`) are reported by one driver and have no constant.
 
 | Code | Constant | Recoverable | When |
 | --- | --- | --- | --- |
@@ -411,11 +782,13 @@ exported from `adk-llm-bridge/agents`.
 | `EXTERNAL_AGENT_NETWORK_UNENFORCEABLE` | `EXTERNAL_AGENT_NETWORK_UNENFORCEABLE` | No | The network cannot be kept off (the policy does not set `allowNetwork: true`), or a Claude agent's `tools` name a web tool while the network is off; see the tables above. The message names the remedy: `allowNetwork: true`, or `allowUnenforcedNetwork: true` on the driver; for web tools named in a Claude agent's `tools`, `allowNetwork: true` or removing them (`allowUnenforcedNetwork` does not lift that refusal). |
 | `EXTERNAL_AGENT_PATHS_UNENFORCEABLE` | `EXTERNAL_AGENT_PATHS_UNENFORCEABLE` | No | The policy sets `allowedPaths` (or a parent agent passed `pathBounds`) and the driver cannot check tool paths: Claude CLI, Codex and Gemini CLI (remedy: `ClaudeAgentSdkDriver`, no `allowedPaths`, or `allowUnenforcedPaths: true` on the driver). On the Claude Agent SDK: a shell tool is on offer and the working directory is outside `allowedPaths` or the shell is unsandboxed (remedy: a working directory inside `allowedPaths`, or `tools` without `Bash`). |
 | `EXTERNAL_AGENT_DEPENDENCY_MISSING` | `EXTERNAL_AGENT_DEPENDENCY_MISSING` | No | An optional SDK package is not installed. |
+| `EXTERNAL_AGENT_BACKGROUND_TASK_PENDING` | `EXTERNAL_AGENT_BACKGROUND_TASK_PENDING` | No | A Claude run (SDK or CLI driver) reached its result while Claude Code still reported a background task (from `system/background_tasks_changed`; ambient tasks do not count). The task's work is not done; the run ends with exit code 1. Background tasks are off by default (`CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`); `allowBackgroundTasks: true` turns them on. |
 | `EXTERNAL_AGENT_CREDENTIAL_UNSUPPORTED` | `EXTERNAL_AGENT_CREDENTIAL_UNSUPPORTED` | No | The credential provider returned a `kind` other than `env` or `none`. |
 | `EXTERNAL_AGENT_OPTION_UNSUPPORTED` | `EXTERNAL_AGENT_OPTION_UNSUPPORTED` | No | Thrown (not an event) when a driver is built with an option its runtime cannot honor: `sessionStore` on `ClaudeCliDriver`. |
 | `CLAUDE_SESSION_STORE_MIRROR_ERROR` | `CLAUDE_SESSION_STORE_MIRROR_ERROR` | Yes | The Claude Agent SDK dropped a transcript batch its `sessionStore` rejected or timed out on (3 attempts in total); the run goes on. See [Persisting Claude sessions](claude-session-store.md). |
-| `MISSING_BINARY` | `EXTERNAL_AGENT_MISSING_BINARY` | No | The `claude`, `codex` or `gemini` binary was not found. |
-| `EXTERNAL_AGENT_BATCH_COMMAND_REFUSED` | `EXTERNAL_AGENT_BATCH_COMMAND_REFUSED` | No | On Windows, the CLI command is or resolves to a `.cmd` or `.bat` file (for example an npm shim). Remedy per CLI: [Windows: batch files and npm installs](#windows-batch-files-and-npm-installs). |
+| `MISSING_BINARY` | `EXTERNAL_AGENT_MISSING_BINARY` | No | The `claude`, `codex` or `gemini` binary was not found, or, with `interpreter` and `entry`, the interpreter or the entry file. |
+| `EXTERNAL_AGENT_BATCH_COMMAND_REFUSED` | `EXTERNAL_AGENT_BATCH_COMMAND_REFUSED` | No | On Windows, the CLI command (or `interpreter`) is or resolves to a `.cmd` or `.bat` file (for example an npm shim). Remedy per CLI: [Windows: batch files and npm installs](#windows-batch-files-and-npm-installs). |
+| `EXTERNAL_AGENT_INTERPRETER_UNSAFE` | `EXTERNAL_AGENT_INTERPRETER_UNSAFE` | No | The driver's `entry`, or its `interpreter` given as a path, (or the entry's directory, where the interpreter starts) is at or under the run's working directory, an `allowedPaths` root or a temp directory a runtime sandbox keeps writable (symlinks resolved), or the interpreter is not the native Node binary (its real path is not named `node`/`node.exe`, or the file is not a native executable, such as an asdf or nodenv script shim). Install the CLI outside every directory the agent can write; see [Interpreter and entry](#interpreter-and-entry). |
 | `CLAUDE_CLI_EXIT`, `CODEX_CLI_EXIT`, `GEMINI_CLI_EXIT` | - | From the message | The CLI exited with a nonzero code (Codex: and reported no error of its own). The message holds the stderr tail; auth, billing and quota failures are not recoverable. |
 | `CLAUDE_PERMISSION_DENIED` | - | No | The Claude Agent SDK denied a tool call (the message names the tool and the reason). |
 | `CLAUDE_AGENT_SDK_ERROR` | - | From the message | The Claude Agent SDK threw; used when the message matches no known failure. |

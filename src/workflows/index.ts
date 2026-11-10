@@ -34,6 +34,7 @@ export {
 } from "./agents/index.js";
 export type {
   ADKSessionCheckpointStoreOptions,
+  AdkSessionCheckpointStoreOptions,
   CreateWorkflowCheckpointInput,
   FileSystemWorkflowCheckpointStoreOptions,
   LoadWorkflowCheckpointInput,
@@ -46,6 +47,7 @@ export type {
   WorkflowCheckpointLocator,
   WorkflowCheckpointRevision,
   WorkflowCheckpointStatus,
+  WorkflowCheckpointStepResultV1,
   WorkflowCheckpointStepStatus,
   WorkflowCheckpointStepV1,
   WorkflowCheckpointStore,
@@ -56,6 +58,7 @@ export type {
 } from "./checkpoint/index.js";
 export {
   ADKSessionCheckpointStore,
+  AdkSessionCheckpointStore,
   assertWorkflowCheckpointSize,
   checkpointExpectation,
   collectFileSystemCheckpointTombstonesOffline,
@@ -81,6 +84,7 @@ export {
   workflowCheckpointRevision,
   workflowCheckpointRevisionMatches,
   workflowCheckpointSizeLimitError,
+  workflowStepResultFromCheckpoint,
 } from "./checkpoint/index.js";
 export type {
   WorkflowAttemptContext,
@@ -143,6 +147,8 @@ export {
 } from "./definition.js";
 export type {
   WorkflowCheckpointSavedEvent,
+  WorkflowCheckpointSizeContributor,
+  WorkflowCheckpointSizeWarningEvent,
   WorkflowCompletedEvent,
   WorkflowCustomEvent,
   WorkflowErrorEvent,
@@ -317,6 +323,7 @@ export {
   workflowArtifactRevisionMatches,
   workflowArtifactStoragePath,
 } from "./resources/index.js";
+export { WORKFLOW_CHECKPOINT_SIZE_WARNING_RATIO } from "./runtime/checkpoint-size.js";
 export type {
   WorkflowExecutionIdResolver,
   WorkflowRuntimeHooks,

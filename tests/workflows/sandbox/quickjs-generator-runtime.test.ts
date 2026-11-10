@@ -194,3 +194,26 @@ describe("QuickJSSyncGeneratorRuntime limits", () => {
     }
   });
 });
+
+describe("QuickJSSyncGeneratorRuntime setup budget", () => {
+  // A source that starts with `}),` closes the generator factory, so the
+  // expression after it runs while the session is set up, before any turn.
+  // Only the setup CPU budget can stop it; without it this test never ends.
+  test("interrupts guest code that runs at setup", async () => {
+    const runtime = new QuickJSSyncGeneratorRuntime({ loader: releaseLoader });
+    const outcome = await runtime
+      .createSession({
+        source: "}), (() => { for (;;) {} })(), (function* () {",
+        limits: { cpuTimeMs: 200 },
+      })
+      .then(
+        (session) => {
+          session.dispose();
+          return "created";
+        },
+        (error: unknown) => error,
+      );
+    expect(outcome).toBeInstanceOf(WorkflowError);
+    expect(outcome).toMatchObject({ code: "WORKFLOW_LIMIT_EXCEEDED" });
+  }, 4_000);
+});

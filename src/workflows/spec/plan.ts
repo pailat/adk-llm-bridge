@@ -43,6 +43,7 @@ function laneAgents(lane: RunSpecLane): RunPlanAgent[] {
     mode: lane.agent.mode,
     allowNetwork: lane.agent.allowNetwork ?? false,
     tools: [...lane.agent.tools],
+    mcp: [...(lane.agent.mcp ?? [])],
   };
   if (lane.steps.testsFirst) {
     agents.push({ purpose: "tests", ...base, maxRuns: 1 });
@@ -57,6 +58,7 @@ function laneAgents(lane: RunSpecLane): RunPlanAgent[] {
       mode: "read-only",
       allowNetwork: false,
       tools: [],
+      mcp: [],
       maxRuns: 1 + rounds,
     });
   }
@@ -193,8 +195,9 @@ export function resolveRunPlan(spec: unknown, rules: RunRules): RunPlanResult {
  * @remarks
  * The digest of the canonical JSON with sorted keys. Object key order does
  * not change it, and neither does spelling a lane agent's network access as
- * an explicit `false` instead of leaving `allowNetwork` out, because the two
- * mean the same thing. Array order and every other semantic change do change
+ * an explicit `false` instead of leaving `allowNetwork` out, or its MCP
+ * providers as an empty `mcp` list instead of leaving it out, because each
+ * pair means the same thing. Array order and every other semantic change do change
  * it. The spec passed in is not modified.
  *
  * @param spec - The validated spec.
@@ -205,8 +208,15 @@ export function runSpecHash(spec: RunSpec): Promise<string> {
   return canonicalDigest({
     ...spec,
     lanes: spec.lanes.map((lane) => {
-      if (lane.agent.allowNetwork !== false) return lane;
-      const { allowNetwork: _omitted, ...agent } = lane.agent;
+      const { allowNetwork, mcp, ...rest } = lane.agent;
+      const omitNetwork = allowNetwork === false;
+      const omitMcp = mcp !== undefined && mcp.length === 0;
+      if (!omitNetwork && !omitMcp) return lane;
+      const agent = {
+        ...rest,
+        ...(omitNetwork || allowNetwork === undefined ? {} : { allowNetwork }),
+        ...(omitMcp || mcp === undefined ? {} : { mcp }),
+      };
       return { ...lane, agent };
     }),
   });

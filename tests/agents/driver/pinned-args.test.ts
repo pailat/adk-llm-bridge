@@ -47,6 +47,26 @@ const CLAUDE_OVERRIDES: readonly (readonly string[])[] = [
   ["--plugin-dir=/tmp/plugins"],
   ["--ide"],
   ["--chrome"],
+  // Subagents carry their own tools, permission mode, MCP servers and hooks.
+  ["--agents", '{"x":{"description":"d","prompt":"p","tools":["Bash"]}}'],
+  ["--agents=agents.json"],
+  ["--agent", "x"],
+  ["--agent=x"],
+  ["--plugin-url", "https://example.invalid/plugin.zip"],
+  ["--permission-prompts", "host"],
+  // These move the session's root or run it outside this process.
+  ["--worktree"],
+  ["--worktree=name"],
+  ["-w"],
+  ["-wname"],
+  ["--remote-control"],
+  ["--cloud", "session_x"],
+  ["--teleport"],
+  ["--environment", "ccpool_x"],
+  // Commander expands a cluster of boolean short flags: `-pw` is `-p -w`.
+  ["-pw"],
+  ["-pvw", "name"],
+  ["-cpwname"],
   // The value of another flag spelled like a pinned flag fails closed.
   ["--append-system-prompt", "--settings"],
 ];
@@ -86,6 +106,18 @@ const CODEX_OVERRIDES: readonly (readonly string[])[] = [
   ["--enable", "web_search_request"],
   ["--disable=x"],
   ["--search"],
+  ["--approve-for-me"],
+  ["--dangerously-bypass-hook-trust"],
+  ["--worktree"],
+  ["-c", 'approvals_reviewer="auto_review"'],
+  ["-c", 'default_permissions=":workspace"'],
+  ["-c", "permissions.open.network=true"],
+  ["-c", 'agents.x.config_file="/tmp/role.toml"'],
+  // Clap expands a cluster of boolean short flags: `-hs x` is `-h -s x`.
+  ["-hsdanger-full-access"],
+  ["-Vs", "danger-full-access"],
+  ["-hc", "sandbox_mode=danger-full-access"],
+  ["-hcsandbox_mode=danger-full-access"],
 ];
 
 describe("ClaudeCliDriver args", () => {
@@ -105,6 +137,9 @@ describe("ClaudeCliDriver args", () => {
       "--append-system-prompt=Be brief.",
       "--fallback-model",
       "sonnet",
+      // A value-taking short flag keeps the rest of the cluster as its value.
+      "-nwork",
+      "-dapi,hooks",
     ];
     const driver = new ClaudeCliDriver({ args });
     expect(
@@ -156,6 +191,9 @@ describe("CodexCliDriver args", () => {
       'model="o3"',
       "--config=model_reasoning_effort=high",
       "--skip-git-repo-check",
+      // A value-taking short flag keeps the rest of the cluster as its value.
+      "-mgpt-sandbox",
+      "-ishot-s.png",
     ];
     const argv = new CodexCliDriver({ args }).buildArgs({
       provider: CODEX_PROVIDER,
@@ -209,5 +247,17 @@ describe("findPinnedArgOverride", () => {
 
   test("ignores a trailing config flag without a value", () => {
     expect(findPinnedArgOverride(["-c"], pinned)).toBeUndefined();
+  });
+
+  test("expands a short-flag cluster only through boolean flags", () => {
+    const clustered = { ...pinned, booleanShortFlags: ["-h", "-V"] };
+    expect(findPinnedArgOverride(["-hVs", "x"], clustered)).toBe("-hVs");
+    expect(
+      findPinnedArgOverride(["-hc", "mcp_servers.x.enabled=true"], clustered),
+    ).toBe("-hc mcp_servers.x.enabled=true");
+    // `-m` takes a value, so `s` belongs to it and is not a flag.
+    expect(findPinnedArgOverride(["-msx"], clustered)).toBeUndefined();
+    // Without the boolean list a cluster is not expanded.
+    expect(findPinnedArgOverride(["-hsx"], pinned)).toBeUndefined();
   });
 });

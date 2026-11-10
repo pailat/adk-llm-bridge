@@ -8,6 +8,7 @@ import {
   WorkflowError,
   type WorkflowExecutionLimits,
 } from "../contracts.js";
+import { monotonicNow } from "../internal/monotonic-clock.js";
 import {
   WORKFLOW_SCRIPT_PROTOCOL,
   WORKFLOW_SCRIPT_PROTOCOL_VERSION,
@@ -161,7 +162,7 @@ class QuickJSSyncGeneratorSession implements WorkflowScriptGeneratorSession {
     this.#signal = signal;
     this.#onDispose = onDispose;
     runtime.setInterruptHandler(
-      () => this.#signal?.aborted === true || Date.now() >= this.#deadline,
+      () => this.#signal?.aborted === true || monotonicNow() >= this.#deadline,
     );
   }
 
@@ -186,7 +187,7 @@ class QuickJSSyncGeneratorSession implements WorkflowScriptGeneratorSession {
     }
 
     const serialized = serializeMessage(value, this.#limits.maxMessageBytes);
-    this.#deadline = Date.now() + this.#limits.cpuTimeMs;
+    this.#deadline = monotonicNow() + this.#limits.cpuTimeMs;
     const argument = context.newString(serialized);
     try {
       let result: ReturnType<QuickJSContext["callFunction"]>;
@@ -340,9 +341,9 @@ export class QuickJSSyncGeneratorRuntime implements WorkflowScriptRuntime {
     const runtime = quickJSModule(module).newRuntime();
     runtime.setMemoryLimit(limits.memoryBytes);
     runtime.setMaxStackSize(limits.stackBytes);
-    const setupDeadline = Date.now() + limits.cpuTimeMs;
+    const setupDeadline = monotonicNow() + limits.cpuTimeMs;
     runtime.setInterruptHandler(
-      () => options.signal?.aborted === true || Date.now() >= setupDeadline,
+      () => options.signal?.aborted === true || monotonicNow() >= setupDeadline,
     );
     const context = runtime.newContext();
     let nextFunction: QuickJSHandle | undefined;

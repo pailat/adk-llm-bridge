@@ -42,9 +42,39 @@ export function shouldCaptureMessageContent(): boolean {
   return value === "true" || value === "1";
 }
 
+/**
+ * Bridge provider ids whose OpenTelemetry GenAI semantic-convention
+ * `gen_ai.provider.name` value differs from the id.
+ */
+const SEMCONV_PROVIDER_NAMES: Readonly<Record<string, string>> = {
+  xai: "x_ai",
+};
+
+/**
+ * The `gen_ai.provider.name` value for a bridge provider id.
+ *
+ * @remarks
+ * Uses the OpenTelemetry GenAI semantic-convention value where one exists:
+ * `openai`, `anthropic` and `x_ai` (for the bridge's `xai`). Providers with
+ * no semconv value keep the bridge id, as the convention allows:
+ * `openrouter`, `ai-gateway`, `custom`, or the `providerId` of a custom
+ * provider.
+ *
+ * @param provider - The bridge provider id.
+ * @returns The value to record.
+ */
+export function genAiProviderName(provider: string): string {
+  return Object.hasOwn(SEMCONV_PROVIDER_NAMES, provider)
+    ? (SEMCONV_PROVIDER_NAMES[provider] as string)
+    : provider;
+}
+
 /** Attributes describing the provider that served a model call. */
 export interface LlmSpanInfo {
-  /** Provider id, e.g. `openai`, `anthropic`, `xai`, `openrouter`, `ai-gateway`, `custom`. */
+  /**
+   * Bridge provider id, e.g. `openai`, `anthropic`, `xai`, `openrouter`,
+   * `ai-gateway`, `custom`; recorded through {@link genAiProviderName}.
+   */
   provider: string;
   /** Model reported by the provider in its response (may differ from the request). */
   model?: string;
@@ -76,7 +106,7 @@ export function serverAddress(baseURL: string | undefined): {
  * Annotates the active model-call span (ADK 2.4 `call_llm`, ADK 2.5
  * `generate_content {model}`; found as the active span, never by name) with
  * provider-level GenAI attributes:
- * `gen_ai.provider.name`, `gen_ai.response.model`, `gen_ai.response.id`,
+ * `gen_ai.provider.name` (see {@link genAiProviderName}), `gen_ai.response.model`, `gen_ai.response.id`,
  * `server.address` and `server.port`. Undefined values are skipped, so it is
  * safe to call more than once (for example once the response id is known).
  *
@@ -90,7 +120,7 @@ export function annotateLlmSpan(
   if (!span) return;
   const { address, port } = serverAddress(info.baseURL);
   const attributes: Record<string, string | number> = {
-    "gen_ai.provider.name": info.provider,
+    "gen_ai.provider.name": genAiProviderName(info.provider),
   };
   if (info.model) attributes["gen_ai.response.model"] = info.model;
   if (info.responseId) attributes["gen_ai.response.id"] = info.responseId;

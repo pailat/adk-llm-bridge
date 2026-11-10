@@ -7,6 +7,7 @@
 
 import type { ExternalAgentEvent } from "../events.js";
 import { networkAllowed } from "../permissions/network.js";
+import { policySetsPaths } from "../permissions/paths.js";
 import type { ExternalAgentPermissionPolicy } from "../permissions/schema.js";
 
 /**
@@ -27,6 +28,15 @@ export const EXTERNAL_AGENT_TOOL_NOT_OFFERED =
   "EXTERNAL_AGENT_TOOL_NOT_OFFERED";
 
 /**
+ * Not a refusal: the code of the `error` event of a Claude run that reached
+ * its result while a background task it started was still running. A
+ * headless run cannot wait for the task, so its work is not done; the run
+ * ends with exit code 1 instead of reporting success.
+ */
+export const EXTERNAL_AGENT_BACKGROUND_TASK_PENDING =
+  "EXTERNAL_AGENT_BACKGROUND_TASK_PENDING";
+
+/**
  * The policy does not set `allowNetwork: true` (network is off), and the
  * runtime cannot keep its
  * tools (shell commands, web tools, MCP servers) off the network in the
@@ -36,7 +46,7 @@ export const EXTERNAL_AGENT_NETWORK_UNENFORCEABLE =
   "EXTERNAL_AGENT_NETWORK_UNENFORCEABLE";
 
 /**
- * The policy sets `allowedPaths` (or inherited `pathBounds`), and the driver
+ * The policy sets `allowedPaths` or `readPaths` (or inherited path bounds), and the driver
  * cannot check the paths of the runtime's tool calls against them: the
  * runtime never asks the bridge before a file tool runs.
  */
@@ -79,10 +89,27 @@ export const EXTERNAL_AGENT_OPTION_UNSUPPORTED =
  * example an npm shim such as `gemini.cmd`. Running one means going through
  * `cmd.exe`, which re-parses the arguments (a prompt with `&` or `|` would
  * run as a command), so the driver never runs it. Point `command` at the
- * native `.exe` or, for Gemini CLI, use a custom `spawn` that runs Node.
+ * native `.exe` or, for Gemini CLI, set `interpreter` (a native `node.exe`)
+ * and `entry` (the package's JavaScript entry).
  */
 export const EXTERNAL_AGENT_BATCH_COMMAND_REFUSED =
   "EXTERNAL_AGENT_BATCH_COMMAND_REFUSED";
+
+/**
+ * A CLI driver built with `interpreter` and `entry` was asked to start a file
+ * the run's agent can write: the entry script, or an interpreter given as a
+ * path, or the entry's directory (where the interpreter starts), is at or
+ * under the run's working directory, an `allowedPaths` root or a temp
+ * directory a runtime sandbox keeps writable (symlinks resolved). The agent could replace it in one run and have the
+ * next run execute it on the host, outside the runtime's sandbox, so the run
+ * is refused before anything starts. Also used when the interpreter is not
+ * the native Node binary (its real path is not named `node` or `node.exe`,
+ * or the file is not a native executable, such as a script shim): other
+ * interpreters and version-manager shims read configuration from the run's
+ * working directory.
+ */
+export const EXTERNAL_AGENT_INTERPRETER_UNSAFE =
+  "EXTERNAL_AGENT_INTERPRETER_UNSAFE";
 
 /** Codes of {@link ExternalAgentPolicyError}. */
 export type ExternalAgentPolicyErrorCode =
@@ -92,6 +119,7 @@ export type ExternalAgentPolicyErrorCode =
   | typeof EXTERNAL_AGENT_DEPENDENCY_MISSING
   | typeof EXTERNAL_AGENT_MISSING_BINARY
   | typeof EXTERNAL_AGENT_BATCH_COMMAND_REFUSED
+  | typeof EXTERNAL_AGENT_INTERPRETER_UNSAFE
   | typeof EXTERNAL_AGENT_CREDENTIAL_UNSUPPORTED
   | typeof EXTERNAL_AGENT_OPTION_UNSUPPORTED;
 
@@ -165,7 +193,7 @@ export function unsandboxedShellRefusal(
 
 /**
  * A driver whose runtime runs file tools without asking the bridge cannot keep
- * a run inside `allowedPaths` or `pathBounds`. Such a run is refused unless the
+ * a run inside `allowedPaths`, `readPaths` or the path bounds. Such a run is refused unless the
  * driver was built with `allowUnenforcedPaths: true`.
  *
  * @param policy - The effective permission policy of the run.
@@ -177,15 +205,12 @@ export function unenforceablePathsRefusal(
   policy: ExternalAgentPermissionPolicy | undefined,
   options: { runtime: string; allowUnenforcedPaths: boolean },
 ): ExternalAgentPolicyError | undefined {
-  if (
-    (policy?.allowedPaths === undefined && policy?.pathBounds === undefined) ||
-    options.allowUnenforcedPaths
-  ) {
+  if (!policySetsPaths(policy) || options.allowUnenforcedPaths) {
     return undefined;
   }
   return new ExternalAgentPolicyError(
     EXTERNAL_AGENT_PATHS_UNENFORCEABLE,
-    `${options.runtime} runs file tools without asking the bridge, so allowedPaths (or the path bounds inherited from a parent agent) cannot be enforced. Use ClaudeAgentSdkDriver, remove allowedPaths, or build the driver with allowUnenforcedPaths: true to run anyway (the runtime's own sandbox then decides which paths it reaches).`,
+    `${options.runtime} runs file tools without asking the bridge, so allowedPaths and readPaths (or the path bounds inherited from a parent agent) cannot be enforced. Use ClaudeAgentSdkDriver, remove allowedPaths, or build the driver with allowUnenforcedPaths: true to run anyway (the runtime's own sandbox then decides which paths it reaches).`,
   );
 }
 
@@ -249,7 +274,7 @@ const BATCH_REMEDY = {
   codex:
     "Set `command` to the codex.exe inside the @openai/codex package, for example node_modules\\@openai\\codex-win32-x64\\vendor\\x86_64-pc-windows-msvc\\bin\\codex.exe (win32-arm64 uses codex-win32-arm64 and aarch64-pc-windows-msvc).",
   gemini:
-    "Gemini CLI has no native .exe: pass a `spawn` option that runs process.execPath with the package's JavaScript entry.",
+    "Gemini CLI has no native .exe: set `interpreter` to node (a native node.exe) and `entry` to the package's JavaScript entry, the file named by `bin.gemini` in @google/gemini-cli's package.json.",
 } as const;
 
 /**

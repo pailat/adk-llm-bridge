@@ -42,6 +42,24 @@ export type WorkflowCheckpointStepStatus =
  */
 export type WorkflowStepResumeReason = "interrupted" | "retry";
 
+/**
+ * Durable form of a completed step's result.
+ *
+ * @remarks
+ * When `content` is exactly `{ role: "model", parts: [{ text: output }] }`, the
+ * checkpoint stores `contentFromOutput: true` instead of `content`, so the
+ * step's text is stored once. {@link workflowStepResultFromCheckpoint} rebuilds
+ * `content` on read; a replayed step gets the same result it had when it ran.
+ * Any other `content` is stored as is.
+ */
+export interface WorkflowCheckpointStepResultV1 extends WorkflowStepResult {
+  /**
+   * `true` when `content` was the plain text of `output` and is not stored.
+   * Absent otherwise, and in checkpoints written before this field existed.
+   */
+  contentFromOutput?: true;
+}
+
 /** Durable record of one workflow step. */
 export interface WorkflowCheckpointStepV1 {
   /** Step id, unique within the execution. */
@@ -67,8 +85,12 @@ export interface WorkflowCheckpointStepV1 {
   updatedAt: number;
   /** Epoch milliseconds when the step finished; set only for `completed`, `failed` and `interrupted`. */
   completedAt?: number;
-  /** Durable result; set only for `completed`. */
-  result?: WorkflowStepResult;
+  /**
+   * Durable result; set only for `completed`. Read it with
+   * {@link workflowStepResultFromCheckpoint}, which rebuilds a `content` that
+   * was stored as `contentFromOutput`.
+   */
+  result?: WorkflowCheckpointStepResultV1;
   /** Serialized error; set only for `failed` and `interrupted`. */
   error?: WorkflowSerializedError;
   /** Present only while `status` is `waiting`. */
@@ -194,10 +216,18 @@ function isWorkflowCheckpointV1Value(
 }
 
 /**
- * Removes runtime-only fields while preserving the v1 durable shape.
+ * Returns the form a checkpoint is stored in: runtime-only fields removed and
+ * step text stored once.
  *
- * @param checkpoint - Checkpoint that may carry transient `events` or `replayed` on step results.
- * @returns The same object when nothing needs removing, otherwise a copy without those fields.
+ * @remarks
+ * Removes `events` and `replayed` from step results, and replaces a `content`
+ * that is the plain text of `output` with `contentFromOutput: true` (see
+ * {@link WorkflowCheckpointStepResultV1}). Idempotent. Stores, revisions and
+ * size checks all use this form, so a checkpoint written before compaction
+ * gets the compact form and its revision on the next save.
+ *
+ * @param checkpoint - Checkpoint that may carry runtime-only fields or a full `content`.
+ * @returns The same object when nothing changes, otherwise a compacted copy.
  * @internal
  */
 export function toDurableWorkflowCheckpoint(
@@ -207,15 +237,84 @@ export function toDurableWorkflowCheckpoint(
   const steps = Object.fromEntries(
     Object.entries(checkpoint.steps).map(([stepId, step]) => {
       if (!step.result) return [stepId, step];
-      const { events: _events, replayed: _replayed, ...result } = step.result;
-      if (!("events" in step.result) && !("replayed" in step.result)) {
-        return [stepId, step];
-      }
+      const result = toDurableStepResult(step.result);
+      if (result === step.result) return [stepId, step];
       changed = true;
       return [stepId, { ...step, result }];
     }),
   );
   return changed ? { ...checkpoint, steps } : checkpoint;
+}
+
+function toDurableStepResult(
+  value: WorkflowCheckpointStepResultV1,
+): WorkflowCheckpointStepResultV1 {
+  const compact = isOutputTextContent(value.content, value.output);
+  if (!("events" in value) && !("replayed" in value) && !compact) {
+    return value;
+  }
+  const { events: _events, replayed: _replayed, ...result } = value;
+  if (!compact) return result;
+  const { content: _content, ...withoutContent } = result;
+  return { ...withoutContent, contentFromOutput: true };
+}
+
+/**
+ * Whether `content` is exactly the plain text of `output`, so it can be
+ * rebuilt from `output` without loss: own data properties `role` and `parts`
+ * only, role `"model"`, one part whose only own data property is `text`, equal
+ * to `output`. An accessor or a symbol key makes it `false`.
+ */
+function isOutputTextContent(content: unknown, output: string): boolean {
+  if (!isPlainRecord(content) || !hasExactlyKeys(content, ["parts", "role"])) {
+    return false;
+  }
+  if (content.role !== "model" || !Array.isArray(content.parts)) return false;
+  if (content.parts.length !== 1) return false;
+  const [part] = content.parts;
+  return (
+    isPlainRecord(part) &&
+    hasExactlyKeys(part, ["text"]) &&
+    part.text === output
+  );
+}
+
+function hasExactlyKeys(
+  value: Record<string, unknown>,
+  keys: readonly string[],
+): boolean {
+  const own = Reflect.ownKeys(value);
+  return (
+    own.length === keys.length &&
+    keys.every((key) => {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      return descriptor?.enumerable === true && descriptor.value !== undefined;
+    })
+  );
+}
+
+/**
+ * Reads a stored step result as the step returned it.
+ *
+ * @remarks
+ * Rebuilds `content` as `{ role: "model", parts: [{ text: output }] }` when the
+ * checkpoint stored `contentFromOutput: true`, and drops that marker. A result
+ * stored with its `content` (any checkpoint written before compaction, or a
+ * `content` that is not the plain text of `output`) is returned without the
+ * marker and otherwise unchanged. Each call returns a new object.
+ *
+ * @param result - The `result` of a `completed` {@link WorkflowCheckpointStepV1}.
+ * @returns The step result with its `content`.
+ */
+export function workflowStepResultFromCheckpoint(
+  result: WorkflowCheckpointStepResultV1,
+): WorkflowStepResult {
+  const { contentFromOutput, ...stepResult } = result;
+  if (contentFromOutput !== true) return stepResult;
+  return {
+    ...stepResult,
+    content: { role: "model", parts: [{ text: stepResult.output }] },
+  };
 }
 
 function isStep(
@@ -384,6 +483,8 @@ function isStepResult(
     (value.replayed === undefined || typeof value.replayed === "boolean") &&
     (value.events === undefined || Array.isArray(value.events)) &&
     isWorkflowContent(value.content) &&
+    (value.contentFromOutput === undefined ||
+      (value.contentFromOutput === true && value.content === undefined)) &&
     (value.stateDelta === undefined ||
       (isPlainRecord(value.stateDelta) && isJsonSafe(value.stateDelta))) &&
     (value.usage === undefined || isWorkflowStepUsage(value.usage))

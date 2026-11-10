@@ -816,6 +816,29 @@ describe("AgentInvocationGateway", () => {
       expect(result.output).toBe("answer");
       expect(result.errorKind).toBeUndefined();
     });
+
+    test("joins the text parts of one event with newlines, as AgentTool does", async () => {
+      const worker = new ScriptAgent("worker", async function* () {
+        yield modelEvent([
+          { text: "first line" },
+          { text: "hidden", thought: true },
+          { text: "" },
+          { text: "second line" },
+        ]);
+      });
+      const gateway = new AgentInvocationGateway({
+        resolveAgent: () => worker,
+      });
+
+      const result = await gateway.run({
+        agentName: "worker",
+        input: { role: "user", parts: [{ text: "go" }] },
+        parentContext: parentContext(new CaptureAgent("root")),
+      });
+
+      expect(result.output).toBe("first line\nsecond line");
+      expect(result.transcript).toBe("first line\nsecond line");
+    });
   });
 
   describe("cancellation and error classification", () => {

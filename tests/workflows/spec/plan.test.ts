@@ -197,6 +197,7 @@ describe("resolveRunPlan agents", () => {
         mode: "workspace-write",
         allowNetwork: false,
         tools: ["Read", "Edit"],
+        mcp: [],
         maxRuns: 1,
       },
       {
@@ -206,6 +207,7 @@ describe("resolveRunPlan agents", () => {
         mode: "workspace-write",
         allowNetwork: false,
         tools: ["Read", "Edit"],
+        mcp: [],
         maxRuns: 3,
       },
       {
@@ -215,6 +217,7 @@ describe("resolveRunPlan agents", () => {
         mode: "read-only",
         allowNetwork: false,
         tools: [],
+        mcp: [],
         maxRuns: 3,
       },
     ]);

@@ -167,6 +167,16 @@ export const RUN_SPEC_ISSUE_FAMILIES = {
   RUN_SPEC_TOOL_NOT_ALLOWED: "models",
   /** A lane's agent lists the same tool twice. */
   RUN_SPEC_TOOL_DUPLICATE: "models",
+  /** A lane's agent lists an MCP provider id outside the rule set's `allowedMcpProviders`. */
+  RUN_SPEC_MCP_PROVIDER_NOT_ALLOWED: "models",
+  /** A lane's agent lists the same MCP provider id twice, or two ids that differ only in case. */
+  RUN_SPEC_MCP_PROVIDER_DUPLICATE: "models",
+  /**
+   * A lane's agent lists a tool that reaches an MCP server (`mcp__<id>`,
+   * `mcp__<id>__<tool>`, or an MCP resource tool) for a provider outside its
+   * own `mcp` list.
+   */
+  RUN_SPEC_MCP_TOOL_NOT_GRANTED: "models",
   /** `env` lists a name outside the rule set's `allowedEnvNames`. */
   RUN_SPEC_ENV_NAME_NOT_ALLOWED: "models",
   /** `env` lists the same name twice. */

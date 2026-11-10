@@ -88,6 +88,7 @@ export function testRules(): RunRules {
     allowNetwork: false,
     allowedTools: ["Read", "Edit", "Bash"],
     allowedEnvNames: ["CI", "NODE_ENV"],
+    allowedMcpProviders: [],
     deniedPathPatterns: [...DEFAULT_DENIED_PATH_PATTERNS],
     allowedQaCommands: [
       ["bun", "run", "test"],

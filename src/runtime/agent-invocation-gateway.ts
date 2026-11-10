@@ -118,9 +118,23 @@ export interface AgentInvocationInterrupt {
   events: readonly Event[];
 }
 
-/** Continuation data for an interrupted delegation. */
+/**
+ * Continuation data for an interrupted delegation.
+ *
+ * @remarks
+ * Trust model: the gateway trusts `events` as given. It does not check that
+ * they came from an earlier result of this gateway, and it keeps no record of
+ * which interrupts were already answered, so it does not guard against
+ * replay: passing the same events and answer twice resumes the delegation
+ * twice, and a tool the answer approves can run twice. The caller must
+ * consume each interrupt once, and store the events where tools and model
+ * output cannot write them (not in session state a tool can change).
+ */
 export interface AgentInvocationResume {
-  /** `interrupt.events` of the interrupted result. */
+  /**
+   * `interrupt.events` of the interrupted result, unchanged. Trusted as
+   * given; see the trust model above.
+   */
   events: readonly Event[];
 }
 
@@ -200,7 +214,11 @@ export interface AgentInvocationRequest {
    * @defaultValue `true`
    */
   appendInput?: boolean;
-  /** Continues a previously interrupted delegation. */
+  /**
+   * Continues a previously interrupted delegation. The events are trusted
+   * from the caller and not guarded against replay; see
+   * {@link AgentInvocationResume}.
+   */
   resume?: AgentInvocationResume;
   /** Receives every persisted child event, after the gateway-level sink. */
   eventSink?: AgentInvocationEventSink;
@@ -985,6 +1003,10 @@ function errorMessage(caught: unknown): string {
   return caught instanceof Error ? caught.message : String(caught);
 }
 
+/**
+ * Non-thought, non-empty text parts of one event joined with `"\n"`, as ADK's
+ * `AgentTool` merges a final event's parts.
+ */
 function extractVisibleText(event: Event): string | undefined {
   const parts = event.content?.parts;
   if (!parts) {
@@ -997,7 +1019,7 @@ function extractVisibleText(event: Event): string | undefined {
     .filter(
       (part): part is string => typeof part === "string" && part.length > 0,
     )
-    .join("");
+    .join("\n");
   return text.length > 0 ? text : undefined;
 }
 

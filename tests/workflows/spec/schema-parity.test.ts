@@ -223,6 +223,48 @@ function generatedSamples(): Sample[] {
   }
   add("tools 64", mutated([...agent, "tools"], paths(64)));
   add("tools 65", mutated([...agent, "tools"], paths(65)));
+  for (const mcp of [
+    [],
+    ["github"],
+    ["docs-search", "a_b"],
+    ["GitHub", "github"],
+    [""],
+    ["a:b"],
+    ["a/b"],
+    ["a b"],
+    ["a__b"],
+    ["a_"],
+    ["-a"],
+    ["a.b"],
+    ["https://mcp.example.com"],
+    ["\u0430pi"],
+    ["a".repeat(64)],
+    ["a".repeat(65)],
+    [1],
+    [{ url: "http://127.0.0.1:1/" }],
+    "github",
+    null,
+    { github: {} },
+  ]) {
+    add(
+      `mcp ${JSON.stringify(mcp).slice(0, 16)}`,
+      mutated([...agent, "mcp"], mcp),
+    );
+  }
+  add(
+    "mcp 16",
+    mutated(
+      [...agent, "mcp"],
+      Array.from({ length: 16 }, (_, i) => `p${i}`),
+    ),
+  );
+  add(
+    "mcp 17",
+    mutated(
+      [...agent, "mcp"],
+      Array.from({ length: 17 }, (_, i) => `p${i}`),
+    ),
+  );
 
   const steps = ["lanes", 0, "steps"] as const;
   add("steps empty", mutated([...steps], {}));

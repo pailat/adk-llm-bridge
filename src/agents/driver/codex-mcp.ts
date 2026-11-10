@@ -48,8 +48,16 @@ export type CodexMcpListSpawn = (
 
 /** Where and how to run the listing: the same as the run itself. */
 export interface CodexMcpListOptions {
-  /** The Codex binary. */
+  /** The Codex binary, or the interpreter that runs `entry`. */
   command: string;
+  /**
+   * Arguments before `mcp list --json` when the driver runs an interpreter
+   * (`CodexCliDriverConfig.interpreter` and `entry`): Node's `--import`
+   * preload and the entry. `cwd` is then the entry's directory and `env`
+   * carries the run's working directory for the preload. A custom lister
+   * must run the listing the same way.
+   */
+  prefixArgs?: readonly string[];
   /** The environment of the run (carries `CODEX_HOME`). */
   env: Record<string, string>;
   /** The working directory of the run (project config is resolved from it). */
@@ -74,7 +82,8 @@ export const CODEX_MCP_LIST_TIMEOUT_MS = 15_000;
 const SAFE_SERVER_NAME = /^[A-Za-z0-9_-]+$/;
 
 /**
- * The default {@link CodexMcpLister}: runs `<command> mcp list --json`.
+ * The default {@link CodexMcpLister}: runs `<command> mcp list --json`, or
+ * `<command> <prefixArgs> mcp list --json` when `prefixArgs` is set.
  *
  * @param options - Binary, environment and working directory of the run.
  * @param spawn - How to start the process.
@@ -87,7 +96,8 @@ export async function listCodexMcpServers(
   options: CodexMcpListOptions,
   spawn: CodexMcpListSpawn = spawnSubprocess,
 ): Promise<readonly string[]> {
-  const child = spawn(options.command, ["mcp", "list", "--json"], {
+  const prefix = options.prefixArgs ?? [];
+  const child = spawn(options.command, [...prefix, "mcp", "list", "--json"], {
     cwd: options.cwd,
     env: options.env,
   });
@@ -181,6 +191,9 @@ export async function codexMcpDisableOverrides(
   try {
     listed = await lister({
       command: options.command,
+      ...(options.prefixArgs === undefined
+        ? {}
+        : { prefixArgs: options.prefixArgs }),
       env: options.env,
       cwd: options.cwd,
     });
@@ -218,4 +231,28 @@ export async function codexMcpDisableOverrides(
       .filter((name) => SAFE_SERVER_NAME.test(name))
       .map((name) => `mcp_servers.${name}.enabled=false`),
   };
+}
+
+/**
+ * The `-c` override that pins Codex's approvals reviewer to the user outside
+ * `full-access`.
+ *
+ * @remarks
+ * Security invariant: Codex reads `approvals_reviewer` from
+ * `~/.codex/config.toml`. Set to `"auto_review"` there, it turns the CLI's
+ * `--ask-for-approval never` into `on-request` with a model reviewer
+ * (observed with codex-cli 0.167.0), so a sandboxed run could ask for, and
+ * be granted, a command outside the sandbox; under `ask` the reviewer would
+ * answer instead of the user. Both Codex drivers pass this override after
+ * every other config value, so the host config and a driver `config` object
+ * cannot change it. `full-access` has no sandbox to keep, so it adds none.
+ *
+ * @param policy - The run's policy; omitted means `read-only`.
+ * @returns The raw overrides, empty under `full-access`.
+ * @internal
+ */
+export function codexApprovalsReviewerOverrides(
+  policy: ExternalAgentPermissionPolicy | undefined,
+): readonly string[] {
+  return policy?.mode === "full-access" ? [] : ['approvals_reviewer="user"'];
 }

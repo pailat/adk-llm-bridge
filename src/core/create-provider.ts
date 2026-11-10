@@ -37,7 +37,7 @@ export type ProviderLlmFactory<
  * The returned class can be registered with ADK's LLMRegistry and
  * instantiated by model name matching.
  *
- * @typeParam C - The provider's config type (for example `OpenRouterConfig`),
+ * @typeParam C - The provider's config type (for example `OpenRouterProviderConfig`),
  * so its own options type-check.
  * @param definition - The provider definition
  * @returns A concrete class extending OpenAICompatibleLlm

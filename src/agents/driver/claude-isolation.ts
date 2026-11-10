@@ -6,16 +6,19 @@
  * except `DEFAULT_CLAUDE_TOOLS` through the SDK driver.
  */
 
-import { tmpdir } from "node:os";
 import { networkAllowed } from "../permissions/network.js";
-import { canonicalPath, isUnderAny } from "../permissions/paths.js";
+import {
+  canonicalPath,
+  isUnderAny,
+  policySetsPaths,
+} from "../permissions/paths.js";
 import type { ExternalAgentPermissionPolicy } from "../permissions/schema.js";
 import { BRIDGE_TOOL_PREFIX } from "../tools/adk-tool-bridge.js";
 import {
   EXTERNAL_AGENT_ISOLATION_VIOLATED,
   ExternalAgentPolicyError,
 } from "./policy-errors.js";
-import { asRecord, stringValue } from "./shared.js";
+import { asRecord, sandboxTempRoots, stringValue } from "./shared.js";
 
 /**
  * Built-in Claude Code tools an isolated agent gets by default: file reading
@@ -80,7 +83,29 @@ export const CLAUDE_NO_NETWORK_SANDBOX = Object.freeze({
 });
 
 /** Shape of {@link CLAUDE_NO_NETWORK_SANDBOX}. */
-export type ClaudeNoNetworkSandbox = typeof CLAUDE_NO_NETWORK_SANDBOX;
+export type ClaudeNoNetworkSandbox = Omit<
+  typeof CLAUDE_NO_NETWORK_SANDBOX,
+  "network"
+> & {
+  readonly network: Omit<
+    (typeof CLAUDE_NO_NETWORK_SANDBOX)["network"],
+    "allowLocalBinding"
+  > & { readonly allowLocalBinding: boolean };
+};
+
+/**
+ * {@link CLAUDE_NO_NETWORK_SANDBOX} with loopback port binding allowed
+ * (`network.allowLocalBinding: true`), for the `allowLocalBinding` opt-in.
+ * Every remote host stays denied.
+ */
+export const CLAUDE_NO_NETWORK_LOCAL_BINDING_SANDBOX: ClaudeNoNetworkSandbox =
+  Object.freeze({
+    ...CLAUDE_NO_NETWORK_SANDBOX,
+    network: Object.freeze({
+      ...CLAUDE_NO_NETWORK_SANDBOX.network,
+      allowLocalBinding: true,
+    }),
+  });
 
 /** Driver settings that {@link planClaudeIsolation} reads. */
 export interface ClaudeIsolationOptions {
@@ -93,6 +118,15 @@ export interface ClaudeIsolationOptions {
    * no-network sandbox. Network access of shell commands is then NOT enforced.
    */
   allowUnsandboxedShell: boolean;
+  /**
+   * Opt-in: let sandboxed shell commands bind local (loopback) ports, for
+   * tools that talk to their own workers over a local port (Turbopack, test
+   * servers). Only applies while the no-network sandbox is on; macOS only
+   * in Claude Code. Loopback services may become reachable.
+   *
+   * @defaultValue false
+   */
+  allowLocalBinding?: boolean;
   /**
    * The run's working directory, the base of relative `allowedPaths`.
    *
@@ -178,9 +212,11 @@ export interface ClaudeIsolationPlan {
  *   their canonical spelling (`bash` becomes `Bash`), so a shell named in
  *   any case gets the sandbox.
  * - Without `allowNetwork: true`, a shell tool on offer turns on the
- *   no-network sandbox, unless `allowUnsandboxedShell` is set.
+ *   no-network sandbox, unless `allowUnsandboxedShell` is set. It denies
+ *   binding local ports too, unless `allowLocalBinding` is set.
  * - With `allowedPaths` or `pathBounds` and a shell tool on offer, the
- *   sandbox may write only to the allowed roots (it does not limit reads).
+ *   sandbox may write only to the allowed roots (it does not limit reads,
+ *   and `readPaths` never become writable).
  *   A working directory outside the allowed roots (Claude Code keeps it
  *   writable), a shell without the sandbox (`allowNetwork: true` or
  *   `allowUnsandboxedShell`), `inheritHostConfig` (host settings widen the
@@ -243,17 +279,16 @@ export function planClaudeIsolation(
     if (options.allowUnsandboxedShell) {
       networkSandbox = "waived";
     } else {
-      sandbox = CLAUDE_NO_NETWORK_SANDBOX;
+      sandbox = options.allowLocalBinding
+        ? CLAUDE_NO_NETWORK_LOCAL_BINDING_SANDBOX
+        : CLAUDE_NO_NETWORK_SANDBOX;
       networkSandbox = "enforced";
     }
   }
 
   let shellPathsUnenforceable: string | undefined;
   let confined: ClaudeConfinedSandbox | undefined;
-  if (
-    shellOffered &&
-    (policy?.allowedPaths !== undefined || policy?.pathBounds !== undefined)
-  ) {
+  if (shellOffered && policySetsPaths(policy)) {
     const confinement = confineShellWrites(
       policy,
       sandbox,
@@ -287,39 +322,6 @@ export function planClaudeIsolation(
 }
 
 /**
- * Directories the Claude Code sandbox keeps writable whatever `allowWrite`
- * says: its temp area (`/tmp`, where it puts `/tmp/claude-<uid>`, the host
- * temp directory and `TMPDIR`/`CLAUDE_CODE_TMPDIR`), as real paths.
- *
- * @remarks Reads the variables from both the host process and the driver's
- * configured environment, so the result stays a superset whether or not a
- * driver forwards them to the runtime.
- *
- * @param env - The driver's configured environment.
- * @returns The canonical roots.
- */
-function alwaysWritableRoots(
-  env: Record<string, string | undefined>,
-): string[] {
-  const candidates = [
-    "/tmp",
-    tmpdir(),
-    process.env.TMPDIR,
-    process.env.CLAUDE_CODE_TMPDIR,
-    env.TMPDIR,
-    env.CLAUDE_CODE_TMPDIR,
-  ];
-  return [
-    ...new Set(
-      candidates
-        .filter((path): path is string => Boolean(path))
-        .map((path) => canonicalPath(path, "/"))
-        .filter((path): path is string => path !== undefined),
-    ),
-  ];
-}
-
-/**
  * The sandbox with its writable roots set to the policy's allowed roots, or
  * why shell writes cannot be kept inside them.
  *
@@ -343,10 +345,16 @@ function confineShellWrites(
   if (inheritHostConfig) {
     return "with inheritHostConfig, host settings (Edit allow rules, sandbox.filesystem.allowWrite) are merged into the sandbox's writable paths";
   }
-  const lists = [
-    ...(policy.allowedPaths ? [policy.allowedPaths] : []),
-    ...(policy.pathBounds ?? []),
-  ].map((list) =>
+  // Writes follow `allowedPaths` and `pathBounds` only; read roots never
+  // become writable. A policy with read rules alone allows no write root.
+  const writeLists =
+    policy.allowedPaths || policy.pathBounds
+      ? [
+          ...(policy.allowedPaths ? [policy.allowedPaths] : []),
+          ...(policy.pathBounds ?? []),
+        ]
+      : [[]];
+  const lists = writeLists.map((list) =>
     list
       .map((root) => canonicalPath(root, workingDirectory))
       .filter((root): root is string => root !== undefined),
@@ -363,7 +371,7 @@ function confineShellWrites(
       ),
     ),
   ];
-  const temp = alwaysWritableRoots(env);
+  const temp = sandboxTempRoots(env);
   const inTemp = [cwd, ...allowWrite].find((path) => isUnderAny(path, temp));
   if (inTemp !== undefined) {
     return `${inTemp} is inside a temp directory that the Claude Code sandbox always keeps writable, so the paths around allowedPaths there stay writable`;

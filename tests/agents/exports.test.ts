@@ -35,6 +35,9 @@ describe("agents public exports", () => {
     expect(agents.EXTERNAL_AGENT_BATCH_COMMAND_REFUSED).toBe(
       "EXTERNAL_AGENT_BATCH_COMMAND_REFUSED",
     );
+    expect(agents.EXTERNAL_AGENT_INTERPRETER_UNSAFE).toBe(
+      "EXTERNAL_AGENT_INTERPRETER_UNSAFE",
+    );
     expect(agents.EXTERNAL_AGENT_DEPENDENCY_MISSING).toBe(
       "EXTERNAL_AGENT_DEPENDENCY_MISSING",
     );

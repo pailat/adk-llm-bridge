@@ -32,14 +32,19 @@ export {
 } from "./hash.js";
 export type {
   WorkflowCheckpointStatus,
+  WorkflowCheckpointStepResultV1,
   WorkflowCheckpointStepStatus,
   WorkflowCheckpointStepV1,
   WorkflowCheckpointV1,
   WorkflowStepResumeReason,
 } from "./schema.js";
-export { WORKFLOW_CHECKPOINT_SCHEMA_VERSION } from "./schema.js";
+export {
+  WORKFLOW_CHECKPOINT_SCHEMA_VERSION,
+  workflowStepResultFromCheckpoint,
+} from "./schema.js";
 export type {
   ADKSessionCheckpointStoreOptions,
+  AdkSessionCheckpointStoreOptions,
   LoadWorkflowCheckpointInput,
   SaveWorkflowCheckpointInput,
   WorkflowCheckpointConflictDetails,
@@ -51,6 +56,7 @@ export type {
 } from "./store.js";
 export {
   ADKSessionCheckpointStore,
+  AdkSessionCheckpointStore,
   assertWorkflowCheckpointSize,
   DEFAULT_WORKFLOW_CHECKPOINT_MAX_BYTES,
   WORKFLOW_CHECKPOINT_STATE_PREFIX,

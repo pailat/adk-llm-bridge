@@ -10,9 +10,9 @@ import type { TrustedWorkflowDefinition } from "./definition.js";
 import { WORKFLOW_AGENT_BRAND } from "./internal/workflow-agent-brand.js";
 import {
   invocationContextForNode,
-  pickWorkflowNodeConfig,
   resolveRetryFailedSteps,
   type WorkflowNodeConfig,
+  workflowAgentBaseConfig,
 } from "./node-config.js";
 import {
   ActiveExecutions,
@@ -25,7 +25,15 @@ import {
 } from "./runtime/workflow-runtime.js";
 import type { WorkflowWorkspaceConfig } from "./workspace/workspace-adapter.js";
 
-/** Configuration of a {@link WorkflowAgent}. */
+/**
+ * Configuration of a {@link WorkflowAgent}.
+ *
+ * @remarks
+ * The whole object is forwarded to `BaseAgent`, so `clone()` rebuilds the
+ * agent from it: the clone shares the definition and any `gateway`,
+ * `checkpointStore`, `runtimeHooks` and `workspace` instances, and gets
+ * clones of the sub-agents.
+ */
 export interface WorkflowAgentConfig extends WorkflowNodeConfig {
   /** ADK agent name. */
   name: string;
@@ -85,12 +93,11 @@ export class WorkflowAgent extends BaseAgent {
    */
   constructor(config: WorkflowAgentConfig) {
     const subAgents = config.subAgents ?? [];
-    super({
-      name: config.name,
-      description: config.description ?? config.definition.description,
-      subAgents,
-      ...pickWorkflowNodeConfig(config),
-    });
+    super(
+      workflowAgentBaseConfig(config, {
+        description: config.definition.description,
+      }),
+    );
     this.definition = config.definition;
     this.#checkpointStore = config.checkpointStore;
     this.#resolveExecutionId = config.resolveExecutionId;

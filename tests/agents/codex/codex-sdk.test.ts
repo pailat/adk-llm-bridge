@@ -80,6 +80,7 @@ describe("CodexSdkDriver", () => {
       baseUrl: "https://example.test/v1",
       apiKey: "codex-key",
       config: { show_raw_agent_reasoning: true },
+      configOverrides: ['approvals_reviewer="user"'],
       env: {
         PATH: "/bin",
         HOME: "/Users/example",

@@ -23,6 +23,13 @@ import {
   claudeInitTools,
   planClaudeIsolation,
 } from "./claude-isolation.js";
+import {
+  applyBackgroundTaskSetting,
+  backgroundTaskPendingEvent,
+  ClaudeBackgroundTaskTracker,
+  createClaudeRunTempDir,
+} from "./claude-run-env.js";
+import { resolveCliLaunch, validateLaunchConfig } from "./launch.js";
 import { collectTail, type LineSource, readLines } from "./lines.js";
 import {
   batchCommandRefusal,
@@ -58,14 +65,16 @@ import {
 import {
   assertNoPinnedArgOverride,
   type PinnedFlags,
-  resolveCliCommand,
   SubprocessJsonlDriver,
 } from "./subprocess-jsonl.js";
 
 /**
  * Flags the Claude CLI driver sets from the policy and its isolation, or that
- * would widen them (extra MCP servers, tools, directories, host integrations).
- * `args` may not pass them unless `allowPolicyOverrideArgs` is set.
+ * would widen them (extra MCP servers, tools, directories, host integrations,
+ * subagent definitions with their own tools and permission mode, plugins, a
+ * different working root, or a session that runs outside this process).
+ * `args` may not pass them unless `allowPolicyOverrideArgs` is set. Reviewed
+ * against the Claude Code version in {@link CLAUDE_CLI_PINNED_FLAGS_REVIEW}.
  */
 const CLAUDE_CLI_PINNED_FLAGS: PinnedFlags = {
   flags: [
@@ -73,6 +82,7 @@ const CLAUDE_CLI_PINNED_FLAGS: PinnedFlags = {
     "--dangerously-skip-permissions",
     "--allow-dangerously-skip-permissions",
     "--permission-prompt-tool",
+    "--permission-prompts",
     "--add-dir",
     "--tools",
     "--allowedTools",
@@ -82,11 +92,39 @@ const CLAUDE_CLI_PINNED_FLAGS: PinnedFlags = {
     "--mcp-config",
     "--settings",
     "--setting-sources",
+    "--agents",
+    "--agent",
     "--plugin-dir",
+    "--plugin-url",
+    "--worktree",
+    "-w",
+    "--remote-control",
+    "--cloud",
+    "--teleport",
+    "--environment",
     "--ide",
     "--chrome",
   ],
+  // Commander reads `-pw` as `-p -w`.
+  booleanShortFlags: ["-c", "-h", "-p", "-v"],
 };
+
+/**
+ * What the pinned `args` flags were last reviewed against: the `claude --help`
+ * of `reviewedCliVersion`, and the SDK release (with the Claude Code version
+ * it bundles) installed at the time. A test compares these with the
+ * installed SDK and the peer range, so any bump fails until the list is
+ * reviewed again.
+ *
+ * @internal
+ */
+export const CLAUDE_CLI_PINNED_FLAGS_REVIEW = Object.freeze({
+  reviewedCliVersion: "2.1.322",
+  sdkPackage: "@anthropic-ai/claude-agent-sdk",
+  sdkPeerRange: ">=0.3.319 <0.4",
+  reviewedSdkVersion: "0.3.319",
+  reviewedBundledCliVersion: "2.1.319",
+});
 
 /** The running `claude` process as the driver sees it. */
 export interface ClaudeCliSubprocess {
@@ -143,6 +181,51 @@ export interface ClaudeCliDriverConfig {
    */
   command?: string;
   /**
+   * Runs the CLI as `<interpreter> <entry> <flags>` instead of `command`, for
+   * a CLI that ships as a JavaScript package (Gemini CLI on Windows, where
+   * the npm `.cmd` shim is refused). Set it with `entry`, and leave
+   * `command` unset.
+   *
+   * @remarks
+   * Security invariants: with the built-in spawn a bare name is looked up
+   * like a bare `command` (no `PATH` entry inside the run's working
+   * directory or `allowedPaths`, no relative entry; on Windows a native
+   * `.exe`/`.com` only, never a `.cmd` or `.bat`). An absolute path is used
+   * as given, unless it is inside the run's working directory or an
+   * `allowedPaths` root, which refuses the run with
+   * `EXTERNAL_AGENT_INTERPRETER_UNSAFE`. A relative path is rejected by the
+   * constructor. Only Node is accepted: the interpreter's real path
+   * (symlinks resolved) must be named `node` (`node.exe` on Windows) and be a
+   * native executable (PE, Mach-O or ELF header; a script shim such as
+   * asdf's or nodenv's is not), or the run is refused with
+   * `EXTERNAL_AGENT_INTERPRETER_UNSAFE` before any spawn, because other
+   * interpreters (Bun, version-manager shims) load configuration from the
+   * run's working directory, which the agent writes. The interpreter starts
+   * in the entry's directory, never in the run's working directory, and a
+   * fixed `--import` preload changes into it before the entry runs; a
+   * custom spawn receives that `cwd`, the preload arguments and the
+   * `ADK_LLM_BRIDGE_AGENT_CWD` variable and must keep them.
+   *
+   * @defaultValue unset: the driver runs `command`
+   */
+  interpreter?: string;
+  /**
+   * The script `interpreter` runs, as an absolute path: the file the CLI
+   * package's `package.json` names under `bin`. It goes before every flag.
+   *
+   * @remarks
+   * Security invariant: a run whose entry is at or under its working
+   * directory, an `allowedPaths` root or a temp directory a runtime sandbox
+   * keeps writable (symlinks resolved) is refused with
+   * `EXTERNAL_AGENT_INTERPRETER_UNSAFE` before anything starts, with the
+   * built-in spawn or a custom one: the agent could rewrite it and run code
+   * on the host at the next run. With the built-in spawn a missing file is
+   * `MISSING_BINARY`.
+   *
+   * @defaultValue unset
+   */
+  entry?: string;
+  /**
    * Extra arguments appended after the ones the driver builds.
    *
    * @remarks
@@ -150,10 +233,16 @@ export interface ClaudeCliDriverConfig {
    * from the policy or its isolation (`--permission-mode`,
    * `--dangerously-skip-permissions`, `--settings`, `--setting-sources`,
    * `--tools`, `--allowedTools`, `--disallowedTools`, `--mcp-config`,
-   * `--add-dir`, `--plugin-dir`, `--ide`, `--chrome` and their spellings) is
-   * refused when the driver is built, unless `allowPolicyOverrideArgs` is
-   * set. Use `model`, `maxTurns`, `systemPrompt`, `tools` and the permission
-   * policy instead.
+   * `--add-dir`, `--plugin-dir`, `--ide`, `--chrome` and their spellings), or
+   * that would widen the run another way (`--agents` and `--agent`, whose
+   * subagent definitions carry their own tools, permission mode, MCP servers
+   * and hooks; `--plugin-url`; `--permission-prompts`; `--worktree`/`-w`,
+   * which moves the session root to the repository's worktree directory;
+   * `--remote-control`, `--cloud`, `--teleport` and `--environment`, which
+   * hand the session to another process), is refused when the driver is
+   * built, unless `allowPolicyOverrideArgs` is set. A cluster of one-letter
+   * flags is split first (`-pw` is `-p -w`). Use `model`, `maxTurns`,
+   * `systemPrompt`, `tools` and the permission policy instead.
    */
   args?: readonly string[];
   /**
@@ -190,7 +279,8 @@ export interface ClaudeCliDriverConfig {
    * With the built-in spawn a bare `command` is looked up on the child's
    * `PATH`, skipping every entry inside the run's working directory or
    * `allowedPaths` (see the class remarks). A custom spawn receives `command`
-   * as given and does its own lookup.
+   * (or `interpreter`, with `entry` as the first argument) as given and does
+   * its own lookup.
    *
    * @defaultValue a subprocess spawn that supports abort and kill
    */
@@ -237,6 +327,33 @@ export interface ClaudeCliDriverConfig {
    */
   allowUnsandboxedShell?: boolean;
   /**
+   * Opt-in: in the no-network sandbox, let shell commands bind local
+   * (loopback) ports, for tools that talk to their own workers over a local
+   * port (Turbopack's PostCSS worker, test servers). macOS only: Claude Code
+   * ignores it on Linux. Remote hosts stay denied, but treat it as network
+   * access: binding a local port may let shell commands reach or
+   * impersonate services that listen on loopback ports, and other local
+   * processes can connect to the ports they open. Enable it only where
+   * every local service is trusted. No effect when the sandbox is off
+   * (`allowNetwork: true`, `allowUnsandboxedShell`).
+   *
+   * @defaultValue false
+   */
+  allowLocalBinding?: boolean;
+
+  /**
+   * Opt-out: let Claude Code run tasks in the background. Off by default,
+   * as in `ClaudeAgentSdkDriver`: the driver sets
+   * `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` for the process unless this is
+   * true, and a run whose result arrives while a background task is still
+   * running ends with an `EXTERNAL_AGENT_BACKGROUND_TASK_PENDING` error and
+   * exit code 1 either way.
+   *
+   * @defaultValue false
+   */
+  allowBackgroundTasks?: boolean;
+
+  /**
    * Opt-in: run a policy with `allowedPaths` (or path bounds inherited from a
    * parent agent) although this driver cannot check tool paths against them.
    * Without it such a run is refused with
@@ -253,6 +370,10 @@ export interface ClaudeCliDriverConfig {
    * JavaScript), the constructor throws.
    */
   sessionStore?: never;
+  /** Not supported, like {@link sessionStore}; the constructor throws. */
+  sessionStoreFlush?: never;
+  /** Not supported, like {@link sessionStore}; the constructor throws. */
+  sessionStoreLoadTimeoutMs?: never;
 }
 
 function claudeCliMissing(): ExternalAgentPolicyError {
@@ -309,6 +430,8 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
   readonly #tools: readonly string[] | undefined;
   readonly #inheritHostConfig: boolean;
   readonly #allowUnsandboxedShell: boolean;
+  readonly #allowLocalBinding: boolean;
+  readonly #allowBackgroundTasks: boolean;
   readonly #allowUnenforcedPaths: boolean;
   readonly #model: string | undefined;
   readonly #maxTurns: number | undefined;
@@ -323,18 +446,26 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
    * `maxTurns` is not a positive integer.
    * @throws InputValidationError when `args` is not an array of strings.
    * @throws {@link ExternalAgentPolicyError} with code
-   * `EXTERNAL_AGENT_OPTION_UNSUPPORTED` when `sessionStore` is given, or when
+   * `EXTERNAL_AGENT_OPTION_UNSUPPORTED` when `sessionStore`,
+   * `sessionStoreFlush` or `sessionStoreLoadTimeoutMs` is given, or when
    * an `args` entry overrides a policy or isolation flag and
    * `allowPolicyOverrideArgs` is not set.
    */
   constructor(config: ClaudeCliDriverConfig = {}) {
-    if ((config as { sessionStore?: unknown }).sessionStore !== undefined) {
-      throw new ExternalAgentPolicyError(
-        EXTERNAL_AGENT_OPTION_UNSUPPORTED,
-        "ClaudeCliDriver does not support sessionStore: the Claude CLI cannot mirror session transcripts to a store. Use ClaudeAgentSdkDriver (the ClaudeAgent default) or remove sessionStore.",
-      );
+    for (const option of [
+      "sessionStore",
+      "sessionStoreFlush",
+      "sessionStoreLoadTimeoutMs",
+    ] as const) {
+      if ((config as Record<string, unknown>)[option] !== undefined) {
+        throw new ExternalAgentPolicyError(
+          EXTERNAL_AGENT_OPTION_UNSUPPORTED,
+          `ClaudeCliDriver does not support ${option}: the Claude CLI cannot mirror session transcripts to a store. Use ClaudeAgentSdkDriver (the ClaudeAgent default) or remove ${option}.`,
+        );
+      }
     }
     validateDriverConfig("ClaudeCliDriver", config);
+    validateLaunchConfig("ClaudeCliDriver", config);
     assertNoPinnedArgOverride(
       "ClaudeCliDriver",
       config.args,
@@ -351,7 +482,12 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
     }
     super({
       providerId: CLAUDE_PROVIDER.id,
-      command: config.command ?? CLAUDE_PROVIDER.command ?? "claude",
+      command:
+        config.interpreter ??
+        config.command ??
+        CLAUDE_PROVIDER.command ??
+        "claude",
+      entry: config.entry,
       args: config.args,
     });
     this.#spawn = config.spawn ?? spawnSubprocess;
@@ -361,6 +497,8 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
     this.#tools = config.tools ? [...config.tools] : undefined;
     this.#inheritHostConfig = config.inheritHostConfig ?? false;
     this.#allowUnsandboxedShell = config.allowUnsandboxedShell ?? false;
+    this.#allowLocalBinding = config.allowLocalBinding ?? false;
+    this.#allowBackgroundTasks = config.allowBackgroundTasks ?? false;
     this.#allowUnenforcedPaths = config.allowUnenforcedPaths ?? false;
     this.#model = config.model;
     this.#maxTurns = config.maxTurns;
@@ -423,22 +561,31 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
       return;
     }
 
-    const command = this.#builtInSpawn
-      ? resolveCliCommand(this.command, env, request)
-      : this.command;
-    if (command === undefined) {
-      yield policyErrorEvent(claudeCliMissing());
+    const resolved = resolveCliLaunch({
+      command: this.command,
+      entry: this.entry,
+      env,
+      request,
+      builtInSpawn: this.#builtInSpawn,
+      missing: claudeCliMissing,
+    });
+    if ("refusal" in resolved) {
+      yield policyErrorEvent(resolved.refusal);
       yield { type: "completed", exitCode: 1, timestamp: Date.now() };
       return;
     }
+    const { launch } = resolved;
+    // A private temp directory for this run, removed when it ends.
+    const runTemp = createClaudeRunTempDir();
     let child: ClaudeCliSubprocess;
     try {
-      child = this.#spawn(command, args, {
-        cwd: request.workingDirectory,
-        env,
+      child = this.#spawn(launch.command, [...launch.prefix, ...args], {
+        cwd: launch.cwd ?? request.workingDirectory,
+        env: { ...env, ...runTemp?.env, ...launch.env },
         input: promptFromRequest(request),
       });
     } catch (error) {
+      runTemp?.dispose();
       if (error instanceof BatchCommandRefusedError) {
         yield policyErrorEvent(batchCommandRefusal(error, "claude"));
         yield { type: "completed", exitCode: 1, timestamp: Date.now() };
@@ -477,6 +624,8 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
       let reportedError = false;
       // The tools the session's system/init reported, for the stop message.
       let offeredTools: string[] | undefined;
+      // Background tasks still live when the run ends fail it.
+      const backgroundTasks = new ClaudeBackgroundTaskTracker();
       for await (const line of readLines(child.stdout)) {
         if (signal?.aborted) {
           return;
@@ -510,6 +659,7 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
           }
         }
         const record = asRecord(raw);
+        backgroundTasks.observe(record);
         if (record.type === "assistant") {
           const error = claudeAssistantErrorEvent(record, "CLAUDE_CLI_ERROR");
           if (error) {
@@ -600,9 +750,13 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
       }
 
       if (exitCode === 0) {
+        const pending = backgroundTasks.pending();
+        if (pending.length > 0) {
+          yield backgroundTaskPendingEvent(pending, "Claude CLI");
+        }
         yield {
           type: "completed",
-          exitCode,
+          exitCode: pending.length > 0 ? 1 : 0,
           ...summary,
           timestamp: Date.now(),
         };
@@ -620,6 +774,7 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
       yield { type: "completed", exitCode, ...summary, timestamp: Date.now() };
     } finally {
       supervisor.release();
+      runTemp?.dispose();
     }
   }
 
@@ -672,6 +827,7 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
       tools: this.#tools,
       inheritHostConfig: this.#inheritHostConfig,
       allowUnsandboxedShell: this.#allowUnsandboxedShell,
+      allowLocalBinding: this.#allowLocalBinding,
       env: this.#env,
       ...(request.workingDirectory
         ? { workingDirectory: request.workingDirectory }
@@ -683,7 +839,10 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
    * Environment of the child process: only `PATH`, `HOME`, `USER`, `SHELL` and
    * the Claude config directories from the driver's environment, plus the
    * credential variables the provider allowlists when the credential is an
-   * `env` one. Nothing else is inherited.
+   * `env` one, and `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` unless
+   * `allowBackgroundTasks`. Nothing else is inherited.
+   * {@link ClaudeCliDriver.run} adds the run's private temp directory
+   * (`CLAUDE_CODE_TMPDIR`, `TMPDIR`).
    *
    * @param request - The run request.
    * @returns The environment to pass to the process.
@@ -691,11 +850,13 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
   buildEnv(request: ExternalAgentRunRequest): Record<string, string> {
     // The config directories let Claude Code use its existing local
     // OAuth/native login cache without the bridge storing secrets.
-    return buildChildEnv(
+    const env = buildChildEnv(
       this.#env,
       ["PATH", "HOME", "USER", "SHELL", "CLAUDE_CONFIG_DIR", "XDG_CONFIG_HOME"],
       request,
     );
+    applyBackgroundTaskSetting(env, this.#allowBackgroundTasks);
+    return env;
   }
 
   /**

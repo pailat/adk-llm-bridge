@@ -18,8 +18,10 @@ import { windowsExecutableKind } from "./spawn.js";
 export interface SubprocessJsonlDriverConfig {
   /** Provider id reported in `started` events. */
   providerId: string;
-  /** Executable to run. */
+  /** Executable to run: the CLI, or the interpreter when `entry` is set. */
   command: string;
+  /** Script the `command` interpreter runs, placed before every other argument. */
+  entry?: string;
   /**
    * Arguments for the executable.
    *
@@ -48,6 +50,37 @@ export interface PinnedFlags {
   configFlags?: readonly string[];
   /** Config keys the driver pins; see `configFlags`. */
   configKeys?: readonly string[];
+  /**
+   * The CLI's one-letter flags that take no value (`-h`, `-p`). Both CLIs
+   * read `-pw` as `-p -w`, so a cluster is split through these letters
+   * before the match: `-pw` is refused when `-w` is pinned, while `-nwork`
+   * (`-n` takes a value) is not.
+   */
+  booleanShortFlags?: readonly string[];
+}
+
+/**
+ * Splits a cluster of one-letter flags (`-pvw`, `-hsx`) the way the CLIs'
+ * parsers do: each letter that is a boolean flag stands alone, and the first
+ * other letter takes the rest of the entry as its attached value.
+ */
+function expandShortCluster(
+  arg: string,
+  booleanShortFlags: readonly string[],
+): readonly string[] {
+  if (booleanShortFlags.length === 0 || !/^-[^-]./.test(arg)) {
+    return [arg];
+  }
+  const parts: string[] = [];
+  for (let index = 1; index < arg.length; index++) {
+    const flag = `-${arg[index]}`;
+    if (!booleanShortFlags.includes(flag)) {
+      parts.push(`${flag}${arg.slice(index + 1)}`);
+      break;
+    }
+    parts.push(flag);
+  }
+  return parts;
 }
 
 function flagValue(arg: string, name: string): string | undefined {
@@ -79,7 +112,8 @@ function configKeyOf(override: string): string {
  * entry such as `--permission-mode bypassPermissions` or
  * `-c sandbox_workspace_write.network_access=true` undo the policy. Matching
  * fails closed: an entry that is the value of another flag but is spelled
- * like a pinned flag is refused too.
+ * like a pinned flag is refused too, and a cluster of one-letter flags is
+ * split through the CLI's boolean flags first (`-pw` is `-p -w`).
  *
  * @param args - The configured extra arguments.
  * @param pinned - The driver's pinned flags.
@@ -93,22 +127,27 @@ export function findPinnedArgOverride(
 ): string | undefined {
   for (let index = 0; index < args.length; index++) {
     const arg = args[index] ?? "";
-    if (pinned.flags.some((name) => flagValue(arg, name) !== undefined)) {
-      return arg;
-    }
-    for (const name of pinned.configFlags ?? []) {
-      const attached = flagValue(arg, name);
-      if (attached === undefined) {
-        continue;
+    for (const part of expandShortCluster(
+      arg,
+      pinned.booleanShortFlags ?? [],
+    )) {
+      if (pinned.flags.some((name) => flagValue(part, name) !== undefined)) {
+        return arg;
       }
-      const override = attached === "" ? (args[index + 1] ?? "") : attached;
-      const key = configKeyOf(override);
-      if (
-        (pinned.configKeys ?? []).some(
-          (pinnedKey) => key === pinnedKey || key.startsWith(`${pinnedKey}.`),
-        )
-      ) {
-        return attached === "" ? `${arg} ${override}` : arg;
+      for (const name of pinned.configFlags ?? []) {
+        const attached = flagValue(part, name);
+        if (attached === undefined) {
+          continue;
+        }
+        const override = attached === "" ? (args[index + 1] ?? "") : attached;
+        const key = configKeyOf(override);
+        if (
+          (pinned.configKeys ?? []).some(
+            (pinnedKey) => key === pinnedKey || key.startsWith(`${pinnedKey}.`),
+          )
+        ) {
+          return attached === "" ? `${arg} ${override}` : arg;
+        }
       }
     }
   }
@@ -279,15 +318,20 @@ export interface CliCommandHost {
 export class SubprocessJsonlDriver implements ExternalAgentDriver {
   /** Provider id reported in `started` events. */
   readonly providerId: string;
-  /** Executable to run. */
+  /** Executable to run: the CLI, or the interpreter when `entry` is set. */
   readonly command: string;
+  /** Script the `command` interpreter runs, when the driver was built with one. */
+  readonly entry?: string;
   /** Arguments for the executable. */
   readonly args: readonly string[];
 
-  /** @param config - Provider id, command and arguments. */
+  /** @param config - Provider id, command, entry and arguments. */
   constructor(config: SubprocessJsonlDriverConfig) {
     this.providerId = config.providerId;
     this.command = config.command;
+    if (config.entry !== undefined) {
+      this.entry = config.entry;
+    }
     this.args = config.args ?? [];
   }
 

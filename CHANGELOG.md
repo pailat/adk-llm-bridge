@@ -166,8 +166,8 @@ from the 0.6.0 tag.
   - a step whose agent stops on an ADK interrupt (for example a tool
     confirmation) ends the run as `waiting`, instead of completing with empty
     output;
-  - a change commit or integration journaled before 0.7.0 and retried after
-    upgrading fails closed with an intent mismatch. Let in-flight
+  - a change commit or integration journaled by a 0.7.0 pre-release build and
+    retried after upgrading fails closed with an intent mismatch. Let in-flight
     `WorkflowValidatedCommitter` / `WorkflowValidatedIntegrator` operations
     finish before upgrading, and do not retry one under a new `operationId`
     without checking the target ref;
@@ -350,8 +350,8 @@ from the 0.6.0 tag.
 - **New `interrupted` workflow step status and `step_interrupted` event.**
   `WorkflowCheckpointStepStatus` and `WorkflowEvent` each gain a member, so an
   exhaustive `switch` over either stops compiling until it handles the new
-  case. A checkpoint that holds an `interrupted` step is rejected by 0.6.0, so
-  rolling back to 0.6.0 cannot read it. A step stopped by an abort or by the
+  case. Workflow checkpoints are new in 0.7.0 (0.6.0 has no workflows), so
+  no earlier release reads them. A step stopped by an abort or by the
   workflow execution timeout is stored as `interrupted`, and a re-run without
   `retryFailedSteps` or `resumePolicy: "retry"` fails with
   `WORKFLOW_INDETERMINATE_STEP`. Checkpoints written before keep an aborted
@@ -361,6 +361,16 @@ from the 0.6.0 tag.
 
 ### Security
 
+- **A Claude agent under `allowedPaths` can read its own large tool
+  outputs.** Claude Code saves a tool output too large to return inline to
+  the session's `tool-results` directory and tells the model to `Read` it;
+  the path guard denied that read, so the agent lost its own command output.
+  `ClaudeAgentSdkDriver` now lets through `Read` of a file in the
+  `tool-results` directory of the session the run started, derived from the
+  runtime (session id from `system/init`, transcript path from the hook
+  input, config directory from the child environment), never from the
+  model. Writes there, other tools, and other sessions' directories stay
+  denied; anything that does not match exactly fails closed.
 - **A shell tool named in any case gets the no-network sandbox.** Claude Code
   matches built-in tool names case-insensitively, but the Claude drivers
   checked for a shell by exact name, so `tools: ["bash"]` (or `"BASH"`,
@@ -422,7 +432,21 @@ from the 0.6.0 tag.
   (Codex) could undo them. Such an entry now makes the constructor throw an
   `ExternalAgentPolicyError` with code `EXTERNAL_AGENT_OPTION_UNSUPPORTED`,
   unless the driver is built with `allowPolicyOverrideArgs: true`. A non-string
-  `args` entry throws `InputValidationError`.
+  `args` entry throws `InputValidationError`. Checked against the real CLIs
+  (Claude Code 2.1.322, codex-cli 0.167.0), the list also refuses flags that
+  widen the run another way: Claude `--agents`/`--agent` (subagents with their
+  own tools and permission mode), `--plugin-url`, `--permission-prompts`,
+  `--worktree`/`-w`, `--remote-control`, `--cloud`, `--teleport`,
+  `--environment`; Codex `--approve-for-me`, `--dangerously-bypass-hook-trust`,
+  `--worktree` and `-c` overrides of `approvals_reviewer`,
+  `default_permissions`, `permissions` and `agents`. One-letter flag clusters
+  (`-pw`, `-hs danger-full-access`) are split before the match. A test pins
+  the CLI versions the list was reviewed against.
+- **Codex runs pin the approvals reviewer.** `approvals_reviewer =
+  "auto_review"` in `~/.codex/config.toml` turned the CLI's `--ask-for-approval
+  never` into `on-request` with a model reviewer, which could approve a
+  command outside the sandbox. Both Codex drivers now pass
+  `-c approvals_reviewer="user"` outside `full-access`.
 - **Dangling symlinks no longer pass the path guard.** A link inside an
   allowed root whose target does not exist yet was compared by its own path,
   so a write through it could land outside the root. The guard now follows
@@ -622,12 +646,85 @@ from the 0.6.0 tag.
   "Exports" in the doc. The plan carries the effective `deniedPathPatterns`,
   which the host enforces on writes (`run-spec.denied-paths`). Rule sets also name the workflows a spec may run
   (`allowedWorkflows`) and the refs it may merge into (`allowedTargetRefs`);
-  both are required and an empty list allows nothing. Needs `zod` >= 4; no
+  both are required and an empty list allows nothing. A lane agent may name
+  MCP providers by id only (`agent.mcp`, at most 16, unique ignoring case,
+  no URL, header, command or token shape), checked against the required rule
+  `allowedMcpProviders` (deny by default, intersection on merge;
+  `RUN_SPEC_MCP_PROVIDER_NOT_ALLOWED`, `RUN_SPEC_MCP_PROVIDER_DUPLICATE`), and
+  an `mcp__` tool name in `tools` must name a granted provider
+  (`RUN_SPEC_MCP_TOOL_NOT_GRANTED`); the
+  plan lists the grant on each agent and the host resolves ids to servers and
+  credentials (`run-spec.mcp-providers`). Needs `zod` >= 4; no
   other subpath changes. Conservative by design: lane ids that differ only in
   case, path segments shaped like Windows 8.3 short names (`GIT~1`) and paths
   deeper than 64 segments are rejected; string lengths count code points, as
   JSON Schema does; schema ids live in a registry of the module, not in zod's
   global one. See [docs/workflow-run-spec.md](./docs/workflow-run-spec.md).
+- **Checkpoint size diagnostics.** A `checkpoint_size_limit_exceeded` error
+  raised while saving now also carries `details.stepId` (the step whose
+  transition triggered the save) and `details.largestContributors` (the five
+  largest parts of the checkpoint as `{ path, bytes }`), and its message names
+  the step and the sizes. A run emits one typed `checkpoint_size_warning`
+  event per checkpoint key once a saved checkpoint reaches 80%
+  (`WORKFLOW_CHECKPOINT_SIZE_WARNING_RATIO`) of the store's limit, for stores
+  that expose the new optional `WorkflowCheckpointStore.maxCheckpointBytes`
+  (both bundled stores do). New `WorkflowCheckpointSizeWarningEvent` and
+  `WorkflowCheckpointSizeContributor` types. See "Checkpoint size" in
+  docs/workflow-durability.md.
+- **Checkpoints store a step's text once.** A completed step whose `content`
+  is exactly `{ role: "model", parts: [{ text: output }] }` is stored with
+  `contentFromOutput: true` instead of `content`, and `content` is rebuilt
+  from `output` on replay, so text-heavy checkpoints are about half the size
+  and a replayed step returns the same result. Other `content` is stored as
+  is. Checkpoints written by earlier 0.7.0 builds load unchanged and are
+  compacted on their next save. Read stored results with the new
+  `workflowStepResultFromCheckpoint()`; new `WorkflowCheckpointStepResultV1`
+  type. See "How a step's text is stored" in docs/workflow-durability.md.
+- **`ExternalAgentPermissionPolicy.readPaths`: read wider than you write.**
+  Extra roots for read tools only, on top of `allowedPaths` (which it
+  requires). The guard knows an explicit set of read tools (Claude Code
+  `Read`, `Glob`, `Grep`, `LS`, `NotebookRead`; Gemini CLI `read_file`,
+  `read_many_files`, `list_directory`, `glob`, `grep`, `grep_search`,
+  `search_file_content`). Every other tool, an unknown one included, counts as
+  a write and stays inside `allowedPaths`. `ClaudeAgentSdkDriver` approves
+  reads there in every mode. It does not pass them as
+  `additionalDirectories`, and they never become writable for the sandboxed
+  shell. The other drivers refuse such a run with
+  `EXTERNAL_AGENT_PATHS_UNENFORCEABLE` unless built with
+  `allowUnenforcedPaths: true`. A delegated agent reads only where both it and
+  its parent may read. New `readPathBounds` holds the inherited read bounds,
+  as `pathBounds` does for writes.
+- **`allowLocalBinding` on `ClaudeAgentSdkDriver` and `ClaudeCliDriver`.**
+  Opt-in (default `false`) to let shell commands bind loopback ports inside
+  the no-network sandbox, for tools such as Turbopack's PostCSS worker or
+  test servers. macOS only (Claude Code ignores it on Linux). Remote hosts
+  stay denied, but services already listening on loopback ports may become
+  reachable, so treat it as network access. The local-port limit of the
+  sandbox is now documented.
+- **`interpreter` and `entry` on `ClaudeCliDriver`, `CodexCliDriver` and
+  `GeminiCliDriver`**, so a CLI that ships as a JavaScript package runs as
+  `<interpreter> <entry> <flags>`: Gemini CLI on Windows, where the npm
+  `.cmd` shim is refused, now runs without a custom `spawn`. Only the native
+  Node binary is accepted: the interpreter's real path must be
+  `node`/`node.exe` and a native executable (PE, Mach-O thin or fat, ELF,
+  checked from the file header), because Bun and version-manager shims, the
+  symlink kind (mise, volta) and the script kind (asdf, nodenv), read
+  configuration from the agent's working directory. The built-in spawn starts
+  the real path it checked. The interpreter itself never starts in the
+  agent's working directory: it starts in the entry's directory (host-owned,
+  not in a sandbox temp directory), and a fixed `--import` preload changes
+  into the workspace before the entry runs, reading the path from
+  `ADK_LLM_BRIDGE_AGENT_CWD`, so no shim or interpreter reads configuration
+  the agent wrote. The entry and the interpreter are started by the canonical
+  paths that were checked, so a symlink through an agent-writable directory
+  cannot be re-pointed in between. The interpreter goes through the same lookup as `command` (native `.exe`/`.com` only on
+  Windows, never `cmd.exe`, no `PATH` entry inside the run's writable roots).
+  An entry, or an interpreter path, inside the run's working directory or
+  `allowedPaths` (symlinks resolved), or a non-Node interpreter, refuses the
+  run with the new `EXTERNAL_AGENT_INTERPRETER_UNSAFE`; a missing entry is `MISSING_BINARY`.
+  Codex lists its MCP servers the same way (`CodexMcpListOptions.entry`). The
+  Windows CI job runs a fake entry through the native `node.exe` under Bun
+  and Node.
 - **`resumeReason` (`"interrupted" | "retry"`) on `step_started` events and
   checkpoint step records**, so consumers can tell a resume after an interruption
   from a retry after a failure. Unset on a first attempt and on the
@@ -663,7 +760,7 @@ from the 0.6.0 tag.
   retried and failed steps are not counted. `llmCalls` is one per model
   response for an `LlmAgent` and one per run for an `ExternalAgent` that ends
   with a final response; `cachedTokens` is part of `promptTokens`. Cost is not
-  computed. `usage` is absent from checkpoints written before 0.7.0.
+  computed. `usage` is absent from checkpoints written by 0.7.0 pre-release builds.
   `AgentInvocationResult` gains `usage`, and `AgentInvocationUsage` and
   `WorkflowStepUsage` are exported from `adk-llm-bridge/workflows`.
 - **`ExternalAgentConfig.beforeToolCallback` and `afterToolCallback`** for
@@ -762,13 +859,17 @@ from the 0.6.0 tag.
 - Usage metadata reports `cachedContentTokenCount`.
 - Provider spans get `gen_ai.provider.name`, `gen_ai.response.model`,
   `gen_ai.response.id` and `server.address`, and ERROR status on failure.
+  `gen_ai.provider.name` uses the OpenTelemetry semantic-convention value
+  where one exists (`openai`, `anthropic`, `x_ai`); OpenRouter, AI Gateway and
+  custom providers keep the bridge id.
 - Runtime conformance fixtures and profiles
   ([#86](https://github.com/pailat/adk-llm-bridge/issues/86)), and the
   OpenAI-compatible feature degradation matrix
   ([#89](https://github.com/pailat/adk-llm-bridge/issues/89)).
 - `workflowCheckpointRevisionMatches(checkpoint, revision)` and
   `workflowArtifactRevisionMatches(artifact, revision)` for durable store
-  implementations; both accept pre-0.7.0 revisions.
+  implementations; both also accept revisions written by 0.7.0 pre-release
+  builds.
 - `workflowArtifactStoragePath({ executionId, artifactId })` resolves to a
   per-execution, traversal-free relative path for file-backed artifact
   stores, with each segment at most 255 characters (a longer escaped id
@@ -837,6 +938,33 @@ from the 0.6.0 tag.
   `normalizeRecoverableErrorCode()` and `EXTERNAL_AGENT_CREDENTIAL_UNSUPPORTED`
   in `adk-llm-bridge/agents`. `CLAUDE_PROVIDER` lives in its own module; the
   old import path still works.
+- Providers send `llmRequest.model` when a `beforeModelCallback` or plugin
+  changes it to an id the provider accepts (its model patterns, matched on the
+  whole id like `LLMRegistry`). A prefixed or foreign id is not sent: the
+  provider uses its own model and warns once with `REQUEST_MODEL_IGNORED`.
+- Responses carry `modelVersion` (the model the provider reports), and the
+  last streamed response has `partial: false`.
+- A content-filter finish (`content_filter`, Anthropic `refusal`) with no
+  content carries `errorCode: "SAFETY"` and an `errorMessage`, so the blank
+  turn is detectable, as ADK does for Gemini.
+- `docs/provider-requests-and-responses.md` (finish-reason and tool-call id
+  mapping, `LLMRegistry` matching and cache, tracking headers, telemetry
+  provider names) and `examples/keyless`, which runs an agent without an API
+  key or network.
+
+- `WorkflowAgent` and `ScriptWorkflowAgent` accept ADK's `waitForOutput`,
+  `beforeAgentCallback`, `afterAgentCallback` and `parentAgent`, like any ADK
+  agent.
+- `ClaudeAgentSdkDriver` options `sessionStoreFlush` (`"batched"` or
+  `"eager"`) and `sessionStoreLoadTimeoutMs` (the SDK's `loadTimeoutMs`); both
+  need a `sessionStore`, and `ClaudeCliDriver` refuses them with
+  `EXTERNAL_AGENT_OPTION_UNSUPPORTED`. Type `ClaudeSessionStoreFlush`.
+- `PortableToolDeclaration.outputSchema`: a bridged ADK tool's declared result
+  schema (`responseJsonSchema`, or a `FunctionTool` `response`), kept as
+  information; the built-in drivers do not advertise it.
+- `ExternalAgentModelUsage`, the type of an `ExternalAgentUsage.byModel` entry.
+- `WORKFLOW_STEP_MISMATCH` details include the saved step's `savedStatus` and
+  `savedAttempts`.
 
 ### Changed
 
@@ -876,7 +1004,8 @@ from the 0.6.0 tag.
   case) or kept in insertion order. This covers checkpoint input/source hashes
   and revisions, artifact digests and revisions, change-set and intent digests,
   external agent revisions and git worktree directory names. Digests stored
-  before 0.7.0 are still accepted when read, so existing checkpoints
+  by 0.7.0 pre-release builds are still accepted when read (0.6.0 and earlier
+  have no workflows and wrote none of these digests), so existing checkpoints
   (including the file store), artifacts, change sets, agent revisions and
   worktrees keep resuming and verifying; only new digests use the canonical
   form. The internal canonical JSON form sorts keys by code unit as well, so
@@ -951,8 +1080,67 @@ from the 0.6.0 tag.
   `{ code }` as a second logger argument, which ADK's default logger printed as
   `[object Object]`.
 
+- ADK tools an `ExternalAgent` cannot use are logged, once per tool for each
+  run, with a stable code: `ADK_TOOL_IN_MODEL_SKIPPED` for in-model tools
+  (`GOOGLE_SEARCH`, `URL_CONTEXT`), now reported in `skipped` as `in-model`;
+  `ADK_TOOL_REQUEST_PROCESSING_SKIPPED` for a tool or toolset whose
+  `processLlmRequest` cannot run (`PRELOAD_MEMORY` is skipped as
+  `request-processor`; `LoadArtifactsTool` is exposed without its request
+  instructions); `ADK_TOOLSET_FAILED` when a toolset's `getTools` throws, with
+  the error as the `skipped` entry's `cause`.
+- `ExternalAgentUsage.byModel` entries no longer allow a `scope` of their own;
+  the usage's `scope` covers them.
+- An abandoned workflow step event stream ends its `execute_node` span with
+  `adk.node.status` `cancelled` (ADK's `NodeStatus.CANCELLED`) instead of
+  `completed`.
+
+### Deprecated
+
+- Config type names follow one scheme: `<Provider>ProviderConfig` for a
+  model's config and `<Provider>RegisterOptions` for a `register*()`
+  function. New names, exported from the package root:
+  `AIGatewayProviderConfig`, `AIGatewayRegisterOptions`,
+  `OpenRouterProviderConfig`, `CustomProviderConfig` and
+  `CustomRegisterOptions`. The old names are `@deprecated` aliases of the same
+  types and stay until the next major version: `AIGatewayConfig`,
+  `RegisterOptions`, `OpenRouterConfig`, `CustomLlmConfig`,
+  `CustomLlmProviderConfig` and `CustomProviderRegistrationConfig`.
+- `AdkSessionCheckpointStore` and `AdkSessionCheckpointStoreOptions` in
+  `adk-llm-bridge/workflows` replace `ADKSessionCheckpointStore` and
+  `ADKSessionCheckpointStoreOptions`, matching `AdkWorkflowTaskDriver` and
+  `AdkToolBridge`. The old names are `@deprecated` aliases of the same class
+  and type.
+- `DEFAULT_CLAUDE_SDK_TOOLS` in `adk-llm-bridge/agents` is `@deprecated`: use
+  `DEFAULT_CLAUDE_TOOLS`, the same list.
+- `LEGACY_RECOVERABLE_ERROR_CODES` in `adk-llm-bridge/agents` is
+  `@deprecated`: use `normalizeRecoverableErrorCode()`, which maps every code
+  in it.
+
 ### Fixed
 
+- **Headless Claude runs no longer report success while their own background
+  job is still running.** `ClaudeAgentSdkDriver` and `ClaudeCliDriver` set
+  `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` for Claude Code, so the Bash tool
+  has no `run_in_background` and subagents run in the foreground. A run whose
+  result arrives while Claude Code still reports a background task ends with
+  an `EXTERNAL_AGENT_BACKGROUND_TASK_PENDING` error (not recoverable) and exit
+  code 1. `allowBackgroundTasks: true` on either driver leaves background
+  tasks on; the check still applies.
+- **Each Claude run gets a private temp directory.** Both Claude drivers create
+  a fresh `0700` directory under `/tmp` for each run, pass it as
+  `CLAUDE_CODE_TMPDIR` (Claude Code's temp root, kept writable in its sandbox)
+  and its per-user directory as `TMPDIR`, and remove it when the run ends.
+  Runs no longer share `/tmp/claude-<uid>`, and the child no longer runs
+  without a `TMPDIR` (shell commands then used the platform default, such as
+  `/var/folders/.../T` on macOS). Not used on Windows. On macOS, a bare
+  `mktemp` and `diff <(...)` still fail in the sandbox (they ignore `TMPDIR`
+  and write to shared temp directories, which stay read-only); use
+  `mktemp -p "$TMPDIR"` and `cmp` or files.
+- **The build output no longer depends on the entry list.** `bunup.config.ts`
+  sets `sourceBase: "./src"`, so every entry builds to the `dist/` path that
+  `package.json` `exports` names; before, Bun used the lowest common ancestor
+  of the entries and a change to the list could move every file to
+  `dist/src/`.
 - **A checkpoint mismatch inside `ctx.parallel` fails the run.** With
   `failureMode: "all-settled"` too, it now throws at the changed step after a
   `step_failed` event, instead of returning a failed outcome.
@@ -960,12 +1148,32 @@ from the 0.6.0 tag.
   wait answerable.** The checkpoint keeps the original input, and a resume that
   re-reaches the wait stores it and the `running` status again, so answering it
   no longer fails with `WORKFLOW_INPUT_MISMATCH`.
-- **The `limits.maxSteps` error says that replayed steps count.** It carries
-  `limit`, `stepId` and `replayedSteps` for handler and script workflows, and
-  the resume procedure (raise the limit, resume in place) is documented.
+- **`limits.maxSteps` no longer counts steps replayed from the checkpoint.**
+  It bounds the steps one turn executes, so a long-lived run no longer fails
+  with `WORKFLOW_LIMIT_EXCEEDED` on a resume because of its earlier steps. The
+  new `limits.maxReplayedSteps` (default ten times `maxSteps`) bounds the
+  replayed steps of a turn. Both are checked before a step is saved `running`,
+  for handler and script workflows alike, and the error details carry
+  `limit`, `limitName`, `stepId`, `executedSteps`, `replayedSteps`, `maxSteps`
+  and `maxReplayedSteps`. `runWorkflowScript` takes `replaysFromCheckpoint`
+  for a host that replays steps; it then enforces only the sum of both bounds
+  and the host each bound (see docs/workflow-durability.md "Step limit on a
+  resumed run").
+- **A recorded failure replayed in an all-settled `ctx.parallel` is marked
+  `replayed: true`.** Its outcome is the stored failure record, as
+  `WorkflowStepFailure.replayed` documents, instead of a new record without
+  the flag.
+- **A wall-clock step no longer ends in-process waits early or stretches
+  them.** The workspace, checkpoint and repository mutation lock waits, the
+  delegated-run abort grace and the sandbox `cpuTimeMs` budget measure elapsed
+  time on a monotonic clock instead of `Date.now()`. Before, an NTP correction
+  or the jump on waking from sleep could fail a lock wait at once, and a
+  backward step could let a sandbox turn run past its CPU budget. Durable lease
+  expiry stays wall time; what a sleeping host does to leases and timeouts is in
+  docs/workflow-durability.md ("Host sleep and wall-clock steps").
 - **A nested workflow's outcome decides its parent step.** A run that completed
   or is waiting is no longer reported as failed because of a retried inner attempt.
-- **The CLI drivers never run a Windows `.cmd` or `.bat` file.** The command is resolved over `.com` and `.exe` on `PATH`; a batch shim ends the run with `EXTERNAL_AGENT_BATCH_COMMAND_REFUSED` (use the native `.exe`, or a custom `spawn` for Gemini CLI; see docs/external-agent-isolation.md), and a Windows CI job checks it with fake `.cmd` files on Bun and Node.
+- **The CLI drivers never run a Windows `.cmd` or `.bat` file.** The command is resolved over `.com` and `.exe` on `PATH`; a batch shim ends the run with `EXTERNAL_AGENT_BATCH_COMMAND_REFUSED` (use the native `.exe`, or `interpreter` + `entry` for Gemini CLI; see docs/external-agent-isolation.md), and a Windows CI job checks it with fake `.cmd` files on Bun and Node.
 - **Aborting a workflow run records an explicit `interrupted` state.** The
   execution is `cancelled` and each in-flight step is checkpointed as
   `interrupted` with a `step_interrupted` event, instead of `failed`, including
@@ -982,6 +1190,17 @@ from the 0.6.0 tag.
   its details. `docs/workflow-durability.md` documents the
   supported way to stop a run (abort the signal, wait for the workflow to
   record it, then exit) and how to recover an answer turn.
+- **A `ctx.parallel` sibling stopped by a fail-fast failure is `interrupted`.**
+  When one step fails in `failureMode: "fail-fast"`, a sibling still in flight
+  was checkpointed `failed` with the other step's error, so a resume replayed
+  a failure the sibling never had. It is now `interrupted` with
+  `WORKFLOW_ABORTED` (`details.reasonCode` is the failing step's code,
+  `details.failedStepId` its id) and a `step_interrupted` event, like any
+  aborted step: a resume re-runs it with `retryFailedSteps` or
+  `resumePolicy: "retry"`, and fails with `WORKFLOW_INDETERMINATE_STEP`
+  without them. A step still queued behind `concurrency` is no longer started
+  and is not recorded, so a resume runs it fresh. The run itself still fails
+  with the failing step's error and its checkpoint is `failed`.
 - **A `Runner` abort is recorded with the default ADK session store.** The
   workflow appends its final checkpoints, and those of a workflow it delegated
   to, to the session. State then shows the step `interrupted` instead of
@@ -1371,6 +1590,36 @@ from the 0.6.0 tag.
   warning instead of an error event.
 - A `null` credential and `driverOptions: null` count as unset instead of
   throwing a TypeError.
+- `normalizeSchema` lowercases each name in a `type` array
+  (`["STRING", "NULL"]` becomes `["string", "null"]`), not only a single
+  `type` string.
+- `AgentInvocationGateway` joins the text parts of one event with a newline,
+  as ADK's `AgentTool` does, instead of with nothing.
+
+- `WorkflowAgent.clone()` and `ScriptWorkflowAgent.clone()` threw a
+  TypeError: the agents passed only part of their config to `BaseAgent`. The
+  whole config is forwarded now, so a clone keeps the definition and adapters.
+
+
+### Docs
+
+- `docs/workflow-durability.md`: writing your own checkpoint store, with
+  `workflowCheckpointRevision`, `assertWorkflowCheckpointSize`,
+  `workflowCheckpointByteLength`, `workflowCheckpointSizeLimitError` and
+  `stableSerializeWorkflowValue`; a step tool can write the parent's
+  checkpoint in session state (who can write the checkpoint); and re-sending
+  an answer after a resumed step's continuation failed can run the approved
+  tool again.
+- `AgentInvocationResume`: the gateway trusts `resume.events` from the caller
+  and does not guard against replay; consume each interrupt once.
+- `docs/external-agent-isolation.md`: how bridged ADK tool names are rewritten
+  (`adk_tool__` prefix, sanitized, 64 characters, `_2` suffixes); how the
+  confirmation protocol differs from ADK's (bridge ids and payload, matching
+  by tool name and arguments, one request per turn); which `EXTERNAL_AGENT_*`
+  codes are policy refusals and which are agent events; and that the
+  case-insensitive built-in name match also applies to the start check, the
+  `PreToolUse` hook and the `canUseTool` wrapper.
+- `docs/workflow-control-plane.md`: which error class carries which code type.
 
 ## [0.6.0] - 2026-06-20
 
