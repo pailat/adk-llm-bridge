@@ -1774,7 +1774,18 @@ from the 0.6.0 tag.
   recoverer had already retired the same lock, instead of waiting for the new
   owner. `MoveFileExW` never replaces a directory, so Windows reports a rename
   onto the existing tombstone as `EPERM`, not `EEXIST`. That `EPERM` now counts
-  as the collision when the tombstone exists; any other `EPERM` still fails.
+  as the collision when a directory (the tombstone) is at that path; any other
+  `EPERM` still fails.
+- Windows: loading a checkpoint could read through a symlink swapped in after
+  the store checked the path, because Windows has no `O_NOFOLLOW` and the open
+  follows it. On every platform the load now checks the path with `lstat`
+  (refusing a symlink before opening it) and reads only when the path names
+  the opened file (device and inode; volume and file id on Windows). A file a
+  concurrent save renamed over the path is read; a path that became a symlink
+  or names another file fails with `checkpoint_file_unsafe` everywhere. On
+  Linux kernels older than about 4.19, overlayfs can report different device
+  and inode numbers to `stat` and `fstat`, which fails every load there; keep
+  the checkpoint root on a volume.
 - Windows: releasing a lock (the checkpoint store, and the workspace and
   repository mutation locks) retries a rename that a waiter's open `owner.json`
   blocks (`EPERM`, `EBUSY`, `EACCES`; 5 tries over about 100 ms) instead of

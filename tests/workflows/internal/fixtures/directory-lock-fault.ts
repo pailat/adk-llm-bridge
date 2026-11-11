@@ -27,6 +27,8 @@
  *   token that holds the lock afterwards.
  * - `recover-blocked-win32`: runs as Windows; the recovery rename fails with
  *   `EPERM` and no tombstone exists (an open file blocks the lock directory).
+ * - `recover-file-win32`: the same, with a plain file (not a tombstone
+ *   directory) at the tombstone path.
  * - `trace`: acquire, release, then recovery of an abandoned lock and a second
  *   acquire and release. Prints every mutating call whose path is the lock or
  *   inside it, other than the two renames the protocol allows, and whether the
@@ -52,6 +54,7 @@ const MODES = [
   "recover-race-win32",
   "recover-race-linux-eperm",
   "recover-blocked-win32",
+  "recover-file-win32",
 ];
 if (!root || !mode || !MODES.includes(mode)) {
   throw new Error(`usage: <${MODES.join("|")}> <root>`);
@@ -168,7 +171,8 @@ mock.module("node:fs", () => ({
     }
     if (raceArmed && retiring) {
       raceArmed = false;
-      if (mode === "recover-blocked-win32") {
+      if (mode === "recover-file-win32") real.writeFileSync(to, "not a lock");
+      if (mode === "recover-blocked-win32" || mode === "recover-file-win32") {
         throw Object.assign(new Error("EPERM"), { code: "EPERM" });
       }
       // The faster recoverer retires the same dead lock, and a new owner

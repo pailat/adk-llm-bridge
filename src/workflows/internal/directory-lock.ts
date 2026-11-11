@@ -331,7 +331,7 @@ function retireDirectoryLock(
  * same owner, so the tombstone exists. POSIX reports that as `EEXIST` or
  * `ENOTEMPTY`. Windows reports `EPERM`, because `MoveFileExW` never replaces
  * a directory; `EPERM` there can also mean the source is in use, so it counts
- * only on Windows and only when the tombstone exists.
+ * only on Windows and only when a directory (a tombstone) is at that path.
  *
  * @param error - Error from the rename of the lock to `retiredPath`.
  * @param retiredPath - The rename's destination.
@@ -349,8 +349,7 @@ export function isRetireCollision(
     return false;
   }
   try {
-    lstatSync(retiredPath);
-    return true;
+    return lstatSync(retiredPath).isDirectory();
   } catch {
     return false;
   }

@@ -40,7 +40,8 @@ async function runFault(
     | "recover-race"
     | "recover-race-win32"
     | "recover-race-linux-eperm"
-    | "recover-blocked-win32",
+    | "recover-blocked-win32"
+    | "recover-file-win32",
 ): Promise<Record<string, unknown>> {
   const root = await mkdtemp(join(tmpdir(), "adk-directory-lock-fault-"));
   roots.push(root);
@@ -283,6 +284,13 @@ describe("directory lock", () => {
 
   test("on Windows an EPERM with no tombstone in the way is an error", async () => {
     expect(await runFault("recover-blocked-win32")).toEqual({
+      code: "EPERM",
+      holder: "dead",
+    });
+  });
+
+  test("on Windows an EPERM with a plain file at the tombstone path is an error", async () => {
+    expect(await runFault("recover-file-win32")).toEqual({
       code: "EPERM",
       holder: "dead",
     });

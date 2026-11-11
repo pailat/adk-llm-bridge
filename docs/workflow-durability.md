@@ -62,9 +62,17 @@ that looks in between fails with `checkpoint_lock_corrupt`. On Windows a
 directory cannot be renamed while another process has a file inside it open,
 so a release retries a blocked rename a few times (5 tries over about 100 ms)
 before it gives up with the `checkpoint_lock_release_failed` warning. A load
-opens the checkpoint file once without following symlinks (`O_NOFOLLOW`, where
-the platform has it) and checks and reads it through that handle, so a path
-swapped for a symlink after the check is never read.
+refuses a symlink at the checkpoint path before opening it, opens the file
+once (without following symlinks where the platform has `O_NOFOLLOW`), and
+reads through that handle only when the path names the opened file (device and
+inode; volume and file id on Windows). A load takes no lock, so a save can
+rename a new checkpoint over the path while it runs: that file is read. A path
+that has become a symlink or names another file is refused, so a path swapped
+for a symlink after the check is never read, also on Windows, where the open
+follows symlinks. On Linux kernels older than about 4.19, `stat` and `fstat`
+of a file on overlayfs (container image layers) can report different device
+and inode numbers; there every load fails with `checkpoint_file_unsafe`, so keep
+the checkpoint root on a volume, not in the image layers.
 Checkpoint contents and their deterministic revision are validated on load.
 New writes remove runtime-only step events and replay markers before hashing or
 persistence. Both bundled checkpoint stores reject malformed durable graphs
@@ -85,7 +93,7 @@ carry `details.causeCode` (the system error code) and, when available,
 | `checkpoint_revision_invalid` | The supplied revision does not match the checkpoint, or a stored file carries an invalid revision. |
 | `checkpoint_schema_invalid` | A save was given an invalid checkpoint. |
 | `checkpoint_file_corrupt` | A stored file is not valid JSON or not a valid checkpoint file. |
-| `checkpoint_file_unsafe` | The checkpoint path is a symlink or not a regular file (a directory, a FIFO). |
+| `checkpoint_file_unsafe` | The checkpoint path is a symlink or not a regular file (a directory, a FIFO), or it changed to a symlink or another file while it was read. |
 | `checkpoint_directory_create_failed`, `checkpoint_read_failed`, `checkpoint_stat_failed`, `checkpoint_write_failed` | A file system call on the checkpoint failed. |
 | `checkpoint_lock_timeout` | The per-checkpoint lock was not acquired in time. |
 | `checkpoint_lock_corrupt` | The lock is not a safe directory or has no valid owner; it is never taken over automatically. |

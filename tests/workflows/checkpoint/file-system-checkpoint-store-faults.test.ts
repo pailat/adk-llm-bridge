@@ -8,6 +8,8 @@ const FIXTURE = join(import.meta.dir, "fixtures", "checkpoint-store-fault.ts");
 /** The child's own limit; the test's is longer, so the child's output is kept. */
 const CHILD_TIMEOUT_MS = 30_000;
 const TEST_TIMEOUT_MS = 45_000;
+/** Room for the child's trace (Windows); Node's default of 1 MiB overflowed. */
+const CHILD_MAX_BUFFER = 64 * 1024 * 1024;
 
 /** How the last fault child ended, printed when its test fails. */
 let lastChild:
@@ -54,6 +56,12 @@ async function runFault(
     | "steal"
     | "corrupt"
     | "swap"
+    | "swap-follow"
+    | "load-follow"
+    | "replace"
+    | "replace-follow"
+    | "swap-replace-follow"
+    | "link-follow"
     | "wait-retire"
     | "wait-replace"
     | "wait-unlink"
@@ -75,7 +83,11 @@ async function runFault(
     const child = spawnSync(
       process.execPath,
       [FIXTURE, mode, root, ...(swapTarget ? [swapTarget] : [])],
-      { encoding: "utf8", timeout: CHILD_TIMEOUT_MS },
+      {
+        encoding: "utf8",
+        timeout: CHILD_TIMEOUT_MS,
+        maxBuffer: CHILD_MAX_BUFFER,
+      },
     );
     lastChild = {
       mode,
@@ -130,6 +142,14 @@ describe("FileSystemWorkflowCheckpointStore under file-system faults", () => {
     expect(output).not.toContain("[WORKFLOW_CHECKPOINT_LOCK_RELEASE_FAILED]");
   });
 
+  test("when the open follows symlinks (Windows) a checkpoint nobody swapped saves and loads", async () => {
+    const { result } = await runFault("load-follow");
+
+    expect(result).toEqual({ saved: true, loaded: true });
+  });
+
+  // A host that cannot create the symlink reports `symlink: "<code>"` in the
+  // result, so these tests fail and say so instead of passing untested.
   test("load never reads a checkpoint swapped for a symlink after it was checked", async () => {
     const outside = await mkdtemp(join(tmpdir(), "adk-checkpoint-outside-"));
     try {
@@ -137,6 +157,75 @@ describe("FileSystemWorkflowCheckpointStore under file-system faults", () => {
       await writeFile(target, "{}", "utf8");
 
       const { result } = await runFault("swap", target);
+
+      expect(result).toEqual({
+        saved: true,
+        reason: "checkpoint_file_unsafe",
+      });
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  // `load` takes no lock, so it can overlap a save, which renames a new file
+  // over the path. A file replaced that way after the check is read, not
+  // refused as a swap.
+  test("a load that races a save's replace of the file reads the new file", async () => {
+    const { result } = await runFault("replace");
+
+    expect(result).toEqual({ saved: true, loaded: true });
+  });
+
+  test("when the open follows symlinks (Windows) a load that races a save's replace reads the new file", async () => {
+    const { result } = await runFault("replace-follow");
+
+    expect(result).toEqual({ saved: true, loaded: true });
+  });
+
+  test("when the open follows symlinks (Windows) a file renamed over a swapped symlink after the open is still refused", async () => {
+    const outside = await mkdtemp(join(tmpdir(), "adk-checkpoint-outside-"));
+    try {
+      const target = join(outside, "planted.json");
+      await writeFile(target, "{}", "utf8");
+
+      const { result } = await runFault("swap-replace-follow", target);
+
+      expect(result).toEqual({
+        saved: true,
+        reason: "checkpoint_file_unsafe",
+      });
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  // Refused before the open: where the open follows a symlink, opening it
+  // would already reach the target (on Windows that can be a device or pipe).
+  test("when the open follows symlinks (Windows) load refuses a symlink without opening it", async () => {
+    const outside = await mkdtemp(join(tmpdir(), "adk-checkpoint-outside-"));
+    try {
+      const target = join(outside, "planted.json");
+      await writeFile(target, "{}", "utf8");
+
+      const { result } = await runFault("link-follow", target);
+
+      expect(result).toEqual({
+        saved: true,
+        reason: "checkpoint_file_unsafe",
+        opens: 0,
+      });
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  test("when the open follows symlinks (Windows) load still refuses a checkpoint swapped for a symlink", async () => {
+    const outside = await mkdtemp(join(tmpdir(), "adk-checkpoint-outside-"));
+    try {
+      const target = join(outside, "planted.json");
+      await writeFile(target, "{}", "utf8");
+
+      const { result } = await runFault("swap-follow", target);
 
       expect(result).toEqual({
         saved: true,

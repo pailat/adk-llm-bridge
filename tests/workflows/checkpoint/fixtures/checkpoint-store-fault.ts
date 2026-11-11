@@ -3,6 +3,22 @@
  * fault, in its own process so the module mock cannot leak into other tests.
  *
  * Usage: `bun checkpoint-store-fault.ts <mode> <root> [swapTarget]`.
+ * `swap` replaces the checkpoint with a symlink to `swapTarget` right after
+ * the store checks the path; `swap-follow` does the same while the store's
+ * opens follow a symlink (`O_NOFOLLOW` is removed from their flags), as on
+ * Windows. When the host refuses to create the
+ * symlink (Windows without Developer Mode or the privilege), the checkpoint
+ * is left in place and the result carries `symlink: <code>`.
+ * `load-follow` only saves and loads with opens that follow a symlink.
+ * `replace` does what a concurrent save does right after the load checked the
+ * path: it writes a copy of the checkpoint next to it and renames the copy
+ * over the path (a new file, same content). `replace-follow` does it with
+ * following opens. `swap-replace-follow` swaps in the symlink after the
+ * check, lets the following open reach the target, and then renames a plain
+ * copy over the path, so the path no longer names the opened file.
+ * `link-follow` replaces the checkpoint with a symlink before the load, with
+ * following opens, and reports how often the load opened the checkpoint path
+ * (`opens`).
  * `steal` hands the lock to another owner (same pid, new token) right after
  * the checkpoint is committed, as a recoverer that wrongly judged this process
  * dead would. `corrupt` overwrites the lock's owner file with invalid JSON at
@@ -42,13 +58,17 @@
  * On a Windows host, or with `ADK_FAULT_TRACE=1`, every file-system step the
  * store takes (and every lock the fixture publishes or retires) is written to
  * stderr as `fault-trace +<ms> <who> <step> <path> -> ok | <code>`, so a child
- * that stops or times out shows its last step.
+ * that stops or times out shows its last step. A step that repeats (a waiter
+ * polling) is printed its first 3 times and then counted; on exit the counts
+ * and the last 30 steps are printed.
  */
 
 import { mock } from "bun:test";
 import { spawnSync } from "node:child_process";
+import { constants } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import type { InvocationContext } from "@google/adk";
+import { isLockOwnerPath, isLockPath, samePath } from "./fault-paths.js";
 
 const [mode, root, swapTarget] = process.argv.slice(2);
 const MODES = [
@@ -56,6 +76,12 @@ const MODES = [
   "steal",
   "corrupt",
   "swap",
+  "swap-follow",
+  "load-follow",
+  "replace",
+  "replace-follow",
+  "swap-replace-follow",
+  "link-follow",
   "wait-retire",
   "wait-replace",
   "wait-unlink",
@@ -81,16 +107,44 @@ const TRACE =
   process.platform === "win32" || process.env.ADK_FAULT_TRACE === "1";
 const traceStart = performance.now();
 
-/** Writes one step of the file-system trace to stderr. */
+/** Times a step with the same who, step, path and outcome is printed. */
+const TRACE_REPEATS_SHOWN = 3;
+/** Steps printed again, in order, when the process exits. */
+const TRACE_TAIL = 30;
+const traceCounts = new Map<string, number>();
+const traceTail: string[] = [];
+
+/**
+ * Writes one step of the file-system trace to stderr. A waiter polls the same
+ * steps many times, so a step that repeats is printed only its first few
+ * times and then counted; the counts and the last steps are printed on exit.
+ */
 function traceStep(who: string, step: string, path: unknown, outcome: string) {
   if (!TRACE) return;
   const at = (performance.now() - traceStart).toFixed(1);
   const shown = String(path)
     .replaceAll("\\", "/")
     .replace(String(root).replaceAll("\\", "/"), "<root>");
-  process.stderr.write(
-    `fault-trace +${at}ms ${who} ${step} ${shown} -> ${outcome}\n`,
-  );
+  const key = `${who} ${step} ${shown} -> ${outcome}`;
+  const line = `fault-trace +${at}ms ${key}`;
+  traceTail.push(line);
+  if (traceTail.length > TRACE_TAIL) traceTail.shift();
+  const count = (traceCounts.get(key) ?? 0) + 1;
+  traceCounts.set(key, count);
+  if (count <= TRACE_REPEATS_SHOWN) process.stderr.write(`${line}\n`);
+}
+
+/** Prints how often each repeated step ran, and the last steps in order. */
+function traceSummary(code: number) {
+  const out = process.stderr;
+  for (const [key, count] of traceCounts) {
+    if (count > TRACE_REPEATS_SHOWN) {
+      out.write(`fault-trace repeated ${count} times: ${key}\n`);
+    }
+  }
+  out.write(`fault-trace last ${traceTail.length} steps:\n`);
+  for (const line of traceTail) out.write(`  ${line}\n`);
+  out.write(`fault-trace process exit code ${code}\n`);
 }
 
 /** Runs one traced step and records its outcome: `ok` or the error code. */
@@ -112,9 +166,7 @@ async function traced<T>(
 }
 
 if (TRACE) {
-  process.on("exit", (code) =>
-    traceStep("process", "exit", "-", `code ${code}`),
-  );
+  process.on("exit", traceSummary);
 }
 const syncFault =
   mode === "dir-sync-win32" || mode === "dir-sync-posix"
@@ -129,6 +181,31 @@ if (mode.endsWith("-win32")) {
 }
 let raceArmed = false;
 let swapArmed = false;
+let symlinkRefused: string | undefined;
+let checkpointOpens: number | undefined;
+let replaceFileArmed = false;
+let replaceAfterOpenArmed = false;
+
+/** Replaces `path` with a new file of the same content, as a save does. */
+async function replaceWithCopy(path: string) {
+  const temporary = `${path}.fixture-save.tmp`;
+  await real.writeFile(temporary, await real.readFile(path));
+  await traced("fixture", "save-replace", path, () =>
+    real.rename(temporary, path),
+  );
+}
+
+/** Replaces `path` with a symlink to the swap target in one rename. */
+async function swapForSymlink(path: string) {
+  const link = `${path}.link`;
+  try {
+    await real.symlink(String(swapTarget), link);
+  } catch (error) {
+    symlinkRefused = String((error as { code?: unknown }).code ?? error);
+    return;
+  }
+  await real.rename(link, path);
+}
 let waitArmed = false;
 let replaceLockPath: string | undefined;
 let vanishLockPath: string | undefined;
@@ -141,10 +218,6 @@ const syncedOwners = new Set<string>();
 let publishes = 0;
 let incompleteOwnerAtPublish = 0;
 let unsyncedOwnerAtPublish = 0;
-const isLockPath = (path: unknown): boolean => {
-  const text = String(path).replaceAll("\\", "/");
-  return text.endsWith(".json.lock") || text.includes(".json.lock/");
-};
 const trace = (call: string, path: unknown): void => {
   if (mode === "trace" && isLockPath(path)) violations.push(`${call} ${path}`);
 };
@@ -179,11 +252,7 @@ async function retireLock(lockPath: string) {
 }
 
 async function beforeOwnerRead(ownerPath: string) {
-  if (
-    !waitArmed ||
-    mode === "wait-vanish" ||
-    !ownerPath.endsWith(".json.lock/owner.json")
-  )
+  if (!waitArmed || mode === "wait-vanish" || !isLockOwnerPath(ownerPath))
     return;
   waitArmed = false;
   const lockPath = dirname(ownerPath);
@@ -297,40 +366,53 @@ const faultFs = {
   },
   // Replace the checkpoint with a symlink right after any check of the path,
   // as a concurrent attacker could.
-  lstat: async (path: string) => {
+  lstat: async (path: string, ...rest: [{ bigint?: boolean }?]) => {
     // Windows: the lock appears after the occupancy check and before the rename.
-    if (epermLockPath !== undefined && path === epermLockPath) {
+    if (epermLockPath !== undefined && samePath(path, epermLockPath)) {
       epermLockPath = undefined;
       throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
     }
     // The waiter's first look is the occupancy check; retire before its second.
-    if (vanishLockPath !== undefined && path === vanishLockPath) {
+    if (vanishLockPath !== undefined && samePath(path, vanishLockPath)) {
       vanishLstats += 1;
       if (vanishLstats === 2) {
         vanishLockPath = undefined;
         await retireLock(path);
       }
     }
-    if (replaceLockPath !== undefined && path === replaceLockPath) {
+    if (replaceLockPath !== undefined && samePath(path, replaceLockPath)) {
       replaceLockPath = undefined;
       await publishLock(path, "abandoned-token", deadPid());
     }
-    const info = await real.lstat(path);
+    const info = await real.lstat(path, ...(rest as []));
     if (swapArmed && path.endsWith(".json") && swapTarget) {
       swapArmed = false;
-      await real.rename(path, `${path}.moved`);
-      await real.symlink(swapTarget, path);
+      await swapForSymlink(path);
+    }
+    if (replaceFileArmed && path.endsWith(".json")) {
+      replaceFileArmed = false;
+      await replaceWithCopy(path);
     }
     return info;
   },
   open: async (path: string, ...rest: [number?, number?]) => {
     if (swapArmed && path.endsWith(".json") && swapTarget) {
       swapArmed = false;
-      await real.rename(path, `${path}.moved`);
-      await real.symlink(swapTarget, path);
+      await swapForSymlink(path);
     }
     if (mode === "trace" && isWriteFlags(rest[0])) trace("open-write", path);
+    if (checkpointOpens !== undefined && path.endsWith(".json")) {
+      checkpointOpens += 1;
+    }
+    // As on Windows, where there is no O_NOFOLLOW: the open follows a symlink.
+    if (mode.endsWith("-follow") && typeof rest[0] === "number") {
+      rest[0] &= ~(constants.O_NOFOLLOW ?? 0);
+    }
     const handle = await real.open(path, ...rest);
+    if (replaceAfterOpenArmed && path.endsWith(".json")) {
+      replaceAfterOpenArmed = false;
+      await replaceWithCopy(path);
+    }
     if (syncFault !== undefined) {
       const isDirectory = (await handle.stat()).isDirectory();
       if (isDirectory === (syncFault === "directory")) {
@@ -494,7 +576,23 @@ if (mode === "trace") {
   result.incompleteOwnerAtPublish = incompleteOwnerAtPublish;
   result.unsyncedOwnerAtPublish = unsyncedOwnerAtPublish;
 }
-if (mode === "swap") swapArmed = true;
+if (
+  mode === "swap" ||
+  mode === "swap-follow" ||
+  mode === "swap-replace-follow"
+) {
+  swapArmed = true;
+}
+replaceAfterOpenArmed = mode === "swap-replace-follow";
+if (mode === "replace" || mode === "replace-follow") replaceFileArmed = true;
+if (mode === "link-follow") {
+  const shardPath = join(root, (await real.readdir(root))[0] ?? "");
+  const checkpointName = (await real.readdir(shardPath)).find((name) =>
+    name.endsWith(".json"),
+  );
+  await swapForSymlink(join(shardPath, String(checkpointName)));
+  checkpointOpens = 0;
+}
 try {
   const loaded = await store.load({
     context,
@@ -505,4 +603,6 @@ try {
 } catch (error) {
   result.reason = (error as { details?: { reason?: unknown } }).details?.reason;
 }
+if (symlinkRefused !== undefined) result.symlink = symlinkRefused;
+if (checkpointOpens !== undefined) result.opens = checkpointOpens;
 console.log(JSON.stringify(result));

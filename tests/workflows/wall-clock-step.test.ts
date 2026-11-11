@@ -22,6 +22,7 @@ import {
   workflowCheckpointRevision,
 } from "../../src/workflows/checkpoint/store.js";
 import { defineWorkflow } from "../../src/workflows/definition.js";
+import { releaseDirectoryLock } from "../../src/workflows/internal/directory-lock.js";
 import { FileSystemWorkflowRepositoryMutationLock } from "../../src/workflows/node/git-worktree-change-driver.js";
 import { QuickJSSyncGeneratorRuntime } from "../../src/workflows/sandbox/quickjs-generator-runtime.js";
 import { FileSystemWorkspaceAdapter } from "../../src/workflows/workspace/file-system-workspace-adapter.js";
@@ -74,16 +75,18 @@ async function holdLock(lockPath: string, token: string): Promise<void> {
 }
 
 /**
- * Releases a lock from {@link holdLock} the way the protocol does: one rename
- * moves the whole directory away, then it is removed. A recursive removal of
- * the lock path would delete the owner file first, and a waiter that polls in
- * that gap sees a lock without an owner, which the checkpoint store rejects as
- * `checkpoint_lock_corrupt`.
+ * Releases a lock from {@link holdLock} with the protocol's own release: one
+ * rename moves the whole directory away, then it is removed. A recursive
+ * removal of the lock path would delete the owner file first, and a waiter
+ * that polls in that gap sees a lock without an owner, which the checkpoint
+ * store rejects as `checkpoint_lock_corrupt`. On Windows that rename is
+ * refused while the waiter has the lock open for a read, and the release
+ * retries it, as a real holder's does.
  */
-async function releaseHeldLock(lockPath: string): Promise<void> {
-  const retired = `${lockPath}.test-retired`;
-  await rename(lockPath, retired);
-  await rm(retired, { recursive: true });
+function releaseHeldLock(lockPath: string, token: string): void {
+  if (!releaseDirectoryLock(lockPath, token)) {
+    throw new Error(`the lock is not held by ${token}: ${lockPath}`);
+  }
 }
 
 function outcome<T>(promise: Promise<T>): Promise<"settled" | unknown> {
@@ -120,7 +123,7 @@ describe("lock waits ignore wall-clock steps", () => {
     await delay(20);
     step(HOUR_MS);
     await delay(40);
-    await releaseHeldLock(lockPath);
+    releaseHeldLock(lockPath, "live-holder");
 
     expect(await pending).toBe("settled");
   });
@@ -172,7 +175,7 @@ describe("lock waits ignore wall-clock steps", () => {
     await delay(20);
     step(HOUR_MS);
     await delay(40);
-    await releaseHeldLock(lockPath);
+    releaseHeldLock(lockPath, "live-holder");
 
     expect(await pending).toBe("settled");
   });

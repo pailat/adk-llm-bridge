@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { constants } from "node:fs";
+import { type BigIntStats, constants } from "node:fs";
 import type { FileHandle } from "node:fs/promises";
 import {
   lstat,
@@ -643,27 +643,30 @@ async function readCheckpointFile(
 }
 
 /**
- * Opens the checkpoint file once, without following a symlink, and checks and
- * reads it through that handle, so a path swapped after the check is never
- * read. A FIFO is opened non-blocking and then rejected as not a regular file.
- * Where the platform has no `O_NOFOLLOW` (Windows), a symlink is rejected by
- * an `lstat` before the open instead.
+ * Checks the checkpoint path with an `lstat` (a symlink is rejected), opens it
+ * once, and reads it through that handle only when the path names the opened
+ * file (device and inode; on Windows volume and file id). When the opened
+ * file is not the one checked, the path is checked again: a file a save
+ * renamed over the path in between is read, but a path that is now a symlink
+ * or names another file is refused. A symlink swapped in after the check is so
+ * never read, also where the open follows it (Windows has no `O_NOFOLLOW`);
+ * where `O_NOFOLLOW` exists, the open refuses a symlink too. A FIFO is opened
+ * non-blocking and then rejected as not a regular file.
  */
 async function readCheckpointBytes(
   checkpointPath: string,
   checkpointKey: string,
   maxCheckpointBytes: number,
 ): Promise<string | undefined> {
-  if (constants.O_NOFOLLOW === undefined) {
-    try {
-      if ((await lstat(checkpointPath)).isSymbolicLink()) {
-        throw unsafeCheckpointFileError(checkpointKey);
-      }
-    } catch (error) {
-      if (error instanceof WorkflowError) throw error;
-      if (hasErrorCode(error, "ENOENT")) return undefined;
-      throw ioError("checkpoint_stat_failed", checkpointKey, error);
-    }
+  let checked: BigIntStats;
+  try {
+    checked = await lstat(checkpointPath, { bigint: true });
+  } catch (error) {
+    if (hasErrorCode(error, "ENOENT")) return undefined;
+    throw ioError("checkpoint_stat_failed", checkpointKey, error);
+  }
+  if (checked.isSymbolicLink()) {
+    throw unsafeCheckpointFileError(checkpointKey);
   }
   let handle: Awaited<ReturnType<typeof open>>;
   try {
@@ -684,23 +687,47 @@ async function readCheckpointBytes(
     throw ioError("checkpoint_stat_failed", checkpointKey, error);
   }
   try {
-    let info: Awaited<ReturnType<typeof handle.stat>>;
+    let info: BigIntStats;
     try {
-      info = await handle.stat();
+      info = await handle.stat({ bigint: true });
     } catch (error) {
       throw ioError("checkpoint_stat_failed", checkpointKey, error);
     }
     if (!info.isFile()) {
       throw unsafeCheckpointFileError(checkpointKey);
     }
+    if (info.dev !== checked.dev || info.ino !== checked.ino) {
+      // A concurrent save renames a new file over the path, so the opened
+      // file may be newer than the one checked. Read it only when the path
+      // still names it now and is not a symlink.
+      let current: BigIntStats | undefined;
+      try {
+        current = await lstat(checkpointPath, { bigint: true });
+      } catch {
+        current = undefined;
+      }
+      if (
+        current === undefined ||
+        current.isSymbolicLink() ||
+        current.dev !== info.dev ||
+        current.ino !== info.ino
+      ) {
+        throw checkpointFileError(
+          "checkpoint_file_unsafe",
+          checkpointKey,
+          `Workflow checkpoint path changed while it was read: ${checkpointKey}`,
+        );
+      }
+    }
     const envelopeOverheadBytes =
       checkpointEnvelopeOverheadBytes(checkpointKey);
     const maxFileBytes = maxCheckpointBytes + envelopeOverheadBytes;
-    if (info.size > maxFileBytes) {
+    const size = Number(info.size);
+    if (size > maxFileBytes) {
       throw workflowCheckpointSizeLimitError(
         checkpointKey,
         maxCheckpointBytes,
-        info.size - envelopeOverheadBytes,
+        size - envelopeOverheadBytes,
         "load",
       );
     }

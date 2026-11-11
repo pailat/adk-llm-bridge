@@ -12,7 +12,7 @@ function flush(
   code: string,
   form: "sync" | "async",
   directory?: string,
-): { ok: boolean; code?: string; flushed?: number } {
+): { ok: boolean; code?: string; flushed?: number; refused?: string } {
   const root = mkdtempSync(join(tmpdir(), "adk-directory-sync-"));
   try {
     const child = spawnSync(
@@ -32,11 +32,14 @@ function flush(
 // refused); NTFS journals the entry change itself. Only there, and only for
 // these codes, the sync is skipped. Everywhere else an error is an error.
 describe.each(["sync", "async"] as const)("directory sync (%s)", (form) => {
+  // On Windows the real flush is refused: the runtime opens the directory
+  // read-only (backup semantics) and `FlushFileBuffers` denies it (`EPERM`).
   test("flushes a real directory", () => {
-    expect(flush(process.platform, "none", "-", form)).toEqual({
-      ok: true,
-      flushed: 1,
-    });
+    expect(flush(process.platform, "none", "-", form)).toEqual(
+      process.platform === "win32"
+        ? { ok: true, flushed: 0, refused: "fsync:EPERM" }
+        : { ok: true, flushed: 1 },
+    );
   });
 
   for (const code of ["EPERM", "EISDIR", "EINVAL"]) {
