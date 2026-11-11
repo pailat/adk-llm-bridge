@@ -550,12 +550,16 @@ export class FxCliDriver extends SubprocessJsonlDriver {
    * as the string `"false"`.
    * @throws {@link ExternalAgentPolicyError} with code
    * `EXTERNAL_AGENT_OPTION_UNSUPPORTED` when a session option
-   * (`resumeSessionId`, `sessionStore*`) is given, `effort` is not a plain
+   * (`resumeSessionId`, `sessionStore`, `sessionStoreFlush`,
+   * `sessionStoreLoadTimeoutMs`) is given (every run is stateless), `effort` is not a plain
    * token, an `args` entry overrides a pinned flag or names a flag the driver
    * owns (`--json`, `--no-save`, `--config`, `--`, `--resume*`, `--continue`,
    * `-c`, `-r`), names a flag the driver does not support (`--image`, `--fast`,
    * `--ultrafast`), or an `args` entry is a lone `-` or is not a flag and not
    * the value of the flag before it (fx would read it as the prompt).
+   * @throws {@link ExternalAgentPolicyError} with code
+   * `EXTERNAL_AGENT_OPTION_UNKNOWN` when `config` is not a plain object or has
+   * a key the driver does not know (a typo, or an option of another driver).
    * @throws {@link ExternalAgentPolicyError} with code
    * `EXTERNAL_AGENT_MODEL_OVERRIDE` when `args` sets the model or provider,
    * `EXTERNAL_AGENT_MODEL_INVALID` when `model` is not a model id, and
@@ -563,6 +567,22 @@ export class FxCliDriver extends SubprocessJsonlDriver {
    * `true`) is set and `model` is absent.
    */
   constructor(config: FxCliDriverConfig = {}) {
+    // The released session-option refusal comes first, so these four keys
+    // keep their stateless message instead of reading as unknown keys.
+    if (typeof config === "object" && config !== null) {
+      for (const option of [
+        "resumeSessionId",
+        "sessionStore",
+        "sessionStoreFlush",
+        "sessionStoreLoadTimeoutMs",
+      ] as const) {
+        if ((config as Record<string, unknown>)[option] !== undefined) {
+          throw unsupported(
+            `FxCliDriver does not support ${option}: every run uses --no-save and is stateless. Remove ${option}.`,
+          );
+        }
+      }
+    }
     assertKnownDriverOptions("FxCliDriver", config, FX_CLI_OPTION_KEYS);
     validateDriverConfig("FxCliDriver", config, FX_CLI_BOOLEAN_OPTIONS);
     validateLaunchConfig("FxCliDriver", config);

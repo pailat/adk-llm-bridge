@@ -596,8 +596,13 @@ describe("capabilities and sessions", () => {
     });
   });
 
-  test("session options are unknown options", async () => {
-    for (const option of ["resumeSessionId", "sessionStore"]) {
+  test("untyped session options are refused", async () => {
+    for (const option of [
+      "resumeSessionId",
+      "sessionStore",
+      "sessionStoreFlush",
+      "sessionStoreLoadTimeoutMs",
+    ]) {
       const error = await refusalCode(
         () =>
           new FxCliDriver({
@@ -606,9 +611,23 @@ describe("capabilities and sessions", () => {
           } as never),
         request(),
       );
-      expect(error.code).toBe(EXTERNAL_AGENT_OPTION_UNKNOWN);
+      expect(error.code).toBe(EXTERNAL_AGENT_OPTION_UNSUPPORTED);
       expect(error.message).toContain(option);
+      expect(error.message).toContain("stateless");
     }
+  });
+
+  test("an unknown key, such as a typo of a session option, is still unknown", async () => {
+    const error = await refusalCode(
+      () =>
+        new FxCliDriver({
+          ...baseConfig(),
+          resumeSesionId: "x",
+        } as never),
+      request(),
+    );
+    expect(error.code).toBe(EXTERNAL_AGENT_OPTION_UNKNOWN);
+    expect(error.message).toContain("resumeSesionId");
   });
 
   test("a missing binary is reported as MISSING_BINARY", async () => {
