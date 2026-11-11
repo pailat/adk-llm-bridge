@@ -507,15 +507,26 @@ new in 0.7.0. If you already use them, these changes apply:
   Also refused, because they widen the run: Claude `--agents`, `--agent`,
   `--plugin-url`, `--permission-prompts`, `--worktree`/`-w`,
   `--remote-control`, `--cloud`, `--teleport`, `--environment`; Codex
-  `--approve-for-me`, `--dangerously-bypass-hook-trust`, `--worktree`, and a
+  `--approve-for-me` (and its hidden alias `--not-so-yolo`),
+  `--dangerously-bypass-hook-trust`, `--ignore-rules`, `--worktree`, and a
   `-c` override of `approvals_reviewer`, `default_permissions`, `permissions`
-  or `agents`. One-letter flag clusters such as `-pw` are split first. See
+  or `agents`. One-letter flag clusters such as `-pw` are split first.
+  `CodexCliDriver` also refuses a positional word (an entry that is neither
+  an option nor the value of the option before it, and `-` or `--`), which
+  `codex exec` would run as a subcommand such as `review` or `resume`, or
+  read as the prompt. Pass several images as `-i a.png -i b.png`, not
+  `-i a.png b.png`. See
   [External agent isolation](./external-agent-isolation.md#extra-args).
   Express the setting through the permission policy or a driver option
   instead, or build the driver with `allowPolicyOverrideArgs: true` to keep
   passing it (the CLI's handling of the repeated flag then decides, and the
   run may not keep the policy). A non-string entry throws
   `InputValidationError`.
+- **Codex SDK thread ids.** `CodexSdkDriver` refuses a thread id to resume
+  that starts with `-` (from `runtimeSession.id` or session state) with
+  `EXTERNAL_AGENT_OPTION_UNSUPPORTED`: codex would read it as an option.
+  Codex's own thread ids never start with `-`, so only a forged or corrupted
+  id is affected. Clear it from session state to start a new thread.
 - **Codex approvals reviewer.** `CodexCliDriver` and `CodexSdkDriver` pass
   `-c approvals_reviewer="user"` outside `full-access`, so an
   `approvals_reviewer = "auto_review"` in `~/.codex/config.toml` no longer
@@ -618,6 +629,86 @@ new in 0.7.0. If you already use them, these changes apply:
   directory and Node changes into the run's working directory before the
   entry runs; a custom `spawn` must keep the `cwd` and `env` it receives; see
   [Interpreter and entry](./external-agent-isolation.md#interpreter-and-entry).
+
+### Explicit models
+
+The external agent drivers now check their model, and nothing but the
+driver's `model` option may set it. See
+[Model](./external-agent-isolation.md#model).
+
+Breaking changes:
+
+- **`ClaudeCliDriver` blank `model`:** it now throws `ExternalAgentPolicyError`
+  (`EXTERNAL_AGENT_MODEL_INVALID`), not `InputValidationError`. Branch on
+  `code`. Other invalid option values (for example `maxTurns`) still throw
+  `InputValidationError`.
+- **`model: ""` on the Claude SDK or Codex SDK driver** now throws when the
+  driver is built. Before, the account, host or Codex default model ran.
+  Remove the key or set an id.
+- **Ids with whitespace or a leading `-`** now throw when the driver is
+  built.
+- **Model-setting `args`/`config`** are now refused, **even with
+  `allowPolicyOverrideArgs`**. That covers:
+  - Claude CLI `--model` and `--fallback-model`;
+  - Codex CLI `--model`/`-m`, `--oss`, `--local-provider`, `--profile`/`-p`,
+    and `-c`/`--config` keys `model`, `model_provider`, `model_providers`,
+    `oss_provider`, `openai_base_url`, `chatgpt_base_url`, `model_catalog_json`,
+    `model_catalog_url`, `profile` and `profiles`;
+  - those keys at any depth of the Codex SDK `config`.
+
+  Set the driver's `model` option instead. Fallback models and Codex
+  profiles are no longer reachable through the bridge. For another endpoint,
+  use the Codex SDK driver's `baseUrl` option.
+- **Custom provider definitions** whose `envAllowlist` forwards
+  `ANTHROPIC_MODEL`, `ANTHROPIC_DEFAULT_*_MODEL`, `ANTHROPIC_SMALL_FAST_MODEL`,
+  `CLAUDE_CODE_SUBAGENT_MODEL`, `GEMINI_MODEL`, `OPENAI_BASE_URL`,
+  `CODEX_OSS_BASE_URL` or `CODEX_OSS_PORT`: runs that would carry one are
+  refused. Remove the name and set `model`.
+- **Gemini read-only runs** (`--approval-mode=plan`, which may route turns to
+  another model) are refused when `model` is set or `requireExplicitModel` is
+  true (`EXTERNAL_AGENT_MODEL_OVERRIDE`). Choices:
+  - Run read-only **without** a model; the CLI then picks the model.
+  - Or switch to `ask` or `workspace-write` with a model. **These modes widen
+    permissions:** `ask` lets the agent write files after approval, and
+    `workspace-write` lets it write in the workspace without asking. Choose
+    them only if the agent may write.
+
+Opt-in behavior:
+
+- **`requireExplicitModel: true`** refuses a driver without a model, and
+  router or default aliases: Claude `default`, `best`, `opusplan` and
+  `opusplan[1m]`; Gemini `auto` and `auto-*`. Use a concrete id or a plain
+  alias (`opus`, `sonnet`).
+
+Not covered by the guarantee:
+
+- **Codex CLI and Gemini CLI users** who relied on `~/.codex/config.toml` or
+  `~/.gemini/settings.json` for the model: set `model` on the driver.
+  Without it the host file still decides. Codex also reads a trusted
+  workspace's `.codex/config.toml`, which the agent can write.
+- **Claude settings, agents and plugins you load on purpose**
+  (`inheritHostConfig`, `settingSources`, or `--settings`,
+  `--setting-sources`, `--agent`, `--agents`, `--plugin-dir` or
+  `--plugin-url` in `args` with `allowPolicyOverrideArgs`) can still remap,
+  restrict or replace the model (`availableModels`, `fallbackModel`,
+  settings `env`, a main-thread agent's `model`). With a full-id
+  `model`, the `started` event shows the model the run started with.
+- **A model mismatch is a reliable signal only with a full id.** With an
+  alias (`opus`), the requested and reported ids always differ. A settings
+  or env remap of the alias is therefore not detectable, and a mid-run
+  `fallbackModel` switch shows only in the usage per model.
+
+Event changes:
+
+- **`ClaudeCliDriver` `started`** now arrives with the first output line, so
+  it can carry the model of `system/init`. Its timestamp is still the start
+  of the run, and it is still the first event on every path.
+
+Recommended for hosts:
+
+- Set `requireExplicitModel: true` on drivers.
+- Use **full model ids** (`claude-opus-5-5`, not `opus`), so a substituted
+  model shows as a reported id that differs from the requested one.
 
 ## 7. Agent invocation gateway
 

@@ -50,6 +50,12 @@ import {
   isSessionToolResultsRead,
 } from "./claude-session-files.js";
 import {
+  assertModelOption,
+  CLAUDE_MODEL_ENV,
+  MODEL_ALIAS_DENYLIST,
+  modelEnvRefusal,
+} from "./model.js";
+import {
   dependencyMissing,
   EXTERNAL_AGENT_ISOLATION_VIOLATED,
   EXTERNAL_AGENT_MISSING_BINARY,
@@ -249,8 +255,24 @@ export interface ClaudeAgentSdkDriverConfig {
   settingSources?: ClaudeAgentSdkSettingSource[];
   /** Maximum agent turns per run (SDK `maxTurns`). */
   maxTurns?: number;
-  /** Model id passed to the SDK; also reported as `gen_ai.request.model`. */
+  /**
+   * Model id passed to the SDK; also reported as `gen_ai.request.model`. A
+   * string of 1 to 256 characters without whitespace or control characters,
+   * not starting with `-`; anything else (including `""`, which the SDK
+   * would drop for the default model) is refused with
+   * `EXTERNAL_AGENT_MODEL_INVALID` when the driver is built.
+   *
+   * @defaultValue the account or host default
+   */
   model?: string;
+  /**
+   * Refuse to build the driver without a `model`, or with an alias that lets
+   * Claude Code choose (`default`, `best`, `opusplan`, `opusplan[1m]`):
+   * `EXTERNAL_AGENT_MODEL_REQUIRED`.
+   *
+   * @defaultValue false
+   */
+  requireExplicitModel?: boolean;
   /**
    * Emit every unrecognized SDK message as an `output` event containing its
    * JSON. For debugging only.
@@ -617,8 +639,18 @@ export class ClaudeAgentSdkDriver {
    * when `maxTurns` is not a positive integer, when `sessionStoreFlush` is not
    * `"batched"` or `"eager"`, when `sessionStoreLoadTimeoutMs` is not a
    * positive integer, or when either is given without `sessionStore`.
+   * @throws {@link ExternalAgentPolicyError} with code
+   * `EXTERNAL_AGENT_MODEL_INVALID` when `model` is not a model id, and
+   * `EXTERNAL_AGENT_MODEL_REQUIRED` when `requireExplicitModel` is set and
+   * `model` is absent or a router alias.
    */
   constructor(config: ClaudeAgentSdkDriverConfig = {}) {
+    this.#model = assertModelOption(
+      "ClaudeAgentSdkDriver",
+      config.model,
+      config.requireExplicitModel ?? false,
+      MODEL_ALIAS_DENYLIST.claude,
+    );
     this.#sdk = config.sdk;
     this.#importSdk = config.importSdk ?? importClaudeAgentSdk;
     this.#env = config.env ?? process.env;
@@ -633,7 +665,6 @@ export class ClaudeAgentSdkDriver {
     this.#settingSources = config.settingSources ?? [];
     validateDriverConfig("ClaudeAgentSdkDriver", { maxTurns: config.maxTurns });
     this.#maxTurns = config.maxTurns;
-    this.#model = config.model;
     this.#debugEvents = config.debugEvents ?? false;
     this.#requiredMcpServers = [...new Set(config.requiredMcpServers ?? [])];
     const unloadable = this.#requiredMcpServers.filter(
@@ -662,6 +693,11 @@ export class ClaudeAgentSdkDriver {
   /** The configured model id (`gen_ai.request.model`), if any. */
   get model(): string | undefined {
     return this.#model;
+  }
+
+  /** `true`: the SDK's `system/init` message and `result` name the model it ran. */
+  get reportsResolvedModel(): boolean {
+    return true;
   }
 
   /**
@@ -769,6 +805,16 @@ export class ClaudeAgentSdkDriver {
     const backgroundTasks = new ClaudeBackgroundTaskTracker();
     let runTemp: ClaudeRunTempDir | undefined;
     try {
+      // A model variable in the child environment would change the model
+      // the runtime runs: refuse before anything else.
+      const envRefusal = modelEnvRefusal(
+        "ClaudeAgentSdkDriver",
+        this.buildEnv(request),
+        CLAUDE_MODEL_ENV,
+      );
+      if (envRefusal) {
+        throw envRefusal;
+      }
       // Shell writes that the sandbox cannot keep inside allowedPaths: refuse
       // before anything starts.
       const webTools = this.isolationPlan(request).unenforceableWebTools;

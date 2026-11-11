@@ -10,6 +10,7 @@ import { InputValidationError } from "@google/adk";
 import { ClaudeCliDriver } from "../../../src/agents/driver/claude-cli.js";
 import { CodexCliDriver } from "../../../src/agents/driver/codex-cli.js";
 import {
+  EXTERNAL_AGENT_MODEL_OVERRIDE,
   EXTERNAL_AGENT_OPTION_UNSUPPORTED,
   ExternalAgentPolicyError,
 } from "../../../src/agents/driver/policy-errors.js";
@@ -107,6 +108,9 @@ const CODEX_OVERRIDES: readonly (readonly string[])[] = [
   ["--disable=x"],
   ["--search"],
   ["--approve-for-me"],
+  // A hidden clap alias of --approve-for-me in codex-cli 0.167.0.
+  ["--not-so-yolo"],
+  ["--not-so-yolo=true"],
   ["--dangerously-bypass-hook-trust"],
   ["--worktree"],
   ["-c", 'approvals_reviewer="auto_review"'],
@@ -131,12 +135,10 @@ describe("ClaudeCliDriver args", () => {
 
   test("keeps args that do not touch the policy", () => {
     const args = [
-      "--model",
-      "haiku",
       "--verbose",
       "--append-system-prompt=Be brief.",
-      "--fallback-model",
-      "sonnet",
+      "--max-budget-usd",
+      "2",
       // A value-taking short flag keeps the rest of the cluster as its value.
       "-nwork",
       "-dapi,hooks",
@@ -183,16 +185,14 @@ describe("CodexCliDriver args", () => {
 
   test("keeps args that do not touch the policy", () => {
     const args = [
-      "--model",
-      "gpt-x",
-      "-m",
-      "gpt-y",
+      "--output-last-message",
+      "last.txt",
       "-c",
-      'model="o3"',
+      'model_reasoning_summary="auto"',
       "--config=model_reasoning_effort=high",
       "--skip-git-repo-check",
       // A value-taking short flag keeps the rest of the cluster as its value.
-      "-mgpt-sandbox",
+      "-olast-s.txt",
       "-ishot-s.png",
     ];
     const argv = new CodexCliDriver({ args }).buildArgs({
@@ -222,6 +222,135 @@ describe("CodexCliDriver args", () => {
       () => new CodexCliDriver({ args: "--yolo" as unknown as string[] }),
     ).toThrow(InputValidationError);
   });
+});
+
+describe("CodexCliDriver args: execpolicy rules and user config", () => {
+  for (const args of [["--ignore-rules"], ["--ignore-rules=true"]]) {
+    test(`refuses ${JSON.stringify(args)}: it drops the execpolicy rules`, () => {
+      const error = refusal(() => new CodexCliDriver({ args }));
+      expect(error.code).toBe(EXTERNAL_AGENT_OPTION_UNSUPPORTED);
+    });
+  }
+
+  test("passes --ignore-rules with allowPolicyOverrideArgs", () => {
+    expect(
+      () =>
+        new CodexCliDriver({
+          args: ["--ignore-rules"],
+          allowPolicyOverrideArgs: true,
+        }),
+    ).not.toThrow();
+  });
+
+  test("keeps --ignore-user-config: it only drops the host config.toml", () => {
+    const argv = new CodexCliDriver({
+      args: ["--ignore-user-config"],
+    }).buildArgs({
+      provider: CODEX_PROVIDER,
+      context: { input: "hi" } as never,
+    });
+    expect(argv.slice(-3)).toEqual(["--ignore-user-config", "--", "hi"]);
+  });
+});
+
+describe("CodexCliDriver args: positional words", () => {
+  // The driver ends argv with `-- <prompt>`, so a bare word in args comes
+  // before `--` and codex exec reads it as a subcommand (review, resume,
+  // fork, help) or as the prompt.
+  const POSITIONAL: readonly (readonly string[])[] = [
+    ["review"],
+    ["resume", "--last"],
+    ["fork", "019a-session"],
+    ["help"],
+    ["write a poem"],
+    ["-"],
+    ["--"],
+    // An empty entry before `--` would be an empty prompt.
+    [""],
+    ["--skip-git-repo-check", "review"],
+    ["--json", "review"],
+    // --image takes one value per flag here: repeat -i for more files.
+    ["-i", "a.png", "review"],
+    ["-hi", "a.png", "review"],
+    // A value attached to its flag leaves the next entry positional.
+    ["-ia.png", "review"],
+    ["-hia.png", "review"],
+    ["-c", "x=1", "resume"],
+    ["--color=never", "review"],
+  ];
+  for (const args of POSITIONAL) {
+    test(`refuses ${JSON.stringify(args)}`, () => {
+      const error = refusal(() => new CodexCliDriver({ args }));
+      expect(error.code).toBe(EXTERNAL_AGENT_OPTION_UNSUPPORTED);
+      expect(error.message).toContain("positional");
+    });
+  }
+
+  const KEPT: readonly (readonly string[])[] = [
+    ["-o", "review"],
+    ["--output-last-message", "resume"],
+    ["-oreview"],
+    ["--output-last-message=review"],
+    ["-i", "a.png", "-i", "b.png"],
+    ["--image", "a.png"],
+    ["-hi", "a.png"],
+    ["-Vi", "a.png"],
+    // A trailing value flag is kept: codex exec does not take the driver's
+    // `--` as its value and stops with a usage error before any turn.
+    ["-o"],
+    ["-c", "x=1", "--config", "y=2"],
+    ["--color", "never"],
+    ["--output-schema", "schema.json"],
+    ["--thread-source", "user"],
+    ["--cyber-access-program", "standard"],
+    ["--add-dir", "/tmp/x"],
+    ["--ephemeral", "--strict-config", "--json"],
+  ];
+  for (const args of KEPT) {
+    test(`keeps ${JSON.stringify(args)}`, () => {
+      const argv = new CodexCliDriver({
+        args,
+        allowPolicyOverrideArgs: args.includes("--add-dir"),
+      }).buildArgs({
+        provider: CODEX_PROVIDER,
+        context: { input: "hi" } as never,
+      });
+      expect(argv.slice(-(args.length + 2), -2)).toEqual([...args]);
+    });
+  }
+
+  test("passes a positional word with allowPolicyOverrideArgs", () => {
+    const argv = new CodexCliDriver({
+      args: ["review"],
+      allowPolicyOverrideArgs: true,
+    }).buildArgs({
+      provider: CODEX_PROVIDER,
+      context: { input: "hi" } as never,
+    });
+    expect(argv.slice(-3)).toEqual(["review", "--", "hi"]);
+  });
+
+  test("the policy flag check runs before the positional check", () => {
+    const error = refusal(
+      () => new CodexCliDriver({ args: ["review", "--yolo"] }),
+    );
+    expect(error.message).toContain("--yolo");
+  });
+
+  // The model check ignores allowPolicyOverrideArgs and runs before the
+  // positional check, so a model flag is reported as a model override
+  // whatever follows it.
+  for (const args of [
+    ["review", "--model", "gpt-x"],
+    ["-m", "gpt-x"],
+    ["--model", "gpt-x"],
+    ["--local-provider", "ollama"],
+  ]) {
+    test(`the model check runs first: ${JSON.stringify(args)}`, () => {
+      const error = refusal(() => new CodexCliDriver({ args }));
+      expect(error.code).toBe(EXTERNAL_AGENT_MODEL_OVERRIDE);
+    });
+  }
 });
 
 describe("findPinnedArgOverride", () => {

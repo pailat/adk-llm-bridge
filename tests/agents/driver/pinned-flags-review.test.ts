@@ -18,6 +18,11 @@ import { dirname, join } from "node:path";
 import packageJson from "../../../package.json" with { type: "json" };
 import { CLAUDE_CLI_PINNED_FLAGS_REVIEW } from "../../../src/agents/driver/claude-cli.js";
 import { CODEX_CLI_PINNED_FLAGS_REVIEW } from "../../../src/agents/driver/codex-cli.js";
+import {
+  MODEL_ALIAS_DENYLIST_REVIEW,
+  MODEL_ENV_REVIEW,
+  MODEL_FLAGS_REVIEW,
+} from "../../../src/agents/driver/model.js";
 
 const ROOT = join(import.meta.dir, "../../..");
 const RE_REVIEW = "re-review the flag denylist";
@@ -126,5 +131,51 @@ describe("pinned flag lists are reviewed against the installed CLIs", () => {
     );
     expect(section).toContain("Pin the CLI version you run");
     expect(section).toContain("Do not offer `Agent`");
+  });
+
+  test("the model tables were reviewed against the bundled CLIs", () => {
+    const claude = CLAUDE_CLI_PINNED_FLAGS_REVIEW;
+    const codex = CODEX_CLI_PINNED_FLAGS_REVIEW;
+    const sdk = readManifest(packageDir(claude.sdkPackage));
+    const cli = readManifest(
+      packageDir("@openai/codex", packageDir(codex.sdkPackage)),
+    );
+    expect([
+      ...mismatch(
+        "Claude Code for the model flags",
+        sdk.claudeCodeVersion,
+        MODEL_FLAGS_REVIEW.claudeCliVersion,
+      ),
+      ...mismatch(
+        "@openai/codex for the model flags",
+        cli.version,
+        MODEL_FLAGS_REVIEW.codexCliVersion,
+      ),
+    ]).toEqual([]);
+    for (const source of [
+      MODEL_ENV_REVIEW.claude,
+      MODEL_ALIAS_DENYLIST_REVIEW.claude,
+    ]) {
+      expect(source).toContain(`Claude Code ${sdk.claudeCodeVersion}`);
+      expect(source).toContain(`${claude.sdkPackage} ${sdk.version}`);
+    }
+    expect(MODEL_ENV_REVIEW.codex).toContain(`@openai/codex ${cli.version}`);
+  });
+
+  test("the isolation doc names the model tables' reviewed versions", () => {
+    const doc = readFileSync(
+      join(ROOT, "docs/external-agent-isolation.md"),
+      "utf8",
+    );
+    const section = doc
+      .slice(doc.indexOf("## Model"), doc.indexOf("## Credentials"))
+      .replace(/\s+/g, " ");
+    expect(section).toContain(
+      `Claude Code ${MODEL_FLAGS_REVIEW.claudeCliVersion}`,
+    );
+    expect(section).toContain(
+      `codex-cli ${MODEL_FLAGS_REVIEW.codexCliVersion}`,
+    );
+    expect(section).toContain("even with `allowPolicyOverrideArgs`");
   });
 });

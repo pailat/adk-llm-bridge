@@ -111,6 +111,31 @@ export const EXTERNAL_AGENT_BATCH_COMMAND_REFUSED =
 export const EXTERNAL_AGENT_INTERPRETER_UNSAFE =
   "EXTERNAL_AGENT_INTERPRETER_UNSAFE";
 
+/**
+ * The driver's `model` option is not a usable model id: not a string, empty,
+ * longer than 256 characters, with whitespace or a control character, or
+ * starting with `-`. Thrown when the driver is built.
+ */
+export const EXTERNAL_AGENT_MODEL_INVALID = "EXTERNAL_AGENT_MODEL_INVALID";
+
+/**
+ * The driver was built with `requireExplicitModel: true` and has no `model`,
+ * or its `model` is a router or default alias that lets the runtime choose
+ * (Claude `default`, `best`, `opusplan`; Gemini `auto`, `auto-*`). Thrown
+ * when the driver is built.
+ */
+export const EXTERNAL_AGENT_MODEL_REQUIRED = "EXTERNAL_AGENT_MODEL_REQUIRED";
+
+/**
+ * Something other than the driver's `model` option would set, remap or route
+ * the model: an extra `args` entry or Codex SDK `config` key (thrown when the
+ * driver is built), a model variable in the run's environment, or a Gemini
+ * CLI read-only run, whose plan mode may route turns to another model
+ * (reported as the run's error event). `allowPolicyOverrideArgs` does not
+ * lift it.
+ */
+export const EXTERNAL_AGENT_MODEL_OVERRIDE = "EXTERNAL_AGENT_MODEL_OVERRIDE";
+
 /** Codes of {@link ExternalAgentPolicyError}. */
 export type ExternalAgentPolicyErrorCode =
   | typeof EXTERNAL_AGENT_ISOLATION_VIOLATED
@@ -121,7 +146,10 @@ export type ExternalAgentPolicyErrorCode =
   | typeof EXTERNAL_AGENT_BATCH_COMMAND_REFUSED
   | typeof EXTERNAL_AGENT_INTERPRETER_UNSAFE
   | typeof EXTERNAL_AGENT_CREDENTIAL_UNSUPPORTED
-  | typeof EXTERNAL_AGENT_OPTION_UNSUPPORTED;
+  | typeof EXTERNAL_AGENT_OPTION_UNSUPPORTED
+  | typeof EXTERNAL_AGENT_MODEL_INVALID
+  | typeof EXTERNAL_AGENT_MODEL_REQUIRED
+  | typeof EXTERNAL_AGENT_MODEL_OVERRIDE;
 
 /**
  * A run the driver refuses to start or continue. Never recoverable: retrying

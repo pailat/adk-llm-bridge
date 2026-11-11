@@ -26,9 +26,18 @@ import {
 import { resolveCliLaunch, validateLaunchConfig } from "./launch.js";
 import { collectTail, type LineSource, readLines } from "./lines.js";
 import {
+  assertModelOption,
+  assertNoModelOverride,
+  CODEX_CLI_MODEL_FLAGS,
+  CODEX_MODEL_ENV,
+  MODEL_ALIAS_DENYLIST,
+  modelEnvRefusal,
+} from "./model.js";
+import {
   batchCommandRefusal,
   dependencyMissing,
-  type ExternalAgentPolicyError,
+  EXTERNAL_AGENT_OPTION_UNSUPPORTED,
+  ExternalAgentPolicyError,
   isCommandNotFound,
   policyErrorEvent,
   unenforceablePathsRefusal,
@@ -71,8 +80,13 @@ const CODEX_CLI_PINNED_FLAGS: PinnedFlags = {
     "-a",
     "--full-auto",
     "--approve-for-me",
+    // A hidden alias of `--approve-for-me` (not in `--help`).
+    "--not-so-yolo",
     "--dangerously-bypass-approvals-and-sandbox",
     "--dangerously-bypass-hook-trust",
+    // Skips the user and project execpolicy `.rules` (forbidden and prompt
+    // decisions, network rules).
+    "--ignore-rules",
     "--yolo",
     "--add-dir",
     "--cd",
@@ -121,6 +135,96 @@ export const CODEX_CLI_PINNED_FLAGS_REVIEW = Object.freeze({
   reviewedSdkVersion: "0.167.0",
   reviewedBundledCliVersion: "0.167.0",
 });
+
+/**
+ * `codex exec` options that take their value as the next argument, as listed
+ * by `codex exec --help` of {@link CODEX_CLI_PINNED_FLAGS_REVIEW}. An entry
+ * after one of them is its value; any other entry that does not start with
+ * `-` is a positional word. A flag missing from this list makes the check
+ * stricter, never looser. The list also keeps the flags the pinned and
+ * model checks refuse first (`--sandbox`, `--model`, ...), so it matches the
+ * help whatever order the checks run in.
+ */
+const CODEX_EXEC_VALUE_FLAGS: readonly string[] = [
+  "-c",
+  "--config",
+  "--enable",
+  "--disable",
+  "-i",
+  "--image",
+  "-m",
+  "--model",
+  "--local-provider",
+  "-p",
+  "--profile",
+  "-s",
+  "--sandbox",
+  "-C",
+  "--cd",
+  "--add-dir",
+  "--thread-source",
+  "--cyber-access-program",
+  "--output-schema",
+  "--color",
+  "-o",
+  "--output-last-message",
+];
+
+/** One-letter `codex exec` flags that take no value. */
+const CODEX_EXEC_BOOLEAN_SHORT_FLAGS: readonly string[] = ["-h", "-V"];
+
+/** Whether an option entry leaves its value to the next entry. */
+function takesNextValue(arg: string): boolean {
+  if (arg.startsWith("--")) {
+    return CODEX_EXEC_VALUE_FLAGS.includes(arg);
+  }
+  // A cluster such as `-hi`: boolean letters, then one flag that takes the
+  // rest of the entry, or the next entry when nothing is left.
+  for (let index = 1; index < arg.length; index++) {
+    const flag = `-${arg[index]}`;
+    if (CODEX_EXEC_BOOLEAN_SHORT_FLAGS.includes(flag)) {
+      continue;
+    }
+    return index === arg.length - 1 && CODEX_EXEC_VALUE_FLAGS.includes(flag);
+  }
+  return false;
+}
+
+/**
+ * Refuses an `args` entry that `codex exec` would read as a positional word.
+ *
+ * @remarks
+ * Security invariant: the driver ends the command line with `-- <prompt>`,
+ * so a bare word in `args` comes before `--`, where `codex exec` reads it as
+ * a subcommand (`review`, `resume`, `fork`, `help`: another mode than the
+ * one the driver runs) or as the prompt. `-` (prompt from stdin) and `--`
+ * are refused too. An entry right after an option that takes a value is
+ * that value; `--image` takes several values only through repeated `-i`.
+ *
+ * A value flag as the last entry is not refused: the next argv entry is the
+ * driver's `--`, which codex exec never takes as a value, so the run stops
+ * at start with a usage error and nothing is swallowed or moved.
+ *
+ * @param args - The configured extra arguments, already checked to be
+ * strings.
+ * @throws {@link ExternalAgentPolicyError} with code
+ * `EXTERNAL_AGENT_OPTION_UNSUPPORTED` for the first positional entry.
+ */
+function assertNoCodexPositionalArg(args: readonly string[] | undefined): void {
+  const entries = args ?? [];
+  for (let index = 0; index < entries.length; index++) {
+    const arg = entries[index] ?? "";
+    if (arg === "-" || arg === "--" || !arg.startsWith("-")) {
+      throw new ExternalAgentPolicyError(
+        EXTERNAL_AGENT_OPTION_UNSUPPORTED,
+        `CodexCliDriver: the args entry "${arg}" is a positional word, which codex exec would read as a subcommand (review, resume, fork, help) or as the prompt, so the run would not be the one the driver starts. Pass only options (an option's value goes right after it; repeat -i for several images), or build the driver with allowPolicyOverrideArgs: true to pass it anyway.`,
+      );
+    }
+    if (takesNextValue(arg)) {
+      index++;
+    }
+  }
+}
 
 /** Warning code of a stderr line from a Codex CLI run that exited 0. */
 const CODEX_CLI_STDERR = "CODEX_CLI_STDERR";
@@ -231,17 +335,49 @@ export interface CodexCliDriverConfig {
    * `allowPolicyOverrideArgs` is set. That covers `--sandbox`/`-s`,
    * `--ask-for-approval`/`-a`, `--full-auto`,
    * `--dangerously-bypass-approvals-and-sandbox`, `--add-dir`, `--cd`/`-C`,
-   * `--profile`/`-p`, `--enable`, `--disable`, `--search`, `--approve-for-me`,
-   * `--dangerously-bypass-hook-trust`, `--worktree` (it moves the working
-   * root under `CODEX_HOME`), and any `-c`/`--config` override of
+   * `--profile`/`-p`, `--enable`, `--disable`, `--search`, `--approve-for-me`
+   * (and its hidden alias `--not-so-yolo`), `--dangerously-bypass-hook-trust`,
+   * `--ignore-rules` (it drops the user and project execpolicy rules),
+   * `--worktree` (it moves the working root under `CODEX_HOME`), and any
+   * `-c`/`--config` override of
    * `sandbox_mode`, `sandbox_workspace_write`, `sandbox_permissions`,
    * `default_permissions`, `permissions`, `approval_policy`,
    * `approvals_reviewer`, `web_search`, `tools`, `mcp_servers`, `features`,
    * `agents` (agent roles load their own config files), `profile` or
    * `profiles`. A cluster of one-letter flags is split first (`-hs x` is
    * `-h -s x`).
+   *
+   * A positional word (an entry that does not start with `-`, and not the
+   * value of the option before it), `-` and `--` are refused too
+   * (`EXTERNAL_AGENT_OPTION_UNSUPPORTED`) unless `allowPolicyOverrideArgs` is
+   * set: `codex exec` would read the word as a subcommand (`review`,
+   * `resume`, `fork`, `help`) or as the prompt. `--ignore-user-config` is
+   * allowed: it only stops Codex from loading `$CODEX_HOME/config.toml`.
+   *
+   * Entries that set or route the model are refused even with
+   * `allowPolicyOverrideArgs` (`EXTERNAL_AGENT_MODEL_OVERRIDE`): `--model`/`-m`,
+   * `--oss`, `--local-provider`, `--profile`/`-p`, and `-c`/`--config` keys
+   * `model`, `model_provider`, `model_providers`, `oss_provider`,
+   * `openai_base_url`, `chatgpt_base_url`, `model_catalog_json`,
+   * `model_catalog_url`, `profile` and `profiles`. Use `model` instead.
    */
   args?: readonly string[];
+  /**
+   * Model id, sent as `--model=<id>` and reported as `gen_ai.request.model`.
+   * A string of 1 to 256 characters without whitespace or control
+   * characters, not starting with `-`; anything else is refused with
+   * `EXTERNAL_AGENT_MODEL_INVALID` when the driver is built.
+   *
+   * @defaultValue the model of the host `config.toml`, or Codex's default
+   */
+  model?: string;
+  /**
+   * Refuse to build the driver without a `model`:
+   * `EXTERNAL_AGENT_MODEL_REQUIRED`.
+   *
+   * @defaultValue false
+   */
+  requireExplicitModel?: boolean;
   /**
    * Opt-in: let `args` pass flags that override the policy flags (see
    * `args`). They are placed last, so with it the CLI's own handling of a
@@ -366,6 +502,7 @@ export class CodexCliDriver extends SubprocessJsonlDriver {
   readonly #allowUnenforcedNetwork: boolean;
   readonly #allowUnenforcedPaths: boolean;
   readonly #listMcpServers?: CodexMcpLister;
+  readonly #model: string | undefined;
 
   /**
    * Creates a driver that runs the `codex` CLI.
@@ -377,6 +514,11 @@ export class CodexCliDriver extends SubprocessJsonlDriver {
    * @throws {@link ExternalAgentPolicyError} with code
    * `EXTERNAL_AGENT_OPTION_UNSUPPORTED` when an `args` entry overrides a
    * policy flag and `allowPolicyOverrideArgs` is not set.
+   * @throws {@link ExternalAgentPolicyError} with code
+   * `EXTERNAL_AGENT_MODEL_OVERRIDE` when an `args` entry sets or routes the
+   * model, `EXTERNAL_AGENT_MODEL_INVALID` when `model` is not a model id,
+   * and `EXTERNAL_AGENT_MODEL_REQUIRED` when `requireExplicitModel` is set
+   * and `model` is absent.
    */
   constructor(config: CodexCliDriverConfig = {}) {
     validateDriverConfig("CodexCliDriver", config);
@@ -386,6 +528,16 @@ export class CodexCliDriver extends SubprocessJsonlDriver {
       config.args,
       CODEX_CLI_PINNED_FLAGS,
       config.allowPolicyOverrideArgs ?? false,
+    );
+    assertNoModelOverride("CodexCliDriver", config.args, CODEX_CLI_MODEL_FLAGS);
+    if (!(config.allowPolicyOverrideArgs ?? false)) {
+      assertNoCodexPositionalArg(config.args);
+    }
+    const model = assertModelOption(
+      "CodexCliDriver",
+      config.model,
+      config.requireExplicitModel ?? false,
+      MODEL_ALIAS_DENYLIST.codex,
     );
     super({
       providerId: CODEX_PROVIDER.id,
@@ -405,6 +557,17 @@ export class CodexCliDriver extends SubprocessJsonlDriver {
     this.#allowUnenforcedNetwork = config.allowUnenforcedNetwork ?? false;
     this.#allowUnenforcedPaths = config.allowUnenforcedPaths ?? false;
     this.#listMcpServers = config.listMcpServers;
+    this.#model = model;
+  }
+
+  /** The configured model id (`gen_ai.request.model`), if any. */
+  get model(): string | undefined {
+    return this.#model;
+  }
+
+  /** `false`: Codex reports no model on any event. */
+  get reportsResolvedModel(): boolean {
+    return false;
   }
 
   /** Features this driver supports: it maps the permission policy onto CLI flags. It emits whole items, not token deltas. */
@@ -440,6 +603,11 @@ export class CodexCliDriver extends SubprocessJsonlDriver {
     const refuse = (error: ExternalAgentPolicyError) =>
       refusedRun(this.providerId, error);
 
+    const envRefusal = modelEnvRefusal("CodexCliDriver", env, CODEX_MODEL_ENV);
+    if (envRefusal) {
+      yield* refuse(envRefusal);
+      return;
+    }
     const pathsRefusal = unenforceablePathsRefusal(request.permissions, {
       runtime: "Codex CLI",
       allowUnenforcedPaths: this.#allowUnenforcedPaths,
@@ -636,6 +804,8 @@ export class CodexCliDriver extends SubprocessJsonlDriver {
     return [
       ...mapPolicyToCodexArgs(request.permissions),
       ...configOverrides.flatMap((override) => ["-c", override]),
+      // Joined, so the id can never be read as a flag.
+      ...(this.#model === undefined ? [] : [`--model=${this.#model}`]),
       ...(this.#skipGitRepoCheck ? ["--skip-git-repo-check"] : []),
       ...this.args,
       "--",

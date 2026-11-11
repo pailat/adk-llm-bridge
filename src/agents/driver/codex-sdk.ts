@@ -24,6 +24,13 @@ import {
   codexMcpDisableOverrides,
 } from "./codex-mcp.js";
 import {
+  assertModelOption,
+  assertNoCodexConfigModelOverride,
+  CODEX_MODEL_ENV,
+  MODEL_ALIAS_DENYLIST,
+  modelEnvRefusal,
+} from "./model.js";
+import {
   dependencyMissing,
   EXTERNAL_AGENT_OPTION_UNSUPPORTED,
   ExternalAgentPolicyError,
@@ -195,14 +202,41 @@ export interface CodexSdkDriverConfig {
    * @defaultValue `process.env`
    */
   env?: Record<string, string | undefined>;
-  /** API base URL passed to the Codex client. */
+  /**
+   * API base URL passed to the Codex client (sent as `openai_base_url`). It
+   * decides which endpoint answers: an explicit, host-set route, not a model
+   * id.
+   */
   baseUrl?: string;
   /** API key passed to the Codex client; falls back to `CODEX_API_KEY` from the run credential. */
   apiKey?: string;
-  /** Codex `config` object passed to the client (for example `mcp_servers`). */
+  /**
+   * Codex `config` object passed to the client (for example `mcp_servers`).
+   * Keys that set or route the model (`model`, `model_provider`,
+   * `model_providers`, `oss_provider`, `openai_base_url`,
+   * `chatgpt_base_url`, `model_catalog_json`, `model_catalog_url`, `profile`,
+   * `profiles`, at any depth and in any spelling) are refused with
+   * `EXTERNAL_AGENT_MODEL_OVERRIDE` when the driver is built: use `model`
+   * and `baseUrl`.
+   */
   config?: CodexSdkConfigObject;
-  /** Model id for new and resumed threads. */
+  /**
+   * Model id for new and resumed threads. A string of 1 to 256 characters
+   * without whitespace or control characters, not starting with `-`;
+   * anything else (including `""`, which the SDK would drop for the default
+   * model) is refused with `EXTERNAL_AGENT_MODEL_INVALID` when the driver is
+   * built.
+   *
+   * @defaultValue the model of the host `config.toml`, or Codex's default
+   */
   model?: string;
+  /**
+   * Refuse to build the driver without a `model`:
+   * `EXTERNAL_AGENT_MODEL_REQUIRED`.
+   *
+   * @defaultValue false
+   */
+  requireExplicitModel?: boolean;
   /** Reasoning effort for new and resumed threads. */
   modelReasoningEffort?: CodexSdkModelReasoningEffort;
   /** Skip Codex's check that the working directory is a git repository. */
@@ -351,9 +385,20 @@ export class CodexSdkDriver {
    * @param config - Driver options; all optional.
    * @throws {@link ExternalAgentPolicyError} with code
    * `EXTERNAL_AGENT_OPTION_UNSUPPORTED` when `strictBinaryResolution` is
-   * set together with a prebuilt `sdk` client.
+   * set together with a prebuilt `sdk` client,
+   * `EXTERNAL_AGENT_MODEL_OVERRIDE` when `config` sets or routes the model,
+   * `EXTERNAL_AGENT_MODEL_INVALID` when `model` is not a model id, and
+   * `EXTERNAL_AGENT_MODEL_REQUIRED` when `requireExplicitModel` is set and
+   * `model` is absent.
    */
   constructor(config: CodexSdkDriverConfig = {}) {
+    assertNoCodexConfigModelOverride("CodexSdkDriver", config.config);
+    this.#model = assertModelOption(
+      "CodexSdkDriver",
+      config.model,
+      config.requireExplicitModel ?? false,
+      MODEL_ALIAS_DENYLIST.codex,
+    );
     this.#sdk = config.sdk;
     this.#Codex = config.Codex;
     this.#importSdk = config.importSdk ?? importCodexSdk;
@@ -362,7 +407,6 @@ export class CodexSdkDriver {
     this.#baseUrl = config.baseUrl;
     this.#apiKey = config.apiKey;
     this.#config = config.config;
-    this.#model = config.model;
     this.#modelReasoningEffort = config.modelReasoningEffort;
     this.#skipGitRepoCheck = config.skipGitRepoCheck;
     this.#webSearchMode = config.webSearchMode;
@@ -385,6 +429,11 @@ export class CodexSdkDriver {
   /** The configured model id (`gen_ai.request.model`), if any. */
   get model(): string | undefined {
     return this.#model;
+  }
+
+  /** `false`: Codex reports no model on any event. */
+  get reportsResolvedModel(): boolean {
+    return false;
   }
 
   /** Features this driver supports: streaming, sessions (thread resume) and permissions. */
@@ -423,6 +472,11 @@ export class CodexSdkDriver {
     };
 
     const refusal =
+      modelEnvRefusal(
+        "CodexSdkDriver",
+        this.buildEnv(request),
+        CODEX_MODEL_ENV,
+      ) ??
       unenforceablePathsRefusal(request.permissions, {
         runtime: "Codex",
         allowUnenforcedPaths: this.#allowUnenforcedPaths,
@@ -532,6 +586,7 @@ export class CodexSdkDriver {
       let input: CodexSdkInput;
 
       if (savedThreadId) {
+        assertThreadIdIsNotAFlag(savedThreadId);
         thread = sdk.resumeThread(savedThreadId, threadOptions);
         const mapping = mapLastContentOrFallback(lastContent, request);
         cleanup = mapping.cleanup;
@@ -1325,6 +1380,27 @@ function prependColdStartTranscript(
     ];
   }
   return [{ type: "text", text: transcript }, ...input];
+}
+
+/**
+ * Refuses a thread id that starts with `-`.
+ *
+ * The SDK passes the id as its own argv entry after `resume`, and
+ * `codex exec resume` reads an entry that starts with `-` as an option, so
+ * an id such as `--dangerously-bypass-approvals-and-sandbox` would change
+ * the run's policy instead of naming a thread. The id can come from session
+ * state, which other agents and tools may write.
+ *
+ * @param threadId - The id the run would resume.
+ * @throws ExternalAgentPolicyError with `EXTERNAL_AGENT_OPTION_UNSUPPORTED`.
+ */
+function assertThreadIdIsNotAFlag(threadId: string): void {
+  if (threadId.startsWith("-")) {
+    throw new ExternalAgentPolicyError(
+      EXTERNAL_AGENT_OPTION_UNSUPPORTED,
+      "CodexSdkDriver: the thread id to resume starts with '-', which codex exec resume would read as an option rather than a thread id. Codex thread ids never start with '-'; check runtimeSession.id and the thread id saved in session state.",
+    );
+  }
 }
 
 function readSavedThreadId(

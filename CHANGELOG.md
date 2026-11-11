@@ -13,6 +13,29 @@ from the 0.6.0 tag.
 
 ### Breaking
 
+- **Model checks on the external agent drivers** (`EXTERNAL_AGENT_MODEL_*`,
+  see [Model](./docs/external-agent-isolation.md#model)):
+  - `ClaudeCliDriver` with a blank `model` throws `ExternalAgentPolicyError`
+    `EXTERNAL_AGENT_MODEL_INVALID` instead of `InputValidationError`.
+  - `ClaudeAgentSdkDriver` and `CodexSdkDriver` reject `model: ""` (it used to
+    run the default model silently), and every driver rejects ids with
+    whitespace or a leading `-` (`EXTERNAL_AGENT_MODEL_INVALID`).
+  - `args`/`config` that set, remap or route the model are refused even with
+    `allowPolicyOverrideArgs` (`EXTERNAL_AGENT_MODEL_OVERRIDE`): Claude CLI
+    `--model`, `--fallback-model`; Codex CLI `--model`/`-m`, `--oss`,
+    `--local-provider`, `--profile`/`-p`, and `-c` keys `model`,
+    `model_provider`, `model_providers`, `oss_provider`, `openai_base_url`,
+    `chatgpt_base_url`, `model_catalog_json`, `model_catalog_url`, `profile`,
+    `profiles`; the same keys anywhere in the Codex SDK `config`.
+  - A run whose environment would carry a model-selection variable
+    (`ANTHROPIC_MODEL`, `ANTHROPIC_DEFAULT_*_MODEL`,
+    `ANTHROPIC_SMALL_FAST_MODEL`, `CLAUDE_CODE_SUBAGENT_MODEL`,
+    `GEMINI_MODEL`, and for Codex `OPENAI_BASE_URL`, `CODEX_OSS_BASE_URL`,
+    `CODEX_OSS_PORT`) through a custom provider `envAllowlist` is refused
+    (`EXTERNAL_AGENT_MODEL_OVERRIDE`).
+  - `GeminiCliDriver` refuses a read-only run (`--approval-mode=plan`) when
+    `model` is set or `requireExplicitModel` is true, because plan mode may
+    route turns to another model (`EXTERNAL_AGENT_MODEL_OVERRIDE`).
 - **OpenAI-compatible `candidatesTokenCount` no longer includes reasoning
   tokens.** It is now `completion_tokens` minus
   `completion_tokens_details.reasoning_tokens`, as genai and Gemini define it,
@@ -438,11 +461,22 @@ from the 0.6.0 tag.
   widen the run another way: Claude `--agents`/`--agent` (subagents with their
   own tools and permission mode), `--plugin-url`, `--permission-prompts`,
   `--worktree`/`-w`, `--remote-control`, `--cloud`, `--teleport`,
-  `--environment`; Codex `--approve-for-me`, `--dangerously-bypass-hook-trust`,
-  `--worktree` and `-c` overrides of `approvals_reviewer`,
-  `default_permissions`, `permissions` and `agents`. One-letter flag clusters
-  (`-pw`, `-hs danger-full-access`) are split before the match. A test pins
-  the CLI versions the list was reviewed against.
+  `--environment`; Codex `--approve-for-me` (and its hidden alias
+  `--not-so-yolo`), `--dangerously-bypass-hook-trust`, `--ignore-rules`
+  (it drops the execpolicy rules), `--worktree` and `-c` overrides of
+  `approvals_reviewer`, `default_permissions`, `permissions` and `agents`.
+  One-letter flag clusters (`-pw`, `-hs danger-full-access`) are split
+  before the match. A test pins the CLI versions the list was reviewed
+  against. `CodexCliDriver` also refuses a positional word in `args` (an
+  entry that is not an option or an option's value, `-` and `--`): `codex
+  exec` would read it as a subcommand (`review`, `resume`, `fork`, `help`) or as
+  the prompt. Repeat `-i` for several images.
+- **`CodexSdkDriver` refuses a thread id that starts with `-`.** The SDK
+  passes the id to resume as its own argv entry after `resume`, where codex
+  reads `-`-prefixed entries as options, so an id from session state such as
+  `--dangerously-bypass-approvals-and-sandbox` would have changed the run's
+  policy. Such an id now ends the run with `EXTERNAL_AGENT_OPTION_UNSUPPORTED`
+  before anything starts.
 - **Codex runs pin the approvals reviewer.** `approvals_reviewer =
   "auto_review"` in `~/.codex/config.toml` turned the CLI's `--ask-for-approval
   never` into `on-request` with a model reviewer, which could approve a
@@ -657,6 +691,16 @@ from the 0.6.0 tag.
   optional `validateLimits(limits)`; `ScriptWorkflowAgent` calls it when it is
   built, so a `stackBytes` above the maximum throws `WORKFLOW_DEFINITION_INVALID`
   at construction, not at the first run.
+- `model` option on `CodexCliDriver` and `GeminiCliDriver`, sent as
+  `--model=<id>` and reported as `gen_ai.request.model`.
+- `requireExplicitModel` on every built-in driver: refuses a driver without a
+  model or with a router/default alias (`default`, `best`, `opusplan`, Gemini
+  `auto`) with `EXTERNAL_AGENT_MODEL_REQUIRED`.
+- `ExternalAgentDriver.reportsResolvedModel` (`true` on the Claude drivers),
+  and the policy codes `EXTERNAL_AGENT_MODEL_INVALID`,
+  `EXTERNAL_AGENT_MODEL_REQUIRED` and `EXTERNAL_AGENT_MODEL_OVERRIDE`.
+- `ExternalAgentStartedEvent.modelRouting` (`"plan-mode"`), set on a Gemini
+  CLI read-only run without a model.
 - **Run spec, `adk-llm-bridge/workflows/spec` (experimental).** Validation,
   planning and the JSON Schema of a lanes job submitted as data: `validateRunSpec`,
   `resolveRunPlan`, `mergeRunRules`, `layerRunSpecLanes`, `runSpecHash` and
@@ -997,6 +1041,9 @@ from the 0.6.0 tag.
   190 nested calls. The limit does not cover the QuickJS parser: a deeply
   nested source given to `eval` can exhaust the host stack from 32 KiB (24 KiB
   on Bun). That case is contained, not prevented; see Fixed.
+- The Claude CLI driver emits `started` on the first output line, with the
+  resolved model from `system/init` (still first on every path, including
+  failures before any output; the timestamp is still the start of the run).
 - Documented the code comment standard (docs/contributing/comments.md) and added
   check-comments and check-export-docs to ci and prepublishOnly: no internal
   tracking ids, valid TSDoc, no per-file license headers (LICENSE is the single

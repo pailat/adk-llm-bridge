@@ -439,11 +439,38 @@ would widen the run another way:
 | Driver | Refused besides the policy flags |
 |---|---|
 | `ClaudeCliDriver` | `--agents` and `--agent` (a subagent definition carries its own tools, permission mode, MCP servers and hooks), `--plugin-url`, `--permission-prompts`, `--worktree`/`-w` (the session root moves to the repository's `.claude/worktrees`, outside a working directory below the repository root), `--remote-control`, `--cloud`, `--teleport` and `--environment` (the session runs or is driven somewhere else). |
-| `CodexCliDriver` | `--approve-for-me`, `--dangerously-bypass-hook-trust`, `--worktree` (the working root moves under `CODEX_HOME`), and a `-c` override of `approvals_reviewer`, `default_permissions`, `permissions` or `agents` (agent roles load their own config files). |
+| `CodexCliDriver` | `--approve-for-me` and its hidden alias `--not-so-yolo`, `--dangerously-bypass-hook-trust`, `--ignore-rules` (the user and project execpolicy `.rules` files, with their forbidden commands and network rules, are not loaded), `--worktree` (the working root moves under `CODEX_HOME`), a `-c` override of `approvals_reviewer`, `default_permissions`, `permissions` or `agents` (agent roles load their own config files), and a positional word (see below). |
 
 A cluster of one-letter flags is split the way the CLI parses it, so `-pw`
 (Claude) and `-hs danger-full-access` (Codex) are refused too, while a flag
 that takes a value keeps the rest of the cluster as its value (`-nwork`).
+
+`CodexCliDriver` also refuses a positional word in `args`: an entry that
+does not start with `-` and is not the value of the option before it, and
+the entries `-` and `--`. `codex exec` would read the word as a subcommand
+(`review`, `resume`, `fork`, `help`), which runs another mode than the one
+the driver starts, or as the prompt. An option's value is still allowed
+(`-o last.txt`, `--color never`). `-i`/`--image` takes one value per entry
+in the driver's check, so repeat it for several images (`-i a.png -i
+b.png`). A value flag as the last entry (`args: ["-o"]`) is not refused:
+the next entry is the driver's `--`, which `codex exec` never takes as a
+value, so the run stops at start with a usage error ("a value is required")
+before any model turn. `--ignore-user-config` is allowed: it only stops Codex from loading
+`$CODEX_HOME/config.toml`, and the driver sets the policy with flags and
+`-c` overrides either way. With `--ignore-rules` refused, Codex loads the
+project's execpolicy `.rules` files too. They are in the workspace, so an
+agent that can write there can change them for a later run; whether a rule
+there can loosen the policy, and not only tighten it, was not checked.
+
+`CodexSdkDriver` takes no `args`: the SDK builds the `codex exec` argv
+itself, and the prompt goes to stdin. The one value it places as its own
+argv entry is the thread id after `resume`, and `codex exec resume` reads
+an entry that starts with `-` as an option
+(`--dangerously-bypass-approvals-and-sandbox` would parse). The driver
+refuses a thread id that starts with `-`, from `runtimeSession.id` or from
+session state, with `EXTERNAL_AGENT_OPTION_UNSUPPORTED` before anything
+starts. `ClaudeAgentSdkDriver` is not affected: its SDK passes the session
+id as `--resume=<id>`.
 
 The list is a denylist: a flag a later CLI adds is not on it. It was
 reviewed against Claude Code 2.1.322 and codex-cli 0.167.0 (the `--help` of
@@ -471,6 +498,149 @@ Both Codex drivers also pin `approvals_reviewer="user"` outside
 in `~/.codex/config.toml` turns `--ask-for-approval never` into
 `on-request` with a model reviewer, which could grant a command outside the
 sandbox.
+
+## Model
+
+On the built-in drivers, the driver's `model` option is the only model id the
+bridge sends, and no `args`, `config` or forwarded environment variable may
+set, remap or route the model, except the host configuration listed here.
+Host configuration that the run deliberately loads can still change the model
+the runtime uses: Claude settings sources under `inheritHostConfig` or
+`settingSources`; `--settings`, `--setting-sources`, `--agent`, `--agents`,
+`--plugin-dir` and `--plugin-url` passed in Claude CLI `args` under
+`allowPolicyOverrideArgs`; the Codex config home and a trusted workspace's
+`.codex/config.toml`; and Gemini settings. Where the runtime reports the model
+it started with, the run's events show it. A `fallbackModel` switch or an
+alias remap may not show there (see "Residuals" below).
+
+### The `model` option
+
+Every built-in driver takes `model` and checks it when it is built. A model
+id is a string of 1 to 256 characters, without whitespace or control
+characters, that does not start with `-`. Anything else throws
+`ExternalAgentPolicyError` with `EXTERNAL_AGENT_MODEL_INVALID`; `""` is no
+longer dropped for the default model. The CLI drivers send it joined to its
+flag (`--model=<id>`), so it is never read as a flag. The driver's `model`
+getter returns it, and `ExternalAgent` writes it to `gen_ai.request.model`.
+
+The model checks are the one deliberate exception to how drivers report bad
+options: other invalid values (for example `maxTurns`) still throw
+`InputValidationError`.
+
+`requireExplicitModel: true` refuses a driver without a `model`, and a model
+that lets the runtime choose, with `EXTERNAL_AGENT_MODEL_REQUIRED`. The
+aliases are compared without regard to case:
+
+| Driver | Refused aliases |
+|---|---|
+| `ClaudeAgentSdkDriver`, `ClaudeCliDriver` | `default`, `best`, `opusplan`, `opusplan[1m]` |
+| `GeminiCliDriver` | `auto`, and any id that starts with `auto-` |
+| `CodexSdkDriver`, `CodexCliDriver` | none |
+
+Plain aliases (`opus`, `sonnet`, `haiku`, `fable`, `opus[1m]`) stay allowed.
+Recommended for hosts: set `requireExplicitModel: true`, and use full model
+ids (`claude-opus-5-5`, not `opus`), so a model the runtime replaced shows as
+a requested id that differs from the reported one.
+
+`reportsResolvedModel` on a driver says whether the runtime reports the model
+it ran. It is `true` for the two Claude drivers (the `system/init` model on
+`started`, and the `result` model on `completed`) and `false` for Codex,
+which reports no model, and Gemini CLI, whose `init` model is kept on
+`completed.model` for diagnostics only. `ClaudeCliDriver` emits `started`
+with the first output line, so it can carry the init model; its timestamp is
+still the start of the run, and it is still the first event on every path.
+
+### Model-setting `args` and `config`
+
+These are refused when the driver is built with
+`EXTERNAL_AGENT_MODEL_OVERRIDE`, **even with `allowPolicyOverrideArgs`**:
+
+| Driver | Flags | Config keys (`-c`/`--config`, or the SDK `config` object) |
+|---|---|---|
+| `ClaudeCliDriver` | `--model`, `--fallback-model` | - |
+| `CodexCliDriver` | `--model`/`-m`, `--oss`, `--local-provider`, `--profile`/`-p` | `model`, `model_provider`, `model_providers`, `oss_provider`, `openai_base_url`, `chatgpt_base_url`, `model_catalog_json`, `model_catalog_url`, `profile`, `profiles` |
+| `CodexSdkDriver` | - | the same keys, at any depth of `config` (`{profiles: {x: {model}}}`), quoted (`{'"model"': …}`) or dotted (`{"model_providers.x": …}`) |
+
+Flags are matched in every spelling (`--model x`, `--model=x`, `-mx`, a
+cluster such as `-hm x`). A key covers the keys below it (`profiles.x.model`),
+but not a longer name: `model_reasoning_effort` stays allowed. Without the
+opt-in, `--profile`/`-p`, `profile` and `profiles` are refused by the policy
+check first, with `EXTERNAL_AGENT_OPTION_UNSUPPORTED`.
+
+The Codex SDK driver's own `baseUrl` and `apiKey` options are not refused:
+they are endpoint and credential choices the host makes on purpose, not model
+ids.
+
+The tables were reviewed against Claude Code 2.1.319 (the CLI the Agent SDK
+bundles) and codex-cli 0.167.0; the version-bump test covers them with the
+policy flag lists.
+
+### Model variables in the environment
+
+A run whose child environment would carry one of these variables (compared
+without regard to case) is refused before anything starts: `started`, an
+`EXTERNAL_AGENT_MODEL_OVERRIDE` error that names the variable (never its
+value), and `completed` with `exitCode: 1`.
+
+| Driver | Variables |
+|---|---|
+| Claude (SDK and CLI) | `ANTHROPIC_MODEL`, `ANTHROPIC_DEFAULT_MODEL`, `ANTHROPIC_DEFAULT_OPUS_MODEL`, `ANTHROPIC_DEFAULT_SONNET_MODEL`, `ANTHROPIC_DEFAULT_HAIKU_MODEL`, `ANTHROPIC_DEFAULT_FABLE_MODEL`, `ANTHROPIC_SMALL_FAST_MODEL`, `CLAUDE_CODE_SUBAGENT_MODEL` |
+| Codex (SDK and CLI) | `OPENAI_BASE_URL`, `CODEX_OSS_BASE_URL`, `CODEX_OSS_PORT` |
+| Gemini CLI | `GEMINI_MODEL` |
+
+The built-in providers forward none of them. Only a custom provider whose
+`envAllowlist` names one can, and the check comes before every other
+pre-spawn refusal.
+
+### Gemini CLI read-only runs
+
+The read-only policy maps to Gemini's plan mode (`--approval-mode=plan`),
+which may route turns to another model than `--model`. A read-only run with a
+`model`, or on a driver with `requireExplicitModel`, is refused before spawn
+with `EXTERNAL_AGENT_MODEL_OVERRIDE`. A read-only run without a model still
+runs (the CLI picks the model anyway) and its `started` event carries
+`modelRouting: "plan-mode"`. To pin a model, use `ask` or `workspace-write`:
+both let the agent write files (`ask` after approval), so choose them only if
+it may.
+
+### Residuals
+
+- **Codex host config.** `CODEX_HOME` and `HOME` are forwarded, so the host
+  `config.toml` still decides the provider and endpoint (`model_provider`,
+  `model_providers`, `openai_base_url`), and, without `model`, the model.
+  Codex reports no model, so nothing in the run's events confirms it.
+- **Codex project config.** Codex 0.167.0 also reads `.codex/config.toml` in
+  a trusted workspace, and ignores some keys there. Which provider and
+  endpoint keys it accepts from that file was not checked. The file is in the
+  workspace, so the agent can write it for a later run.
+- **Gemini host settings.** Without `model`, `~/.gemini/settings.json`
+  decides. A quota fallback to another model is not reported.
+- **Gemini CLI model reporting.** Neither the model on Gemini's `init` line,
+  nor plan-mode routing, nor the router aliases (`auto`, `auto-*`) were
+  checked against a live Gemini CLI. So the driver trusts no reported model
+  (`reportsResolvedModel: false`) and refuses a read-only run with a model.
+- **Claude agents and plugins you pass** (`--agent`, `--agents`,
+  `--plugin-dir`, `--plugin-url` under `allowPolicyOverrideArgs`): a
+  main-thread agent whose `model` is not `inherit` switches the session's
+  model, and a plugin can bring such an agent (or a skill with a `model`).
+  So the model that runs may not be `model`. Whether `system/init` then
+  names the agent's model was not checked against a live CLI.
+- **Claude settings you load** (`inheritHostConfig`, `settingSources`,
+  `--settings`/`--setting-sources` under `allowPolicyOverrideArgs`) can remap
+  aliases (`env.ANTHROPIC_DEFAULT_*_MODEL`), restrict models
+  (`availableModels`) or add a `fallbackModel`. Managed (policy) settings
+  always load, even when the run is isolated. A replaced start model shows on
+  `started` only when `model` is a full id: with an alias the reported id
+  always differs. A `fallbackModel` switch happens mid-run and shows only in
+  the usage per model.
+- **Claude server-side substitution** (organization model lists, entitlement
+  and refusal fallbacks) can replace an explicit `--model`; a mid-run switch
+  shows only in the usage per model.
+- **Helper models and subagents** run other models: Claude's WebFetch helper
+  and `Agent`/`Task` subagents (they show only in the usage per model), and
+  Codex's `review_model` and subagent model (`agents.default_subagent_model`,
+  reachable only through the policy key `agents` under
+  `allowPolicyOverrideArgs`), which Codex does not report.
 
 ## Credentials
 
@@ -800,11 +970,14 @@ exported from `adk-llm-bridge/agents`. They come from two places, and
   `EXTERNAL_AGENT_NETWORK_UNENFORCEABLE`, `EXTERNAL_AGENT_PATHS_UNENFORCEABLE`,
   `EXTERNAL_AGENT_DEPENDENCY_MISSING`, `EXTERNAL_AGENT_MISSING_BINARY`
   (value `MISSING_BINARY`), `EXTERNAL_AGENT_BATCH_COMMAND_REFUSED`,
-  `EXTERNAL_AGENT_CREDENTIAL_UNSUPPORTED` and
-  `EXTERNAL_AGENT_OPTION_UNSUPPORTED`. A driver raises them; during a run the
+  `EXTERNAL_AGENT_CREDENTIAL_UNSUPPORTED`, `EXTERNAL_AGENT_OPTION_UNSUPPORTED`,
+  `EXTERNAL_AGENT_MODEL_INVALID`, `EXTERNAL_AGENT_MODEL_REQUIRED` and
+  `EXTERNAL_AGENT_MODEL_OVERRIDE`. A driver raises them; during a run the
   agent turns them into a non-recoverable error event, so you read them from
-  `errorCode`. Only `EXTERNAL_AGENT_OPTION_UNSUPPORTED` is thrown to you, by
-  the driver's constructor.
+  `errorCode`. `EXTERNAL_AGENT_OPTION_UNSUPPORTED`,
+  `EXTERNAL_AGENT_MODEL_INVALID` and `EXTERNAL_AGENT_MODEL_REQUIRED` are
+  thrown to you by the driver's constructor, and so is
+  `EXTERNAL_AGENT_MODEL_OVERRIDE` for `args` and `config`.
 - **Agent event codes**: `EXTERNAL_AGENT_ERROR`,
   `EXTERNAL_AGENT_TRANSFER_FAILED`, `EXTERNAL_AGENT_NOT_CONFIGURED`,
   `EXTERNAL_AGENT_CONFIRMATION_UNUSED`,
@@ -832,6 +1005,9 @@ because the tool was not offered. The other codes in the table (`CLAUDE_*`,
 | `EXTERNAL_AGENT_BACKGROUND_TASK_PENDING` | `EXTERNAL_AGENT_BACKGROUND_TASK_PENDING` | No | A Claude run (SDK or CLI driver) reached its result while Claude Code still reported a background task (from `system/background_tasks_changed`; ambient tasks do not count). The task's work is not done; the run ends with exit code 1. Background tasks are off by default (`CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`); `allowBackgroundTasks: true` turns them on. |
 | `EXTERNAL_AGENT_CREDENTIAL_UNSUPPORTED` | `EXTERNAL_AGENT_CREDENTIAL_UNSUPPORTED` | No | The credential provider returned a `kind` other than `env` or `none`. |
 | `EXTERNAL_AGENT_OPTION_UNSUPPORTED` | `EXTERNAL_AGENT_OPTION_UNSUPPORTED` | No | Thrown (not an event) when a driver is built with an option its runtime cannot honor: `sessionStore` on `ClaudeCliDriver`. |
+| `EXTERNAL_AGENT_MODEL_INVALID` | `EXTERNAL_AGENT_MODEL_INVALID` | No | Thrown when a driver is built with a `model` that is not a model id (not a string, empty, over 256 characters, with whitespace or a control character, or starting with `-`). See [Model](#model). |
+| `EXTERNAL_AGENT_MODEL_REQUIRED` | `EXTERNAL_AGENT_MODEL_REQUIRED` | No | Thrown when a driver with `requireExplicitModel: true` has no `model`, or a router or default alias (`default`, `best`, `opusplan`, Gemini `auto`). |
+| `EXTERNAL_AGENT_MODEL_OVERRIDE` | `EXTERNAL_AGENT_MODEL_OVERRIDE` | No | Something other than `model` would set or route the model: thrown for model-setting `args` or Codex SDK `config` keys (even with `allowPolicyOverrideArgs`); an error event for a model variable in the run's environment, or a Gemini CLI read-only run with a model (plan mode may route turns to another model). |
 | `CLAUDE_SESSION_STORE_MIRROR_ERROR` | `CLAUDE_SESSION_STORE_MIRROR_ERROR` | Yes | The Claude Agent SDK dropped a transcript batch its `sessionStore` rejected or timed out on (3 attempts in total); the run goes on. See [Persisting Claude sessions](claude-session-store.md). |
 | `MISSING_BINARY` | `EXTERNAL_AGENT_MISSING_BINARY` | No | The `claude`, `codex` or `gemini` binary was not found, or, with `interpreter` and `entry`, the interpreter or the entry file. |
 | `EXTERNAL_AGENT_BATCH_COMMAND_REFUSED` | `EXTERNAL_AGENT_BATCH_COMMAND_REFUSED` | No | On Windows, the CLI command (or `interpreter`) is or resolves to a `.cmd` or `.bat` file (for example an npm shim). Remedy per CLI: [Windows: batch files and npm installs](#windows-batch-files-and-npm-installs). |

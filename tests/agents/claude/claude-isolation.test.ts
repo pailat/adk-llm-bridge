@@ -183,10 +183,10 @@ describe("ClaudeCliDriver isolation flags", () => {
   });
 
   test("user args are the last arguments (the prompt goes on stdin)", () => {
-    const args = new ClaudeCliDriver({ args: ["--model", "x"] }).buildArgs(
-      request({ mode: "ask" }),
-    );
-    expect(args.slice(-2)).toEqual(["--model", "x"]);
+    const args = new ClaudeCliDriver({
+      args: ["--max-budget-usd", "2"],
+    }).buildArgs(request({ mode: "ask" }));
+    expect(args.slice(-2)).toEqual(["--max-budget-usd", "2"]);
     expect(args).not.toContain("--");
   });
 
