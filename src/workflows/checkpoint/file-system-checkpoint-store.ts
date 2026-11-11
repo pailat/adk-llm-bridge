@@ -168,6 +168,12 @@ export async function collectFileSystemCheckpointTombstonesOffline(
  * after it. Windows cannot flush a directory, so there a rename is journaled
  * by NTFS but a save that already resolved can still be lost to a power
  * failure right after it. Elsewhere a failed directory flush fails the save.
+ *
+ * On Windows a save waits up to 5 s for other processes that hold the
+ * checkpoint file open (readers, other savers) to release it, then fails with
+ * `checkpoint_write_failed` (`details.causeCode` `EPERM`, `EBUSY` or
+ * `EACCES`). A reader that keeps the file open almost continuously can make
+ * saves fail: read with open, read, close.
  */
 export class FileSystemWorkflowCheckpointStore
   implements WorkflowCheckpointStore
@@ -1227,6 +1233,9 @@ function ioError(
       ...(errorSyscall(error) !== undefined
         ? { syscall: errorSyscall(error) }
         : {}),
+      ...(errorWaitedMs(error) !== undefined
+        ? { waitedMs: errorWaitedMs(error) }
+        : {}),
     },
   );
   return attachCause(wrapped, error);
@@ -1239,6 +1248,13 @@ function errorMessage(error: unknown): string | undefined {
 function errorSyscall(error: unknown): string | undefined {
   return isRecord(error) && typeof error.syscall === "string"
     ? error.syscall
+    : undefined;
+}
+
+/** How long a blocked rename was retried before it gave up, when it was. */
+function errorWaitedMs(error: unknown): number | undefined {
+  return isRecord(error) && typeof error.waitedMs === "number"
+    ? error.waitedMs
     : undefined;
 }
 

@@ -1871,8 +1871,9 @@ from the 0.6.0 tag.
   the checkpoint root on a volume.
 - Windows: releasing a lock (the checkpoint store, and the workspace and
   repository mutation locks) retries a rename that a waiter's open `owner.json`
-  blocks (`EPERM`, `EBUSY`, `EACCES`; 5 tries over about 100 ms) instead of
-  leaving the lock behind under a live process.
+  blocks (`EPERM`, `EBUSY`, `EACCES`; within a time budget, see the entry on
+  the checkpoint publish below) instead of leaving the lock behind under a live
+  process.
 - Linux and Windows: a checkpoint save that waited while the lock was
   released and taken by another writer could fail with
   `checkpoint_lock_corrupt`. The new lock directory often reuses the old one's
@@ -1901,6 +1902,14 @@ from the 0.6.0 tag.
   does not run in the normal path; but `EPERM` and `EACCES` there are also real
   permission errors (a read-only directory, say), and a save that hits one now
   fails with the same error after the 5 second budget, not at once.
+  On Windows a save waits up to 5 s for other processes that hold the
+  checkpoint file open (readers, other savers) to release it, then fails with
+  `checkpoint_write_failed` (`details.causeCode` `EPERM`, `EBUSY` or
+  `EACCES`; `details.waitedMs` is the time waited). A reader that keeps the
+  file open almost continuously can make saves fail: read with open, read,
+  close, and do other work between reads. Antivirus scanners, indexers and
+  editors that watch the checkpoint directory can hold files open too.
+  See [Checkpoint commit semantics](docs/workflow-durability.md#checkpoint-commit-semantics).
 
 ### Docs
 

@@ -312,15 +312,23 @@ describe("FileSystemWorkflowCheckpointStore under file-system faults", () => {
     });
   });
 
-  test("a publishing rename blocked past the budget fails the save and leaves no temporary file", async () => {
+  // The documented limit: a holder that keeps the file open past the budget
+  // makes the save fail, promptly, naming the cause and the time waited.
+  test("a publishing rename blocked past the budget fails the save after the budget, names the cause and the wait, and leaves no temporary file", async () => {
     const { result } = await runFault("publish-blocked-forever");
 
     expect(result).toMatchObject({
       saved: false,
       reason: "checkpoint_write_failed",
+      causeCode: "EBUSY",
       tmpLeft: 0,
     });
     expect(result.blocks).toBeGreaterThan(5);
+    // The wait is the 5 s budget: not cut short, and not a hang.
+    expect(result.waitedMs as number).toBeGreaterThanOrEqual(5000);
+    expect(result.waitedMs as number).toBeLessThan(5000 + 250 + 1000);
+    expect(result.elapsedMs as number).toBeGreaterThanOrEqual(5000);
+    expect(result.elapsedMs as number).toBeLessThan(5000 + 250 + 3000);
   });
 
   // The claim behind the wall-clock fix: the lock path is only ever replaced

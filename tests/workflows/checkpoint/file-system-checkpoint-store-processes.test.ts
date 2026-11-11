@@ -89,11 +89,25 @@ interface SaverResult {
   outcome: string;
   revision?: string;
   message?: string;
+  causeCode?: string;
+  causeMessage?: string;
+  syscall?: string;
+  ms?: number;
 }
 function results(running: Running[]): SaverResult[] {
   return running.flatMap((r) =>
     r.lines.map((line) => JSON.parse(line) as SaverResult),
   );
+}
+
+/**
+ * Everything the children printed or wrote to stderr, as one message for a
+ * failed assertion: outcome, cause code, syscall and elapsed ms per save.
+ */
+function report(running: Running[]): string {
+  return running
+    .map((r) => `${r.lines.join(" | ")}${r.stderr.join("")}`)
+    .join("\n");
 }
 
 async function leftovers(root: string): Promise<string[]> {
@@ -127,6 +141,8 @@ describe("FileSystemWorkflowCheckpointStore across processes", () => {
     await Promise.all(running.map((r) => r.exited));
 
     const outcomes = results(running);
+    const shown = report(running);
+    expect(outcomes, shown).toHaveLength(workers);
     expect(outcomes.map((r) => r.outcome).sort()).toEqual([
       "conflict",
       "conflict",
@@ -166,8 +182,16 @@ describe("FileSystemWorkflowCheckpointStore across processes", () => {
       await writeFile(startFile, "go");
       await Promise.all(running.map((r) => r.exited));
       const outcomes = results(running);
-      expect(outcomes.filter((o) => o.outcome === "won")).toHaveLength(1);
-      expect(outcomes.filter((o) => o.outcome === "conflict")).toHaveLength(3);
+      const shown = report(running);
+      expect(outcomes, shown).toHaveLength(4);
+      expect(
+        outcomes.filter((o) => o.outcome === "won"),
+        shown,
+      ).toHaveLength(1);
+      expect(
+        outcomes.filter((o) => o.outcome === "conflict"),
+        shown,
+      ).toHaveLength(3);
       expected = outcomes.find((o) => o.outcome === "won")?.revision as string;
       const loaded = await store.load({
         context: CONTEXT,
@@ -212,17 +236,33 @@ describe("FileSystemWorkflowCheckpointStore across processes", () => {
       await writeFile(roundStart, "go");
       await saver.exited;
       const [result] = results([saver]);
-      expect(result?.outcome, result?.message).toBe("won");
+      if (result?.outcome !== "won") {
+        // Name the reader's load too (its open fraction) before failing.
+        await writeFile(stopFile, "stop");
+        await reader.exited;
+      }
+      expect(
+        result?.outcome,
+        `${report([saver])}\nreader: ${report([reader])}`,
+      ).toBe("won");
       expected = result?.revision as string;
     }
     await writeFile(stopFile, "stop");
     await reader.exited;
 
     const [read] = reader.lines.map(
-      (line) => JSON.parse(line) as { reads: number; partial: number },
+      (line) =>
+        JSON.parse(line) as {
+          reads: number;
+          partial: number;
+          openFraction: number;
+        },
     );
-    expect(read?.reads).toBeGreaterThan(0);
-    expect(read?.partial).toBe(0);
+    // The reader must keep the file open often enough to block a publish
+    // without the retry, or the test would pass without the fix.
+    expect(read?.openFraction, report([reader])).toBeGreaterThanOrEqual(0.25);
+    expect(read?.reads, report([reader])).toBeGreaterThan(0);
+    expect(read?.partial, report([reader])).toBe(0);
     const loaded = await store.load({
       context: CONTEXT,
       workflowId: WORKFLOW_ID,

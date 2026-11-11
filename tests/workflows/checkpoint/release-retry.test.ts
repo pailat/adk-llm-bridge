@@ -69,6 +69,13 @@ describe("checkpoint lock release rename", () => {
         ...clock.options,
       }),
     ).rejects.toMatchObject({ code: "EPERM" });
+    // The error says how long it waited: the whole budget.
+    await expect(
+      renameRetryingBlocked("lock", "lock.retired", run, {
+        budgetMs: 1000,
+        ...fakeClock().options,
+      }),
+    ).rejects.toMatchObject({ code: "EPERM", waitedMs: 1000 });
     // Bounded: it stopped at the budget, not before and not long after.
     expect(clock.elapsed()).toBeGreaterThanOrEqual(1000);
     expect(clock.elapsed()).toBeLessThan(1000 + 1);
@@ -217,6 +224,17 @@ describe("blocked rename time budget and backoff", () => {
       }),
     ).toThrow("EACCES");
     expect(clock.elapsed()).toBe(50);
+    let thrown: unknown;
+    try {
+      renameRetryingBlockedSync("a", "b", stuck, {
+        budgetMs: 50,
+        ...fakeClock().options,
+      });
+    } catch (error) {
+      thrown = error;
+    }
+    // The error says how long it waited: the whole budget.
+    expect(thrown).toMatchObject({ code: "EACCES", waitedMs: 50 });
     expect(calls).toBeLessThan(RUNAWAY_CALLS);
   });
 });

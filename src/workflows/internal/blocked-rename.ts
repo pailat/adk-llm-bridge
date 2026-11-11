@@ -60,6 +60,30 @@ export function isBlockedRename(error: unknown): boolean {
 }
 
 /**
+ * Records on a blocked rename's error how long the rename was retried, so the
+ * failure says that the budget was spent. Other errors are returned as they
+ * are.
+ *
+ * @param error - The rename's error.
+ * @param waitedMs - Time spent retrying.
+ * @returns The same error, with `waitedMs` set when it is a blocked rename.
+ */
+function withWaitedMs(error: unknown, waitedMs: number): unknown {
+  if (isBlockedRename(error) && typeof error === "object" && error !== null) {
+    try {
+      Object.defineProperty(error, "waitedMs", {
+        value: Math.round(waitedMs),
+        configurable: true,
+        enumerable: false,
+      });
+    } catch {
+      // A frozen error keeps its own fields; the failure is still reported.
+    }
+  }
+  return error;
+}
+
+/**
  * The pause before retry number `retry` (1-based): full jitter over an
  * exponential ceiling, never under 1 ms and never past the time left.
  *
@@ -86,7 +110,8 @@ export function blockedRenamePause(
  * @param renamePath - The rename to run; the file system's by default.
  * @param options - Budget, clock and sleep, for tests.
  * @throws The rename's error when it is not a blocked rename, or when the
- * rename is still blocked once the budget is spent.
+ * rename is still blocked once the budget is spent (then with `waitedMs`, the
+ * time spent retrying).
  */
 export async function renameRetryingBlocked(
   from: string,
@@ -108,7 +133,7 @@ export async function renameRetryingBlocked(
     } catch (error) {
       const remaining = budgetMs - (now() - startedAt);
       if (!isBlockedRename(error) || remaining <= 0) {
-        throw error;
+        throw withWaitedMs(error, now() - startedAt);
       }
       await sleep(blockedRenamePause(retry, remaining, random));
     }
@@ -125,7 +150,8 @@ export async function renameRetryingBlocked(
  * @param renamePath - The rename to run; the file system's by default.
  * @param options - Budget, clock and sleep, for tests.
  * @throws The rename's error when it is not a blocked rename, or when the
- * rename is still blocked once the budget is spent.
+ * rename is still blocked once the budget is spent (then with `waitedMs`, the
+ * time spent retrying).
  */
 export function renameRetryingBlockedSync(
   from: string,
@@ -149,7 +175,7 @@ export function renameRetryingBlockedSync(
     } catch (error) {
       const remaining = budgetMs - (now() - startedAt);
       if (!isBlockedRename(error) || remaining <= 0) {
-        throw error;
+        throw withWaitedMs(error, now() - startedAt);
       }
       sleepSync(blockedRenamePause(retry, remaining, random));
     }

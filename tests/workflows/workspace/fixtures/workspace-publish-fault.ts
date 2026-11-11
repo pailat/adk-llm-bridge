@@ -76,7 +76,9 @@ const walk = (directory: string) => {
   }
 };
 walk(stateDirectory);
+// Exit from the write callback: a pipe write is asynchronous on Windows, and
+// `process.exit` right after it can drop the line.
 process.stdout.write(
   `${JSON.stringify({ acquired, code, thrown, tmpLeft: leftovers.length, stateWritten })}\n`,
+  () => process.exit(0),
 );
-process.exit(0);
