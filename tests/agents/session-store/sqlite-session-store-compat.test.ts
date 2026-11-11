@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import {
   chmodSync,
   copyFileSync,
+  mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
@@ -192,6 +193,77 @@ describe("SqliteSessionStore with a version 1 database file", () => {
   });
 });
 
+describe("SqliteSessionStore with an unusual user_version", () => {
+  async function userVersion(path: string): Promise<number> {
+    const { Database } = await import("bun:sqlite");
+    const db = new Database(path);
+    try {
+      return (db.query("PRAGMA user_version").get() as { user_version: number })
+        .user_version;
+    } finally {
+      db.close();
+    }
+  }
+
+  test("accepts a negative user_version, keeps the entries and rewrites it to 1", async () => {
+    const path = writeFixture(tempDir());
+    const { Database } = await import("bun:sqlite");
+    const raw = new Database(path);
+    raw.exec("PRAGMA user_version = -5");
+    raw.close();
+    expect(await userVersion(path)).toBe(-5);
+    const store = open(path);
+    expect(await store.load(key)).toEqual([
+      { type: "user", uuid: "u1", message: "hello" },
+      { type: "assistant", uuid: "u2", message: "hi" },
+    ]);
+    store.close();
+    expect(await userVersion(path)).toBe(1);
+  });
+
+  test("repairs a file stamped version 1 whose table and indexes are missing", async () => {
+    const path = join(tempDir(), "stamped.db");
+    const { Database } = await import("bun:sqlite");
+    const raw = new Database(path);
+    raw.exec("PRAGMA user_version = 1");
+    raw.close();
+    const store = open(path);
+    await store.append(key, [{ type: "user", uuid: "u1", message: "a" }]);
+    await store.append(key, [{ type: "user", uuid: "u1", message: "b" }]);
+    expect(await store.load(key)).toEqual([
+      { type: "user", uuid: "u1", message: "b" },
+    ]);
+    store.close();
+    expect(await userVersion(path)).toBe(1);
+  });
+
+  test("recreates an index a file stamped version 1 lost", async () => {
+    const path = writeFixture(tempDir());
+    const { Database } = await import("bun:sqlite");
+    const raw = new Database(path);
+    const indexes = (
+      raw
+        .query(
+          "SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE '%_uuid'",
+        )
+        .all() as { name: string }[]
+    ).map((row) => row.name);
+    expect(indexes.length).toBe(1);
+    raw.exec(`DROP INDEX ${indexes[0]}`);
+    raw.close();
+    const store = open(path);
+    store.close();
+    const check = new Database(path);
+    const after = check
+      .query(
+        "SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE '%_uuid'",
+      )
+      .all();
+    check.close();
+    expect(after.length).toBe(1);
+  });
+});
+
 describe("SqliteSessionStore without node:sqlite", () => {
   test("reports SESSION_STORE_SQLITE_UNAVAILABLE and creates no directory or file", () => {
     const dir = tempDir();
@@ -232,5 +304,45 @@ describe("SqliteSessionStore without node:sqlite", () => {
       "SESSION_STORE_UNSAFE_PATH",
     );
     expect((error as Error).message).toContain("database rel-link.db:");
+  });
+
+  // Skipped on Windows: POSIX directory modes.
+  test.skipIf(process.platform === "win32")(
+    "names the directory as given in the unsafe directory error for a relative path",
+    () => {
+      const dir = tempDir();
+      mkdirSync(join(dir, "shared"));
+      chmodSync(join(dir, "shared"), 0o777);
+      const cwd = process.cwd();
+      let error: unknown;
+      process.chdir(dir);
+      try {
+        open("shared/s.db");
+      } catch (caught) {
+        error = caught;
+      } finally {
+        process.chdir(cwd);
+      }
+      expect((error as SqliteSessionStoreError).code).toBe(
+        "SESSION_STORE_UNSAFE_PATH",
+      );
+      expect((error as Error).message).toContain(
+        "database shared/s.db: its directory shared can be written",
+      );
+    },
+  );
+
+  test("opens a relative path against the directory the store was created in", async () => {
+    const dir = tempDir();
+    const cwd = process.cwd();
+    process.chdir(dir);
+    let store: SqliteSessionStore;
+    try {
+      store = open("rel.db");
+    } finally {
+      process.chdir(cwd);
+    }
+    await store.append(key, [{ type: "user", uuid: "u1" }]);
+    expect(readdirSync(dir)).toContain("rel.db");
   });
 });

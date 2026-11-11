@@ -53,16 +53,39 @@ async function tempRoot(): Promise<string> {
   roots.push(root);
   return root;
 }
+/** Waits for a child to be gone, but never longer than `timeoutMs`. */
+async function reaped(child: ChildProcess, timeoutMs = 10_000): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  child.kill("SIGKILL");
+  await Promise.race([
+    new Promise<void>((resolveExit) =>
+      child.once("close", () => resolveExit()),
+    ),
+    new Promise<void>((resolveTimeout) =>
+      setTimeout(resolveTimeout, timeoutMs),
+    ),
+  ]);
+}
+
+/** Removes a directory tree, retrying while a dying child still writes to it. */
+async function removed(path: string): Promise<void> {
+  await rm(path, {
+    recursive: true,
+    force: true,
+    maxRetries: 5,
+    retryDelay: 50,
+  });
+}
+
+// A hook that waits on a child is bounded: a killed child is reaped for at
+// most 10 s, and the limit of the hook itself is explicit, so a stuck process
+// can never hold the file for minutes.
 afterEach(async () => {
-  for (const child of children.splice(0)) {
-    if (child.exitCode === null && child.signalCode === null) {
-      child.kill("SIGKILL");
-    }
-  }
+  await Promise.all(children.splice(0).map((child) => reaped(child)));
   for (const root of roots.splice(0)) {
-    await rm(root, { recursive: true, force: true });
+    await removed(root);
   }
-});
+}, 60_000);
 
 function makeCheckpoint(input: string) {
   return createWorkflowCheckpoint({
@@ -271,65 +294,77 @@ describe("FileSystemWorkflowCheckpointProvider across processes", () => {
     for (let attempt = 0; attempt < 40; attempt++) {
       const root = await tempRoot();
       const loop = start(SAVE_LOOP, [root]);
-      await waitFor(
-        () =>
-          loop.lines.length >= 2 ||
-          loop.lines.some((line) => line.includes('"error"')),
-        "two acknowledged saves",
-      );
-      expect(loop.lines.some((line) => line.includes('"error"'))).toBe(false);
-      if (attempt % 2 === 0) {
-        // Kill a random few milliseconds after a save took its lock, so some
-        // attempts land while the temporary file is being written.
-        await waitForAsync(
-          async () => (await lockEntries(root)).length > 0,
-          "a save holding the lock",
+      try {
+        await waitFor(
+          () =>
+            loop.lines.length >= 2 ||
+            loop.lines.some((line) => line.includes('"error"')),
+          "two acknowledged saves",
         );
-        await new Promise((r) => setTimeout(r, Math.random() * 20));
-      } else {
-        // Kill the instant the checkpoint file is first touched by a save: a
-        // write that changed the file in place would be cut off half-way.
-        const path = checkpointFile(root);
-        const before = statSync(path).mtimeMs;
-        const deadline = Date.now() + 30_000;
-        while (statSync(path).mtimeMs === before && Date.now() < deadline) {
-          // Busy wait: a sleep would let the write finish.
+        expect(loop.lines.some((line) => line.includes('"error"'))).toBe(false);
+        if (attempt % 2 === 0) {
+          // Kill a random few milliseconds after a save took its lock, so some
+          // attempts land while the temporary file is being written.
+          await waitForAsync(
+            async () => (await lockEntries(root)).length > 0,
+            "a save holding the lock",
+          );
+          await new Promise((r) => setTimeout(r, Math.random() * 20));
+        } else {
+          // Kill the instant the checkpoint file is first touched by a save: a
+          // write that changed the file in place would be cut off half-way.
+          const path = checkpointFile(root);
+          const before = statSync(path).mtimeMs;
+          const deadline = Date.now() + 30_000;
+          while (statSync(path).mtimeMs === before && Date.now() < deadline) {
+            // Busy wait: a sleep would let the write finish.
+          }
         }
-      }
-      loop.child.kill("SIGKILL");
-      await loop.exited;
+        loop.child.kill("SIGKILL");
+        await loop.exited;
 
-      const acknowledged = loop.lines
-        .filter((line) => line.startsWith("{") && line.endsWith("}"))
-        .map((line) => JSON.parse(line) as { saved: number; revision: string });
-      const lastAcknowledged = acknowledged[acknowledged.length - 1];
-      expect(lastAcknowledged).toBeDefined();
+        const acknowledged = loop.lines
+          .filter((line) => line.startsWith("{") && line.endsWith("}"))
+          .map(
+            (line) => JSON.parse(line) as { saved: number; revision: string },
+          );
+        const lastAcknowledged = acknowledged[acknowledged.length - 1];
+        expect(lastAcknowledged).toBeDefined();
 
-      const provider = new FileSystemWorkflowCheckpointProvider({ root });
-      const stored = await provider.get({
-        workflowId: WORKFLOW_ID,
-        executionId: EXECUTION_ID,
-      });
-      expect(stored).toBeDefined();
-      // The stored checkpoint is the last acknowledged save, or the one that
-      // was committing when the process died; never an older or a torn one.
-      const candidates = [
-        lastAcknowledged?.revision,
-        await workflowCheckpointRevision(
-          withWorkflowCompleted(
-            await makeCheckpoint(`loop-${(lastAcknowledged?.saved ?? 0) + 1}`),
-            `loop-${(lastAcknowledged?.saved ?? 0) + 1}${padding}`,
-            1_700_000_001_000,
+        const provider = new FileSystemWorkflowCheckpointProvider({ root });
+        const stored = await provider.get({
+          workflowId: WORKFLOW_ID,
+          executionId: EXECUTION_ID,
+        });
+        expect(stored).toBeDefined();
+        // The stored checkpoint is the last acknowledged save, or the one that
+        // was committing when the process died; never an older or a torn one.
+        const candidates = [
+          lastAcknowledged?.revision,
+          await workflowCheckpointRevision(
+            withWorkflowCompleted(
+              await makeCheckpoint(
+                `loop-${(lastAcknowledged?.saved ?? 0) + 1}`,
+              ),
+              `loop-${(lastAcknowledged?.saved ?? 0) + 1}${padding}`,
+              1_700_000_001_000,
+            ),
           ),
-        ),
-      ];
-      expect(candidates).toContain(stored?.revision as string);
-      const viaLoad = await provider.load({
-        context: CONTEXT,
-        workflowId: WORKFLOW_ID,
-        executionId: EXECUTION_ID,
-      });
-      expect(viaLoad).toEqual(stored?.checkpoint);
+        ];
+        expect(candidates).toContain(stored?.revision as string);
+        const viaLoad = await provider.load({
+          context: CONTEXT,
+          workflowId: WORKFLOW_ID,
+          executionId: EXECUTION_ID,
+        });
+        expect(viaLoad).toEqual(stored?.checkpoint);
+      } finally {
+        // Each attempt leaves nothing behind: the loop is reaped and its
+        // directory (several 3 MiB files) removed before the next one starts.
+        await reaped(loop.child);
+        await removed(root);
+        roots.splice(roots.indexOf(root), 1);
+      }
     }
   }, 300_000);
 });

@@ -73,10 +73,15 @@ jobs:
         run: bun test tests/agents/driver/windows-command.test.ts tests/agents/driver/cli-interpreter-entry.test.ts
       - name: Storage providers under Bun
         run: bun test tests/workflows/storage tests/utils/sqlite-database.test.ts tests/utils/sqlite-open-while-locked.test.ts tests/utils/windows-contract.test.ts tests/agents/session-store
+      # The steps below run even when the Bun storage step fails, so the Node
+      # Windows contract is reported on its own.
       - run: bun run build
+        if: ${{ !cancelled() }}
       - name: Fake .cmd shims and the interpreter + entry route under Node
+        if: ${{ !cancelled() }}
         run: node scripts/windows-shim-smoke.mjs
       - name: Storage conformance under Node
+        if: ${{ !cancelled() }}
         run: node --test scripts/node-storage-conformance.mjs
 
   # Installs the packed tarball with npm into an empty project, which pulls in

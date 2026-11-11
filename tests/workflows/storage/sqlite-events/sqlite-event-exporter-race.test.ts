@@ -15,7 +15,7 @@ const here = import.meta.path;
 
 if (CHILD === undefined) {
   describe("SqliteWorkflowEventExporter when the path is taken between the check and the create", () => {
-    for (const kind of ["symlink", "directory"]) {
+    for (const kind of ["symlink", "directory", "directory-denied"]) {
       // Skipped on Windows for the symbolic link: there is no `O_NOFOLLOW`, so a
       // link that appears after the check can be followed by the create; the
       // check before the open is the only guard there.
@@ -53,6 +53,19 @@ if (CHILD === undefined) {
   const real = { ...realFs };
   mock.module("node:fs", () => ({
     ...real,
+    // Windows may report a create over a directory as a permission error
+    // instead of EEXIST; the exporter must still refuse the directory.
+    openSync: (target: string, ...rest: unknown[]) => {
+      if (CHILD === "directory-denied" && target === path) {
+        const error = new Error("EPERM") as NodeJS.ErrnoException;
+        error.code = "EPERM";
+        throw error;
+      }
+      return (real.openSync as (...args: unknown[]) => unknown)(
+        target,
+        ...rest,
+      );
+    },
     lstatSync: (target: string, ...rest: unknown[]) => {
       if (armed && target === path) {
         armed = false;

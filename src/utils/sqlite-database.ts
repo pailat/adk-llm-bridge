@@ -206,6 +206,18 @@ export interface SqliteMigration {
 export type SqliteSchemaVersionStorage = "user_version" | "table";
 
 /**
+ * Options of {@link SqliteDatabaseHandle.migrate}.
+ *
+ * @internal
+ */
+export interface SqliteMigrateOptions {
+  /** Take the write lock even when the schema is current. */
+  readonly lockWhenCurrent?: boolean;
+  /** The lenient behaviour of the shipped session store; see `migrate`. */
+  readonly release?: boolean;
+}
+
+/**
  * An open database.
  *
  * @internal
@@ -227,8 +239,11 @@ export interface SqliteDatabaseHandle {
    * step.
    *
    * A current schema takes no write lock unless `options.lockWhenCurrent` is
-   * set; the shipped Claude session store sets it to keep the locking it
-   * always had.
+   * set. `options.release` is the lenient behaviour of the shipped Claude
+   * session store: a negative `user_version` counts as unset, and every
+   * step and the version write run again inside the transaction even when
+   * the schema is current, so a stamped file that lost its table or indexes
+   * is repaired. It implies `lockWhenCurrent`.
    *
    * @returns The version before and after.
    */
@@ -236,7 +251,7 @@ export interface SqliteDatabaseHandle {
     component: string,
     migrations: readonly SqliteMigration[],
     storage?: SqliteSchemaVersionStorage,
-    options?: { readonly lockWhenCurrent?: boolean },
+    options?: SqliteMigrateOptions,
   ): { from: number; to: number };
   /** Reads a component's stored schema version; `0` when it has none. */
   schemaVersion(
@@ -442,12 +457,15 @@ function prepareFile(
         ),
       );
     } catch (error) {
-      // Another process created it first: check what it made.
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      const raced = lstatSync(path);
+      // Another process may have created it first: check what it made. A
+      // create over a directory is reported as EEXIST on POSIX and may be a
+      // permission error on Windows, so any failure looks at the path.
+      const raced = lstatOrUndefined(path);
+      if (raced === undefined) throw error;
       if (raced.isSymbolicLink() || !raced.isFile()) {
         throw unsafe("is not a regular file");
       }
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
     }
     return;
   }
@@ -534,10 +552,13 @@ class Handle implements SqliteDatabaseHandle {
   schemaVersion(
     component: string,
     storage: SqliteSchemaVersionStorage = "table",
+    lenient = false,
   ): number {
     if (storage === "user_version") {
       const row = this.#db.prepare("PRAGMA user_version").get();
-      return this.#checkedVersion(component, row?.user_version ?? 0);
+      const stored = row?.user_version ?? 0;
+      if (lenient && typeof stored === "number" && stored < 0) return 0;
+      return this.#checkedVersion(component, stored);
     }
     const exists = this.#db
       .prepare(
@@ -575,7 +596,7 @@ class Handle implements SqliteDatabaseHandle {
     component: string,
     migrations: readonly SqliteMigration[],
     storage: SqliteSchemaVersionStorage = "table",
-    options: { readonly lockWhenCurrent?: boolean } = {},
+    options: SqliteMigrateOptions = {},
   ): { from: number; to: number } {
     migrations.forEach((step, index) => {
       if (step.version !== index + 1) {
@@ -596,22 +617,23 @@ class Handle implements SqliteDatabaseHandle {
     // Refuse a newer schema before asking for the write lock, so a locked or
     // read-only file still reports the typed failure; the check is repeated
     // inside the transaction in case another process migrated in between.
-    const stored = this.schemaVersion(component, storage);
+    const release = options.release === true;
+    const stored = this.schemaVersion(component, storage, release);
     refuseNewer(stored);
     // A current schema needs no write. Opening it then takes no write lock,
     // so it neither waits for another process's write transaction nor blocks
     // the event loop for the busy timeout. A version only grows, so a
     // concurrent migration cannot make this answer wrong. A caller that
     // always took the lock (the session store) can ask to keep doing so.
-    if (stored === last && options.lockWhenCurrent !== true)
+    if (stored === last && !release && options.lockWhenCurrent !== true)
       return { from: last, to: last };
     return this.transaction(() => {
-      const from = this.schemaVersion(component, storage);
+      const from = this.schemaVersion(component, storage, release);
       refuseNewer(from);
       for (const step of migrations) {
-        if (step.version > from) this.#db.exec(step.sql);
+        if (release || step.version > from) this.#db.exec(step.sql);
       }
-      if (last > from) this.#writeVersion(component, storage, last);
+      if (release || last > from) this.#writeVersion(component, storage, last);
       return { from, to: Math.max(from, last) };
     });
   }

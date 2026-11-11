@@ -142,10 +142,11 @@ with the file-system store fix; this section does not repeat it.
   the account can open.
 - **Symbolic links are still refused**, from `lstat` before the open, because
   Windows has no `O_NOFOLLOW`. The refusal holds for a link or junction at the
-  database path and, for the SQLite stores and exporter, at its `-wal` and `-shm`
-  files and its directory. A link swapped in between that check and the open is
-  not caught, and creating a link needs a privilege (administrator or developer
-  mode), so a host without it never sees one.
+  database path of the SQLite checkpoint store and event exporter and, for
+  those two, at the `-wal` and `-shm` files and the directory. The Claude
+  session store refuses a link at its database path only; it follows a link
+  in its directory and companion files, as it always did. A link swapped in
+  between that check and the open is not caught.
 - **No FIFOs.** The checks for a FIFO at the path apply only to POSIX.
 - **Open files.** Windows cannot delete or rename a file another process has
   open. The JSONL exporter keeps no file open between calls, so this only

@@ -232,7 +232,7 @@ describe("event export pipeline", () => {
     expect(pipeline.stats.exported).toBe(4);
   });
 
-  test("clipping a 10 MB payload made of 600 long strings takes well under a second", () => {
+  test("clipping a 10 MB payload made of 600 long strings costs well under a second of CPU", () => {
     const big = {
       ...record("many-long"),
       payload: {
@@ -242,11 +242,15 @@ describe("event export pipeline", () => {
         ),
       },
     };
-    const started = performance.now();
+    // CPU time of this process, not wall time: clipping is pure computation
+    // (about 0.2 s here), and a wall clock also counts the time a busy host
+    // keeps the process descheduled. A quadratic clip still costs far more.
+    const before = process.cpuUsage();
     const { record: clipped } = clipWorkflowEventRecord(big, {
       maxRecordBytes: 256 * 1024,
     });
-    expect(performance.now() - started).toBeLessThan(1_000);
+    const used = process.cpuUsage(before);
+    expect((used.user + used.system) / 1000).toBeLessThan(1_000);
     expect(Buffer.byteLength(JSON.stringify(clipped))).toBeLessThanOrEqual(
       256 * 1024,
     );

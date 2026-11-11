@@ -142,33 +142,35 @@ const SCHEMA_MIGRATIONS = [
  *   after it, since the create and the reopen follow it), and no owner or
  *   mode check is made, because NTFS access follows the directory's ACL.
  *
- * @param path - The database path.
+ * @param path - The resolved database path, which every check and open uses.
+ * @param label - The path as the caller gave it, which the messages name.
  * @throws {@link SqliteSessionStoreError} with code
  * `SESSION_STORE_UNSAFE_PATH` when a check fails.
  */
-function prepareDatabaseFile(path: string): void {
+function prepareDatabaseFile(path: string, label: string): void {
   const directory = dirname(path);
+  const shownDirectory = dirname(label);
   mkdirSync(directory, { recursive: true, mode: 0o700 });
   const uid =
     typeof process.getuid === "function" ? process.getuid() : undefined;
   const unsafe = (reason: string, cause?: unknown) =>
     new SqliteSessionStoreError(
       "SESSION_STORE_UNSAFE_PATH",
-      `Refusing the session store database ${path}: ${reason}.`,
+      `Refusing the session store database ${label}: ${reason}.`,
       cause === undefined ? undefined : { cause },
     );
   if (uid !== undefined) {
     // statSync follows symlinks, so the checks apply to the real directory.
     const dir = statSync(directory);
     if (!dir.isDirectory()) {
-      throw unsafe(`${directory} is not a directory`);
+      throw unsafe(`${shownDirectory} is not a directory`);
     }
     if (dir.uid !== uid && dir.uid !== 0) {
-      throw unsafe(`its directory ${directory} is owned by another user`);
+      throw unsafe(`its directory ${shownDirectory} is owned by another user`);
     }
     if ((dir.mode & 0o022) !== 0 && (dir.mode & 0o1000) === 0) {
       throw unsafe(
-        `its directory ${directory} can be written by other users and has no sticky bit`,
+        `its directory ${shownDirectory} can be written by other users and has no sticky bit`,
       );
     }
   }
@@ -296,7 +298,7 @@ export class SqliteSessionStore implements SessionStore {
     if (path !== ":memory:") {
       // A runtime without node:sqlite must create no directory or file.
       requireNodeSqlite(failOpen);
-      prepareDatabaseFile(options.path);
+      prepareDatabaseFile(path, options.path);
     }
     // prepareDatabaseFile has created or checked the file without following
     // a symlink, so the helper opens that checked file as it is.
@@ -308,10 +310,11 @@ export class SqliteSessionStore implements SessionStore {
       fail: failOpen,
     });
     try {
-      // Take the write lock even when the schema is current, as this store
-      // always did.
+      // Behave as this store always did: take the write lock, run the schema
+      // SQL and write the version even when the schema is current, and accept
+      // a negative user_version.
       this.#db.migrate("session store", SCHEMA_MIGRATIONS, "user_version", {
-        lockWhenCurrent: true,
+        release: true,
       });
     } catch (error) {
       this.#db.close();

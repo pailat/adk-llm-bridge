@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite";
 import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -45,6 +46,46 @@ const BUDGET = {
   rssGrowthMiB: FULL ? 300 : 100,
 };
 
+// The time budgets are about work, not about how busy the machine is. Before
+// the run, a fixed reference workload on plain SQLite is timed in this same
+// process; a machine that is slower right now than when the budgets were
+// measured scales every time budget by the same ratio. The memory budget is not
+// scaled. A store that becomes slower than SQLite itself still fails, because
+// the reference does not include the store.
+const REFERENCE_IDLE_MS = 100;
+const REFERENCE_RUNS = 3;
+
+function referenceMilliseconds(dir: string, run: number): number {
+  const started = performance.now();
+  const db = new Database(join(dir, `reference-${run}.db`));
+  try {
+    db.exec(
+      "PRAGMA journal_mode=WAL; CREATE TABLE t (id INTEGER PRIMARY KEY, body TEXT)",
+    );
+    const insert = db.prepare("INSERT INTO t (body) VALUES (?)");
+    const body = "x".repeat(CHECKPOINT_BYTES);
+    for (let i = 0; i < 1_000; i++) insert.run(body);
+    db.exec("BEGIN");
+    for (let i = 0; i < 100_000; i++) insert.run("note");
+    db.exec("COMMIT");
+    let rows = 0;
+    for (const _ of db.prepare("SELECT id, body FROM t").iterate()) rows++;
+    if (rows !== 101_000) throw new Error("reference workload lost rows");
+  } finally {
+    db.close();
+  }
+  return performance.now() - started;
+}
+
+/** How many times slower than the budget measurements this machine is now. */
+function slowdown(dir: string): number {
+  const runs = Array.from({ length: REFERENCE_RUNS }, (_, run) =>
+    referenceMilliseconds(dir, run),
+  ).sort((a, b) => a - b);
+  const median = runs[Math.floor(runs.length / 2)] as number;
+  return Math.max(1, median / REFERENCE_IDLE_MS);
+}
+
 const APPEND_BATCH = 500;
 const READ_PAGE = 1_000;
 const LIST_PAGE = 500;
@@ -75,6 +116,10 @@ describe(`SQLite storage load (${CHECKPOINTS} checkpoints, ${RECORDS} event reco
     const dir = mkdtempSync(join(tmpdir(), "sqlite-load-"));
     directories.push(dir);
     const path = join(dir, "load.db");
+    const factor = slowdown(dir);
+    report(
+      `machine slowdown against the reference workload: x${factor.toFixed(2)}`,
+    );
     const checkpoints = new SqliteWorkflowCheckpointStore({
       path,
       busyTimeoutMs: 30_000,
@@ -112,7 +157,7 @@ describe(`SQLite storage load (${CHECKPOINTS} checkpoints, ${RECORDS} event reco
       }
       const saveSeconds = seconds(started);
       report(
-        `saved ${CHECKPOINTS} checkpoints in ${saveSeconds.toFixed(2)} s (budget ${BUDGET.saveSeconds.toFixed(2)} s)`,
+        `saved ${CHECKPOINTS} checkpoints in ${saveSeconds.toFixed(2)} s (budget ${(BUDGET.saveSeconds * factor).toFixed(2)} s)`,
       );
 
       // 2. Listing every checkpoint in pages.
@@ -127,7 +172,7 @@ describe(`SQLite storage load (${CHECKPOINTS} checkpoints, ${RECORDS} event reco
       } while (cursor !== undefined);
       const listSeconds = seconds(started);
       report(
-        `listed ${listed} checkpoints in pages of ${LIST_PAGE} in ${listSeconds.toFixed(2)} s (budget ${BUDGET.listSeconds.toFixed(2)} s)`,
+        `listed ${listed} checkpoints in pages of ${LIST_PAGE} in ${listSeconds.toFixed(2)} s (budget ${(BUDGET.listSeconds * factor).toFixed(2)} s)`,
       );
       expect(listed).toBe(CHECKPOINTS);
 
@@ -155,7 +200,7 @@ describe(`SQLite storage load (${CHECKPOINTS} checkpoints, ${RECORDS} event reco
       }
       const appendSeconds = seconds(started);
       report(
-        `appended ${appended} records in batches of ${APPEND_BATCH} in ${appendSeconds.toFixed(2)} s (budget ${BUDGET.appendSeconds.toFixed(2)} s)`,
+        `appended ${appended} records in batches of ${APPEND_BATCH} in ${appendSeconds.toFixed(2)} s (budget ${(BUDGET.appendSeconds * factor).toFixed(2)} s)`,
       );
       expect(appended).toBe(RECORDS);
 
@@ -194,7 +239,7 @@ describe(`SQLite storage load (${CHECKPOINTS} checkpoints, ${RECORDS} event reco
       }
       const readSeconds = seconds(started);
       report(
-        `read ${read} records in pages of ${READ_PAGE} in ${readSeconds.toFixed(2)} s (budget ${BUDGET.readSeconds.toFixed(2)} s)`,
+        `read ${read} records in pages of ${READ_PAGE} in ${readSeconds.toFixed(2)} s (budget ${(BUDGET.readSeconds * factor).toFixed(2)} s)`,
       );
       expect(read).toBe(RECORDS);
 
@@ -207,10 +252,10 @@ describe(`SQLite storage load (${CHECKPOINTS} checkpoints, ${RECORDS} event reco
         `resident memory grew ${rssGrowthMiB.toFixed(1)} MiB (budget ${BUDGET.rssGrowthMiB} MiB)`,
       );
 
-      expect(saveSeconds).toBeLessThanOrEqual(BUDGET.saveSeconds);
-      expect(listSeconds).toBeLessThanOrEqual(BUDGET.listSeconds);
-      expect(appendSeconds).toBeLessThanOrEqual(BUDGET.appendSeconds);
-      expect(readSeconds).toBeLessThanOrEqual(BUDGET.readSeconds);
+      expect(saveSeconds).toBeLessThanOrEqual(BUDGET.saveSeconds * factor);
+      expect(listSeconds).toBeLessThanOrEqual(BUDGET.listSeconds * factor);
+      expect(appendSeconds).toBeLessThanOrEqual(BUDGET.appendSeconds * factor);
+      expect(readSeconds).toBeLessThanOrEqual(BUDGET.readSeconds * factor);
       expect(rssGrowthMiB).toBeLessThanOrEqual(BUDGET.rssGrowthMiB);
     } finally {
       await checkpoints.close().catch(() => undefined);

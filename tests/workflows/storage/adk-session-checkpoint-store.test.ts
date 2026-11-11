@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -38,7 +38,20 @@ import {
 // The conformance suite may build a store while the cases are registered, so
 // directories live until the whole file has run.
 const dirs: string[] = [];
+// A file-backed service keeps its database file open until its ORM closes;
+// Windows cannot delete an open file, so they are closed before the rm.
+const fileServices: DatabaseSessionService[] = [];
+function fileService(url: string): DatabaseSessionService {
+  const service = new DatabaseSessionService(url);
+  fileServices.push(service);
+  return service;
+}
 afterAll(async () => {
+  for (const service of fileServices.splice(0)) {
+    const orm = (service as unknown as { orm?: { close(): Promise<void> } })
+      .orm;
+    await orm?.close().catch(() => undefined);
+  }
   for (const dir of dirs.splice(0)) {
     await rm(dir, { recursive: true, force: true });
   }
@@ -207,6 +220,18 @@ const SKIP_NAME =
   "AdkSessionServiceWorkflowCheckpointStore over DatabaseSessionService (skipped: @mikro-orm/sqlite does not resolve)";
 
 if (hasSqliteDriver) {
+  // The first DatabaseSessionService of a process loads the optional driver and
+  // builds the schema (about 1 s idle, far more on a busy host). It is paid here,
+  // under its own generous limit, so that no conformance case carries it
+  // against the 5 s limit of a single test.
+  beforeAll(async () => {
+    const warm = new DatabaseSessionService("sqlite://:memory:");
+    await warm.getSession({ appName: "warm-up", userId: "u", sessionId: "s" });
+    await (warm as unknown as { orm?: { close(): Promise<void> } }).orm
+      ?.close()
+      .catch(() => undefined);
+  }, 120_000);
+
   const memoryDatabases = new WeakMap<
     BaseWorkflowCheckpointStore,
     DatabaseSessionService
@@ -236,14 +261,12 @@ if (hasSqliteDriver) {
       const dir = await mkdtemp(join(tmpdir(), "adk-session-sqlite-"));
       dirs.push(dir);
       const file = join(dir, "checkpoints.sqlite");
-      const created = store(new DatabaseSessionService(`sqlite://${file}`));
+      const created = store(fileService(`sqlite://${file}`));
       files.set(created, file);
       return created;
     },
     reopenStore: (existing) =>
-      store(
-        new DatabaseSessionService(`sqlite://${files.get(existing) as string}`),
-      ),
+      store(fileService(`sqlite://${files.get(existing) as string}`)),
   });
   register(
     "AdkSessionServiceWorkflowCheckpointStore conformance over DatabaseSessionService sqlite file with reopen",
@@ -269,10 +292,10 @@ if (hasSqliteDriver) {
       const dir = await mkdtemp(join(tmpdir(), "adk-session-sqlite-"));
       dirs.push(dir);
       const url = `sqlite://${join(dir, "reopen.sqlite")}`;
-      const first = store(new DatabaseSessionService(url));
+      const first = store(fileService(url));
       const checkpoint = await makeCheckpoint("flow", "exec");
       await first.put({ checkpoint, expectedRevision: null });
-      const second = store(new DatabaseSessionService(url));
+      const second = store(fileService(url));
       const stored = await second.get({
         workflowId: "flow",
         executionId: "exec",
@@ -288,9 +311,9 @@ if (hasSqliteDriver) {
       dirs.push(dir);
       const url = `sqlite://${join(dir, "race.sqlite")}`;
       const writers = [
-        store(new DatabaseSessionService(url)),
-        store(new DatabaseSessionService(url)),
-        store(new DatabaseSessionService(url)),
+        store(fileService(url)),
+        store(fileService(url)),
+        store(fileService(url)),
       ];
       const base = await writers[0]?.put({
         checkpoint: await makeCheckpoint("flow", "exec", "base"),

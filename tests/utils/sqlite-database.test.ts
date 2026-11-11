@@ -326,8 +326,9 @@ describe("openSqliteDatabase: symbolic links and special files", () => {
   for (const suffix of ["-wal", "-shm"]) {
     for (const companionMode of [0o755, 0o600]) {
       for (const kind of ["directory", "fifo"] as const) {
-        // Skipped on Windows: Windows has no FIFOs.
-        test.skipIf(process.platform === "win32")(
+        // Skipped on Windows for a FIFO only: Windows has no FIFOs. The
+        // directory case runs there; only chmod and the mode check are POSIX.
+        test.skipIf(kind === "fifo" && process.platform === "win32")(
           `rejects a ${kind} at the ${suffix} companion file without blocking (mode ${companionMode.toString(8)})`,
           () => {
             const dir = tempDir();
@@ -338,7 +339,9 @@ describe("openSqliteDatabase: symbolic links and special files", () => {
             rmSync(path + suffix, { force: true });
             if (kind === "directory") {
               mkdirSync(path + suffix);
-              chmodSync(path + suffix, companionMode);
+              if (process.platform !== "win32") {
+                chmodSync(path + suffix, companionMode);
+              }
             } else {
               execFileSync("mkfifo", [
                 "-m",
@@ -351,7 +354,9 @@ describe("openSqliteDatabase: symbolic links and special files", () => {
             expect(failure.message).toContain(
               "companion that is not a regular file",
             );
-            expect(mode(path + suffix)).toBe(companionMode);
+            if (process.platform !== "win32") {
+              expect(mode(path + suffix)).toBe(companionMode);
+            }
           },
         );
       }

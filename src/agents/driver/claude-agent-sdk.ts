@@ -1365,11 +1365,12 @@ export class ClaudeAgentSdkDriver {
         readCredentialEnv(request, "CLAUDE_CODE_EXECUTABLE"),
         readCredentialEnv(request, "CLAUDE_CODE_PATH"),
       ],
-      claudeExecutableCandidates({
-        env: this.#env,
-        executableSearchPaths: this.#executableSearchPaths,
-        excluded: agentWritableRoots(request),
-      }),
+      () =>
+        claudeExecutableCandidates({
+          env: this.#env,
+          executableSearchPaths: this.#executableSearchPaths,
+          excluded: agentWritableRoots(request),
+        }),
     );
   }
 
