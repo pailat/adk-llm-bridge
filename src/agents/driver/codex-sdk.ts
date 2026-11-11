@@ -65,6 +65,7 @@ import {
   readCredentialEnv,
   removeUndefined,
   stringValue,
+  validateDriverConfig,
 } from "./shared.js";
 import {
   type StrictBinaryCheck,
@@ -175,6 +176,17 @@ export interface CodexBinaryResolution {
    */
   pathDirs?: string[];
 }
+
+/** Every `?: boolean` option of the driver config, checked when the driver is built. */
+const CODEX_SDK_BOOLEAN_OPTIONS = [
+  "requireExplicitModel",
+  "skipGitRepoCheck",
+  "webSearchEnabled",
+  "allowUnenforcedNetwork",
+  "allowUnenforcedPaths",
+  "allowUncontainedCodexSdk",
+  "strictBinaryResolution",
+] as const;
 
 /**
  * Options for {@link CodexSdkDriver}.
@@ -427,6 +439,9 @@ export class CodexSdkDriver {
 
   /**
    * @param config - Driver options; all optional.
+   * @throws InputValidationError (from `@google/adk`) when a boolean option
+   * (see the config's `?: boolean` fields) is set to a non-boolean value such
+   * as the string `"false"`.
    * @throws {@link ExternalAgentPolicyError} with code
    * `EXTERNAL_AGENT_OPTION_UNSUPPORTED` when `strictBinaryResolution` is
    * set together with a prebuilt `sdk` client,
@@ -436,6 +451,7 @@ export class CodexSdkDriver {
    * `model` is absent.
    */
   constructor(config: CodexSdkDriverConfig = {}) {
+    validateDriverConfig("CodexSdkDriver", config, CODEX_SDK_BOOLEAN_OPTIONS);
     assertNoCodexConfigModelOverride("CodexSdkDriver", config.config);
     this.#model = assertModelOption(
       "CodexSdkDriver",

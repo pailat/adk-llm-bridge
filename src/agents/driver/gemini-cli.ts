@@ -92,6 +92,13 @@ export type GeminiCliSpawn = (
   options: GeminiCliSpawnOptions,
 ) => GeminiCliSubprocess;
 
+/** Every `?: boolean` option of the driver config, checked when the driver is built. */
+const GEMINI_CLI_BOOLEAN_OPTIONS = [
+  "allowUnenforcedNetwork",
+  "allowUnenforcedPaths",
+  "requireExplicitModel",
+] as const;
+
 /** Options for {@link GeminiCliDriver}. */
 export interface GeminiCliDriverConfig {
   /**
@@ -286,13 +293,16 @@ export class GeminiCliDriver extends SubprocessJsonlDriver {
    * @param config - Driver options; all optional.
    * @throws InputValidationError (from `@google/adk`) when `command` is empty or
    * `killGraceMs` is not a finite number of at least 0.
+   * @throws InputValidationError (from `@google/adk`) when a boolean option
+   * (see the config's `?: boolean` fields) is set to a non-boolean value such
+   * as the string `"false"`.
    * @throws {@link ExternalAgentPolicyError} with code
    * `EXTERNAL_AGENT_MODEL_INVALID` when `model` is not a model id, and
    * `EXTERNAL_AGENT_MODEL_REQUIRED` when `requireExplicitModel` is set and
    * `model` is absent or a router alias.
    */
   constructor(config: GeminiCliDriverConfig = {}) {
-    validateDriverConfig("GeminiCliDriver", config);
+    validateDriverConfig("GeminiCliDriver", config, GEMINI_CLI_BOOLEAN_OPTIONS);
     validateLaunchConfig("GeminiCliDriver", config);
     const model = assertModelOption(
       "GeminiCliDriver",

@@ -215,6 +215,18 @@ export interface ClaudeExecutableResolution {
   checked: string[];
 }
 
+/** Every `?: boolean` option of the driver config, checked when the driver is built. */
+const CLAUDE_AGENT_SDK_BOOLEAN_OPTIONS = [
+  "requireExplicitModel",
+  "debugEvents",
+  "inheritHostConfig",
+  "allowUnsandboxedShell",
+  "allowLocalBinding",
+  "allowBackgroundTasks",
+  "strictBinaryResolution",
+  "forkSession",
+] as const;
+
 /** Configuration of {@link ClaudeAgentSdkDriver}. */
 export interface ClaudeAgentSdkDriverConfig {
   /** Already loaded Claude Agent SDK module; skips `importSdk`. */
@@ -634,6 +646,9 @@ export class ClaudeAgentSdkDriver {
    * Creates a driver that runs Claude through `@anthropic-ai/claude-agent-sdk`.
    *
    * @param config - Driver options; all optional.
+   * @throws InputValidationError (from `@google/adk`) when a boolean option
+   * (see the config's `?: boolean` fields) is set to a non-boolean value such
+   * as the string `"false"`.
    * @throws {@link InputValidationError} when `requiredMcpServers` names a
    * server other than `adk_bridge` and `inheritHostConfig` is not `true`,
    * when `maxTurns` is not a positive integer, when `sessionStoreFlush` is not
@@ -645,6 +660,11 @@ export class ClaudeAgentSdkDriver {
    * `model` is absent or a router alias.
    */
   constructor(config: ClaudeAgentSdkDriverConfig = {}) {
+    validateDriverConfig(
+      "ClaudeAgentSdkDriver",
+      config,
+      CLAUDE_AGENT_SDK_BOOLEAN_OPTIONS,
+    );
     this.#model = assertModelOption(
       "ClaudeAgentSdkDriver",
       config.model,
@@ -663,7 +683,6 @@ export class ClaudeAgentSdkDriver {
     // silently override the intended policy. Consumers opt back in by passing an
     // explicit allowlist.
     this.#settingSources = config.settingSources ?? [];
-    validateDriverConfig("ClaudeAgentSdkDriver", { maxTurns: config.maxTurns });
     this.#maxTurns = config.maxTurns;
     this.#debugEvents = config.debugEvents ?? false;
     this.#requiredMcpServers = [...new Set(config.requiredMcpServers ?? [])];

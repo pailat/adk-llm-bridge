@@ -189,6 +189,17 @@ export type ClaudeCliSpawn = (
   options: ClaudeCliSpawnOptions,
 ) => ClaudeCliSubprocess;
 
+/** Every `?: boolean` option of the driver config, checked when the driver is built. */
+const CLAUDE_CLI_BOOLEAN_OPTIONS = [
+  "allowPolicyOverrideArgs",
+  "requireExplicitModel",
+  "inheritHostConfig",
+  "allowUnsandboxedShell",
+  "allowLocalBinding",
+  "allowBackgroundTasks",
+  "allowUnenforcedPaths",
+] as const;
+
 /** Configuration of {@link ClaudeCliDriver}. */
 export interface ClaudeCliDriverConfig {
   /**
@@ -480,6 +491,9 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
    * @throws InputValidationError (from `@google/adk`) when `command`
    * is empty, `killGraceMs` is not a finite number of at least 0, or
    * `maxTurns` is not a positive integer.
+   * @throws InputValidationError (from `@google/adk`) when a boolean option
+   * (see the config's `?: boolean` fields) is set to a non-boolean value such
+   * as the string `"false"`.
    * @throws InputValidationError when `args` is not an array of strings.
    * @throws {@link ExternalAgentPolicyError} with code
    * `EXTERNAL_AGENT_OPTION_UNSUPPORTED` when `sessionStore`,
@@ -505,7 +519,7 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
         );
       }
     }
-    validateDriverConfig("ClaudeCliDriver", config);
+    validateDriverConfig("ClaudeCliDriver", config, CLAUDE_CLI_BOOLEAN_OPTIONS);
     validateLaunchConfig("ClaudeCliDriver", config);
     assertNoPinnedArgOverride(
       "ClaudeCliDriver",

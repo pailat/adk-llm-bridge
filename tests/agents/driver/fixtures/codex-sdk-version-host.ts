@@ -5,8 +5,7 @@
  *
  * Usage: `bun codex-sdk-version-host.ts <version|none> [allow] [stub] [runs]`.
  * - `none` reports a version the driver cannot read.
- * - `allow` builds the driver with `allowUncontainedCodexSdk: true`;
- *   `truthy` with the string `"true"` instead.
+ * - `allow` builds the driver with `allowUncontainedCodexSdk: true`.
  * - `stub` is the codex binary (default `/opt/codex`, which never starts).
  * - `runs` is the number of turns on one driver (default 1).
  * Prints one JSON line: `{ codes, message, turns, execRuns, exitCodes,
@@ -73,8 +72,6 @@ client.startThread = (...args: Parameters<typeof startThread>) => {
 const driver = new agents.CodexSdkDriver({
   sdk: client,
   ...(allow === "allow" ? { allowUncontainedCodexSdk: true } : {}),
-  // A truthy value that is not `true`, as an env-driven host might pass.
-  ...(allow === "truthy" ? { allowUncontainedCodexSdk: "true" } : {}),
 });
 const report: {
   codes: string[];

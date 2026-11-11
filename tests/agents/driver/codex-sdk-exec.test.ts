@@ -448,17 +448,14 @@ describe("the installed SDK version at run time", () => {
     HOST_TIMEOUT_MS,
   );
 
-  test(
-    "allowUncontainedCodexSdk set to a truthy value other than true does not enable it",
-    () => {
-      const report = runVersionHost(["0.168.0", "truthy", normalStub]);
-      expect(report.turns).toBe(0);
-      expect(report.execRuns).toBe(0);
-      expect(report.codes).toEqual([EXTERNAL_AGENT_DEPENDENCY_MISSING]);
-      expect(report.warnings).toEqual([]);
-    },
-    HOST_TIMEOUT_MS,
-  );
+  test("allowUncontainedCodexSdk set to a truthy value other than true is refused at construction", () => {
+    expect(
+      () =>
+        new CodexSdkDriver({
+          allowUncontainedCodexSdk: "true" as unknown as boolean,
+        }),
+    ).toThrow(/allowUncontainedCodexSdk must be a boolean/);
+  });
 
   test(
     "allowUncontainedCodexSdk on 0.167.0 still runs the contained exec, with no warning",

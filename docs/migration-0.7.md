@@ -780,6 +780,19 @@ whatever needed approval. Remove `confirmation` from those agents, or use
 routes prompts to the approver. See
 [Approvers and ADK confirmation](./external-agent-isolation.md#approvers-and-adk-confirmation-need-a-driver-that-asks).
 
+### Boolean driver options
+
+Boolean driver options must be `true` or `false`. A string such as `"false"`
+(from an env var or a JSON file) now throws `InputValidationError` naming the
+driver and the option, instead of enabling it: the drivers read these options
+as truthy, so `"false"` turned an escape hatch such as `allowUnsandboxedShell`
+ON. The check covers `allowUnsandboxedShell`, `inheritHostConfig`,
+`allowLocalBinding`, `allowBackgroundTasks`, `allowUnenforcedPaths`,
+`allowUnenforcedNetwork`, `allowPolicyOverrideArgs`, `allowUncontainedCodexSdk`,
+`strictBinaryResolution`, `requireExplicitModel`, `forkSession`, `debugEvents`,
+`skipGitRepoCheck` and `webSearchEnabled`. Parse the value yourself (for
+example `process.env.X === "true"`) before you pass it.
+
 ### Coming in 0.8
 
 0.8 is planned to replace the `args` denylist of `ClaudeCliDriver` and
