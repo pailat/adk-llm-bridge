@@ -127,7 +127,7 @@ describe("workflow contracts", () => {
       timeoutMs: 300_000,
       cpuTimeMs: 5_000,
       memoryBytes: 67_108_864,
-      stackBytes: 524_288,
+      stackBytes: 32_768,
       maxSourceBytes: 262_144,
       maxMessageBytes: 1_048_576,
     });

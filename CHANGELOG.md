@@ -652,6 +652,11 @@ from the 0.6.0 tag.
   `sdk` client. It narrows the bundled-binary residual, it does not close
   it: the agent can still edit the installed JavaScript. See
   [Strict binary resolution](docs/external-agent-isolation.md#strict-binary-resolution).
+- `QUICKJS_MAX_STACK_BYTES` (32768) from `adk-llm-bridge/workflows`, the largest
+  `stackBytes` the bundled script runtime accepts. `WorkflowScriptRuntime` has an
+  optional `validateLimits(limits)`; `ScriptWorkflowAgent` calls it when it is
+  built, so a `stackBytes` above the maximum throws `WORKFLOW_DEFINITION_INVALID`
+  at construction, not at the first run.
 - **Run spec, `adk-llm-bridge/workflows/spec` (experimental).** Validation,
   planning and the JSON Schema of a lanes job submitted as data: `validateRunSpec`,
   `resolveRunPlan`, `mergeRunRules`, `layerRunSpecLanes`, `runSpecHash` and
@@ -982,6 +987,16 @@ from the 0.6.0 tag.
 
 ### Changed
 
+- **The script sandbox stack limit is lower and capped.**
+  `DEFAULT_WORKFLOW_EXECUTION_LIMITS.stackBytes` is 32 KiB (32768, was
+  512 KiB), and a script workflow whose `stackBytes` is above 32 KiB is refused
+  with `WORKFLOW_DEFINITION_INVALID`. With 512 KiB, ordinary deep recursion
+  overflowed the host stack before QuickJS reported its limit; see Fixed. At
+  32 KiB the 22 recursion patterns measured end in QuickJS's own limit error
+  (clean up to 64 KiB on Node 22, 24 and 26 and Bun), and a script gets about
+  190 nested calls. The limit does not cover the QuickJS parser: a deeply
+  nested source given to `eval` can exhaust the host stack from 32 KiB (24 KiB
+  on Bun). That case is contained, not prevented; see Fixed.
 - Documented the code comment standard (docs/contributing/comments.md) and added
   check-comments and check-export-docs to ci and prepublishOnly: no internal
   tracking ids, valid TSDoc, no per-file license headers (LICENSE is the single
@@ -1132,6 +1147,24 @@ from the 0.6.0 tag.
 
 ### Fixed
 
+- **A script that exhausted the host stack could leave the sandbox unable to
+  run scripts.** QuickJS runs on the host's own stack inside a WebAssembly
+  module. When the host stack overflowed first (deep recursion under the old
+  512 KiB limit, or a deeply nested source given to `eval`), the host
+  `RangeError` unwound the module without freeing the guest's objects. Freeing
+  the runtime then asserted (`Aborted(Assertion failed:
+  list_empty(&rt->gc_obj_list)...)` on stderr) and the runtime stayed in the
+  process-wide module; after about fifteen such runs a healthy script failed to
+  start. Now any host stack overflow or WebAssembly abort, in a turn, in the
+  parser at set-up, while reading an error or while freeing the runtime, ends
+  that run with `WORKFLOW_LIMIT_EXCEEDED` (the message says the host stack was
+  exhausted and the sandbox was reset). The module is marked poisoned. Every
+  other session on it fails its next turn with `WORKFLOW_EXECUTION_ERROR`, a
+  new session never starts on it (`WORKFLOW_SANDBOX_UNAVAILABLE` when a custom
+  `loader` returns it again), and the default loader builds a new module for
+  the next session. One hostile overflow therefore fails the other live script
+  sessions of the process: they would otherwise run on a module whose heap may
+  be corrupted.
 - **Headless Claude runs no longer report success while their own background
   job is still running.** `ClaudeAgentSdkDriver` and `ClaudeCliDriver` set
   `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` for Claude Code, so the Bash tool

@@ -140,6 +140,7 @@ export class ScriptWorkflowAgent extends BaseAgent {
     this.#limits = mergeLimits(config.definition.limits, config.limits);
     this.#onEvent = config.onEvent;
     this.#scriptRuntime = config.runtime ?? new QuickJSSyncGeneratorRuntime();
+    this.#scriptRuntime.validateLimits?.(this.#limits);
     this.#declaredAgents = new Map(
       subAgents.map((agent) => [agent.name, agent]),
     );

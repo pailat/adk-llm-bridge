@@ -19,6 +19,28 @@ export interface QuickJSModuleLike {
 export type QuickJSModuleLoader = () => Promise<QuickJSModuleLike>;
 
 let releaseModulePromise: Promise<QuickJSWASMModule> | undefined;
+let releaseModule: QuickJSWASMModule | undefined;
+
+/**
+ * Drops the cached release module so the next {@link loadReleaseQuickJS}
+ * builds a new one.
+ *
+ * @remarks
+ * A module that ran a runtime into a host stack overflow or a wasm assertion
+ * has leaked that runtime for good and can stop running scripts. Only the
+ * module that was poisoned is dropped: a module another caller already
+ * rebuilt stays.
+ *
+ * @param module - Module the failing run used.
+ *
+ * @internal
+ */
+export function discardReleaseQuickJS(module: QuickJSModuleLike): void {
+  if (releaseModule === module) {
+    releaseModulePromise = undefined;
+    releaseModule = undefined;
+  }
+}
 
 /**
  * Lazily loads the optional production QuickJS sync variant and caches it.
@@ -33,9 +55,11 @@ export const loadReleaseQuickJS = async (): Promise<QuickJSWASMModule> => {
     releaseModulePromise = (async () => {
       try {
         const core = await import("quickjs-emscripten-core");
-        return await core.newQuickJSWASMModuleFromVariant(
+        const loaded = await core.newQuickJSWASMModuleFromVariant(
           import("@jitl/quickjs-wasmfile-release-sync"),
         );
+        releaseModule = loaded;
+        return loaded;
       } catch (cause) {
         releaseModulePromise = undefined;
         throw new WorkflowError(

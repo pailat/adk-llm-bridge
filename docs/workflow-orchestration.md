@@ -162,6 +162,55 @@ A lock is taken over only when its owner file is readable and names a dead
 process. A lock whose owner cannot be read is never taken over: waiters time
 out with `GIT_MUTATION_AMBIGUOUS`.
 
+## Script sandbox stack
+
+A script workflow runs in QuickJS inside a WebAssembly module, on the host's
+own stack. `stackBytes` (in `WorkflowExecutionLimits`) bounds the guest's
+stack. Its default and its maximum, `QUICKJS_MAX_STACK_BYTES`, are both 32 KiB
+(32768), about 190 nested calls. A larger value throws
+`WORKFLOW_DEFINITION_INVALID` when the `ScriptWorkflowAgent` is built (and again
+at a run whose per-run limits exceed it).
+
+### What the limit covers
+
+The limit counts guest frames. It makes ordinary deep recursion end in
+QuickJS's own error, `WORKFLOW_LIMIT_EXCEEDED`. It does not count the native
+recursion inside QuickJS, such as its parser, so a deeply nested source given to
+`eval` or `new Function` can exhaust the host stack first. No static value is
+safe on every host: a thread with a small stack overflows at a smaller size.
+
+Each measurement is one run in a fresh process, with 37 deep-recursion patterns
+(the 22 ordinary ones: plain, generator, getter, Proxy, `JSON`, `sort`
+comparator, `toString` chains and others; and 15 parser and compiler ones):
+
+| Host | Ordinary patterns | Parser patterns |
+|---|---|---|
+| Node 22 | clean up to 64 KiB | first overflow at 32 KiB |
+| Node 24 | clean up to 64 KiB | first overflow at 32 KiB |
+| Node 26 | clean up to 64 KiB | first overflow at 32 KiB |
+| Bun 1.4 | clean up to 64 KiB | first overflow at 24 KiB |
+| Node 26 worker, 1 MB stack | clean up to 48 KiB | first overflow at 32 KiB |
+
+### When the host stack is exhausted anyway
+
+Any host stack overflow or WebAssembly abort, in a turn, in the parser at
+set-up, while reading an error or while freeing the runtime, is contained:
+
+- That run ends with `WORKFLOW_LIMIT_EXCEEDED`; the message says the host stack
+  was exhausted and the sandbox was reset.
+- The module is marked poisoned. The overflow unwinds the module without
+  freeing the guest's objects and can stop inside its allocator, so its heap is
+  not trusted. Every other session on it fails its next turn with
+  `WORKFLOW_EXECUTION_ERROR`; start those runs again. This favors integrity: one
+  hostile script fails the other live script sessions of the process.
+- A new session never starts on a poisoned module. The default loader builds a
+  new one. A custom `loader` that returns the poisoned module again is refused
+  with `WORKFLOW_SANDBOX_UNAVAILABLE`; give it a `discardModule` that drops its
+  cache.
+
+Run a deep script on your own host (Windows, a small thread stack) to see which
+case it takes.
+
 ## Identifiers and paths
 
 Every store, controller and driver checks identifiers against the same named

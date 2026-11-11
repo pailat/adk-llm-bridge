@@ -54,6 +54,15 @@ export interface WorkflowScriptGeneratorSession {
 export interface WorkflowScriptRuntime {
   /** Isolation guarantees of this runtime. */
   readonly capabilities: WorkflowScriptRuntimeCapabilities;
+  /**
+   * Checks the limits a workflow declares, so a limit this runtime cannot
+   * honor fails when the agent is built and not at its first run. Optional:
+   * a runtime without it is checked only by `createSession`.
+   *
+   * @throws {@link WorkflowError} with code `WORKFLOW_DEFINITION_INVALID` for
+   * a limit the runtime refuses.
+   */
+  validateLimits?(limits: WorkflowExecutionLimits | undefined): void;
   /** Creates an isolated session for one script execution. */
   createSession(
     options: WorkflowScriptSessionOptions,

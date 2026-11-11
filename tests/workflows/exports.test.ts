@@ -41,6 +41,7 @@ describe("workflows public exports", () => {
       workflows.collectFileSystemCheckpointTombstonesOffline,
     ).toBeFunction();
     expect(workflows.QuickJSSyncGeneratorRuntime).toBeFunction();
+    expect(workflows.QUICKJS_MAX_STACK_BYTES).toBe(32 * 1024);
     expect(workflows.runWorkflowScript).toBeFunction();
     expect(workflows.ExternalAgentWorkflowFactory).toBeFunction();
     expect(workflows.WorkflowAgentFactoryError).toBeFunction();
