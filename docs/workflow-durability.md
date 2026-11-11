@@ -104,6 +104,14 @@ normal path; a real permission error there (`EPERM` or `EACCES`, such as a
 read-only directory) now fails after the 5 s instead of at once. The workspace
 store and the lock release block the thread while they wait.
 
+Known limitation on Windows: when several saves of the same checkpoint overlap
+(from one or more processes), a save can fail with `checkpoint_lock_acquire_failed`
+(`details.causeCode` `EPERM`) instead of waiting for the lock. The rename of
+the lock candidate onto the lock path is refused while another save holds or
+has just released the lock, and the store does not always read that as
+contention. Saves that do not overlap are not affected. Tracked in
+[issue 117](https://github.com/pailat/adk-llm-bridge/issues/117).
+
 ### Checkpoint failure reasons
 
 Checkpoint stores throw `WorkflowError` with code `WORKFLOW_EXECUTION_ERROR`
