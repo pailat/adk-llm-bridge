@@ -19,6 +19,11 @@ import type {
 import type { ExternalAgentRunRequest } from "../external-agent-driver.js";
 import { canonicalPath, expandHome, isUnderAny } from "../permissions/paths.js";
 import { classifyRecoverable } from "../runtime/error-classification.js";
+import { CLAUDE_AGENT_SDK_ONLY_KEYS } from "./option-keys.js";
+import {
+  EXTERNAL_AGENT_OPTION_UNKNOWN,
+  ExternalAgentPolicyError,
+} from "./policy-errors.js";
 
 /**
  * Narrows an unknown value to a record.
@@ -627,6 +632,66 @@ export function validateDriverConfig(
       `${driver}: maxTurns must be a positive integer.`,
     );
   }
+}
+
+/**
+ * Refuses a driver config that is not a plain object or has a key the driver
+ * does not know. Runs first in each driver constructor, before any value is
+ * read, so an option meant for another driver or misspelled is never
+ * silently ignored.
+ *
+ * @remarks In order: the config must be a plain object (its prototype is
+ * `Object.prototype` or `null`), have no symbol keys, and every own string key
+ * must be in `keys`. A known key with the value `undefined` passes; an unknown
+ * one does not. Only key names are checked here; each option's value is
+ * checked by its owner. An omitted config is the empty object.
+ *
+ * @param driver - The driver's class name, for the message.
+ * @param config - The config the constructor received.
+ * @param keys - The keys the driver accepts.
+ * @throws ExternalAgentPolicyError `EXTERNAL_AGENT_OPTION_UNKNOWN`, naming the
+ * first unknown key in sorted order.
+ */
+export function assertKnownDriverOptions(
+  driver: string,
+  config: unknown,
+  keys: readonly string[],
+): void {
+  if (config === undefined) {
+    return;
+  }
+  const proto =
+    typeof config === "object" && config !== null
+      ? Object.getPrototypeOf(config)
+      : undefined;
+  if (proto !== Object.prototype && proto !== null) {
+    throw new ExternalAgentPolicyError(
+      EXTERNAL_AGENT_OPTION_UNKNOWN,
+      `${driver}: driver config must be a plain object.`,
+    );
+  }
+  const record = config as object;
+  if (Object.getOwnPropertySymbols(record).length > 0) {
+    throw new ExternalAgentPolicyError(
+      EXTERNAL_AGENT_OPTION_UNKNOWN,
+      `${driver}: driver config must not have symbol keys.`,
+    );
+  }
+  const known = new Set(keys);
+  const unknown = Object.getOwnPropertyNames(record)
+    .filter((key) => !known.has(key))
+    .sort();
+  const first = unknown[0];
+  if (first === undefined) {
+    return;
+  }
+  const hint = CLAUDE_AGENT_SDK_ONLY_KEYS.has(first)
+    ? ` ${first} is supported only by ClaudeAgentSdkDriver.`
+    : "";
+  throw new ExternalAgentPolicyError(
+    EXTERNAL_AGENT_OPTION_UNKNOWN,
+    `${driver}: unknown option ${JSON.stringify(first)}.${hint} Remove it or check its spelling.`,
+  );
 }
 
 /**

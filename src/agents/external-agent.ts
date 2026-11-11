@@ -66,6 +66,7 @@ import {
   type PermissionRequest,
   permissionSignature,
   readConfirmationAnswers,
+  readOnlyMcpToolAllowed,
   readOnlyWebToolAllowed,
 } from "./permissions/confirmation.js";
 import {
@@ -862,19 +863,30 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
       ]);
       return bridgedNames;
     };
+    // Read once per run: the servers the host declared on the driver.
+    const declaredMcpServers = this.driver.declaredMcpServers?.();
     const requestPermission = async (
       request: PermissionRequest,
     ): Promise<PermissionDecision> => {
       const guarded = guardPermissionRequest(permissions, request, {
         workingDirectory: this.workingDirectory,
         bridgeToolNames: bridgeToolNames(),
+        ...(declaredMcpServers ? { declaredMcpServers } : {}),
       });
       if (guarded) {
         return guarded;
       }
       // Read-only takes no confirmations: what the guard lets through there
-      // (a web tool with the network on) runs without asking anyone.
-      if (readOnlyWebToolAllowed(permissions, request.toolName)) {
+      // (a web tool with the network on, a listed tool of a declared
+      // read-only MCP server) runs without asking anyone.
+      if (
+        readOnlyWebToolAllowed(permissions, request.toolName) ||
+        readOnlyMcpToolAllowed(
+          permissions,
+          request.toolName,
+          declaredMcpServers,
+        )
+      ) {
         return { behavior: "allow" };
       }
       const signature = permissionSignature(request.toolName, request.input);

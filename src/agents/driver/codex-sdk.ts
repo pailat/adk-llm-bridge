@@ -42,6 +42,7 @@ import {
   MODEL_ALIAS_DENYLIST,
   modelEnvRefusal,
 } from "./model.js";
+import { CODEX_SDK_OPTION_KEYS } from "./option-keys.js";
 import {
   dependencyMissing,
   EXTERNAL_AGENT_OPTION_UNSUPPORTED,
@@ -55,6 +56,7 @@ import { codexTurnUsage } from "./run-summary.js";
 import {
   agentWritableRoots,
   asRecord,
+  assertKnownDriverOptions,
   candidateBaseDirectories,
   contextText,
   copyIfPresent,
@@ -452,6 +454,7 @@ export class CodexSdkDriver {
    * `model` is absent.
    */
   constructor(config: CodexSdkDriverConfig = {}) {
+    assertKnownDriverOptions("CodexSdkDriver", config, CODEX_SDK_OPTION_KEYS);
     validateDriverConfig("CodexSdkDriver", config, CODEX_SDK_BOOLEAN_OPTIONS);
     assertNoCodexConfigModelOverride("CodexSdkDriver", config.config);
     this.#model = assertModelOption(
@@ -1127,6 +1130,20 @@ function configuredMcpServerNames(
 }
 
 /**
+ * `metadata.mcp` for a Codex `mcp_tool_call` item: its server and tool, when
+ * both are strings.
+ */
+function codexMcpMetadata(item: Record<string, unknown>): {
+  mcp?: { server: string; tool: string };
+} {
+  const server = stringValue(item.server);
+  const tool = stringValue(item.tool);
+  return server !== undefined && tool !== undefined
+    ? { mcp: { server, tool } }
+    : {};
+}
+
+/**
  * Maps a permission policy to Codex thread options.
  *
  * @remarks
@@ -1350,6 +1367,7 @@ function normalizeCompletedItem(
           builtin: true,
           status: item.status,
           title: `Codex: ${toolName} call`,
+          ...codexMcpMetadata(item),
         },
         timestamp,
       },
@@ -1369,6 +1387,7 @@ function normalizeCompletedItem(
           builtin: true,
           status: item.status,
           title: `Codex: ${toolName} ${status}`,
+          ...codexMcpMetadata(item),
         },
         timestamp,
       },
