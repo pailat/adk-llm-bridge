@@ -1466,6 +1466,14 @@ from the 0.6.0 tag.
   results fails with `EXTERNAL_AGENT_NO_TURN` (recoverable) and exit code 1.
   A real result still ends the run at once.
 
+- **A Claude Agent SDK stream that ends with no result message no longer
+  reports a clean exit.** When the SDK stream ended without any `result`
+  message (Claude Code exited or the pipe closed mid-run), and no background
+  task was pending, `ClaudeAgentSdkDriver` completed with exit code 0 and no
+  error, so a workflow step could pass after a cut-off run. The run now emits
+  an `EXTERNAL_AGENT_NO_RESULT` error (recoverable) and completes with exit
+  code 1, and the workflow step fails with that code.
+
 - **A Codex SDK run can no longer end the host process with `EPIPE`.**
   `@openai/codex-sdk` writes the prompt to codex's stdin with no error
   handler. When codex was gone before it read the whole prompt (it exited
