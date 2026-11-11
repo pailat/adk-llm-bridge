@@ -156,6 +156,15 @@ export const EXTERNAL_AGENT_APPROVALS_UNSUPPORTED =
   "EXTERNAL_AGENT_APPROVALS_UNSUPPORTED";
 
 /**
+ * The run asked for a runtime session (`request.runtimeSession`) from a driver
+ * whose `capabilities().sessions` is not `true`, so the id would be ignored.
+ * The run is refused before any process starts. Use a driver that resumes
+ * (`ClaudeAgent`, `CodexAgent`), or drop `runtimeSession`.
+ */
+export const EXTERNAL_AGENT_SESSIONS_UNSUPPORTED =
+  "EXTERNAL_AGENT_SESSIONS_UNSUPPORTED";
+
+/**
  * A `readOnlyTools` entry that cannot attest exactly one tool: it is empty,
  * listed twice, matches no direct tool (when no toolset could add it), or
  * names two or more direct tools. Thrown when the agent is built.
@@ -188,6 +197,7 @@ export type ExternalAgentPolicyErrorCode =
   | typeof EXTERNAL_AGENT_MODEL_OVERRIDE
   | typeof EXTERNAL_AGENT_TOOLS_UNSUPPORTED
   | typeof EXTERNAL_AGENT_APPROVALS_UNSUPPORTED
+  | typeof EXTERNAL_AGENT_SESSIONS_UNSUPPORTED
   | typeof EXTERNAL_AGENT_READ_ONLY_TOOL_UNKNOWN
   | typeof EXTERNAL_AGENT_TOOL_NOT_READ_ONLY;
 
@@ -230,6 +240,28 @@ export function policyErrorEvent(
     recoverable: false,
     timestamp: Date.now(),
   };
+}
+
+/**
+ * Refuses a run that sets `request.runtimeSession` on a driver that cannot
+ * resume a runtime session.
+ *
+ * @param driverName - Driver class name for the message.
+ * @param request - The run request.
+ * @returns An `EXTERNAL_AGENT_SESSIONS_UNSUPPORTED` error to report, or
+ * `undefined` when the request has no `runtimeSession`.
+ */
+export function sessionRefusal(
+  driverName: string,
+  request: { readonly runtimeSession?: unknown },
+): ExternalAgentPolicyError | undefined {
+  if (request.runtimeSession === undefined) {
+    return undefined;
+  }
+  return new ExternalAgentPolicyError(
+    EXTERNAL_AGENT_SESSIONS_UNSUPPORTED,
+    `${driverName} cannot resume a runtime session (capabilities().sessions is not true), so request.runtimeSession would be ignored. Use ClaudeAgent or CodexAgent, or remove runtimeSession.`,
+  );
 }
 
 /**

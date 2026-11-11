@@ -28,6 +28,7 @@ import {
   isCommandNotFound,
   networkUnenforceable,
   policyErrorEvent,
+  sessionRefusal,
   unenforceablePathsRefusal,
 } from "./policy-errors.js";
 import {
@@ -353,8 +354,10 @@ export class GeminiCliDriver extends SubprocessJsonlDriver {
    *
    * @remarks
    * The stream starts with `started`. A refused run yields one `error` event
-   * with the policy code and `completed` with `exitCode: 1`. A model variable
-   * (`GEMINI_MODEL`) in the run's environment is refused first, then a
+   * with the policy code and `completed` with `exitCode: 1`. A
+   * `request.runtimeSession` is refused first (`EXTERNAL_AGENT_SESSIONS_UNSUPPORTED`,
+   * this driver cannot resume), then a model variable
+   * (`GEMINI_MODEL`) in the run's environment, then a
    * read-only run (plan mode) with a model or `requireExplicitModel`, both
    * with `EXTERNAL_AGENT_MODEL_OVERRIDE`. A read-only run without a model
    * starts with `modelRouting: "plan-mode"` on `started`. A non-zero exit
@@ -397,6 +400,7 @@ export class GeminiCliDriver extends SubprocessJsonlDriver {
       return;
     }
     const refusal =
+      sessionRefusal("GeminiCliDriver", request) ??
       envRefusal ??
       (planModeRefused
         ? new ExternalAgentPolicyError(

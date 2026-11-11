@@ -777,6 +777,7 @@ export class ClaudeAgentSdkDriver {
       subagents: true,
       mcpServers: true,
       approvals: true,
+      sessions: true,
     };
   }
 

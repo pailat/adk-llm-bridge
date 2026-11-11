@@ -79,7 +79,7 @@ export interface ExternalAgentRunRequest {
    *   `runtimeSession.id`, then the id saved in ADK session state, then the
    *   id the driver captured earlier for the same ADK session.
    *
-   * The CLI drivers ignore it.
+   * The CLI drivers refuse it.
    */
   runtimeSession?: AgentRuntimeSession;
   /**
