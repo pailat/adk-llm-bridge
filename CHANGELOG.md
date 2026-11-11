@@ -1167,8 +1167,9 @@ from the 0.6.0 tag.
   options must be `true` or `false`. `args` holds only flags: the policy flags
   (`--permission-mode`, `--ask`, `--timeout`, `--profile`, ...)
   need `allowPolicyOverrideArgs`; `--model`, `--provider`, `--config`, `--`,
-  a lone `-` and the session flags (`--resume*`, `--continue`, `-c`, `-r`)
-  are never allowed. `request.runtimeSession`, ADK tools, approvers and
+  a lone `-`, the session flags (`--resume*`, `--continue`, `-c`, `-r`) and
+  the unsupported `--image`, `--fast` and `--ultrafast` are never allowed.
+  `request.runtimeSession`, ADK tools, approvers and
   `subAgents` are refused. A
   run fails on a non-zero process exit, an `exit_code` that is not `0` or an
   `error` field, and then reports no `output`. A stdout line over 8 MiB ends
