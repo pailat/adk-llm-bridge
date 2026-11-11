@@ -384,8 +384,8 @@ from the 0.6.0 tag.
   The new `WorkflowStepInterruptedEvent` type is exported from
   `adk-llm-bridge/workflows`.
 - **Boolean driver options must be booleans.** Every `?: boolean` option of
-  `ClaudeAgentSdkDriver`, `ClaudeCliDriver`, `CodexSdkDriver`, `CodexCliDriver`
-  and `GeminiCliDriver` (for example `allowUnsandboxedShell`,
+  `ClaudeAgentSdkDriver`, `ClaudeCliDriver`, `CodexSdkDriver`, `CodexCliDriver`,
+  `GeminiCliDriver` and `FxCliDriver` (for example `allowUnsandboxedShell`,
   `inheritHostConfig`, `allowLocalBinding`, `allowUnenforcedPaths`,
   `allowUnenforcedNetwork`, `allowPolicyOverrideArgs`,
   `allowUncontainedCodexSdk`, `strictBinaryResolution`, `requireExplicitModel`,
@@ -1164,6 +1164,28 @@ from the 0.6.0 tag.
 - `ExternalAgentModelUsage`, the type of an `ExternalAgentUsage.byModel` entry.
 - `WORKFLOW_STEP_MISMATCH` details include the saved step's `savedStatus` and
   `savedAttempts`.
+- `FxAgent` and `FxCliDriver`: run the fx coding agent (`fx ask --json`,
+  fx 0.0.16) as an external agent. The prompt goes on stdin, the model is
+  pinned with `--model` and required by default (`requireExplicitModel`
+  defaults to `true` for fx only), and every run uses `--no-save`. fx has no
+  sandbox, so `read-only` is refused, and network, paths, `workspace-write`
+  and the host `~/.fx` configuration need explicit opt-ins
+  (`allowUnenforcedNetwork`, `allowUnenforcedPaths`, `allowUnsandboxedShell`,
+  `inheritHostConfig`). In `ask` mode the first write or shell command ends
+  the run with `FX_CLI_PERMISSION_REQUIRED`, unless the user's fx permission
+  rules in `~/.fx/settings.json` allow it; `workspace-write` (fx `auto` mode)
+  asks a reviewer model whose cost is not in `usage`. The driver's boolean
+  options must be `true` or `false`. `args` holds only flags: the policy flags
+  (`--permission-mode`, `--ask`, `--timeout`, `--profile`, ...)
+  need `allowPolicyOverrideArgs`; `--model`, `--provider`, `--config`, `--`,
+  a lone `-`, the session flags (`--resume*`, `--continue`, `-c`, `-r`) and
+  the unsupported `--image`, `--fast` and `--ultrafast` are never allowed.
+  `request.runtimeSession`, ADK tools, approvers and
+  `subAgents` are refused. A
+  run fails on a non-zero process exit, an `exit_code` that is not `0` or an
+  `error` field, and then reports no `output`. A stdout line over 8 MiB ends
+  the run with `FX_CLI_RESULT_TOO_LARGE`. See
+  [External agent isolation](./docs/external-agent-isolation.md#fx).
 - Workflow storage providers. Checkpoint and event providers are chosen by
   injection (`checkpointStore`) or by URI (`getWorkflowCheckpointStoreFromUri`,
   `getWorkflowEventExporterFromUri`), with custom schemes through
@@ -1199,8 +1221,8 @@ from the 0.6.0 tag.
 - **CLI drivers refuse `runtimeSession`.** `ClaudeCliDriver`, `CodexCliDriver` and
   `GeminiCliDriver` used to ignore `request.runtimeSession`. They now fail the run with
   `EXTERNAL_AGENT_SESSIONS_UNSUPPORTED` (exported from `adk-llm-bridge/agents`) before any
-  process starts. `ClaudeAgentSdkDriver` now declares `capabilities().sessions = true`,
-  matching what it already did.
+  process starts, and so does the new `FxCliDriver`. `ClaudeAgentSdkDriver` now declares
+  `capabilities().sessions = true`, matching what it already did.
 - **Prompt caching is on by default for Anthropic models** (fixes zero cache reads on
   AI Gateway, where every turn paid the full prompt again):
   - native `AnthropicLlm`: `promptCaching` was opt-in and marked only the system block and
@@ -1246,7 +1268,7 @@ from the 0.6.0 tag.
 - **Sub-agents, `permissions`, `delegation` and `tools` entries are checked
   when an `ExternalAgent` is built**, instead of being ignored silently (see
   [Sub-agents need a driver that exposes them](./docs/external-agent-isolation.md#sub-agents-need-a-driver-that-exposes-them)):
-  - `subAgents` on the Claude CLI, Codex CLI, Codex SDK or Gemini CLI driver
+  - `subAgents` on the Claude CLI, Codex CLI, Codex SDK, Gemini CLI or fx driver
     (any driver whose `capabilities()` lacks `subagents`) throws
     `EXTERNAL_AGENT_SUBAGENTS_UNSUPPORTED`, also on `clone()`. Those drivers
     never exposed the sub-agents, so they were never called. Use
