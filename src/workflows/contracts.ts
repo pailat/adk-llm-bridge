@@ -101,8 +101,8 @@ export interface WorkflowStepUsage {
    * Summed cost in US dollars the providers reported for the step's model
    * calls (AI Gateway and OpenRouter `usage.cost`; for a BYOK gateway
    * call, the upstream or market cost the gateway reports, see
-   * `COST_METADATA_KEY`). Absent when no call reported one, and in results saved before it
-   * existed. An `ExternalAgent` step reports none here.
+   * `COST_METADATA_KEY`). Absent when no call reported one, and in results
+   * saved before it existed. An `ExternalAgent` step reports none here.
    */
   costUsd?: number;
   /** Function calls requested on non-partial events. */
