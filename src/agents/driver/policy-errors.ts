@@ -37,6 +37,15 @@ export const EXTERNAL_AGENT_BACKGROUND_TASK_PENDING =
   "EXTERNAL_AGENT_BACKGROUND_TASK_PENDING";
 
 /**
+ * Not a refusal: the code of the `error` event of a Claude Agent SDK run
+ * whose stream ended with no turn run: Claude Code wrote only "model-less"
+ * results (success, `num_turns` 0, empty `result`) and never ran the input.
+ * The run ends with exit code 1 instead of an empty success. Recoverable: a
+ * new run of the same input can work.
+ */
+export const EXTERNAL_AGENT_NO_TURN = "EXTERNAL_AGENT_NO_TURN";
+
+/**
  * The policy does not set `allowNetwork: true` (network is off), and the
  * runtime cannot keep its
  * tools (shell commands, web tools, MCP servers) off the network in the

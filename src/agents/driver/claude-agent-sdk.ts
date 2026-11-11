@@ -61,6 +61,7 @@ import {
   dependencyMissing,
   EXTERNAL_AGENT_ISOLATION_VIOLATED,
   EXTERNAL_AGENT_MISSING_BINARY,
+  EXTERNAL_AGENT_NO_TURN,
   EXTERNAL_AGENT_PATHS_UNENFORCEABLE,
   EXTERNAL_AGENT_TOOL_NOT_OFFERED,
   ExternalAgentPolicyError,
@@ -616,6 +617,10 @@ export const CLAUDE_STRICT_BINARY_CHECK: StrictBinaryCheck = {
  * - Session resume: the SDK session id is kept per agent instance and ADK
  *   session, and in session state, so a later turn sends only the newest user
  *   message and the SDK reloads history from its own transcript.
+ * - A "model-less" result (success, `num_turns` 0, empty `result`) before
+ *   any turn activity does not end the run: the turn that runs the input
+ *   follows. A stream that ends after only such results fails with
+ *   `EXTERNAL_AGENT_NO_TURN` instead of completing empty.
  */
 export class ClaudeAgentSdkDriver {
   /** Provider id of this driver (`claude`). */
@@ -844,6 +849,11 @@ export class ClaudeAgentSdkDriver {
     let completed = false;
     let failed = false;
     let emittedOutput = false;
+    // Whether this run saw any turn activity (assistant, stream or user
+    // message), and the model-less results it read before any.
+    let sawTurn = false;
+    let modelLessResults = 0;
+    let modelLessSession: string | undefined;
     // Capture the Query so we can tear down the spawned `claude`
     // subprocess on early consumer break or thrown error. We drive the iterator
     // manually (rather than `for await`) so the `finally` reliably runs even
@@ -984,10 +994,19 @@ export class ClaudeAgentSdkDriver {
           // A call held for the runtime's answer that never came stops the
           // run, as a result message without it does.
           toolUseCheck?.finish();
+          if (modelLessResults > 0) {
+            // Only model-less results: the input was never worked on.
+            failed = true;
+            if (!startedEmitted) {
+              yield startedEvent(initModel);
+            }
+            yield noTurnEvent(modelLessSession ?? resolvedResume);
+          }
           break;
         }
         const message = next.value;
         initModel ??= claudeInitModel(message);
+        sawTurn ||= isTurnMessage(message);
         if (sessionReads) {
           // The session the runtime reports, never one the model names.
           sessionReads.sessionId =
@@ -1008,6 +1027,16 @@ export class ClaudeAgentSdkDriver {
         }
         this.assertRequiredMcpServersConnected(message);
         backgroundTasks.observe(message);
+        if (!sawTurn && isModelLessResult(message)) {
+          // Claude Code writes this when display rows arrive while no turn
+          // is under way (on a resume, before the new input is queued); the
+          // turn that runs the input follows with its own result. Not the
+          // end of the run, and not a baseline: it carries the session total.
+          modelLessResults++;
+          modelLessSession =
+            stringValue(asRecord(message).session_id) ?? modelLessSession;
+          continue;
+        }
         // Capture the SDK session id (system/init or result) so the
         // next turn of this ADK session can resume it.
         if (adkSessionId) {
@@ -2669,6 +2698,44 @@ function toolEventMetadata(
       ? { builtin: false, adkTool: true }
       : { builtin: true }),
     ...(parent ? { parentToolUseId: parent } : {}),
+  };
+}
+
+/**
+ * A "model-less" result: success, not an error, zero turns and an empty
+ * `result`. Claude Code writes one when display rows reach the host while no
+ * turn is under way and its input queue is empty; it does not answer the
+ * input.
+ */
+function isModelLessResult(message: ClaudeAgentSdkMessage): boolean {
+  const record = asRecord(message);
+  return (
+    record.type === "result" &&
+    record.subtype === "success" &&
+    record.is_error !== true &&
+    record.num_turns === 0 &&
+    (record.result === undefined || record.result === "")
+  );
+}
+
+/** A message that only a running turn writes. */
+function isTurnMessage(message: ClaudeAgentSdkMessage): boolean {
+  const type = asRecord(message).type;
+  return type === "assistant" || type === "stream_event" || type === "user";
+}
+
+/**
+ * The error of a run whose stream ended after only model-less results.
+ *
+ * @param sessionId - The SDK session the run was in, if known.
+ */
+function noTurnEvent(sessionId: string | undefined): ExternalAgentEvent {
+  return {
+    type: "error",
+    message: `Claude Agent SDK: Claude Code ended the run without running the input: it wrote only a model-less result (success, num_turns 0, empty result)${sessionId ? ` in session ${sessionId}` : ""}, so the input was not worked on. A new run of the same input can work.`,
+    code: EXTERNAL_AGENT_NO_TURN,
+    recoverable: true,
+    timestamp: Date.now(),
   };
 }
 
