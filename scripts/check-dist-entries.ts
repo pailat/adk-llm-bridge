@@ -15,7 +15,11 @@
  *    needs zod): those entries import only from a consumer that has exactly
  *    those peers, and every other entry is still checked without them.
  * 3. A name exported by more than one entry is the same value in each, so
- *    singletons such as error classes and registries are shared.
+ *    singletons such as error classes and registries are shared. The storage
+ *    registry and error class are also checked by name across the workflows
+ *    entry and the storage entries.
+ * 4. The probe blocks `node:sqlite`, so an entry that loads it while being
+ *    imported (instead of when a store is opened) fails the check.
  *
  * The consumer lives in a temporary directory: the package is copied in and
  * every other installed package except the optional peers is symlinked from
@@ -172,6 +176,14 @@ function checkConsumer(
         }
       }
       const owners = new Map();
+      const storageNames = ["WorkflowStorageError", "registerWorkflowStorageProvider", "getWorkflowCheckpointStoreFromUri", "getWorkflowEventExporterFromUri", "BaseWorkflowCheckpointStore", "BaseWorkflowEventExporter"];
+      const storageEntries = [
+        "/workflows",
+        "/workflows/checkpoint/sqlite",
+        "/workflows/events/sqlite",
+        "/workflows/storage/conformance",
+      ];
+      const storageValues = new Map();
       for (const specifier of specifiers) {
         let mod;
         try {
@@ -183,12 +195,22 @@ function checkConsumer(
           continue;
         }
         if (specifier.endsWith("/package.json")) continue;
+        for (const name of storageNames) {
+          if (!(name in mod) || !storageEntries.some((e) => specifier.endsWith(e))) continue;
+          const seen = storageValues.get(name);
+          if (seen === undefined) storageValues.set(name, mod[name]);
+          else if (seen !== mod[name])
+            failures.push(name + " is defined more than once across storage entries (" + specifier + ")");
+        }
         for (const [name, value] of Object.entries(mod)) {
           const first = owners.get(name);
           if (!first) owners.set(name, { specifier, value });
           else if (first.value !== value)
             failures.push(name + " differs between " + first.specifier + " and " + specifier);
         }
+      }
+      for (const name of ["WorkflowStorageError", "registerWorkflowStorageProvider"]) {
+        if (!storageValues.has(name)) failures.push(name + " is not exported by the workflows entry");
       }
       if (failures.length > 0) {
         console.error(failures.join("\\n"));
@@ -198,7 +220,22 @@ function checkConsumer(
     `;
     const probeFile = join(consumer, "probe.mjs");
     writeFileSync(probeFile, probe);
-    const result = spawnSync("node", [probeFile], {
+    // Makes every `require("node:sqlite")`, including a lazy one made through
+    // `createRequire`, throw, so importing an entry must not need the module.
+    const blockFile = join(consumer, "block-sqlite.mjs");
+    writeFileSync(
+      blockFile,
+      `import Module from "node:module";
+const load = Module._load;
+Module._load = function (request, ...rest) {
+  if (request === "node:sqlite" || request === "sqlite") {
+    throw new Error("node:sqlite was required while importing an entry");
+  }
+  return load.call(this, request, ...rest);
+};
+`,
+    );
+    const result = spawnSync("node", ["--import", blockFile, probeFile], {
       cwd: consumer,
       encoding: "utf8",
     });

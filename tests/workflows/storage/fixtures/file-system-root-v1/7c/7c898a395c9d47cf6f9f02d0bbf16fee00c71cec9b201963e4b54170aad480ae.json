@@ -1,0 +1,36 @@
+{
+  "format": "adk-llm-bridge/workflow-checkpoint-file",
+  "formatVersion": 1,
+  "checkpointKey": "__adk_llm_bridge_workflow_v1:legacy-flow:exec-legacy",
+  "revision": "sha256:47d2ba5b5d1aa9539fe72d891cb40cd6618fa9a5707b4da728f04302e79df6e5",
+  "checkpoint": {
+    "schemaVersion": 1,
+    "workflowId": "legacy-flow",
+    "workflowVersion": "1",
+    "executionId": "exec-legacy",
+    "inputHash": "sha256:fbdc9072aa3d1b97bdde1b18d5babeedfa1c3519d5e51a5f90567ce7bdd86589",
+    "status": "running",
+    "steps": {
+      "a": {
+        "id": "a",
+        "agentName": "agent",
+        "inputHash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        "status": "running",
+        "attempts": 1,
+        "startedAt": 1700000003000,
+        "updatedAt": 1700000003000
+      },
+      "B": {
+        "id": "B",
+        "agentName": "agent",
+        "inputHash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        "status": "running",
+        "attempts": 1,
+        "startedAt": 1700000003000,
+        "updatedAt": 1700000003000
+      }
+    },
+    "startedAt": 1700000003000,
+    "updatedAt": 1700000003000
+  }
+}

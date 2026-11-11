@@ -1126,6 +1126,35 @@ from the 0.6.0 tag.
 - `ExternalAgentModelUsage`, the type of an `ExternalAgentUsage.byModel` entry.
 - `WORKFLOW_STEP_MISMATCH` details include the saved step's `savedStatus` and
   `savedAttempts`.
+- Workflow storage providers. Checkpoint and event providers are chosen by
+  injection (`checkpointStore`) or by URI (`getWorkflowCheckpointStoreFromUri`,
+  `getWorkflowEventExporterFromUri`), with custom schemes through
+  `registerWorkflowStorageProvider`. Events export through
+  `WorkflowEventExportPlugin` and `WorkflowSpanExportProcessor`. The SQLite
+  providers load from `adk-llm-bridge/workflows/checkpoint/sqlite` and
+  `adk-llm-bridge/workflows/events/sqlite`, and the conformance suite from
+  `adk-llm-bridge/workflows/storage/conformance`. The default checkpoint
+  store does not change: it was `ADKSessionCheckpointStore` before this
+  addition and still is; a provider is used only when you pass or select one.
+  Known limitation: concurrent multi-process saves to the file-system
+  checkpoint provider are not yet supported on Windows, and its
+  `capabilities.multiProcess` is `false` there
+  ([#117](https://github.com/pailat/adk-llm-bridge/issues/117)).
+  On Windows the SQLite stores and the JSONL exporter set no owner-only mode and
+  refuse symbolic links from `lstat`. The Claude SQLite session store now
+  opens through the same shared helper: it still takes the write lock
+  (`BEGIN IMMEDIATE`) on open, also for a schema that is already current, as
+  before; on Windows a symbolic link at the database path is now refused
+  before the open, and no mode is set or checked there. The JSONL exporter
+  flushes its directory with the same helper as the file-system stores: a
+  failed directory flush after it creates or removes a file now fails the call
+  instead of being ignored, except on Windows, which cannot flush a
+  directory. The SQLite session store now sets `PRAGMA synchronous = FULL`
+  explicitly, and a storage URI longer than 8192 characters
+  (`MAX_WORKFLOW_STORAGE_URI_LENGTH`) is rejected with
+  `WORKFLOW_STORAGE_INVALID_URI`. See
+  [Choosing storage providers](./docs/storage-providers.md) and
+  [Workflow durability](./docs/workflow-durability.md).
 
 ### Changed
 

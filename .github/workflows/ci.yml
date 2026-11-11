@@ -52,7 +52,8 @@ jobs:
   # native node.exe (the only interpreter accepted), under Bun and under Node,
   # with a prompt cmd.exe would re-parse.
   # Only Windows-safe driver checks run here: the rest assume POSIX. The
-  # file-system store suites run whole, under Bun and under Node.
+  # file-system store and storage provider suites run whole, under Bun and
+  # under Node.
   windows-shims:
     name: windows shims (Bun and Node)
     runs-on: windows-latest
@@ -67,6 +68,11 @@ jobs:
         ./tests/workflows/checkpoint-size-limit.test.ts
         ./tests/workflows/workspace/file-system-workspace-adapter.test.ts
         ./tests/workflows/wall-clock-step.test.ts
+        ./tests/workflows/storage
+        ./tests/utils/sqlite-database.test.ts
+        ./tests/utils/sqlite-open-while-locked.test.ts
+        ./tests/utils/windows-contract.test.ts
+        ./tests/agents/session-store
     defaults:
       run:
         shell: bash
@@ -83,13 +89,19 @@ jobs:
       - run: bun install --frozen-lockfile
       - name: Fake .cmd shims and the interpreter + entry route under Bun
         run: bun test tests/agents/driver/windows-command.test.ts tests/agents/driver/cli-interpreter-entry.test.ts
+      # The steps below run even when an earlier step fails, so the Node
+      # Windows contract is reported on its own.
       - run: bun run build
+        if: ${{ !cancelled() }}
       - name: Fake .cmd shims and the interpreter + entry route under Node
+        if: ${{ !cancelled() }}
         run: node scripts/windows-shim-smoke.mjs
-      # The file-system stores and the lock protocol on NTFS, under Bun and
-      # under Node (their file-system implementations differ on Windows). Both
-      # legs run even when the other fails, so one run shows every failure.
+      # The file-system stores, the storage providers and the lock protocol on
+      # NTFS, under Bun and under Node (their file-system implementations
+      # differ on Windows). Both legs run even when the other fails, so one run
+      # shows every failure.
       - name: File-system stores and lock protocol on NTFS under Bun
+        if: ${{ !cancelled() }}
         run: bun test ${{ env.FS_STORE_SUITES }}
       - name: File-system stores and lock protocol on NTFS under Node
         if: ${{ !cancelled() }}
@@ -143,7 +155,7 @@ jobs:
               }
               transitive.push(name + ' (via ' + [...new Set(dependents)].join(', ') + ')');
             }
-            for (const p of ['adk-llm-bridge', 'adk-llm-bridge/agents', 'adk-llm-bridge/agents/session-store/sqlite', 'adk-llm-bridge/workflows', 'adk-llm-bridge/workflows/node']) await import(p);
+            for (const p of ['adk-llm-bridge', 'adk-llm-bridge/agents', 'adk-llm-bridge/agents/session-store/sqlite', 'adk-llm-bridge/workflows', 'adk-llm-bridge/workflows/node', 'adk-llm-bridge/workflows/checkpoint/sqlite', 'adk-llm-bridge/workflows/events/sqlite', 'adk-llm-bridge/workflows/storage/conformance']) await import(p);
             await import('adk-llm-bridge/package.json', { with: { type: 'json' } });
             console.log('entries import with optional peers absent on', process.version, '| present transitively:', transitive.join('; ') || 'none');
           "

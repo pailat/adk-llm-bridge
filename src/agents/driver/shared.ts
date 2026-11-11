@@ -461,12 +461,14 @@ export function buildChildEnv(
  * runtime reports the precise failure.
  *
  * @param explicit - Configured paths, in priority order; empty ones are skipped.
- * @param candidates - Paths to probe, in order.
+ * @param candidates - Paths to probe, in order, or a function that builds
+ * them. A function is called only when no explicit path is set: building the
+ * list probes the file system, and an explicit path makes it useless.
  * @returns The path found, if any, and every path considered, in order.
  */
 export function findExecutable(
   explicit: ReadonlyArray<string | undefined>,
-  candidates: readonly string[],
+  candidates: readonly string[] | (() => readonly string[]),
 ): { path?: string; checked: string[] } {
   const checked: string[] = [];
   const chosen = firstNonEmpty(...explicit);
@@ -474,7 +476,9 @@ export function findExecutable(
     checked.push(chosen);
     return { path: chosen, checked };
   }
-  for (const candidate of candidates) {
+  for (const candidate of typeof candidates === "function"
+    ? candidates()
+    : candidates) {
     checked.push(candidate);
     if (existsSync(candidate)) {
       return { path: candidate, checked };

@@ -57,6 +57,18 @@
       "types": "./dist/workflows/node/index.d.ts",
       "import": "./dist/workflows/node/index.js"
     },
+    "./workflows/checkpoint/sqlite": {
+      "types": "./dist/workflows/checkpoint/sqlite/index.d.ts",
+      "import": "./dist/workflows/checkpoint/sqlite/index.js"
+    },
+    "./workflows/events/sqlite": {
+      "types": "./dist/workflows/events/sqlite/index.d.ts",
+      "import": "./dist/workflows/events/sqlite/index.js"
+    },
+    "./workflows/storage/conformance": {
+      "types": "./dist/workflows/storage/conformance/index.d.ts",
+      "import": "./dist/workflows/storage/conformance/index.js"
+    },
     "./workflows/spec": {
       "types": "./dist/workflows/spec/index.d.ts",
       "import": "./dist/workflows/spec/index.js"
@@ -133,8 +145,10 @@
     "@jitl/quickjs-wasmfile-debug-sync": "^0.32.0",
     "@jitl/quickjs-wasmfile-release-sync": "^0.32.0",
     "@microsoft/tsdoc": "0.17.1",
+    "@mikro-orm/sqlite": "^7.2.5",
     "@openai/codex-sdk": "0.167.0",
     "@opentelemetry/api": "^1.10.0",
+    "@opentelemetry/sdk-trace-base": "^2.12.0",
     "@types/bun": "^1.4.4",
     "bunup": "^0.16.32",
     "publint": "^0.3.25",

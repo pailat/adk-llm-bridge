@@ -845,6 +845,12 @@ checkpoints:
   `waiting`, and it resumes when the user answers.
 - Import `BaseAgent` from `@google/adk`; the workflows entry point does not
   re-export it.
+- The default checkpoint store is `ADKSessionCheckpointStore`, as it was
+  before the storage providers were added: with no `checkpointStore`, the
+  checkpoints stay in ADK session state. Adding the storage providers changed
+  no default. To use another provider, pass it as `checkpointStore` or select
+  it with `getWorkflowCheckpointStoreFromUri`; see
+  [Choosing storage providers](./storage-providers.md).
 - `WorkflowAgent` and `ScriptWorkflowAgent` now take ADK's `waitForOutput`,
   `beforeAgentCallback`, `afterAgentCallback` and `parentAgent`, and
   `clone()` works (it threw before). A `beforeAgentCallback` that returns

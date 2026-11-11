@@ -87,6 +87,7 @@ import { isWorkflowAgent } from "../internal/workflow-agent-brand.js";
 import type { ResolvedWorkflowReplayOptions } from "../node-config.js";
 import {
   recordWorkflowSpanEvent,
+  setWorkflowExecutionIdOnActiveSpan,
   withStepSpan,
   withWorkflowSpan,
 } from "../telemetry.js";
@@ -342,6 +343,7 @@ export class WorkflowRuntime {
       throwIfRunAborted(abortScope.signal);
       this.#executionId = await this.#resolveExecutionId(this.#parentContext);
       validateExecutionId(this.#executionId);
+      setWorkflowExecutionIdOnActiveSpan(this.#executionId);
       this.#inputOverride = await this.restoreWaitingInput();
       this.#checkpointCoordinator = new WorkflowCheckpointCoordinator({
         definition: this.#checkpointDefinition,
