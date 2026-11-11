@@ -6,6 +6,15 @@
 import { InputValidationError } from "@google/adk";
 import type { ExternalAgentPermissionPolicy } from "./schema.js";
 
+const PERMISSION_KEYS: ReadonlySet<string> = new Set([
+  "mode",
+  "allowNetwork",
+  "allowedPaths",
+  "readPaths",
+  "pathBounds",
+  "readPathBounds",
+]);
+
 const PERMISSION_MODES: ReadonlySet<string> = new Set([
   "read-only",
   "ask",
@@ -17,8 +26,8 @@ const PERMISSION_MODES: ReadonlySet<string> = new Set([
  * Validated, deep-frozen copy of a permission policy.
  *
  * @remarks
- * Only the known fields are copied, so extra or accessor-backed fields cannot
- * leak through. `mode` must be a known mode, `allowNetwork` a boolean,
+ * An unknown key makes the policy malformed (it is never dropped silently).
+ * Accessor-backed known fields are read once and copied. `mode` must be a known mode, `allowNetwork` a boolean,
  * `allowedPaths` and `readPaths` arrays of strings and `pathBounds` and
  * `readPathBounds` arrays of string arrays. `readPaths` needs `allowedPaths`:
  * without it paths are not restricted, so read roots would mean nothing.
@@ -34,6 +43,10 @@ export function snapshotPermissionPolicy(
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return null;
   }
+  // An unknown key is a typo or a field the policy never had: ignoring it
+  // could widen the policy (a misspelled `allowedPaths` leaves paths
+  // unrestricted), so the whole policy is refused.
+  if (unknownPermissionKeys(value).length > 0) return null;
   const {
     mode,
     allowNetwork,
@@ -61,6 +74,13 @@ export function snapshotPermissionPolicy(
     ...(bounds ? { pathBounds: bounds } : {}),
     ...(readBounds ? { readPathBounds: readBounds } : {}),
   });
+}
+
+/** Own enumerable keys of `value` that are not permission policy fields, sorted. */
+function unknownPermissionKeys(value: object): string[] {
+  return Object.keys(value)
+    .filter((key) => !PERMISSION_KEYS.has(key))
+    .sort();
 }
 
 /** A frozen copy of a string array; `null` when it is not one. */
@@ -104,7 +124,8 @@ function snapshotBoundLists(
  * not a well-formed policy: an unknown `mode`, a non-boolean `allowNetwork`,
  * an `allowedPaths` or `readPaths` that is not an array of strings, a
  * `pathBounds` or `readPathBounds` that is not an array of string arrays, or
- * `readPaths` without `allowedPaths`.
+ * `readPaths` without `allowedPaths`, or a key that is not a policy field
+ * (named in the message).
  */
 export function assertPermissionPolicy(
   value: unknown,
@@ -112,6 +133,15 @@ export function assertPermissionPolicy(
 ): ExternalAgentPermissionPolicy | undefined {
   const policy = snapshotPermissionPolicy(value);
   if (policy === null) {
+    const unknown =
+      typeof value === "object" && value !== null && !Array.isArray(value)
+        ? unknownPermissionKeys(value)
+        : [];
+    if (unknown.length > 0) {
+      throw new InputValidationError(
+        `${owner}: permissions has unknown ${unknown.length === 1 ? "key" : "keys"}: ${unknown.join(", ")}. Known keys: mode, allowNetwork, allowedPaths, readPaths, pathBounds, readPathBounds.`,
+      );
+    }
     throw new InputValidationError(
       `${owner}: permissions must be { mode: "read-only" | "ask" | "workspace-write" | "full-access", allowNetwork?: boolean, allowedPaths?: string[], readPaths?: string[] (needs allowedPaths), pathBounds?: string[][], readPathBounds?: string[][] }.`,
     );

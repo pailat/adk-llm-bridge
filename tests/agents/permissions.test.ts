@@ -7,6 +7,7 @@ import {
   mapPermissionModeToPolicy,
 } from "../../src/agents/index.js";
 import { mapPermissionPolicyToFlags } from "../../src/agents/permissions/mapper.js";
+import { snapshotPermissionPolicy } from "../../src/agents/permissions/policy.js";
 
 describe("permission mapping", () => {
   test("maps read-only policy to provider flags", () => {
@@ -94,6 +95,64 @@ describe("permission policy validation", () => {
           }),
       ).toThrow(InputValidationError);
     }
+  });
+
+  test("ExternalAgent rejects an unknown permissions key, naming every unknown key sorted", () => {
+    const build = (permissions: unknown) => () =>
+      new ExternalAgent({
+        name: "worker",
+        provider: CODEX_PROVIDER,
+        permissions: permissions as never,
+      });
+    expect(build({ mode: "read-only", allowedPath: ["/repo"] })).toThrow(
+      InputValidationError,
+    );
+    expect(build({ mode: "read-only", allowedPath: ["/repo"] })).toThrow(
+      "allowedPath",
+    );
+    expect(
+      build({ mode: "ask", zeta: 1, allowedPath: [], alpha: true }),
+    ).toThrow("allowedPath, alpha, zeta");
+  });
+
+  test("snapshotPermissionPolicy returns null for an unknown key, even with an otherwise valid policy", () => {
+    expect(
+      snapshotPermissionPolicy({ mode: "ask", allowedPath: ["/repo"] }),
+    ).toBeNull();
+    expect(
+      snapshotPermissionPolicy({
+        mode: "ask",
+        allowNetwork: true,
+        allowedPaths: ["/repo"],
+        readPaths: ["/repo"],
+        pathBounds: [["/repo"]],
+        readPathBounds: [["/repo"]],
+      }),
+    ).not.toBeNull();
+  });
+
+  test("every known permissions key is still accepted and the copy stays frozen", () => {
+    const agent = new ExternalAgent({
+      name: "worker",
+      provider: CODEX_PROVIDER,
+      permissions: {
+        mode: "ask",
+        allowNetwork: true,
+        allowedPaths: ["/repo"],
+        readPaths: ["/repo/docs"],
+        pathBounds: [["/repo"]],
+        readPathBounds: [["/repo"]],
+      },
+    });
+    expect(Object.isFrozen(agent.permissions)).toBe(true);
+    expect(Object.keys(agent.permissions ?? {}).sort()).toEqual([
+      "allowNetwork",
+      "allowedPaths",
+      "mode",
+      "pathBounds",
+      "readPathBounds",
+      "readPaths",
+    ]);
   });
 
   test("ExternalAgent accepts a well-formed policy or none", () => {

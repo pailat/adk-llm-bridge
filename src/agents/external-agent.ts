@@ -7,6 +7,7 @@ import {
   createEvent,
   createEventActions,
   type Event,
+  InputValidationError,
   type InvocationContext,
   isBaseTool,
   isBaseToolset,
@@ -25,6 +26,7 @@ import {
   EXTERNAL_AGENT_APPROVALS_UNSUPPORTED,
   EXTERNAL_AGENT_CREDENTIAL_UNSUPPORTED,
   EXTERNAL_AGENT_READ_ONLY_TOOL_UNKNOWN,
+  EXTERNAL_AGENT_SUBAGENTS_UNSUPPORTED,
   EXTERNAL_AGENT_TOOL_NOT_READ_ONLY,
   EXTERNAL_AGENT_TOOLS_UNSUPPORTED,
   ExternalAgentPolicyError,
@@ -117,6 +119,44 @@ type PolicyReader = () => ExternalAgentPermissionPolicy | undefined;
 const UNREADABLE_POLICY: ExternalAgentPermissionPolicy = Object.freeze({
   mode: "ask",
 });
+
+/**
+ * Validates `delegation`: a plain object whose only key is `finalAnswer`,
+ * `"subagent"` or `"coordinator"` when set.
+ */
+function assertDelegationOptions(
+  value: unknown,
+  owner: string,
+): DelegationOptions | undefined {
+  if (value === undefined) return undefined;
+  const shape = `${owner}: delegation must be { finalAnswer?: "subagent" | "coordinator" }`;
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new InputValidationError(`${shape}.`);
+  }
+  const unknown = Object.keys(value)
+    .filter((key) => key !== "finalAnswer")
+    .sort();
+  if (unknown.length > 0) {
+    throw new InputValidationError(
+      `${shape}; unknown ${unknown.length === 1 ? "key" : "keys"}: ${unknown.join(", ")}.`,
+    );
+  }
+  const { finalAnswer } = value as { finalAnswer?: unknown };
+  if (
+    finalAnswer !== undefined &&
+    finalAnswer !== "subagent" &&
+    finalAnswer !== "coordinator"
+  ) {
+    // Only a string is quoted: JSON.stringify throws on a bigint or a cyclic
+    // object, which would replace this error with a TypeError.
+    const got =
+      typeof finalAnswer === "string"
+        ? JSON.stringify(finalAnswer)
+        : `of type ${finalAnswer === null ? "null" : typeof finalAnswer}`;
+    throw new InputValidationError(`${shape}; got finalAnswer ${got}.`);
+  }
+  return value as DelegationOptions;
+}
 
 /** Defines the brand on `agent`: a frozen reader of its current policy. */
 function brandExternalAgent(agent: ExternalAgent): void {
@@ -448,7 +488,15 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
    * set but malformed: an unknown `mode`, a non-boolean `allowNetwork`, an
    * `allowedPaths` or `readPaths` that is not an array of strings, a
    * `pathBounds` or `readPathBounds` that is not an array of string arrays,
-   * or `readPaths` without `allowedPaths`.
+   * or `readPaths` without `allowedPaths`, or has a key that is not a
+   * policy field; also when `delegation` is not a plain object with only
+   * `finalAnswer: "subagent" | "coordinator"`, or when a `tools` entry is not
+   * an ADK tool or toolset.
+   * @throws ExternalAgentPolicyError `EXTERNAL_AGENT_TOOLS_UNSUPPORTED`,
+   * `EXTERNAL_AGENT_APPROVALS_UNSUPPORTED` or
+   * `EXTERNAL_AGENT_SUBAGENTS_UNSUPPORTED` when `tools`, `confirmation` or
+   * `subAgents` are set on a driver whose `capabilities()` lacks `tools`,
+   * `approvals` or `subagents`.
    */
   constructor(config: ExternalAgentConfig) {
     super(config);
@@ -464,7 +512,10 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
       config.permissions,
       `ExternalAgent "${this.name}"`,
     );
-    this.delegation = config.delegation;
+    this.delegation = assertDelegationOptions(
+      config.delegation,
+      `ExternalAgent "${this.name}"`,
+    );
     this.confirmation = config.confirmation;
     this.tools = config.tools ?? [];
     this.readOnlyTools = Object.freeze([...(config.readOnlyTools ?? [])]);
@@ -484,6 +535,15 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
    */
   private assertToolDeclarations(): void {
     const driver = this.driver;
+    // A malformed entry can never work on any driver, so it is reported as
+    // malformed before the capability check can call it unsupported.
+    this.tools.forEach((entry, index) => {
+      if (!isBaseTool(entry) && !isBaseToolset(entry)) {
+        throw new InputValidationError(
+          `ExternalAgent "${this.name}": tools[${index}] is not an ADK tool or toolset.`,
+        );
+      }
+    });
     if (this.tools.length > 0 && typeof driver.capabilities === "function") {
       if (driver.capabilities().tools !== true) {
         throw new ExternalAgentPolicyError(
@@ -503,6 +563,18 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
       throw new ExternalAgentPolicyError(
         EXTERNAL_AGENT_APPROVALS_UNSUPPORTED,
         `ExternalAgent "${this.name}": ${driver.constructor.name} never asks the host for permission, so \`confirmation\` would be ignored and the runtime would decide alone. Use ClaudeAgent (ClaudeAgentSdkDriver), or remove \`confirmation\`.`,
+      );
+    }
+    // Only the Claude Agent SDK driver reads `request.toolGateway`, the way
+    // the runtime reaches a sub-agent; elsewhere they would never be called.
+    if (
+      this.subAgents.length > 0 &&
+      typeof driver.capabilities === "function" &&
+      driver.capabilities().subagents !== true
+    ) {
+      throw new ExternalAgentPolicyError(
+        EXTERNAL_AGENT_SUBAGENTS_UNSUPPORTED,
+        `ExternalAgent "${this.name}": ${driver.constructor.name} never exposes sub-agents to the runtime, so \`subAgents\` would never be called. Use ClaudeAgent (ClaudeAgentSdkDriver), or put the sub-agents on an ADK LlmAgent parent.`,
       );
     }
 

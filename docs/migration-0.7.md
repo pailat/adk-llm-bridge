@@ -813,6 +813,21 @@ ON. The check covers `allowUnsandboxedShell`, `inheritHostConfig`,
 `skipGitRepoCheck` and `webSearchEnabled`. Parse the value yourself (for
 example `process.env.X === "true"`) before you pass it.
 
+### Sub-agents, permissions and delegation are checked
+
+- `subAgents` now throws `EXTERNAL_AGENT_SUBAGENTS_UNSUPPORTED` on the Claude
+  CLI, Codex CLI, Codex SDK and Gemini CLI drivers: they never exposed the
+  sub-agents. Use `ClaudeAgent`, or put the sub-agents on an ADK `LlmAgent`
+  parent.
+- `permissions` with an unknown key throws `InputValidationError` naming it;
+  before, the key was dropped (a misspelled `allowedPaths` left paths
+  unrestricted).
+- `delegation` accepts only `finalAnswer: "subagent" | "coordinator"`.
+- `tools` entries must be ADK tools or toolsets.
+
+See
+[Sub-agents need a driver that exposes them](./external-agent-isolation.md#sub-agents-need-a-driver-that-exposes-them).
+
 ### Coming in 0.8
 
 0.8 is planned to replace the `args` denylist of `ClaudeCliDriver` and
