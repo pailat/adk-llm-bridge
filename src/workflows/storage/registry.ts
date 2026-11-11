@@ -125,6 +125,13 @@ export interface WorkflowStorageSchemeInfo {
 }
 
 const SCHEME_PATTERN = /^[A-Za-z][A-Za-z0-9+.-]*$/;
+/**
+ * Longest storage URI, in characters, the registry parses; a longer one is
+ * rejected with `WORKFLOW_STORAGE_INVALID_URI` before any parsing.
+ *
+ * @experimental
+ */
+export const MAX_WORKFLOW_STORAGE_URI_LENGTH = 8192;
 const URI_PATTERN = /^([A-Za-z][A-Za-z0-9+.-]*):\/\/([\s\S]*)$/;
 const ADK_SESSION_PREFIX = "adk-session+";
 const INVALID_URI_PLACEHOLDER = "<invalid uri>";
@@ -152,6 +159,9 @@ const ADK_DATABASE_SCHEMES = [
  * @experimental
  */
 export function redactWorkflowStorageUri(uri: string): string {
+  if (typeof uri !== "string" || uri.length > MAX_WORKFLOW_STORAGE_URI_LENGTH) {
+    return INVALID_URI_PLACEHOLDER;
+  }
   const match = URI_PATTERN.exec(uri);
   if (match === null) return INVALID_URI_PLACEHOLDER;
   const scheme = match[1] as string;
@@ -172,15 +182,31 @@ export function redactWorkflowStorageUri(uri: string): string {
   }
   const queryStart = rest.search(/[?#]/);
   const beforeQuery = queryStart === -1 ? rest : rest.slice(0, queryStart);
-  let query = queryStart === -1 ? "" : rest.slice(queryStart);
-  const hashStart = query.indexOf("#");
-  if (hashStart !== -1) query = `${query.slice(0, hashStart)}#***`;
-  query = query.replace(
-    /([?&])([^=&#]+)=([^&#]*)/g,
-    (whole, separator: string, key: string) =>
-      isSecretQueryKey(key) ? `${separator}${key}=***` : whole,
-  );
+  let query = "";
+  if (queryStart !== -1) {
+    const tail = rest.slice(queryStart);
+    const hashStart = tail.indexOf("#");
+    const pairs =
+      hashStart === 0
+        ? ""
+        : tail.slice(0, hashStart === -1 ? undefined : hashStart);
+    const fragment = hashStart === -1 ? "" : "#***";
+    query = `${redactQueryPairs(pairs)}${fragment}`;
+  }
   return `${scheme}://${userInfo}${beforeQuery}${query}`;
+}
+
+// Linear: one split and one indexOf per pair, so no input backtracks.
+function redactQueryPairs(query: string): string {
+  if (query === "") return "";
+  const pairs = query.slice(1).split("&");
+  const redacted = pairs.map((pair) => {
+    const equals = pair.indexOf("=");
+    if (equals <= 0) return pair;
+    const key = pair.slice(0, equals);
+    return isSecretQueryKey(key) ? `${key}=***` : pair;
+  });
+  return `${query[0]}${redacted.join("&")}`;
 }
 
 function isSecretQueryKey(key: string): boolean {
@@ -309,6 +335,18 @@ export function listWorkflowStorageSchemes(): WorkflowStorageSchemeInfo[] {
 }
 
 function parseWorkflowStorageUri(uri: string): WorkflowStorageUri {
+  if (typeof uri === "string" && uri.length > MAX_WORKFLOW_STORAGE_URI_LENGTH) {
+    throw new WorkflowStorageError(
+      "WORKFLOW_STORAGE_INVALID_URI",
+      `Invalid workflow storage URI: it is ${uri.length} characters long and the limit is ${MAX_WORKFLOW_STORAGE_URI_LENGTH}`,
+      {
+        details: {
+          uri: INVALID_URI_PLACEHOLDER,
+          maxLength: MAX_WORKFLOW_STORAGE_URI_LENGTH,
+        },
+      },
+    );
+  }
   const match = typeof uri === "string" ? URI_PATTERN.exec(uri) : null;
   if (match === null) {
     throw new WorkflowStorageError(
@@ -530,8 +568,11 @@ function isModuleNotFound(error: unknown): boolean {
 function driverName(error: unknown): string {
   const message =
     error instanceof Error ? error.message : String((error as unknown) ?? "");
-  const quoted = /['"`]([^'"`]+)['"`]/.exec(message);
-  return quoted?.[1] ?? "@google/adk";
+  const open = message.search(/['"`]/);
+  if (open === -1 || open > MAX_WORKFLOW_STORAGE_URI_LENGTH)
+    return "@google/adk";
+  const close = message.slice(open + 1).search(/['"`]/);
+  return close > 0 ? message.slice(open + 1, open + 1 + close) : "@google/adk";
 }
 
 const memoryFactory: WorkflowStorageProviderFactory = {

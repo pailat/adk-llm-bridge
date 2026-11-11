@@ -20,6 +20,7 @@ import {
   workflowCheckpointRevision,
   workflowCheckpointRevisionMatches,
 } from "../checkpoint/store.js";
+import { WorkflowError } from "../contracts.js";
 import {
   BaseWorkflowCheckpointStore,
   type BaseWorkflowCheckpointStoreOptions,
@@ -41,6 +42,11 @@ const FILE_FORMAT = "adk-llm-bridge/workflow-checkpoint-file";
 const MAX_CURSOR_LENGTH = 8192;
 // Room for the file envelope around a checkpoint at the size limit.
 const ENVELOPE_ALLOWANCE_BYTES = 4096;
+// On Windows a rename onto a file another process has open fails with one of
+// these codes until that process closes it, which takes milliseconds.
+const WINDOWS_BLOCKED_RENAME_CODES = new Set(["EPERM", "EBUSY", "EACCES"]);
+const WINDOWS_RETRY_BUDGET_MS = 5000;
+const WINDOWS_RETRY_MAX_DELAY_MS = 100;
 
 /**
  * Options of {@link FileSystemWorkflowCheckpointProvider}: those of
@@ -134,14 +140,27 @@ export class FileSystemWorkflowCheckpointProvider extends BaseWorkflowCheckpoint
     request: WorkflowCheckpointWriteRequest,
   ): Promise<number> {
     await this.#refuseLinkedRoot();
-    await this.#store.save({
-      context: NO_CONTEXT,
-      checkpoint: request.checkpoint,
-      revision: request.revision,
-      ...(request.expectedRevision === undefined
-        ? {}
-        : { expectedRevision: request.expectedRevision }),
-    });
+    const deadline = Date.now() + WINDOWS_RETRY_BUDGET_MS;
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        await this.#store.save({
+          context: NO_CONTEXT,
+          checkpoint: request.checkpoint,
+          revision: request.revision,
+          ...(request.expectedRevision === undefined
+            ? {}
+            : { expectedRevision: request.expectedRevision }),
+        });
+        break;
+      } catch (error) {
+        // A failed write left the file as it was and released the lock, so
+        // running the save again re-checks the expected revision.
+        if (!isBlockedWindowsRename(error) || Date.now() >= deadline) {
+          throw error;
+        }
+        await delay(Math.min(5 * 2 ** attempt, WINDOWS_RETRY_MAX_DELAY_MS));
+      }
+    }
     return await this.#modifiedAt(request);
   }
 
@@ -333,6 +352,22 @@ export class FileSystemWorkflowCheckpointProvider extends BaseWorkflowCheckpoint
       await handle.close().catch(() => {});
     }
   }
+}
+
+function isBlockedWindowsRename(error: unknown): boolean {
+  if (process.platform !== "win32" || !(error instanceof WorkflowError)) {
+    return false;
+  }
+  const { reason, causeCode } = error.details ?? {};
+  return (
+    reason === "checkpoint_write_failed" &&
+    typeof causeCode === "string" &&
+    WINDOWS_BLOCKED_RENAME_CODES.has(causeCode)
+  );
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((done) => setTimeout(done, ms));
 }
 
 function digestOf(key: string): string {

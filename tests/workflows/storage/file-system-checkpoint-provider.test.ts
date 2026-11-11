@@ -25,6 +25,7 @@ import {
   workflowCheckpointKey,
   workflowCheckpointRevision,
 } from "../../../src/workflows/checkpoint/store.js";
+import { WorkflowError } from "../../../src/workflows/contracts.js";
 import { defineWorkflow } from "../../../src/workflows/definition.js";
 import {
   defineWorkflowStorageConformanceTests,
@@ -207,28 +208,165 @@ describe("FileSystemWorkflowCheckpointProvider reads and writes through the stor
     expect(read?.revision).toBe(await workflowCheckpointRevision(second));
   });
 
-  test("a save replaces the checkpoint file instead of rewriting it, so a half-written file is never visible", async () => {
+  test("a file read while saves replace it is always a complete checkpoint file", async () => {
     const root = await tempRoot();
     const provider = new FileSystemWorkflowCheckpointProvider({ root });
+    const padding = "x".repeat(200_000);
     const first = await provider.put({
-      checkpoint: await makeCheckpoint("flow", "exec", "first"),
+      checkpoint: await makeCheckpoint("flow", "exec", `0${padding}`),
       expectedRevision: null,
     });
     const path = checkpointPath(root, "flow", "exec");
-    const before = await readFile(path, "utf8");
-    // A reader that opened the file before the save keeps the old, complete
-    // content; a save that rewrote the file in place would change it.
-    const reader = await open(path, "r");
+    const revisions = new Set([first.revision]);
+    let saving = true;
+    let reads = 0;
+    const reader = (async () => {
+      while (saving) {
+        let text: string;
+        try {
+          text = await readFile(path, "utf8");
+        } catch (error) {
+          // Windows can refuse a read for an instant while a save swaps the
+          // file in; that is a refused read, not a partial file.
+          const code = (error as NodeJS.ErrnoException).code;
+          if (code === "EPERM" || code === "EBUSY" || code === "EACCES") {
+            continue;
+          }
+          throw error;
+        }
+        const parsed = JSON.parse(text) as { revision: string };
+        expect(text.endsWith("\n")).toBe(true);
+        expect(revisions.has(parsed.revision)).toBe(true);
+        reads += 1;
+      }
+    })();
     try {
-      await provider.put({
-        checkpoint: await makeCheckpoint("flow", "exec", "second"),
-        expectedRevision: first.revision,
-      });
-      expect(await reader.readFile("utf8")).toBe(before);
+      let expected = first.revision;
+      for (let round = 1; round <= 8; round++) {
+        const checkpoint = await makeCheckpoint(
+          "flow",
+          "exec",
+          `${round}${padding}`,
+        );
+        revisions.add(await workflowCheckpointRevision(checkpoint));
+        expected = (
+          await provider.put({ checkpoint, expectedRevision: expected })
+        ).revision;
+      }
     } finally {
-      await reader.close();
+      saving = false;
+      await reader;
     }
-    expect(await readFile(path, "utf8")).not.toBe(before);
+    expect(reads).toBeGreaterThan(0);
+    expect(
+      (await readdir(join(path, ".."))).filter((name) => name.endsWith(".tmp")),
+    ).toEqual([]);
+  });
+
+  // POSIX only: a reader that keeps a handle open across a save is the proof,
+  // and Windows refuses to rename over a file another handle holds open.
+  test.skipIf(process.platform === "win32")(
+    "a save replaces the checkpoint file instead of rewriting it, so a half-written file is never visible",
+    async () => {
+      const root = await tempRoot();
+      const provider = new FileSystemWorkflowCheckpointProvider({ root });
+      const first = await provider.put({
+        checkpoint: await makeCheckpoint("flow", "exec", "first"),
+        expectedRevision: null,
+      });
+      const path = checkpointPath(root, "flow", "exec");
+      const before = await readFile(path, "utf8");
+      // A reader that opened the file before the save keeps the old, complete
+      // content; a save that rewrote the file in place would change it.
+      const reader = await open(path, "r");
+      try {
+        await provider.put({
+          checkpoint: await makeCheckpoint("flow", "exec", "second"),
+          expectedRevision: first.revision,
+        });
+        expect(await reader.readFile("utf8")).toBe(before);
+      } finally {
+        await reader.close();
+      }
+      expect(await readFile(path, "utf8")).not.toBe(before);
+    },
+  );
+
+  describe("a rename another process's open handle blocks on Windows", () => {
+    const realPlatform = Object.getOwnPropertyDescriptor(process, "platform");
+    const realSave = FileSystemWorkflowCheckpointStore.prototype.save;
+    afterEach(() => {
+      if (realPlatform)
+        Object.defineProperty(process, "platform", realPlatform);
+      FileSystemWorkflowCheckpointStore.prototype.save = realSave;
+    });
+
+    function blocked(code: string): WorkflowError {
+      return new WorkflowError(
+        "WORKFLOW_EXECUTION_ERROR",
+        "Workflow checkpoint file operation failed: key",
+        { reason: "checkpoint_write_failed", causeCode: code },
+      );
+    }
+
+    function failSaves(
+      times: number,
+      code: string,
+      platform: string,
+    ): () => number {
+      Object.defineProperty(process, "platform", { value: platform });
+      let calls = 0;
+      FileSystemWorkflowCheckpointStore.prototype.save = async function (
+        this: FileSystemWorkflowCheckpointStore,
+        ...args: Parameters<FileSystemWorkflowCheckpointStore["save"]>
+      ) {
+        calls += 1;
+        if (calls <= times) throw blocked(code);
+        return await realSave.apply(this, args);
+      };
+      return () => calls;
+    }
+
+    test("a save retried after a transient EPERM is stored", async () => {
+      const root = await tempRoot();
+      const provider = new FileSystemWorkflowCheckpointProvider({ root });
+      const calls = failSaves(3, "EPERM", "win32");
+      const written = await provider.put({
+        checkpoint: await makeCheckpoint("flow", "exec"),
+        expectedRevision: null,
+      });
+      expect(calls()).toBe(4);
+      expect(
+        (await provider.get({ workflowId: "flow", executionId: "exec" }))
+          ?.revision,
+      ).toBe(written.revision);
+    });
+
+    test("a block that never clears fails with the store's error", async () => {
+      const root = await tempRoot();
+      const provider = new FileSystemWorkflowCheckpointProvider({ root });
+      failSaves(10_000, "EBUSY", "win32");
+      const error = (await reject(
+        provider.put({
+          checkpoint: await makeCheckpoint("flow", "exec"),
+          expectedRevision: null,
+        }),
+      )) as WorkflowError;
+      expect(error.details?.causeCode).toBe("EBUSY");
+    }, 20_000);
+
+    test("off Windows the same error is not retried", async () => {
+      const root = await tempRoot();
+      const provider = new FileSystemWorkflowCheckpointProvider({ root });
+      const calls = failSaves(10_000, "EPERM", "linux");
+      await reject(
+        provider.put({
+          checkpoint: await makeCheckpoint("flow", "exec"),
+          expectedRevision: null,
+        }),
+      );
+      expect(calls()).toBe(1);
+    });
   });
 
   test("a stale expectedRevision rejects with the same conflict error the store throws", async () => {

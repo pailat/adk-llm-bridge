@@ -842,7 +842,11 @@ function missingDriverError(error: unknown): WorkflowStorageError | undefined {
     const code = (entry as { code?: unknown }).code;
     return code === "MODULE_NOT_FOUND" || code === "ERR_MODULE_NOT_FOUND";
   });
-  const text = chain.map((entry) => (entry as Error).message).join("\n");
+  // A cap keeps the two searches below cheap on any message.
+  const text = chain
+    .map((entry) => (entry as Error).message)
+    .join("\n")
+    .slice(0, 4096);
   const named =
     /optional peer dependency "([^"]+)"/u.exec(text) ??
     /Cannot find (?:module|package) '(@mikro-orm\/[^']+)'/u.exec(text);
