@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
+import type { FileHandle } from "node:fs/promises";
 import {
   lstat,
   mkdir,
@@ -923,36 +924,46 @@ async function readLockOwner(
     throw ioError("checkpoint_lock_read_failed", checkpointKey, error);
   }
   if (info.isSymbolicLink() || !info.isDirectory()) {
-    throw checkpointFileError(
-      "checkpoint_lock_corrupt",
-      checkpointKey,
-      `Workflow checkpoint lock is not a safe directory: ${checkpointKey}`,
-    );
+    throw unsafeLockError(checkpointKey);
   }
 
-  let rawOwner: string;
+  // A missing owner means either that this directory was retired (the path
+  // now names another lock or nothing) or that it lost its owner in place.
+  // (dev, ino) tells the two apart only while the directory is held open:
+  // Linux (ext4) and NTFS give a freed number to the next directory at once,
+  // so a lock retired and republished in between would look unchanged. The
+  // open neither follows a symlink nor blocks on a FIFO swapped in since the
+  // check above (on Windows that check alone rejects a symlink).
+  let pin: FileHandle;
   try {
-    rawOwner = await readFile(join(lockPath, LOCK_OWNER_FILE), "utf8");
+    pin = await open(
+      lockPath,
+      constants.O_RDONLY |
+        (constants.O_NOFOLLOW ?? 0) |
+        (constants.O_NONBLOCK ?? 0),
+    );
   } catch (error) {
     if (hasErrorCode(error, "ENOENT")) {
-      try {
-        const currentInfo = await lstat(lockPath);
-        if (currentInfo.dev !== info.dev || currentInfo.ino !== info.ino) {
-          return await readLockOwner(lockPath, checkpointKey);
-        }
-      } catch (statError) {
-        if (hasErrorCode(statError, "ENOENT")) {
-          return undefined;
-        }
-        throw ioError("checkpoint_lock_read_failed", checkpointKey, statError);
-      }
-      throw checkpointFileError(
-        "checkpoint_lock_corrupt",
-        checkpointKey,
-        `Workflow checkpoint lock has no valid owner: ${checkpointKey}`,
-      );
+      return undefined;
+    }
+    // O_NOFOLLOW reports a symlink as ELOOP (EMLINK on FreeBSD).
+    if (hasErrorCode(error, "ELOOP") || hasErrorCode(error, "EMLINK")) {
+      throw unsafeLockError(checkpointKey);
     }
     throw ioError("checkpoint_lock_read_failed", checkpointKey, error);
+  }
+  let rawOwner: string | "replaced" | "retired";
+  try {
+    rawOwner = await readPinnedLockOwner(lockPath, pin, checkpointKey);
+  } finally {
+    // A read-only handle: closing it cannot lose data.
+    await pin.close().catch(() => {});
+  }
+  if (rawOwner === "retired") {
+    return undefined;
+  }
+  if (rawOwner === "replaced") {
+    return await readLockOwner(lockPath, checkpointKey);
   }
   const metadata = parseLockMetadata(rawOwner);
   if (!metadata) {
@@ -963,6 +974,57 @@ async function readLockOwner(
     );
   }
   return metadata;
+}
+
+function unsafeLockError(checkpointKey: string): WorkflowError {
+  return checkpointFileError(
+    "checkpoint_lock_corrupt",
+    checkpointKey,
+    `Workflow checkpoint lock is not a safe directory: ${checkpointKey}`,
+  );
+}
+
+/**
+ * Reads the owner of the lock directory `pin` holds open: `"replaced"` when
+ * the path now names another directory, `"retired"` when it names nothing.
+ */
+async function readPinnedLockOwner(
+  lockPath: string,
+  pin: FileHandle,
+  checkpointKey: string,
+): Promise<string | "replaced" | "retired"> {
+  let pinned: Awaited<ReturnType<FileHandle["stat"]>>;
+  try {
+    pinned = await pin.stat();
+  } catch (error) {
+    throw ioError("checkpoint_lock_read_failed", checkpointKey, error);
+  }
+  if (!pinned.isDirectory()) {
+    throw unsafeLockError(checkpointKey);
+  }
+  try {
+    return await readFile(join(lockPath, LOCK_OWNER_FILE), "utf8");
+  } catch (error) {
+    if (!hasErrorCode(error, "ENOENT")) {
+      throw ioError("checkpoint_lock_read_failed", checkpointKey, error);
+    }
+  }
+  try {
+    const current = await lstat(lockPath);
+    if (current.dev !== pinned.dev || current.ino !== pinned.ino) {
+      return "replaced";
+    }
+  } catch (error) {
+    if (hasErrorCode(error, "ENOENT")) {
+      return "retired";
+    }
+    throw ioError("checkpoint_lock_read_failed", checkpointKey, error);
+  }
+  throw checkpointFileError(
+    "checkpoint_lock_corrupt",
+    checkpointKey,
+    `Workflow checkpoint lock has no valid owner: ${checkpointKey}`,
+  );
 }
 
 async function assertLockOwnership(

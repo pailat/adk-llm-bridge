@@ -1628,6 +1628,12 @@ from the 0.6.0 tag.
   repository mutation locks) retries a rename that a waiter's open `owner.json`
   blocks (`EPERM`, `EBUSY`, `EACCES`; 5 tries over about 100 ms) instead of
   leaving the lock behind under a live process.
+- Linux and Windows: a checkpoint save that waited while the lock was
+  released and taken by another writer could fail with
+  `checkpoint_lock_corrupt`. The new lock directory often reuses the old one's
+  inode number (ext4, NTFS), so the store took it for the same lock without
+  its owner. The store now holds the lock directory open while it reads the
+  owner, so its number cannot be reused in between.
 
 
 ### Docs
