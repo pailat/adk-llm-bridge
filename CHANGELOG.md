@@ -1221,6 +1221,9 @@ from the 0.6.0 tag.
   check-comments and check-export-docs to ci and prepublishOnly: no internal
   tracking ids, valid TSDoc, no per-file license headers (LICENSE is the single
   source).
+- `check:comments` also rejects backlog, fix, verification, request and audit
+  tracking ids (`BF-*`, `BL-*`, `FS-*`, `V-<n>`, `REQ-<n>`, `H-<letter>`) in
+  comments and test names; see [comments.md](./docs/contributing/comments.md).
 - License holder is now "adk-llm-bridge contributors" (MIT, unchanged); per-file
   license headers were removed, LICENSE is the single source.
 - **Dependency upgrade.** Built and tested against `@google/adk` 2.4.0,

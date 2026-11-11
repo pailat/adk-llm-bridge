@@ -63,7 +63,9 @@ export function AIGateway(model: string, options?: AIGatewayProviderConfig): Bas
 
 Comments, test names and file names do not contain internal tracking labels: review or
 finding ids (`F2`, `N1`, `E3`, `B1`, `m2`), stream or lane ids
-(`STREAM-1`, `AGENTS-6`, `RT-8`, `WF-4b`, `LLM-3b`, `OBS-9`, `PERM-1`), wave names
+(`STREAM-1`, `AGENTS-6`, `RT-8`, `WF-4b`, `LLM-3b`, `OBS-9`, `PERM-1`), backlog and fix
+ids (`BF-M1-F4`, `FS-RENAME-RETRY-1`, `BL-QJS-WORKER`), verification, request and audit ids
+(`V-12`, `REQ-7`, `H-C`), wave names
 (`Wave 4`), or request numbers (`REQUESTS #7`). A reader of the published code
 cannot look them up. That history belongs in commit messages, pull requests
 and the CHANGELOG.
