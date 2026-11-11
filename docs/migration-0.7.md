@@ -622,6 +622,13 @@ new in 0.7.0. If you already use them, these changes apply:
   exit code 1. To keep background tasks, pass `allowBackgroundTasks: true`
   (for example `new ClaudeAgent({ driverOptions: { allowBackgroundTasks:
   true } })`); the check stays on.
+- **A Claude Agent SDK run that never ran its input fails.** Claude Code can
+  write a "model-less" result (success, `num_turns` 0, empty `result`) before
+  the turn that runs the input, most often on a resumed session.
+  `ClaudeAgentSdkDriver` reads past it; when the stream ends with only such
+  results, the run ends with `EXTERNAL_AGENT_NO_TURN` (recoverable) and exit
+  code 1 instead of completing with empty output, so a workflow step fails
+  instead of completing empty.
 - **Private temp directory per Claude run.** Both Claude drivers create a
   fresh `0700` directory under `/tmp` for each run and set
   `CLAUDE_CODE_TMPDIR` to it and `TMPDIR` to the `claude-<uid>` directory

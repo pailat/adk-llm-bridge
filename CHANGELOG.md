@@ -1423,6 +1423,19 @@ from the 0.6.0 tag.
   the run's `models` (and a workflow step's `result.models`) now include the
   sub-agent's `used` and `unexpected`. See
   [Reports under delegation](./docs/external-agent-isolation.md#reports-under-delegation).
+
+- **A resumed Claude Agent SDK run no longer completes empty without running
+  its input.** Claude Code can write a "model-less" result (success,
+  `num_turns` 0, empty `result`) when display rows arrive while no turn is
+  under way, for example at the start of a resumed session before the new
+  input is queued; the turn that runs the input follows in the same query.
+  `ClaudeAgentSdkDriver` ended the run at that first result, so a second
+  workflow step of the same Claude agent could complete with empty output and
+  no error. The driver now reads past a model-less result that comes before
+  any turn activity, and a run whose stream ends after only model-less
+  results fails with `EXTERNAL_AGENT_NO_TURN` (recoverable) and exit code 1.
+  A real result still ends the run at once.
+
 - **A Codex SDK run can no longer end the host process with `EPIPE`.**
   `@openai/codex-sdk` writes the prompt to codex's stdin with no error
   handler. When codex was gone before it read the whole prompt (it exited
