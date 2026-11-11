@@ -16,6 +16,7 @@ import {
   SqliteSessionStore,
   SqliteSessionStoreError,
 } from "../../../src/agents/session-store/sqlite/index.js";
+import { overrideNodeSqliteLoaderForTests } from "../../../src/utils/sqlite-database.js";
 
 // A second version 1 database, written by the first release of the session
 // store (schema version 1, WAL checkpointed) and embedded as base64 so tests
@@ -188,5 +189,48 @@ describe("SqliteSessionStore with a version 1 database file", () => {
     expect(() => open(path)).toThrow(
       "The session store database has schema version 2; this version of adk-llm-bridge reads version 1. Upgrade adk-llm-bridge.",
     );
+  });
+});
+
+describe("SqliteSessionStore without node:sqlite", () => {
+  test("reports SESSION_STORE_SQLITE_UNAVAILABLE and creates no directory or file", () => {
+    const dir = tempDir();
+    const target = join(dir, "missing", "store.db");
+    const restore = overrideNodeSqliteLoaderForTests(() => {
+      throw new Error("no node:sqlite");
+    });
+    let error: unknown;
+    try {
+      open(target);
+    } catch (caught) {
+      error = caught;
+    } finally {
+      restore();
+    }
+    expect(error).toBeInstanceOf(SqliteSessionStoreError);
+    expect((error as SqliteSessionStoreError).code).toBe(
+      "SESSION_STORE_SQLITE_UNAVAILABLE",
+    );
+    expect(readdirSync(dir)).toEqual([]);
+  });
+
+  test("names the path as given, not the resolved path, in the unsafe path error", () => {
+    const dir = tempDir();
+    writeFileSync(join(dir, "t.db"), "");
+    symlinkSync(join(dir, "t.db"), join(dir, "rel-link.db"));
+    const cwd = process.cwd();
+    let error: unknown;
+    process.chdir(dir);
+    try {
+      open("rel-link.db");
+    } catch (caught) {
+      error = caught;
+    } finally {
+      process.chdir(cwd);
+    }
+    expect((error as SqliteSessionStoreError).code).toBe(
+      "SESSION_STORE_UNSAFE_PATH",
+    );
+    expect((error as Error).message).toContain("database rel-link.db:");
   });
 });

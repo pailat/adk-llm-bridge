@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { AsyncLocalStorage } from "node:async_hooks";
+import { fileURLToPath } from "node:url";
 import {
   BaseAgent,
   createEvent,
@@ -543,9 +544,9 @@ describe("WorkflowSpanExportProcessor", () => {
       import.meta.url,
     );
     const script = `
-const { WorkflowEventExportPipeline } = await import(${JSON.stringify(new URL("event-export-pipeline.ts", source).pathname)});
-const { InMemoryWorkflowEventExporter } = await import(${JSON.stringify(new URL("in-memory-event-exporter.ts", source).pathname)});
-const { WorkflowSpanExportProcessor } = await import(${JSON.stringify(new URL("span-export-processor.ts", source).pathname)});
+const { WorkflowEventExportPipeline } = await import(${JSON.stringify(fileURLToPath(new URL("event-export-pipeline.ts", source)))});
+const { InMemoryWorkflowEventExporter } = await import(${JSON.stringify(fileURLToPath(new URL("in-memory-event-exporter.ts", source)))});
+const { WorkflowSpanExportProcessor } = await import(${JSON.stringify(fileURLToPath(new URL("span-export-processor.ts", source)))});
 const pipeline = new WorkflowEventExportPipeline({ exporter: new InMemoryWorkflowEventExporter() });
 const processor = new WorkflowSpanExportProcessor({ pipeline });
 const span = (spanId, parent) => ({

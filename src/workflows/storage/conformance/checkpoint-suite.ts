@@ -3,7 +3,12 @@ import {
   withWorkflowCompleted,
   withWorkflowFailed,
 } from "../../checkpoint/checkpoint.js";
+import { MAX_STEP_ACCEPTANCES } from "../../checkpoint/replay-acceptance.js";
 import type { WorkflowCheckpointV1 } from "../../checkpoint/schema.js";
+import {
+  MAX_INPUT_CHUNKS,
+  MIN_INPUT_CHUNK_SIZE,
+} from "../../checkpoint/step-record.js";
 import {
   type WorkflowCheckpointLocator,
   workflowCheckpointKey,
@@ -509,6 +514,171 @@ export async function workflowCheckpointStoreConformanceCases(
       }
     }),
   );
+
+  // --- Step results, step records and acceptances ---------------------------
+
+  const roundTrips = (
+    name: string,
+    build: (base: WorkflowCheckpointV1) => WorkflowCheckpointV1,
+  ): void => {
+    add(
+      name,
+      withStore(async (store) => {
+        const checkpoint = build(await makeCheckpoint(LOCATOR));
+        await store.save({ context: NO_CONTEXT, checkpoint });
+        checkEqual(
+          await store.load({ ...LOCATOR, context: NO_CONTEXT }),
+          checkpoint,
+          "the loaded checkpoint",
+        );
+        checkEqual(
+          (await store.get(LOCATOR))?.checkpoint,
+          checkpoint,
+          "the checkpoint get returned",
+        );
+      }),
+    );
+  };
+
+  roundTrips("a step result with models loads back equal", (base) =>
+    withSteps(base, {
+      a: completedStep("a", {
+        models: {
+          requested: ["model-a"],
+          resolved: ["model-a-2026-01"],
+          unknown: false,
+        },
+      }),
+      b: completedStep("b", {
+        models: { requested: [], resolved: [], unknown: true },
+      }),
+    }),
+  );
+
+  roundTrips(
+    "a step record with the requested model and the input fingerprint at its limits loads back equal",
+    (base) =>
+      withSteps(base, {
+        small: {
+          ...completedStep("small"),
+          model: { requested: "model-a" },
+          inputLength: MIN_INPUT_CHUNK_SIZE + 1,
+          inputDigest: {
+            chunkSize: MIN_INPUT_CHUNK_SIZE,
+            chunks: digests(2),
+          },
+        },
+        large: {
+          ...completedStep("large"),
+          model: {},
+          inputLength: MIN_INPUT_CHUNK_SIZE * MAX_INPUT_CHUNKS,
+          inputDigest: {
+            chunkSize: MIN_INPUT_CHUNK_SIZE,
+            chunks: digests(MAX_INPUT_CHUNKS),
+          },
+        },
+        short: { ...completedStep("short"), inputLength: 10 },
+      }),
+  );
+
+  for (const count of [1, MAX_STEP_ACCEPTANCES]) {
+    roundTrips(
+      `a completed step with ${count} acceptance${count === 1 ? "" : "s"} loads back equal and in order`,
+      (base) =>
+        withSteps(base, {
+          a: {
+            ...completedStep("a"),
+            acceptances: Array.from({ length: count }, (_, i) => ({
+              kind: "model" as const,
+              from: `model-${i}`,
+              to: `model-${i + 1}`,
+              reason: `reason ${i}`,
+              ...(i % 2 === 0 ? { approvedBy: "operator" } : {}),
+              acceptedAt: 1000 + i,
+            })),
+          },
+        }),
+    );
+  }
+
+  roundTrips(
+    "a checkpoint without models or step records still loads",
+    (base) => withSteps(base, { a: completedStep("a") }),
+  );
+
+  const malformed: [string, Record<string, unknown>][] = [
+    ["models with a missing field", { result: { models: { requested: [] } } }],
+    [
+      "models with a non-boolean unknown",
+      { result: { models: { requested: [], resolved: [], unknown: "no" } } },
+    ],
+    ["a model with an empty requested id", { model: { requested: "" } }],
+    [
+      "an input fingerprint without a length",
+      {
+        inputDigest: { chunkSize: MIN_INPUT_CHUNK_SIZE, chunks: digests(2) },
+      },
+    ],
+    [
+      "an input fingerprint with a chunk count that does not match",
+      {
+        inputLength: MIN_INPUT_CHUNK_SIZE * 3,
+        inputDigest: { chunkSize: MIN_INPUT_CHUNK_SIZE, chunks: digests(2) },
+      },
+    ],
+    [
+      "more acceptances than a step may hold",
+      {
+        acceptances: Array.from(
+          { length: MAX_STEP_ACCEPTANCES + 1 },
+          (_, i) => ({
+            kind: "model",
+            from: `m${i}`,
+            to: `m${i + 1}`,
+            reason: "r",
+            acceptedAt: 1,
+          }),
+        ),
+      },
+    ],
+    ["an empty acceptances list", { acceptances: [] }],
+  ];
+  for (const [what, patch] of malformed) {
+    add(
+      `a stored checkpoint with ${what} is rejected as corrupt, and put refuses it`,
+      withStore(async (store) => {
+        const good = withSteps(await makeCheckpoint(LOCATOR), {
+          a: completedStep("a"),
+        });
+        await store.put({ checkpoint: good });
+        const bad = withSteps(await makeCheckpoint(LOCATOR), {
+          a: mergeStep(completedStep("a"), patch),
+        });
+        const refused = await rejection(store.put({ checkpoint: bad }));
+        checkEqual(
+          reasonOf(refused),
+          "checkpoint_schema_invalid",
+          "the failure reason of put",
+        );
+        const tampered = tamperedView(store, (stored) => ({
+          ...stored,
+          checkpoint: bad,
+        }));
+        const viaLoad = await rejection(
+          tampered.load({ ...LOCATOR, context: NO_CONTEXT }),
+        );
+        check(
+          hasCode(viaLoad, "WORKFLOW_STORAGE_CORRUPT"),
+          "a malformed stored step was returned or failed with another error",
+        );
+        checkEqual(
+          (await store.get(LOCATOR))?.checkpoint,
+          good,
+          "the stored checkpoint",
+        );
+      }),
+    );
+  }
 
   // --- Capability flags ---------------------------------------------------
 
@@ -1267,6 +1437,59 @@ async function makeCheckpoint(
     input: "input",
     now,
   });
+}
+
+function digests(count: number): string[] {
+  return Array.from({ length: count }, (_, i) =>
+    i.toString(16).padStart(12, "0"),
+  );
+}
+
+function completedStep(
+  id: string,
+  result: Record<string, unknown> = {},
+): WorkflowCheckpointV1["steps"][string] {
+  return {
+    id,
+    agentName: "agent",
+    inputHash: `sha256:${"a".repeat(64)}`,
+    status: "completed",
+    attempts: 1,
+    startedAt: 1,
+    updatedAt: 2,
+    completedAt: 2,
+    result: {
+      status: "completed",
+      id,
+      agentName: "agent",
+      output: "out",
+      attempts: 1,
+      startedAt: 1,
+      completedAt: 2,
+      ...result,
+    },
+  } as WorkflowCheckpointV1["steps"][string];
+}
+
+function withSteps(
+  base: WorkflowCheckpointV1,
+  steps: Record<string, WorkflowCheckpointV1["steps"][string]>,
+): WorkflowCheckpointV1 {
+  return { ...base, steps };
+}
+
+function mergeStep(
+  step: WorkflowCheckpointV1["steps"][string],
+  patch: Record<string, unknown>,
+): WorkflowCheckpointV1["steps"][string] {
+  const { result, ...rest } = patch;
+  return {
+    ...step,
+    ...rest,
+    ...(result === undefined
+      ? {}
+      : { result: { ...step.result, ...(result as object) } }),
+  } as WorkflowCheckpointV1["steps"][string];
 }
 
 function check(condition: boolean, message: string): asserts condition {

@@ -13,11 +13,13 @@
  */
 
 import { rmSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { SqliteWorkflowCheckpointStore } from "../../../../../src/workflows/checkpoint/sqlite/index.js";
 import { buildCheckpoint } from "./checkpoint-worker.js";
 
 const output =
-  process.argv[2] ?? new URL("checkpoint-v1.db", import.meta.url).pathname;
+  process.argv[2] ??
+  fileURLToPath(new URL("checkpoint-v1.db", import.meta.url));
 
 for (const suffix of ["", "-wal", "-shm"]) {
   rmSync(output + suffix, { force: true });

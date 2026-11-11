@@ -1100,7 +1100,11 @@ from the 0.6.0 tag.
   store does not change: it was `ADKSessionCheckpointStore` before this
   addition and still is; a provider is used only when you pass or select one.
   On Windows the SQLite stores and the JSONL exporter set no owner-only mode and
-  refuse symbolic links from `lstat`; see
+  refuse symbolic links from `lstat`. The Claude SQLite session store now
+  opens through the same shared helper: it still takes the write lock
+  (`BEGIN IMMEDIATE`) on open, also for a schema that is already current, as
+  before; on Windows a symbolic link at the database path is now refused
+  before the open, and no mode is set or checked there. See
   [Choosing storage providers](./docs/storage-providers.md) and
   [Workflow durability](./docs/workflow-durability.md).
 

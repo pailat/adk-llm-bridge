@@ -11,6 +11,7 @@ import {
 import { dirname, resolve } from "node:path";
 import {
   openSqliteDatabase,
+  requireNodeSqlite,
   type SqliteDatabaseHandle,
   type SqliteOpenFailure,
   type SqliteStatementHandle,
@@ -136,10 +137,10 @@ const SCHEMA_MIGRATIONS = [
  *   existing file keeps its mode and must be a regular file owned by this
  *   user.
  * - On Windows there is no `O_NOFOLLOW`, POSIX owner or mode: a symbolic link
- *   or junction at the path is refused from `lstat` before the open (a link
- *   swapped in after that check is not caught), `O_EXCL` still refuses one
- *   that appears while the file is created, and no owner or mode check is
- *   made, because NTFS access follows the directory's ACL.
+ *   or junction at the path is refused from `lstat` before the open (that
+ *   check is the only guard: `O_EXCL` does not refuse a link that appears
+ *   after it, since the create and the reopen follow it), and no owner or
+ *   mode check is made, because NTFS access follows the directory's ACL.
  *
  * @param path - The database path.
  * @throws {@link SqliteSessionStoreError} with code
@@ -293,7 +294,9 @@ export class SqliteSessionStore implements SessionStore {
     const path =
       options.path === ":memory:" ? ":memory:" : resolve(options.path);
     if (path !== ":memory:") {
-      prepareDatabaseFile(path);
+      // A runtime without node:sqlite must create no directory or file.
+      requireNodeSqlite(failOpen);
+      prepareDatabaseFile(options.path);
     }
     // prepareDatabaseFile has created or checked the file without following
     // a symlink, so the helper opens that checked file as it is.

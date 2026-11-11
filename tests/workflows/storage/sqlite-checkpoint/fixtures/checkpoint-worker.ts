@@ -10,6 +10,7 @@
  * and `spawnWorker`.
  */
 
+import { fileURLToPath } from "node:url";
 import { openSqliteDatabase } from "../../../../../src/utils/sqlite-database.js";
 import {
   createWorkflowCheckpoint,
@@ -20,7 +21,7 @@ import { SqliteWorkflowCheckpointStore } from "../../../../../src/workflows/chec
 import { workflowCheckpointRevision } from "../../../../../src/workflows/checkpoint/store.js";
 import { defineWorkflow } from "../../../../../src/workflows/definition.js";
 
-const WORKER_PATH = new URL(import.meta.url).pathname;
+const WORKER_PATH = fileURLToPath(new URL(import.meta.url));
 
 const definitions = new Map<string, ReturnType<typeof defineWorkflow>>();
 
@@ -118,17 +119,22 @@ export function spawnWorker(
     }
   })();
   let finished = false;
+  let killed = false;
   const exited = child.exited.then(async (code) => {
     await pumping;
     await pumpingErrors;
     finished = true;
     for (const wake of waiters.splice(0)) wake();
-    return child.signalCode ? null : code;
+    // Windows has no signals: a killed process reports an exit code there.
+    return child.signalCode || (killed && process.platform === "win32")
+      ? null
+      : code;
   });
   return {
     pid: child.pid,
     lines,
     kill: (signal = "SIGKILL") => {
+      killed = true;
       try {
         child.kill(signal);
       } catch {

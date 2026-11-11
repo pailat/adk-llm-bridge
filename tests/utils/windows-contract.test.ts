@@ -105,15 +105,19 @@ function modeOf(path: string): number {
 }
 
 describe("SQLite database helper on Windows", () => {
-  test("an existing database that others can read is neither tightened nor refused", async () => {
-    const path = join(tempDir(), "data.db");
-    sqlite(path).close();
-    chmodSync(path, 0o644);
+  // Skipped on a real Windows host: the mode it reports ignores `chmod`.
+  test.skipIf(process.platform === "win32")(
+    "an existing database that others can read is neither tightened nor refused",
+    async () => {
+      const path = join(tempDir(), "data.db");
+      sqlite(path).close();
+      chmodSync(path, 0o644);
 
-    await asWindows(() => sqlite(path));
+      await asWindows(() => sqlite(path));
 
-    expect(modeOf(path)).toBe(0o644);
-  });
+      expect(modeOf(path)).toBe(0o644);
+    },
+  );
 
   test("a symbolic link at the path is refused without O_NOFOLLOW and its target is left alone", async () => {
     const dir = tempDir();
@@ -225,28 +229,32 @@ describe("SqliteSessionStore on Windows", () => {
 });
 
 describe("JsonlWorkflowEventExporter on Windows", () => {
-  test("a directory others can read is left as it is, not tightened", async () => {
-    const directory = tempDir();
-    await chmod(directory, 0o750);
-    const exporter = new JsonlWorkflowEventExporter({ directory });
-    closers.push(() => exporter.close());
+  // Skipped on a real Windows host: the mode it reports ignores `chmod`.
+  test.skipIf(process.platform === "win32")(
+    "a directory others can read is left as it is, not tightened",
+    async () => {
+      const directory = tempDir();
+      await chmod(directory, 0o750);
+      const exporter = new JsonlWorkflowEventExporter({ directory });
+      closers.push(() => exporter.close());
 
-    await asWindows(() =>
-      exporter.append({
-        executionId: "exec-1",
-        records: [
-          {
-            id: "r1",
-            executionId: "exec-1",
-            kind: "workflow",
-            type: "custom",
-            timestamp: 1,
-            payload: {},
-          },
-        ],
-      }),
-    );
+      await asWindows(() =>
+        exporter.append({
+          executionId: "exec-1",
+          records: [
+            {
+              id: "r1",
+              executionId: "exec-1",
+              kind: "workflow",
+              type: "custom",
+              timestamp: 1,
+              payload: {},
+            },
+          ],
+        }),
+      );
 
-    expect((await stat(directory)).mode & 0o777).toBe(0o750);
-  });
+      expect((await stat(directory)).mode & 0o777).toBe(0o750);
+    },
+  );
 });

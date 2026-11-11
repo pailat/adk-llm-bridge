@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { fileURLToPath } from "node:url";
 import {
   createEvent,
   InMemoryArtifactService,
@@ -1073,14 +1074,18 @@ describe("WorkflowEventExportPipeline: offerAdkEvent", () => {
 });
 
 describe("WorkflowEventExportPipeline: timers do not keep the process alive", () => {
-  const pipelineModule = new URL(
-    "../../../../src/workflows/storage/event-export-pipeline.ts",
-    import.meta.url,
-  ).pathname;
-  const exporterModule = new URL(
-    "../../../../src/workflows/storage/event-exporter.ts",
-    import.meta.url,
-  ).pathname;
+  const pipelineModule = fileURLToPath(
+    new URL(
+      "../../../../src/workflows/storage/event-export-pipeline.ts",
+      import.meta.url,
+    ),
+  );
+  const exporterModule = fileURLToPath(
+    new URL(
+      "../../../../src/workflows/storage/event-exporter.ts",
+      import.meta.url,
+    ),
+  );
 
   async function runScript(
     body: string,

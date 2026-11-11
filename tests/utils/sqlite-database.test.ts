@@ -15,7 +15,7 @@ import {
 } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative, sep } from "node:path";
 import {
   isSqliteBusyError,
   type OpenSqliteDatabaseOptions,
@@ -576,14 +576,22 @@ describe("openSqliteDatabase: options and pragmas", () => {
 
 describe("node:sqlite is loaded only by the helper, and lazily", () => {
   test("no other file under src references node:sqlite", () => {
-    const out = execFileSync(
-      "grep",
-      ["-rlE", "[\"']node:sqlite[\"']", join(import.meta.dir, "../../src")],
-      { encoding: "utf8" },
-    ).trim();
-    expect(out.split("\n").map((p) => p.replace(/^.*\/src\//, "src/"))).toEqual(
-      ["src/utils/sqlite-database.ts"],
-    );
+    // Walked in code: Windows has no `grep`.
+    const found: string[] = [];
+    const walk = (directory: string): void => {
+      for (const entry of readdirSync(directory, { withFileTypes: true })) {
+        const full = join(directory, entry.name);
+        if (entry.isDirectory()) walk(full);
+        else if (/["']node:sqlite["']/.test(readFileSync(full, "utf8"))) {
+          found.push(full);
+        }
+      }
+    };
+    const src = join(import.meta.dir, "../../src");
+    walk(src);
+    expect(
+      found.map((path) => relative(src, path).split(sep).join("/")),
+    ).toEqual(["utils/sqlite-database.ts"]);
   });
 
   test("the helper has no static import of node:sqlite", () => {

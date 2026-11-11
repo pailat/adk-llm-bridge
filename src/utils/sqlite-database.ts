@@ -40,8 +40,50 @@ interface NodeSqliteModule {
   ) => NodeSqliteDatabase;
 }
 
-function loadNodeSqlite(): NodeSqliteModule {
-  return createRequire(import.meta.url)("node:sqlite") as NodeSqliteModule;
+let loadNodeSqlite = (): NodeSqliteModule =>
+  createRequire(import.meta.url)("node:sqlite") as NodeSqliteModule;
+
+/**
+ * Replaces how `node:sqlite` is loaded, so a test can stand in for a runtime
+ * that lacks it. Returns a function that restores the real loader.
+ *
+ * @internal
+ */
+export function overrideNodeSqliteLoaderForTests(
+  loader: () => unknown,
+): () => void {
+  const previous = loadNodeSqlite;
+  loadNodeSqlite = loader as () => NodeSqliteModule;
+  return () => {
+    loadNodeSqlite = previous;
+  };
+}
+
+/**
+ * Loads `node:sqlite` or throws the `unavailable` failure built by `fail`.
+ * A caller that creates files before {@link openSqliteDatabase} calls this
+ * first, so a runtime without `node:sqlite` creates nothing.
+ *
+ * @internal
+ */
+export function requireNodeSqlite(
+  fail: OpenSqliteDatabaseOptions["fail"],
+): void {
+  loadChecked(fail);
+}
+
+function loadChecked(
+  fail: OpenSqliteDatabaseOptions["fail"],
+): NodeSqliteModule {
+  try {
+    return loadNodeSqlite();
+  } catch (error) {
+    throw fail(
+      "unavailable",
+      "The built-in node:sqlite module is not available: it needs Node 22.13 or later, or Bun. On Node 22.5 to 22.12 run with --experimental-sqlite.",
+      error,
+    );
+  }
 }
 
 function errcodeOf(error: unknown): number | undefined {
@@ -121,9 +163,10 @@ export interface OpenSqliteDatabaseOptions {
    * `0700`.
    *
    * On Windows there is no `O_NOFOLLOW`: `reject` is decided from `lstat`
-   * before the open (a symbolic link or junction is refused), and
-   * `O_CREAT | O_EXCL` still fails on a link that appears at the path first.
-   * A link swapped in between the check and SQLite's own open is not caught.
+   * before the open (a symbolic link or junction is refused). That check is
+   * the only guard: `O_CREAT | O_EXCL` does not refuse a link that appears
+   * after it (the create follows the link), so a link swapped in between the
+   * check and the create, or SQLite's own open, is not caught.
    * The modes `0600` and `0700`, and the owner-only tightening of an existing
    * file, have no effect there: NTFS access is set by the parent directory's
    * ACL, and the file is neither tightened nor refused for its mode.
@@ -308,16 +351,7 @@ export function openSqliteDatabase(
     );
   }
 
-  let sqlite: NodeSqliteModule;
-  try {
-    sqlite = loadNodeSqlite();
-  } catch (error) {
-    throw fail(
-      "unavailable",
-      "The built-in node:sqlite module is not available: it needs Node 22.13 or later, or Bun. On Node 22.5 to 22.12 run with --experimental-sqlite.",
-      error,
-    );
-  }
+  const sqlite = loadChecked(fail);
   if (!inMemory) prepareFile(path, symlinks, fail);
 
   let raw: NodeSqliteDatabase | undefined;

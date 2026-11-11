@@ -16,25 +16,33 @@ const here = import.meta.path;
 if (CHILD === undefined) {
   describe("SqliteWorkflowEventExporter when the path is taken between the check and the create", () => {
     for (const kind of ["symlink", "directory"]) {
-      test(`refuses a ${kind} that appeared there, and does not follow or use it`, () => {
-        const dir = mkdtempSync(join(tmpdir(), "sqlite-events-race-"));
-        try {
-          const result = spawnSync("bun", ["test", here], {
-            env: {
-              ...process.env,
-              EVENT_EXPORTER_RACE_CHILD: kind,
-              EVENT_EXPORTER_RACE_PATH: join(dir, "data.db"),
-            },
-            encoding: "utf8",
-            timeout: 60_000,
-          });
-          expect(result.stdout + result.stderr).toContain("1 pass");
-          expect(result.status).toBe(0);
-          expect(realFs.existsSync(join(dir, "data.db.elsewhere"))).toBe(false);
-        } finally {
-          rmSync(dir, { recursive: true, force: true });
-        }
-      });
+      // Skipped on Windows for the symbolic link: there is no `O_NOFOLLOW`, so a
+      // link that appears after the check can be followed by the create; the
+      // check before the open is the only guard there.
+      test.skipIf(kind === "symlink" && process.platform === "win32")(
+        `refuses a ${kind} that appeared there, and does not follow or use it`,
+        () => {
+          const dir = mkdtempSync(join(tmpdir(), "sqlite-events-race-"));
+          try {
+            const result = spawnSync(process.execPath, ["test", here], {
+              env: {
+                ...process.env,
+                EVENT_EXPORTER_RACE_CHILD: kind,
+                EVENT_EXPORTER_RACE_PATH: join(dir, "data.db"),
+              },
+              encoding: "utf8",
+              timeout: 60_000,
+            });
+            expect(result.stdout + result.stderr).toContain("1 pass");
+            expect(result.status).toBe(0);
+            expect(realFs.existsSync(join(dir, "data.db.elsewhere"))).toBe(
+              false,
+            );
+          } finally {
+            rmSync(dir, { recursive: true, force: true });
+          }
+        },
+      );
     }
   });
 } else {

@@ -691,41 +691,40 @@ describe("JsonlWorkflowEventExporter writer lock", () => {
     expect(result.records[0]?.sequence).toBe(1);
   });
 
-  // Skipped on Windows: POSIX modes.
-  test.skipIf(process.platform === "win32")(
-    "a read that finds a torn last line takes no lock, changes nothing and leaves the directory to a writer",
-    async () => {
-      const directory = await tempDirectory();
-      const seeder = exporterOver(directory);
-      await seeder.append({
-        executionId: "exec-1",
-        records: [record("exec-1", "r1"), record("exec-1", "r2")],
-      });
-      await seeder.close();
-      const file = fileFor(directory, "exec-1");
-      await appendFile(file, '{"id":"torn"');
-      await chmod(directory, 0o750);
-      const before = await readFile(file, "utf8");
+  test("a read that finds a torn last line takes no lock, changes nothing and leaves the directory to a writer", async () => {
+    const directory = await tempDirectory();
+    const seeder = exporterOver(directory);
+    await seeder.append({
+      executionId: "exec-1",
+      records: [record("exec-1", "r1"), record("exec-1", "r2")],
+    });
+    await seeder.close();
+    const file = fileFor(directory, "exec-1");
+    await appendFile(file, '{"id":"torn"');
+    // Skipped on Windows: POSIX modes.
+    if (process.platform !== "win32") await chmod(directory, 0o750);
+    const before = await readFile(file, "utf8");
 
-      const reader = exporterOver(directory);
-      const page = await reader.read({ executionId: "exec-1" });
-      expect(page.records.map((r) => r.sequence)).toEqual([1, 2]);
-      expect(await readFile(file, "utf8")).toBe(before);
-      expect(await readdir(directory)).not.toContain(".writer.lock");
+    const reader = exporterOver(directory);
+    const page = await reader.read({ executionId: "exec-1" });
+    expect(page.records.map((r) => r.sequence)).toEqual([1, 2]);
+    expect(await readFile(file, "utf8")).toBe(before);
+    expect(await readdir(directory)).not.toContain(".writer.lock");
+    if (process.platform !== "win32") {
       expect((await stat(directory)).mode & 0o777).toBe(0o750);
+    }
 
-      // The reader stays open while a restarted writer takes the directory.
-      const writer = exporterOver(directory);
-      const result = await writer.append({
-        executionId: "exec-1",
-        records: [record("exec-1", "r3")],
-      });
-      expect(result.records[0]?.sequence).toBe(3);
-      expect(await readFile(file, "utf8")).not.toContain("torn");
-      const again = await reader.read({ executionId: "exec-1" });
-      expect(again.records.map((r) => r.sequence)).toEqual([1, 2, 3]);
-    },
-  );
+    // The reader stays open while a restarted writer takes the directory.
+    const writer = exporterOver(directory);
+    const result = await writer.append({
+      executionId: "exec-1",
+      records: [record("exec-1", "r3")],
+    });
+    expect(result.records[0]?.sequence).toBe(3);
+    expect(await readFile(file, "utf8")).not.toContain("torn");
+    const again = await reader.read({ executionId: "exec-1" });
+    expect(again.records.map((r) => r.sequence)).toEqual([1, 2, 3]);
+  });
 
   test("a health check does not take the writer lock", async () => {
     const directory = await tempDirectory();

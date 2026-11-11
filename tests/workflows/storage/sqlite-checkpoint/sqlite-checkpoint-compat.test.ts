@@ -8,6 +8,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { openSqliteDatabase } from "../../../../src/utils/sqlite-database.js";
 import { SqliteWorkflowCheckpointStore } from "../../../../src/workflows/checkpoint/sqlite/index.js";
 import { buildCheckpoint } from "./fixtures/checkpoint-worker.js";
@@ -25,9 +26,12 @@ import { buildCheckpoint } from "./fixtures/checkpoint-worker.js";
 // to version 2, this fixture stays at version 1 and is migrated on open.
 
 const FIXTURE_DIR = new URL("./fixtures/", import.meta.url);
-const FIXTURE_DATABASE = new URL("checkpoint-v1.db", FIXTURE_DIR).pathname;
-const FIXTURE_GENERATOR = new URL("generate-checkpoint-v1.ts", FIXTURE_DIR)
-  .pathname;
+const FIXTURE_DATABASE = fileURLToPath(
+  new URL("checkpoint-v1.db", FIXTURE_DIR),
+);
+const FIXTURE_GENERATOR = fileURLToPath(
+  new URL("generate-checkpoint-v1.ts", FIXTURE_DIR),
+);
 
 const directories: string[] = [];
 const stores: SqliteWorkflowCheckpointStore[] = [];

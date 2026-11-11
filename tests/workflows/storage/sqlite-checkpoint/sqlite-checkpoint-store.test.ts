@@ -188,6 +188,7 @@ describe("SqliteWorkflowCheckpointStore database file", () => {
     );
   });
 
+  // Skipped on Windows: there are no FIFOs.
   test.skipIf(process.platform === "win32")(
     "rejects a FIFO at the database path without blocking",
     async () => {

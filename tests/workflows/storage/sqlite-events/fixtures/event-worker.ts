@@ -25,6 +25,7 @@
  */
 
 import { rmSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { openSqliteDatabase } from "../../../../../src/utils/sqlite-database.js";
 import { SqliteWorkflowEventExporter } from "../../../../../src/workflows/events/sqlite/index.js";
 import type {
@@ -32,7 +33,7 @@ import type {
   WorkflowEventRecordKind,
 } from "../../../../../src/workflows/storage/event-exporter.js";
 
-const WORKER_PATH = new URL(import.meta.url).pathname;
+const WORKER_PATH = fileURLToPath(new URL(import.meta.url));
 
 /** Options of {@link buildRecord}. */
 export interface BuildRecordOptions {
@@ -122,17 +123,22 @@ export function spawnWorker(
     }
   })();
   let finished = false;
+  let killed = false;
   const exited = child.exited.then(async (code) => {
     await pumping;
     await pumpingErrors;
     finished = true;
     wakeAll();
-    return child.signalCode ? null : code;
+    // Windows has no signals: a killed process reports an exit code there.
+    return child.signalCode || (killed && process.platform === "win32")
+      ? null
+      : code;
   });
   return {
     pid: child.pid,
     lines,
     kill: (signal = "SIGKILL") => {
+      killed = true;
       try {
         child.kill(signal);
       } catch {
@@ -403,7 +409,7 @@ async function main(): Promise<void> {
     }
     case "generate-v1": {
       const output =
-        args.output ?? new URL("events-v1.db", import.meta.url).pathname;
+        args.output ?? fileURLToPath(new URL("events-v1.db", import.meta.url));
       for (const suffix of ["", "-wal", "-shm"]) {
         rmSync(output + suffix, { force: true });
       }

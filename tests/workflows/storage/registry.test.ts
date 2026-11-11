@@ -733,7 +733,7 @@ test("driver missing", async () => {
 });
 `,
     );
-    const child = Bun.spawn(["bun", "test", script], {
+    const child = Bun.spawn([process.execPath, "test", script], {
       cwd: dir,
       stdout: "pipe",
       stderr: "pipe",

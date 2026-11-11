@@ -8,6 +8,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { openSqliteDatabase } from "../../../../src/utils/sqlite-database.js";
 import { SqliteWorkflowEventExporter } from "../../../../src/workflows/events/sqlite/index.js";
 import { buildRecord } from "./fixtures/event-worker.js";
@@ -25,8 +26,10 @@ import { buildRecord } from "./fixtures/event-worker.js";
 // to version 2, this fixture stays at version 1 and is migrated on open.
 
 const FIXTURE_DIR = new URL("./fixtures/", import.meta.url);
-const FIXTURE_DATABASE = new URL("events-v1.db", FIXTURE_DIR).pathname;
-const FIXTURE_GENERATOR = new URL("event-worker.ts", FIXTURE_DIR).pathname;
+const FIXTURE_DATABASE = fileURLToPath(new URL("events-v1.db", FIXTURE_DIR));
+const FIXTURE_GENERATOR = fileURLToPath(
+  new URL("event-worker.ts", FIXTURE_DIR),
+);
 
 const directories: string[] = [];
 const exporters: SqliteWorkflowEventExporter[] = [];

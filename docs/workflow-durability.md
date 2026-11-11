@@ -153,6 +153,20 @@ with the file-system store fix; this section does not repeat it.
   that call rejects with the file system error and can be repeated. Releasing
   the writer lock ignores a failed delete, as on POSIX.
 
+### Known limits of the JSONL exporter lock
+
+- **Leftover takeover files are not swept.** A process killed in the middle of
+  a lock takeover can leave a `.writer.lock.takeover-*` claim or a `*.tmp`
+  staging file in the directory. They are harmless and are removed by hand: no
+  process deletes a file another process created, because that rule is what
+  keeps a crash from leaving two writers.
+- **A paused claimer can remove a new lock.** A process that wins a takeover
+  and is then paused for more than 60 seconds between its last check of the
+  stale lock and the delete can remove a lock a new writer created in the
+  meantime. Deleting a file only if it still holds a given token is not
+  possible with the file system calls Node offers, and the writer notices the
+  loss at its next heartbeat or write and stops.
+
 ## Checkpoint size
 
 One execution has one checkpoint, and it grows with every step that
