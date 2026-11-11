@@ -1,5 +1,10 @@
-import { describe, expect, it } from "bun:test";
+import { it as bunIt, describe, expect } from "bun:test";
 import { registerCustomProvider } from "../../../src/index.js";
+
+// Every test here runs a fixture in a cold child process (a few hundred ms
+// alone, several seconds on a loaded host), so the 5 s default is not a
+// deadline on the behavior under test.
+const it = (name: string, run: () => void) => bunIt(name, run, 60_000);
 
 const fixtureResults = new Map<string, unknown>();
 
