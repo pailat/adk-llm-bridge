@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SqliteSessionStore } from "../../../src/agents/session-store/sqlite.js";
+import { openRawDatabase } from "../../utils/fixtures/raw-sqlite.js";
 
 const dirs: string[] = [];
 
@@ -16,8 +17,7 @@ test("opening a current-schema file waits for another connection's write lock, a
   dirs.push(dir);
   const path = join(dir, "s.db");
   new SqliteSessionStore({ path }).close();
-  const { Database } = await import("bun:sqlite");
-  const holder = new Database(path);
+  const holder = openRawDatabase(path);
   try {
     holder.exec("BEGIN IMMEDIATE");
     expect(() => new SqliteSessionStore({ path, busyTimeoutMs: 0 })).toThrow();

@@ -61,6 +61,11 @@ afterEach(async () => {
     rmSync(dir, { recursive: true, force: true });
 });
 
+// Node freezes `fs.constants`, so off Windows there `O_NOFOLLOW` stays set and
+// only the platform is changed; on a real Windows run it is absent anyway.
+const noFollowWritable =
+  Object.getOwnPropertyDescriptor(constants, "O_NOFOLLOW")?.writable !== false;
+
 /** Runs `run` with `process.platform` set to win32 and no `O_NOFOLLOW`. */
 async function asWindows<T>(run: () => T | Promise<T>): Promise<T> {
   const platform = Object.getOwnPropertyDescriptor(process, "platform");
@@ -69,11 +74,15 @@ async function asWindows<T>(run: () => T | Promise<T>): Promise<T> {
     value: "win32",
     configurable: true,
   });
-  (constants as { O_NOFOLLOW?: number }).O_NOFOLLOW = undefined;
+  if (noFollowWritable) {
+    (constants as { O_NOFOLLOW?: number }).O_NOFOLLOW = undefined;
+  }
   try {
     return await run();
   } finally {
-    (constants as { O_NOFOLLOW?: number }).O_NOFOLLOW = noFollow;
+    if (noFollowWritable) {
+      (constants as { O_NOFOLLOW?: number }).O_NOFOLLOW = noFollow;
+    }
     if (platform) Object.defineProperty(process, "platform", platform);
   }
 }

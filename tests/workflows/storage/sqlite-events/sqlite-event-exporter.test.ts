@@ -25,6 +25,7 @@ import {
 } from "../../../../src/workflows/storage/conformance/index.js";
 import { isWorkflowStorageError } from "../../../../src/workflows/storage/errors.js";
 import type { BaseWorkflowEventExporter } from "../../../../src/workflows/storage/event-exporter.js";
+import { isBun } from "../../../utils/fixtures/runtime.js";
 import { buildCheckpoint } from "../sqlite-checkpoint/fixtures/checkpoint-worker.js";
 import {
   buildRecord,
@@ -380,38 +381,42 @@ describe("SqliteWorkflowEventExporter database file", () => {
 
 // --- Settings of the connection --------------------------------------------
 
-describe("SqliteWorkflowEventExporter connection settings", () => {
-  async function pragmasOf(args: Record<string, unknown>) {
-    const worker = spawnWorker("pragmas", {
-      path: join(tempDir(), "p.db"),
-      ...args,
-    });
-    workers.push(worker);
-    const line = await worker.waitForLine((text) =>
-      text.includes("journalMode"),
-    );
-    return JSON.parse(line) as Record<string, unknown>;
-  }
+// Skipped under Node: the worker wraps the shared helper with `mock.module` of `bun:test`.
+describe.skipIf(!isBun)(
+  "SqliteWorkflowEventExporter connection settings",
+  () => {
+    async function pragmasOf(args: Record<string, unknown>) {
+      const worker = spawnWorker("pragmas", {
+        path: join(tempDir(), "p.db"),
+        ...args,
+      });
+      workers.push(worker);
+      const line = await worker.waitForLine((text) =>
+        text.includes("journalMode"),
+      );
+      return JSON.parse(line) as Record<string, unknown>;
+    }
 
-  test("opens through the shared helper once, rejecting symbolic links, in WAL mode with a short per-statement busy timeout", async () => {
-    const settings = await pragmasOf({ busyTimeoutMs: 1234 });
-    expect(settings.openCalls).toBe(1);
-    expect(settings.symlinks).toBe("reject");
-    expect(String(settings.journalMode).toLowerCase()).toBe("wal");
-    // The configured wait happens between statements, off the event loop.
-    expect(settings.busyTimeout).toBe(20);
-  }, 30_000);
+    test("opens through the shared helper once, rejecting symbolic links, in WAL mode with a short per-statement busy timeout", async () => {
+      const settings = await pragmasOf({ busyTimeoutMs: 1234 });
+      expect(settings.openCalls).toBe(1);
+      expect(settings.symlinks).toBe("reject");
+      expect(String(settings.journalMode).toLowerCase()).toBe("wal");
+      // The configured wait happens between statements, off the event loop.
+      expect(settings.busyTimeout).toBe(20);
+    }, 30_000);
 
-  test("each statement blocks for at most the 20 ms busy slice by default", async () => {
-    expect((await pragmasOf({})).busyTimeout).toBe(20);
-  }, 30_000);
+    test("each statement blocks for at most the 20 ms busy slice by default", async () => {
+      expect((await pragmasOf({})).busyTimeout).toBe(20);
+    }, 30_000);
 
-  test("synchronous is normal by default and full when asked", async () => {
-    // SQLite reports synchronous as 1 for NORMAL and 2 for FULL.
-    expect((await pragmasOf({})).synchronous).toBe(1);
-    expect((await pragmasOf({ synchronous: "full" })).synchronous).toBe(2);
-  }, 30_000);
-});
+    test("synchronous is normal by default and full when asked", async () => {
+      // SQLite reports synchronous as 1 for NORMAL and 2 for FULL.
+      expect((await pragmasOf({})).synchronous).toBe(1);
+      expect((await pragmasOf({ synchronous: "full" })).synchronous).toBe(2);
+    }, 30_000);
+  },
+);
 
 // --- Layout ------------------------------------------------------------------
 

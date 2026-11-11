@@ -1,10 +1,10 @@
-import { Database } from "bun:sqlite";
 import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SqliteWorkflowCheckpointStore } from "../../../../src/workflows/checkpoint/sqlite/index.js";
 import { SqliteWorkflowEventExporter } from "../../../../src/workflows/events/sqlite/index.js";
+import { openRawDatabase } from "../../../utils/fixtures/raw-sqlite.js";
 import { buildCheckpoint } from "../sqlite-checkpoint/fixtures/checkpoint-worker.js";
 import { buildRecord } from "./fixtures/event-worker.js";
 
@@ -57,7 +57,7 @@ const REFERENCE_RUNS = 3;
 
 function referenceMilliseconds(dir: string, run: number): number {
   const started = performance.now();
-  const db = new Database(join(dir, `reference-${run}.db`));
+  const db = openRawDatabase(join(dir, `reference-${run}.db`));
   try {
     db.exec(
       "PRAGMA journal_mode=WAL; CREATE TABLE t (id INTEGER PRIMARY KEY, body TEXT)",

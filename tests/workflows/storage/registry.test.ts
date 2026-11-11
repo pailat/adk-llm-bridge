@@ -31,6 +31,7 @@ import {
   type WorkflowStorageUri,
   windowsDrivePath,
 } from "../../../src/workflows/storage/registry.js";
+import { isBun } from "../../utils/fixtures/runtime.js";
 
 const SECRET = "s3cr3t-p4ss";
 const tempRoots: string[] = [];
@@ -693,19 +694,22 @@ describe("registry errors", () => {
     expect(JSON.stringify(unsupported.details)).not.toContain(SECRET);
   });
 
-  test("a missing runtime module or peer is WORKFLOW_STORAGE_DRIVER_MISSING", async () => {
-    const dir = tempDir();
-    const root = join(import.meta.dir, "..", "..", "..");
-    const script = join(dir, "driver-missing.test.ts");
-    const registry = join(root, "src/workflows/storage/registry.ts");
-    const sqliteCheckpoint = join(
-      root,
-      "src/workflows/checkpoint/sqlite/index.ts",
-    );
-    const sqliteEvents = join(root, "src/workflows/events/sqlite/index.ts");
-    writeFileSync(
-      script,
-      `import { expect, mock, test } from "bun:test";
+  // Skipped under Node: the child test file uses `mock.module` of `bun:test`.
+  test.skipIf(!isBun)(
+    "a missing runtime module or peer is WORKFLOW_STORAGE_DRIVER_MISSING",
+    async () => {
+      const dir = tempDir();
+      const root = join(import.meta.dir, "..", "..", "..");
+      const script = join(dir, "driver-missing.test.ts");
+      const registry = join(root, "src/workflows/storage/registry.ts");
+      const sqliteCheckpoint = join(
+        root,
+        "src/workflows/checkpoint/sqlite/index.ts",
+      );
+      const sqliteEvents = join(root, "src/workflows/events/sqlite/index.ts");
+      writeFileSync(
+        script,
+        `import { expect, mock, test } from "bun:test";
 mock.module(${JSON.stringify(sqliteCheckpoint)}, () => {
   throw Object.assign(new Error("Cannot find module 'node:sqlite'"), { code: "ERR_MODULE_NOT_FOUND" });
 });
@@ -732,30 +736,32 @@ test("driver missing", async () => {
   expect(results.length).toBe(3);
 });
 `,
-    );
-    const child = Bun.spawn([process.execPath, "test", script], {
-      cwd: dir,
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    const timer = setTimeout(() => child.kill("SIGKILL"), 60_000);
-    const [stdout, stderr] = await Promise.all([
-      new Response(child.stdout).text(),
-      new Response(child.stderr).text(),
-    ]);
-    await child.exited;
-    clearTimeout(timer);
-    const line = `${stdout}\n${stderr}`
-      .split("\n")
-      .find((candidate) => candidate.startsWith("RESULT="));
-    if (line === undefined) throw new Error(`no result: ${stdout}\n${stderr}`);
-    const results = JSON.parse(line.slice("RESULT=".length)) as Array<{
-      code: string;
-      message: string;
-    }>;
-    for (const result of results) {
-      expect(result.code).toBe("WORKFLOW_STORAGE_DRIVER_MISSING");
-      expect(result.message).not.toContain(SECRET);
-    }
-  });
+      );
+      const child = Bun.spawn([process.execPath, "test", script], {
+        cwd: dir,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const timer = setTimeout(() => child.kill("SIGKILL"), 60_000);
+      const [stdout, stderr] = await Promise.all([
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
+      ]);
+      await child.exited;
+      clearTimeout(timer);
+      const line = `${stdout}\n${stderr}`
+        .split("\n")
+        .find((candidate) => candidate.startsWith("RESULT="));
+      if (line === undefined)
+        throw new Error(`no result: ${stdout}\n${stderr}`);
+      const results = JSON.parse(line.slice("RESULT=".length)) as Array<{
+        code: string;
+        message: string;
+      }>;
+      for (const result of results) {
+        expect(result.code).toBe("WORKFLOW_STORAGE_DRIVER_MISSING");
+        expect(result.message).not.toContain(SECRET);
+      }
+    },
+  );
 });

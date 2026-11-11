@@ -13,6 +13,7 @@ import {
   unlink,
 } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
+import { fsyncDirectory } from "../internal/directory-sync.js";
 import { isWorkflowStorageError, WorkflowStorageError } from "./errors.js";
 import {
   type AppendWorkflowEventRecordsResult,
@@ -222,7 +223,7 @@ export class JsonlWorkflowEventExporter extends BaseWorkflowEventExporter {
         await handle?.close().catch(() => undefined);
       }
       if (this.#sync === "none") this.#unsynced.add(state.path);
-      if (created) await syncDirectory(this.#directory);
+      if (created) await fsyncDirectory(this.#directory);
       for (const entry of added) {
         state.ids.set(entry.id, entry.sequence);
         if ((entry.sequence - 1) % MARK_INTERVAL === 0) {
@@ -357,7 +358,7 @@ export class JsonlWorkflowEventExporter extends BaseWorkflowEventExporter {
         this.#states.delete(target.executionId);
         this.#unsynced.delete(target.path);
       }
-      if (targets.length > 0) await syncDirectory(this.#directory);
+      if (targets.length > 0) await fsyncDirectory(this.#directory);
       return { executions: targets.length, records, hasMore };
     });
   }
@@ -788,18 +789,6 @@ async function writeFully(handle: FileHandle, buffer: Buffer): Promise<void> {
       buffer.length - written,
     );
     written += bytesWritten;
-  }
-}
-
-async function syncDirectory(directory: string): Promise<void> {
-  let handle: FileHandle | undefined;
-  try {
-    handle = await open(directory, constants.O_RDONLY);
-    await handle.sync();
-  } catch {
-    // Not every platform can sync a directory; the file itself is synced.
-  } finally {
-    await handle?.close().catch(() => undefined);
   }
 }
 

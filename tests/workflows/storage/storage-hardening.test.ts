@@ -1,4 +1,3 @@
-import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
 import {
   chmodSync,
@@ -33,6 +32,7 @@ import {
   getWorkflowCheckpointStoreFromUri,
   getWorkflowEventExporterFromUri,
 } from "../../../src/workflows/storage/registry.js";
+import { openRawDatabase } from "../../utils/fixtures/raw-sqlite.js";
 
 const dirs: string[] = [];
 
@@ -267,7 +267,7 @@ describe("SQLite checkpoint store under a held lock", () => {
       checkpoint: await checkpoint("e1"),
       expectedRevision: null,
     });
-    const holder = new Database(path);
+    const holder = openRawDatabase(path);
     holder.exec("BEGIN IMMEDIATE");
     let ticks = 0;
     const timer = setInterval(() => {

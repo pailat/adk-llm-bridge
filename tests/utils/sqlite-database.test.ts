@@ -24,6 +24,7 @@ import {
   type SqliteMigration,
   type SqliteOpenFailure,
 } from "../../src/utils/sqlite-database.js";
+import { isBun, preloadFlag, quietFlags } from "./fixtures/runtime.js";
 
 class TestFailure extends Error {
   constructor(
@@ -145,25 +146,30 @@ describe("openSqliteDatabase: creating the file", () => {
     expect(readdirSync(elsewhere)).toEqual([]);
   });
 
-  test("checks again what another process created between the check and the create", () => {
-    // The race needs a replaced node:fs, so it runs in its own process.
-    const fixture = join(
-      import.meta.dir,
-      "fixtures",
-      "sqlite-database-create-race.ts",
-    );
-    const result = Bun.spawnSync([process.execPath, "test", fixture], {
-      cwd: join(import.meta.dir, "../.."),
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    const output = result.stdout.toString() + result.stderr.toString();
-    expect({ exitCode: result.exitCode, output }).toMatchObject({
-      exitCode: 0,
-    });
-    expect(output).toMatch(/\b3 pass\b/);
-    expect(output).toMatch(/\b0 fail\b/);
-  }, 20000);
+  // Skipped under Node: the fixture replaces `node:fs` with `mock.module` of `bun:test`.
+  test.skipIf(!isBun)(
+    "checks again what another process created between the check and the create",
+    () => {
+      // The race needs a replaced node:fs, so it runs in its own process.
+      const fixture = join(
+        import.meta.dir,
+        "fixtures",
+        "sqlite-database-create-race.ts",
+      );
+      const result = Bun.spawnSync([process.execPath, "test", fixture], {
+        cwd: join(import.meta.dir, "../.."),
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const output = result.stdout.toString() + result.stderr.toString();
+      expect({ exitCode: result.exitCode, output }).toMatchObject({
+        exitCode: 0,
+      });
+      expect(output).toMatch(/\b3 pass\b/);
+      expect(output).toMatch(/\b0 fail\b/);
+    },
+    20000,
+  );
 
   test("refuses a schema version marker that is not a whole number", () => {
     const path = join(tempDir(), "data.db");
@@ -669,7 +675,7 @@ try {
 `,
     );
     const result = Bun.spawnSync(
-      [process.execPath, "--preload", preload, script],
+      [process.execPath, ...quietFlags, preloadFlag, preload, script],
       { stdout: "pipe", stderr: "pipe" },
     );
     expect({
@@ -972,8 +978,8 @@ describe("migrate and schemaVersion", () => {
 
 describe("two processes on one file", () => {
   const holder = `
-    const { Database } = require("bun:sqlite");
-    const db = new Database(process.argv[1]);
+    const { DatabaseSync } = require("node:sqlite");
+    const db = new DatabaseSync(process.argv[1]);
     db.exec("BEGIN IMMEDIATE");
     db.exec("INSERT INTO t VALUES (99)");
     process.stdout.write("locked\\n");

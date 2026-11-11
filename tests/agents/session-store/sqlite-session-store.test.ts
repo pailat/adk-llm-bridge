@@ -16,6 +16,7 @@ import {
   SqliteSessionStore,
   SqliteSessionStoreError,
 } from "../../../src/agents/session-store/sqlite/index.js";
+import { openRawDatabase } from "../../utils/fixtures/raw-sqlite.js";
 
 const dirs: string[] = [];
 const stores: SqliteSessionStore[] = [];
@@ -281,8 +282,7 @@ describe("SqliteSessionStore", () => {
   test("refuses a database written by a newer schema version", async () => {
     const path = join(tempDir(), "sessions.db");
     open(path).close();
-    const { Database } = await import("bun:sqlite");
-    const raw = new Database(path);
+    const raw = openRawDatabase(path);
     raw.exec("PRAGMA user_version = 99");
     raw.close();
     let caught: unknown;
@@ -301,7 +301,7 @@ describe("SqliteSessionStore", () => {
     open(path).close();
     const writer = resolve(import.meta.dir, "fixtures/concurrent-writer.ts");
     const procs = ["a", "b"].map((tag) =>
-      Bun.spawn(["bun", writer, path, tag, "60"], {
+      Bun.spawn([process.execPath, writer, path, tag, "60"], {
         stdout: "pipe",
         stderr: "pipe",
       }),
@@ -343,8 +343,7 @@ function openError(options: { path: string; busyTimeoutMs?: number }) {
 
 /** Adds a trigger, through a second connection, that fails on `type: "boom"`. */
 async function failOnBoom(path: string, action: "ABORT" | "ROLLBACK") {
-  const { Database } = await import("bun:sqlite");
-  const raw = new Database(path);
+  const raw = openRawDatabase(path);
   raw.exec(`CREATE TRIGGER boom BEFORE INSERT ON claude_session_entries
     WHEN json_extract(NEW.entry, '$.type') = 'boom'
     BEGIN SELECT RAISE(${action}, 'boom'); END`);

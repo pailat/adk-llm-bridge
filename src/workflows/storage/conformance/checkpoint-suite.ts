@@ -540,6 +540,62 @@ export async function workflowCheckpointStoreConformanceCases(
     );
   };
 
+  roundTrips(
+    "a step result whose usage has cache creation tokens, zero included, loads back equal",
+    (base) =>
+      withSteps(base, {
+        a: completedStep("a", {
+          usage: {
+            promptTokens: 10,
+            completionTokens: 5,
+            totalTokens: 15,
+            cachedTokens: 2,
+            toolCalls: 1,
+            llmCalls: 1,
+            cacheCreationTokens: 7,
+          },
+        }),
+        b: completedStep("b", {
+          usage: {
+            promptTokens: 10,
+            completionTokens: 5,
+            totalTokens: 15,
+            cachedTokens: 2,
+            toolCalls: 1,
+            llmCalls: 1,
+            cacheCreationTokens: 0,
+          },
+        }),
+      }),
+  );
+
+  add(
+    "a step result whose usage has no cache creation tokens loads back without the field",
+    withStore(async (store) => {
+      const checkpoint = withSteps(await makeCheckpoint(LOCATOR), {
+        a: completedStep("a", {
+          usage: {
+            promptTokens: 10,
+            completionTokens: 5,
+            totalTokens: 15,
+            cachedTokens: 2,
+            toolCalls: 1,
+            llmCalls: 1,
+          },
+        }),
+      });
+      await store.save({ context: NO_CONTEXT, checkpoint });
+      const loaded = await store.load({ ...LOCATOR, context: NO_CONTEXT });
+      const usage = loaded?.steps.a?.result?.usage;
+      check(usage !== undefined, "the loaded usage is missing");
+      check(
+        !("cacheCreationTokens" in usage),
+        "the loaded usage gained a cache creation tokens field",
+      );
+      checkEqual(loaded, checkpoint, "the loaded checkpoint");
+    }),
+  );
+
   roundTrips("a step result with models loads back equal", (base) =>
     withSteps(base, {
       a: completedStep("a", {
@@ -611,6 +667,54 @@ export async function workflowCheckpointStoreConformanceCases(
     [
       "models with a non-boolean unknown",
       { result: { models: { requested: [], resolved: [], unknown: "no" } } },
+    ],
+    [
+      "usage with negative cache creation tokens",
+      {
+        result: {
+          usage: {
+            promptTokens: 10,
+            completionTokens: 5,
+            totalTokens: 15,
+            cachedTokens: 2,
+            toolCalls: 1,
+            llmCalls: 1,
+            cacheCreationTokens: -1,
+          },
+        },
+      },
+    ],
+    [
+      "usage with non-finite cache creation tokens",
+      {
+        result: {
+          usage: {
+            promptTokens: 10,
+            completionTokens: 5,
+            totalTokens: 15,
+            cachedTokens: 2,
+            toolCalls: 1,
+            llmCalls: 1,
+            cacheCreationTokens: Number.NaN,
+          },
+        },
+      },
+    ],
+    [
+      "usage with string cache creation tokens",
+      {
+        result: {
+          usage: {
+            promptTokens: 10,
+            completionTokens: 5,
+            totalTokens: 15,
+            cachedTokens: 2,
+            toolCalls: 1,
+            llmCalls: 1,
+            cacheCreationTokens: "7" as never,
+          },
+        },
+      },
     ],
     ["a model with an empty requested id", { model: { requested: "" } }],
     [

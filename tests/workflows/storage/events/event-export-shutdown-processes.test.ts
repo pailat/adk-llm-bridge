@@ -3,6 +3,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { isBun } from "../../../utils/fixtures/runtime.js";
 
 /**
  * A real Node binary, when one is on PATH. Node lets a process exit while a
@@ -23,6 +24,7 @@ const directories: string[] = [];
 let bundle = "";
 
 beforeAll(async () => {
+  if (!isBun) return;
   const out = await mkdtemp(join(tmpdir(), "event-export-shutdown-bundle-"));
   directories.push(out);
   // Node cannot run the TypeScript sources directly, so the child is bundled.
@@ -98,34 +100,39 @@ const HOSTS = [
   { label: "Bun", bin: process.execPath, node: false },
 ];
 
-describe("event export at shutdown of a process whose only work is the run", () => {
-  for (const host of HOSTS) {
-    for (const [mode, wait] of [
-      ["plugin", "the plugin's end-of-run flush"],
-      ["flush", "an awaited pipeline.flush()"],
-      ["close", "an awaited pipeline.close() over a slow exporter"],
-    ] as const) {
-      test(`${host.label}: ${wait} keeps the process alive until every event is exported`, async () => {
-        const dir = await mkdtemp(join(tmpdir(), "event-export-shutdown-"));
-        directories.push(dir);
-        const started = Date.now();
-        const outcome = await runChild(
-          host.bin,
-          host.node ? bundle : FIXTURE,
-          mode,
-          dir,
-        );
-        const stats = afterRun(outcome);
-        // The child waits up to 20 s; a wait released when the export ends
-        // lets it exit long before that.
-        expect(Date.now() - started).toBeLessThan(10_000);
-        expect(outcome.code).toBe(0);
-        expect(stats.offered).toBeGreaterThan(0);
-        expect(stats.exported).toBe(stats.offered);
-        expect(stats.stored).toBe(stats.offered);
-        expect(stats.dropped).toBe(0);
-        expect(stats.buffered).toBe(0);
-      }, 40_000);
+// Skipped under Node: the file bundles the child with `Bun.build` and starts the
+// Node host itself, so the Bun run already covers both hosts.
+describe.skipIf(!isBun)(
+  "event export at shutdown of a process whose only work is the run",
+  () => {
+    for (const host of HOSTS) {
+      for (const [mode, wait] of [
+        ["plugin", "the plugin's end-of-run flush"],
+        ["flush", "an awaited pipeline.flush()"],
+        ["close", "an awaited pipeline.close() over a slow exporter"],
+      ] as const) {
+        test(`${host.label}: ${wait} keeps the process alive until every event is exported`, async () => {
+          const dir = await mkdtemp(join(tmpdir(), "event-export-shutdown-"));
+          directories.push(dir);
+          const started = Date.now();
+          const outcome = await runChild(
+            host.bin,
+            host.node ? bundle : FIXTURE,
+            mode,
+            dir,
+          );
+          const stats = afterRun(outcome);
+          // The child waits up to 20 s; a wait released when the export ends
+          // lets it exit long before that.
+          expect(Date.now() - started).toBeLessThan(10_000);
+          expect(outcome.code).toBe(0);
+          expect(stats.offered).toBeGreaterThan(0);
+          expect(stats.exported).toBe(stats.offered);
+          expect(stats.stored).toBe(stats.offered);
+          expect(stats.dropped).toBe(0);
+          expect(stats.buffered).toBe(0);
+        }, 40_000);
+      }
     }
-  }
-});
+  },
+);

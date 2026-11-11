@@ -416,6 +416,48 @@ export async function workflowEventExporterConformanceCases(
       }),
     },
     {
+      name: "a payload carrying usage with cache creation tokens reads back equal",
+      ...scenario(async ({ exporter }) => {
+        const withTokens = record("e1", "with", {
+          payload: {
+            usage: {
+              promptTokens: 10,
+              completionTokens: 5,
+              totalTokens: 15,
+              cachedTokens: 2,
+              cacheCreationTokens: 7,
+            },
+          },
+        });
+        const zero = record("e1", "zero", {
+          payload: { usage: { cachedTokens: 0, cacheCreationTokens: 0 } },
+        });
+        const without = record("e1", "without", {
+          payload: { usage: { cachedTokens: 2 } },
+        });
+        await exporter.append({
+          executionId: "e1",
+          records: [withTokens, zero, without],
+        });
+        const page = await exporter.read({ executionId: "e1" });
+        same(
+          page.records,
+          [
+            { ...withTokens, sequence: 1 },
+            { ...zero, sequence: 2 },
+            { ...without, sequence: 3 },
+          ],
+          "stored records",
+        );
+        same(
+          "cacheCreationTokens" in
+            ((page.records[2]?.payload.usage ?? {}) as Record<string, unknown>),
+          false,
+          "cache creation tokens on the record without them",
+        );
+      }),
+    },
+    {
       name: "cursor reads visit every record once in ascending order",
       ...scenario(async ({ exporter }) => {
         await exporter.append({

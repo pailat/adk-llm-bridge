@@ -25,6 +25,7 @@ import {
   workflowCheckpointStoreConformanceCases,
 } from "../../../../src/workflows/storage/conformance/index.js";
 import { isWorkflowStorageError } from "../../../../src/workflows/storage/errors.js";
+import { isBun } from "../../../utils/fixtures/runtime.js";
 import { buildCheckpoint, spawnWorker } from "./fixtures/checkpoint-worker.js";
 
 const directories: string[] = [];
@@ -285,70 +286,76 @@ describe("SqliteWorkflowCheckpointStore database file", () => {
 
 // --- Settings of the connection --------------------------------------------
 
-describe("SqliteWorkflowCheckpointStore connection settings", () => {
-  async function pragmasOf(args: Record<string, unknown>) {
-    const worker = spawnWorker("pragmas", {
-      path: join(tempDir(), "p.db"),
-      ...args,
+// Skipped under Node: the worker wraps the shared helper with `mock.module` of `bun:test`.
+describe.skipIf(!isBun)(
+  "SqliteWorkflowCheckpointStore connection settings",
+  () => {
+    async function pragmasOf(args: Record<string, unknown>) {
+      const worker = spawnWorker("pragmas", {
+        path: join(tempDir(), "p.db"),
+        ...args,
+      });
+      try {
+        const line = await worker.waitForLine((text) =>
+          text.includes("journalMode"),
+        );
+        return JSON.parse(line) as Record<string, unknown>;
+      } finally {
+        worker.kill();
+        await worker.exited;
+      }
+    }
+
+    test("opens through the shared helper once, rejecting symbolic links, in WAL mode with a short per-statement busy timeout and full synchronous", async () => {
+      const settings = await pragmasOf({ busyTimeoutMs: 1234 });
+      expect(settings.openCalls).toBe(1);
+      expect(settings.symlinks).toBe("reject");
+      expect(settings.journalMode).toBe("wal");
+      // The configured wait happens between statements, off the event loop.
+      expect(settings.busyTimeout).toBe(20);
+      expect(settings.synchronous).toBe(2);
+    }, 30_000);
+
+    test("each statement blocks for at most the 20 ms busy slice by default", async () => {
+      const settings = await pragmasOf({});
+      expect(settings.busyTimeout).toBe(20);
+      expect(settings.synchronous).toBe(2);
+    }, 30_000);
+
+    test("synchronous normal is applied when asked for", async () => {
+      const settings = await pragmasOf({ synchronous: "normal" });
+      expect(settings.synchronous).toBe(1);
+    }, 30_000);
+
+    test("the journal mode written to the file reads back as wal from another connection", async () => {
+      const path = join(tempDir(), "wal.db");
+      const store = newStore(path);
+      await seed(store, "exec-wal");
+      const db = rawDatabase(path);
+      try {
+        expect(db.prepare("PRAGMA journal_mode").get()?.journal_mode).toBe(
+          "wal",
+        );
+      } finally {
+        db.close();
+      }
     });
-    try {
-      const line = await worker.waitForLine((text) =>
-        text.includes("journalMode"),
+
+    test("the store source never imports node:sqlite and opens its database through openSqliteDatabase", () => {
+      const source = readFileSync(
+        new URL(
+          "../../../../src/workflows/checkpoint/sqlite/sqlite-checkpoint-store.ts",
+          import.meta.url,
+        ),
+        "utf8",
       );
-      return JSON.parse(line) as Record<string, unknown>;
-    } finally {
-      worker.kill();
-      await worker.exited;
-    }
-  }
-
-  test("opens through the shared helper once, rejecting symbolic links, in WAL mode with a short per-statement busy timeout and full synchronous", async () => {
-    const settings = await pragmasOf({ busyTimeoutMs: 1234 });
-    expect(settings.openCalls).toBe(1);
-    expect(settings.symlinks).toBe("reject");
-    expect(settings.journalMode).toBe("wal");
-    // The configured wait happens between statements, off the event loop.
-    expect(settings.busyTimeout).toBe(20);
-    expect(settings.synchronous).toBe(2);
-  }, 30_000);
-
-  test("each statement blocks for at most the 20 ms busy slice by default", async () => {
-    const settings = await pragmasOf({});
-    expect(settings.busyTimeout).toBe(20);
-    expect(settings.synchronous).toBe(2);
-  }, 30_000);
-
-  test("synchronous normal is applied when asked for", async () => {
-    const settings = await pragmasOf({ synchronous: "normal" });
-    expect(settings.synchronous).toBe(1);
-  }, 30_000);
-
-  test("the journal mode written to the file reads back as wal from another connection", async () => {
-    const path = join(tempDir(), "wal.db");
-    const store = newStore(path);
-    await seed(store, "exec-wal");
-    const db = rawDatabase(path);
-    try {
-      expect(db.prepare("PRAGMA journal_mode").get()?.journal_mode).toBe("wal");
-    } finally {
-      db.close();
-    }
-  });
-
-  test("the store source never imports node:sqlite and opens its database through openSqliteDatabase", () => {
-    const source = readFileSync(
-      new URL(
-        "../../../../src/workflows/checkpoint/sqlite/sqlite-checkpoint-store.ts",
-        import.meta.url,
-      ),
-      "utf8",
-    );
-    expect(source).not.toMatch(
-      /(from\s+|require\(\s*|import\(\s*)["']node:sqlite["']/,
-    );
-    expect(source).toContain("openSqliteDatabase");
-  });
-});
+      expect(source).not.toMatch(
+        /(from\s+|require\(\s*|import\(\s*)["']node:sqlite["']/,
+      );
+      expect(source).toContain("openSqliteDatabase");
+    });
+  },
+);
 
 // --- Schema -----------------------------------------------------------------
 

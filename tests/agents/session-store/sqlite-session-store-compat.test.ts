@@ -18,6 +18,7 @@ import {
   SqliteSessionStoreError,
 } from "../../../src/agents/session-store/sqlite/index.js";
 import { overrideNodeSqliteLoaderForTests } from "../../../src/utils/sqlite-database.js";
+import { openRawDatabase } from "../../utils/fixtures/raw-sqlite.js";
 
 // A second version 1 database, written by the first release of the session
 // store (schema version 1, WAL checkpointed) and embedded as base64 so tests
@@ -64,8 +65,7 @@ const key = { projectKey: "proj", sessionId: "s1" };
 describe("SqliteSessionStore with a version 1 database file", () => {
   test("refuses a newer schema at once while another connection holds the write lock", async () => {
     const path = writeFixture(tempDir());
-    const { Database } = await import("bun:sqlite");
-    const holder = new Database(path);
+    const holder = openRawDatabase(path);
     try {
       holder.exec("PRAGMA user_version = 2");
       holder.exec("BEGIN IMMEDIATE");
@@ -195,8 +195,7 @@ describe("SqliteSessionStore with a version 1 database file", () => {
 
 describe("SqliteSessionStore with an unusual user_version", () => {
   async function userVersion(path: string): Promise<number> {
-    const { Database } = await import("bun:sqlite");
-    const db = new Database(path);
+    const db = openRawDatabase(path);
     try {
       return (db.query("PRAGMA user_version").get() as { user_version: number })
         .user_version;
@@ -207,8 +206,7 @@ describe("SqliteSessionStore with an unusual user_version", () => {
 
   test("accepts a negative user_version, keeps the entries and rewrites it to 1", async () => {
     const path = writeFixture(tempDir());
-    const { Database } = await import("bun:sqlite");
-    const raw = new Database(path);
+    const raw = openRawDatabase(path);
     raw.exec("PRAGMA user_version = -5");
     raw.close();
     expect(await userVersion(path)).toBe(-5);
@@ -223,8 +221,7 @@ describe("SqliteSessionStore with an unusual user_version", () => {
 
   test("repairs a file stamped version 1 whose table and indexes are missing", async () => {
     const path = join(tempDir(), "stamped.db");
-    const { Database } = await import("bun:sqlite");
-    const raw = new Database(path);
+    const raw = openRawDatabase(path);
     raw.exec("PRAGMA user_version = 1");
     raw.close();
     const store = open(path);
@@ -239,8 +236,7 @@ describe("SqliteSessionStore with an unusual user_version", () => {
 
   test("recreates an index a file stamped version 1 lost", async () => {
     const path = writeFixture(tempDir());
-    const { Database } = await import("bun:sqlite");
-    const raw = new Database(path);
+    const raw = openRawDatabase(path);
     const indexes = (
       raw
         .query(
@@ -253,7 +249,7 @@ describe("SqliteSessionStore with an unusual user_version", () => {
     raw.close();
     const store = open(path);
     store.close();
-    const check = new Database(path);
+    const check = openRawDatabase(path);
     const after = check
       .query(
         "SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE '%_uuid'",

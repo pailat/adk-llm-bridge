@@ -2,6 +2,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { preloadFlag, quietFlags } from "../../utils/fixtures/runtime.js";
 
 // Importing the workflows entry or a provider subpath must never load
 // `node:sqlite`; only opening a database does. Each import runs in a child
@@ -39,11 +40,14 @@ function runChild(
 ): { status: number | null; stdout: string; stderr: string } {
   const file = join(scratch, `${name}.mjs`);
   writeFileSync(file, source);
-  const result = Bun.spawnSync([process.execPath, "--preload", preload, file], {
-    cwd: root,
-    stdout: "pipe",
-    stderr: "pipe",
-  });
+  const result = Bun.spawnSync(
+    [process.execPath, ...quietFlags, preloadFlag, preload, file],
+    {
+      cwd: root,
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  );
   return {
     status: result.exitCode,
     stdout: result.stdout.toString(),

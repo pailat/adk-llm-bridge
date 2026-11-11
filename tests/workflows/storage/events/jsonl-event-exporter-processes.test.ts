@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isWorkflowStorageError } from "../../../../src/workflows/storage/errors.js";
 import { JsonlWorkflowEventExporter } from "../../../../src/workflows/storage/jsonl-event-exporter.js";
+import { isBun } from "../../../utils/fixtures/runtime.js";
 
 const child = join(import.meta.dir, "fixtures", "jsonl-writer-child.ts");
 const takeoverChild = join(
@@ -255,48 +256,70 @@ describe("JsonlWorkflowEventExporter across processes", () => {
     ]);
   }, 60_000);
 
-  test("a process that judged a crashed takeover stale cannot remove the claim of the process that replaced it", async () => {
-    const deadPid = await crashedPid();
-    const directory = await tempDirectory();
-    await seedCrashedTakeover(directory, deadPid, "dead-writer");
+  // Skipped under Node: the child replaces `node:fs` with `mock.module` of `bun:test`.
+  test.skipIf(!isBun)(
+    "a process that judged a crashed takeover stale cannot remove the claim of the process that replaced it",
+    async () => {
+      const deadPid = await crashedPid();
+      const directory = await tempDirectory();
+      await seedCrashedTakeover(directory, deadPid, "dead-writer");
 
-    // The first process reads the claim the crashed process left and stops
-    // before it acts on what it read.
-    const first = spawnScript(takeoverChild, "claim", directory, "exec-claim");
-    expect(await first.nextLine()).toBe("paused");
-    // The second process replaces that claim with its own, reads the stale
-    // lock and stops before it removes it.
-    const second = spawnScript(takeoverChild, "lock", directory, "exec-claim");
-    expect(await second.nextLine()).toBe("paused");
+      // The first process reads the claim the crashed process left and stops
+      // before it acts on what it read.
+      const first = spawnScript(
+        takeoverChild,
+        "claim",
+        directory,
+        "exec-claim",
+      );
+      expect(await first.nextLine()).toBe("paused");
+      // The second process replaces that claim with its own, reads the stale
+      // lock and stops before it removes it.
+      const second = spawnScript(
+        takeoverChild,
+        "lock",
+        directory,
+        "exec-claim",
+      );
+      expect(await second.nextLine()).toBe("paused");
 
-    send(first.proc, "go");
-    const firstEarly = await first.nextLine(1_000);
-    send(second.proc, "go");
-    const secondResult = await second.nextLine();
-    const firstResult = firstEarly ?? (await first.nextLine());
-    expect([firstResult, secondResult].sort()).toEqual([
-      "holding",
-      "refused WORKFLOW_STORAGE_UNAVAILABLE",
-    ]);
-    // The first process could not act while the second held the claim.
-    expect(firstEarly).toBeUndefined();
-  }, 60_000);
+      send(first.proc, "go");
+      const firstEarly = await first.nextLine(1_000);
+      send(second.proc, "go");
+      const secondResult = await second.nextLine();
+      const firstResult = firstEarly ?? (await first.nextLine());
+      expect([firstResult, secondResult].sort()).toEqual([
+        "holding",
+        "refused WORKFLOW_STORAGE_UNAVAILABLE",
+      ]);
+      // The first process could not act while the second held the claim.
+      expect(firstEarly).toBeUndefined();
+    },
+    60_000,
+  );
 
-  test("a process whose view of a dead lock is outdated does not remove the lock of the writer that took over", async () => {
-    const deadPid = await crashedPid();
-    const directory = await tempDirectory();
-    await seedCrashedTakeover(directory, deadPid, "dead-writer");
+  // Skipped under Node: the child replaces `node:fs` with `mock.module` of `bun:test`.
+  test.skipIf(!isBun)(
+    "a process whose view of a dead lock is outdated does not remove the lock of the writer that took over",
+    async () => {
+      const deadPid = await crashedPid();
+      const directory = await tempDirectory();
+      await seedCrashedTakeover(directory, deadPid, "dead-writer");
 
-    // The first process reads the dead lock and stops there.
-    const late = spawnScript(takeoverChild, "holder", directory, "exec-late");
-    expect(await late.nextLine()).toBe("paused");
-    // Another process takes the directory over completely meanwhile.
-    const writer = spawnChild("hold", directory, "exec-late");
-    expect(await writer.nextLine()).toBe("holding");
+      // The first process reads the dead lock and stops there.
+      const late = spawnScript(takeoverChild, "holder", directory, "exec-late");
+      expect(await late.nextLine()).toBe("paused");
+      // Another process takes the directory over completely meanwhile.
+      const writer = spawnChild("hold", directory, "exec-late");
+      expect(await writer.nextLine()).toBe("holding");
 
-    send(late.proc, "go");
-    expect(await late.nextLine()).toBe("refused WORKFLOW_STORAGE_UNAVAILABLE");
-  }, 60_000);
+      send(late.proc, "go");
+      expect(await late.nextLine()).toBe(
+        "refused WORKFLOW_STORAGE_UNAVAILABLE",
+      );
+    },
+    60_000,
+  );
 
   test("a long chain of abandoned takeover claims does not lock the directory for good", async () => {
     const deadPid = await crashedPid();
@@ -365,59 +388,74 @@ describe("JsonlWorkflowEventExporter across processes", () => {
     );
   }, 60_000);
 
-  test("an exporter does not replace the takeover claim of another exporter of the same process, however long that takeover takes", async () => {
-    const deadPid = await crashedPid();
-    const directory = await tempDirectory();
-    await seedCrashedTakeover(directory, deadPid, "dead-writer");
-    const both = spawnScript(takeoverChild, "same", directory, "exec-same");
-    expect([await both.nextLine(), await both.nextLine()]).toEqual([
-      "first holding",
-      "second refused WORKFLOW_STORAGE_UNAVAILABLE",
-    ]);
-  }, 60_000);
-
-  test("two processes racing after a writer crashed inside the takeover window: exactly one writes, in every round", async () => {
-    const deadPid = await crashedPid();
-    const rounds = 12;
-    for (let round = 0; round < rounds; round += 1) {
+  // Skipped under Node: the child replaces `node:fs` with `mock.module` of `bun:test`.
+  test.skipIf(!isBun)(
+    "an exporter does not replace the takeover claim of another exporter of the same process, however long that takeover takes",
+    async () => {
+      const deadPid = await crashedPid();
       const directory = await tempDirectory();
-      await seedCrashedTakeover(directory, deadPid, `dead-writer-${round}`);
-
-      const startAt = String(Date.now() + 400);
-      const a = spawnChild("hold-at", directory, "exec-race", startAt);
-      const b = spawnChild("hold-at", directory, "exec-race", startAt);
-      const lines = await Promise.all([a.nextLine(), b.nextLine()]);
-      expect([round, ...lines.sort()]).toEqual([
-        round,
-        "holding",
-        "refused WORKFLOW_STORAGE_UNAVAILABLE",
+      await seedCrashedTakeover(directory, deadPid, "dead-writer");
+      const both = spawnScript(takeoverChild, "same", directory, "exec-same");
+      expect([await both.nextLine(), await both.nextLine()]).toEqual([
+        "first holding",
+        "second refused WORKFLOW_STORAGE_UNAVAILABLE",
       ]);
-      const left = (await readdir(directory)).filter((name) =>
-        name.startsWith(".writer.lock.takeover"),
-      );
-      expect(left).toEqual([]);
-      for (const proc of [a.proc, b.proc]) {
-        proc.kill(9);
-        await proc.exited;
-      }
-    }
-  }, 120_000);
+    },
+    60_000,
+  );
 
-  test("a lock that is gone each time it is read is retried with a pause, not in a tight loop", async () => {
-    const directory = await tempDirectory();
-    const vanishing = spawnScript(
-      join(import.meta.dir, "fixtures", "jsonl-vanishing-lock-child.ts"),
-      directory,
-    );
-    const line = await vanishing.nextLine(30_000);
-    expect(await vanishing.proc.exited).toBe(0);
-    const [, reads, code] = (line ?? "").split(" ");
-    expect(code).toBe("WORKFLOW_STORAGE_UNAVAILABLE");
-    // The exporter tries for 5 seconds, pausing 20 ms between tries: about
-    // 250 reads. Without the pause it reads the lock many thousand times.
-    expect(Number(reads)).toBeGreaterThan(0);
-    expect(Number(reads)).toBeLessThan(1_000);
-  }, 30_000);
+  // Skipped under Node: the child replaces `node:fs` with `mock.module` of `bun:test`.
+  test.skipIf(!isBun)(
+    "two processes racing after a writer crashed inside the takeover window: exactly one writes, in every round",
+    async () => {
+      const deadPid = await crashedPid();
+      const rounds = 12;
+      for (let round = 0; round < rounds; round += 1) {
+        const directory = await tempDirectory();
+        await seedCrashedTakeover(directory, deadPid, `dead-writer-${round}`);
+
+        const startAt = String(Date.now() + 400);
+        const a = spawnChild("hold-at", directory, "exec-race", startAt);
+        const b = spawnChild("hold-at", directory, "exec-race", startAt);
+        const lines = await Promise.all([a.nextLine(), b.nextLine()]);
+        expect([round, ...lines.sort()]).toEqual([
+          round,
+          "holding",
+          "refused WORKFLOW_STORAGE_UNAVAILABLE",
+        ]);
+        const left = (await readdir(directory)).filter((name) =>
+          name.startsWith(".writer.lock.takeover"),
+        );
+        expect(left).toEqual([]);
+        for (const proc of [a.proc, b.proc]) {
+          proc.kill(9);
+          await proc.exited;
+        }
+      }
+    },
+    120_000,
+  );
+
+  // Skipped under Node: the child replaces `node:fs/promises` with `mock.module` of `bun:test`.
+  test.skipIf(!isBun)(
+    "a lock that is gone each time it is read is retried with a pause, not in a tight loop",
+    async () => {
+      const directory = await tempDirectory();
+      const vanishing = spawnScript(
+        join(import.meta.dir, "fixtures", "jsonl-vanishing-lock-child.ts"),
+        directory,
+      );
+      const line = await vanishing.nextLine(30_000);
+      expect(await vanishing.proc.exited).toBe(0);
+      const [, reads, code] = (line ?? "").split(" ");
+      expect(code).toBe("WORKFLOW_STORAGE_UNAVAILABLE");
+      // The exporter tries for 5 seconds, pausing 20 ms between tries: about
+      // 250 reads. Without the pause it reads the lock many thousand times.
+      expect(Number(reads)).toBeGreaterThan(0);
+      expect(Number(reads)).toBeLessThan(1_000);
+    },
+    30_000,
+  );
 });
 
 /** The pid of a process that was killed, as after a crash. */

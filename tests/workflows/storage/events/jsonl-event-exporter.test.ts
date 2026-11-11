@@ -1,5 +1,6 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { createHash } from "node:crypto";
+import * as fsPromises from "node:fs/promises";
 import {
   appendFile,
   chmod,
@@ -26,6 +27,8 @@ import {
   WORKFLOW_EVENT_JSONL_FORMAT,
   WORKFLOW_EVENT_JSONL_FORMAT_VERSION,
 } from "../../../../src/workflows/storage/jsonl-event-exporter.js";
+
+import { isBun } from "../../../utils/fixtures/runtime.js";
 
 const created: string[] = [];
 const open: JsonlWorkflowEventExporter[] = [];
@@ -182,6 +185,39 @@ describe("JsonlWorkflowEventExporter construction and layout", () => {
       }
       for (const file of await readdir(directory)) {
         expect((await stat(join(directory, file))).mode & 0o077).toBe(0);
+      }
+    },
+  );
+
+  // Skipped under Node: `spyOn` on a `node:fs/promises` namespace is Bun-only.
+  test.skipIf(!isBun)(
+    "a failed flush of the directory after a new execution file is created fails the append",
+    async () => {
+      const directory = await tempDirectory();
+      const exporter = exporterOver(directory);
+      const realOpen = fsPromises.open;
+      const spy = spyOn(fsPromises, "open").mockImplementation(((
+        path: Parameters<typeof realOpen>[0],
+        flags?: Parameters<typeof realOpen>[1],
+        mode?: Parameters<typeof realOpen>[2],
+      ) => {
+        if (path === directory) {
+          return Promise.reject(
+            Object.assign(new Error("EIO: i/o error"), { code: "EIO" }),
+          );
+        }
+        return realOpen(path, flags, mode);
+      }) as typeof realOpen);
+      try {
+        await expect(
+          exporter.append({
+            executionId: "exec-flush",
+            records: [record("exec-flush", "a")],
+          }),
+        ).rejects.toThrow(/EIO/);
+        expect(spy).toHaveBeenCalled();
+      } finally {
+        spy.mockRestore();
       }
     },
   );

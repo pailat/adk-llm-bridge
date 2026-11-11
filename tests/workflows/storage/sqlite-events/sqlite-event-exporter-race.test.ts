@@ -4,6 +4,7 @@ import * as realFs from "node:fs";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { isBun } from "../../../utils/fixtures/runtime.js";
 
 // The create-time check cannot be reached by arranging files before the open:
 // the existence check would see them. So a child run of this file makes the
@@ -19,7 +20,10 @@ if (CHILD === undefined) {
       // Skipped on Windows for the symbolic link: there is no `O_NOFOLLOW`, so a
       // link that appears after the check can be followed by the create; the
       // check before the open is the only guard there.
-      test.skipIf(kind === "symlink" && process.platform === "win32")(
+      // Also skipped under Node: the child replaces `node:fs` with `mock.module` of `bun:test`.
+      test.skipIf(
+        !isBun || (kind === "symlink" && process.platform === "win32"),
+      )(
         `refuses a ${kind} that appeared there, and does not follow or use it`,
         () => {
           const dir = mkdtempSync(join(tmpdir(), "sqlite-events-race-"));

@@ -1116,7 +1116,11 @@ from the 0.6.0 tag.
   opens through the same shared helper: it still takes the write lock
   (`BEGIN IMMEDIATE`) on open, also for a schema that is already current, as
   before; on Windows a symbolic link at the database path is now refused
-  before the open, and no mode is set or checked there. See
+  before the open, and no mode is set or checked there. The JSONL exporter
+  flushes its directory with the same helper as the file-system stores: a
+  failed directory flush after it creates or removes a file now fails the call
+  instead of being ignored, except on Windows, which cannot flush a
+  directory. See
   [Choosing storage providers](./docs/storage-providers.md) and
   [Workflow durability](./docs/workflow-durability.md).
 
