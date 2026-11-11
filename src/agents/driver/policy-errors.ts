@@ -146,6 +146,16 @@ export const EXTERNAL_AGENT_TOOLS_UNSUPPORTED =
   "EXTERNAL_AGENT_TOOLS_UNSUPPORTED";
 
 /**
+ * The agent has an approver (`confirmation.approver`) or ADK confirmation
+ * (`confirmation.adk`), and its driver never asks the host for permission
+ * (`capabilities().approvals` is not `true`): the runtime decides alone, so
+ * the setting would be ignored silently. Thrown when the agent is built. Use
+ * `ClaudeAgent` (the Claude Agent SDK driver), or remove `confirmation`.
+ */
+export const EXTERNAL_AGENT_APPROVALS_UNSUPPORTED =
+  "EXTERNAL_AGENT_APPROVALS_UNSUPPORTED";
+
+/**
  * A `readOnlyTools` entry that cannot attest exactly one tool: it is empty,
  * listed twice, matches no direct tool (when no toolset could add it), or
  * names two or more direct tools. Thrown when the agent is built.
@@ -177,6 +187,7 @@ export type ExternalAgentPolicyErrorCode =
   | typeof EXTERNAL_AGENT_MODEL_REQUIRED
   | typeof EXTERNAL_AGENT_MODEL_OVERRIDE
   | typeof EXTERNAL_AGENT_TOOLS_UNSUPPORTED
+  | typeof EXTERNAL_AGENT_APPROVALS_UNSUPPORTED
   | typeof EXTERNAL_AGENT_READ_ONLY_TOOL_UNKNOWN
   | typeof EXTERNAL_AGENT_TOOL_NOT_READ_ONLY;
 

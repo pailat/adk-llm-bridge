@@ -72,6 +72,7 @@ export type {
 export { GeminiCliDriver } from "./driver/gemini-cli.js";
 export type { ExternalAgentPolicyErrorCode } from "./driver/policy-errors.js";
 export {
+  EXTERNAL_AGENT_APPROVALS_UNSUPPORTED,
   EXTERNAL_AGENT_BACKGROUND_TASK_PENDING,
   EXTERNAL_AGENT_BATCH_COMMAND_REFUSED,
   EXTERNAL_AGENT_CREDENTIAL_UNSUPPORTED,

@@ -1105,6 +1105,13 @@ from the 0.6.0 tag.
   - tools hidden by a `read-only` policy (an inherited one included) are
     reported by one `EXTERNAL_AGENT_TOOLS_HIDDEN` warning per run, on the final
     event (`customMetadata.externalAgentTools`) and on the span.
+- **An approver or ADK confirmation on a driver that never asks is refused**
+  (see
+  [Approvers and ADK confirmation](./docs/external-agent-isolation.md#approvers-and-adk-confirmation-need-a-driver-that-asks)):
+  `confirmation.approver` or `confirmation.adk` on the Claude CLI, Codex or
+  Gemini CLI drivers used to be ignored silently (the runtime decided alone and
+  denied what needed approval). It now throws `EXTERNAL_AGENT_APPROVALS_UNSUPPORTED`
+  when the agent is built, also on `clone()`. Only `ClaudeAgent` asks the host.
 
 - **The script sandbox stack limit is lower and capped.**
   `DEFAULT_WORKFLOW_EXECUTION_LIMITS.stackBytes` is 32 KiB (32768, was

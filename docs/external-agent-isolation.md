@@ -303,6 +303,23 @@ the guard checks every bound when a request arrives. A kept root that a
 symlink later points outside the parent's roots (a link created or retargeted
 after delegation) is therefore still denied.
 
+### Approvers and ADK confirmation need a driver that asks
+
+`confirmation.approver` and `confirmation.adk` only work when the driver hands
+the runtime's permission prompts to the host (`capabilities().approvals` is
+`true`, which means the driver calls `request.requestPermission`). Only the
+Claude Agent SDK driver (`ClaudeAgent`) does. The Claude CLI, Codex SDK, Codex
+CLI and Gemini CLI drivers enforce the policy through the runtime's own flags
+and never ask the host: a tool that needs approval is denied, and an approver
+or ADK confirmation there would be ignored.
+
+So an agent built with either option on one of those drivers throws
+`ExternalAgentPolicyError` `EXTERNAL_AGENT_APPROVALS_UNSUPPORTED`, naming the
+driver. `clone()` re-checks, so a clone onto such a driver throws too. A custom
+driver without `capabilities()` is not checked. The checks run in the order
+tools (`EXTERNAL_AGENT_TOOLS_UNSUPPORTED`), approvals, then the `readOnlyTools`
+checks.
+
 ### Reading wider than you write
 
 `allowedPaths` holds the roots an agent may read and write. `readPaths` adds
@@ -420,6 +437,7 @@ dropped silently.
 | Code (`ExternalAgentPolicyError`, thrown when the agent is built) | When |
 |---|---|
 | `EXTERNAL_AGENT_TOOLS_UNSUPPORTED` | `tools` on a driver whose `capabilities().tools` is not `true` (Codex, Gemini CLI, Claude CLI). Only the Claude Agent SDK driver (`ClaudeAgent`) hosts ADK tools. A custom driver without `capabilities()` is not checked. |
+| `EXTERNAL_AGENT_APPROVALS_UNSUPPORTED` | `confirmation.approver` or `confirmation.adk: true` on a driver whose `capabilities().approvals` is not `true` (Codex, Gemini CLI, Claude CLI): the runtime decides alone and the setting would be ignored. Only the Claude Agent SDK driver (`ClaudeAgent`) asks the host. A custom driver without `capabilities()` is not checked. See [Approvers and ADK confirmation](#approvers-and-adk-confirmation-need-a-driver-that-asks). |
 | `EXTERNAL_AGENT_READ_ONLY_TOOL_UNKNOWN` | A `readOnlyTools` entry that is empty, listed twice, names no direct tool (when `tools` has no toolset), or names two or more direct tools. |
 | `EXTERNAL_AGENT_TOOL_NOT_READ_ONLY` | The agent's **own** mode is `read-only` and a direct tool is not in `readOnlyTools`. Add it if it has no side effects, or remove it. |
 
