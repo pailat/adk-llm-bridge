@@ -1091,12 +1091,25 @@ async function releaseLock(
 /**
  * Renames, waiting out a Windows open file a few times: a directory cannot be
  * renamed while another process has a file inside it open, such as a waiter
- * reading `owner.json`.
+ * reading `owner.json`. Retries only `EPERM`, `EBUSY` and `EACCES`, 5 attempts
+ * 20 ms apart; any other error is thrown at once.
+ *
+ * @param from - Path to rename.
+ * @param to - New path.
+ * @param renamePath - The rename to run; the file system's by default. The
+ * test fixtures pass their own so they retire a lock with the same policy.
+ * @throws The rename's error when it is not a blocked rename, or when the
+ * rename is still blocked after the last attempt.
+ * @internal
  */
-async function renameRetryingBlocked(from: string, to: string): Promise<void> {
+export async function renameRetryingBlocked(
+  from: string,
+  to: string,
+  renamePath: (from: string, to: string) => Promise<void> = rename,
+): Promise<void> {
   for (let attempt = 1; ; attempt += 1) {
     try {
-      await rename(from, to);
+      await renamePath(from, to);
       return;
     } catch (error) {
       if (

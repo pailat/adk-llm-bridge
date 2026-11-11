@@ -60,6 +60,7 @@ async function runFault(
     | "load-follow"
     | "replace"
     | "replace-follow"
+    | "late-fixture-failure"
     | "swap-replace-follow"
     | "link-follow"
     | "wait-retire"
@@ -360,6 +361,18 @@ describe("FileSystemWorkflowCheckpointStore under file-system faults", () => {
       saved: false,
       loaded: true,
       reason: "checkpoint_lock_recovery_failed",
+    });
+  });
+
+  // Every fixture failure is named, also one that happens after the store's
+  // last call: the fixture waits for its pending actions before it reports.
+  test("a fixture action that fails late is still reported", async () => {
+    const { result } = await runFault("late-fixture-failure");
+
+    expect(result).toEqual({
+      saved: true,
+      loaded: true,
+      fixtureErrors: ["late action: EPERM"],
     });
   });
 });

@@ -53,7 +53,9 @@
  * `EPERM`, as Windows does; `dir-sync-posix` is the same fault as `linux`.
  * `file-sync-win32` runs as `win32` and fails the owner file's flush instead.
  * Prints one JSON line: `{ saved, loaded, reason }`, plus the trace fields in
- * `trace` mode.
+ * `trace` mode, and `fixtureErrors` when an action of the fixture itself
+ * failed (the test then fails and names it). `late-fixture-failure` saves and
+ * loads normally and schedules a fixture action that fails after that.
  *
  * On a Windows host, or with `ADK_FAULT_TRACE=1`, every file-system step the
  * store takes (and every lock the fixture publishes or retires) is written to
@@ -80,6 +82,7 @@ const MODES = [
   "load-follow",
   "replace",
   "replace-follow",
+  "late-fixture-failure",
   "swap-replace-follow",
   "link-follow",
   "wait-retire",
@@ -180,6 +183,34 @@ if (mode.endsWith("-win32")) {
   Object.defineProperty(process, "platform", { value: "linux" });
 }
 let raceArmed = false;
+/** Fixture actions that failed; reported in the result so the test says why. */
+const fixtureErrors: string[] = [];
+
+/** Fixture actions scheduled with {@link later}, settled before the result. */
+const pendingActions: Promise<void>[] = [];
+
+/**
+ * Runs a fixture action `ms` later, as another process would. A failure is
+ * recorded in the result instead of escaping as an unhandled rejection, which
+ * ends a Node process before it prints the result. The fixture waits for every
+ * scheduled action before it reports, so a late failure is not dropped.
+ */
+function later(ms: number, name: string, action: () => Promise<unknown>) {
+  pendingActions.push(
+    new Promise<void>((done) => {
+      setTimeout(() => {
+        action()
+          .catch((error: unknown) => {
+            const code = (error as { code?: unknown }).code;
+            fixtureErrors.push(
+              `${name}: ${typeof code === "string" ? code : String(error)}`,
+            );
+          })
+          .finally(done);
+      }, ms);
+    }),
+  );
+}
 let swapArmed = false;
 let symlinkRefused: string | undefined;
 let checkpointOpens: number | undefined;
@@ -240,11 +271,16 @@ async function publishLock(lockPath: string, token: string, pid: number) {
   );
 }
 
-/** Retires a lock the way the protocol does: one rename away, then removal. */
+/**
+ * Retires a lock the way the protocol does: one rename away, then removal.
+ * The rename goes through the store's own release retry, so it waits out a
+ * Windows refusal while a waiter has the lock directory open, with the
+ * product's budget. It renames with the real file system, not the faults.
+ */
 async function retireLock(lockPath: string) {
   const retired = `${lockPath}.retired.fixture`;
-  await traced("fixture", "retire", lockPath, () =>
-    real.rename(lockPath, retired),
+  await renameRetryingBlocked(lockPath, retired, (from, to) =>
+    traced("fixture", "retire", from, () => real.rename(from, to)),
   );
   await traced("fixture", "remove", retired, () =>
     real.rm(retired, { recursive: true }),
@@ -319,7 +355,7 @@ const faultFs = {
       // Windows refuses the rename because the holder's lock is there; the
       // holder retires it shortly after, not on a clock started earlier.
       if (mode === "eperm-live") {
-        setTimeout(() => void retireLock(to), 50);
+        later(50, "holder retire", () => retireLock(to));
       }
       throw Object.assign(new Error("injected EPERM"), { code: "EPERM" });
     }
@@ -330,7 +366,7 @@ const faultFs = {
       }
       await real.rename(from, to);
       await publishLock(from, "next-token", process.pid);
-      setTimeout(() => void retireLock(from), 50);
+      later(50, "next owner retire", () => retireLock(from));
       try {
         await real.rename(from, to);
       } catch (error) {
@@ -493,9 +529,10 @@ function tracedFs(fs: typeof faultFs): typeof faultFs {
 
 mock.module("node:fs/promises", () => (TRACE ? tracedFs(faultFs) : faultFs));
 
-const { FileSystemWorkflowCheckpointStore } = await import(
-  "../../../../src/workflows/checkpoint/file-system-checkpoint-store.js"
-);
+const { FileSystemWorkflowCheckpointStore, renameRetryingBlocked } =
+  await import(
+    "../../../../src/workflows/checkpoint/file-system-checkpoint-store.js"
+  );
 const { createWorkflowCheckpoint, withWorkflowCompleted } = await import(
   "../../../../src/workflows/checkpoint/checkpoint.js"
 );
@@ -604,5 +641,12 @@ try {
   result.reason = (error as { details?: { reason?: unknown } }).details?.reason;
 }
 if (symlinkRefused !== undefined) result.symlink = symlinkRefused;
+if (mode === "late-fixture-failure") {
+  later(20, "late action", async () => {
+    throw Object.assign(new Error("late"), { code: "EPERM" });
+  });
+}
+await Promise.allSettled(pendingActions);
+if (fixtureErrors.length > 0) result.fixtureErrors = fixtureErrors;
 if (checkpointOpens !== undefined) result.opens = checkpointOpens;
 console.log(JSON.stringify(result));
