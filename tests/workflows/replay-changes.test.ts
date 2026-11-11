@@ -204,7 +204,7 @@ const types = (turnResult: Turn) =>
 
 const BIG = "abcdefghij".repeat(100);
 
-describe("BF-MODEL-2 input change: the hint stays host-side (tests 7, 8)", () => {
+describe("a changed input: the hint stays host-side", () => {
   async function changedInputTurn(replay?: WorkflowReplayOptions) {
     let text = BIG;
     const steps = [{ id: "s1", input: () => text }];
