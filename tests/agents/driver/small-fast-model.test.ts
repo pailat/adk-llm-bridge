@@ -15,8 +15,10 @@ import {
 import { CodexCliDriver } from "../../../src/agents/driver/codex-cli.js";
 import { CodexSdkDriver } from "../../../src/agents/driver/codex-sdk.js";
 import {
+  assertSmallFastModelOption,
   CLAUDE_MODEL_ENV_RULE,
   isClaudeModelEnv,
+  stripBracketSuffix,
 } from "../../../src/agents/driver/model.js";
 import {
   EXTERNAL_AGENT_MODEL_INVALID,
@@ -290,6 +292,84 @@ describe("the Codex drivers do not take the option", () => {
     const cli = new CodexCliDriver({ model: "gpt-x" });
     expect((sdk as { smallFastModel?: string }).smallFastModel).toBe(undefined);
     expect((cli as { smallFastModel?: string }).smallFastModel).toBe(undefined);
+  });
+});
+
+describe("stripBracketSuffix equals the old end-anchored regex", () => {
+  // The regex it replaced (CodeQL js/polynomial-redos on library input).
+  const oldRegex = (value: string) => value.replace(/\[[^\]]*\]$/u, "");
+  const cases = [
+    "opus[1m]",
+    "sonnet[1m]",
+    "haiku[1m]",
+    "opus",
+    "claude-haiku-5-5",
+    "a[b[c]",
+    "a[b]c]",
+    "a]b[c]",
+    "[x]",
+    "[]",
+    "a[]",
+    "a]",
+    "]",
+    "[",
+    "a[",
+    "a[b",
+    "a[b]c",
+    "a[b][c]",
+    "a][b]",
+    "[[]",
+    "[]]",
+    "[a]]",
+    "a[[[b]",
+    "a]]]",
+    "",
+    "]]",
+    "][",
+    "x[1m][2m]",
+  ];
+  for (const value of cases) {
+    test(`${JSON.stringify(value)}`, () => {
+      expect(stripBracketSuffix(value)).toBe(oldRegex(value));
+    });
+  }
+
+  test("agrees with the regex on every string over [ ] a up to length 8", () => {
+    const alphabet = ["[", "]", "a"];
+    let checked = 0;
+    const walk = (prefix: string) => {
+      expect(stripBracketSuffix(prefix)).toBe(oldRegex(prefix));
+      checked++;
+      if (prefix.length === 8) return;
+      for (const ch of alphabet) walk(prefix + ch);
+    };
+    walk("");
+    expect(checked).toBe(9841);
+  });
+
+  test("many open brackets return at once", () => {
+    for (const input of [
+      `a${"[".repeat(50000)}]`,
+      `${"[".repeat(50000)}`,
+      `${"[]".repeat(25000)}`,
+      `a${"[".repeat(50000)}b]`,
+    ]) {
+      const start = performance.now();
+      stripBracketSuffix(input);
+      expect(performance.now() - start).toBeLessThan(50);
+    }
+  });
+
+  test("a long smallFastModel is refused before it reaches the strip", () => {
+    const start = performance.now();
+    expect(() =>
+      assertSmallFastModelOption(
+        "ClaudeCliDriver",
+        `a${"[".repeat(50000)}]`,
+        true,
+      ),
+    ).toThrow(ExternalAgentPolicyError);
+    expect(performance.now() - start).toBeLessThan(50);
   });
 });
 

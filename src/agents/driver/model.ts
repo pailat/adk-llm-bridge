@@ -549,7 +549,7 @@ export function assertSmallFastModelOption(
       `${driver}: smallFastModel is required with requireExplicitModel. Set smallFastModel to the id the runtime's helper calls must use, for example "claude-haiku-5-5".`,
     );
   }
-  const tier = smallFastModel.toLowerCase().replace(/\[[^\]]*\]$/u, "");
+  const tier = stripBracketSuffix(smallFastModel.toLowerCase());
   if (CLAUDE_TIER_ALIASES.includes(tier)) {
     throw new ExternalAgentPolicyError(
       EXTERNAL_AGENT_MODEL_REQUIRED,
@@ -557,6 +557,26 @@ export function assertSmallFastModelOption(
     );
   }
   return smallFastModel;
+}
+
+/**
+ * Removes a trailing `[...]` suffix (a context-window marker such as `[1m]`).
+ * It removes from the first `[` after the last `]` that precedes the final
+ * `]`, so `a[b[c]` gives `a` and `[x]` gives the empty string. Plain string
+ * operations, linear in the length: the end-anchored regex it replaced
+ * (`/\[[^\]]*\]$/u`) is quadratic on many `[`.
+ *
+ * @param value - A model id.
+ * @returns `value` without the suffix, or `value` itself when it has none.
+ * @internal
+ */
+export function stripBracketSuffix(value: string): string {
+  if (!value.endsWith("]")) {
+    return value;
+  }
+  const previousClose = value.lastIndexOf("]", value.length - 2);
+  const open = value.indexOf("[", previousClose + 1);
+  return open === -1 ? value : value.slice(0, open);
 }
 
 /**
