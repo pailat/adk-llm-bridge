@@ -2,7 +2,7 @@
  * Boolean driver options must be real booleans. An untyped host (an env var,
  * a JSON file) that passes `"false"` used to turn an escape hatch such as
  * `allowUnsandboxedShell` ON, because the driver read it as truthy. Every
- * `?: boolean` field of the five public driver configs is checked when the
+ * `?: boolean` field of the six public driver configs is checked when the
  * driver is built. The key lists below are written out on purpose: a key
  * dropped from the product list is caught here.
  */
@@ -13,6 +13,7 @@ import { ClaudeAgentSdkDriver } from "../../../src/agents/driver/claude-agent-sd
 import { ClaudeCliDriver } from "../../../src/agents/driver/claude-cli.js";
 import { CodexCliDriver } from "../../../src/agents/driver/codex-cli.js";
 import { CodexSdkDriver } from "../../../src/agents/driver/codex-sdk.js";
+import { FxCliDriver } from "../../../src/agents/driver/fx-cli.js";
 import { GeminiCliDriver } from "../../../src/agents/driver/gemini-cli.js";
 
 interface DriverCase {
@@ -88,6 +89,19 @@ const DRIVERS: readonly DriverCase[] = [
       "requireExplicitModel",
     ],
     build: (config) => new GeminiCliDriver(config as never),
+  },
+  {
+    name: "FxCliDriver",
+    base: { model: "some/model-id" },
+    keys: [
+      "requireExplicitModel",
+      "allowPolicyOverrideArgs",
+      "allowUnenforcedNetwork",
+      "allowUnenforcedPaths",
+      "allowUnsandboxedShell",
+      "inheritHostConfig",
+    ],
+    build: (config) => new FxCliDriver(config as never),
   },
 ];
 
