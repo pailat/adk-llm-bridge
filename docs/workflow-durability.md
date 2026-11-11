@@ -838,18 +838,39 @@ scope; release it or let it expire.
 
 ### Path case
 
-Both adapters compare write paths case-sensitively by default, so on a
-case-insensitive filesystem (the macOS and Windows defaults) `Src/a` and
-`src/a` would not conflict although they are the same file. Set
-`caseInsensitivePaths: true` on `InMemoryWorkspaceAdapter` or
-`FileSystemWorkspaceAdapter` for such a workspace: paths then conflict after
+`InMemoryWorkspaceAdapter` compares write paths case-sensitively by default.
+`FileSystemWorkspaceAdapter` folds case by default on macOS and Windows
+(`process.platform` `darwin` or `win32`, read when the adapter is constructed)
+and compares case-sensitively elsewhere, because on a case-insensitive
+filesystem (the macOS and Windows defaults) `Src/a` and `src/a` are the same
+file and would otherwise both be leased. A value you pass wins: set
+`caseInsensitivePaths: false` for a case-sensitive volume on those platforms, or
+`caseInsensitivePaths: true` on either adapter for a case-insensitive workspace
+on another platform. With the fold on, paths conflict after
 Unicode NFC normalization and a full case fold, so `Straße` meets `STRASSE`,
 `ς` meets `σ`, and the long s and micro sign meet `s` and `μ`. The fold is
 conservative: it may report an overlap the filesystem would not (dotless `ı`
 meets `i`), but never fewer. Leases keep the caller's spelling. Every
 `FileSystemWorkspaceAdapter` that shares a `stateDirectory` must use the same
-setting. Write paths follow the
+setting; pass `caseInsensitivePaths` explicitly when adapters on different
+platforms share a state directory, because the default differs between
+platforms. Write paths follow the
 [portable path grammar](./workflow-orchestration.md#identifiers-and-paths).
+
+### A save that fails after its rename
+
+A `checkpoint_write_failed` raised after the rename carries
+`details.committed: true`: the new revision is already in place and `load()`
+returns it, but the directory flush that follows failed, so it may not survive
+a crash. The save is reported as failed because durability was not confirmed.
+Reload, then save again with the loaded revision as `expectedRevision`; retrying
+with the old one raises a revision conflict. A failure before the rename (the
+temporary file write, the ownership check, the rename itself) has no
+`committed` field and leaves the previous revision in place. The workspace
+adapter's state commit has the same window: a lease operation that fails after
+its state file was renamed leaves state that `load` of the adapter already
+sees, and a lease that is not renewed expires normally. The workspace adapter
+raises plain `Error`s, without a `committed` field.
 
 ## Host sleep and wall-clock steps
 

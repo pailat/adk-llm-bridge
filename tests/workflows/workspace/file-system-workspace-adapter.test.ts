@@ -480,12 +480,71 @@ function delay(milliseconds: number): Promise<void> {
 }
 
 describe("FileSystemWorkspaceAdapter path case", () => {
-  test("compares paths case-sensitively by default", async () => {
-    const root = await stateDirectory();
-    const first = adapter(root);
-    await first.acquire(request("agent-a", ["Src/a"]));
+  const realPlatform = Object.getOwnPropertyDescriptor(process, "platform");
+  afterEach(() => {
+    if (realPlatform) Object.defineProperty(process, "platform", realPlatform);
+  });
 
-    expect(adapter(root).conflicts(request("agent-b", ["src/a"]))).toEqual([]);
+  /** Runs `body` with `process.platform` reading as `platform`. */
+  async function asPlatform(platform: string, body: () => Promise<void>) {
+    Object.defineProperty(process, "platform", { value: platform });
+    try {
+      await body();
+    } finally {
+      if (realPlatform)
+        Object.defineProperty(process, "platform", realPlatform);
+    }
+  }
+
+  async function holdsOverlap(
+    options: Partial<FileSystemWorkspaceAdapterOptions> = {},
+  ): Promise<boolean> {
+    const root = await stateDirectory();
+    await adapter(root, options).acquire(request("agent-a", ["Src/a"]));
+    return (
+      adapter(root, options).conflicts(request("agent-b", ["src/a"])).length > 0
+    );
+  }
+
+  test("compares paths case-sensitively by default on Linux", async () => {
+    await asPlatform("linux", async () => {
+      expect(await holdsOverlap()).toBe(false);
+    });
+  });
+
+  for (const platform of ["darwin", "win32"]) {
+    test(`folds case by default on ${platform}`, async () => {
+      await asPlatform(platform, async () => {
+        expect(await holdsOverlap()).toBe(true);
+      });
+    });
+  }
+
+  test("an explicit false wins over the macOS default", async () => {
+    await asPlatform("darwin", async () => {
+      expect(await holdsOverlap({ caseInsensitivePaths: false })).toBe(false);
+    });
+  });
+
+  for (const value of ["false", 1, 0, null]) {
+    test(`caseInsensitivePaths rejects the non-boolean ${JSON.stringify(value)}`, async () => {
+      const root = await stateDirectory();
+      expect(() =>
+        adapter(root, {
+          caseInsensitivePaths: value as unknown as boolean,
+        }),
+      ).toThrow(
+        new TypeError(
+          "Workspace adapter caseInsensitivePaths must be a boolean",
+        ),
+      );
+    });
+  }
+
+  test("an explicit true wins over the Linux default", async () => {
+    await asPlatform("linux", async () => {
+      expect(await holdsOverlap({ caseInsensitivePaths: true })).toBe(true);
+    });
   });
 
   test("caseInsensitivePaths makes differently cased paths conflict", async () => {

@@ -973,9 +973,12 @@ checkpoints:
   load; drain them before upgrading.
 - **Paths.** Pass `/`-separated paths to workspace leases: a `\` is rejected
   instead of converted, and a first segment of one letter and a colon
-  (`x:y`, `a:b.txt`) is rejected as a drive prefix; rename such files. Set
-  `caseInsensitivePaths: true` on the workspace adapter for a workspace on a
-  case-insensitive filesystem (default macOS APFS, Windows).
+  (`x:y`, `a:b.txt`) is rejected as a drive prefix; rename such files.
+  `FileSystemWorkspaceAdapter` folds case by default on macOS and Windows and
+  compares case-sensitively elsewhere; pass `caseInsensitivePaths: false` for a
+  case-sensitive volume on those platforms, or `true` for a case-insensitive
+  workspace elsewhere (and on `InMemoryWorkspaceAdapter`, which stays
+  case-sensitive by default).
 - **Workspace leases.** Drain or delete workspace `stateDirectory` lease files
   before upgrading. Expired legacy leases with rejected paths are dropped; a
   live one fails with `WORKFLOW_WORKSPACE_STATE_INCOMPATIBLE` until it is
