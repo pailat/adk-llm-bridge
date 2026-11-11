@@ -1,7 +1,8 @@
 /**
  * A process that exited does not keep its run open. Once the CLI has exited,
  * its stdout and stderr are read until EOF, or until they stay idle for
- * 500 ms (at most 5 s after the exit); a grandchild that still holds a pipe
+ * 500 ms; a pipe that stays silent is cut within 5 s of the exit plus the
+ * idle window, and a consumer that is behind is never cut. A grandchild that still holds a pipe
  * (a background task, an MCP server) is not waited for, and is not killed by
  * this rule. What the process wrote before it exited is read in full.
  */

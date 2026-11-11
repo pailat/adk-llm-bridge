@@ -12,8 +12,9 @@
  *
  * A run does not outlive its process: once the CLI has exited, `stdout` and
  * `stderr` are read until EOF, or until they stay idle for
- * {@link POST_EXIT_IDLE_MS} (at most {@link POST_EXIT_MAX_MS} after the
- * exit), and then end. A grandchild that still holds a pipe is not waited
+ * {@link POST_EXIT_IDLE_MS}; a pipe that stays silent is cut within
+ * {@link POST_EXIT_MAX_MS} of the exit plus the idle window, and a consumer
+ * that is behind is never cut. A grandchild that still holds a pipe is not waited
  * for and is not killed by this rule; what the CLI wrote before it exited is
  * read in full. The rule is {@link drainAfterExit}, the same on Bun and Node.
  */
