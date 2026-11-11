@@ -566,17 +566,35 @@ export function describeMissingExecutable(options: {
  * @remarks
  * Checks the fields that are set: `command` is a non-empty string,
  * `killGraceMs` a finite number of at least 0, `maxTurns` a positive
- * integer.
+ * integer, and every key in `booleanOptions` is `true` or `false`. A
+ * boolean option read as truthy would let a string such as `"false"` (from
+ * an env var) switch an escape hatch ON.
  *
  * @param driver - The driver name, for the message.
- * @param config - The options to check.
+ * @param driverConfig - The options to check.
+ * @param booleanOptions - Keys of `config` that must be real booleans when
+ * set (`undefined` counts as not set).
  * @throws InputValidationError (from `@google/adk`) naming the first invalid
  * option.
  */
 export function validateDriverConfig(
   driver: string,
-  config: { command?: unknown; killGraceMs?: unknown; maxTurns?: unknown },
+  driverConfig: object,
+  booleanOptions: readonly string[] = [],
 ): void {
+  const config = driverConfig as {
+    command?: unknown;
+    killGraceMs?: unknown;
+    maxTurns?: unknown;
+  };
+  for (const key of booleanOptions) {
+    const value = (driverConfig as Record<string, unknown>)[key];
+    if (value !== undefined && typeof value !== "boolean") {
+      throw new InputValidationError(
+        `${driver}: ${key} must be a boolean (true or false).`,
+      );
+    }
+  }
   if (
     config.command !== undefined &&
     (typeof config.command !== "string" || config.command.trim() === "")

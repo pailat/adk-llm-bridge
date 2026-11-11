@@ -383,6 +383,19 @@ from the 0.6.0 tag.
   step as `failed` with `WORKFLOW_ABORTED` and still replay it as that failure.
   The new `WorkflowStepInterruptedEvent` type is exported from
   `adk-llm-bridge/workflows`.
+- **Boolean driver options must be booleans.** Every `?: boolean` option of
+  `ClaudeAgentSdkDriver`, `ClaudeCliDriver`, `CodexSdkDriver`, `CodexCliDriver`
+  and `GeminiCliDriver` (for example `allowUnsandboxedShell`,
+  `inheritHostConfig`, `allowLocalBinding`, `allowUnenforcedPaths`,
+  `allowUnenforcedNetwork`, `allowPolicyOverrideArgs`,
+  `allowUncontainedCodexSdk`, `strictBinaryResolution`, `requireExplicitModel`,
+  `forkSession`, `debugEvents`, `skipGitRepoCheck`, `webSearchEnabled`) now
+  throws `InputValidationError` naming the driver and the option when it is
+  set to anything but `true` or `false`. Before, the driver read the value as
+  truthy, so an untyped host that passed the string `"false"` (an env var, a
+  JSON file) turned the escape hatch ON. Most of these options are new in
+  0.7.0; `skipGitRepoCheck` and `webSearchEnabled` on `CodexSdkDriver` exist in
+  0.6.0 and only a non-boolean from untyped JavaScript is refused.
 
 ### Security
 

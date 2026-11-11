@@ -274,6 +274,15 @@ export type CodexCliSpawn = (
   options: CodexCliSpawnOptions,
 ) => CodexCliSubprocess;
 
+/** Every `?: boolean` option of the driver config, checked when the driver is built. */
+const CODEX_CLI_BOOLEAN_OPTIONS = [
+  "requireExplicitModel",
+  "allowPolicyOverrideArgs",
+  "skipGitRepoCheck",
+  "allowUnenforcedNetwork",
+  "allowUnenforcedPaths",
+] as const;
+
 /** Options for {@link CodexCliDriver}. */
 export interface CodexCliDriverConfig {
   /**
@@ -512,6 +521,9 @@ export class CodexCliDriver extends SubprocessJsonlDriver {
    * @throws InputValidationError (from `@google/adk`) when `command` is empty,
    * `killGraceMs` is not a finite number of at least 0, or `args` is not an
    * array of strings.
+   * @throws InputValidationError (from `@google/adk`) when a boolean option
+   * (see the config's `?: boolean` fields) is set to a non-boolean value such
+   * as the string `"false"`.
    * @throws {@link ExternalAgentPolicyError} with code
    * `EXTERNAL_AGENT_OPTION_UNSUPPORTED` when an `args` entry overrides a
    * policy flag and `allowPolicyOverrideArgs` is not set.
@@ -522,7 +534,7 @@ export class CodexCliDriver extends SubprocessJsonlDriver {
    * and `model` is absent.
    */
   constructor(config: CodexCliDriverConfig = {}) {
-    validateDriverConfig("CodexCliDriver", config);
+    validateDriverConfig("CodexCliDriver", config, CODEX_CLI_BOOLEAN_OPTIONS);
     validateLaunchConfig("CodexCliDriver", config);
     assertNoPinnedArgOverride(
       "CodexCliDriver",
