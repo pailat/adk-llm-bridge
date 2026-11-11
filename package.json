@@ -49,6 +49,10 @@
       "types": "./dist/agents/session-store/sqlite/index.d.ts",
       "import": "./dist/agents/session-store/sqlite/index.js"
     },
+    "./agents/session-store/adk-artifacts": {
+      "types": "./dist/agents/session-store/adk-artifacts/index.d.ts",
+      "import": "./dist/agents/session-store/adk-artifacts/index.js"
+    },
     "./workflows": {
       "types": "./dist/workflows/index.d.ts",
       "import": "./dist/workflows/index.js"
