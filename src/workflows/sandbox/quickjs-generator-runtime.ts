@@ -30,7 +30,11 @@ import type {
 
 const encoder = new TextEncoder();
 
-/** Capabilities of {@link QuickJSSyncGeneratorRuntime}: bounded memory, stack and CPU time. */
+/**
+ * Capabilities of {@link QuickJSSyncGeneratorRuntime}: bounded memory and stack,
+ * and a time budget checked between bytecode operations (not a hard bound on
+ * the host thread).
+ */
 export const QUICKJS_SYNC_CAPABILITIES: WorkflowScriptRuntimeCapabilities =
   Object.freeze({
     engine: "quickjs",
@@ -172,7 +176,8 @@ export const QUICKJS_MAX_STACK_BYTES = 32 * 1024;
 /**
  * Modules that a host stack overflow or a wasm abort left in an unknown state.
  * The host `RangeError` unwinds the wasm without freeing the guest's objects
- * and can stop inside the allocator, so no session runs on such a module.
+ * and can stop inside the allocator, so the runtime never enters such a
+ * module again: no session starts or runs on it, and nothing on it is freed.
  */
 const poisonedModules = new WeakSet<object>();
 
@@ -372,7 +377,8 @@ class QuickJSSyncGeneratorSession implements WorkflowScriptGeneratorSession {
         );
       }
     } finally {
-      argument.dispose();
+      // A poisoned module is never entered again, not even to free.
+      if (!poisonedModules.has(this.#module)) argument.dispose();
       this.#deadline = Number.POSITIVE_INFINITY;
     }
   }
@@ -385,17 +391,27 @@ class QuickJSSyncGeneratorSession implements WorkflowScriptGeneratorSession {
     return failure;
   }
 
+  /**
+   * Frees the session. On a poisoned module (this session's or another's), it
+   * only drops the handles: the module's heap is not trusted, and a free walks
+   * it without any interrupt check, so it could block the host thread. The
+   * module's memory is released when nothing references it.
+   */
   dispose(): void {
-    if (!this.#context || !this.#runtime) {
+    const context = this.#context;
+    const runtime = this.#runtime;
+    const nextFunction = this.#nextFunction;
+    if (!context || !runtime) {
       return;
     }
-    this.#nextFunction?.dispose();
     this.#nextFunction = undefined;
-    this.#context.dispose();
     this.#context = undefined;
-    const runtime = this.#runtime;
     this.#runtime = undefined;
-    if (disposeRuntime(runtime)) this.#poison();
+    if (!poisonedModules.has(this.#module)) {
+      nextFunction?.dispose();
+      context.dispose();
+      if (disposeRuntime(runtime)) this.#poison();
+    }
     this.#onDispose?.();
   }
 }
@@ -634,9 +650,12 @@ ${options.source}
         module,
       );
     } catch (error) {
-      nextFunction?.dispose();
-      context.dispose();
-      if (disposeRuntime(runtime)) poison();
+      // A module poisoned at set-up is never entered again, not even to free.
+      if (!poisonedModules.has(module)) {
+        nextFunction?.dispose();
+        context.dispose();
+        if (disposeRuntime(runtime)) poison();
+      }
       this.#onDispose?.();
       throw error;
     }

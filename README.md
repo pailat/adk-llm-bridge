@@ -584,9 +584,11 @@ export const workflow = new WorkflowAgent({
   events. The next turn that answers the request resumes the step exactly
   once. Handlers must not catch `WorkflowInterruptedError`.
 - **Script workflows.** `ScriptWorkflowAgent` runs a synchronous generator
-  script (`yield ctx.run(...)`) in a fresh QuickJS VM with CPU, memory and
-  step limits, no imports and no host globals. Use it for sequences supplied
-  at runtime. It needs the optional QuickJS peers.
+  script (`yield ctx.run(...)`) in a fresh QuickJS VM with a time budget,
+  memory and step limits, no imports and no host globals. Use it for
+  sequences supplied at runtime. The budget is not a hard bound on the host
+  thread ([Time bound](docs/workflow-orchestration.md#time-bound)). It needs
+  the optional QuickJS peers.
 - **Control plane.** `WorkflowControlPlane.dispatch()` takes one versioned
   JSON request to start, observe, answer and cancel executions, spawn tasks,
   exchange messages and validate artifacts, for an MCP tool or HTTP route.

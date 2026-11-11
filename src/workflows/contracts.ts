@@ -325,7 +325,12 @@ export interface WorkflowExecutionLimits {
    * time asleep counts toward it depends on the runtime and operating system.
    */
   timeoutMs?: number;
-  /** Sandboxed runtime CPU budget per uninterrupted guest turn. */
+  /**
+   * Time budget, in milliseconds of monotonic time, for each guest turn and
+   * for set-up (the compile of the bridge's wrapper included). QuickJS checks
+   * it between bytecode operations, so it is not a hard bound on the host
+   * thread; see the "Time bound" section of `docs/workflow-orchestration.md`.
+   */
   cpuTimeMs?: number;
   /** Sandbox heap limit in bytes. */
   memoryBytes?: number;

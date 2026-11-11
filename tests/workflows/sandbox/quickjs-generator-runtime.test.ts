@@ -1,4 +1,4 @@
-import { describe, expect, spyOn, test } from "bun:test";
+import { describe, expect, spyOn } from "bun:test";
 import {
   newQuickJSWASMModuleFromVariant,
   type QuickJSWASMModule,
@@ -15,6 +15,8 @@ import {
   discardReleaseQuickJS,
   loadReleaseQuickJS,
 } from "../../../src/workflows/sandbox/quickjs-loader.js";
+// Every test here gets a deadline and the host-blocking watchdog.
+import { sandboxTest as test } from "../../helpers/sandbox-test.js";
 
 const releaseLoader = (): Promise<QuickJSWASMModule> =>
   newQuickJSWASMModuleFromVariant(
@@ -96,7 +98,9 @@ describe("QuickJSSyncGeneratorRuntime limits", () => {
   });
 
   test("rejects invalid source and oversized source or messages", async () => {
-    const runtime = new QuickJSSyncGeneratorRuntime({ loader: releaseLoader });
+    const runtime = new QuickJSSyncGeneratorRuntime({
+      loader: releaseLoader,
+    });
     await expect(
       runtime.createSession({ source: "if (" }),
     ).rejects.toMatchObject({
@@ -121,10 +125,21 @@ describe("QuickJSSyncGeneratorRuntime limits", () => {
     const runtime = new QuickJSSyncGeneratorRuntime({ loader: releaseLoader });
     const session = await runtime.createSession({
       source: "while (true) {}",
-      limits: { cpuTimeMs: 250 },
+      // The budget also covers set-up (the wrapper's compile); 1 s keeps a
+      // loaded machine from spending it there.
+      limits: { cpuTimeMs: 1_000 },
     });
     try {
-      expect(() => session.next()).toThrow(WorkflowError);
+      let caught: unknown;
+      try {
+        session.next();
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(WorkflowError);
+      expect(caught).toMatchObject({ code: "WORKFLOW_LIMIT_EXCEEDED" });
+      // The turn's interrupt, not the set-up's.
+      expect((caught as Error).message).toContain("execution limit exceeded");
       try {
         session.next();
       } catch (error) {
@@ -178,10 +193,14 @@ describe("QuickJSSyncGeneratorRuntime limits", () => {
   });
 
   test("reports unbounded recursion as a limit error and survives disposal", async () => {
-    const runtime = new QuickJSSyncGeneratorRuntime({ loader: releaseLoader });
+    const runtime = new QuickJSSyncGeneratorRuntime({
+      loader: releaseLoader,
+    });
     const session = await runtime.createSession({
       source: "function f() { return f() + 1; } return f();",
-      limits: { cpuTimeMs: 300 },
+      // The budget also covers set-up (the wrapper's compile); 1 s keeps a
+      // loaded machine from spending it there.
+      limits: { cpuTimeMs: 1_000 },
     });
     let caught: unknown;
     try {
@@ -191,6 +210,7 @@ describe("QuickJSSyncGeneratorRuntime limits", () => {
     }
     expect(caught).toBeInstanceOf(WorkflowError);
     expect(caught).toMatchObject({ code: "WORKFLOW_LIMIT_EXCEEDED" });
+    expect((caught as Error).message).toContain("execution limit exceeded");
     // The wasm assertion raised while freeing the overflowed runtime must not
     // replace the limit error nor escape from dispose().
     expect(() => session.dispose()).not.toThrow();
@@ -308,7 +328,9 @@ describe("QuickJSSyncGeneratorRuntime stack limit and the host stack", () => {
   });
 
   test("validateLimits refuses a stackBytes above the maximum without a session", () => {
-    const runtime = new QuickJSSyncGeneratorRuntime({ loader: releaseLoader });
+    const runtime = new QuickJSSyncGeneratorRuntime({
+      loader: releaseLoader,
+    });
 
     expect(() => runtime.validateLimits(undefined)).not.toThrow();
     expect(() =>
@@ -323,7 +345,9 @@ describe("QuickJSSyncGeneratorRuntime stack limit and the host stack", () => {
   });
 
   test("stackBytes above the maximum is refused and names the maximum", async () => {
-    const runtime = new QuickJSSyncGeneratorRuntime({ loader: releaseLoader });
+    const runtime = new QuickJSSyncGeneratorRuntime({
+      loader: releaseLoader,
+    });
     const error = await runtime
       .createSession({
         source: "return 1;",
@@ -651,6 +675,312 @@ describe("QuickJSSyncGeneratorRuntime stack limit and the host stack", () => {
       },
     );
 
+    /**
+     * The real module, with every call on its runtimes, contexts and handles
+     * recorded. Once a call throws a host failure (a `RangeError` or a wasm
+     * abort), the module counts as poisoned and every later call is listed in
+     * `afterPoison`. With `refuseAfterPoison`, such a call throws instead of
+     * reaching the wasm: it stands for a free that never returns. `inject`
+     * makes the first call of one context method throw, as a host overflow
+     * there does.
+     */
+    function recordingModule(
+      real: QuickJSWASMModule,
+      options: {
+        refuseAfterPoison?: boolean;
+        inject?: { method: "evalCode" | "callFunction"; error: Error };
+      } = {},
+    ) {
+      const state = {
+        poisoned: false,
+        calls: [] as string[],
+        afterPoison: [] as string[],
+        /** Every handle the module handed out, with how often it was freed. */
+        handles: new Map<string, number>(),
+      };
+      let handleCount = 0;
+      const handle = (target: object): object => {
+        handleCount += 1;
+        const id = `handle#${handleCount}`;
+        state.handles.set(id, 0);
+        return wrap(target, id);
+      };
+      let armed = options.inject !== undefined;
+      const isHostFailure = (error: unknown) =>
+        error instanceof RangeError ||
+        (error instanceof Error && error.message.startsWith("Aborted("));
+      const wrapResult = (out: unknown): unknown => {
+        if (!out || typeof out !== "object") return out;
+        const result = out as { value?: object; error?: object };
+        if ("value" in result || "error" in result) {
+          // A call result: `{ value }` or `{ error }`, each a handle.
+          return {
+            ...result,
+            ...(result.value ? { value: handle(result.value) } : {}),
+            ...(result.error ? { error: handle(result.error) } : {}),
+          };
+        }
+        return out;
+      };
+      function wrap<T extends object>(target: T, label: string): T {
+        return new Proxy(target, {
+          get(object, key) {
+            const value = Reflect.get(object, key);
+            if (typeof value !== "function") return value;
+            return (...args: unknown[]) => {
+              const isHandle = label.startsWith("handle#");
+              const name = `${isHandle ? "handle" : label}.${String(key)}`;
+              state.calls.push(name);
+              if (isHandle && key === "dispose") {
+                state.handles.set(label, (state.handles.get(label) ?? 0) + 1);
+              }
+              if (state.poisoned) {
+                state.afterPoison.push(name);
+                if (options.refuseAfterPoison) {
+                  throw new Error(`called after poison: ${name}`);
+                }
+              }
+              if (
+                armed &&
+                label === "context" &&
+                key === options.inject?.method
+              ) {
+                armed = false;
+                state.poisoned = true;
+                throw options.inject.error;
+              }
+              try {
+                const out = (value as (...a: unknown[]) => unknown).apply(
+                  object,
+                  args,
+                );
+                if (key === "newContext") return wrap(out as object, "context");
+                if (key === "newString") return handle(out as object);
+                if (key === "evalCode" || key === "callFunction") {
+                  return wrapResult(out);
+                }
+                return out;
+              } catch (error) {
+                if (isHostFailure(error)) state.poisoned = true;
+                throw error;
+              }
+            };
+          },
+        });
+      }
+      const module = new Proxy(real, {
+        get(target, key) {
+          if (key !== "newRuntime") return Reflect.get(target, key);
+          return () => wrap(target.newRuntime(), "runtime");
+        },
+      });
+      return { module, state };
+    }
+
+    test("after a host stack overflow in a turn, nothing calls into the module again", async () => {
+      const modules = isolatedModules();
+      const real = await captureWasmErrors(modules.loader).then(
+        ({ result }) => result,
+      );
+      const { module, state } = recordingModule(real);
+      let disposedCount = 0;
+      const runtime = new QuickJSSyncGeneratorRuntime({
+        loader: async () => module,
+        discardModule: () => {},
+        maxStackBytes: 4 * FORCED,
+        onDispose: () => {
+          disposedCount += 1;
+        },
+      });
+      const turn = await captureWasmErrors(async () => {
+        const session = await runtime.createSession({
+          source: RECURSION,
+          limits: { stackBytes: FORCED, cpuTimeMs: 2_000 },
+        });
+        let reason: unknown;
+        try {
+          session.next();
+        } catch (error) {
+          reason = error;
+        }
+        session.dispose();
+        session.dispose();
+        return { reason, disposed: session.disposed };
+      }).then(({ result }) => result);
+
+      expect(turn.reason).toMatchObject({ code: "WORKFLOW_LIMIT_EXCEEDED" });
+      expect((turn.reason as Error).message).toContain(
+        "host stack was exhausted",
+      );
+      expect(state.poisoned).toBe(true);
+      expect(state.afterPoison).toEqual([]);
+      expect(turn.disposed).toBe(true);
+      expect(disposedCount).toBe(1);
+    });
+
+    test("after a host stack overflow at set-up, nothing calls into the module again", async () => {
+      const modules = isolatedModules();
+      const real = await captureWasmErrors(modules.loader).then(
+        ({ result }) => result,
+      );
+      const { module, state } = recordingModule(real, {
+        inject: {
+          method: "evalCode",
+          error: new RangeError("Maximum call stack size exceeded."),
+        },
+      });
+      let disposedCount = 0;
+      const runtime = new QuickJSSyncGeneratorRuntime({
+        loader: async () => module,
+        discardModule: () => {},
+        onDispose: () => {
+          disposedCount += 1;
+        },
+      });
+
+      expect(await code(runtime, "return 1;")).toBe("WORKFLOW_LIMIT_EXCEEDED");
+      expect(state.poisoned).toBe(true);
+      expect(state.afterPoison).toEqual([]);
+      expect(disposedCount).toBe(1);
+    });
+
+    test("a session on a module another session poisoned frees nothing on that module", async () => {
+      const modules = isolatedModules();
+      const real = await captureWasmErrors(modules.loader).then(
+        ({ result }) => result,
+      );
+      const { module, state } = recordingModule(real);
+      const runtime = new QuickJSSyncGeneratorRuntime({
+        loader: async () => module,
+        discardModule: () => {},
+        maxStackBytes: 4 * FORCED,
+      });
+      const outcome = await captureWasmErrors(async () => {
+        const bystander = await runtime.createSession({
+          source: "return 1;",
+        });
+        const culprit = await runtime.createSession({
+          source: RECURSION,
+          limits: { stackBytes: FORCED, cpuTimeMs: 2_000 },
+        });
+        try {
+          culprit.next();
+        } catch {
+          // The culprit's own limit error; another test checks it.
+        }
+        culprit.dispose();
+        let bystanderCode: unknown;
+        try {
+          bystander.next();
+        } catch (error) {
+          bystanderCode = (error as { code?: unknown }).code;
+        }
+        bystander.dispose();
+        return { bystanderCode, disposed: bystander.disposed };
+      }).then(({ result }) => result);
+
+      expect(outcome.bystanderCode).toBe("WORKFLOW_EXECUTION_ERROR");
+      expect(outcome.disposed).toBe(true);
+      expect(state.poisoned).toBe(true);
+      expect(state.afterPoison).toEqual([]);
+    });
+
+    test("a free on a poisoned module is never reached, so it cannot block the host", async () => {
+      // Each call after the poisoning throws here; it stands for a free that
+      // walks the corrupted heap and never returns. The flows must still end
+      // with their documented codes and never reach it.
+      const results: Record<string, unknown> = {};
+      for (const flow of ["turn", "set-up", "bystander"] as const) {
+        const modules = isolatedModules();
+        const real = await captureWasmErrors(modules.loader).then(
+          ({ result }) => result,
+        );
+        const { module, state } = recordingModule(real, {
+          refuseAfterPoison: true,
+          ...(flow === "set-up"
+            ? {
+                inject: {
+                  method: "evalCode" as const,
+                  error: new RangeError("Maximum call stack size exceeded."),
+                },
+              }
+            : {}),
+        });
+        const runtime = new QuickJSSyncGeneratorRuntime({
+          loader: async () => module,
+          discardModule: () => {},
+          maxStackBytes: 4 * FORCED,
+        });
+        results[flow] = await captureWasmErrors(async () => {
+          if (flow === "set-up") return code(runtime, "return 1;");
+          const bystander =
+            flow === "bystander"
+              ? await runtime.createSession({ source: "return 1;" })
+              : undefined;
+          const culprit = await runtime.createSession({
+            source: RECURSION,
+            limits: { stackBytes: FORCED, cpuTimeMs: 2_000 },
+          });
+          const codes: unknown[] = [];
+          try {
+            culprit.next();
+          } catch (error) {
+            codes.push((error as { code?: unknown }).code);
+          }
+          culprit.dispose();
+          if (bystander) {
+            try {
+              bystander.next();
+            } catch (error) {
+              codes.push((error as { code?: unknown }).code);
+            }
+            bystander.dispose();
+          }
+          return codes;
+        }).then(({ result }) => result);
+        expect(state.afterPoison).toEqual([]);
+      }
+
+      expect(results).toEqual({
+        turn: ["WORKFLOW_LIMIT_EXCEEDED"],
+        "set-up": "WORKFLOW_LIMIT_EXCEEDED",
+        bystander: ["WORKFLOW_LIMIT_EXCEEDED", "WORKFLOW_EXECUTION_ERROR"],
+      });
+    });
+
+    test("a healthy run frees every handle once, and its context and runtime", async () => {
+      const modules = isolatedModules();
+      const real = await captureWasmErrors(modules.loader).then(
+        ({ result }) => result,
+      );
+      const { module, state } = recordingModule(real);
+      const runtime = new QuickJSSyncGeneratorRuntime({
+        loader: async () => module,
+        discardModule: modules.discardModule,
+      });
+      const session = await runtime.createSession({
+        source: "const first = yield 1; return first + 1;",
+      });
+      const turns = [session.next(), session.next(41)];
+      session.dispose();
+
+      expect(turns).toEqual([
+        { done: false, value: 1 },
+        { done: true, value: 42 },
+      ]);
+      expect(state.poisoned).toBe(false);
+      const count = (name: string) =>
+        state.calls.filter((call) => call === name).length;
+      expect(count("runtime.dispose")).toBe(1);
+      expect(count("context.dispose")).toBe(1);
+      // Per turn the argument and the result; once the next function.
+      expect(state.handles.size).toBe(2 * turns.length + 1);
+      expect([...state.handles.values()]).toEqual(
+        Array.from({ length: state.handles.size }, () => 1),
+      );
+      expect(modules.discarded).toHaveLength(0);
+    });
+
     test("a custom loader that keeps returning a poisoned module is refused", async () => {
       const modules = isolatedModules();
       const fixed = await captureWasmErrors(modules.loader).then(
@@ -803,7 +1133,9 @@ describe("QuickJSSyncGeneratorRuntime setup budget", () => {
   // expression after it runs while the session is set up, before any turn.
   // Only the setup CPU budget can stop it; without it this test never ends.
   test("interrupts guest code that runs at setup", async () => {
-    const runtime = new QuickJSSyncGeneratorRuntime({ loader: releaseLoader });
+    const runtime = new QuickJSSyncGeneratorRuntime({
+      loader: releaseLoader,
+    });
     const outcome = await runtime
       .createSession({
         source: "}), (() => { for (;;) {} })(), (function* () {",

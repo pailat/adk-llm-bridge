@@ -277,7 +277,8 @@ comparator, `toString` chains and others; and 15 parser and compiler ones):
 ### When the host stack is exhausted anyway
 
 Any host stack overflow or WebAssembly abort, in a turn, in the parser at
-set-up, while reading an error or while freeing the runtime, is contained:
+set-up, while reading an error, or while a healthy runtime is freed, is
+contained:
 
 - That run ends with `WORKFLOW_LIMIT_EXCEEDED`; the message says the host stack
   was exhausted and the sandbox was reset.
@@ -286,13 +287,39 @@ set-up, while reading an error or while freeing the runtime, is contained:
   not trusted. Every other session on it fails its next turn with
   `WORKFLOW_EXECUTION_ERROR`; start those runs again. This favors integrity: one
   hostile script fails the other live script sessions of the process.
-- A new session never starts on a poisoned module. The default loader builds a
-  new one. A custom `loader` that returns the poisoned module again is refused
-  with `WORKFLOW_SANDBOX_UNAVAILABLE`; give it a `discardModule` that drops its
-  cache.
+- A poisoned module is never entered again. A new session never starts on it,
+  no turn runs on it, and no handle, context or runtime on it is freed: a free
+  walks the untrusted heap without any interrupt check, so it could block the
+  host thread. Sessions on it only drop their references.
+- Each poisoning keeps one WebAssembly heap until the last session on that
+  module is disposed and the module is garbage-collected.
+- The default loader builds a new module. A custom `loader` that returns the
+  poisoned module again is refused with `WORKFLOW_SANDBOX_UNAVAILABLE`; give it
+  a `discardModule` that drops its cache.
 
 Run a deep script on your own host (Windows, a small thread stack) to see which
 case it takes.
+
+### Time bound
+
+What the sandbox contains, what it bounds and what it does not:
+
+1. `cpuTimeMs` is monotonic wall time per turn and for set-up, the compile of
+   the bridge's own wrapper program included, so a budget of a few hundred
+   milliseconds can run out at set-up on a loaded machine. QuickJS checks it
+   between bytecode operations and in the regular-expression engine: guest
+   loops, recursion and backtracking end with `WORKFLOW_LIMIT_EXCEEDED`. It is
+   not a hard bound on the host thread.
+2. A single native builtin call (`sort`, `join`, `JSON.stringify`) runs to
+   completion. `memoryBytes` bounds it, not the budget: about 160 ms was
+   measured at 256 MiB.
+3. After a host stack overflow or a WebAssembly abort, the runtime never calls
+   into that module again. The overflowing call itself, and the JavaScript
+   engine's own overflow handling, are not bounded by the sandbox.
+4. That a script can never block the host longer than its budget is
+   **UNPROVEN**. One CI run hung in the forced-overflow tests, and it was not
+   reproduced in about 16,800 local overflows.
+5. A host that needs a hard bound must run workflows in a process it can kill.
 
 ## Identifiers and paths
 

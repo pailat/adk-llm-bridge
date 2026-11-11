@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect } from "bun:test";
 import {
   BaseAgent,
   createEvent,
@@ -21,6 +21,8 @@ import {
 import type { WorkflowEvent } from "../../src/workflows/events.js";
 import { ScriptWorkflowAgent } from "../../src/workflows/script-workflow-agent.js";
 import { WorkflowAgent } from "../../src/workflows/workflow-agent.js";
+// Every test here gets a deadline and the host-blocking watchdog.
+import { sandboxTest as test } from "../helpers/sandbox-test.js";
 
 class KeyedStore implements WorkflowCheckpointStore {
   readonly checkpoints = new Map<string, WorkflowCheckpointV1>();

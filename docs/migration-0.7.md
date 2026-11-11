@@ -1069,8 +1069,10 @@ checkpoints:
 - **A host stack overflow resets the sandbox.** A script that exhausts the host
   stack (for example `eval` of a deeply nested source) ends with
   `WORKFLOW_LIMIT_EXCEEDED`. Other script sessions running at that moment fail
-  their next turn with `WORKFLOW_EXECUTION_ERROR`; start them again. See
-  [Script sandbox stack](./workflow-orchestration.md#script-sandbox-stack).
+  their next turn with `WORKFLOW_EXECUTION_ERROR`; start them again. The
+  runtime never calls into the overflowed module again, not even to free it.
+  See [Script sandbox stack](./workflow-orchestration.md#script-sandbox-stack)
+  and [Time bound](./workflow-orchestration.md#time-bound).
 
 ### Model and input changes on replayed steps
 
