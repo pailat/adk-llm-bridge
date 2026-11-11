@@ -308,9 +308,10 @@ export interface FxCliDriverConfig {
   args?: readonly string[];
   /**
    * Opt-in: let `args` carry the pinned policy flags. It never lifts the
-   * model flags (`--model`, `--provider`) or {@link FX_CLI_FIXED_FLAGS}
-   * (the output and session flags, `--config` and `--`). Must be `true` or
-   * `false`.
+   * model flags (`--model`, `--provider`), {@link FX_CLI_FIXED_FLAGS}
+   * (the output and session flags, `--config` and `--`) or
+   * {@link FX_CLI_UNSUPPORTED_FLAGS} (`--image`, `--fast`, `--ultrafast`).
+   * Must be `true` or `false`.
    *
    * @defaultValue false
    */
@@ -550,8 +551,9 @@ export class FxCliDriver extends SubprocessJsonlDriver {
    * (`resumeSessionId`, `sessionStore*`) is given, `effort` is not a plain
    * token, an `args` entry overrides a pinned flag or names a flag the driver
    * owns (`--json`, `--no-save`, `--config`, `--`, `--resume*`, `--continue`,
-   * `-c`, `-r`), or an `args` entry is a lone `-` or is not a flag and not the
-   * value of the flag before it (fx would read it as the prompt).
+   * `-c`, `-r`), names a flag the driver does not support (`--image`, `--fast`,
+   * `--ultrafast`), or an `args` entry is a lone `-` or is not a flag and not
+   * the value of the flag before it (fx would read it as the prompt).
    * @throws {@link ExternalAgentPolicyError} with code
    * `EXTERNAL_AGENT_MODEL_OVERRIDE` when `args` sets the model or provider,
    * `EXTERNAL_AGENT_MODEL_INVALID` when `model` is not a model id, and
