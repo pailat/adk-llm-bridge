@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import {
   BaseAgent,
   createEvent,
@@ -15,11 +15,42 @@ interface Activity {
   maxActive: number;
 }
 
+/** Workflow timeout armed by the timeout tests; the test fires it, so it never races the clock. */
+const TIMEOUT_MS = 60_000;
+
+/**
+ * Holds the one timer armed with `delayMs` so a test fires it at a chosen
+ * point instead of racing the wall clock. Other timers run normally.
+ */
+function holdTimer(delayMs: number) {
+  let callback: (() => void) | undefined;
+  const realSetTimeout = globalThis.setTimeout;
+  const spy = spyOn(globalThis, "setTimeout").mockImplementation(((
+    handler: () => void,
+    delay?: number,
+    ...args: unknown[]
+  ) => {
+    if (delay === delayMs && callback === undefined) {
+      callback = handler;
+      return realSetTimeout(() => {}, 0);
+    }
+    return realSetTimeout(handler, delay, ...args);
+  }) as unknown as typeof setTimeout);
+  return {
+    fire() {
+      if (!callback) throw new Error(`no ${delayMs}ms timer was armed`);
+      callback();
+    },
+    restore: () => spy.mockRestore(),
+  };
+}
+
 class DelayedAgent extends BaseAgent {
   readonly #delayMs: number;
   readonly #output: string;
   readonly #activity: Activity;
   aborted = false;
+  entered = false;
   readonly started = deferred<void>();
 
   constructor(
@@ -35,6 +66,7 @@ class DelayedAgent extends BaseAgent {
   }
 
   protected async *runAsyncImpl(context: InvocationContext) {
+    this.entered = true;
     this.started.resolve();
     this.#activity.active++;
     this.#activity.maxActive = Math.max(
@@ -126,10 +158,9 @@ async function collect(agent: BaseAgent, context = invocation(agent)) {
 
 describe("WorkflowRuntime parallel execution", () => {
   test("runs different agents concurrently and preserves result order", async () => {
-    const activity = { active: 0, maxActive: 0 };
-    const slow = new DelayedAgent("slow", 30, "slow-result", activity);
-    const fast = new DelayedAgent("fast", 5, "fast-result", activity);
-    const queued = new DelayedAgent("queued", 5, "queued-result", activity);
+    const slow = new ControlledAgent("slow");
+    const fast = new ControlledAgent("fast");
+    const queued = new ControlledAgent("queued");
     let outputs: string[] = [];
     const workflow = new WorkflowAgent({
       name: "workflow",
@@ -151,9 +182,22 @@ describe("WorkflowRuntime parallel execution", () => {
       subAgents: [slow, fast, queued],
     });
 
-    await collect(workflow);
-    expect(activity.maxActive).toBe(2);
-    expect(outputs).toEqual(["slow-result", "fast-result", "queued-result"]);
+    const running = collect(workflow);
+    // Both permits are taken at once, and the third step waits for one.
+    await Promise.all([slow.started.promise, fast.started.promise]);
+    // A negative check needs a window: a broken cap starts the third step on a
+    // later timer turn, so checking at once would miss it. Correct code cannot
+    // fail this wait, because the third step cannot start before a permit is
+    // released, however long the window is. The runtime exposes no "blocked on
+    // the permit" signal to wait on instead.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(queued.hasStarted).toBe(false);
+    fast.proceed.resolve();
+    await queued.started.promise;
+    slow.proceed.resolve();
+    queued.proceed.resolve();
+    await running;
+    expect(outputs).toEqual(["slow-done", "fast-done", "queued-done"]);
   });
 
   test("honors per-call concurrency and serializes the same BaseAgent", async () => {
@@ -266,30 +310,130 @@ describe("WorkflowRuntime parallel execution", () => {
       message: "cancelled by parent",
     });
     expect(parentSlow.aborted).toBe(true);
+  });
 
-    const timeoutSlow = new DelayedAgent("timeout_slow", 1_000, "late");
-    const timeoutWorkflow = new WorkflowAgent({
-      name: "timeout_workflow",
-      definition: defineWorkflow({
-        id: "timeout",
-        version: "1",
-        limits: { timeoutMs: 10 },
-        handler: async (ctx) =>
-          (
-            await ctx.run({
-              id: "slow",
-              agentName: "timeout_slow",
-              input: "slow",
-            })
-          ).output,
-      }),
-      subAgents: [timeoutSlow],
-    });
-    await expect(collect(timeoutWorkflow)).rejects.toMatchObject({
-      code: "WORKFLOW_ABORTED",
-      message: "Workflow execution timed out after 10ms",
-    });
-    expect(timeoutSlow.aborted).toBe(true);
+  test("a workflow timeout aborts the step in flight", async () => {
+    const timer = holdTimer(TIMEOUT_MS);
+    try {
+      const timeoutSlow = new DelayedAgent("timeout_slow", 61_000, "late");
+      const timeoutWorkflow = new WorkflowAgent({
+        name: "timeout_workflow",
+        definition: defineWorkflow({
+          id: "timeout",
+          version: "1",
+          limits: { timeoutMs: TIMEOUT_MS },
+          handler: async (ctx) =>
+            (
+              await ctx.run({
+                id: "slow",
+                agentName: "timeout_slow",
+                input: "slow",
+              })
+            ).output,
+        }),
+        subAgents: [timeoutSlow],
+      });
+      const running = collect(timeoutWorkflow).then(
+        () => undefined,
+        (caught: unknown) => caught,
+      );
+      // The timeout only fires once the step is in flight, never before it.
+      await timeoutSlow.started.promise;
+      timer.fire();
+      expect(await running).toMatchObject({
+        code: "WORKFLOW_ABORTED",
+        message: `Workflow execution timed out after ${TIMEOUT_MS}ms`,
+      });
+      expect(timeoutSlow.aborted).toBe(true);
+    } finally {
+      timer.restore();
+    }
+  });
+
+  test("a step that has not started when the workflow times out never runs", async () => {
+    const timer = holdTimer(TIMEOUT_MS);
+    try {
+      const idle = new DelayedAgent("idle", 61_000, "late");
+      const reached = deferred<void>();
+      const release = deferred<void>();
+      const workflow = new WorkflowAgent({
+        name: "idle_workflow",
+        definition: defineWorkflow({
+          id: "timeout-before-step",
+          version: "1",
+          limits: { timeoutMs: TIMEOUT_MS },
+          handler: async (ctx) => {
+            reached.resolve();
+            await release.promise;
+            return (
+              await ctx.run({ id: "idle", agentName: "idle", input: "idle" })
+            ).output;
+          },
+        }),
+        subAgents: [idle],
+      });
+      const running = collect(workflow).then(
+        () => undefined,
+        (caught: unknown) => caught,
+      );
+      await reached.promise;
+      timer.fire();
+      release.resolve();
+      expect(await running).toMatchObject({
+        code: "WORKFLOW_ABORTED",
+        message: `Workflow execution timed out after ${TIMEOUT_MS}ms`,
+      });
+      // The step was requested after the timeout, so it is refused before the
+      // agent is called: nothing runs on after the workflow timed out.
+      expect(idle.entered).toBe(false);
+      expect(idle.aborted).toBe(false);
+    } finally {
+      timer.restore();
+    }
+  });
+
+  test("a step held in beforeAttempt when the workflow times out never runs", async () => {
+    const timer = holdTimer(TIMEOUT_MS);
+    try {
+      const idle = new DelayedAgent("idle", 61_000, "late");
+      const reached = deferred<void>();
+      const release = deferred<void>();
+      const workflow = new WorkflowAgent({
+        name: "attempt_workflow",
+        definition: defineWorkflow({
+          id: "timeout-before-attempt",
+          version: "1",
+          limits: { timeoutMs: TIMEOUT_MS },
+          handler: async (ctx) =>
+            (await ctx.run({ id: "idle", agentName: "idle", input: "idle" }))
+              .output,
+        }),
+        subAgents: [idle],
+        runtimeHooks: {
+          beforeAttempt: async () => {
+            reached.resolve();
+            await release.promise;
+            return undefined;
+          },
+        },
+      });
+      const running = collect(workflow).then(
+        () => undefined,
+        (caught: unknown) => caught,
+      );
+      // The step is already saved running and its signal exists, but the
+      // agent has not been called when the timeout fires.
+      await reached.promise;
+      timer.fire();
+      release.resolve();
+      expect(await running).toMatchObject({
+        code: "WORKFLOW_ABORTED",
+        message: `Workflow execution timed out after ${TIMEOUT_MS}ms`,
+      });
+      expect(idle.entered).toBe(false);
+    } finally {
+      timer.restore();
+    }
   });
 
   test("serializes overlapping write paths while disjoint paths remain concurrent", async () => {
@@ -358,7 +502,6 @@ describe("WorkflowRuntime parallel execution", () => {
       definition: defineWorkflow({
         id: "workspace-failure",
         version: "1",
-        limits: { timeoutMs: 250 },
         handler: async (ctx) => {
           try {
             await ctx.run({
