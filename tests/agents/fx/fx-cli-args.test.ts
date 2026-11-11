@@ -265,48 +265,46 @@ describe("no prompt text in args", () => {
     expect(refusal?.message).toMatch(/\b0\b/);
   });
 
-  test('["--fast", "hello"] is refused at index 1', () => {
-    const refusal = construct(["--fast", "hello"]);
+  test('["--debug", "hello"] is refused at index 1', () => {
+    const refusal = construct(["--debug", "hello"]);
     expectRefused(refusal, EXTERNAL_AGENT_OPTION_UNSUPPORTED, "args");
     expect(refusal?.message).toMatch(/\b1\b/);
   });
 
   test("the message never repeats more than the first 40 characters of the entry", () => {
     const entry = `${"abcdefghij".repeat(10)}`;
-    const refusal = construct(["--fast", entry]);
+    const refusal = construct(["--debug", entry]);
     expectRefused(refusal, EXTERNAL_AGENT_OPTION_UNSUPPORTED, "args");
     expect(refusal?.message).not.toContain(entry.slice(0, 41));
   });
 
-  test("a value after an allowed value flag is kept; a bare word after it is refused", () => {
-    // `--image` is allowed and takes a value in the space form.
-    expect(construct(["--image", "/tmp/a.png"])).toBeUndefined();
-    // `--image` alone is accepted at construction (fx reports it).
-    expect(construct(["--image"])).toBeUndefined();
+  test("a value after a value flag is kept; a bare word after it is refused", () => {
+    const optIn = { allowPolicyOverrideArgs: true };
+    // `--system` takes a value in the space form.
+    expect(construct(["--system", "x"], optIn)).toBeUndefined();
+    // `--system` alone is accepted at construction (fx reports it).
+    expect(construct(["--system"], optIn)).toBeUndefined();
     const driver = new FxCliDriver(
-      baseConfig({ args: ["--image", "/tmp/a.png"] }),
+      baseConfig({ args: ["--system", "x"], ...optIn }),
     );
-    expect(driver.buildArgs(request()).slice(-2)).toEqual([
-      "--image",
-      "/tmp/a.png",
-    ]);
+    expect(driver.buildArgs(request()).slice(-2)).toEqual(["--system", "x"]);
     // A third entry with no flag in front of it is prompt text.
-    const refusal = construct(["--image", "/tmp/a.png", "hello"]);
+    const refusal = construct(["--system", "x", "hello"], optIn);
     expectRefused(refusal, EXTERNAL_AGENT_OPTION_UNSUPPORTED, "args");
     expect(refusal?.message).toMatch(/\b2\b/);
   });
 
   test("the =value form does not consume the next entry", () => {
-    expect(construct(["--image=/tmp/a.png"])).toBeUndefined();
+    const optIn = { allowPolicyOverrideArgs: true };
+    expect(construct(["--system=x"], optIn)).toBeUndefined();
     expectRefused(
-      construct(["--image=/tmp/a.png", "hello"]),
+      construct(["--system=x", "hello"], optIn),
       EXTERNAL_AGENT_OPTION_UNSUPPORTED,
       "args",
     );
   });
 
   const valueFlags = [
-    "--image",
     "--system",
     "--permission-mode",
     "--timeout",
@@ -397,24 +395,23 @@ describe("a lone - is the prompt marker of fx", () => {
     }
   });
 
-  test('["--fast", "-"] is refused at index 1', () => {
+  test('["--debug", "-"] is refused at index 1', () => {
     for (const allowPolicyOverrideArgs of [false, true]) {
-      const refusal = construct(["--fast", "-"], { allowPolicyOverrideArgs });
+      const refusal = construct(["--debug", "-"], { allowPolicyOverrideArgs });
       expectRefused(refusal, EXTERNAL_AGENT_OPTION_UNSUPPORTED, "args");
       expect(refusal?.message).toMatch(/\b1\b/);
     }
   });
 
   test("a - that is the value of a value flag in the space form is accepted", () => {
-    expect(construct(["--image", "-"])).toBeUndefined();
     expect(
-      construct(["--image", "-"], { allowPolicyOverrideArgs: true }),
+      construct(["--system", "-"], { allowPolicyOverrideArgs: true }),
     ).toBeUndefined();
   });
 
   test("a - after that value is refused again", () => {
     expectRefused(
-      construct(["--image", "-", "-"]),
+      construct(["--system", "-", "-"], { allowPolicyOverrideArgs: true }),
       EXTERNAL_AGENT_OPTION_UNSUPPORTED,
       "args",
     );
@@ -425,7 +422,7 @@ describe("-- ends the flags of fx and is never allowed", () => {
   const cases: ReadonlyArray<readonly string[]> = [
     ["--"],
     ["--", "--foo"],
-    ["--fast", "--"],
+    ["--debug", "--"],
   ];
   for (const args of cases) {
     test(`${JSON.stringify(args)} is refused with and without the opt-in`, () => {
@@ -499,4 +496,23 @@ describe("the isolation doc for fx", () => {
     expect(fxSection.replace(/\s+/g, " ")).toContain("letter case");
     expect(fxSection).toContain("2026-11-11");
   });
+});
+
+describe("flags the v1 driver leaves out are refused", () => {
+  const unsupported = [
+    ["--image", "/tmp/a.png"],
+    ["--image=/tmp/a.png"],
+    ["--fast"],
+    ["--ultrafast"],
+  ] as const;
+  for (const args of unsupported) {
+    test(`${JSON.stringify(args)} is refused with and without the opt-in`, () => {
+      for (const allowPolicyOverrideArgs of [false, true]) {
+        const refusal = construct(args, { allowPolicyOverrideArgs });
+        expectRefused(refusal, EXTERNAL_AGENT_OPTION_UNSUPPORTED, args[0]);
+        expect(refusal?.message).toContain("not supported");
+        expect(refusal?.message).not.toContain("allowPolicyOverrideArgs: true");
+      }
+    });
+  }
 });

@@ -93,14 +93,13 @@ export const FX_CLI_PINNED_FLAGS: PinnedFlags = Object.freeze({
 });
 
 /**
- * The fx flags that take a value in the space form (`--image <path>`). The
+ * The fx flags that take a value in the space form (`--system <text>`). The
  * entry after one of them in `args` is its value, not prompt text.
  */
 const FX_CLI_VALUE_FLAGS: readonly string[] = Object.freeze([
   "--model",
   "--effort",
   "--provider-order",
-  "--image",
   "--system",
   "--resume",
   "--resume-id",
@@ -151,6 +150,17 @@ export const FX_CLI_FIXED_FLAGS: PinnedFlags = Object.freeze({
   ]),
   // A cluster such as `-vc` is split into `-v -c` before the match.
   booleanShortFlags: Object.freeze(["-h", "-v", "-c", "-r"]),
+});
+
+/**
+ * fx flags the driver does not support: image input, and the faster, higher
+ * priced service tiers, whose cost `usage` does not show. `args` may never pass
+ * them, even with `allowPolicyOverrideArgs`.
+ *
+ * @internal
+ */
+export const FX_CLI_UNSUPPORTED_FLAGS: PinnedFlags = Object.freeze({
+  flags: Object.freeze(["--image", "--fast", "--ultrafast"]),
 });
 
 /** Every `?: boolean` option of the driver config, checked when the driver is built. */
@@ -393,6 +403,22 @@ function assertNoFixedArg(args: readonly string[] | undefined): void {
 }
 
 /**
+ * Refuses an `args` entry that names a flag the driver does not support (see
+ * {@link FX_CLI_UNSUPPORTED_FLAGS}). Nothing lifts this refusal.
+ */
+function assertNoUnsupportedArg(args: readonly string[] | undefined): void {
+  if (args === undefined) {
+    return;
+  }
+  const entry = findPinnedArgOverride(args, FX_CLI_UNSUPPORTED_FLAGS);
+  if (entry !== undefined) {
+    throw unsupported(
+      `FxCliDriver: the args entry "${cut(entry, 40)}" is not supported: the driver sends no images and does not use the faster fx service tiers. Remove it; allowPolicyOverrideArgs does not lift this.`,
+    );
+  }
+}
+
+/**
  * Refuses an `args` entry that is not a flag and is not the value of the flag
  * before it: `fx ask` takes its prompt from a bare argument and then ignores
  * stdin, so the prompt would not be the one the run was given.
@@ -549,6 +575,7 @@ export class FxCliDriver extends SubprocessJsonlDriver {
     validateLaunchConfig("FxCliDriver", config);
     assertNoModelOverride("FxCliDriver", config.args, FX_CLI_MODEL_FLAGS);
     assertNoFixedArg(config.args);
+    assertNoUnsupportedArg(config.args);
     assertNoPinnedArgOverride(
       "FxCliDriver",
       config.args,
@@ -1133,7 +1160,7 @@ function failureEvent(
       .map((line) => cut(line, 300));
     return {
       type: "error",
-      message: `fx needed an approval that a noninteractive ask run cannot give, so the run ended at its first sensitive action and nothing ran. Use the workspace-write mode with allowUnsandboxedShell: true, or the full-access mode, to allow it.${blocked.length > 0 ? ` fx said: ${blocked.join("; ")}` : ""}${output ? ` fx output: ${cut(output)}` : ""}`,
+      message: `fx needed an approval that a noninteractive ask run cannot give, so the run ended at its first sensitive action. and nothing ran. Use the workspace-write mode with allowUnsandboxedShell: true, or the full-access mode, to allow it.${blocked.length > 0 ? ` fx said: ${blocked.join("; ")}` : ""}${output ? ` fx output: ${cut(output)}` : ""}`,
       code: "FX_CLI_PERMISSION_REQUIRED",
       recoverable: false,
       timestamp,

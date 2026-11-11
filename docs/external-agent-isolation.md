@@ -978,7 +978,7 @@ Other refusals:
   error and runs an unknown one at the model default, so only the syntax is
   checked.
 - **Extra `args`.** Only flags go in `args`. An entry that is not a flag and
-  does not follow a flag that takes a value (`--image <path>`) is refused with
+  does not follow a flag that takes a value (`--system <text>`) is refused with
   `EXTERNAL_AGENT_OPTION_UNSUPPORTED`: fx would read it as the prompt and
   ignore stdin. The refusal names `args` and the entry's index, never more than
   its first 40 characters. The flags the driver sets from the policy or its
@@ -990,13 +990,15 @@ Other refusals:
   `--context-limit` and `--quiet`. Never allowed, even with
   `allowPolicyOverrideArgs`: `--model` and `--provider` (both as
   `EXTERNAL_AGENT_MODEL_OVERRIDE`: they change which model answers), and, as
-  `EXTERNAL_AGENT_OPTION_UNSUPPORTED`, `--effort`, `--json`, `--no-save`,
+  `EXTERNAL_AGENT_OPTION_UNSUPPORTED`, `--image`, `--fast`, `--ultrafast` (not
+  supported: no image input, and the faster tiers cost more than `usage` shows),
+  `--effort`, `--json`, `--no-save`,
   `--no-color`, `--config` (a key such as `provider` or `model` would change
   which model answers), `--` and a lone `-` (fx would read what follows, or
   the `-`, as the prompt and ignore stdin) and the session flags `--resume`,
   `--resume-id`, `--resume-last`, any `--resume-<id>`, `--continue`, `-c` and
   `-r`. A lone `-` is accepted only as the value of a flag that takes one
-  (`--image -`). Every flag is refused in the `--flag value` and the
+  (`--system -`). Every flag is refused in the `--flag value` and the
   `--flag=value` form, and a cluster such as `-vc` is split first. The refusal
   names the entry; use the matching driver option or policy field instead.
 - **Boolean options.** `requireExplicitModel`, `allowPolicyOverrideArgs`,
@@ -1434,7 +1436,7 @@ because the tool was not offered. The other codes in the table (`CLAUDE_*`,
 | `EXTERNAL_AGENT_BATCH_COMMAND_REFUSED` | `EXTERNAL_AGENT_BATCH_COMMAND_REFUSED` | No | On Windows, the CLI command (or `interpreter`) is or resolves to a `.cmd` or `.bat` file (for example an npm shim). Remedy per CLI: [Windows: batch files and npm installs](#windows-batch-files-and-npm-installs). |
 | `EXTERNAL_AGENT_INTERPRETER_UNSAFE` | `EXTERNAL_AGENT_INTERPRETER_UNSAFE` | No | The driver's `entry`, or its `interpreter` given as a path, (or the entry's directory, where the interpreter starts) is at or under the run's working directory, an `allowedPaths` root or a temp directory a runtime sandbox keeps writable (symlinks resolved), or the interpreter is not the native Node binary (its real path is not named `node`/`node.exe`, or the file is not a native executable, such as an asdf or nodenv script shim). Install the CLI outside every directory the agent can write; see [Interpreter and entry](#interpreter-and-entry). |
 | `CLAUDE_CLI_EXIT`, `CODEX_CLI_EXIT`, `GEMINI_CLI_EXIT` | - | From the message | The CLI exited with a nonzero code (Codex: and reported no error of its own). The message holds the stderr tail; auth, billing and quota failures are not recoverable. |
-| `FX_CLI_PERMISSION_REQUIRED` | - | No | An fx `ask` run needed an approval a noninteractive run cannot give (fx reported `NonInteractivePermissionRequired`). The message names the modes that allow it and carries fx's `blocked action` lines and fx's own output; nothing ran. |
+| `FX_CLI_PERMISSION_REQUIRED` | - | No | An fx `ask` run needed an approval a noninteractive run cannot give (fx reported `NonInteractivePermissionRequired`). The message names the modes that allow it and carries fx's `blocked action` lines and fx's own output. nothing ran. |
 | `FX_CLI_ERROR` | - | From the message | The fallback code of an fx failure the shared classifier does not know, and the code (not recoverable) of a result whose `exit_code` is not a number. fx failures carry the classifier code when they have one: `AUTH_ERROR` (`auth_failure`), `QUOTA_EXHAUSTED` (`recovery.need` `quota`) and `INVALID_REQUEST` (`recovery.need` `content_filter`, `rejected` or `too_long`, and `model_not_found`), none recoverable, and whatever `classifyRecoverable` gives the message of an `error` name or a reason only in `output` (for example `RATE_LIMIT`, `TRANSPORT_ERROR`). |
 | `FX_CLI_EXIT` | - | From the message | fx exited non-zero and printed no JSON result. The message holds the stderr tail. |
 | `FX_CLI_NO_RESULT` | - | No | fx exited 0 and printed no JSON result object. |

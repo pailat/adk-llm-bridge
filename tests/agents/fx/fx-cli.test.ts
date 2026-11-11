@@ -109,21 +109,15 @@ describe("FxCliDriver buildArgs", () => {
   test("user args come last, after the policy flags", () => {
     const driver = new FxCliDriver(
       baseConfig({
-        // A flag that takes no value: a bare word in args is refused.
-        args: ["--fast", "--image", "/tmp/a.png"],
+        args: ["--debug", "--system", "x"],
+        allowPolicyOverrideArgs: true,
         allowUnsandboxedShell: true,
       }),
     );
     const args = driver.buildArgs(
       request({ permissions: { mode: "workspace-write", allowNetwork: true } }),
     );
-    expect(args).toEqual([
-      ...BASE_ARGV,
-      "--auto",
-      "--fast",
-      "--image",
-      "/tmp/a.png",
-    ]);
+    expect(args).toEqual([...BASE_ARGV, "--auto", "--debug", "--system", "x"]);
   });
 });
 
