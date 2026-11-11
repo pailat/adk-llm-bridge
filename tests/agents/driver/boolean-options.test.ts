@@ -17,6 +17,8 @@ import { GeminiCliDriver } from "../../../src/agents/driver/gemini-cli.js";
 
 interface DriverCase {
   readonly name: string;
+  /** Options that make `requireExplicitModel: true` satisfiable. */
+  readonly base: Record<string, unknown>;
   readonly keys: readonly string[];
   readonly build: (config: Record<string, unknown>) => unknown;
 }
@@ -24,6 +26,7 @@ interface DriverCase {
 const DRIVERS: readonly DriverCase[] = [
   {
     name: "ClaudeCliDriver",
+    base: { model: "some-model-id", smallFastModel: "claude-haiku-5-5" },
     keys: [
       "allowPolicyOverrideArgs",
       "requireExplicitModel",
@@ -37,6 +40,7 @@ const DRIVERS: readonly DriverCase[] = [
   },
   {
     name: "ClaudeAgentSdkDriver",
+    base: { model: "some-model-id", smallFastModel: "claude-haiku-5-5" },
     keys: [
       "requireExplicitModel",
       "debugEvents",
@@ -51,6 +55,7 @@ const DRIVERS: readonly DriverCase[] = [
   },
   {
     name: "CodexCliDriver",
+    base: { model: "some-model-id" },
     keys: [
       "requireExplicitModel",
       "allowPolicyOverrideArgs",
@@ -62,6 +67,7 @@ const DRIVERS: readonly DriverCase[] = [
   },
   {
     name: "CodexSdkDriver",
+    base: { model: "some-model-id" },
     keys: [
       "requireExplicitModel",
       "skipGitRepoCheck",
@@ -75,6 +81,7 @@ const DRIVERS: readonly DriverCase[] = [
   },
   {
     name: "GeminiCliDriver",
+    base: { model: "some-model-id" },
     keys: [
       "allowUnenforcedNetwork",
       "allowUnenforcedPaths",
@@ -84,9 +91,6 @@ const DRIVERS: readonly DriverCase[] = [
   },
 ];
 
-/** A model id so `requireExplicitModel: true` is satisfied. */
-const BASE = { model: "some-model-id" } as const;
-
 describe("driver boolean options", () => {
   for (const driver of DRIVERS) {
     for (const key of driver.keys) {
@@ -94,7 +98,7 @@ describe("driver boolean options", () => {
         test(`${driver.name}: ${key}=${JSON.stringify(bad)} throws`, () => {
           let caught: unknown;
           try {
-            driver.build({ ...BASE, [key]: bad });
+            driver.build({ ...driver.base, [key]: bad });
           } catch (error) {
             caught = error;
           }
@@ -106,9 +110,13 @@ describe("driver boolean options", () => {
         });
       }
       test(`${driver.name}: ${key} accepts true, false and absent`, () => {
-        expect(() => driver.build({ ...BASE, [key]: true })).not.toThrow();
-        expect(() => driver.build({ ...BASE, [key]: false })).not.toThrow();
-        expect(() => driver.build({ ...BASE })).not.toThrow();
+        expect(() =>
+          driver.build({ ...driver.base, [key]: true }),
+        ).not.toThrow();
+        expect(() =>
+          driver.build({ ...driver.base, [key]: false }),
+        ).not.toThrow();
+        expect(() => driver.build({ ...driver.base })).not.toThrow();
       });
     }
   }
@@ -116,7 +124,9 @@ describe("driver boolean options", () => {
   test("an undefined value is the same as absent", () => {
     for (const driver of DRIVERS) {
       for (const key of driver.keys) {
-        expect(() => driver.build({ ...BASE, [key]: undefined })).not.toThrow();
+        expect(() =>
+          driver.build({ ...driver.base, [key]: undefined }),
+        ).not.toThrow();
       }
     }
   });
