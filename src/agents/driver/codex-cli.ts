@@ -131,7 +131,7 @@ const CODEX_CLI_PINNED_FLAGS: PinnedFlags = {
 export const CODEX_CLI_PINNED_FLAGS_REVIEW = Object.freeze({
   reviewedCliVersion: "0.167.0",
   sdkPackage: "@openai/codex-sdk",
-  sdkPeerRange: ">=0.167.0 <0.168",
+  sdkPeerRange: "0.167.0",
   reviewedSdkVersion: "0.167.0",
   reviewedBundledCliVersion: "0.167.0",
 });

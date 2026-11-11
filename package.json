@@ -65,7 +65,8 @@
   },
   "files": [
     "dist",
-    "CHANGELOG.md"
+    "CHANGELOG.md",
+    "THIRD-PARTY-NOTICES"
   ],
   "engines": {
     "node": ">=22.0.0"
@@ -84,7 +85,7 @@
     "check:comments": "bun scripts/check-comments.ts",
     "check:links": "bun scripts/check-links.ts",
     "check:export-docs": "bun scripts/check-export-docs.ts",
-    "check:dist": "bun scripts/check-export-docs.ts && bun scripts/fix-dts-private.ts --check && bun scripts/check-dts-extensions.ts && bun scripts/check-dist-permissions.ts && bun scripts/check-dist-entries.ts",
+    "check:dist": "bun scripts/check-export-docs.ts && bun scripts/fix-dts-private.ts --check && bun scripts/check-dts-extensions.ts && bun scripts/check-dist-permissions.ts && bun scripts/check-dist-entries.ts && bun scripts/check-dist-notices.ts",
     "check:fix": "biome check --write .",
     "lint:publish": "publint --strict && attw --pack --profile esm-only",
     "ci": "bun run typecheck:all && bun run typecheck:conformance && bun run check && bun run check:comments && bun run check:links && bun test && bun run build && bun run check:dist && bun run check:compat:nodenext && bun run lint:publish",
@@ -97,7 +98,7 @@
     "@google/adk": ">=2.4.0 <3",
     "@google/genai": ">=2.29.1 <3",
     "@jitl/quickjs-wasmfile-release-sync": ">=0.32.0 <0.33.0",
-    "@openai/codex-sdk": ">=0.167.0 <0.168",
+    "@openai/codex-sdk": "0.167.0",
     "@opentelemetry/api": ">=1.9.1 <2",
     "quickjs-emscripten-core": ">=0.32.0 <0.33.0",
     "zod": "^4.0.0"
@@ -132,7 +133,7 @@
     "@jitl/quickjs-wasmfile-debug-sync": "^0.32.0",
     "@jitl/quickjs-wasmfile-release-sync": "^0.32.0",
     "@microsoft/tsdoc": "0.17.1",
-    "@openai/codex-sdk": "^0.167.0",
+    "@openai/codex-sdk": "0.167.0",
     "@opentelemetry/api": "^1.10.0",
     "@types/bun": "^1.4.4",
     "bunup": "^0.16.32",

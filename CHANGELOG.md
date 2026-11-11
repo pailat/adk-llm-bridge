@@ -68,7 +68,9 @@ from the 0.6.0 tag.
   - `zod` is an optional peer at `^4` (ADK 2.4 requires zod 4); zod 3 is no
     longer supported.
   - `@anthropic-ai/claude-agent-sdk` `>=0.3.319 <0.4` and `@openai/codex-sdk`
-    `>=0.167.0 <0.168` (optional, for `adk-llm-bridge/agents`).
+    exactly `0.167.0` (optional, for `adk-llm-bridge/agents`). The Codex SDK
+    range narrows from `>=0.167.0 <0.168` to `0.167.0`, because the contained
+    exec copy (see Fixed) is verified against that exact version.
   - `quickjs-emscripten-core` and `@jitl/quickjs-wasmfile-release-sync`
     `>=0.32.0 <0.33.0` (optional, new, for `ScriptWorkflowAgent`).
 - **Providers throw by default.** With the new `errorMode: "throw"` default, a
@@ -1280,6 +1282,29 @@ from the 0.6.0 tag.
 
 ### Fixed
 
+- **A Codex SDK run can no longer end the host process with `EPIPE`.**
+  `@openai/codex-sdk` writes the prompt to codex's stdin with no error
+  handler. When codex was gone before it read the whole prompt (it exited
+  early, the run was aborted, or it closed stdin), the failed write was an
+  uncaught exception that ended the host. With a prompt larger than the pipe
+  buffer (256 KiB on Linux, 1 MiB on macOS) this happened at any exit time.
+  `CodexSdkDriver` now replaces the client's exec with a copy of the SDK
+  0.167.0 exec path that handles the error, with the same arguments,
+  environment, binary and abort signal. An abort and a non-zero exit of
+  codex's own are reported as before (`CODEX_SDK_ERROR` with stderr). A prompt
+  codex did not read in any other way is the new `CODEX_SDK_INPUT_NOT_DELIVERED`
+  (not recoverable), and a codex that closed stdin and kept running is
+  stopped. The copy is used only on `@openai/codex-sdk` 0.167.0, read from the
+  installed package at run time. Another version, an unreadable version, or a
+  client whose exec differs from 0.167.0 is refused with
+  `EXTERNAL_AGENT_DEPENDENCY_MISSING` before codex starts; the message names
+  the supported and the installed version and the ways forward. The new
+  opt-in `CodexSdkDriver` option `allowUncontainedCodexSdk: true` runs another
+  version through the SDK's own exec without the containment, so an `EPIPE`
+  from that SDK can end the host again; the driver logs one
+  `CODEX_SDK_UNCONTAINED` warning per driver. The copy is temporary, until the
+  SDK handles stdin errors itself. The adapted code is Apache-2.0: its legal
+  comment stays in `dist`, and the package ships `THIRD-PARTY-NOTICES`.
 - **A script that exhausted the host stack could leave the sandbox unable to
   run scripts.** QuickJS runs on the host's own stack inside a WebAssembly
   module. When the host stack overflowed first (deep recursion under the old
