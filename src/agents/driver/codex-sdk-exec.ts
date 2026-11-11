@@ -199,9 +199,9 @@ export class ContainedCodexExec {
    *
    * @param args - What `Thread` passes for the turn.
    * @returns The JSONL lines Codex prints. The stream ends when the child's
-   * stdout reaches EOF, or, once the child has exited, when stdout stays idle
-   * for 500 ms (at most 5 s after the exit): a grandchild that holds the pipe
-   * does not hold the turn. A child that was stopped (cleanup, abort, a
+   * stdout reaches EOF, or, once the child has exited, when a wait on stdout
+   * stays unanswered for two idle windows of 500 ms; output not yet read is
+   * never dropped: a grandchild that holds the pipe does not hold the turn. A child that was stopped (cleanup, abort, a
    * failed stdin) and ignores SIGTERM gets SIGKILL after the kill grace.
    * @throws The spawn error as soon as the spawn fails (the turn does not
    * wait for an exit that never comes); the `error` of the child's stdout;

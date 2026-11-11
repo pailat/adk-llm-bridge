@@ -1,10 +1,10 @@
 /**
  * A process that exited does not keep its run open. Once the CLI has exited,
- * its stdout and stderr are read until EOF, or until they stay idle for
- * 500 ms; a pipe that stays silent is cut within 5 s of the exit plus twice
- * the idle window, and a consumer that is behind is never cut. A grandchild
- * that still holds a pipe (a background task, an MCP server) is not waited for, and is not killed by
- * this rule. What the process wrote before it exited is read in full.
+ * its stdout and stderr are read until EOF, or until a wait on the pipe stays
+ * unanswered for two consecutive idle windows of 500 ms. Output not yet read
+ * is never dropped, however slow the consumer. A grandchild that still holds
+ * a pipe (a background task, an MCP server) does not hold the run and is not
+ * killed by this rule.
  */
 
 import { describe, expect, test } from "bun:test";
@@ -14,7 +14,6 @@ import {
   type DriverSubprocess,
   drainAfterExit,
   POST_EXIT_IDLE_MS,
-  POST_EXIT_MAX_MS,
   type SpawnRuntime,
   spawnSubprocess,
 } from "../../../src/agents/driver/spawn.js";
@@ -130,7 +129,7 @@ describe.skipIf(process.platform === "win32")(
   "a slow consumer keeps what the process wrote before it exited",
   () => {
     for (const [name, runtime] of runtimes) {
-      test(`${name}: every line is read, the last one too, past the 5 s window`, async () => {
+      test(`${name}: every line is read, the last one too, well past 5 s`, async () => {
         const child = spawnSubprocess(
           "/bin/sh",
           ["-c", PRINTS_BACKLOG],
@@ -148,7 +147,7 @@ describe.skipIf(process.platform === "win32")(
           child.killGroup?.("SIGKILL");
           child.kill("SIGKILL");
         }
-        // The consumer outlasted the post-exit max window.
+        // The consumer took longer than any idle window; nothing was cut.
         expect(performance.now() - startedAt).toBeGreaterThan(5_000);
         expect(lines.length).toBe(BACKLOG_LINES + 1);
         expect(lines.at(-1)).toBe(FINAL_MARKER);
@@ -223,34 +222,6 @@ describe("drainAfterExit idle rule", () => {
       drain.cancel();
     }
   });
-
-  test("the max window does not cut a wait that has only just started", async () => {
-    let reading = false;
-    let stops = 0;
-    const drain = drainAfterExit(
-      () => {
-        stops += 1;
-      },
-      () => reading,
-    );
-    drain.start();
-    try {
-      // Activity puts an idle tick 30 ms after the max window ends.
-      await sleep(POST_EXIT_MAX_MS - POST_EXIT_IDLE_MS + 30);
-      drain.activity();
-      // The consumer asks for more just before the max window ends.
-      await sleep(POST_EXIT_IDLE_MS - 30 - 10);
-      reading = true;
-      await sleep(10 + 60 + 30);
-      // The tick after max saw a wait that began a moment ago.
-      expect(stops).toBe(0);
-      // The same wait, unanswered for a whole window, ends the read.
-      await sleep(POST_EXIT_IDLE_MS);
-      expect(stops).toBe(1);
-    } finally {
-      drain.cancel();
-    }
-  }, 10_000);
 
   test("activity restarts the wait", async () => {
     let stops = 0;
