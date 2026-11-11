@@ -197,7 +197,7 @@ export class ExternalAgentWorkflowFactory implements WorkflowAgentFactory {
     const descriptor = Object.freeze({
       providerId: normalized.providerId,
       name: normalized.name,
-      revision: agentRevision(normalized),
+      revision: agentRevisionFor(normalized),
       ...(model !== undefined ? { model } : {}),
     });
     const agent = this.#createAgent(normalized);
@@ -313,10 +313,24 @@ export class ExternalAgentWorkflowFactory implements WorkflowAgentFactory {
   }
 }
 
-function agentRevision(request: WorkflowAgentFactoryRequest): string {
+/**
+ * Revision of a factory request: a digest of the provider id and the config
+ * without its top-level `model` key.
+ *
+ * @remarks
+ * The model is not part of the revision, so changing it is reported by the
+ * replay model check (`replay.modelChange`) and does not stop completed steps
+ * from replaying. Only that one key is left out: a `model` key nested anywhere
+ * else in the config stays in the revision. A host that wants the model to be
+ * identity sets `replay.modelChange: "mismatch"`.
+ *
+ * @internal
+ */
+export function agentRevisionFor(request: WorkflowAgentFactoryRequest): string {
+  const { model: _model, ...config } = request.config ?? {};
   const fingerprint = {
     providerId: request.providerId,
-    config: request.config ?? {},
+    config,
   };
   const revision = canonicalDigestSync(fingerprint);
   // Steps checkpointed before 0.7.0 hold the localeCompare-ordered revision

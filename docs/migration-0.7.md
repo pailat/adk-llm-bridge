@@ -779,7 +779,10 @@ checkpoints:
 - **Explicit models in the factory and in run specs** (see also
   [Explicit models](#explicit-models) for the drivers):
   - `config.model` is forwarded to the driver, recorded as
-    `descriptor.model` and part of the revision. The factory fails closed with
+    `descriptor.model`; it is not part of the revision (a model change is
+    reported by the replay model check, see
+    [Model and input changes on replayed steps](#model-and-input-changes-on-replayed-steps)).
+    The factory fails closed with
     `WORKFLOW_AGENT_MODEL_NOT_APPLIED` when the driver does not keep exactly
     that id, or the definition has no `createDriver`. A custom definition that
     turns an alias into a full id must be given the id the driver keeps.
@@ -1007,6 +1010,30 @@ checkpoints:
   `WORKFLOW_LIMIT_EXCEEDED`. Other script sessions running at that moment fail
   their next turn with `WORKFLOW_EXECUTION_ERROR`; start them again. See
   [Script sandbox stack](./workflow-orchestration.md#script-sandbox-stack).
+
+### Model and input changes on replayed steps
+
+- Nothing breaks. Older checkpoints load: their steps have no model record and
+  no fingerprint, so a model change on them is not reported per step (the turn
+  logs one `WORKFLOW_STEP_MODEL_UNRECORDED` with the count) and an input hint
+  says `not-recorded` until the step runs again.
+- A changed model on a replayed step is now a `step_model_changed` event and a
+  `WORKFLOW_STEP_MODEL_CHANGED` warning; the saved result is still used. If you
+  match on events exhaustively, handle the new type.
+- `ExternalAgentWorkflowFactory` no longer puts `config.model` in the agent
+  revision. If you relied on a model change stopping replay, set
+  `replay: { modelChange: "mismatch" }` with `requireExplicitModel` and full
+  model ids, or put the model in `agentRevision` yourself.
+- Strict mode on an execution started before the upgrade fails on every reused
+  step, because the saved steps have no model record. Resume such executions in
+  the default `warn` mode.
+- Step inputs are fingerprinted by default (`inputLength`, and `inputDigest`
+  for inputs over 256 UTF-16 code units). Keep secrets out of step inputs, or
+  set `replay.inputDigest: false`; see the residual in the durability guide.
+- `WORKFLOW_STEP_MISMATCH` details gain `mismatch`. To see what changed in an
+  input, set `replay.onStepMismatch` (or read the
+  `WORKFLOW_STEP_MISMATCH_HINT` warning) and look at the window with
+  `workflowStepInputCanonicalForm(input).slice(start, end)`.
 
 ## 9. Deprecated names
 

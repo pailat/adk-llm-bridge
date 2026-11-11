@@ -1,9 +1,10 @@
 import type { InvocationContext } from "@google/adk";
 import type { Content } from "@google/genai";
+import { LogCode, warn } from "../../utils/log.js";
 import {
   checkpointExpectation,
+  classifyWorkflowStep,
   createWorkflowCheckpoint,
-  resolveWorkflowStep,
   validateWorkflowCheckpoint,
   type WorkflowStepResolution,
   withWorkflowCompleted,
@@ -13,13 +14,20 @@ import {
   withWorkflowStepRunning,
   withWorkflowStepWaiting,
 } from "../checkpoint/checkpoint.js";
-import { hashWorkflowInput } from "../checkpoint/hash.js";
+import { workflowStepInputCanonicalForm } from "../checkpoint/hash.js";
+import {
+  diffCanonicalInput,
+  fingerprintCanonicalInput,
+  type WorkflowStepMismatchHint,
+} from "../checkpoint/input-diff.js";
 import {
   isWorkflowCheckpointV1,
   toDurableWorkflowCheckpoint,
+  type WorkflowCheckpointStepV1,
   type WorkflowCheckpointV1,
   type WorkflowStepResumeReason,
 } from "../checkpoint/schema.js";
+import type { WorkflowCheckpointStepRecordV1 } from "../checkpoint/step-record.js";
 import type {
   WorkflowCheckpointRevision,
   WorkflowCheckpointStore,
@@ -43,7 +51,9 @@ import {
   isRememberedLegacyDigest,
   legacyDigest,
   resolveStoredDigest,
+  sha256Digest,
 } from "../internal/canonical-hash.js";
+import type { ResolvedWorkflowReplayOptions } from "../node-config.js";
 import {
   enrichCheckpointSizeError,
   isCheckpointSizeSaveError,
@@ -89,6 +99,8 @@ export interface WorkflowCheckpointCoordinatorConfig {
   retryFailedSteps?: boolean;
   /** This turn answers a waiting step; recorded failures are replayed, never re-run. */
   answerTurn?: boolean;
+  /** Model and input-change handling on replayed steps; defaults apply when omitted. */
+  replay?: ResolvedWorkflowReplayOptions;
   /** Called after each successful store write, with the id of the step that triggered it when there is one; a failure here cannot roll back the committed checkpoint. */
   onWrite: (
     write: WorkflowCheckpointWrite,
@@ -132,6 +144,8 @@ export class WorkflowCheckpointCoordinator {
   #revision: WorkflowCheckpointRevision | null | undefined;
   #tail: Promise<void> = Promise.resolve();
   #sizeWarned = false;
+  /** Model and fingerprint to write each time a step is saved `running` or `waiting` this turn. */
+  readonly #stepRecords = new Map<string, WorkflowCheckpointStepRecordV1>();
 
   constructor(config: WorkflowCheckpointCoordinatorConfig) {
     this.#config = config;
@@ -249,17 +263,28 @@ export class WorkflowCheckpointCoordinator {
    * Hashes the step input and decides how the step proceeds; persists the step
    * as running when it will execute.
    *
+   * @remarks
+   * A step whose identity differs from the saved one throws
+   * `WORKFLOW_STEP_MISMATCH`. For an input difference, the input hint is
+   * delivered first (see `replay.onStepMismatch`), outside the checkpoint
+   * lock, and never put in the error.
+   *
    * @param step - Step about to run.
    * @param admit - Called with the resolution before anything is persisted; a
    * throw rejects the step and leaves the checkpoint unchanged.
+   * @param currentModel - Model the step's agent requests now; without it no
+   * model is compared or recorded.
    * @returns The input hash and the chosen resolution.
    */
   async prepareStep(
     step: WorkflowStep,
     admit?: (resolution: WorkflowStepResolution) => void,
+    currentModel?: { requested?: string },
   ): Promise<PreparedWorkflowStep> {
-    const currentHash = await hashWorkflowInput(step.input);
-    return this.#exclusive(async () => {
+    const canonical = workflowStepInputCanonicalForm(step.input);
+    const currentHash = await sha256Digest(canonical);
+    const replay = this.#config.replay;
+    const outcome = await this.#exclusive(async () => {
       const checkpoint = this.checkpoint();
       // A step checkpointed before 0.7.0 keeps its legacy input hash.
       const inputHash = await resolveStoredDigest(
@@ -267,11 +292,23 @@ export class WorkflowCheckpointCoordinator {
         currentHash,
         () => legacyDigest(step.input, "locale"),
       );
-      const resolution = resolveWorkflowStep(checkpoint, step, inputHash, {
+      const resolution = classifyWorkflowStep(checkpoint, step, inputHash, {
         retryFailed: this.#config.retryFailedSteps,
         answerTurn: this.#config.answerTurn,
+        modelChange: replay?.modelChange,
+        currentModel,
       });
+      if (resolution.action === "mismatch") return resolution;
       admit?.(resolution);
+      const record =
+        resolution.action === "resume"
+          ? savedRecord(checkpoint.steps[step.id])
+          : await this.#newRecord(
+              canonical,
+              inputHash === currentHash,
+              currentModel,
+            );
+      this.#stepRecords.set(step.id, record);
       if (resolution.action === "execute") {
         const candidate = withWorkflowStepRunning(
           checkpoint,
@@ -280,11 +317,91 @@ export class WorkflowCheckpointCoordinator {
           resolution.attempt,
           undefined,
           resolution.resumeReason,
+          record,
         );
         await this.#persist(candidate, step.id);
       }
       return { inputHash, resolution };
     });
+    if ("action" in outcome) {
+      if (outcome.parts.includes("input")) {
+        await this.#deliverInputHint(step.id, outcome.saved, canonical);
+      }
+      throw outcome.error;
+    }
+    return outcome;
+  }
+
+  async #newRecord(
+    canonical: string,
+    canonicalHash: boolean,
+    currentModel: { requested?: string } | undefined,
+  ): Promise<WorkflowCheckpointStepRecordV1> {
+    const fingerprint =
+      this.#fingerprintOn() && canonicalHash
+        ? await fingerprintCanonicalInput(canonical)
+        : undefined;
+    return {
+      ...(currentModel === undefined
+        ? {}
+        : {
+            model:
+              currentModel.requested === undefined
+                ? {}
+                : { requested: currentModel.requested },
+          }),
+      ...(fingerprint ?? {}),
+    };
+  }
+
+  #fingerprintOn(): boolean {
+    return this.#config.replay?.inputDigest !== false;
+  }
+
+  /**
+   * Gives the host the input hint of a mismatch: to `onStepMismatch`, else to
+   * a warn log. Never throws, and never changes the mismatch.
+   */
+  async #deliverInputHint(
+    stepId: string,
+    saved: WorkflowCheckpointStepV1,
+    canonical: string,
+  ): Promise<void> {
+    let hint: WorkflowStepMismatchHint;
+    try {
+      hint = {
+        stepId,
+        diff: await diffCanonicalInput(
+          {
+            ...(saved.inputLength === undefined
+              ? {}
+              : { inputLength: saved.inputLength }),
+            ...(saved.inputDigest === undefined
+              ? {}
+              : { inputDigest: saved.inputDigest }),
+          },
+          canonical,
+          { enabled: this.#fingerprintOn() },
+        ),
+      };
+    } catch {
+      return;
+    }
+    const callback = this.#config.replay?.onStepMismatch;
+    if (callback === undefined) {
+      warn(LogCode.WORKFLOW_STEP_MISMATCH_HINT, describeHint(hint));
+      return;
+    }
+    try {
+      await callback(hint);
+    } catch (caught) {
+      warn(
+        LogCode.WORKFLOW_STEP_MISMATCH_HINT,
+        `replay.onStepMismatch failed for step "${stepId}": ${
+          caught instanceof Error ? caught.message : String(caught)
+        }`,
+      );
+    }
   }
 
   /**
@@ -309,6 +426,7 @@ export class WorkflowCheckpointCoordinator {
         attempt,
         undefined,
         resumeReason,
+        this.#stepRecords.get(step.id),
       );
       await this.#persist(candidate, step.id);
     });
@@ -337,6 +455,8 @@ export class WorkflowCheckpointCoordinator {
         attempt,
         interrupt,
         this.#config.input,
+        undefined,
+        this.#stepRecords.get(step.id),
       );
       await this.#persist(candidate, step.id);
     });
@@ -364,6 +484,8 @@ export class WorkflowCheckpointCoordinator {
         attempt,
         interrupt,
         this.#config.input,
+        undefined,
+        this.#stepRecords.get(step.id),
       );
       await this.#persist(candidate, step.id);
     });
@@ -481,4 +603,30 @@ export class WorkflowCheckpointCoordinator {
     );
     return result;
   }
+}
+
+/** The model and fingerprint fields a saved step already holds. */
+function savedRecord(
+  saved: WorkflowCheckpointStepV1 | undefined,
+): WorkflowCheckpointStepRecordV1 {
+  if (!saved) return {};
+  return {
+    ...(saved.model === undefined ? {} : { model: saved.model }),
+    ...(saved.inputLength === undefined
+      ? {}
+      : { inputLength: saved.inputLength }),
+    ...(saved.inputDigest === undefined
+      ? {}
+      : { inputDigest: saved.inputDigest }),
+  };
+}
+
+/** One log line for an input hint: lengths, window and path; no input text. */
+function describeHint(hint: WorkflowStepMismatchHint): string {
+  const { diff } = hint;
+  if (!diff.available) {
+    return `step "${hint.stepId}": input changed, no window (${diff.reason})`;
+  }
+  const path = diff.path === undefined ? "" : `, path "${diff.path}"`;
+  return `step "${hint.stepId}": input changed (saved length ${diff.savedLength}, current length ${diff.length}, first difference at [${diff.firstDifference.start}, ${diff.firstDifference.end})${path}); read it locally with workflowStepInputCanonicalForm()`;
 }

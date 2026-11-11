@@ -69,8 +69,12 @@ policy to its dispatcher.
 ## Models of external agents
 
 `ExternalAgentWorkflowFactory` accepts `config.model` and forwards it to the
-provider's driver as the `model` option. The descriptor records it as `model`
-and the revision includes it, so changing the model changes the revision. The
+provider's driver as the `model` option. The descriptor records it as `model`.
+The revision leaves out the top-level `config.model` (a `model` key nested
+elsewhere in the config is still part of it), so changing the model does not
+change the revision: it is reported by the replay model check, see
+[Model and input changes on replayed steps](workflow-durability.md#model-and-input-changes-on-replayed-steps).
+The
 factory checks that the driver keeps exactly that id and registers nothing
 otherwise (`WORKFLOW_AGENT_MODEL_NOT_APPLIED`); a custom definition that turns
 an alias into a full id must be given the id the driver keeps.
@@ -120,6 +124,30 @@ info or an author the step's agent tree does not contain. An agent that runs but
 yields no event at all stays invisible. A replayed step returns the stored value. `models` is a record of
 what the runtimes said, not a guarantee: an alias remap or a mid-run fallback
 can still change what ran (see the external-agent isolation guide).
+
+### When a replayed step's model changed
+
+A step records the model its agent requested when its latest attempt started
+(`model.requested` in the checkpoint). When a later turn replays that step,
+replays its recorded failure or resumes it, and the agent now requests another
+model, the runtime emits `step_model_changed` before the step's
+`step_replayed` (or its replayed `step_failed`) and logs
+`WORKFLOW_STEP_MODEL_CHANGED`:
+
+| Field | Meaning |
+| --- | --- |
+| `stepId` | The step. |
+| `savedRequestedModel` | Model the agent requested when the step ran; absent when it named none. |
+| `savedRecorded` | `true`: a step without a model record is not compared and has no event. |
+| `savedResolvedModels` | `result.models.resolved` of the saved result, when stored. |
+| `requestedModel` | Model the agent requests now; absent when it names none or it cannot be read. |
+| `action` | `replayed`, `replayed-failure` or `resumed`. |
+
+The saved result is still used: the model is not part of a step's identity.
+A step that runs again (a retried failure) uses the current model and emits
+nothing. The same moment adds a `step_model_changed` event to the active
+telemetry span, with the step id, the action and the two model ids and no
+content.
 
 ## Parallel steps and agent instances
 

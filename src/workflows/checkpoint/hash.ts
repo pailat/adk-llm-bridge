@@ -1,3 +1,4 @@
+import type { WorkflowStepInputContent } from "../contracts.js";
 import { WorkflowError } from "../contracts.js";
 import { canonicalJson, sha256Digest } from "../internal/canonical-hash.js";
 
@@ -53,4 +54,24 @@ export function hashWorkflowSource(source: string): Promise<string> {
  */
 export function hashWorkflowInput(input: unknown): Promise<string> {
   return hashWorkflowValue(input);
+}
+
+/**
+ * The canonical JSON string of a step input: the exact text its `inputHash`
+ * is the digest of, and the text the offsets of an input mismatch hint refer
+ * to.
+ *
+ * @remarks
+ * Use it to look at a window locally:
+ * `workflowStepInputCanonicalForm(input).slice(start, end)`. It is the same
+ * text the checkpoint stores a digest of, so it can contain the whole input.
+ *
+ * @param input - The step input.
+ * @returns The canonical JSON string.
+ * @throws {@link WorkflowError} with code `WORKFLOW_EXECUTION_ERROR` when the input cannot be serialized.
+ */
+export function workflowStepInputCanonicalForm(
+  input: WorkflowStepInputContent,
+): string {
+  return stableSerializeWorkflowValue(input);
 }

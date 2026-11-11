@@ -673,6 +673,23 @@ from the 0.6.0 tag.
 
 ### Added
 
+- Workflow replay records the model each step's agent requested (`model.requested`
+  on the checkpoint step) and reports a change on a replayed or resumed step: a
+  `step_model_changed` event and a `WORKFLOW_STEP_MODEL_CHANGED` warning.
+  `replay.modelChange: "mismatch"` makes it a `WORKFLOW_STEP_MISMATCH` instead
+  (both models must be known). A saved step without a record is not compared;
+  the turn logs one `WORKFLOW_STEP_MODEL_UNRECORDED` with the count. See
+  [Model and input changes on replayed steps](docs/workflow-durability.md#model-and-input-changes-on-replayed-steps).
+- `WORKFLOW_STEP_MISMATCH` details gain `mismatch` (the differing parts). An
+  input mismatch also gives the host a hint (input lengths and the first
+  differing window of the canonical input, with a structural path, never
+  input text) through `replay.onStepMismatch` or a
+  `WORKFLOW_STEP_MISMATCH_HINT` warning, and never in events, the persisted
+  error or the checkpoint. It comes from a per-step input fingerprint
+  (`inputLength`, `inputDigest`); `replay.inputDigest: false` turns that off.
+  The new `workflowStepInputCanonicalForm()` returns the text the window
+  refers to. The residual of the fingerprint is documented in the durability
+  guide.
 - **Opt-in strict binary resolution for the SDK drivers.**
   `ClaudeAgentSdkDriver` and `CodexSdkDriver` take `strictBinaryResolution`
   (default `false`, behaviour unchanged). When it is on, no explicit path is
@@ -694,8 +711,9 @@ from the 0.6.0 tag.
 - Workflow factory `config.model`: `ExternalAgentWorkflowFactory` forwards it
   to the driver as the `model` option, checks it as applied
   (`WORKFLOW_AGENT_MODEL_NOT_APPLIED`: nothing is registered when the driver
-  does not keep exactly that id) and records it in the agent descriptor and
-  the revision. An agent without a model keeps its revision. With a model, the
+  does not keep exactly that id) and records it in the agent descriptor. The
+  revision leaves out the top-level `config.model`, so an agent keeps its
+  revision whatever model it names (see Changed below). With a model, the
   definition's `createDriver` receives `{ model }` (and `requireExplicitModel`)
   where it received no options: a custom definition must merge them into its
   own defaults.
@@ -1073,6 +1091,10 @@ from the 0.6.0 tag.
   190 nested calls. The limit does not cover the QuickJS parser: a deeply
   nested source given to `eval` can exhaust the host stack from 32 KiB (24 KiB
   on Bun). That case is contained, not prevented; see Fixed.
+- `ExternalAgentWorkflowFactory` leaves the top-level `config.model` out of the
+  agent revision: a model change no longer changes the revision (and so no
+  longer stops completed steps from replaying); it is reported by the replay
+  model check. A `model` key nested elsewhere in `config` stays in the revision.
 - The Claude CLI driver emits `started` on the first output line, with the
   resolved model from `system/init` (still first on every path, including
   failures before any output; the timestamp is still the start of the run).

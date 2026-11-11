@@ -56,7 +56,8 @@ export interface WorkflowExternalAgentConfig {
    *
    * @remarks
    * Forwarded to the provider's driver as the `model` option, checked with the
-   * driver's model grammar, and recorded in the descriptor and the revision.
+   * driver's model grammar, and recorded in the descriptor. It is not part of the revision: a model
+   * change is reported by the replay model check (`replay.modelChange`).
    * The factory fails closed when the driver does not keep exactly this id
    * (`WORKFLOW_AGENT_MODEL_NOT_APPLIED`), so a custom definition that turns an
    * alias into a full id must be given the id the driver keeps. With

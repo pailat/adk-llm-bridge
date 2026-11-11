@@ -4,6 +4,82 @@ import {
   InvocationContext,
   type NodeContext,
 } from "@google/adk";
+import type { WorkflowStepMismatchHint } from "./checkpoint/input-diff.js";
+import { WorkflowError } from "./contracts.js";
+
+export type { WorkflowStepMismatchHint } from "./checkpoint/input-diff.js";
+
+/**
+ * How a re-entered execution treats changes on the steps it replays.
+ *
+ * @remarks
+ * The model is not part of a step's identity: a completed step's result is
+ * history, produced by the model the checkpoint recorded, and replaying it
+ * does not claim the new model produced it. `agentRevision` stays the
+ * explicit, host-chosen "a different build must not replay" signal.
+ *
+ * The options are host configuration. They are read once when the workflow
+ * agent is built and frozen; workflow code (a trusted handler or a sandboxed
+ * script) has no way to read or change them.
+ */
+export interface WorkflowReplayOptions {
+  /**
+   * What happens when a replayed or resumed step's agent now requests a
+   * different model than the one recorded when the step ran.
+   *
+   * - `warn`: replay the saved result, emit `step_model_changed` and log
+   *   `WORKFLOW_STEP_MODEL_CHANGED`. A saved step with no model record (written
+   *   before the field existed) cannot be compared: it gets no event, and the
+   *   turn logs one `WORKFLOW_STEP_MODEL_UNRECORDED` with the count.
+   * - `mismatch`: throw `WORKFLOW_STEP_MISMATCH` with `mismatch: ["model"]`.
+   *   It is also thrown when either model is unknown, so pair it with
+   *   `requireExplicitModel` and full model ids (an alias can hide a remap).
+   *   An execution started before this field existed fails on every reused
+   *   step: resume it in `warn` mode.
+   *
+   * Only a step whose saved outcome is reused is checked. A step that runs
+   * again (a retried failure) uses the current model and is never compared.
+   * Only the step's own agent is compared; models of nested agents are
+   * recorded in `result.models` but a change in them is not reported.
+   *
+   * @defaultValue `"warn"`
+   */
+  modelChange?: "warn" | "mismatch";
+  /**
+   * Store a chunked fingerprint of each step input (`inputLength`, and
+   * `inputDigest` for an input longer than 256 UTF-16 code units) so an input
+   * mismatch can name the first differing window. With `false` nothing is
+   * stored and the hint says `{ available: false, reason: "disabled" }`.
+   *
+   * @remarks
+   * The fingerprint is an unsalted 48-bit digest per chunk, at known offsets.
+   * A reader of the checkpoint can confirm guesses for a low-entropy value
+   * inside an otherwise predictable chunk, one chunk at a time. Keep secrets
+   * out of step inputs; turn the option off when that is not enough.
+   * `inputLength` is stored for every step while the option is on, including
+   * single-chunk inputs.
+   *
+   * @defaultValue `true`
+   */
+  inputDigest?: boolean;
+  /**
+   * Host-only receiver of the input hint of a `WORKFLOW_STEP_MISMATCH`: input
+   * lengths, the first differing window and a structural path, never input
+   * text.
+   *
+   * @remarks
+   * Called once, and awaited, before the mismatch error is thrown, so the host
+   * has the hint before it sees the error. A callback that never settles holds
+   * the turn, as any host hook does. An error or rejection from it is logged
+   * and ignored; the mismatch is thrown regardless. Without a callback the
+   * hint is logged as `WORKFLOW_STEP_MISMATCH_HINT` (lengths, window and path
+   * only): if your logs land where agents can read them, set this callback or
+   * `inputDigest: false`. The hint is never put in error details, events or
+   * the checkpoint. The window refers to
+   * `workflowStepInputCanonicalForm(input)`.
+   */
+  onStepMismatch?: (hint: WorkflowStepMismatchHint) => void | Promise<void>;
+}
 
 /**
  * ADK workflow-node settings accepted by workflow agents.
@@ -56,6 +132,8 @@ export type WorkflowNodeConfig = Pick<
    * @defaultValue `true` when `retryConfig` is set, otherwise `false`.
    */
   retryFailedSteps?: boolean;
+  /** How a re-entered execution treats model and input changes on replayed steps. */
+  replay?: WorkflowReplayOptions;
 };
 
 /**
@@ -98,6 +176,92 @@ export function resolveRetryFailedSteps(
   config: Pick<WorkflowNodeConfig, "retryConfig" | "retryFailedSteps">,
 ): boolean {
   return config.retryFailedSteps ?? config.retryConfig !== undefined;
+}
+
+/**
+ * `WorkflowReplayOptions` with every default applied.
+ *
+ * @internal
+ */
+export interface ResolvedWorkflowReplayOptions {
+  readonly modelChange: "warn" | "mismatch";
+  readonly inputDigest: boolean;
+  readonly onStepMismatch?: (
+    hint: WorkflowStepMismatchHint,
+  ) => void | Promise<void>;
+}
+
+const REPLAY_KEYS: ReadonlySet<string> = new Set([
+  "modelChange",
+  "inputDigest",
+  "onStepMismatch",
+]);
+
+/**
+ * Validates `config.replay`, applies defaults and freezes the result.
+ *
+ * @remarks
+ * Data fields are copied, so a caller that keeps the object and changes it
+ * later has no effect. The callback is copied by reference: a function cannot
+ * be cloned.
+ *
+ * @throws {@link WorkflowError} with code `WORKFLOW_DEFINITION_INVALID` for a
+ * value that is not a plain object, an unknown key, a `modelChange` other
+ * than `warn` or `mismatch`, a non-boolean `inputDigest` or a non-function
+ * `onStepMismatch`.
+ * @internal
+ */
+export function resolveReplayOptions(
+  config: Pick<WorkflowNodeConfig, "replay">,
+): ResolvedWorkflowReplayOptions {
+  const replay: unknown = config.replay;
+  if (replay === undefined) {
+    return Object.freeze({ modelChange: "warn", inputDigest: true });
+  }
+  if (!isPlainObject(replay)) {
+    throw invalidReplay("replay must be an object");
+  }
+  for (const key of Object.keys(replay)) {
+    if (!REPLAY_KEYS.has(key))
+      throw invalidReplay(`unknown replay key: ${key}`);
+  }
+  const { modelChange, inputDigest, onStepMismatch } = replay;
+  if (
+    modelChange !== undefined &&
+    modelChange !== "warn" &&
+    modelChange !== "mismatch"
+  ) {
+    throw invalidReplay('replay.modelChange must be "warn" or "mismatch"');
+  }
+  if (inputDigest !== undefined && typeof inputDigest !== "boolean") {
+    throw invalidReplay("replay.inputDigest must be a boolean");
+  }
+  if (onStepMismatch !== undefined && typeof onStepMismatch !== "function") {
+    throw invalidReplay("replay.onStepMismatch must be a function");
+  }
+  return Object.freeze({
+    modelChange: modelChange ?? "warn",
+    inputDigest: inputDigest ?? true,
+    ...(onStepMismatch === undefined
+      ? {}
+      : {
+          onStepMismatch: onStepMismatch as NonNullable<
+            ResolvedWorkflowReplayOptions["onStepMismatch"]
+          >,
+        }),
+  });
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function invalidReplay(message: string): WorkflowError {
+  return new WorkflowError("WORKFLOW_DEFINITION_INVALID", message);
 }
 
 /**

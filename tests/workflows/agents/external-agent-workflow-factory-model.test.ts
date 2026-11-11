@@ -6,7 +6,10 @@ import { ClaudeAgentSdkDriver } from "../../../src/agents/driver/claude-agent-sd
 import { ExternalAgentPolicyError } from "../../../src/agents/driver/policy-errors.js";
 import type { ExternalAgentDriver } from "../../../src/agents/external-agent-driver.js";
 import { PlaceholderExternalAgentDriver } from "../../../src/agents/external-agent-driver.js";
-import { ExternalAgentWorkflowFactory } from "../../../src/workflows/agents/external-agent-workflow-factory.js";
+import {
+  agentRevisionFor,
+  ExternalAgentWorkflowFactory,
+} from "../../../src/workflows/agents/external-agent-workflow-factory.js";
 import { WorkflowAgentFactoryError } from "../../../src/workflows/agents/workflow-agent-factory.js";
 
 interface Options {
@@ -120,7 +123,7 @@ describe("factory config.model", () => {
     expect(factory.list()).toEqual([]);
   });
 
-  test("the revision without a model equals the pre-change digest, and a model changes it", () => {
+  test("the revision is the pre-change digest for any top-level model: the model is not part of it", () => {
     const make = () => factoryFor([definition("codex", keeping("codex"))]);
     const plain = make().create({
       providerId: "codex",
@@ -129,13 +132,35 @@ describe("factory config.model", () => {
     });
     // Golden: sha256 of the canonical {providerId, config} as before the change.
     expect(plain.descriptor.revision).toBe(GOLDEN_NO_MODEL_REVISION);
-    const withModel = make().create({
+    for (const model of ["gpt-5.5", "gpt-5.4"]) {
+      const withModel = make().create({
+        providerId: "codex",
+        name: "a1",
+        config: { description: "d", model },
+      });
+      expect(withModel.descriptor.revision).toBe(GOLDEN_NO_MODEL_REVISION);
+      expect(withModel.descriptor.model).toBe(model);
+    }
+  });
+
+  test("only the top-level model key leaves the fingerprint: a nested model key still changes it", () => {
+    const request = (config: Record<string, unknown>) => ({
       providerId: "codex",
       name: "a1",
-      config: { description: "d", model: "gpt-5.5" },
+      config,
     });
-    expect(withModel.descriptor.revision).not.toBe(plain.descriptor.revision);
-    expect(withModel.descriptor.revision).toMatch(/^sha256:[a-f0-9]{64}$/);
+    const flat = agentRevisionFor(request({ description: "d" }));
+    expect(agentRevisionFor(request({ description: "d", model: "x" }))).toBe(
+      flat,
+    );
+    const nestedOne = agentRevisionFor(
+      request({ description: "d", driver: { model: "x" } }),
+    );
+    const nestedTwo = agentRevisionFor(
+      request({ description: "d", driver: { model: "y" } }),
+    );
+    expect(nestedOne).not.toBe(flat);
+    expect(nestedOne).not.toBe(nestedTwo);
   });
 });
 

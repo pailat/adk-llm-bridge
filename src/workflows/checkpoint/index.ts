@@ -1,7 +1,10 @@
 export type {
   CreateWorkflowCheckpointInput,
   WorkflowCheckpointExpectation,
+  WorkflowStepMismatchPart,
+  WorkflowStepModelChange,
   WorkflowStepResolution,
+  WorkflowStepResolveOptions,
 } from "./checkpoint.js";
 export {
   checkpointExpectation,
@@ -29,7 +32,13 @@ export {
   hashWorkflowSource,
   hashWorkflowValue,
   stableSerializeWorkflowValue,
+  workflowStepInputCanonicalForm,
 } from "./hash.js";
+export type {
+  WorkflowInputFingerprint,
+  WorkflowStepMismatchDiff,
+  WorkflowStepMismatchHint,
+} from "./input-diff.js";
 export type {
   WorkflowCheckpointStatus,
   WorkflowCheckpointStepResultV1,
@@ -42,6 +51,11 @@ export {
   WORKFLOW_CHECKPOINT_SCHEMA_VERSION,
   workflowStepResultFromCheckpoint,
 } from "./schema.js";
+export type {
+  WorkflowCheckpointStepInputDigestV1,
+  WorkflowCheckpointStepModelV1,
+  WorkflowCheckpointStepRecordV1,
+} from "./step-record.js";
 export type {
   ADKSessionCheckpointStoreOptions,
   AdkSessionCheckpointStoreOptions,

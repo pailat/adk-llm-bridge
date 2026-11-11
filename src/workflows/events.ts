@@ -93,6 +93,32 @@ export interface WorkflowStepReplayedEvent extends WorkflowEventBase {
   result: WorkflowStepResult;
 }
 
+/**
+ * A replayed or resumed step's agent now requests another model than the one
+ * recorded when the step ran.
+ *
+ * @remarks
+ * Emitted in `replay.modelChange: "warn"` mode (the default) before the step's
+ * `step_replayed` (or its replayed `step_failed`), and not when the step runs
+ * again. The saved result is still used: it was produced by the saved model.
+ */
+export interface WorkflowStepModelChangedEvent extends WorkflowEventBase {
+  /** Event discriminator. */
+  type: "step_model_changed";
+  /** Id of the step. */
+  stepId: string;
+  /** Model the step's agent requested when the step ran; absent when it named none. */
+  savedRequestedModel?: string;
+  /** Always `true` here: a step with no model record cannot be compared and gets no event. */
+  savedRecorded: boolean;
+  /** Models the runtime reported when the step ran (`result.models.resolved`), when stored. */
+  savedResolvedModels?: readonly string[];
+  /** Model the step's agent requests now; absent when it names none or it cannot be read. */
+  requestedModel?: string;
+  /** What the runtime did: replayed the saved result, replayed a saved failure, or continued a waiting step. */
+  action: "replayed" | "replayed-failure" | "resumed";
+}
+
 /** A step's sub-agent stopped waiting for input (HITL); answer to resume. */
 export interface WorkflowStepWaitingEvent extends WorkflowEventBase {
   /** Event discriminator. */
@@ -218,6 +244,7 @@ export type WorkflowEvent =
   | WorkflowStepFailedEvent
   | WorkflowStepInterruptedEvent
   | WorkflowStepReplayedEvent
+  | WorkflowStepModelChangedEvent
   | WorkflowStepWaitingEvent
   | WorkflowCheckpointSavedEvent
   | WorkflowCheckpointSizeWarningEvent
@@ -234,6 +261,7 @@ const WORKFLOW_EVENT_TYPES = new Set<WorkflowEvent["type"]>([
   "step_failed",
   "step_interrupted",
   "step_replayed",
+  "step_model_changed",
   "step_waiting",
   "checkpoint_saved",
   "checkpoint_size_warning",
