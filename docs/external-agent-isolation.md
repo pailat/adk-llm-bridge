@@ -345,8 +345,8 @@ checks.
 `subAgents` only work when the driver hands the delegation tool to the runtime
 (`capabilities().subagents` is `true`, which means the driver reads
 `request.toolGateway`). Only the Claude Agent SDK driver (`ClaudeAgent`) does.
-On the Claude CLI, Codex SDK, Codex CLI and Gemini CLI drivers the sub-agents
-could never be called, so an agent built with `subAgents` there throws
+On the Claude CLI, Codex SDK, Codex CLI, Gemini CLI and fx drivers the
+sub-agents could never be called, so an agent built with `subAgents` there throws
 `ExternalAgentPolicyError` `EXTERNAL_AGENT_SUBAGENTS_UNSUPPORTED`, naming the
 driver. `clone()` re-checks. A custom driver without `capabilities()` is not
 checked; an empty `subAgents` list is accepted. To delegate from one of those
@@ -477,7 +477,7 @@ dropped silently.
 |---|---|
 | `EXTERNAL_AGENT_TOOLS_UNSUPPORTED` | `tools` on a driver whose `capabilities().tools` is not `true` (Codex, Gemini CLI, Claude CLI). Only the Claude Agent SDK driver (`ClaudeAgent`) hosts ADK tools. A custom driver without `capabilities()` is not checked. |
 | `EXTERNAL_AGENT_APPROVALS_UNSUPPORTED` | `confirmation.approver` or `confirmation.adk: true` on a driver whose `capabilities().approvals` is not `true` (Codex, Gemini CLI, Claude CLI): the runtime decides alone and the setting would be ignored. Only the Claude Agent SDK driver (`ClaudeAgent`) asks the host. A custom driver without `capabilities()` is not checked. See [Approvers and ADK confirmation](#approvers-and-adk-confirmation-need-a-driver-that-asks). |
-| `EXTERNAL_AGENT_SUBAGENTS_UNSUPPORTED` | `subAgents` on a driver whose `capabilities().subagents` is not `true` (Codex, Gemini CLI, Claude CLI): the delegation tool never reaches the runtime, so the sub-agents would never be called. Only the Claude Agent SDK driver (`ClaudeAgent`) exposes them. A custom driver without `capabilities()` is not checked. See [Sub-agents need a driver that exposes them](#sub-agents-need-a-driver-that-exposes-them). |
+| `EXTERNAL_AGENT_SUBAGENTS_UNSUPPORTED` | `subAgents` on a driver whose `capabilities().subagents` is not `true` (Codex, Gemini CLI, Claude CLI, fx): the delegation tool never reaches the runtime, so the sub-agents would never be called. Only the Claude Agent SDK driver (`ClaudeAgent`) exposes them. A custom driver without `capabilities()` is not checked. See [Sub-agents need a driver that exposes them](#sub-agents-need-a-driver-that-exposes-them). |
 | `EXTERNAL_AGENT_READ_ONLY_TOOL_UNKNOWN` | A `readOnlyTools` entry that is empty, listed twice, names no direct tool (when `tools` has no toolset), or names two or more direct tools. |
 | `EXTERNAL_AGENT_TOOL_NOT_READ_ONLY` | The agent's **own** mode is `read-only` and a direct tool is not in `readOnlyTools`. Add it if it has no side effects, or remove it. |
 
@@ -1005,9 +1005,12 @@ Other refusals:
   `"false"`, `0`, `null`) throws `InputValidationError` when the driver is
   built, so an untyped host cannot turn an opt-in on by accident.
 - **Sessions.** Every run is stateless. `resumeSessionId` and `sessionStore*`
-  are refused with `EXTERNAL_AGENT_OPTION_UNSUPPORTED`. ADK tools and
-  `confirmation` approvers are refused by `ExternalAgent`
-  (`EXTERNAL_AGENT_TOOLS_UNSUPPORTED`, `EXTERNAL_AGENT_APPROVALS_UNSUPPORTED`).
+  are refused with `EXTERNAL_AGENT_OPTION_UNSUPPORTED`, and a
+  `request.runtimeSession` is refused with
+  `EXTERNAL_AGENT_SESSIONS_UNSUPPORTED` before fx starts. ADK tools,
+  `confirmation` approvers and `subAgents` are refused by `ExternalAgent`
+  (`EXTERNAL_AGENT_TOOLS_UNSUPPORTED`, `EXTERNAL_AGENT_APPROVALS_UNSUPPORTED`,
+  `EXTERNAL_AGENT_SUBAGENTS_UNSUPPORTED`).
 
 What a run reports:
 

@@ -1168,7 +1168,8 @@ from the 0.6.0 tag.
   (`--permission-mode`, `--ask`, `--timeout`, `--profile`, ...)
   need `allowPolicyOverrideArgs`; `--model`, `--provider`, `--config`, `--`,
   a lone `-` and the session flags (`--resume*`, `--continue`, `-c`, `-r`)
-  are never allowed. A
+  are never allowed. `request.runtimeSession`, ADK tools, approvers and
+  `subAgents` are refused. A
   run fails on a non-zero process exit, an `exit_code` that is not `0` or an
   `error` field, and then reports no `output`. A stdout line over 8 MiB ends
   the run with `FX_CLI_RESULT_TOO_LARGE`. See
@@ -1208,8 +1209,8 @@ from the 0.6.0 tag.
 - **CLI drivers refuse `runtimeSession`.** `ClaudeCliDriver`, `CodexCliDriver` and
   `GeminiCliDriver` used to ignore `request.runtimeSession`. They now fail the run with
   `EXTERNAL_AGENT_SESSIONS_UNSUPPORTED` (exported from `adk-llm-bridge/agents`) before any
-  process starts. `ClaudeAgentSdkDriver` now declares `capabilities().sessions = true`,
-  matching what it already did.
+  process starts, and so does the new `FxCliDriver`. `ClaudeAgentSdkDriver` now declares
+  `capabilities().sessions = true`, matching what it already did.
 - **Prompt caching is on by default for Anthropic models** (fixes zero cache reads on
   AI Gateway, where every turn paid the full prompt again):
   - native `AnthropicLlm`: `promptCaching` was opt-in and marked only the system block and
@@ -1255,7 +1256,7 @@ from the 0.6.0 tag.
 - **Sub-agents, `permissions`, `delegation` and `tools` entries are checked
   when an `ExternalAgent` is built**, instead of being ignored silently (see
   [Sub-agents need a driver that exposes them](./docs/external-agent-isolation.md#sub-agents-need-a-driver-that-exposes-them)):
-  - `subAgents` on the Claude CLI, Codex CLI, Codex SDK or Gemini CLI driver
+  - `subAgents` on the Claude CLI, Codex CLI, Codex SDK, Gemini CLI or fx driver
     (any driver whose `capabilities()` lacks `subagents`) throws
     `EXTERNAL_AGENT_SUBAGENTS_UNSUPPORTED`, also on `clone()`. Those drivers
     never exposed the sub-agents, so they were never called. Use

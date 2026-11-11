@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { FunctionTool } from "@google/adk";
+import { FunctionTool, LlmAgent } from "@google/adk";
 import { z } from "zod";
 import { FxCliDriver } from "../../../src/agents/driver/fx-cli.js";
 import {
@@ -122,5 +122,20 @@ describe("FxAgent", () => {
           }),
       ).code,
     ).toBe("EXTERNAL_AGENT_TOOLS_UNSUPPORTED");
+  });
+
+  test("sub-agents are refused, naming the driver", () => {
+    const sub = new LlmAgent({ name: "helper", model: "gemini-2.5-flash" });
+    const error = codeOf(
+      () => new FxAgent({ name: "fx", driverOptions, subAgents: [sub] }),
+    );
+    expect(error.code).toBe("EXTERNAL_AGENT_SUBAGENTS_UNSUPPORTED");
+    expect(error.message).toContain("FxCliDriver");
+  });
+
+  test("an empty subAgents list is fine", () => {
+    expect(
+      () => new FxAgent({ name: "fx", driverOptions, subAgents: [] }),
+    ).not.toThrow();
   });
 });

@@ -34,6 +34,7 @@ import {
   isCommandNotFound,
   networkUnenforceable,
   policyErrorEvent,
+  sessionRefusal,
   unenforceablePathsRefusal,
 } from "./policy-errors.js";
 import {
@@ -680,6 +681,10 @@ export class FxCliDriver extends SubprocessJsonlDriver {
     baseEnv: Record<string, string>,
   ): ExternalAgentPolicyError | undefined {
     const permissions = request.permissions;
+    const sessionRefused = sessionRefusal("FxCliDriver", request);
+    if (sessionRefused) {
+      return sessionRefused;
+    }
     const envRefusal = modelEnvRefusal(
       "FxCliDriver",
       baseEnv,
@@ -737,8 +742,10 @@ export class FxCliDriver extends SubprocessJsonlDriver {
    *
    * @remarks
    * The stream starts with `started`. A refused run yields one `error` event
-   * with the policy code and `completed` with `exitCode: 1`. A successful run
-   * yields `output`, one `tool_call` and `tool_result` pair per tool call fx
+   * with the policy code and `completed` with `exitCode: 1`. A
+   * `request.runtimeSession` is refused with
+   * `EXTERNAL_AGENT_SESSIONS_UNSUPPORTED` before any process starts. A
+   * successful run yields `output`, one `tool_call` and `tool_result` pair per tool call fx
    * reports (replayed after the run: fx gives no arguments, ids or times),
    * and `completed` with the model, turns and usage. A run failed when the
    * process exit is not 0, the JSON `exit_code` is not the number 0 or the
