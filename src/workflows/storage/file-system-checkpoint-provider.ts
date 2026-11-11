@@ -108,8 +108,8 @@ export class FileSystemWorkflowCheckpointProvider extends BaseWorkflowCheckpoint
    *
    * @param options - Root directory, lock timing and the shared provider
    * options.
-   * @throws `WorkflowError` with code `WORKFLOW_DEFINITION_INVALID` when
-   * `root` is not absolute or a numeric option is not a positive integer.
+   * @throws `WorkflowError` with code `WORKFLOW_DEFINITION_INVALID` when an
+   * option is unknown (the message names it), `root` is not absolute or a numeric option is not a positive integer.
    */
   constructor(options: FileSystemWorkflowCheckpointProviderOptions) {
     super(options);

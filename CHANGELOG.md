@@ -396,6 +396,20 @@ from the 0.6.0 tag.
   JSON file) turned the escape hatch ON. Most of these options are new in
   0.7.0; `skipGitRepoCheck` and `webSearchEnabled` on `CodexSdkDriver` exist in
   0.6.0 and only a non-boolean from untyped JavaScript is refused.
+- **Unknown options are refused where a typo drops a host limit** (`ExternalAgentWorkflowFactory`
+  and `FileSystemWorkflowCheckpointStore`, both new in 0.7.0; see
+  [Unknown options](./docs/external-agent-isolation.md#unknown-options)):
+  - `new ExternalAgentWorkflowFactory(...)` throws `WorkflowAgentFactoryError`
+    `WORKFLOW_AGENT_INVALID_REQUEST` for an unknown top-level option (for
+    example `allowFullAccess`, which belongs under `policy`) or an unknown
+    `limits` key (for example `maxTurnz`). The message names the key.
+  - `new FileSystemWorkflowCheckpointStore(...)` and
+    `FileSystemWorkflowCheckpointProvider` throw `WorkflowError`
+    `WORKFLOW_DEFINITION_INVALID` (`unknown checkpoint store option: <key>`)
+    for an option that is not `root`, `lockTimeoutMs`, `lockRetryMs`, `signal`
+    or `maxCheckpointBytes` (the provider also takes `operationTimeoutMs`,
+    `retry` and `onOperation`). A misspelled `maxCheckpointBytes` or
+    `lockTimeoutMs` used to keep the default silently.
 
 ### Security
 
