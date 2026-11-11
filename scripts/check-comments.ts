@@ -8,7 +8,10 @@
  * - TSDoc syntax of every `/** *\/` block under `src/`.
  * - Any comment under `src/` and `tests/` that contains `@license`,
  *   `Copyright` or `SPDX-License-Identifier`; the LICENSE file is the single
- *   source.
+ *   source. The one exception is the `/*!` legal comment of a file that
+ *   adapts third-party code and is named in THIRD-PARTY-NOTICES: the
+ *   bundler keeps that comment in `dist`, as the third-party license
+ *   requires.
  *
  * Usage:
  * - `bun scripts/check-comments.ts`: exit 1 on any finding.
@@ -21,12 +24,24 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { TSDocConfiguration, TSDocParser } from "@microsoft/tsdoc";
+import {
+  isThirdPartyLegalComment,
+  noticedSourceFiles,
+} from "./third-party-notices.js";
 
 const ROOT = resolve(import.meta.dir, "..");
 const reportOnly = process.argv.includes("--report");
 const ALLOW_MARKER = "check-comments-allow";
 /** The marker only counts when a reason follows the colon. */
 const ALLOW_WITH_REASON = /check-comments-allow:\s*\S/;
+// Source files that adapt third-party code; their leading `/*!` legal
+// comment may carry the third-party license and copyright (see above).
+const NOTICED_FILES = noticedSourceFiles(
+  readFileSync(
+    join(resolve(import.meta.dir, ".."), "THIRD-PARTY-NOTICES"),
+    "utf8",
+  ),
+);
 
 /** Labels that only make sense inside the team's tracking, never in code. */
 const TRACKING_ID_PATTERNS: ReadonlyArray<{ name: string; pattern: RegExp }> = [
@@ -357,6 +372,9 @@ for (const dir of ["src", "tests"]) {
       }
     }
     for (const comment of comments) {
+      if (isThirdPartyLegalComment(file, comment, NOTICED_FILES)) {
+        continue;
+      }
       let offset = comment.start;
       for (const lineText of comment.text.split("\n")) {
         if (

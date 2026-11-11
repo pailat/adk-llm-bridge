@@ -527,6 +527,29 @@ new in 0.7.0. If you already use them, these changes apply:
   `EXTERNAL_AGENT_OPTION_UNSUPPORTED`: codex would read it as an option.
   Codex's own thread ids never start with `-`, so only a forged or corrupted
   id is affected. Clear it from session state to start a new thread.
+- **Codex SDK prompt delivery.** `CodexSdkDriver` runs codex through a
+  copy of the `@openai/codex-sdk` 0.167.0 exec path that handles a failed
+  write of the prompt (see [Codex SDK prompt delivery](external-agent-isolation.md#codex-sdk-prompt-delivery)).
+  A prompt codex did not read is the new error code
+  `CODEX_SDK_INPUT_NOT_DELIVERED` instead of an uncaught `EPIPE` that ended
+  the process.
+  - **The optional peer range narrows** from `>=0.167.0 <0.168` to exactly
+    `0.167.0`, because the contained copy is verified against that exact
+    version. Install exactly `@openai/codex-sdk@0.167.0`.
+  - Another installed version, one the driver cannot read, or a prebuilt
+    `sdk` client whose exec differs from 0.167.0 is refused with
+    `EXTERNAL_AGENT_DEPENDENCY_MISSING`, naming the supported and the
+    installed version. To run another version anyway, set
+    `allowUncontainedCodexSdk: true`: the run then uses the SDK's own exec
+    without the containment (an `EPIPE` from it can end the host again) and
+    logs one `CODEX_SDK_UNCONTAINED` warning per driver. Or use
+    `CodexCliDriver`. npm refuses another version beside the exact peer
+    (`ERESOLVE`): add `"overrides": { "adk-llm-bridge": { "@openai/codex-sdk":
+    "$@openai/codex-sdk" } }` to the host's `package.json`, or install with
+    `--legacy-peer-deps` (see [Running another SDK version uncontained](external-agent-isolation.md#running-another-sdk-version-uncontained)).
+  - A bundled host must keep `@openai/codex-sdk` external, or the version
+    cannot be read and every run is refused; a prebuilt `sdk` client must
+    come from the same SDK install the bridge resolves.
 - **Codex approvals reviewer.** `CodexCliDriver` and `CodexSdkDriver` pass
   `-c approvals_reviewer="user"` outside `full-access`, so an
   `approvals_reviewer = "auto_review"` in `~/.codex/config.toml` no longer

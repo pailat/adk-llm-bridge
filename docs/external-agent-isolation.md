@@ -1145,6 +1145,7 @@ because the tool was not offered. The other codes in the table (`CLAUDE_*`,
 | `CODEX_TURN_FAILED` | - | From the message | A Codex SDK `turn.failed` event. |
 | `CODEX_SDK_STREAM_ERROR` | - | From the message | A Codex SDK `error` stream event. |
 | `CODEX_SDK_ERROR` | - | From the message | The Codex SDK threw. |
+| `CODEX_SDK_INPUT_NOT_DELIVERED` | - | No | Codex did not read the prompt from stdin: it closed stdin while it kept running (the driver stops it), it exited 0 without reading it, or a process it started kept the pipe without reading. A Codex that exits non-zero before reading reports `CODEX_SDK_ERROR` with its stderr instead. Neither ends the host process; see [Codex SDK prompt delivery](#codex-sdk-prompt-delivery). |
 | `CODEX_ITEM_ERROR` | - | From the message | A Codex SDK `error` item. |
 
 "From the message" means `classifyRecoverable` sorts the message. Auth,
@@ -1155,6 +1156,104 @@ reports that failure's code instead (for example `RATE_LIMIT` or
 `QUOTA_EXHAUSTED`); the CLI exit codes stay as shown, and for them only the
 last stderr line is sorted. A Codex CLI that writes to stderr and exits 0 only
 logs a `CODEX_CLI_STDERR` warning.
+
+### Codex SDK prompt delivery
+
+`@openai/codex-sdk` writes the prompt to the codex process's stdin without
+an `error` listener on that stream. If the process is gone before it has read
+the whole prompt (it exited early, the run was aborted, or it closed stdin),
+the failed write would be an uncaught `EPIPE` that ends the host process. With
+a prompt larger than the pipe buffer this happens at any exit time, not only
+right after the start.
+
+`CodexSdkDriver` therefore replaces the exec of the client it uses (the one it
+builds and a prebuilt `sdk` client) with a copy of the SDK's exec path that
+handles the error. The copy sends the same arguments and environment and uses
+the same binary and abort signal. The result:
+
+- An abort is reported as before.
+- A non-zero exit of codex's own is `CODEX_SDK_ERROR` with its stderr, as
+  before.
+- A prompt codex did not read in any other way is `CODEX_SDK_INPUT_NOT_DELIVERED`.
+  A codex that closed stdin and kept running is stopped.
+
+The copy follows `@openai/codex-sdk` 0.167.0, and the driver uses it only on
+that version. The optional peer is exactly `0.167.0`, and on each run the
+driver also reads the installed SDK's version (from the `package.json` beside
+the resolved `@openai/codex-sdk` entry, once per process), because a package
+manager can still install another one. The run is refused with
+`EXTERNAL_AGENT_DEPENDENCY_MISSING`, before codex starts, when:
+
+- the installed version is another one, such as 0.167.1. Its exec may build a
+  different command line, so the driver does not run the 0.167.0 copy for it.
+  The message names the supported version, the installed one and the ways
+  forward: install `@openai/codex-sdk@0.167.0`, set
+  `allowUncontainedCodexSdk: true`, or use `CodexCliDriver`;
+- the version cannot be read. The driver finds the SDK with
+  `import.meta.resolve`, so a bundler that rewrites or drops that call (or
+  inlines the SDK without its `package.json`) makes every Codex SDK run fail
+  closed with this message. Keep `@openai/codex-sdk` external to the bundle;
+- the version is 0.167.0 but the client's exec does not have the 0.167.0
+  fields.
+
+The version checked is the one the bridge resolves, not the copy a prebuilt
+`sdk` client came from: a prebuilt client must come from the same
+`@openai/codex-sdk` install the bridge resolves. A client from another copy
+(a second version nested under the host's own dependencies) is checked only
+by the shape of its exec, not by its version.
+
+A client with no SDK exec (for example a test double) is used as is.
+`CodexCliDriver` writes the prompt through its own spawn helper, which already
+handles the error.
+
+#### Running another SDK version uncontained
+
+`allowUncontainedCodexSdk: true` lets a host run an installed SDK version the
+driver cannot contain (a patch release such as 0.167.1, or a version it cannot
+read) instead of being refused. Such a run goes through the SDK's own exec
+**without the containment**: a codex that exits, is aborted or closes stdin
+before it has read the prompt can again end the host process with an uncaught
+`EPIPE`. The driver logs one `CODEX_SDK_UNCONTAINED` warning per driver
+instance. On 0.167.0 the option changes nothing: the contained copy is still
+used, and a client whose exec does not match 0.167.0 is still refused.
+
+The optional peer is exactly `0.167.0`, so npm (7 and later) fails with
+`ERESOLVE` when another version is installed beside the bridge. With npm,
+override the bridge's peer with the version the host installs:
+
+```json
+{
+  "dependencies": {
+    "adk-llm-bridge": "^0.7.0",
+    "@openai/codex-sdk": "0.167.1"
+  },
+  "overrides": {
+    "adk-llm-bridge": {
+      "@openai/codex-sdk": "$@openai/codex-sdk"
+    }
+  }
+}
+```
+
+or install with `npm install --legacy-peer-deps`. Bun and pnpm install it
+without failing on the peer.
+
+#### Supporting a new SDK version
+
+A new 0.167.x patch (or a later release) becomes supported when it is added to
+the verified list, `SUPPORTED_CODEX_SDK_VERSIONS` in
+`src/agents/driver/codex-sdk-exec.ts`, together with the exact peer range. That
+happens only after the copied `CodexExec.run` is compared with the new SDK's,
+and the pin test (`tests/agents/driver/codex-sdk-exec.test.ts`) and the fault
+tests (`tests/agents/driver/codex-sdk-epipe.test.ts`) pass on it.
+
+The copy is temporary. It stays until `@openai/codex-sdk` handles stdin errors
+itself, and is removed once an SDK version with that fix is verified: the
+fault tests pass on it with the SDK's own exec.
+
+A prebuilt `sdk` client is changed in place: its exec is replaced on the first
+run, so the host's own later uses of that client go through the contained
+copy too.
 
 ### Classified codes
 

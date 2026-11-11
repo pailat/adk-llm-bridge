@@ -60,7 +60,7 @@ Optional peers, only for the features that use them:
 | zod schemas (ADK 2.4 requires zod 4) | `zod@^4` |
 | Run spec, `adk-llm-bridge/workflows/spec` (experimental) | `zod@^4`; zod >= 4 is required by this subpath only |
 | `ClaudeAgent` | `@anthropic-ai/claude-agent-sdk@">=0.3.319 <0.4"` |
-| `CodexAgent` | `@openai/codex-sdk@">=0.167.0 <0.168"` |
+| `CodexAgent` | `@openai/codex-sdk@0.167.0` (exact) |
 | `GeminiCliAgent` | the `gemini` CLI on `PATH` |
 | `ScriptWorkflowAgent` | `quickjs-emscripten-core@">=0.32.0 <0.33.0"` and `@jitl/quickjs-wasmfile-release-sync@">=0.32.0 <0.33.0"` |
 
