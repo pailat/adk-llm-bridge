@@ -23,6 +23,7 @@ import { LogCode, warn } from "../../utils/log.js";
 import { isTempStateKey, withoutTempStateKeys } from "../../utils/state.js";
 import type { WorkflowStepResolution } from "../checkpoint/checkpoint.js";
 import { hashWorkflowValue } from "../checkpoint/hash.js";
+import type { WorkflowCheckpointStepAcceptanceV1 } from "../checkpoint/replay-acceptance.js";
 import type {
   WorkflowCheckpointStore,
   WorkflowCheckpointWrite,
@@ -65,6 +66,7 @@ import type {
   WorkflowEvent,
   WorkflowOutputEvent,
   WorkflowStartedEvent,
+  WorkflowStepChangeAcceptedEvent,
   WorkflowStepCompletedEvent,
   WorkflowStepFailedEvent,
   WorkflowStepInterruptedEvent,
@@ -234,6 +236,8 @@ const MAX_LISTED_SHARED_STEPS = 5;
 
 /** Step ids named in the unrecorded-model warning before it shortens the list. */
 const MAX_LISTED_UNRECORDED_STEPS = 10;
+/** Characters of an input digest shown in logs and spans: `sha256:` and 12 hex. */
+const INPUT_DIGEST_SHOWN = 19;
 
 /**
  * Executes one trusted workflow definition inside an ADK invocation.
@@ -402,6 +406,7 @@ export class WorkflowRuntime {
       throw error;
     } finally {
       this.logUnrecordedModels();
+      this.#checkpointCoordinator?.reportUnusedAcceptances();
       abortScope.dispose();
       await this.persistCheckpointsAfterAbort();
       delegatedRun?.();
@@ -588,6 +593,9 @@ export class WorkflowRuntime {
     // A step about to execute is already saved `running`, so its abort check
     // runs inside the try below, where the abort is recorded as `interrupted`.
     if (prepared.resolution.action !== "execute") throwIfRunAborted(signal);
+    if (prepared.accepted) {
+      await this.reportAcceptedChanges(step.id, prepared.accepted);
+    }
     if (prepared.resolution.action !== "execute") {
       await this.reportModelNotes(step.id, prepared.resolution);
     }
@@ -1240,6 +1248,46 @@ export class WorkflowRuntime {
         : { requestedModel: change.requestedModel }),
       action,
     } satisfies WorkflowStepModelChangedEvent);
+  }
+
+  /**
+   * Reports host acceptances applied to a step and already saved: a warn log
+   * (it weakens a durability check, so it is always visible), a span event and
+   * a `step_change_accepted` event per entry. The reason text goes only into
+   * the event; the log and the span carry its length.
+   */
+  private async reportAcceptedChanges(
+    stepId: string,
+    accepted: readonly WorkflowCheckpointStepAcceptanceV1[],
+  ): Promise<void> {
+    for (const acceptance of accepted) {
+      const from = telemetryValue(acceptance.kind, acceptance.from);
+      const to = telemetryValue(acceptance.kind, acceptance.to);
+      warn(
+        LogCode.WORKFLOW_REPLAY_CHANGE_ACCEPTED,
+        `step ${JSON.stringify(stepId)} replays its saved result after a host-accepted ${acceptance.kind} change from ${from} to ${to}${
+          acceptance.approvedBy === undefined
+            ? ""
+            : ` (approved by ${JSON.stringify(acceptance.approvedBy)})`
+        }`,
+      );
+      recordWorkflowSpanEvent("step_change_accepted", {
+        "adk.workflow.step.id": stepId,
+        "adk.workflow.acceptance.kind": acceptance.kind,
+        "adk.workflow.acceptance.from": from,
+        "adk.workflow.acceptance.to": to,
+        ...(acceptance.approvedBy === undefined
+          ? {}
+          : { "adk.workflow.acceptance.approved_by": acceptance.approvedBy }),
+        "adk.workflow.acceptance.reason_length": acceptance.reason.length,
+      });
+      await this.emitWorkflowEvent({
+        ...this.envelope(),
+        type: "step_change_accepted",
+        stepId,
+        acceptance,
+      } satisfies WorkflowStepChangeAcceptedEvent);
+    }
   }
 
   /** Logs once the steps this turn replayed without a saved model to compare. */
@@ -2274,6 +2322,8 @@ function workflowEventTitle(event: WorkflowEvent): string {
       return `Workflow ${event.workflowId}: ${event.result.id} replayed`;
     case "step_model_changed":
       return `Workflow ${event.workflowId}: ${event.stepId} model changed`;
+    case "step_change_accepted":
+      return `Workflow ${event.workflowId}: ${event.stepId} ${event.acceptance.kind} change accepted`;
     case "step_waiting":
       return `Workflow ${event.workflowId}: ${event.stepId} waiting for input`;
     case "workflow_waiting":
@@ -2424,4 +2474,17 @@ function latestWaitingExecutionId(
     }
   }
   return undefined;
+}
+
+/**
+ * An acceptance value as logs and spans show it: a model id whole, an input
+ * digest cut to `sha256:` and its first 12 hex characters. A full digest of
+ * a short input can be reversed by guessing; the checkpoint and the
+ * `step_change_accepted` event keep the full value.
+ */
+function telemetryValue(
+  kind: WorkflowCheckpointStepAcceptanceV1["kind"],
+  value: string,
+): string {
+  return kind === "input" ? value.slice(0, INPUT_DIGEST_SHOWN) : value;
 }

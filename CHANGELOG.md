@@ -690,6 +690,17 @@ from the 0.6.0 tag.
   The new `workflowStepInputCanonicalForm()` returns the text the window
   refers to. The residual of the fingerprint is documented in the durability
   guide.
+- `replay.acceptChanges`: host-approved input or model changes for completed
+  steps, so a relaunch keeps a step's saved result after a known-equivalent
+  change. Each entry is bound to the execution, the step and the exact saved
+  and current values, with a reason; entries are checked against the
+  checkpoint before any step runs (`WORKFLOW_REPLAY_ACCEPTANCE_INVALID`, never
+  saved) and applied in one save with an audit entry on the step
+  (`acceptances`, `step_change_accepted`, `WORKFLOW_REPLAY_CHANGE_ACCEPTED`).
+  A relaunch with the same entry is a no-op. `parseWorkflowReplayAcceptances()`
+  validates an operator file. Acceptances must come from a host-only source,
+  never a file an agent can write; see
+  [Accepting a known-equivalent change](docs/workflow-durability.md#accepting-a-known-equivalent-change).
 - **Opt-in strict binary resolution for the SDK drivers.**
   `ClaudeAgentSdkDriver` and `CodexSdkDriver` take `strictBinaryResolution`
   (default `false`, behaviour unchanged). When it is on, no explicit path is

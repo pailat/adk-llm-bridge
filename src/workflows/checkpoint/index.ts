@@ -40,6 +40,12 @@ export type {
   WorkflowStepMismatchHint,
 } from "./input-diff.js";
 export type {
+  WorkflowCheckpointStepAcceptanceV1,
+  WorkflowReplayAcceptance,
+  WorkflowReplayChangeKind,
+} from "./replay-acceptance.js";
+export { parseWorkflowReplayAcceptances } from "./replay-acceptance.js";
+export type {
   WorkflowCheckpointStatus,
   WorkflowCheckpointStepResultV1,
   WorkflowCheckpointStepStatus,

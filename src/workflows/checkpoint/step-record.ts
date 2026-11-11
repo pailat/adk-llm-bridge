@@ -1,9 +1,14 @@
 /**
  * Optional per-step fields that let a later turn report what changed on a
- * replayed step: the model the step's agent requested and a fingerprint of the
- * canonical step input. Every field may be absent (older checkpoints, or the
+ * replayed step: the model the step's agent requested, a fingerprint of the
+ * canonical step input, and the host acceptances applied to it. Every field may be absent (older checkpoints, or the
  * fingerprint turned off), and an absent field means "not recorded".
  */
+
+import {
+  isStepAcceptances,
+  type WorkflowCheckpointStepAcceptanceV1,
+} from "./replay-acceptance.js";
 
 /** Longest stored model id. */
 const MAX_MODEL_ID_LENGTH = 256;
@@ -44,6 +49,13 @@ export interface WorkflowCheckpointStepRecordV1 {
    * recorded, is turned off, or the input fits one chunk.
    */
   inputDigest?: WorkflowCheckpointStepInputDigestV1;
+  /**
+   * Host acceptances applied to this step, oldest first, at most 32; only on a
+   * `completed` step. An audit record, not authority: after an accepted input
+   * change, `inputHash` is the accepted input's hash and the entry keeps the
+   * old one; an accepted model change leaves `model.requested` as it ran.
+   */
+  acceptances?: WorkflowCheckpointStepAcceptanceV1[];
 }
 
 /**
@@ -52,8 +64,14 @@ export interface WorkflowCheckpointStepRecordV1 {
  * @internal
  */
 export function isStepRecordFields(value: Record<string, unknown>): boolean {
-  const { model, inputLength, inputDigest } = value;
+  const { model, inputLength, inputDigest, acceptances } = value;
   if (model !== undefined && !isModel(model)) return false;
+  if (
+    acceptances !== undefined &&
+    !isStepAcceptances(acceptances, value.status)
+  ) {
+    return false;
+  }
   if (inputLength !== undefined && !isLength(inputLength)) return false;
   if (inputDigest !== undefined) {
     return isLength(inputLength) && isInputDigest(inputDigest, inputLength);
