@@ -24,6 +24,7 @@ import {
   type ExternalAgentEvent,
   type ExternalAgentUsage,
 } from "./events.js";
+import type { ExternalAgentToolsReport } from "./tools/adk-tool-bridge.js";
 
 const tracerName = "gcp.vertex.agent";
 const tracerVersion = "adk-llm-bridge";
@@ -312,6 +313,26 @@ export class ExternalAgentRunTracer {
     }
     if (completed && this.#agentSpan) {
       this.#agentSpan.setAttributes(runAttributes(completed));
+    }
+  }
+
+  /**
+   * Records the tools an effective `read-only` policy hid, as attributes of
+   * the agent span. Empty lists set nothing.
+   *
+   * @param report - The run's tools report.
+   */
+  traceToolsReport(report: ExternalAgentToolsReport): void {
+    if (!this.#agentSpan) return;
+    const lists: Array<[string, readonly string[] | undefined]> = [
+      [`${EXT}.tools.hidden`, report.hidden],
+      [`${EXT}.tools.ambiguous`, report.ambiguous],
+      [`${EXT}.tools.unmatched_read_only`, report.unmatchedReadOnlyTools],
+    ];
+    for (const [key, names] of lists) {
+      if (names && names.length > 0) {
+        this.#agentSpan.setAttribute(key, [...names]);
+      }
     }
   }
 

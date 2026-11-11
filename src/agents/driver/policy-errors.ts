@@ -136,6 +136,32 @@ export const EXTERNAL_AGENT_MODEL_REQUIRED = "EXTERNAL_AGENT_MODEL_REQUIRED";
  */
 export const EXTERNAL_AGENT_MODEL_OVERRIDE = "EXTERNAL_AGENT_MODEL_OVERRIDE";
 
+/**
+ * `ExternalAgentConfig.tools` was given to an agent whose driver cannot host
+ * ADK tools (`capabilities().tools` is not `true`): the tools would never
+ * reach the runtime. Thrown when the agent is built. Use `ClaudeAgent` (the
+ * Claude Agent SDK driver) or remove `tools`.
+ */
+export const EXTERNAL_AGENT_TOOLS_UNSUPPORTED =
+  "EXTERNAL_AGENT_TOOLS_UNSUPPORTED";
+
+/**
+ * A `readOnlyTools` entry that cannot attest exactly one tool: it is empty,
+ * listed twice, matches no direct tool (when no toolset could add it), or
+ * names two or more direct tools. Thrown when the agent is built.
+ */
+export const EXTERNAL_AGENT_READ_ONLY_TOOL_UNKNOWN =
+  "EXTERNAL_AGENT_READ_ONLY_TOOL_UNKNOWN";
+
+/**
+ * The agent's own `permissions.mode` is `read-only` and a direct ADK tool is
+ * not named in `readOnlyTools`, so the run would drop it silently. Thrown
+ * when the agent is built. List the tool if it has no side effects, or
+ * remove it.
+ */
+export const EXTERNAL_AGENT_TOOL_NOT_READ_ONLY =
+  "EXTERNAL_AGENT_TOOL_NOT_READ_ONLY";
+
 /** Codes of {@link ExternalAgentPolicyError}. */
 export type ExternalAgentPolicyErrorCode =
   | typeof EXTERNAL_AGENT_ISOLATION_VIOLATED
@@ -149,7 +175,10 @@ export type ExternalAgentPolicyErrorCode =
   | typeof EXTERNAL_AGENT_OPTION_UNSUPPORTED
   | typeof EXTERNAL_AGENT_MODEL_INVALID
   | typeof EXTERNAL_AGENT_MODEL_REQUIRED
-  | typeof EXTERNAL_AGENT_MODEL_OVERRIDE;
+  | typeof EXTERNAL_AGENT_MODEL_OVERRIDE
+  | typeof EXTERNAL_AGENT_TOOLS_UNSUPPORTED
+  | typeof EXTERNAL_AGENT_READ_ONLY_TOOL_UNKNOWN
+  | typeof EXTERNAL_AGENT_TOOL_NOT_READ_ONLY;
 
 /**
  * A run the driver refuses to start or continue. Never recoverable: retrying

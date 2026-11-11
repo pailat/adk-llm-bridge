@@ -1092,6 +1092,20 @@ from the 0.6.0 tag.
 
 ### Changed
 
+- **`ExternalAgent` no longer drops ADK tools silently** (see
+  [Read-only agents and host tools](./docs/external-agent-isolation.md#read-only-agents-and-host-tools)):
+  - a `read-only` agent with tools not listed in `readOnlyTools` throws
+    `EXTERNAL_AGENT_TOOL_NOT_READ_ONLY`;
+  - `readOnlyTools` entries that name no tool, or more than one tool, throw
+    `EXTERNAL_AGENT_READ_ONLY_TOOL_UNKNOWN`;
+  - a listed name that resolves to more than one tool at run time exposes none
+    of them and is reported as `ambiguous`;
+  - tools on a driver that cannot host them (Codex, Gemini CLI, Claude CLI)
+    throw `EXTERNAL_AGENT_TOOLS_UNSUPPORTED`;
+  - tools hidden by a `read-only` policy (an inherited one included) are
+    reported by one `EXTERNAL_AGENT_TOOLS_HIDDEN` warning per run, on the final
+    event (`customMetadata.externalAgentTools`) and on the span.
+
 - **The script sandbox stack limit is lower and capped.**
   `DEFAULT_WORKFLOW_EXECUTION_LIMITS.stackBytes` is 32 KiB (32768, was
   512 KiB), and a script workflow whose `stackBytes` is above 32 KiB is refused

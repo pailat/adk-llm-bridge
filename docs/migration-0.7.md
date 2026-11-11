@@ -719,6 +719,22 @@ Recommended for hosts:
 - Use **full model ids** (`claude-opus-5-5`, not `opus`), so a substituted
   model shows as a reported id that differs from the requested one.
 
+### Read-only agents and tools
+
+`ExternalAgent` now refuses configurations that used to drop ADK tools
+silently. See
+[Read-only agents and host tools](./external-agent-isolation.md#read-only-agents-and-host-tools).
+
+- List the tools that are safe in a `read-only` agent in `readOnlyTools`, by
+  their original names. A `read-only` agent with an unlisted direct tool throws
+  `EXTERNAL_AGENT_TOOL_NOT_READ_ONLY`; an entry that names no tool, or more
+  than one tool, throws `EXTERNAL_AGENT_READ_ONLY_TOOL_UNKNOWN`.
+- Remove `tools` from Codex, Gemini CLI and Claude CLI agents: they never
+  reached the runtime, and now throw `EXTERNAL_AGENT_TOOLS_UNSUPPORTED`. Use
+  `ClaudeAgent` to host ADK tools.
+- The bridge cannot verify that a host function is read-only. The declaration
+  is yours.
+
 ### Coming in 0.8
 
 0.8 is planned to replace the `args` denylist of `ClaudeCliDriver` and

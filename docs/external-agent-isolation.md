@@ -396,6 +396,74 @@ does not match any tool the model sees: describe what the tool does, or use
 the exposed name. Read-only filters (`readOnlyTools`) match the tool's own
 name, before it is rewritten.
 
+### Read-only agents and host tools
+
+`permissions.mode: "read-only"` constrains **the runtime's own tools**. It
+cannot see inside a host function: an ADK `FunctionTool` is host code that
+runs in your process with your authority (files, network, credentials),
+outside every runtime sandbox, and no static check proves a closure has no
+side effects. So "read-only" for a host tool is **your declaration**, made
+with `readOnlyTools` (original tool names). **The bridge cannot verify it.**
+
+```ts
+new ClaudeAgent({
+  permissions: { mode: "read-only" },
+  tools: [getComponent, validateUsage],
+  readOnlyTools: ["reui_get_component", "reui_validate_usage"],
+});
+```
+
+What the bridge does guarantee: only declared tools are exposed under
+`read-only`, a declaration that names no tool is caught, and nothing is
+dropped silently.
+
+| Code (`ExternalAgentPolicyError`, thrown when the agent is built) | When |
+|---|---|
+| `EXTERNAL_AGENT_TOOLS_UNSUPPORTED` | `tools` on a driver whose `capabilities().tools` is not `true` (Codex, Gemini CLI, Claude CLI). Only the Claude Agent SDK driver (`ClaudeAgent`) hosts ADK tools. A custom driver without `capabilities()` is not checked. |
+| `EXTERNAL_AGENT_READ_ONLY_TOOL_UNKNOWN` | A `readOnlyTools` entry that is empty, listed twice, names no direct tool (when `tools` has no toolset), or names two or more direct tools. |
+| `EXTERNAL_AGENT_TOOL_NOT_READ_ONLY` | The agent's **own** mode is `read-only` and a direct tool is not in `readOnlyTools`. Add it if it has no side effects, or remove it. |
+
+The checks run in that order, so a typo in `readOnlyTools` is reported as
+unknown before an undeclared tool. Toolsets are listed only at run time, so
+they are not checked at construction.
+
+When the run is under a `read-only` policy it inherited (for example a
+`workspace-write` child of a `read-only` coordinator), hiding the tools is the
+designed narrowing, so the agent still builds. The run reports what it hid, in
+three places:
+
+- **A warning, always.** One warning per run with the code
+  `EXTERNAL_AGENT_TOOLS_HIDDEN` names the hidden, ambiguous and unmatched
+  tools. It is logged when the tools are resolved, so it does not depend on how
+  the run ends (a driver error, a pause, a run without a final event) or on
+  tracing. An ambiguous name also gets its own `ADK_TOOL_AMBIGUOUS_SKIPPED`
+  warning.
+- **The final event**, when the run completes: `customMetadata.externalAgentTools`
+  (on the last error event when there is no final text). A run that fails,
+  pauses or ends without a completion has no event copy.
+- **The span**, when tracing is on: the attributes
+  `gcp.vertex.agent.external_agent.tools.hidden`, `.ambiguous` and
+  `.unmatched_read_only`.
+
+```ts
+{ hidden: string[]; ambiguous?: string[]; unmatchedReadOnlyTools?: string[]; reason: "read-only" }
+```
+
+The names are original names, sorted. Nothing is set when nothing was hidden.
+
+**A `readOnlyTools` entry declares one tool.** If a toolset can add a tool with
+the same name (an MCP server that grows a `get_component` that writes), the
+declaration is void at run time: neither tool is exposed and the run reports
+the name as `ambiguous`. Give read-only tools names that are unique across the
+agent's tools and toolsets, or filter the toolset. Edge cases: a toolset whose
+`getTools()` fails adds nothing to the count, so a listed direct tool stays
+exposed; a tool the bridge would skip anyway (an in-model tool, a tool with no
+declaration) still counts, so it makes the name ambiguous. That fails closed.
+
+Read-only MCP servers follow the same model: the host's declaration
+(`readOnly: true` with a `tools` list) is the attestation, and the guard
+enforces it as an allowlist.
+
 ### Confirmations compared with ADK
 
 A tool's `requireConfirmation` and a `toolContext.requestConfirmation()` call
