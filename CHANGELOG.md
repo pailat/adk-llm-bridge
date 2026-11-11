@@ -675,6 +675,19 @@ from the 0.6.0 tag.
 
 ### Added
 
+- **`agentKind` on workflow step events and spans.** `step_started` and
+  `step_completed` carry `agentKind: "llm" | "external" | "host" | "workflow"`
+  (`WorkflowAgentKind`), derived from the step's agent before it runs:
+  `ExternalAgent` is `external`, `LlmAgent` (subclasses included) is `llm`, the
+  bridge's workflow agents and ADK's `Workflow`, `SequentialAgent`,
+  `ParallelAgent` and `LoopAgent` are `workflow`, and any other `BaseAgent` is
+  `host`. The same value is the span attribute
+  `gcp.vertex.agent.agent_kind`, always on the step's parent `execute_node` span and on `invoke_agent` only for
+  `ExternalAgent` runs: ADK 2.4 creates the `invoke_agent` span of `llm`,
+  `workflow` and `host` agents privately in `BaseAgent.runAsync`, and the bridge
+  has no hook inside it. Additive: events recorded before this have no
+  `agentKind` and are still valid. See
+  [Which agent ran a step](./docs/workflow-orchestration.md#which-agent-ran-a-step).
 - **Prompt caching for Anthropic models** (see [Prompt caching](./docs/prompt-caching.md)):
   a `promptCaching` option, `boolean | { ttl?: "5m" | "1h" }`, on `AnthropicProviderConfig`,
   `AIGatewayProviderConfig` and `OpenRouterProviderConfig`, and on their register options.

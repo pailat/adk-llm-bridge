@@ -361,6 +361,9 @@ describe("ExternalAgent spans: one agent with a built-in tool", () => {
 
     const recorded = spans.find((span) => span.name === "invoke_agent coder");
     expect(named("call_llm")[0]?.parent).toBe(recorded);
+    expect(recorded?.attributes["gcp.vertex.agent.agent_kind"]).toBe(
+      "external",
+    );
     expect(recorded?.attributes).toMatchObject({
       "gen_ai.request.model": "haiku",
       "gen_ai.response.model": "haiku-real-1",
