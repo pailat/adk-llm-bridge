@@ -138,6 +138,67 @@ Behavior:
 | `SESSION_STORE_SCHEMA_UNSUPPORTED` | The file was written by a newer version of the store. |
 | `SESSION_STORE_UNSAFE_PATH` | A symlink at the database path, a file that is not a regular file or is owned by another user, or a directory owned by another user (not root) or writable by others without the sticky bit. |
 
+## ADK artifacts
+
+A store that needs no database: the transcripts live in the ADK artifact
+service of the run (`InMemoryArtifactService`, `FileArtifactService`,
+`GcsArtifactService`, or any `BaseArtifactService`), scoped to the ADK
+session. It comes from `adk-llm-bridge/agents/session-store/adk-artifacts`.
+
+```ts
+import { ClaudeAgent } from "adk-llm-bridge/agents";
+import { adkArtifactSessionStore } from "adk-llm-bridge/agents/session-store/adk-artifacts";
+
+const agent = new ClaudeAgent({
+  name: "coder",
+  description: "Edits code",
+  workingDirectory: process.cwd(),
+  driverOptions: { sessionStore: adkArtifactSessionStore() },
+});
+// new Runner({ appName, agent, sessionService, artifactService })
+```
+
+`adkArtifactSessionStore()` returns a factory (`SessionStoreFactory`, exported
+from `adk-llm-bridge/agents`). `ClaudeAgentSdkDriver` calls it once per run
+with the invocation context and gives the store it returns to the SDK. A plain
+store object still works as before.
+
+- **The artifact service.** The store uses `context.artifactService`, which the
+  `Runner` sets. Pass `adkArtifactSessionStore({ artifactService })` to use
+  another service; it is scoped by `context.session` (app, user, session id).
+- **No artifact service is an error before the run starts.** The run yields an
+  `error` event with code `CLAUDE_SESSION_STORE_UNAVAILABLE` (not recoverable;
+  the message is the factory's) and `completed` with exit code 1. The SDK is
+  not started and no model call is made. The store's own error code is
+  `SESSION_STORE_NO_ARTIFACT_SERVICE`. Any throw from a factory is reported the
+  same way.
+- **Layout.** One artifact per transcript, named
+  `claude-session.v1.<project>.<session>.<main or subagent>.jsonl` (hashed or
+  encoded, never containing `/`), with one version per `append` batch. A batch
+  over `maxVersionBytes` (default 4 MiB, an integer of at least 1) is split into
+  consecutive versions. `load` reads every version, up to 8 in parallel, and
+  has to fit `sessionStoreLoadTimeoutMs`.
+- **Cost of eager flushing.** Every `append` is one `saveArtifact`, and the
+  GCS and file services list all versions on each save. Keep the default
+  `"batched"` flush; `sessionStoreFlush: "eager"` makes more and smaller versions and slows
+  long sessions down.
+- **One writer.** Two processes (or two runs) writing the same ADK session's transcript at
+  the same time are not supported; appends of one run are serialized per
+  artifact.
+- **Another ADK session's transcript.** A `resumeSessionId` that belongs to a
+  different ADK session finds nothing in this session's artifacts. When `load`
+  gives nothing, the SDK does not fail: it starts the resume from the local
+  transcript under `CLAUDE_CONFIG_DIR` if there is one.
+- **Corrupt data.** A version that is not JSONL or has another `format` makes
+  `load` reject with `SESSION_STORE_CORRUPT_VERSION`; nothing is skipped.
+  Other codes: `SESSION_STORE_INVALID_KEY`, `SESSION_STORE_INVALID_ENTRY`,
+  `SESSION_STORE_INVALID_OPTION`. All are `AdkArtifactSessionStoreError`.
+- **Retention is yours.** The built-in ADK session services do not delete an
+  ended session's artifacts, and only `delete` removes a transcript. Transcripts can hold tool
+  output and file contents, and the artifact service stores them.
+- **Claude Agent SDK only.** `ClaudeCliDriver` still throws
+  `EXTERNAL_AGENT_OPTION_UNSUPPORTED` for any `sessionStore`, a factory too.
+
 ## Your own store
 
 Any object that implements `SessionStore` works: `append` and `load` are

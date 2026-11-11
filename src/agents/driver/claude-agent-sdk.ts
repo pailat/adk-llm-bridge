@@ -21,6 +21,7 @@ import {
   safeCollectContents,
 } from "../runtime/content-collector.js";
 import { classifyRecoverable } from "../runtime/error-classification.js";
+import type { SessionStoreFactory } from "../session-store/adk-artifacts.js";
 import type { SessionStore } from "../session-store/types.js";
 import {
   BRIDGE_MCP_SERVER,
@@ -134,7 +135,7 @@ type ClaudeAgentSdkOptions = {
   sandbox?: Record<string, unknown>;
   resume?: string;
   forkSession?: boolean;
-  sessionStore?: SessionStore;
+  sessionStore?: SessionStore | SessionStoreFactory;
   sessionStoreFlush?: ClaudeSessionStoreFlush;
   loadTimeoutMs?: number;
   canUseTool?: ClaudeAgentSdkCanUseTool;
@@ -467,7 +468,7 @@ export interface ClaudeAgentSdkDriverConfig {
    * contract, which can change in a minor SDK release.
    * @defaultValue `undefined` (no store: only the local transcript is written)
    */
-  sessionStore?: SessionStore;
+  sessionStore?: SessionStore | SessionStoreFactory;
   /**
    * How eagerly the SDK sends transcript entries to {@link sessionStore}
    * (the SDK `sessionStoreFlush` option): `"batched"` or `"eager"`.
@@ -552,6 +553,23 @@ export const DEFAULT_CLAUDE_SDK_TOOLS: readonly string[] = DEFAULT_CLAUDE_TOOLS;
  */
 export const CLAUDE_SESSION_STORE_MIRROR_ERROR =
   "CLAUDE_SESSION_STORE_MIRROR_ERROR";
+
+/**
+ * Code of the non-recoverable `error` event a run reports, before the SDK
+ * starts, when a `sessionStore` factory (such as `adkArtifactSessionStore()`)
+ * cannot build its store, for example because the run has no ADK artifact
+ * service.
+ */
+export const CLAUDE_SESSION_STORE_UNAVAILABLE =
+  "CLAUDE_SESSION_STORE_UNAVAILABLE";
+
+/** A `sessionStore` factory failed; reported as CLAUDE_SESSION_STORE_UNAVAILABLE. */
+class SessionStoreUnavailableError extends Error {
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause });
+    this.name = "SessionStoreUnavailableError";
+  }
+}
 
 /** The bridge's delegation tool; it maps to transfer events, not tool events. */
 const BRIDGE_SUBAGENT_TOOL = `${BRIDGE_TOOL_PREFIX}run_adk_subagent`;
@@ -641,7 +659,8 @@ export class ClaudeAgentSdkDriver {
   readonly #requiredMcpServers: readonly string[];
   readonly #resumeSessionId?: string;
   readonly #forkSession?: boolean;
-  readonly #sessionStore?: SessionStore;
+  readonly #sessionStore?: SessionStore | SessionStoreFactory;
+  readonly #resolvedStores = new WeakMap<object, SessionStore>();
   readonly #sessionStoreFlush?: ClaudeSessionStoreFlush;
   readonly #sessionStoreLoadTimeoutMs?: number;
   readonly #systemPrompt?: string;
@@ -876,6 +895,11 @@ export class ClaudeAgentSdkDriver {
     const backgroundTasks = new ClaudeBackgroundTaskTracker();
     let runTemp: ClaudeRunTempDir | undefined;
     try {
+      // A session store factory that cannot build its store ends the run
+      // here, before the SDK is loaded: a store that fails inside append()
+      // would only be reported as mirror_error and the run would go on
+      // without its transcript.
+      this.resolveSessionStore(request);
       // A model variable in the child environment would change the model
       // the runtime runs: refuse before anything else.
       const envRefusal = modelEnvRefusal(
@@ -1119,7 +1143,15 @@ export class ClaudeAgentSdkDriver {
       if (!startedEmitted) {
         yield startedEvent();
       }
-      if (error instanceof ExternalAgentPolicyError) {
+      if (error instanceof SessionStoreUnavailableError) {
+        yield {
+          type: "error",
+          message: error.message,
+          code: CLAUDE_SESSION_STORE_UNAVAILABLE,
+          recoverable: false,
+          timestamp: Date.now(),
+        };
+      } else if (error instanceof ExternalAgentPolicyError) {
         yield policyErrorEvent(error);
       } else {
         const { message, missingExecutable } = this.describeError(
@@ -1178,6 +1210,33 @@ export class ClaudeAgentSdkDriver {
   }
 
   /**
+   * The store for one run: a configured store as is, or the product of a
+   * configured factory (built once per request).
+   *
+   * @throws `SessionStoreUnavailableError` when the factory throws.
+   */
+  private resolveSessionStore(
+    request: ExternalAgentRunRequest,
+  ): SessionStore | undefined {
+    const configured = this.#sessionStore;
+    if (typeof configured !== "function") {
+      return configured;
+    }
+    const cached = this.#resolvedStores.get(request);
+    if (cached) {
+      return cached;
+    }
+    let store: SessionStore;
+    try {
+      store = configured({ context: request.context });
+    } catch (error) {
+      throw new SessionStoreUnavailableError(error);
+    }
+    this.#resolvedStores.set(request, store);
+    return store;
+  }
+
+  /**
    * SDK `query()` options for a request, without the bridge MCP server (see
    * {@link ClaudeAgentSdkDriver.buildOptionsForRun}). Undefined keys are
    * removed.
@@ -1210,7 +1269,7 @@ export class ClaudeAgentSdkDriver {
         permission.allowDangerouslySkipPermissions,
       resume,
       forkSession: this.#forkSession,
-      sessionStore: this.#sessionStore,
+      sessionStore: this.resolveSessionStore(request),
       sessionStoreFlush: this.#sessionStoreFlush,
       loadTimeoutMs: this.#sessionStoreLoadTimeoutMs,
       canUseTool: this.buildCanUseTool(request),

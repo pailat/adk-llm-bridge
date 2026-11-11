@@ -155,7 +155,7 @@ jobs:
               }
               transitive.push(name + ' (via ' + [...new Set(dependents)].join(', ') + ')');
             }
-            for (const p of ['adk-llm-bridge', 'adk-llm-bridge/agents', 'adk-llm-bridge/agents/session-store/sqlite', 'adk-llm-bridge/workflows', 'adk-llm-bridge/workflows/node', 'adk-llm-bridge/workflows/checkpoint/sqlite', 'adk-llm-bridge/workflows/events/sqlite', 'adk-llm-bridge/workflows/storage/conformance']) await import(p);
+            for (const p of ['adk-llm-bridge', 'adk-llm-bridge/agents', 'adk-llm-bridge/agents/session-store/sqlite', 'adk-llm-bridge/agents/session-store/adk-artifacts', 'adk-llm-bridge/workflows', 'adk-llm-bridge/workflows/node', 'adk-llm-bridge/workflows/checkpoint/sqlite', 'adk-llm-bridge/workflows/events/sqlite', 'adk-llm-bridge/workflows/storage/conformance']) await import(p);
             await import('adk-llm-bridge/package.json', { with: { type: 'json' } });
             console.log('entries import with optional peers absent on', process.version, '| present transitively:', transitive.join('; ') || 'none');
           "
