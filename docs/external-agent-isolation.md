@@ -897,5 +897,7 @@ any other code unchanged), so a stored code still compares:
 
 A failed delegation's `RunSubAgentResult` carries `error` and `errorKind`
 (`"aborted"`, `"llm-calls-limit"`, `"preparation"`, `"agent-error"` or
-`"invalid-resume"`). The registries throw `InputValidationError` from
+`"invalid-resume"`). `"llm-calls-limit"` covers both a thrown
+`LlmCallsLimitExceededError` and the error event a real `LlmAgent` yields when
+it goes over the shared `maxLlmCalls`. The registries throw `InputValidationError` from
 `@google/adk` for an empty provider id or an unknown provider.

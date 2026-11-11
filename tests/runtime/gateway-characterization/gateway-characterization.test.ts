@@ -245,7 +245,7 @@ describe("gateway characterization: maxLlmCalls sharing", () => {
     expect(results.map((r) => r.errorKind)).toEqual([
       null,
       null,
-      "agent-error",
+      "llm-calls-limit",
     ]);
     expect(results[2]?.error).toBe(
       "Max number of llm calls limit of 3 exceeded",
