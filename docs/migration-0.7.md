@@ -186,6 +186,10 @@ Related behavior changes:
   `customMetadata.cacheCreationTokenCount` (genai has no field for them), and
   in the optional `cacheCreationTokens` of `AgentInvocationUsage` and
   `WorkflowStepUsage`.
+- The cost a provider reports (`usage.cost` of AI Gateway and OpenRouter, plus
+  the upstream or market cost of a BYOK gateway call, with `customMetadata.costSource` naming the field) is in `customMetadata.costUsd`, and
+  summed in the optional `costUsd` of `AgentInvocationUsage` and
+  `WorkflowStepUsage`. See [Prompt caching](prompt-caching.md#reading-the-cache-usage).
 - Claude Agent SDK: a resumed session reports usage and cost per run instead
   of the session total, marked `usage.scope: "run"`. When the driver has no
   baseline for the session (first run after a restart or on another replica,

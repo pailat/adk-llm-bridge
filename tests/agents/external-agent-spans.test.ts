@@ -519,6 +519,33 @@ describe("ExternalAgent spans: one agent with a built-in tool", () => {
       expect(final?.customMetadata?.externalAgent).toBe(true);
     });
 
+    test("a many-turn Claude run reports usage once, with cache writes inside the prompt count", async () => {
+      // Pinned: the run's usage rides on ONE
+      // event whatever `numTurns` says (so a gateway `llmCalls` is 1 per run),
+      // and the prompt count is input + cache read + cache write (Anthropic
+      // semantics), which is above a count that leaves the writes out.
+      const events = await run([
+        { type: "output", content: "A" },
+        {
+          type: "completed",
+          numTurns: 106,
+          usage: {
+            inputTokens: 200,
+            outputTokens: 900,
+            cacheReadInputTokens: 50_000,
+            cacheCreationInputTokens: 3_000,
+            scope: "run",
+          },
+        },
+      ]);
+      expect(events.filter((event) => event.usageMetadata)).toHaveLength(1);
+      const final = events.find((event) => textOf(event) === "A");
+      expect(final?.usageMetadata?.promptTokenCount).toBe(53_200);
+      expect(final?.usageMetadata?.cachedContentTokenCount).toBe(50_000);
+      expect(final?.customMetadata?.cacheCreationTokenCount).toBe(3_000);
+      expect(final?.customMetadata).not.toHaveProperty("numTurns");
+    });
+
     test("usage without cache creation adds no cacheCreationTokenCount", async () => {
       const events = await run([
         { type: "output", content: "A" },

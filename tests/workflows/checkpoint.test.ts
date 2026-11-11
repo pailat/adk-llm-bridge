@@ -613,6 +613,26 @@ describe("stored step usage", () => {
     }
   });
 
+  test("costUsd is optional: old usage loads, 0 and a real cost load, a bad one is corrupt", async () => {
+    for (const ok of [0, 0.0042, 15.63]) {
+      expect(
+        isWorkflowCheckpointV1(await withUsage({ ...usage, costUsd: ok })),
+      ).toBe(true);
+    }
+    for (const bad of [
+      "1",
+      -0.01,
+      null,
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      {},
+    ]) {
+      expect(
+        isWorkflowCheckpointV1(await withUsage({ ...usage, costUsd: bad })),
+      ).toBe(false);
+    }
+  });
+
   test("a result whose usage is malformed is rejected as corrupt", async () => {
     const corrupt: Record<string, unknown> = {
       null: null,

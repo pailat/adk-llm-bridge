@@ -903,6 +903,23 @@ export interface StreamAccumulator {
    * `customMetadata.cacheCreationTokenCount` on the final response.
    */
   cacheCreationTokens?: number;
+
+  /**
+   * Cost in US dollars the provider reported on the usage chunk
+   * (`usage.cost`). Emitted as `customMetadata.costUsd` on the final response.
+   */
+  costUsd?: number;
+
+  /**
+   * The usage field `costUsd` came from. Emitted as `customMetadata.costSource`.
+   */
+  costSource?: "cost" | "cost+upstream" | "market_cost";
+
+  /**
+   * Market cost the AI Gateway reported (`usage.market_cost`). Emitted as
+   * `customMetadata.marketCostUsd`.
+   */
+  marketCostUsd?: number;
 }
 
 /**
