@@ -48,6 +48,7 @@ import {
   isCommandNotFound,
   networkUnenforceable,
   policyErrorEvent,
+  sessionRefusal,
   unenforceablePathsRefusal,
   webToolsRefusal,
 } from "./policy-errors.js";
@@ -628,7 +629,9 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
    * the CLI's `system/init` line names; its timestamp is still the start of
    * the run. A run that ends before any output (a refusal, a spawn failure,
    * an abort, a process that writes only to stderr) still emits `started`
-   * first, without a model. `completed` carries the model of the `result`
+   * first, without a model. A `request.runtimeSession` is refused with
+   * `EXTERNAL_AGENT_SESSIONS_UNSUPPORTED` before any process starts.
+   * `completed` carries the model of the `result`
    * line, or the init model when the result names several.
    *
    * @param request - The run request (instruction, context, permissions,
@@ -680,6 +683,12 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
     request: ExternalAgentRunRequest,
     state: ClaudeCliRunState,
   ): AsyncIterable<ExternalAgentEvent | typeof FIRST_OUTPUT_LINE> {
+    const sessionsRefusal = sessionRefusal("ClaudeCliDriver", request);
+    if (sessionsRefusal) {
+      yield policyErrorEvent(sessionsRefusal);
+      yield { type: "completed", exitCode: 1, timestamp: Date.now() };
+      return;
+    }
     const isolation = this.isolationPlan(request);
     const args = this.buildArgs(request);
     const env = this.buildEnv(request);

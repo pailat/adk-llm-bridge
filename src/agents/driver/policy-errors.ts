@@ -37,6 +37,15 @@ export const EXTERNAL_AGENT_BACKGROUND_TASK_PENDING =
   "EXTERNAL_AGENT_BACKGROUND_TASK_PENDING";
 
 /**
+ * Not a refusal: the code of the `error` event of a Claude Agent SDK run
+ * whose stream ended with no turn run: Claude Code wrote only "model-less"
+ * results (success, `num_turns` 0, empty `result`) and never ran the input.
+ * The run ends with exit code 1 instead of an empty success. Recoverable: a
+ * new run of the same input can work.
+ */
+export const EXTERNAL_AGENT_NO_TURN = "EXTERNAL_AGENT_NO_TURN";
+
+/**
  * The policy does not set `allowNetwork: true` (network is off), and the
  * runtime cannot keep its
  * tools (shell commands, web tools, MCP servers) off the network in the
@@ -156,6 +165,26 @@ export const EXTERNAL_AGENT_APPROVALS_UNSUPPORTED =
   "EXTERNAL_AGENT_APPROVALS_UNSUPPORTED";
 
 /**
+ * The run asked for a runtime session (`request.runtimeSession`) from a driver
+ * whose `capabilities().sessions` is not `true`, so the id would be ignored.
+ * The run is refused before any process starts. Use a driver that resumes
+ * (`ClaudeAgent`, `CodexAgent`), or drop `runtimeSession`.
+ */
+export const EXTERNAL_AGENT_SESSIONS_UNSUPPORTED =
+  "EXTERNAL_AGENT_SESSIONS_UNSUPPORTED";
+
+/**
+ * `subAgents` are set on an `ExternalAgent` whose driver does not expose them
+ * (`capabilities().subagents` is not `true`): the delegation tool reaches the
+ * runtime only through the Claude Agent SDK driver, so the sub-agents could
+ * never be called and the run would complete without them. Thrown when the
+ * agent is built. Use `ClaudeAgent` (the Claude Agent SDK driver), or put the
+ * sub-agents on an ADK `LlmAgent` parent.
+ */
+export const EXTERNAL_AGENT_SUBAGENTS_UNSUPPORTED =
+  "EXTERNAL_AGENT_SUBAGENTS_UNSUPPORTED";
+
+/**
  * A `readOnlyTools` entry that cannot attest exactly one tool: it is empty,
  * listed twice, matches no direct tool (when no toolset could add it), or
  * names two or more direct tools. Thrown when the agent is built.
@@ -188,6 +217,8 @@ export type ExternalAgentPolicyErrorCode =
   | typeof EXTERNAL_AGENT_MODEL_OVERRIDE
   | typeof EXTERNAL_AGENT_TOOLS_UNSUPPORTED
   | typeof EXTERNAL_AGENT_APPROVALS_UNSUPPORTED
+  | typeof EXTERNAL_AGENT_SESSIONS_UNSUPPORTED
+  | typeof EXTERNAL_AGENT_SUBAGENTS_UNSUPPORTED
   | typeof EXTERNAL_AGENT_READ_ONLY_TOOL_UNKNOWN
   | typeof EXTERNAL_AGENT_TOOL_NOT_READ_ONLY;
 
@@ -230,6 +261,28 @@ export function policyErrorEvent(
     recoverable: false,
     timestamp: Date.now(),
   };
+}
+
+/**
+ * Refuses a run that sets `request.runtimeSession` on a driver that cannot
+ * resume a runtime session.
+ *
+ * @param driverName - Driver class name for the message.
+ * @param request - The run request.
+ * @returns An `EXTERNAL_AGENT_SESSIONS_UNSUPPORTED` error to report, or
+ * `undefined` when the request has no `runtimeSession`.
+ */
+export function sessionRefusal(
+  driverName: string,
+  request: { readonly runtimeSession?: unknown },
+): ExternalAgentPolicyError | undefined {
+  if (request.runtimeSession === undefined) {
+    return undefined;
+  }
+  return new ExternalAgentPolicyError(
+    EXTERNAL_AGENT_SESSIONS_UNSUPPORTED,
+    `${driverName} cannot resume a runtime session (capabilities().sessions is not true), so request.runtimeSession would be ignored. Use ClaudeAgent or CodexAgent, or remove runtimeSession.`,
+  );
 }
 
 /**

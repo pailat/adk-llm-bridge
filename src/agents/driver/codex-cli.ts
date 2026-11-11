@@ -41,6 +41,7 @@ import {
   ExternalAgentPolicyError,
   isCommandNotFound,
   policyErrorEvent,
+  sessionRefusal,
   unenforceablePathsRefusal,
   unsandboxedShellRefusal,
 } from "./policy-errors.js";
@@ -593,7 +594,9 @@ export class CodexCliDriver extends SubprocessJsonlDriver {
    *
    * @remarks
    * A refused run (see the class remarks) yields `started`, one `error`
-   * event with the policy code, and `completed` with `exitCode: 1`. If the
+   * event with the policy code, and `completed` with `exitCode: 1`. A
+   * `request.runtimeSession` is refused first with
+   * `EXTERNAL_AGENT_SESSIONS_UNSUPPORTED`, before any process starts. If the
    * abort signal fires, the stream ends without a `completed` event after the
    * process is killed. A duplicated `turn.failed` after an `error` with the
    * same message is reported once. After a non-zero exit, each stderr line
@@ -612,9 +615,14 @@ export class CodexCliDriver extends SubprocessJsonlDriver {
     if (signal?.aborted) {
       return;
     }
-    const env = this.buildEnv(request);
     const refuse = (error: ExternalAgentPolicyError) =>
       refusedRun(this.providerId, error);
+    const sessionsRefusal = sessionRefusal("CodexCliDriver", request);
+    if (sessionsRefusal) {
+      yield* refuse(sessionsRefusal);
+      return;
+    }
+    const env = this.buildEnv(request);
 
     const envRefusal = modelEnvRefusal(
       "CodexCliDriver",

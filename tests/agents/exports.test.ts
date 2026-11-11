@@ -26,6 +26,12 @@ describe("agents public exports", () => {
     expect(Object.isFrozen(agents.DEFAULT_CLAUDE_SDK_TOOLS)).toBe(true);
   });
 
+  test("./agents exports the sessions-unsupported code", () => {
+    expect(agents.EXTERNAL_AGENT_SESSIONS_UNSUPPORTED).toBe(
+      "EXTERNAL_AGENT_SESSIONS_UNSUPPORTED",
+    );
+  });
+
   test("./agents exposes the driver policy errors and their codes", () => {
     expect(agents.EXTERNAL_AGENT_ISOLATION_VIOLATED).toBe(
       "EXTERNAL_AGENT_ISOLATION_VIOLATED",
