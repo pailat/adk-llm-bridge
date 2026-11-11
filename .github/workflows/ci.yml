@@ -33,8 +33,12 @@ jobs:
         with:
           bun-version: 1.4.4
       - run: bun install --frozen-lockfile
-      # Builds once; the NodeNext consumer check runs on that build.
+      # Builds once; the NodeNext consumer check runs on that build. The step
+      # timeout (typecheck, lint, tests and build together) ends a stuck run
+      # before the job's, so its log is kept; a sandbox test that blocks the
+      # host is named sooner by the test watchdog.
       - run: bun run ci
+        timeout-minutes: 12
       - name: Smoke-import dist on Node ${{ matrix.node }}
         run: |
           node --input-type=module -e "

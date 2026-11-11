@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect } from "bun:test";
 import {
   BaseAgent,
   createEvent,
@@ -17,6 +17,8 @@ import {
 import { ScriptWorkflowAgent } from "../../src/workflows/script-workflow-agent.js";
 import { WorkflowAgent } from "../../src/workflows/workflow-agent.js";
 import { withDeadline } from "../agents/helpers.js";
+// Every test here gets a deadline and the host-blocking watchdog.
+import { sandboxTest as test } from "../helpers/sandbox-test.js";
 
 /** Contract with ADK's (experimental) graph engine: our agents work as nodes. */
 

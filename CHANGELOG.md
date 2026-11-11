@@ -1367,6 +1367,21 @@ from the 0.6.0 tag.
   the next session. One hostile overflow therefore fails the other live script
   sessions of the process: they would otherwise run on a module whose heap may
   be corrupted.
+- **A poisoned sandbox module is no longer freed, which could block the host
+  thread.** After a host stack overflow or a WebAssembly abort, the runtime
+  still freed the turn's argument, the context and the runtime on the poisoned
+  module, for the failing session and for every other session on it. A free
+  walks the module's untrusted heap without any interrupt check, so it could
+  loop and block the host thread. Now the runtime never calls into a poisoned
+  module again: its sessions only drop their references, and its memory is
+  released when the module is garbage-collected. This is a possible cause of
+  one CI run that hung in the forced-overflow tests; that hang was not
+  reproduced locally. That a script can never block the host longer than its
+  `cpuTimeMs` budget remains unproven: the budget is checked between bytecode
+  operations, a single native builtin call (`sort`, `join`,
+  `JSON.stringify`) runs to completion, and a host that needs a hard bound must
+  run workflows in a process it can kill (see "Time bound" in
+  `docs/workflow-orchestration.md`).
 - **Headless Claude runs no longer report success while their own background
   job is still running.** `ClaudeAgentSdkDriver` and `ClaudeCliDriver` set
   `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` for Claude Code, so the Bash tool

@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect } from "bun:test";
 import {
   AgentTool,
   BaseAgent,
@@ -46,6 +46,8 @@ import type {
 import { ScriptWorkflowAgent } from "../../src/workflows/script-workflow-agent.js";
 import { WorkflowAgent } from "../../src/workflows/workflow-agent.js";
 import { fromPartial } from "../helpers/partial.js";
+// Every test here gets a deadline and the host-blocking watchdog.
+import { sandboxTest as test } from "../helpers/sandbox-test.js";
 
 /**
  * Regression tests for permission inheritance across the intermediates that
