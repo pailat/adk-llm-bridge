@@ -446,6 +446,69 @@ describe("WorkflowSpanExportProcessor", () => {
     expect(await readAll(exporter, "exec-late")).toHaveLength(3);
   });
 
+  test("keeps spans that started inside a nested workflow before its execution id was set under the nested execution", async () => {
+    const { exporter, processor } = setup();
+    const traceId = "7".repeat(32);
+    const outer = makeSpan({
+      name: "invoke_workflow outer",
+      traceId,
+      spanId: "1".repeat(16),
+      attributes: { [WORKFLOW_EXECUTION_ID_SPAN_ATTRIBUTE]: "exec-outer" },
+    });
+    const outerStep = makeSpan({
+      name: "execute_node run_inner",
+      traceId,
+      spanId: "2".repeat(16),
+      parentSpanId: "1".repeat(16),
+    });
+    const inner = makeSpan({
+      name: "invoke_workflow inner",
+      traceId,
+      spanId: "3".repeat(16),
+      parentSpanId: "2".repeat(16),
+    });
+    const innerStep = makeSpan({
+      name: "execute_node s",
+      traceId,
+      spanId: "4".repeat(16),
+      parentSpanId: "3".repeat(16),
+    });
+    const innerCall = makeSpan({
+      name: "call_llm",
+      traceId,
+      spanId: "5".repeat(16),
+      parentSpanId: "4".repeat(16),
+    });
+
+    processor.onStart(outer);
+    processor.onStart(outerStep);
+    processor.onStart(inner);
+    // Both start while the nested workflow has no execution id yet.
+    processor.onStart(innerStep);
+    processor.onStart(innerCall);
+    inner.attributes[WORKFLOW_EXECUTION_ID_SPAN_ATTRIBUTE] = "exec-inner";
+    processor.onEnd(innerCall);
+    processor.onEnd(innerStep);
+    processor.onEnd(inner);
+    processor.onEnd(outerStep);
+    processor.onEnd(outer);
+    await processor.forceFlush();
+
+    const names = async (executionId: string) =>
+      (await readAll(exporter, executionId)).map(
+        (record) => (record.payload as { name?: string }).name,
+      );
+    expect(await names("exec-inner")).toEqual([
+      "call_llm",
+      "execute_node s",
+      "invoke_workflow inner",
+    ]);
+    expect(await names("exec-outer")).toEqual([
+      "execute_node run_inner",
+      "invoke_workflow outer",
+    ]);
+  });
+
   test("returns from spans whose parents form a cycle", async () => {
     const { exporter, processor } = setup();
     const traceId = "3".repeat(32);
@@ -471,6 +534,48 @@ describe("WorkflowSpanExportProcessor", () => {
 
     expect(await readAll(exporter, `trace:${traceId}`)).toHaveLength(3);
   });
+
+  test("a cycle in the span ancestry ends within a time limit (checked in a child process, so an endless climb fails instead of hanging the run)", () => {
+    // An endless climb is a synchronous loop that no test timeout can stop;
+    // a child process with a time limit turns it into a failure.
+    const source = new URL(
+      "../../../../src/workflows/storage/",
+      import.meta.url,
+    );
+    const script = `
+const { WorkflowEventExportPipeline } = await import(${JSON.stringify(new URL("event-export-pipeline.ts", source).pathname)});
+const { InMemoryWorkflowEventExporter } = await import(${JSON.stringify(new URL("in-memory-event-exporter.ts", source).pathname)});
+const { WorkflowSpanExportProcessor } = await import(${JSON.stringify(new URL("span-export-processor.ts", source).pathname)});
+const pipeline = new WorkflowEventExportPipeline({ exporter: new InMemoryWorkflowEventExporter() });
+const processor = new WorkflowSpanExportProcessor({ pipeline });
+const span = (spanId, parent) => ({
+  name: "call_llm",
+  spanContext: () => ({ traceId: "9".repeat(32), spanId }),
+  parentSpanContext: { spanId: parent },
+  startTime: [1, 0],
+  endTime: [2, 0],
+  attributes: {},
+  status: { code: 0 },
+  instrumentationScope: { name: "gcp.vertex.agent" },
+});
+const spans = [span("a".repeat(16), "b".repeat(16)), span("b".repeat(16), "a".repeat(16)), span("c".repeat(16), "c".repeat(16))];
+for (const s of spans) processor.onStart(s);
+for (const s of spans) processor.onEnd(s);
+await pipeline.close(1000);
+console.log("returned");
+`;
+    const result = Bun.spawnSync([process.execPath, "-e", script], {
+      stdout: "pipe",
+      stderr: "pipe",
+      timeout: 10_000,
+      killSignal: "SIGKILL",
+    });
+    expect({
+      timedOut: result.exitedDueToTimeout === true,
+      stdout: result.stdout.toString(),
+      stderr: result.stderr.toString(),
+    }).toEqual({ timedOut: false, stdout: "returned\n", stderr: "" });
+  }, 20_000);
 
   test("keeps traces apart", async () => {
     const { exporter, processor } = setup();

@@ -4,6 +4,7 @@ import {
   access,
   chmod,
   type FileHandle,
+  link,
   lstat,
   lutimes,
   mkdir,
@@ -76,7 +77,10 @@ export interface JsonlWorkflowEventExporterOptions
  * seconds and checks it before each write; a lock whose process is gone, or
  * that was not refreshed for 60 seconds (its pid may have been reused), is
  * taken over by one process only. A directory that others can read or write
- * is set to `0700` before use. When an execution is first used, its file
+ * is set to `0700` before use (on Windows there is no mode: the directory
+ * and files keep the access the parent directory's ACL gives them, and a
+ * symbolic link is refused from `lstat`, so a link swapped in after that
+ * check is not caught). When an execution is first used, its file
  * is read once to recover the last sequence and the stored ids. A last line
  * cut short by a killed process is removed then; any other malformed line
  * rejects with `WORKFLOW_STORAGE_CORRUPT`. A file with a newer format
@@ -440,7 +444,8 @@ export class JsonlWorkflowEventExporter extends BaseWorkflowEventExporter {
       if (!info.isDirectory()) throw unsafePath(this.#directory);
       // A directory others can read or write is made owner-only before any
       // event is written into it; one that cannot be changed is refused.
-      if ((info.mode & 0o077) !== 0) {
+      // Windows has no mode to tighten: the directory is left as it is.
+      if (process.platform !== "win32" && (info.mode & 0o077) !== 0) {
         await chmod(this.#directory, 0o700).catch(() => {
           throw unsafePath(this.#directory);
         });
@@ -456,61 +461,107 @@ export class JsonlWorkflowEventExporter extends BaseWorkflowEventExporter {
 
   async #acquireLock(): Promise<void> {
     const lockPath = join(this.#directory, LOCK_NAME);
-    const takeoverPath = join(this.#directory, TAKEOVER_NAME);
     const token = randomBytes(8).toString("hex");
     const body = JSON.stringify({ pid: process.pid, token });
     const deadline = Date.now() + TAKEOVER_WAIT_MS;
-    while (Date.now() < deadline) {
-      if (await createExclusive(lockPath, body)) {
-        this.#holdLock(token);
-        return;
-      }
-      const holder = await readLockHolder(lockPath);
-      if (!holder) continue;
-      if (holderIsAlive(holder)) throw writerBusy(holder.pid);
-      // The holder is gone. Removing its lock is serialized by a second,
-      // short-lived lock: without it, a process that judged the old lock
-      // stale could remove the lock another process has just created, and
-      // both would write.
-      if (!(await createExclusive(takeoverPath, body))) {
-        const other = await readLockHolder(takeoverPath);
-        if (
-          other !== undefined &&
-          other.ageMs > TAKEOVER_STALE_MS &&
-          !holderIsAlive(other)
-        ) {
-          // A process died in the middle of a takeover.
-          await unlink(takeoverPath).catch(() => undefined);
-        } else {
-          await delay(TAKEOVER_POLL_MS);
-        }
-        continue;
-      }
-      try {
-        const current = await readLockHolder(lockPath);
-        if (
-          current !== undefined &&
-          current.token === holder.token &&
-          current.pid === holder.pid &&
-          !holderIsAlive(current)
-        ) {
-          await unlink(lockPath).catch((error: unknown) => {
-            if (errorCode(error) !== "ENOENT") throw error;
-          });
-        }
+    // The token counts as held while this process claims a takeover, so that
+    // another exporter of this process never judges the claim abandoned.
+    HELD_LOCK_TOKENS.add(token);
+    try {
+      while (Date.now() < deadline) {
         if (await createExclusive(lockPath, body)) {
           this.#holdLock(token);
           return;
         }
-      } finally {
-        await unlink(takeoverPath).catch(() => undefined);
+        const holder = await readLockHolder(lockPath);
+        if (!holder) {
+          // Released between the create and the read: try again shortly.
+          await delay(TAKEOVER_POLL_MS);
+          continue;
+        }
+        if (holderIsAlive(holder)) throw writerBusy(holder.pid);
+        // The holder is gone. Only the process that holds the claim for this
+        // lock may remove it: without the claim, a process that judged the
+        // old lock stale could remove the lock another process has just
+        // created, and both would write.
+        const claims = await this.#claimTakeover(holder, body);
+        if (claims === undefined) {
+          await delay(TAKEOVER_POLL_MS);
+          continue;
+        }
+        try {
+          const current = await readLockHolder(lockPath);
+          if (
+            current !== undefined &&
+            current.token === holder.token &&
+            current.pid === holder.pid &&
+            !holderIsAlive(current)
+          ) {
+            await unlink(lockPath).catch((error: unknown) => {
+              if (errorCode(error) !== "ENOENT") throw error;
+            });
+          }
+          if (await createExclusive(lockPath, body)) {
+            this.#holdLock(token);
+            return;
+          }
+        } finally {
+          // The lock these claims were for is gone, so no other process can
+          // act on them any more; removing them only tidies the directory.
+          for (const claim of claims.reverse()) {
+            await unlink(claim).catch(() => undefined);
+          }
+        }
       }
+      throw new WorkflowStorageError(
+        "WORKFLOW_STORAGE_UNAVAILABLE",
+        "The event directory lock could not be taken",
+        { details: { provider: "jsonl" } },
+      );
+    } finally {
+      if (this.#lockToken !== token) HELD_LOCK_TOKENS.delete(token);
     }
-    throw new WorkflowStorageError(
-      "WORKFLOW_STORAGE_UNAVAILABLE",
-      "The event directory lock could not be taken",
-      { details: { provider: "jsonl" } },
-    );
+  }
+
+  /**
+   * Claims the right to remove the stale lock `holder`.
+   *
+   * @remarks
+   * A claim is a file named after the token of what it replaces and created
+   * exclusively, so one process at most holds it. A claim left by a process
+   * that died is never removed by the others: it is replaced by a claim named
+   * after the dead claimer's token, which again only one process can create.
+   * No process removes a file another live process created, so a crash at any
+   * point of a takeover cannot leave two writers.
+   *
+   * @returns The claim files walked, the last one created by this call, or
+   * `undefined` when a live process holds the claim.
+   */
+  async #claimTakeover(
+    holder: LockHolder,
+    body: string,
+  ): Promise<string[] | undefined> {
+    const walked: string[] = [];
+    let replaced = holder;
+    for (let hop = 0; hop < MAX_TAKEOVER_HOPS; hop += 1) {
+      const path = join(this.#directory, claimName(replaced));
+      if (await createExclusiveComplete(path, body)) {
+        walked.push(path);
+        return walked;
+      }
+      const claimer = await readLockHolder(path);
+      if (claimer === undefined) {
+        // The claim was just finished and removed: start again.
+        return undefined;
+      }
+      if (claimer.ageMs <= TAKEOVER_STALE_MS || holderIsAlive(claimer)) {
+        return undefined;
+      }
+      // A process died in the middle of a takeover.
+      walked.push(path);
+      replaced = claimer;
+    }
+    return undefined;
   }
 
   #holdLock(token: string): void {
@@ -568,8 +619,10 @@ export class JsonlWorkflowEventExporter extends BaseWorkflowEventExporter {
 
   /**
    * State for a read. An exporter that holds the directory lock uses its
-   * cached state. Otherwise the file is scanned without changing it, and a
-   * torn last line is removed only when the lock can be taken.
+   * cached state. Otherwise the file is scanned without changing it: a read
+   * never takes the lock, changes permissions or removes a torn last line, so
+   * a reader cannot block a restarted writer. The writer removes the torn
+   * line on its first append.
    */
   async #stateForRead(executionId: string): Promise<ExecutionState> {
     if (this.#lockToken !== undefined) return this.#load(executionId);
@@ -584,17 +637,6 @@ export class JsonlWorkflowEventExporter extends BaseWorkflowEventExporter {
     const known = this.#readStates.get(executionId);
     if (known?.key === key) return known.state;
     const state = await recover(executionId, path, false);
-    if (state.torn) {
-      try {
-        await this.#ensureReady();
-        return await this.#load(executionId);
-      } catch (error) {
-        if (!isWorkflowStorageError(error, "WORKFLOW_STORAGE_UNAVAILABLE")) {
-          throw error;
-        }
-        // Another process writes: read the valid part and leave the tail.
-      }
-    }
     if (this.#readStates.size >= MAX_CACHED_EXECUTIONS)
       this.#readStates.clear();
     this.#readStates.set(executionId, { key, state });
@@ -648,7 +690,8 @@ const MAX_CACHED_EXECUTIONS = 64;
 const DEFAULT_PRUNE_LIMIT = 500;
 const READ_CHUNK_BYTES = 64 * 1024;
 const FRESH_LOCK_MS = 5_000;
-const TAKEOVER_NAME = ".writer.lock.takeover";
+const TAKEOVER_PREFIX = ".writer.lock.takeover-";
+const MAX_TAKEOVER_HOPS = 4096;
 const TAKEOVER_WAIT_MS = 5_000;
 const TAKEOVER_POLL_MS = 20;
 const TAKEOVER_STALE_MS = 5_000;
@@ -1106,6 +1149,42 @@ async function createExclusive(path: string, body: string): Promise<boolean> {
     await handle.close();
   }
   return true;
+}
+
+/**
+ * Name of the claim that replaces `replaced`. The name comes from its token
+ * (or, for a lock whose body was never written, its pid), hashed so that a
+ * token read from disk cannot form a path.
+ */
+function claimName(replaced: LockHolder): string {
+  const identity =
+    replaced.token !== undefined
+      ? replaced.token
+      : `no-token:${replaced.pid ?? "none"}`;
+  const key = createHash("sha256").update(identity).digest("hex").slice(0, 32);
+  return `${TAKEOVER_PREFIX}${key}`;
+}
+
+/**
+ * Like {@link createExclusive}, but the file appears with its whole body: it
+ * is written under a private name and linked into place, and the link fails
+ * when `path` exists. A claim therefore always names its claimer.
+ */
+async function createExclusiveComplete(
+  path: string,
+  body: string,
+): Promise<boolean> {
+  const staging = `${path}.${randomBytes(8).toString("hex")}.tmp`;
+  if (!(await createExclusive(staging, body))) return false;
+  try {
+    await link(staging, path);
+    return true;
+  } catch (error) {
+    if (errorCode(error) === "EEXIST") return false;
+    throw error;
+  } finally {
+    await unlink(staging).catch(() => undefined);
+  }
 }
 
 function writerBusy(pid: number | undefined): WorkflowStorageError {

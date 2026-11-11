@@ -8,7 +8,7 @@
  *
  * Modes: `append` (a fixed number of batches, then a report), `append-forever`
  * (batches until it is killed, one line per committed batch), `open`,
- * `hold-lock`, `pragmas` and `generate-v1`.
+ * `hold-lock`, `commit-newer-version`, `commit-current-schema`, `pragmas` and `generate-v1`.
  *
  * `generate-v1` writes `events-v1.db`, a database made by the first release
  * of the exporter (schema version 1):
@@ -280,6 +280,65 @@ async function main(): Promise<void> {
       db.exec("ROLLBACK");
       db.close();
       emit({ released: true });
+      return;
+    }
+    case "commit-newer-version": {
+      // Holds the write lock for `holdMs` while it records schema version
+      // `version` for `component`, then commits: a newer release migrating
+      // the file while another process is opening it.
+      const db = openSqliteDatabase({
+        path: args.path,
+        fail: (failure, message) => new Error(`${failure}: ${message}`),
+      });
+      db.exec("BEGIN IMMEDIATE");
+      db.exec(
+        "CREATE TABLE IF NOT EXISTS adk_llm_bridge_schema_versions (component TEXT PRIMARY KEY, version INTEGER NOT NULL)",
+      );
+      db.prepare(
+        "INSERT INTO adk_llm_bridge_schema_versions (component, version) VALUES (?, ?)",
+      ).run(args.component, args.version);
+      emit({ locked: true });
+      Bun.sleepSync(args.holdMs);
+      db.exec("COMMIT");
+      db.close();
+      emit({ committed: true });
+      return;
+    }
+    case "commit-current-schema": {
+      // Holds the write lock for `holdMs` while it creates the current event
+      // schema in `path` (copied from a database an exporter made at
+      // `template`), then commits: another process finishing the migration
+      // while this one waits for the lock.
+      const template = new SqliteWorkflowEventExporter({ path: args.template });
+      await template.close();
+      const source = openSqliteDatabase({
+        path: args.template,
+        fail: (failure, message) => new Error(`${failure}: ${message}`),
+      });
+      const statements = source
+        .prepare(
+          "SELECT sql FROM sqlite_master WHERE sql IS NOT NULL AND name LIKE 'workflow_event%'",
+        )
+        .all()
+        .map((row) => String(row.sql));
+      source.close();
+      const db = openSqliteDatabase({
+        path: args.path,
+        fail: (failure, message) => new Error(`${failure}: ${message}`),
+      });
+      db.exec("BEGIN IMMEDIATE");
+      for (const sql of statements) db.exec(sql);
+      db.exec(
+        "CREATE TABLE IF NOT EXISTS adk_llm_bridge_schema_versions (component TEXT PRIMARY KEY, version INTEGER NOT NULL)",
+      );
+      db.prepare(
+        "INSERT INTO adk_llm_bridge_schema_versions (component, version) VALUES ('workflow-events', 1)",
+      ).run();
+      emit({ locked: true });
+      Bun.sleepSync(args.holdMs);
+      db.exec("COMMIT");
+      db.close();
+      emit({ committed: true });
       return;
     }
     case "pragmas": {

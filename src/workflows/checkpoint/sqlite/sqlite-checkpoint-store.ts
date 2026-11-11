@@ -121,6 +121,12 @@ export interface SqliteWorkflowCheckpointStoreOptions
  * and older versions are migrated forward on open. The file can be shared
  * with `SqliteWorkflowEventExporter`.
  *
+ * Each leased execution keeps a row in the `leases` table. `delete` and
+ * `prune` remove the rows of the executions they delete, and `prune` also
+ * removes rows of leases nobody holds whose execution has no checkpoint. The
+ * largest removed fencing token is kept, so a new lease always gets a larger
+ * token than any removed one.
+ *
  * Capabilities: everything `true`, `compareAndSet: "atomic"`.
  *
  * @example
@@ -417,7 +423,7 @@ export class SqliteWorkflowCheckpointStore extends BaseWorkflowCheckpointStore {
             );
           }
         }
-        this.#freeLease(input.workflowId, input.executionId);
+        this.#dropLease(input.workflowId, input.executionId);
         const result = this.#db
           .prepare(
             "DELETE FROM checkpoints WHERE workflow_id = ? AND execution_id = ?",
@@ -463,8 +469,9 @@ export class SqliteWorkflowCheckpointStore extends BaseWorkflowCheckpointStore {
         );
         for (const row of batch) {
           remove.run(String(row.workflow_id), String(row.execution_id));
-          this.#freeLease(String(row.workflow_id), String(row.execution_id));
+          this.#dropLease(String(row.workflow_id), String(row.execution_id));
         }
+        this.#dropIdleLeases(this.currentTime(), input.limit);
         return {
           deleted: batch.length,
           hasMore: doomed.length > batch.length,
@@ -497,7 +504,8 @@ export class SqliteWorkflowCheckpointStore extends BaseWorkflowCheckpointStore {
             { details: { expiresAt: expiresAtOfHolder } },
           );
         }
-        const fencingToken = Number(current?.fencing_token ?? 0) + 1;
+        const fencingToken =
+          Math.max(Number(current?.fencing_token ?? 0), this.#tokenFloor()) + 1;
         const expiresAt = now + input.ttlMs;
         this.#db
           .prepare(
@@ -613,16 +621,67 @@ export class SqliteWorkflowCheckpointStore extends BaseWorkflowCheckpointStore {
   }
 
   /**
-   * Frees the lease of a deleted execution. The row and its token stay, so
-   * the next lease still counts up and a writer holding an old token can
-   * never write again.
+   * Removes the lease row of a deleted execution. The fencing token floor is
+   * raised to its token first, so the next lease of the execution still gets
+   * a larger token and a writer holding an old one can never write again.
    */
-  #freeLease(workflowId: string, executionId: string): void {
+  #dropLease(workflowId: string, executionId: string): void {
+    const row = this.#db
+      .prepare(
+        "SELECT fencing_token FROM leases WHERE workflow_id = ? AND execution_id = ?",
+      )
+      .get(workflowId, executionId);
+    if (row === undefined) return;
+    this.#raiseTokenFloor(Number(row.fencing_token));
+    this.#db
+      .prepare("DELETE FROM leases WHERE workflow_id = ? AND execution_id = ?")
+      .run(workflowId, executionId);
+  }
+
+  /**
+   * Removes up to `limit` lease rows that nobody holds (released or expired)
+   * and whose execution has no checkpoint: executions that were leased and
+   * never saved, or whose holder died first. Without this the table would
+   * keep one row for every execution ever leased.
+   */
+  #dropIdleLeases(now: number, limit: number): void {
+    const rows = this.#db
+      .prepare(
+        `SELECT workflow_id, execution_id FROM leases AS l
+         WHERE l.workflow_id <> '' AND (l.owner_id IS NULL OR l.expires_at <= ?)
+           AND NOT EXISTS (SELECT 1 FROM checkpoints AS c
+             WHERE c.workflow_id = l.workflow_id AND c.execution_id = l.execution_id)
+         LIMIT ?`,
+      )
+      .all(now, limit);
+    for (const row of rows) {
+      this.#dropLease(String(row.workflow_id), String(row.execution_id));
+    }
+  }
+
+  /**
+   * The largest fencing token of a removed lease row. It is kept in a row
+   * with blank ids, which no lease can have (blank ids are refused), so no
+   * schema change is needed.
+   */
+  #tokenFloor(): number {
+    const row = this.#db
+      .prepare(
+        "SELECT fencing_token FROM leases WHERE workflow_id = '' AND execution_id = ''",
+      )
+      .get();
+    return Number(row?.fencing_token ?? 0);
+  }
+
+  #raiseTokenFloor(token: number): void {
     this.#db
       .prepare(
-        "UPDATE leases SET owner_id = NULL, expires_at = 0 WHERE workflow_id = ? AND execution_id = ?",
+        `INSERT INTO leases (workflow_id, execution_id, owner_id, fencing_token, expires_at)
+         VALUES ('', '', NULL, ?, 0)
+         ON CONFLICT (workflow_id, execution_id) DO UPDATE SET
+           fencing_token = max(fencing_token, excluded.fencing_token)`,
       )
-      .run(workflowId, executionId);
+      .run(token);
   }
 
   #currentToken(locator: WorkflowCheckpointLocator): number {

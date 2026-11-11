@@ -14,6 +14,7 @@ import {
   type ListSessionsResponse,
   type Session,
   StaleSessionError,
+  VertexAiSessionService,
 } from "@google/adk";
 import { createWorkflowCheckpoint } from "../../../src/workflows/checkpoint/checkpoint.js";
 import type { WorkflowCheckpointV1 } from "../../../src/workflows/checkpoint/schema.js";
@@ -332,7 +333,9 @@ describe("AdkSessionServiceWorkflowCheckpointStore options and capabilities", ()
   });
 
   test("concurrency stale-session-reject is what makes it report atomic, with leases and multi-process", () => {
-    const atomic = store(new InMemorySessionService(), {
+    // A subclass of ADK's in-memory service may reject stale sessions, as
+    // this spy does; the host asserts it with the option.
+    const atomic = store(new SpyService(), {
       concurrency: "stale-session-reject",
     });
     expect(atomic.capabilities).toMatchObject({
@@ -363,6 +366,54 @@ describe("AdkSessionServiceWorkflowCheckpointStore options and capabilities", ()
         }),
       ).capabilities.compareAndSet,
     ).toBe("atomic");
+  });
+
+  test("concurrency stale-session-reject is refused over an ADK service that does not reject stale sessions", () => {
+    const refused = (
+      sessionService: BaseSessionService,
+    ): string | undefined => {
+      try {
+        store(sessionService, { concurrency: "stale-session-reject" });
+      } catch (error) {
+        return (error as { code?: string }).code;
+      }
+      return undefined;
+    };
+    expect(refused(new InMemorySessionService())).toBe(
+      "WORKFLOW_STORAGE_INVALID_OPTION",
+    );
+    expect(
+      refused(
+        Object.create(VertexAiSessionService.prototype) as BaseSessionService,
+      ),
+    ).toBe("WORKFLOW_STORAGE_INVALID_OPTION");
+    expect(
+      refused(
+        new DatabaseSessionService("sqlite://:memory:", {
+          staleSession: "reload",
+        }),
+      ),
+    ).toBe("WORKFLOW_STORAGE_INVALID_OPTION");
+    expect(refused(new DatabaseSessionService("sqlite://:memory:"))).toBe(
+      undefined,
+    );
+  });
+
+  test("the default concurrency falls back to none, so advisory, when ADK's stale-session setting cannot be read", () => {
+    // ADK keeps the setting in a field that is private in its types; if a
+    // release renames it, the provider must claim less, not more.
+    const renamed = Object.create(
+      DatabaseSessionService.prototype,
+    ) as DatabaseSessionService;
+    expect(renamed).toBeInstanceOf(DatabaseSessionService);
+    expect(store(renamed).capabilities).toMatchObject({
+      compareAndSet: "advisory",
+      leases: false,
+      multiProcess: false,
+    });
+    // The same object with the field ADK 2.4 sets is trusted.
+    Object.assign(renamed, { staleSession: "reject" });
+    expect(store(renamed).capabilities.compareAndSet).toBe("atomic");
   });
 
   test("an explicit concurrency none wins over a DatabaseSessionService", () => {
@@ -608,6 +659,55 @@ describe("AdkSessionServiceWorkflowCheckpointStore save", () => {
       executionId: "exec",
     });
     expect(stored?.revision).toBe(conflict.conflict.actualRevision as string);
+  });
+
+  test("a stale-session rejection on the last allowed try is still a conflict when the checkpoint changed", async () => {
+    // The provider tries a save eight times. The first seven rejections come
+    // from changes that leave the checkpoint alone (as a lease renewal
+    // would) and are retried; before the eighth, a rival saves a checkpoint.
+    // One outer attempt, so the answer is the provider's own and not that of
+    // a retry by the base class.
+    const tries = 8;
+    const service = new SpyService();
+    const provider = store(service, {
+      concurrency: "stale-session-reject",
+      retry: { maxAttempts: 1 },
+    });
+    const rival = store(service, { concurrency: "stale-session-reject" });
+    const base = await provider.put({
+      checkpoint: await makeCheckpoint("flow", "exec", "base"),
+      expectedRevision: null,
+    });
+    const rivalCheckpoint = await makeCheckpoint("flow", "exec", "rival");
+    let rejected = 0;
+    const rejectAgain = async (): Promise<void> => {
+      rejected += 1;
+      if (rejected < tries) {
+        service.competeThenStale = rejectAgain;
+        return;
+      }
+      await rival.put({
+        checkpoint: rivalCheckpoint,
+        expectedRevision: base.revision,
+      });
+    };
+    service.competeThenStale = rejectAgain;
+    const appendsBefore = service.count("appendEvent");
+    const error = await reject(
+      provider.put({
+        checkpoint: await makeCheckpoint("flow", "exec", "mine"),
+        expectedRevision: base.revision,
+      }),
+    );
+    expect(rejected).toBe(tries);
+    // Eight tries of this save, plus the rival's one append.
+    expect(service.count("appendEvent") - appendsBefore).toBe(tries + 1);
+    expect(error).toBeInstanceOf(WorkflowCheckpointConflictError);
+    const conflict = error as WorkflowCheckpointConflictError;
+    expect(conflict.conflict.expectedRevision).toBe(base.revision);
+    expect(conflict.conflict.actualRevision).toBe(
+      await workflowCheckpointRevision(rivalCheckpoint),
+    );
   });
 });
 

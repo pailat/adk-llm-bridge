@@ -42,7 +42,16 @@ The table reads the default settings. `durable` for the ADK provider comes from
 its `durable` option. It defaults to `false` for ADK's `InMemorySessionService`
 and to `true` for every other service. `compareAndSet` and `leases` for the ADK
 provider come from its `concurrency` option. The default is
-`stale-session-reject` for a `DatabaseSessionService` and `none` otherwise.
+`stale-session-reject` for a `DatabaseSessionService` that rejects stale
+sessions (ADK's default `staleSession: "reject"`) and `none` otherwise. If the
+setting cannot be read, the default is `none`, so the provider claims less.
+Setting `concurrency: "stale-session-reject"` (or
+`?concurrency=stale-session-reject`) is refused with
+`WORKFLOW_STORAGE_INVALID_OPTION` over a service that does not reject stale
+sessions: ADK's `InMemorySessionService` (so `adk-session+memory://`),
+`VertexAiSessionService`, or a `DatabaseSessionService` created with another
+`staleSession` setting. For a service of your own, the option is your statement
+that it rejects stale sessions.
 
 `LeasedWorkflowCheckpointStore` is a decorator, not a URI. It wraps a provider
 whose `capabilities.leases` is `true`; wrapping any other provider throws
@@ -53,7 +62,8 @@ durability guide for lease behavior.
 
 Two classes sit behind these providers. `FileSystemWorkflowCheckpointProvider`
 stores through `FileSystemWorkflowCheckpointStore`, which you can also use
-directly. `ADKSessionCheckpointStore` is the store the workflow runtime uses when
+directly. `AdkSessionCheckpointStore` (also exported as
+`ADKSessionCheckpointStore`) is the store the workflow runtime uses when
 no `checkpointStore` is given. It keeps checkpoints in ADK session state and
 enforces the `maxCheckpointBytes` limit, 4 MiB by default. Its capabilities are
 not in the table above.
@@ -128,7 +138,9 @@ errors; `redactWorkflowStorageUri` does the same for any string you log.
 
 When no `checkpointStore` is given and no URI is used, `WorkflowAgent` keeps
 checkpoints in ADK session state through `ADKSessionCheckpointStore`. The file
-system provider is used only when you select it.
+system provider is used only when you select it. The default did not change in
+this release: before the storage providers were added it was
+`ADKSessionCheckpointStore`, and it still is.
 
 ## Custom schemes
 
@@ -323,9 +335,42 @@ Other pipeline defaults: `maxBatchRecords` 200, `flushIntervalMs` 100,
 Records waiting in the pipeline buffer when the process is killed are lost. The
 stored log stays valid and has no gaps, because a record is only stored by an
 `append` that completed. For the JSONL exporter, a last line cut short by the
-kill is removed the next time the execution is opened. Other malformed lines are
+kill is skipped by readers and removed by the next writer when it first appends
+to that execution. Other malformed lines are
 reported as `WORKFLOW_STORAGE_CORRUPT`. A checkpoint is not affected in the same
 way: a process killed during a SQLite save leaves the previous checkpoint.
+
+## Shutdown
+
+The pipeline's batching, retry and timeout timers do not keep the process alive,
+so an idle pipeline never holds a process open. An awaited `flush` or `close`
+does keep the process alive until it ends or its time limit passes. This also
+holds for the plugin's end-of-run flush (`flushOnRunEndMs`) and for the span
+processor's `forceFlush` and `shutdown`. A script whose only work is the run
+therefore exports its records and reaches the code after its run loop. A time
+limit above 2147483647 ms (the largest delay a timer honors) is capped to that
+value, so a very large limit means "wait as long as it takes", not "do not wait".
+
+Records offered after the last flush are still buffered. Before the process
+exits, close in this order:
+
+```ts
+for await (const event of runner.runAsync({ userId, sessionId, newMessage })) {
+  // ...
+}
+await plugin.pipeline.close(5_000); // exports what is left, then stops
+await exporter.close(); // the pipeline leaves its exporter open
+await store.close(); // a LeasedWorkflowCheckpointStore releases its leases
+```
+
+- `pipeline.close(timeoutMs)` flushes first. Records still buffered when the
+  limit passes are dropped with reason `closed` and reported by a warning. Use
+  `flush(timeoutMs)` instead when the pipeline stays in use.
+- `exporter.close()` and `store.close()` release files, database handles and the
+  JSONL directory lock. Later calls reject with `WORKFLOW_STORAGE_CLOSED`.
+- A process that exits without these steps, for example on `process.exit()` or
+  a signal, loses its buffered records as described in
+  [What is lost on kill -9](#what-is-lost-on-kill--9).
 
 ## Errors
 
@@ -402,7 +447,15 @@ defineWorkflowStorageConformanceTests(cases, { test });
 - The `file://` checkpoint provider has the same limit: `multiProcess` is true for
   one host and one local file system.
 - The JSONL event exporter takes one writer per directory. A second writer is
-  refused with `WORKFLOW_STORAGE_UNAVAILABLE`.
+  refused with `WORKFLOW_STORAGE_UNAVAILABLE`. A process that only reads,
+  checks health or lists never takes the directory lock, changes the
+  directory's permissions or edits a file, so it never blocks a writer. The
+  lock of a writer that died is taken over by one process at most, also when a
+  process dies in the middle of that takeover.
+- Opening a SQLite store whose schema is current takes no write lock, so it
+  does not wait for another process's write. Opening a file that still needs a
+  schema migration waits up to `busyTimeoutMs` for the write lock, blocking the
+  event loop while it waits.
 - The modules load on first use. The root, agents and workflows entries import
   without `node:sqlite` or the SQLite subpaths.
 
@@ -427,5 +480,19 @@ still available but superseded is marked `@deprecated` in its TSDoc.
   strings are cut, and if that is not enough the payload is dropped. Only an
   overflow handler keeps the full payload.
 - **Buffered records are lost on a kill.** See [What is lost on kill -9](#what-is-lost-on-kill--9).
+- **`file://` list cost.** `list` of `FileSystemWorkflowCheckpointProvider`
+  opens, reads and parses every checkpoint file under the root for each page,
+  whatever the filters and the cursor, so a page costs time in proportion to
+  all stored checkpoints. Prune old executions, or use the SQLite provider,
+  when the root holds many.
+- **SQLite lease rows.** `SqliteWorkflowCheckpointStore` keeps one row in its
+  `leases` table for each execution that has been leased, so that fencing
+  tokens only grow. `delete` and `prune` remove the row of each execution they
+  delete. `prune` also removes up to `limit` rows of leases that nobody holds
+  (released or expired) whose execution has no checkpoint, such as a run whose
+  process died before its first save. Run `prune` regularly and the table stays
+  about as large as the checkpoint table. A removed row cannot let an old token
+  write again: the store keeps the largest removed token, and every new lease
+  gets a larger one.
 - **Single host for SQLite and the file-system providers.** See
   [the one-host limit](#runtimes-and-the-sqlite-one-host-limit).

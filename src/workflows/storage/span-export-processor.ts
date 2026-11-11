@@ -250,8 +250,19 @@ export class WorkflowSpanExportProcessor {
         : DEFAULT_MAX_TRACKED_TRACES;
   }
 
-  /** Execution of a started span: its own, else its nearest ancestor's. */
-  #lookup(spanId: string | undefined): string | undefined {
+  /**
+   * Execution of a started span: its own, else its nearest ancestor's.
+   *
+   * With `stopAtUnresolved`, the climb ends at an `invoke_workflow` span
+   * whose execution id is not set yet and returns `undefined`: the span below
+   * it belongs to that workflow, whose id is not known so far. Without it,
+   * the climb passes such a span, which is the best answer when the span
+   * ends.
+   */
+  #lookup(
+    spanId: string | undefined,
+    stopAtUnresolved = false,
+  ): string | undefined {
     let id = spanId;
     for (
       let depth = 0;
@@ -270,6 +281,7 @@ export class WorkflowSpanExportProcessor {
         }
       }
       if (entry.executionId !== undefined) return entry.executionId;
+      if (stopAtUnresolved && entry.live !== undefined) return undefined;
       id = entry.parentSpanId;
     }
     return undefined;
@@ -308,7 +320,10 @@ export class WorkflowSpanExportProcessor {
         // attribute from the live span later.
         entry.live = live;
       } else {
-        const inherited = this.#lookup(parentSpanId);
+        // Only a resolved execution is kept. Under a nested workflow whose id
+        // is not set yet nothing is kept, so the span is resolved again when
+        // it ends, once that workflow has its id.
+        const inherited = this.#lookup(parentSpanId, true);
         if (inherited !== undefined) entry.executionId = inherited;
       }
       remember(this.#spans, spanId, entry, this.#maxTrackedTraces);

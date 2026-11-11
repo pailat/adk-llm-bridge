@@ -256,16 +256,20 @@ describe("SqliteSessionStore", () => {
     ]);
   });
 
-  test("creates the database file 0600 in a 0700 directory, uses WAL, and the WAL file is 0600", async () => {
-    const dir = join(tempDir(), "nested", "dir");
-    const path = join(dir, "sessions.db");
-    const store = open(path);
-    await store.append(key, [{ type: "user", uuid: "u1" }]);
-    expect(statSync(path).mode & 0o777).toBe(0o600);
-    expect(statSync(dir).mode & 0o777).toBe(0o700);
-    expect(existsSync(`${path}-wal`)).toBe(true);
-    expect(statSync(`${path}-wal`).mode & 0o777).toBe(0o600);
-  });
+  // Skipped on Windows: POSIX modes.
+  test.skipIf(process.platform === "win32")(
+    "creates the database file 0600 in a 0700 directory, uses WAL, and the WAL file is 0600",
+    async () => {
+      const dir = join(tempDir(), "nested", "dir");
+      const path = join(dir, "sessions.db");
+      const store = open(path);
+      await store.append(key, [{ type: "user", uuid: "u1" }]);
+      expect(statSync(path).mode & 0o777).toBe(0o600);
+      expect(statSync(dir).mode & 0o777).toBe(0o700);
+      expect(existsSync(`${path}-wal`)).toBe(true);
+      expect(statSync(`${path}-wal`).mode & 0o777).toBe(0o600);
+    },
+  );
 
   test("works in memory", async () => {
     const store = new SqliteSessionStore({ path: ":memory:" });

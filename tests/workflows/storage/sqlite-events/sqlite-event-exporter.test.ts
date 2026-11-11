@@ -1,5 +1,6 @@
 import { afterAll, afterEach, describe, expect, test } from "bun:test";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -171,14 +172,33 @@ defineWorkflowStorageConformanceTests(
 // --- Files and paths --------------------------------------------------------
 
 describe("SqliteWorkflowEventExporter database file", () => {
-  test("creates the database file with mode 0600 and a missing directory with mode 0700", async () => {
-    const dir = join(tempDir(), "nested", "state");
-    const path = join(dir, "events.db");
-    const exporter = newExporter(path);
-    await appendMany(exporter, "exec-mode", 1);
-    expect(statSync(path).mode & 0o777).toBe(0o600);
-    expect(statSync(dir).mode & 0o777).toBe(0o700);
-  });
+  // Skipped on Windows: POSIX modes.
+  test.skipIf(process.platform === "win32")(
+    "creates the database file with mode 0600 and a missing directory with mode 0700",
+    async () => {
+      const dir = join(tempDir(), "nested", "state");
+      const path = join(dir, "events.db");
+      const exporter = newExporter(path);
+      await appendMany(exporter, "exec-mode", 1);
+      expect(statSync(path).mode & 0o777).toBe(0o600);
+      expect(statSync(dir).mode & 0o777).toBe(0o700);
+    },
+  );
+
+  // Skipped on Windows: POSIX modes.
+  test.skipIf(process.platform === "win32")(
+    "sets an existing database file that others can read back to 0600",
+    async () => {
+      const path = join(tempDir(), "events.db");
+      const first = newExporter(path);
+      await appendMany(first, "exec-open-mode", 1);
+      await first.close();
+      chmodSync(path, 0o644);
+      const second = newExporter(path);
+      await appendMany(second, "exec-open-mode-2", 1);
+      expect(statSync(path).mode & 0o777).toBe(0o600);
+    },
+  );
 
   test("rejects a symbolic link at the database path and leaves its target untouched", async () => {
     const dir = tempDir();
@@ -219,6 +239,69 @@ describe("SqliteWorkflowEventExporter database file", () => {
       "WORKFLOW_STORAGE_UNSAFE_PATH",
     );
   });
+
+  test("rejects a database path inside a directory that is a symbolic link and creates nothing there", () => {
+    const dir = tempDir();
+    const real = join(dir, "real");
+    mkdirSync(real);
+    const linked = join(dir, "linked");
+    symlinkSync(real, linked);
+    expectStorageError(
+      thrown(() => newExporter(join(linked, "events.db"))),
+      "WORKFLOW_STORAGE_UNSAFE_PATH",
+    );
+    expect(existsSync(join(real, "events.db"))).toBe(false);
+  });
+
+  for (const suffix of ["-wal", "-shm"]) {
+    test(`rejects a symbolic link at ${suffix} of an existing database and leaves its target untouched`, async () => {
+      const dir = tempDir();
+      const path = join(dir, "existing.db");
+      const first = newExporter(path);
+      await appendMany(first, "exec-companion-link", 1);
+      await first.close();
+      const decoy = join(dir, "decoy");
+      writeFileSync(decoy, "decoy");
+      // Under a strict umask the link itself has no group or world bits, so
+      // only a check for links, not for loose modes, can reject it.
+      const previousUmask = process.umask(0o077);
+      try {
+        symlinkSync(decoy, `${path}${suffix}`);
+      } finally {
+        process.umask(previousUmask);
+      }
+      expectStorageError(
+        thrown(() => newExporter(path)),
+        "WORKFLOW_STORAGE_UNSAFE_PATH",
+      );
+      expect(readFileSync(decoy, "utf8")).toBe("decoy");
+    });
+
+    // Skipped on Windows: POSIX modes.
+    test.skipIf(process.platform === "win32")(
+      `sets an existing ${suffix} file that others can read back to 0600 on open`,
+      async () => {
+        const dir = tempDir();
+        const path = join(dir, "companion-mode.db");
+        const first = newExporter(path);
+        await appendMany(first, "exec-companion-mode", 1);
+        await first.close();
+        // A second connection keeps the -wal and -shm files in place, as a
+        // process that is still running would.
+        const live = rawDatabase(path);
+        try {
+          live.exec("CREATE TABLE IF NOT EXISTS keep_open (x)");
+          live.exec("INSERT INTO keep_open VALUES (1)");
+          expect(existsSync(`${path}${suffix}`)).toBe(true);
+          chmodSync(`${path}${suffix}`, 0o644);
+          newExporter(path);
+          expect(statSync(`${path}${suffix}`).mode & 0o777).toBe(0o600);
+        } finally {
+          live.close();
+        }
+      },
+    );
+  }
 
   test("rejects a directory at the database path", () => {
     const path = join(tempDir(), "is-a-directory.db");
@@ -399,6 +482,23 @@ describe("SqliteWorkflowEventExporter layout", () => {
   });
 });
 
+describe("SqliteWorkflowEventExporter execution summary", () => {
+  test("keeps first_timestamp from the first append when later batches arrive", async () => {
+    const exporter = newExporter(join(tempDir(), "first-ts.db"));
+    await appendMany(exporter, "exec-first-ts", 2);
+    await appendMany(exporter, "exec-first-ts", 2, 10);
+    const page = await exporter.listExecutions();
+    expect(page.items).toEqual([
+      {
+        executionId: "exec-first-ts",
+        lastSequence: 4,
+        firstTimestamp: 1_000,
+        lastTimestamp: 1_011,
+      },
+    ]);
+  });
+});
+
 // --- Schema versions ---------------------------------------------------------
 
 describe("SqliteWorkflowEventExporter schema version", () => {
@@ -433,6 +533,123 @@ describe("SqliteWorkflowEventExporter schema version", () => {
     expect(
       rawCount(path, "SELECT count(*) AS n FROM workflow_event_records"),
     ).toBe(2);
+  });
+
+  test("refuses a database that is exactly one schema version newer", async () => {
+    const path = join(tempDir(), "newer-by-one.db");
+    const first = newExporter(path);
+    await first.close();
+    const component = versionRows(path)[0]?.component as string;
+    const next = SQLITE_WORKFLOW_EVENT_SCHEMA_VERSION + 1;
+    const db = rawDatabase(path);
+    try {
+      db.prepare(
+        "UPDATE adk_llm_bridge_schema_versions SET version = ? WHERE component = ?",
+      ).run(next, component);
+    } finally {
+      db.close();
+    }
+    expectStorageError(
+      thrown(() => newExporter(path)),
+      "WORKFLOW_STORAGE_SCHEMA_UNSUPPORTED",
+    );
+    expect(versionRows(path)).toEqual([{ component, version: next }]);
+  });
+
+  test("does not run a migration step again when another process finished the migration while it waited for the lock", async () => {
+    const dir = tempDir();
+    const path = join(dir, "migrated-while-waiting.db");
+    const holder = spawnWorker("commit-current-schema", {
+      path,
+      template: join(dir, "template.db"),
+      holdMs: 1500,
+    });
+    workers.push(holder);
+    await holder.waitForLine((line) => line.includes('"locked"'));
+    const opener = spawnWorker("open", { path });
+    workers.push(opener);
+    const outcome = JSON.parse(
+      await opener.waitForLine((line) => line.includes('"opened"')),
+    ) as { opened: boolean; code?: string; message?: string };
+    await holder.waitForLine((line) => line.includes('"committed"'));
+    expect(outcome).toMatchObject({ opened: true });
+    expect(versionRows(path)).toEqual([
+      {
+        component: "workflow-events",
+        version: SQLITE_WORKFLOW_EVENT_SCHEMA_VERSION,
+      },
+    ]);
+  });
+
+  test("reports a newer schema version at once while another process holds the write lock", async () => {
+    const path = join(tempDir(), "newer-locked.db");
+    const first = newExporter(path);
+    await first.close();
+    const component = versionRows(path)[0]?.component as string;
+    const db = rawDatabase(path);
+    try {
+      db.prepare(
+        "UPDATE adk_llm_bridge_schema_versions SET version = 99 WHERE component = ?",
+      ).run(component);
+    } finally {
+      db.close();
+    }
+    const holder = Bun.spawn(
+      [
+        process.execPath,
+        join(import.meta.dir, "../../../utils/fixtures/sqlite-write-holder.ts"),
+        path,
+      ],
+      { stdin: "pipe", stdout: "pipe", stderr: "pipe" },
+    );
+    try {
+      const reader = (holder.stdout as ReadableStream<Uint8Array>).getReader();
+      const chunk = await reader.read();
+      reader.releaseLock();
+      expect(new TextDecoder().decode(chunk.value).trim()).toBe("locked");
+      const started = performance.now();
+      const error = thrown(() => newExporter(path, { busyTimeoutMs: 3000 }));
+      const elapsed = performance.now() - started;
+      expectStorageError(error, "WORKFLOW_STORAGE_SCHEMA_UNSUPPORTED");
+      expect(elapsed).toBeLessThan(1000);
+    } finally {
+      holder.kill(9);
+      await holder.exited;
+    }
+  });
+
+  test("refuses a newer schema version committed by another process while it waited for the write lock", async () => {
+    const path = join(tempDir(), "newer-while-waiting.db");
+    // The other process holds the write lock with version 99 not yet
+    // committed: the opener reads no version, waits for the lock, and must
+    // check the version again once it has the lock.
+    const holder = spawnWorker("commit-newer-version", {
+      path,
+      component: "workflow-events",
+      version: 99,
+      holdMs: 1500,
+    });
+    workers.push(holder);
+    await holder.waitForLine((line) => line.includes('"locked"'));
+    const opener = spawnWorker("open", { path });
+    workers.push(opener);
+    const outcome = JSON.parse(
+      await opener.waitForLine((line) => line.includes('"opened"')),
+    ) as { opened: boolean; code?: string };
+    await holder.waitForLine((line) => line.includes('"committed"'));
+    expect(outcome).toMatchObject({
+      opened: false,
+      code: "WORKFLOW_STORAGE_SCHEMA_UNSUPPORTED",
+    });
+    expect(versionRows(path)).toEqual([
+      { component: "workflow-events", version: 99 },
+    ]);
+    expect(
+      rawCount(
+        path,
+        "SELECT count(*) AS n FROM sqlite_master WHERE name LIKE 'workflow_event%'",
+      ),
+    ).toBe(0);
   });
 
   test("migrates a database that has no version row for it, keeping the rows of other components", async () => {
@@ -870,6 +1087,51 @@ describe("SqliteWorkflowEventExporter pruning", () => {
     );
   });
 
+  test("prune by age keeps an execution whose newest record is exactly at the cutoff", async () => {
+    const exporter = newExporter(join(tempDir(), "prune-boundary.db"));
+    await exporter.append({
+      executionId: "at-cutoff",
+      records: [buildRecord("at-cutoff", "c1", { timestamp: 100 })],
+    });
+    await exporter.append({
+      executionId: "before-cutoff",
+      records: [buildRecord("before-cutoff", "b1", { timestamp: 99 })],
+    });
+    const result = await exporter.prune({ lastRecordBefore: 100, limit: 1 });
+    expect(result).toEqual({ executions: 1, records: 1, hasMore: false });
+    expect(
+      (await exporter.listExecutions()).items.map((item) => item.executionId),
+    ).toEqual(["at-cutoff"]);
+  });
+
+  test("prune by age keeps an execution that becomes exactly as new as the cutoff after it was chosen", async () => {
+    const path = join(tempDir(), "prune-race-boundary.db");
+    const exporter = newExporter(path);
+    await exporter.append({
+      executionId: "a-old",
+      records: [buildRecord("a-old", "a1", { timestamp: 10 })],
+    });
+    await exporter.append({
+      executionId: "b-old",
+      records: [buildRecord("b-old", "b1", { timestamp: 20 })],
+    });
+    const db = rawDatabase(path);
+    try {
+      db.exec(
+        `CREATE TRIGGER freshen_to_cutoff BEFORE DELETE ON workflow_event_records
+         WHEN OLD.execution_id = 'a-old'
+         BEGIN UPDATE workflow_event_executions SET last_timestamp = 1000 WHERE execution_id = 'b-old'; END`,
+      );
+    } finally {
+      db.close();
+    }
+    const result = await exporter.prune({ lastRecordBefore: 1_000 });
+    expect(result).toEqual({ executions: 1, records: 1, hasMore: false });
+    expect(
+      (await exporter.read({ executionId: "b-old" })).records,
+    ).toHaveLength(1);
+  });
+
   test("prune by age deletes whole executions whose newest record is old, never part of one", async () => {
     const path = join(tempDir(), "prune-age.db");
     const exporter = newExporter(path);
@@ -907,6 +1169,30 @@ describe("SqliteWorkflowEventExporter pruning", () => {
         "old",
       ),
     ).toBe(0);
+  });
+
+  test("prune by age chooses executions by their newest record, not their first", async () => {
+    const exporter = newExporter(join(tempDir(), "prune-newest.db"));
+    // Its first record is the oldest of all, its newest is past the cutoff.
+    await exporter.append({
+      executionId: "started-early",
+      records: [
+        buildRecord("started-early", "s1", { timestamp: 5 }),
+        buildRecord("started-early", "s2", { timestamp: 500 }),
+      ],
+    });
+    await exporter.append({
+      executionId: "all-old",
+      records: [
+        buildRecord("all-old", "a1", { timestamp: 50 }),
+        buildRecord("all-old", "a2", { timestamp: 60 }),
+      ],
+    });
+    const result = await exporter.prune({ lastRecordBefore: 100, limit: 1 });
+    expect(result).toEqual({ executions: 1, records: 2, hasMore: false });
+    expect(
+      (await exporter.listExecutions()).items.map((item) => item.executionId),
+    ).toEqual(["started-early"]);
   });
 
   test("prune by age works in bounded batches and reports that more remain", async () => {
@@ -993,6 +1279,19 @@ describe("SqliteWorkflowEventExporter busy database", () => {
     ).toBe(0);
     const retried = await appendMany(exporter, "exec-blocked", 2);
     expect(retried.records.map((r) => r.sequence)).toEqual([1, 2]);
+  }, 30_000);
+
+  test("an append of only repeated ids still needs the write lock, so it waits and fails while another process holds it", async () => {
+    const path = join(tempDir(), "busy-duplicates.db");
+    const exporter = newExporter(path, { busyTimeoutMs: 300 });
+    await appendMany(exporter, "exec-dup-lock", 2);
+    const holder = spawnWorker("hold-lock", { path, holdMs: 3000 });
+    workers.push(holder);
+    await holder.waitForLine((line) => line.includes("locked"));
+    const error = await rejected(appendMany(exporter, "exec-dup-lock", 2));
+    expectStorageError(error, "WORKFLOW_STORAGE_UNAVAILABLE");
+    holder.kill();
+    await holder.exited;
   }, 30_000);
 
   test("an append waits for a lock that is released within the busy timeout, then succeeds", async () => {

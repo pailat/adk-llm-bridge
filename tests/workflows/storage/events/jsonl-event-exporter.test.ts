@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import {
   appendFile,
+  chmod,
   mkdir,
   mkdtemp,
   readdir,
@@ -153,33 +154,37 @@ describe("JsonlWorkflowEventExporter construction and layout", () => {
     expect(await readdir(parent)).toEqual([]);
   });
 
-  test("creates the directory with mode 0700 and one file per execution with mode 0600 named by SHA-256", async () => {
-    const parent = await tempDirectory();
-    const directory = join(parent, "events");
-    const exporter = exporterOver(directory);
-    await exporter.append({
-      executionId: "exec-a",
-      records: [record("exec-a", "1")],
-    });
-    await exporter.append({
-      executionId: "exec-b",
-      records: [record("exec-b", "1")],
-    });
-    expect((await stat(directory)).mode & 0o777).toBe(0o700);
-    const files = (await readdir(directory))
-      .filter((f) => f.endsWith(".jsonl"))
-      .sort();
-    const expected = ["exec-a", "exec-b"]
-      .map((id) => `${createHash("sha256").update(id).digest("hex")}.jsonl`)
-      .sort();
-    expect(files).toEqual(expected);
-    for (const file of files) {
-      expect((await stat(join(directory, file))).mode & 0o777).toBe(0o600);
-    }
-    for (const file of await readdir(directory)) {
-      expect((await stat(join(directory, file))).mode & 0o077).toBe(0);
-    }
-  });
+  // Skipped on Windows: POSIX modes.
+  test.skipIf(process.platform === "win32")(
+    "creates the directory with mode 0700 and one file per execution with mode 0600 named by SHA-256",
+    async () => {
+      const parent = await tempDirectory();
+      const directory = join(parent, "events");
+      const exporter = exporterOver(directory);
+      await exporter.append({
+        executionId: "exec-a",
+        records: [record("exec-a", "1")],
+      });
+      await exporter.append({
+        executionId: "exec-b",
+        records: [record("exec-b", "1")],
+      });
+      expect((await stat(directory)).mode & 0o777).toBe(0o700);
+      const files = (await readdir(directory))
+        .filter((f) => f.endsWith(".jsonl"))
+        .sort();
+      const expected = ["exec-a", "exec-b"]
+        .map((id) => `${createHash("sha256").update(id).digest("hex")}.jsonl`)
+        .sort();
+      expect(files).toEqual(expected);
+      for (const file of files) {
+        expect((await stat(join(directory, file))).mode & 0o777).toBe(0o600);
+      }
+      for (const file of await readdir(directory)) {
+        expect((await stat(join(directory, file))).mode & 0o077).toBe(0);
+      }
+    },
+  );
 
   test("writes a header line with format, version and execution id, then one line per record", async () => {
     const directory = await tempDirectory();
@@ -685,6 +690,42 @@ describe("JsonlWorkflowEventExporter writer lock", () => {
     });
     expect(result.records[0]?.sequence).toBe(1);
   });
+
+  // Skipped on Windows: POSIX modes.
+  test.skipIf(process.platform === "win32")(
+    "a read that finds a torn last line takes no lock, changes nothing and leaves the directory to a writer",
+    async () => {
+      const directory = await tempDirectory();
+      const seeder = exporterOver(directory);
+      await seeder.append({
+        executionId: "exec-1",
+        records: [record("exec-1", "r1"), record("exec-1", "r2")],
+      });
+      await seeder.close();
+      const file = fileFor(directory, "exec-1");
+      await appendFile(file, '{"id":"torn"');
+      await chmod(directory, 0o750);
+      const before = await readFile(file, "utf8");
+
+      const reader = exporterOver(directory);
+      const page = await reader.read({ executionId: "exec-1" });
+      expect(page.records.map((r) => r.sequence)).toEqual([1, 2]);
+      expect(await readFile(file, "utf8")).toBe(before);
+      expect(await readdir(directory)).not.toContain(".writer.lock");
+      expect((await stat(directory)).mode & 0o777).toBe(0o750);
+
+      // The reader stays open while a restarted writer takes the directory.
+      const writer = exporterOver(directory);
+      const result = await writer.append({
+        executionId: "exec-1",
+        records: [record("exec-1", "r3")],
+      });
+      expect(result.records[0]?.sequence).toBe(3);
+      expect(await readFile(file, "utf8")).not.toContain("torn");
+      const again = await reader.read({ executionId: "exec-1" });
+      expect(again.records.map((r) => r.sequence)).toEqual([1, 2, 3]);
+    },
+  );
 
   test("a health check does not take the writer lock", async () => {
     const directory = await tempDirectory();

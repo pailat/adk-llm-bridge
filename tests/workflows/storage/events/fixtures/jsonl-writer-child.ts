@@ -10,6 +10,8 @@
  *   `refused <code>` when the exporter rejects.
  * - `hold`: appends one record, prints `holding`, and keeps the exporter
  *   open until it is killed or its stdin closes.
+ * - `hold-at`: like `hold`, but waits until the wall-clock time in `[count]`
+ *   (milliseconds since the epoch) so that two children start together.
  */
 import { JsonlWorkflowEventExporter } from "../../../../../src/workflows/storage/jsonl-event-exporter.js";
 
@@ -45,7 +47,13 @@ async function main(): Promise<void> {
     }
     return;
   }
-  if (mode === "once" || mode === "hold") {
+  if (mode === "once" || mode === "hold" || mode === "hold-at") {
+    if (mode === "hold-at") {
+      const startAt = Number(countArgument);
+      await new Promise((resolve) =>
+        setTimeout(resolve, Math.max(0, startAt - Date.now())),
+      );
+    }
     try {
       const result = await exporter.append({
         executionId,

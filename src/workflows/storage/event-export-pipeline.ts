@@ -832,7 +832,8 @@ export class WorkflowEventExportPipeline {
 
   /**
    * Waits until the buffered records are exported or dropped, or the time
-   * limit passes.
+   * limit passes. While it waits it holds the process open, so a script whose
+   * only remaining work is this flush does not exit before it ends.
    *
    * @param timeoutMs - Longest wait, in milliseconds. Defaults to 5000.
    * @returns The number of records still buffered; `0` when everything was
@@ -857,7 +858,8 @@ export class WorkflowEventExportPipeline {
   /**
    * Flushes, then stops the pipeline; records still buffered after the time
    * limit are dropped with reason `closed`. The exporter stays open. Later
-   * offers are dropped.
+   * offers are dropped. Like {@link WorkflowEventExportPipeline.flush}, it holds
+   * the process open while it waits.
    *
    * @param timeoutMs - Longest wait, in milliseconds. Defaults to 5000.
    */
@@ -1455,8 +1457,10 @@ export class WorkflowEventExportPipeline {
         this.#idleWaiters.delete(done);
         resolve();
       };
-      const timer = setTimeout(done, timeoutMs);
-      timer.unref?.();
+      // This timer stays referenced: it is the handle that keeps the process
+      // alive while a flush or close is awaited. The pipeline's other timers
+      // are unreferenced, so an idle pipeline never holds the process.
+      const timer = setTimeout(done, Math.min(timeoutMs, MAX_TIMER_MS));
       this.#idleWaiters.add(done);
     });
   }
@@ -1490,6 +1494,8 @@ export class WorkflowEventExportPipeline {
   }
 }
 
+/** Largest delay `setTimeout` honors; longer delays fire after about 1 ms. */
+const MAX_TIMER_MS = 2 ** 31 - 1;
 const DEFAULT_WAIT_MS = 5_000;
 /** Idle executions whose pending drop report is kept in memory. */
 const MAX_IDLE_REMEMBERED_QUEUES = 1_000;

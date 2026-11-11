@@ -48,10 +48,13 @@ jobs:
   # native node.exe (the only interpreter accepted), under Bun and under Node,
   # with a prompt cmd.exe would re-parse.
   # Only Windows-safe checks run here: the rest of the driver tests assume POSIX.
+  # The storage suites run here too: the SQLite stores, the JSONL exporter, the
+  # session store and the file-system provider, under Bun, and the conformance
+  # cases of the SQLite stores and the JSONL exporter under Node, from dist.
   windows-shims:
     name: windows shims (Bun and Node)
     runs-on: windows-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     defaults:
       run:
         shell: bash
@@ -68,9 +71,13 @@ jobs:
       - run: bun install --frozen-lockfile
       - name: Fake .cmd shims and the interpreter + entry route under Bun
         run: bun test tests/agents/driver/windows-command.test.ts tests/agents/driver/cli-interpreter-entry.test.ts
+      - name: Storage providers under Bun
+        run: bun test tests/workflows/storage tests/utils/sqlite-database.test.ts tests/utils/sqlite-open-while-locked.test.ts tests/utils/windows-contract.test.ts tests/agents/session-store
       - run: bun run build
       - name: Fake .cmd shims and the interpreter + entry route under Node
         run: node scripts/windows-shim-smoke.mjs
+      - name: Storage conformance under Node
+        run: node --test scripts/node-storage-conformance.mjs
 
   # Installs the packed tarball with npm into an empty project, which pulls in
   # the required peers and skips the optional ones, then imports every entry.

@@ -231,6 +231,21 @@ describe("WorkflowEventExportPipeline: offer", () => {
     expect(pipeline.stats.buffered).toBe(0);
   });
 
+  test("a flush or close limit above the timer range waits for the export instead of returning at once", async () => {
+    for (const method of ["flush", "close"] as const) {
+      const exporter = new FaultyExporter();
+      exporter.delayMs = 25;
+      const { pipeline } = makePipeline(exporter);
+      for (let i = 0; i < 5; i += 1) pipeline.offer(record(`r${i}`));
+      const started = Date.now();
+      await pipeline[method](2 ** 31);
+      expect(Date.now() - started).toBeGreaterThanOrEqual(20);
+      expect(exporter.ids()).toHaveLength(5);
+      expect(pipeline.stats.buffered).toBe(0);
+      expect(pipeline.stats.dropped).toBe(0);
+    }
+  });
+
   test("records of one execution are stored in offer order, in batches of at most maxBatchRecords", async () => {
     const exporter = new FaultyExporter();
     exporter.delayMs = 3;
@@ -1116,14 +1131,15 @@ describe("WorkflowEventExportPipeline: timers do not keep the process alive", ()
     expect(result.ms).toBeLessThan(10_000);
   }, 30_000);
 
-  test("a flush with a long time limit does not keep the process alive after the script ends", async () => {
+  test("a pending flush keeps the process alive until its time limit, then lets it exit", async () => {
     const result = await runScript(`
       const p = new WorkflowEventExportPipeline({ exporter: new Hanging(), flushIntervalMs: 1, appendTimeoutMs: 60000 });
       p.offer(record);
-      p.flush(60000);
+      p.flush(1500);
       await new Promise((r) => setTimeout(r, 50));
     `);
     expect(result.code).toBe(0);
+    expect(result.ms).toBeGreaterThanOrEqual(1500);
     expect(result.ms).toBeLessThan(10_000);
   }, 30_000);
 });

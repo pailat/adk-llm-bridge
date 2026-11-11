@@ -126,12 +126,16 @@ describe("SqliteSessionStore with a version 1 database file", () => {
     ]);
   });
 
-  test("keeps the file mode of an existing version 1 file", () => {
-    const path = writeFixture(tempDir());
-    chmodSync(path, 0o640);
-    open(path);
-    expect(statSync(path).mode & 0o777).toBe(0o640);
-  });
+  // Skipped on Windows: POSIX modes.
+  test.skipIf(process.platform === "win32")(
+    "keeps the file mode of an existing version 1 file",
+    () => {
+      const path = writeFixture(tempDir());
+      chmodSync(path, 0o640);
+      open(path);
+      expect(statSync(path).mode & 0o777).toBe(0o640);
+    },
+  );
 
   test("refuses a symbolic link to a version 1 file and leaves the target alone", () => {
     // Since the S13 hardening the store opens its path without following a
@@ -173,5 +177,16 @@ describe("SqliteSessionStore with a version 1 database file", () => {
     );
     expect(readdirSync(dir)).toEqual(["v1.db"]);
     expect(Buffer.compare(bytes, readFileSync(path))).toBe(0);
+  });
+
+  test("keeps the message of the schema refusal that earlier versions raised", () => {
+    const dir = tempDir();
+    const path = writeFixture(dir);
+    const bytes = Buffer.from(VERSION_1_DATABASE, "base64");
+    bytes.writeUInt32BE(2, 60);
+    writeFileSync(path, bytes);
+    expect(() => open(path)).toThrow(
+      "The session store database has schema version 2; this version of adk-llm-bridge reads version 1. Upgrade adk-llm-bridge.",
+    );
   });
 });

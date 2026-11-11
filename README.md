@@ -69,8 +69,12 @@ Import only the documented subpaths: `adk-llm-bridge` (providers),
 `adk-llm-bridge/agents/session-store/sqlite` (Claude session store),
 `adk-llm-bridge/workflows`
 (workflows), `adk-llm-bridge/workflows/node` (Node host adapters),
-`adk-llm-bridge/workflows/spec` (experimental run spec, needs zod >= 4) and
-`adk-llm-bridge/package.json`. Files under `dist/` are build output, and their
+`adk-llm-bridge/workflows/spec` (experimental run spec, needs zod >= 4),
+`adk-llm-bridge/workflows/checkpoint/sqlite` (SQLite checkpoint store, needs
+`node:sqlite`), `adk-llm-bridge/workflows/events/sqlite` (SQLite event
+exporter, needs `node:sqlite`),
+`adk-llm-bridge/workflows/storage/conformance` (conformance suite for storage
+providers) and `adk-llm-bridge/package.json`. Files under `dist/` are build output, and their
 names change between releases.
 
 **Licenses of the optional SDKs.** `ClaudeAgent` with its default driver

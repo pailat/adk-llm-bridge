@@ -443,29 +443,41 @@ function definedOptions<T extends object>(options: T): Partial<T> {
   return result;
 }
 
+/**
+ * Turns the URL form of a Windows drive path (`/C:/dir`) into the path
+ * Windows opens (`C:/dir`); any other path is returned as it is.
+ *
+ * @internal
+ */
+export function windowsDrivePath(path: string): string {
+  return /^\/[A-Za-z]:[\\/]/.test(path) ? path.slice(1) : path;
+}
+
 function requireAbsolutePath(
   uri: WorkflowStorageUri,
   allowMemoryDatabase = false,
 ): string {
   if (allowMemoryDatabase && uri.path === ":memory:") return uri.path;
-  if (uri.path === "" || !isAbsolute(uri.path)) {
+  const path =
+    process.platform === "win32" ? windowsDrivePath(uri.path) : uri.path;
+  if (path === "" || !isAbsolute(path)) {
     throw invalidUri(
       uri.uri,
       `scheme "${uri.scheme}" needs an absolute path, for example ${uri.scheme}:///var/lib/app/data`,
     );
   }
-  if (uri.path.includes("\0")) {
+  if (path.includes("\0")) {
     throw invalidUri(uri.uri, "the path holds a NUL byte");
   }
   // Percent-encoded dot segments decode to '..' and would resolve outside
   // the directory the URI names; the path must be written in final form.
-  if (uri.path.split(/[\\/]/).some((part) => part === "." || part === "..")) {
+  if (path.split(/[\\/]/).some((part) => part === "." || part === "..")) {
     throw invalidUri(
       uri.uri,
       "the path holds a '.' or '..' segment; write the resolved path",
     );
   }
-  return uri.path;
+  return path;
 }
 
 function requireNoPath(uri: WorkflowStorageUri): void {

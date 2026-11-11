@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { execFileSync, spawn } from "node:child_process";
 import {
+  chmodSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -12,6 +13,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -85,40 +87,52 @@ afterEach(() => {
 });
 
 describe("openSqliteDatabase: creating the file", () => {
-  test("creates a missing file with mode 0600 and its directory with 0700, whatever the umask", () => {
-    const root = tempDir();
-    const previous = process.umask(0);
-    try {
-      const path = join(root, "a", "b", "data.db");
-      open({ path }).exec("CREATE TABLE t (x)");
+  // Skipped on Windows: POSIX modes.
+  test.skipIf(process.platform === "win32")(
+    "creates a missing file with mode 0600 and its directory with 0700, whatever the umask",
+    () => {
+      const root = tempDir();
+      const previous = process.umask(0);
+      try {
+        const path = join(root, "a", "b", "data.db");
+        open({ path }).exec("CREATE TABLE t (x)");
+        expect(mode(path)).toBe(0o600);
+        expect(mode(join(root, "a", "b"))).toBe(0o700);
+      } finally {
+        process.umask(previous);
+      }
+    },
+  );
+
+  // Skipped on Windows: POSIX modes.
+  test.skipIf(process.platform === "win32")(
+    "keeps the mode of a file that already exists when links are followed",
+    () => {
+      const path = join(tempDir(), "data.db");
+      writeFileSync(path, "");
+      execFileSync("chmod", ["640", path]);
+      open({ path, symlinks: "follow" });
+      expect(mode(path)).toBe(0o640);
+    },
+  );
+
+  // Skipped on Windows: POSIX modes.
+  test.skipIf(process.platform === "win32")(
+    "sets an existing file that others can read to 0600, and its -wal and -shm with it",
+    () => {
+      const dir = tempDir();
+      const path = join(dir, "data.db");
+      writeFileSync(path, "");
+      writeFileSync(`${path}-wal`, "");
+      execFileSync("chmod", ["644", path, `${path}-wal`]);
+      const db = open({ path });
+      db.exec("CREATE TABLE t (x); INSERT INTO t VALUES (1)");
       expect(mode(path)).toBe(0o600);
-      expect(mode(join(root, "a", "b"))).toBe(0o700);
-    } finally {
-      process.umask(previous);
-    }
-  });
-
-  test("keeps the mode of a file that already exists when links are followed", () => {
-    const path = join(tempDir(), "data.db");
-    writeFileSync(path, "");
-    execFileSync("chmod", ["640", path]);
-    open({ path, symlinks: "follow" });
-    expect(mode(path)).toBe(0o640);
-  });
-
-  test("sets an existing file that others can read to 0600, and its -wal and -shm with it", () => {
-    const dir = tempDir();
-    const path = join(dir, "data.db");
-    writeFileSync(path, "");
-    writeFileSync(`${path}-wal`, "");
-    execFileSync("chmod", ["644", path, `${path}-wal`]);
-    const db = open({ path });
-    db.exec("CREATE TABLE t (x); INSERT INTO t VALUES (1)");
-    expect(mode(path)).toBe(0o600);
-    expect(mode(`${path}-wal`)).toBe(0o600);
-    expect(mode(`${path}-shm`)).toBe(0o600);
-    db.close();
-  });
+      expect(mode(`${path}-wal`)).toBe(0o600);
+      expect(mode(`${path}-shm`)).toBe(0o600);
+      db.close();
+    },
+  );
 
   test("refuses a database whose directory is a symbolic link and creates nothing through it", () => {
     const dir = tempDir();
@@ -130,6 +144,26 @@ describe("openSqliteDatabase: creating the file", () => {
     );
     expect(readdirSync(elsewhere)).toEqual([]);
   });
+
+  test("checks again what another process created between the check and the create", () => {
+    // The race needs a replaced node:fs, so it runs in its own process.
+    const fixture = join(
+      import.meta.dir,
+      "fixtures",
+      "sqlite-database-create-race.ts",
+    );
+    const result = Bun.spawnSync([process.execPath, "test", fixture], {
+      cwd: join(import.meta.dir, "../.."),
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const output = result.stdout.toString() + result.stderr.toString();
+    expect({ exitCode: result.exitCode, output }).toMatchObject({
+      exitCode: 0,
+    });
+    expect(output).toMatch(/\b3 pass\b/);
+    expect(output).toMatch(/\b0 fail\b/);
+  }, 20000);
 
   test("refuses a schema version marker that is not a whole number", () => {
     const path = join(tempDir(), "data.db");
@@ -232,12 +266,44 @@ describe("openSqliteDatabase: symbolic links and special files", () => {
     expect(failureOf(() => open({ path })).failure).toBe("unsafe_path");
   });
 
-  test("rejects a FIFO at the path without blocking", () => {
-    const dir = tempDir();
-    const path = join(dir, "data.db");
-    execFileSync("mkfifo", [path]);
-    expect(failureOf(() => open({ path })).failure).toBe("unsafe_path");
-  });
+  // Skipped on Windows: Windows has no FIFOs.
+  test.skipIf(process.platform === "win32")(
+    "rejects a FIFO at the path without blocking",
+    () => {
+      const dir = tempDir();
+      const path = join(dir, "data.db");
+      execFileSync("mkfifo", [path]);
+      expect(failureOf(() => open({ path })).failure).toBe("unsafe_path");
+    },
+  );
+
+  for (const symlinks of ["follow", "reject"] as const) {
+    for (const dirMode of [0o700, 0o600]) {
+      const label = `symlinks ${symlinks}, directory mode ${dirMode.toString(8)}`;
+      test(`rejects a directory at the path (${label})`, () => {
+        const dir = tempDir();
+        const path = join(dir, "data.db");
+        mkdirSync(path);
+        chmodSync(path, dirMode);
+        const failure = failureOf(() => open({ path, symlinks }));
+        expect(failure.failure).toBe("unsafe_path");
+        expect(failure.message).toContain("is not a regular file");
+      });
+
+      // Skipped on Windows: Windows has no FIFOs.
+      test.skipIf(process.platform === "win32")(
+        `rejects a FIFO at the path without blocking (${label})`,
+        () => {
+          const dir = tempDir();
+          const path = join(dir, "data.db");
+          execFileSync("mkfifo", ["-m", dirMode.toString(8), path]);
+          const failure = failureOf(() => open({ path, symlinks }));
+          expect(failure.failure).toBe("unsafe_path");
+          expect(failure.message).toContain("is not a regular file");
+        },
+      );
+    }
+  }
 
   for (const suffix of ["-wal", "-shm"]) {
     test(`rejects a symbolic link at the ${suffix} companion file`, () => {
@@ -250,9 +316,46 @@ describe("openSqliteDatabase: symbolic links and special files", () => {
       writeFileSync(decoy, "");
       rmSync(path + suffix, { force: true });
       symlinkSync(decoy, path + suffix);
-      expect(failureOf(() => open({ path })).failure).toBe("unsafe_path");
+      const failure = failureOf(() => open({ path }));
+      expect(failure.failure).toBe("unsafe_path");
+      expect(failure.message).toContain(`has a symbolic link at ${suffix}`);
       expect(readFileSync(decoy).length).toBe(0);
     });
+  }
+
+  for (const suffix of ["-wal", "-shm"]) {
+    for (const companionMode of [0o755, 0o600]) {
+      for (const kind of ["directory", "fifo"] as const) {
+        // Skipped on Windows: Windows has no FIFOs.
+        test.skipIf(process.platform === "win32")(
+          `rejects a ${kind} at the ${suffix} companion file without blocking (mode ${companionMode.toString(8)})`,
+          () => {
+            const dir = tempDir();
+            const path = join(dir, "data.db");
+            const seed = open({ path });
+            seed.exec("CREATE TABLE t (x)");
+            seed.close();
+            rmSync(path + suffix, { force: true });
+            if (kind === "directory") {
+              mkdirSync(path + suffix);
+              chmodSync(path + suffix, companionMode);
+            } else {
+              execFileSync("mkfifo", [
+                "-m",
+                companionMode.toString(8),
+                path + suffix,
+              ]);
+            }
+            const failure = failureOf(() => open({ path, symlinks: "reject" }));
+            expect(failure.failure).toBe("unsafe_path");
+            expect(failure.message).toContain(
+              "companion that is not a regular file",
+            );
+            expect(mode(path + suffix)).toBe(companionMode);
+          },
+        );
+      }
+    }
   }
 
   test("rejects a dangling symbolic link at a companion file when the database is missing", () => {
@@ -284,16 +387,20 @@ describe("openSqliteDatabase: symbolic links and special files", () => {
 });
 
 describe("openSqliteDatabase: symlinks follow edge cases", () => {
-  test("creates the target of a dangling link with mode 0600", () => {
-    const dir = tempDir();
-    const target = join(dir, "made.db");
-    const link = join(dir, "link.db");
-    symlinkSync(target, link);
-    open({ path: link, symlinks: "follow" });
-    expect(existsSync(target)).toBe(true);
-    expect(mode(target)).toBe(0o600);
-    expect(lstatSync(link).isSymbolicLink()).toBe(true);
-  });
+  // Skipped on Windows: POSIX modes.
+  test.skipIf(process.platform === "win32")(
+    "creates the target of a dangling link with mode 0600",
+    () => {
+      const dir = tempDir();
+      const target = join(dir, "made.db");
+      const link = join(dir, "link.db");
+      symlinkSync(target, link);
+      open({ path: link, symlinks: "follow" });
+      expect(existsSync(target)).toBe(true);
+      expect(mode(target)).toBe(0o600);
+      expect(lstatSync(link).isSymbolicLink()).toBe(true);
+    },
+  );
 
   test("rejects a link to a directory", () => {
     const dir = tempDir();
@@ -305,15 +412,20 @@ describe("openSqliteDatabase: symlinks follow edge cases", () => {
     ).toBe("unsafe_path");
   });
 
-  test("rejects a link to a FIFO without blocking", () => {
-    const dir = tempDir();
-    execFileSync("mkfifo", [join(dir, "fifo")]);
-    symlinkSync(join(dir, "fifo"), join(dir, "link.db"));
-    expect(
-      failureOf(() => open({ path: join(dir, "link.db"), symlinks: "follow" }))
-        .failure,
-    ).toBe("unsafe_path");
-  });
+  // Skipped on Windows: Windows has no FIFOs.
+  test.skipIf(process.platform === "win32")(
+    "rejects a link to a FIFO without blocking",
+    () => {
+      const dir = tempDir();
+      execFileSync("mkfifo", [join(dir, "fifo")]);
+      symlinkSync(join(dir, "fifo"), join(dir, "link.db"));
+      expect(
+        failureOf(() =>
+          open({ path: join(dir, "link.db"), symlinks: "follow" }),
+        ).failure,
+      ).toBe("unsafe_path");
+    },
+  );
 });
 
 describe("openSqliteDatabase: options and pragmas", () => {
@@ -386,6 +498,75 @@ describe("openSqliteDatabase: options and pragmas", () => {
     expect(caught).toBe(mine);
   });
 
+  test("sets the busy timeout with a PRAGMA too, for a DatabaseSync that ignores its timeout option", () => {
+    // Node 22 releases before 22.16 have no `timeout` option on DatabaseSync
+    // and drop it silently; only the PRAGMA sets the timeout there.
+    const sqlite = createRequire(import.meta.url)("node:sqlite") as {
+      DatabaseSync: new (path: string, options?: object) => object;
+    };
+    const Real = sqlite.DatabaseSync;
+    sqlite.DatabaseSync = class extends Real {
+      constructor(path: string) {
+        super(path);
+      }
+    };
+    try {
+      const db = open({ path: join(tempDir(), "d.db"), busyTimeoutMs: 1234 });
+      expect(pragma(db, "busy_timeout")).toBe(1234);
+    } finally {
+      sqlite.DatabaseSync = Real;
+    }
+  });
+
+  test("waits for the busy timeout while opening a rollback-journal file that another connection locks", () => {
+    // Switching to WAL needs a lock. With the constructor option ignored (as
+    // on Node 22 before 22.16), the PRAGMA has to be set before that switch,
+    // or opening reports busy at once instead of waiting.
+    const path = join(tempDir(), "d.db");
+    const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as {
+      DatabaseSync: new (
+        path: string,
+        options?: object,
+      ) => {
+        exec(sql: string): void;
+        close(): void;
+      };
+    };
+    const seed = new DatabaseSync(path);
+    seed.exec("PRAGMA journal_mode = DELETE");
+    seed.exec("CREATE TABLE t (x)");
+    seed.close();
+    const locker = new DatabaseSync(path);
+    locker.exec("BEGIN EXCLUSIVE");
+    const sqlite = createRequire(import.meta.url)("node:sqlite") as {
+      DatabaseSync: new (path: string, options?: object) => object;
+    };
+    const Real = sqlite.DatabaseSync;
+    sqlite.DatabaseSync = class extends Real {
+      constructor(file: string) {
+        super(file);
+      }
+    };
+    try {
+      const started = performance.now();
+      let error: unknown;
+      try {
+        open({ path, busyTimeoutMs: 400 });
+      } catch (caught) {
+        error = caught;
+      }
+      const waited = performance.now() - started;
+      expect(error).toBeDefined();
+      expect(isSqliteBusyError(error)).toBe(true);
+      expect(waited).toBeGreaterThanOrEqual(300);
+      expect(waited).toBeLessThan(5000);
+    } finally {
+      sqlite.DatabaseSync = Real;
+      locker.exec("ROLLBACK");
+      locker.close();
+    }
+  });
+
   test("close can be called twice", () => {
     const db = open({ path: join(tempDir(), "d.db") });
     db.close();
@@ -432,6 +613,62 @@ describe("node:sqlite is loaded only by the helper, and lazily", () => {
       topLevel.filter((line) => /loadNodeSqlite\(|createRequire\(/.test(line)),
     ).toEqual([]);
   });
+
+  test("importing the helper, the Claude session store or the agents entry never requires node:sqlite; opening does", () => {
+    // A child process whose preload makes every require of node:sqlite
+    // throw: an import that loads it fails, and opening a database (the
+    // control) must report it as unavailable.
+    const dir = tempDir();
+    const preload = join(dir, "block-node-sqlite.mjs");
+    writeFileSync(
+      preload,
+      `import Module from "node:module";
+const blocked = (id) => id === "node:sqlite" || id === "sqlite";
+const load = Module._load;
+Module._load = function (request, ...rest) {
+  if (blocked(request)) throw new Error("node:sqlite was required");
+  return load.call(this, request, ...rest);
+};
+const create = Module.createRequire;
+Module.createRequire = function (...args) {
+  const inner = create.apply(this, args);
+  return Object.assign((id) => {
+    if (blocked(id)) throw new Error("node:sqlite was required");
+    return inner(id);
+  }, inner);
+};
+`,
+    );
+    const src = join(import.meta.dir, "../../src");
+    const script = join(dir, "child.mjs");
+    writeFileSync(
+      script,
+      `const helper = await import(${JSON.stringify(join(src, "utils/sqlite-database.ts"))});
+await import(${JSON.stringify(join(src, "agents/session-store/sqlite/index.ts"))});
+await import(${JSON.stringify(join(src, "agents/index.ts"))});
+console.log("imported");
+try {
+  helper.openSqliteDatabase({ path: ":memory:", fail: (failure) => new Error(failure) });
+  console.log("opened");
+} catch (error) {
+  console.log("open failed: " + error.message);
+}
+`,
+    );
+    const result = Bun.spawnSync(
+      [process.execPath, "--preload", preload, script],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+    expect({
+      exitCode: result.exitCode,
+      stdout: result.stdout.toString(),
+      stderr: result.stderr.toString(),
+    }).toEqual({
+      exitCode: 0,
+      stdout: "imported\nopen failed: unavailable\n",
+      stderr: "",
+    });
+  }, 20000);
 });
 
 describe("SqliteDatabaseHandle.transaction", () => {
@@ -529,6 +766,39 @@ describe("migrate step numbering", () => {
       ),
     ).toThrow(/numbered 1, 2, 3/);
     expect(db.schemaVersion("c", "table")).toBe(0);
+  });
+});
+
+describe("migrate with a current schema", () => {
+  test("takes no write lock, so another writer's open transaction does not block it", () => {
+    const path = join(tempDir(), "current.db");
+    const steps = [{ version: 1, sql: "CREATE TABLE t (x)" }];
+    const first = open({ path, busyTimeoutMs: 0 });
+    first.migrate("c", steps, "table");
+    const writer = open({ path, busyTimeoutMs: 0 });
+    writer.exec("BEGIN IMMEDIATE");
+    const second = open({ path, busyTimeoutMs: 0 });
+    expect(second.migrate("c", steps, "table")).toEqual({ from: 1, to: 1 });
+    writer.exec("ROLLBACK");
+  });
+});
+
+describe("migrate with a current schema and lockWhenCurrent", () => {
+  test("takes the write lock, so another writer's open transaction blocks it", () => {
+    const path = join(tempDir(), "current.db");
+    const steps = [{ version: 1, sql: "CREATE TABLE t (x)" }];
+    const first = open({ path, busyTimeoutMs: 0 });
+    first.migrate("c", steps, "table");
+    const writer = open({ path, busyTimeoutMs: 0 });
+    writer.exec("BEGIN IMMEDIATE");
+    const second = open({ path, busyTimeoutMs: 0 });
+    expect(() =>
+      second.migrate("c", steps, "table", { lockWhenCurrent: true }),
+    ).toThrow();
+    writer.exec("ROLLBACK");
+    expect(
+      second.migrate("c", steps, "table", { lockWhenCurrent: true }),
+    ).toEqual({ from: 1, to: 1 });
   });
 });
 
@@ -637,6 +907,39 @@ describe("migrate and schemaVersion", () => {
     expect(count(db, "two")).toBe(1);
   });
 
+  for (const bad of ["0.5", "-1"]) {
+    test(`refuses a stored table version of ${bad} as unreadable and rewrites nothing`, () => {
+      const db = open({ path: join(tempDir(), "d.db") });
+      db.migrate("c", steps, "table");
+      db.exec(
+        `UPDATE adk_llm_bridge_schema_versions SET version = ${bad} WHERE component = 'c'`,
+      );
+      const failure = failureOf(() => db.migrate("c", steps, "table"));
+      expect(failure.failure).toBe("schema_unsupported");
+      expect(failure.message).toContain("unreadable schema version");
+      expect(
+        db
+          .prepare(
+            "SELECT version FROM adk_llm_bridge_schema_versions WHERE component = 'c'",
+          )
+          .get(),
+      ).toEqual({ version: Number(bad) });
+      expect(count(db, "one")).toBe(1);
+    });
+  }
+
+  test("refuses user_version -1 as unreadable and leaves the file unchanged", () => {
+    const db = open({ path: join(tempDir(), "d.db") });
+    db.exec("PRAGMA user_version = -1");
+    const failure = failureOf(() => db.migrate("c", steps, "user_version"));
+    expect(failure.failure).toBe("schema_unsupported");
+    expect(failure.message).toContain("unreadable schema version");
+    expect(pragma(db, "user_version")).toBe(-1);
+    expect(
+      db.prepare("SELECT name FROM sqlite_master WHERE name = 'one'").get(),
+    ).toBeUndefined();
+  });
+
   test("components keep separate versions in one file", () => {
     const db = open({ path: join(tempDir(), "d.db") });
     db.migrate("a", [{ version: 1, sql: "CREATE TABLE a1 (x)" }], "table");
@@ -705,6 +1008,55 @@ describe("two processes on one file", () => {
     // The lock is gone once the holder exits: the write now goes through.
     db.transaction(() => db.exec("INSERT INTO t VALUES (2)"));
     expect(db.prepare("SELECT count(*) AS n FROM t").get()).toEqual({ n: 1 });
+  }, 20000);
+
+  test("migrate refuses a newer version that another process stores while migrate waits for the write lock", async () => {
+    const path = join(tempDir(), "d.db");
+    const steps: SqliteMigration[] = [
+      { version: 1, sql: "CREATE TABLE one (x)" },
+      { version: 2, sql: "CREATE TABLE two (x)" },
+      { version: 3, sql: "CREATE TABLE three (x)" },
+    ];
+    const db = open({ path, busyTimeoutMs: 5000 });
+    db.migrate("c", steps.slice(0, 2), "table");
+    const holdMs = 600;
+    const child = Bun.spawn(
+      [
+        process.execPath,
+        join(import.meta.dir, "fixtures", "sqlite-schema-bump-holder.ts"),
+        path,
+        "c",
+        "9",
+        String(holdMs),
+      ],
+      { stdout: "pipe", stderr: "inherit" },
+    );
+    try {
+      const reader = child.stdout.getReader();
+      let seen = "";
+      while (!seen.includes("locked")) {
+        const { value, done } = await reader.read();
+        if (done) throw new Error("the holder exited before locking");
+        seen += new TextDecoder().decode(value);
+      }
+      reader.releaseLock();
+      // The version the holder stores is not committed yet: the check before
+      // the transaction still reads 2 and lets migrate ask for the lock.
+      const started = performance.now();
+      const failure = failureOf(() => db.migrate("c", steps, "table"));
+      const waited = performance.now() - started;
+      expect(failure.failure).toBe("schema_unsupported");
+      expect(failure.message).toContain("schema version 9");
+      // The refusal came from inside the transaction, after the wait.
+      expect(waited).toBeGreaterThanOrEqual(holdMs / 2);
+      expect(db.schemaVersion("c", "table")).toBe(9);
+      expect(
+        db.prepare("SELECT name FROM sqlite_master WHERE name = 'three'").get(),
+      ).toBeUndefined();
+    } finally {
+      child.kill(9);
+      await child.exited;
+    }
   }, 20000);
 });
 

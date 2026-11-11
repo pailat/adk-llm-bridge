@@ -346,18 +346,22 @@ describe("JSONL writer lock", () => {
     }
   });
 
-  test("a world-writable event directory is made owner-only before events are written", async () => {
-    const dir = join(tempDir(), "events");
-    mkdirSync(dir);
-    chmodSync(dir, 0o777);
-    const exporter = new JsonlWorkflowEventExporter({ directory: dir });
-    await exporter.append({
-      executionId: "e1",
-      records: [{ ...record("r1"), executionId: "e1" }],
-    });
-    await exporter.close();
-    expect(statSync(dir).mode & 0o777).toBe(0o700);
-  });
+  // Skipped on Windows: POSIX modes.
+  test.skipIf(process.platform === "win32")(
+    "a world-writable event directory is made owner-only before events are written",
+    async () => {
+      const dir = join(tempDir(), "events");
+      mkdirSync(dir);
+      chmodSync(dir, 0o777);
+      const exporter = new JsonlWorkflowEventExporter({ directory: dir });
+      await exporter.append({
+        executionId: "e1",
+        records: [{ ...record("r1"), executionId: "e1" }],
+      });
+      await exporter.close();
+      expect(statSync(dir).mode & 0o777).toBe(0o700);
+    },
+  );
 });
 
 describe("file-system checkpoint provider", () => {

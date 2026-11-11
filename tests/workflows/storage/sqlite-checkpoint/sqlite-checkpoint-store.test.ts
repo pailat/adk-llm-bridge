@@ -131,14 +131,18 @@ defineWorkflowStorageConformanceTests(
 // --- Files and paths --------------------------------------------------------
 
 describe("SqliteWorkflowCheckpointStore database file", () => {
-  test("creates the database file with mode 0600 and a missing directory with mode 0700", async () => {
-    const dir = join(tempDir(), "nested", "state");
-    const path = join(dir, "checkpoints.db");
-    const store = newStore(path);
-    await seed(store, "exec-mode");
-    expect(statSync(path).mode & 0o777).toBe(0o600);
-    expect(statSync(dir).mode & 0o777).toBe(0o700);
-  });
+  // Skipped on Windows: POSIX modes.
+  test.skipIf(process.platform === "win32")(
+    "creates the database file with mode 0600 and a missing directory with mode 0700",
+    async () => {
+      const dir = join(tempDir(), "nested", "state");
+      const path = join(dir, "checkpoints.db");
+      const store = newStore(path);
+      await seed(store, "exec-mode");
+      expect(statSync(path).mode & 0o777).toBe(0o600);
+      expect(statSync(dir).mode & 0o777).toBe(0o700);
+    },
+  );
 
   test("rejects a symbolic link at the database path and leaves its target untouched", async () => {
     const dir = tempDir();
@@ -959,6 +963,100 @@ describe("SqliteWorkflowCheckpointStore leases", () => {
       "WORKFLOW_STORAGE_LEASE_LOST",
     );
   });
+
+  function leaseRows(path: string): string[] {
+    const db = rawDatabase(path);
+    try {
+      return db
+        .prepare(
+          "SELECT execution_id FROM leases WHERE workflow_id <> '' ORDER BY execution_id",
+        )
+        .all()
+        .map((row) => String(row.execution_id));
+    } finally {
+      db.close();
+    }
+  }
+
+  test("delete removes the lease row of the execution, and a later lease still gets a larger token", async () => {
+    const path = join(tempDir(), "lease-delete.db");
+    const store = newStore(path);
+    const old = await store.acquireLease({
+      ...locator,
+      ownerId: "old",
+      ttlMs: 60_000,
+    });
+    await store.put({
+      checkpoint: await buildCheckpoint(WORKFLOW, locator.executionId, 0),
+      fencingToken: old.fencingToken,
+    });
+    await store.releaseLease(old);
+    expect(await store.delete(locator)).toBe(true);
+    expect(leaseRows(path)).toEqual([]);
+    // With no row, the old token matches nothing.
+    expectStorageError(
+      await rejected(
+        store.put({
+          checkpoint: await buildCheckpoint(WORKFLOW, locator.executionId, 0),
+          fencingToken: old.fencingToken,
+        }),
+      ),
+      "WORKFLOW_STORAGE_LEASE_LOST",
+    );
+    await store.close();
+    const reopened = newStore(path);
+    const next = await reopened.acquireLease({
+      ...locator,
+      ownerId: "new",
+      ttlMs: 60_000,
+    });
+    expect(next.fencingToken).toBeGreaterThan(old.fencingToken);
+  });
+
+  test("prune removes the lease rows of pruned executions and of free leases without a checkpoint, and keeps the others", async () => {
+    const path = join(tempDir(), "lease-prune.db");
+    const store = newStore(path);
+    const lease = (executionId: string, ttlMs = 60_000) =>
+      store.acquireLease({
+        workflowId: WORKFLOW,
+        executionId,
+        ownerId: "owner",
+        ttlMs,
+      });
+    // Finished and pruned.
+    await store.releaseLease(await lease("done"));
+    await seed(store, "done", WORKFLOW, 1);
+    // Leased and released, never saved.
+    const released = await lease("released");
+    await store.releaseLease(released);
+    // Leased by a holder that died, never saved.
+    const expired = await lease("expired", 30);
+    // Held now, not saved yet.
+    await lease("held");
+    // Still running, so its checkpoint and lease stay.
+    await store.releaseLease(await lease("running"));
+    await seed(store, "running");
+    await Bun.sleep(80);
+    const result = await store.prune({
+      updatedBefore: Date.now() + 1000,
+      limit: 10,
+    });
+    expect(result).toEqual({ deleted: 1, hasMore: false });
+    expect(leaseRows(path)).toEqual(["held", "running"]);
+    const again = await lease("released");
+    expect(again.fencingToken).toBeGreaterThan(released.fencingToken);
+    const after = await lease("expired");
+    expect(after.fencingToken).toBeGreaterThan(expired.fencingToken);
+    expectStorageError(
+      await rejected(
+        store.put({
+          checkpoint: await buildCheckpoint(WORKFLOW, "expired", 0),
+          fencingToken: expired.fencingToken,
+        }),
+      ),
+      "WORKFLOW_STORAGE_LEASE_LOST",
+    );
+  });
 });
 
 // --- Listing, delete and prune ---------------------------------------------
@@ -1086,35 +1184,145 @@ describe("SqliteWorkflowCheckpointStore listing", () => {
 // --- Failures other than busy and corrupt -------------------------------------
 
 describe("SqliteWorkflowCheckpointStore other SQLite failures", () => {
-  test("a read-only database file fails as a typed WORKFLOW_STORAGE_UNAVAILABLE, not a raw driver error", async () => {
-    if (process.getuid?.() === 0) return; // root ignores file modes
-    const path = join(tempDir(), "readonly.db");
-    const first = newStore(path);
-    await seed(first, "exec-ro");
-    await first.close();
-    rmSync(`${path}-wal`, { force: true });
-    rmSync(`${path}-shm`, { force: true });
-    chmodSync(path, 0o400);
-    try {
-      let opened: SqliteWorkflowCheckpointStore | undefined;
-      const openError = thrown(() => {
-        opened = newStore(path);
-      });
-      if (openError !== undefined) {
-        expectStorageError(openError, "WORKFLOW_STORAGE_UNAVAILABLE");
-        expect((openError as { cause?: unknown }).cause).toBeDefined();
-        return;
+  // Skipped on Windows: a read-only flag is not a POSIX mode.
+  test.skipIf(process.platform === "win32")(
+    "a read-only database file fails as a typed WORKFLOW_STORAGE_UNAVAILABLE, not a raw driver error",
+    async () => {
+      if (process.getuid?.() === 0) return; // root ignores file modes
+      const path = join(tempDir(), "readonly.db");
+      const first = newStore(path);
+      await seed(first, "exec-ro");
+      await first.close();
+      rmSync(`${path}-wal`, { force: true });
+      rmSync(`${path}-shm`, { force: true });
+      chmodSync(path, 0o400);
+      try {
+        let opened: SqliteWorkflowCheckpointStore | undefined;
+        const openError = thrown(() => {
+          opened = newStore(path);
+        });
+        if (openError !== undefined) {
+          expectStorageError(openError, "WORKFLOW_STORAGE_UNAVAILABLE");
+          expect((openError as { cause?: unknown }).cause).toBeDefined();
+          return;
+        }
+        // Opened anyway: a write must still fail typed.
+        const error = await rejected(
+          (opened as SqliteWorkflowCheckpointStore).put({
+            checkpoint: await buildCheckpoint(WORKFLOW, "exec-ro-2", 0),
+          }),
+        );
+        expectStorageError(error, "WORKFLOW_STORAGE_UNAVAILABLE");
+      } finally {
+        chmodSync(path, 0o600);
       }
-      // Opened anyway: a write must still fail typed.
-      const error = await rejected(
-        (opened as SqliteWorkflowCheckpointStore).put({
-          checkpoint: await buildCheckpoint(WORKFLOW, "exec-ro-2", 0),
-        }),
-      );
-      expectStorageError(error, "WORKFLOW_STORAGE_UNAVAILABLE");
+    },
+  );
+
+  test("a save writes its row once, already carrying its SHA-256 and byte size: no state without them is ever written", async () => {
+    const path = join(tempDir(), "one-write.db");
+    const store = newStore(path);
+    // Triggers record every state a row is written in, including states
+    // that a later statement of the same save would overwrite.
+    const db = rawDatabase(path);
+    try {
+      db.exec(`
+CREATE TABLE row_writes (json TEXT, sha TEXT, bytes INTEGER);
+CREATE TRIGGER record_insert AFTER INSERT ON checkpoints BEGIN
+  INSERT INTO row_writes VALUES (NEW.checkpoint_json, NEW.sha256, NEW.bytes);
+END;
+CREATE TRIGGER record_update AFTER UPDATE ON checkpoints BEGIN
+  INSERT INTO row_writes VALUES (NEW.checkpoint_json, NEW.sha256, NEW.bytes);
+END;`);
     } finally {
-      chmodSync(path, 0o600);
+      db.close();
     }
+    const first = await store.put({
+      checkpoint: await buildCheckpoint(WORKFLOW, "exec-once", 1),
+    });
+    await store.put({
+      checkpoint: await buildCheckpoint(WORKFLOW, "exec-once", 2),
+      expectedRevision: first.revision,
+    });
+    const reader = rawDatabase(path);
+    try {
+      const writes = reader.prepare("SELECT * FROM row_writes").all();
+      expect(writes.length).toBe(2);
+      for (const write of writes) {
+        const text = String(write.json);
+        expect(write.sha).toBe(createHash("sha256").update(text).digest("hex"));
+        expect(Number(write.bytes)).toBe(Buffer.byteLength(text));
+      }
+    } finally {
+      reader.close();
+    }
+  });
+
+  test("a read uses one snapshot: a row replaced by another connection between its two selects is not mixed in", async () => {
+    const path = join(tempDir(), "snapshot.db");
+    const store = newStore(path);
+    const locator = { workflowId: WORKFLOW, executionId: "exec-snapshot" };
+    const first = await store.put({
+      checkpoint: await buildCheckpoint(WORKFLOW, "exec-snapshot", 1),
+    });
+    const other = rawDatabase(path);
+    const select =
+      "SELECT revision, checkpoint_json, bytes, sha256 FROM checkpoints WHERE workflow_id = ? AND execution_id = ?";
+    const rowOf = () =>
+      other.prepare(select).get(locator.workflowId, locator.executionId) as {
+        revision: string;
+        checkpoint_json: string;
+        bytes: number;
+        sha256: string;
+      };
+    const write = (row: ReturnType<typeof rowOf>) =>
+      other
+        .prepare(
+          "UPDATE checkpoints SET revision = ?, checkpoint_json = ?, bytes = ?, sha256 = ? WHERE workflow_id = ? AND execution_id = ?",
+        )
+        .run(
+          row.revision,
+          row.checkpoint_json,
+          row.bytes,
+          row.sha256,
+          locator.workflowId,
+          locator.executionId,
+        );
+    const older = rowOf();
+    const second = await store.put({
+      checkpoint: await buildCheckpoint(WORKFLOW, "exec-snapshot", 2),
+      expectedRevision: first.revision,
+    });
+    const newer = rowOf();
+    write(older);
+    // Every handle shares one prototype. When the store prepares the select
+    // that reads the text, after its size check has run, the other
+    // connection replaces the row.
+    const prototype = Object.getPrototypeOf(other) as {
+      prepare: (this: unknown, sql: string) => unknown;
+    };
+    const prepare = prototype.prepare;
+    let replaced = false;
+    prototype.prepare = function (this: unknown, sql: string) {
+      if (
+        !replaced &&
+        this !== other &&
+        sql.includes("checkpoint_json, bytes, sha256")
+      ) {
+        replaced = true;
+        write(newer);
+      }
+      return prepare.call(this, sql);
+    };
+    try {
+      const read = await store.get(locator);
+      expect(replaced).toBe(true);
+      expect(read?.revision).toBe(first.revision);
+    } finally {
+      prototype.prepare = prepare;
+    }
+    expect((await store.get(locator))?.revision).toBe(second.revision);
+    other.close();
   });
 
   test("a stored row larger than the size limit is refused before it is read", async () => {

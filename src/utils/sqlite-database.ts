@@ -120,6 +120,14 @@ export interface OpenSqliteDatabaseOptions {
    * `O_CREAT | O_EXCL | O_NOFOLLOW` and mode `0600`, and its directory with
    * `0700`.
    *
+   * On Windows there is no `O_NOFOLLOW`: `reject` is decided from `lstat`
+   * before the open (a symbolic link or junction is refused), and
+   * `O_CREAT | O_EXCL` still fails on a link that appears at the path first.
+   * A link swapped in between the check and SQLite's own open is not caught.
+   * The modes `0600` and `0700`, and the owner-only tightening of an existing
+   * file, have no effect there: NTFS access is set by the parent directory's
+   * ACL, and the file is neither tightened nor refused for its mode.
+   *
    * @defaultValue `"reject"`
    */
   symlinks?: "reject" | "follow";
@@ -175,12 +183,17 @@ export interface SqliteDatabaseHandle {
    * with `schema_unsupported` when the stored version is newer than the last
    * step.
    *
+   * A current schema takes no write lock unless `options.lockWhenCurrent` is
+   * set; the shipped Claude session store sets it to keep the locking it
+   * always had.
+   *
    * @returns The version before and after.
    */
   migrate(
     component: string,
     migrations: readonly SqliteMigration[],
     storage?: SqliteSchemaVersionStorage,
+    options?: { readonly lockWhenCurrent?: boolean },
   ): { from: number; to: number };
   /** Reads a component's stored schema version; `0` when it has none. */
   schemaVersion(
@@ -310,8 +323,10 @@ export function openSqliteDatabase(
   let raw: NodeSqliteDatabase | undefined;
   try {
     raw = new sqlite.DatabaseSync(path, { timeout });
-    raw.exec("PRAGMA journal_mode = WAL");
+    // The timeout comes first: switching to WAL takes a lock, and a
+    // DatabaseSync that ignores its timeout option would fail at once.
     raw.exec(`PRAGMA busy_timeout = ${timeout}`);
+    raw.exec("PRAGMA journal_mode = WAL");
     raw.exec(
       `PRAGMA synchronous = ${synchronous === "full" ? "FULL" : "NORMAL"}`,
     );
@@ -388,7 +403,7 @@ function prepareFile(
           fsConstants.O_WRONLY |
             fsConstants.O_CREAT |
             fsConstants.O_EXCL |
-            fsConstants.O_NOFOLLOW,
+            (fsConstants.O_NOFOLLOW ?? 0),
           0o600,
         ),
       );
@@ -430,9 +445,13 @@ function ownerOnly(
   info: Stats | BigIntStats,
   unsafe: (what: string) => Error,
 ): void {
-  if ((Number(info.mode) & 0o077) === 0) return;
-  if (!info.isFile())
+  if (!info.isFile()) {
     throw unsafe("has a companion that is not a regular file");
+  }
+  // Windows reports a mode that does not describe who can read the file, and
+  // `chmod` only toggles the read-only flag: claim no protection, refuse nothing.
+  if (process.platform === "win32") return;
+  if ((Number(info.mode) & 0o077) === 0) return;
   try {
     chmodSync(path, 0o600);
   } catch {
@@ -522,6 +541,7 @@ class Handle implements SqliteDatabaseHandle {
     component: string,
     migrations: readonly SqliteMigration[],
     storage: SqliteSchemaVersionStorage = "table",
+    options: { readonly lockWhenCurrent?: boolean } = {},
   ): { from: number; to: number } {
     migrations.forEach((step, index) => {
       if (step.version !== index + 1) {
@@ -542,7 +562,15 @@ class Handle implements SqliteDatabaseHandle {
     // Refuse a newer schema before asking for the write lock, so a locked or
     // read-only file still reports the typed failure; the check is repeated
     // inside the transaction in case another process migrated in between.
-    refuseNewer(this.schemaVersion(component, storage));
+    const stored = this.schemaVersion(component, storage);
+    refuseNewer(stored);
+    // A current schema needs no write. Opening it then takes no write lock,
+    // so it neither waits for another process's write transaction nor blocks
+    // the event loop for the busy timeout. A version only grows, so a
+    // concurrent migration cannot make this answer wrong. A caller that
+    // always took the lock (the session store) can ask to keep doing so.
+    if (stored === last && options.lockWhenCurrent !== true)
+      return { from: last, to: last };
     return this.transaction(() => {
       const from = this.schemaVersion(component, storage);
       refuseNewer(from);

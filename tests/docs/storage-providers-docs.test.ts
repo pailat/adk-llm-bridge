@@ -274,6 +274,17 @@ describe("storage providers page (docs/storage-providers.md)", () => {
     expect(page).not.toBe("");
     expect(internalLabelsIn(page)).toEqual([]);
   });
+
+  test("has a Shutdown section that tells the host to flush or close the pipeline and close the stores", () => {
+    const section = markdownSection(readRepoFile(STORAGE_PAGE), "## Shutdown");
+    expect(section).not.toBe("");
+    expect(section).toContain("pipeline.close(");
+    expect(section).toContain("flush");
+    expect(section).toContain("flushOnRunEndMs");
+    expect(section).toMatch(/keeps? the process (alive|open)/);
+    expect(section).toMatch(/exporter\.close\(\)/);
+    expect(section).toMatch(/store\.close\(\)/);
+  });
 });
 
 describe("workflow durability page (docs/workflow-durability.md)", () => {

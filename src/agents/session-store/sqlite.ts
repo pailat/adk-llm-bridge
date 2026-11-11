@@ -3,6 +3,7 @@ import {
   constants,
   fchmodSync,
   fstatSync,
+  lstatSync,
   mkdirSync,
   openSync,
   statSync,
@@ -134,8 +135,11 @@ const SCHEMA_MIGRATIONS = [
  *   SQLite gives the `-wal` and `-shm` files the database file's mode. An
  *   existing file keeps its mode and must be a regular file owned by this
  *   user.
- * - On Windows, where there is no `O_NOFOLLOW` or POSIX owner, only the
- *   file is created.
+ * - On Windows there is no `O_NOFOLLOW`, POSIX owner or mode: a symbolic link
+ *   or junction at the path is refused from `lstat` before the open (a link
+ *   swapped in after that check is not caught), `O_EXCL` still refuses one
+ *   that appears while the file is created, and no owner or mode check is
+ *   made, because NTFS access follows the directory's ACL.
  *
  * @param path - The database path.
  * @throws {@link SqliteSessionStoreError} with code
@@ -169,6 +173,16 @@ function prepareDatabaseFile(path: string): void {
   }
 
   const noFollow = constants.O_NOFOLLOW ?? 0;
+  if (noFollow === 0) {
+    // Without `O_NOFOLLOW` the open would follow a link: look first.
+    let link: ReturnType<typeof lstatSync> | undefined;
+    try {
+      link = lstatSync(path);
+    } catch (error) {
+      if (errorCode(error) !== "ENOENT") throw error;
+    }
+    if (link?.isSymbolicLink()) throw unsafe("the path is a symlink");
+  }
   let fd: number;
   try {
     fd = openSync(
@@ -291,7 +305,11 @@ export class SqliteSessionStore implements SessionStore {
       fail: failOpen,
     });
     try {
-      this.#db.migrate("session store", SCHEMA_MIGRATIONS, "user_version");
+      // Take the write lock even when the schema is current, as this store
+      // always did.
+      this.#db.migrate("session store", SCHEMA_MIGRATIONS, "user_version", {
+        lockWhenCurrent: true,
+      });
     } catch (error) {
       this.#db.close();
       throw error;

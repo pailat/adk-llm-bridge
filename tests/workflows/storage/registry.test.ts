@@ -29,6 +29,7 @@ import {
   WORKFLOW_EVENT_URI_SCHEMES,
   type WorkflowStorageProviderFactory,
   type WorkflowStorageUri,
+  windowsDrivePath,
 } from "../../../src/workflows/storage/registry.js";
 
 const SECRET = "s3cr3t-p4ss";
@@ -285,6 +286,23 @@ describe("built-in schemes for checkpoints", () => {
     await saveAndReadCheckpoint(store, "exec-file");
   });
 
+  test("a Windows drive path written as file:///C:/dir loses the slash before the drive letter", () => {
+    expect(windowsDrivePath("/C:/Users/a b/data")).toBe("C:/Users/a b/data");
+    expect(windowsDrivePath("/d:\\data")).toBe("d:\\data");
+    expect(windowsDrivePath("/C:")).toBe("/C:");
+    expect(windowsDrivePath("/var/db/C:/x")).toBe("/var/db/C:/x");
+    expect(windowsDrivePath("C:/x")).toBe("C:/x");
+  });
+
+  test.skipIf(process.platform !== "win32")(
+    "file:///C:/dir, the URL form of a Windows path, returns the file-system provider",
+    async () => {
+      const root = tempDir().replaceAll("\\", "/");
+      const store = await checkpointFrom(`file:///${root}`);
+      expect(store).toBeInstanceOf(FileSystemWorkflowCheckpointProvider);
+    },
+  );
+
   test("sqlite:///file.db returns the native SQLite store and saves a checkpoint", async () => {
     const path = join(tempDir(), "w.db");
     const store = await checkpointFrom(`sqlite://${path}`);
@@ -306,6 +324,19 @@ describe("built-in schemes for checkpoints", () => {
     const store = await checkpointFrom("adk-session+memory://");
     expect(store).toBeInstanceOf(AdkSessionServiceWorkflowCheckpointStore);
     await saveAndReadCheckpoint(store, "exec-adk-memory");
+  });
+
+  test("adk-session+memory:// refuses concurrency=stale-session-reject: the in-memory service cannot give it", async () => {
+    await storageError(
+      getWorkflowCheckpointStoreFromUri(
+        "adk-session+memory://?concurrency=stale-session-reject",
+      ),
+      "WORKFLOW_STORAGE_INVALID_OPTION",
+    );
+    const store = await checkpointFrom(
+      "adk-session+memory://?concurrency=none",
+    );
+    expect(store.capabilities.compareAndSet).toBe("advisory");
   });
 
   test("adk-session+sqlite:// wraps ADK's database session service", async () => {

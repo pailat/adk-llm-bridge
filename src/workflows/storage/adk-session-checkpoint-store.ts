@@ -7,6 +7,7 @@ import {
   InMemorySessionService,
   isStaleSessionError,
   type Session,
+  VertexAiSessionService,
 } from "@google/adk";
 import type {
   WorkflowCheckpointStatus,
@@ -109,6 +110,12 @@ export interface AdkSessionServiceWorkflowCheckpointStoreOptions
    *   provider reports `compareAndSet: "advisory"`, `leases: false` and
    *   `multiProcess: false`.
    *
+   * `stale-session-reject` is refused for a service known not to reject stale
+   * sessions: an ADK `InMemorySessionService` or `VertexAiSessionService`
+   * (the classes themselves, not subclasses) and a `DatabaseSessionService`
+   * created with a `staleSession` setting other than `"reject"`. For any other
+   * service it is the host's statement about that service.
+   *
    * @defaultValue `stale-session-reject` when `sessionService` is an ADK
    * `DatabaseSessionService`, else `none`
    */
@@ -173,7 +180,8 @@ export class AdkSessionServiceWorkflowCheckpointStore extends BaseWorkflowCheckp
    * @param options - The session service, the app name, what the service
    * guarantees and the shared provider options.
    * @throws `WorkflowStorageError` with code `WORKFLOW_STORAGE_INVALID_OPTION`
-   * for an empty `appName`.
+   * for an empty `appName`, or for `concurrency: "stale-session-reject"` over
+   * a service known not to reject stale sessions.
    */
   constructor(options: AdkSessionServiceWorkflowCheckpointStoreOptions) {
     super(options);
@@ -182,6 +190,16 @@ export class AdkSessionServiceWorkflowCheckpointStore extends BaseWorkflowCheckp
         "WORKFLOW_STORAGE_INVALID_OPTION",
         "appName must not be empty",
         { details: { option: "appName" } },
+      );
+    }
+    if (
+      options.concurrency === "stale-session-reject" &&
+      cannotRejectStaleSessions(options.sessionService)
+    ) {
+      throw new WorkflowStorageError(
+        "WORKFLOW_STORAGE_INVALID_OPTION",
+        'concurrency "stale-session-reject" needs a session service that rejects stale sessions; this one does not',
+        { details: { option: "concurrency" } },
       );
     }
     this.#service = options.sessionService;
@@ -670,11 +688,42 @@ export class AdkSessionServiceWorkflowCheckpointStore extends BaseWorkflowCheckp
   }
 }
 
+/**
+ * Whether `service` is known not to reject an append from a stale session.
+ * Subclasses are not judged: they may add the check.
+ */
+function cannotRejectStaleSessions(service: BaseSessionService): boolean {
+  const own = Object.getPrototypeOf(service) as unknown;
+  if (
+    own === InMemorySessionService.prototype ||
+    own === VertexAiSessionService.prototype
+  ) {
+    return true;
+  }
+  if (service instanceof DatabaseSessionService) {
+    const setting = staleSessionSetting(service);
+    return setting !== undefined && setting !== "reject";
+  }
+  return false;
+}
+
+/**
+ * ADK's `staleSession` setting of a `DatabaseSessionService`. The field is
+ * private in ADK's types; when a release renames it the answer is
+ * `undefined`, and the default concurrency becomes `none`, which claims less.
+ */
+function staleSessionSetting(
+  service: DatabaseSessionService,
+): string | undefined {
+  const value = (service as unknown as { staleSession?: unknown }).staleSession;
+  return typeof value === "string" ? value : undefined;
+}
+
 function defaultConcurrency(
   service: BaseSessionService,
 ): "stale-session-reject" | "none" {
   return service instanceof DatabaseSessionService &&
-    (service as unknown as { staleSession?: string }).staleSession === "reject"
+    staleSessionSetting(service) === "reject"
     ? "stale-session-reject"
     : "none";
 }

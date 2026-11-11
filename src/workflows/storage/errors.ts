@@ -136,14 +136,3 @@ export function isWorkflowStorageError(
     (code === undefined || value.code === code)
   );
 }
-
-/**
- * Builds the error a stub throws until its lane implements it.
- *
- * @param symbol - Name of the class or function.
- * @returns An error whose message names the missing implementation.
- * @internal
- */
-export function workflowStorageNotImplemented(symbol: string): Error {
-  return new Error(`adk-llm-bridge: ${symbol} is not implemented yet`);
-}
