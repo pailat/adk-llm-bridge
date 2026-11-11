@@ -28,7 +28,7 @@ can pick 3.x, which is outside the supported range.
 The package is ESM only. Use `import`, or `await import()` from CommonJS.
 Shared code and its type declarations now live in `dist/shared/` chunks
 (`.js` and `.d.ts`). Import only the documented
-subpaths (`adk-llm-bridge`, `/agents`, `/agents/session-store/sqlite`,
+subpaths (`adk-llm-bridge`, `/agents`, `/agents/session-store/sqlite`, `/agents/session-store/adk-artifacts`,
 `/workflows`, `/workflows/node`, `/package.json`), never a file under `dist/`: chunk names change between
 builds. The package declares `"sideEffects": false`, so bundlers can drop the
 modules you do not import.
@@ -634,6 +634,10 @@ new in 0.7.0. If you already use them, these changes apply:
   results, the run ends with `EXTERNAL_AGENT_NO_TURN` (recoverable) and exit
   code 1 instead of completing with empty output, so a workflow step fails
   instead of completing empty.
+- **A Claude Agent SDK stream with no result message fails.** When the
+  stream ends without any `result` message, the run ends with
+  `EXTERNAL_AGENT_NO_RESULT` (recoverable) and exit code 1 instead of a clean
+  exit 0, so a cut-off run no longer passes as a success.
 - **Private temp directory per Claude run.** Both Claude drivers create a
   fresh `0700` directory under `/tmp` for each run and set
   `CLAUDE_CODE_TMPDIR` to it and `TMPDIR` to the `claude-<uid>` directory
@@ -839,6 +843,15 @@ example `process.env.X === "true"`) before you pass it.
 
 See
 [Sub-agents need a driver that exposes them](./external-agent-isolation.md#sub-agents-need-a-driver-that-exposes-them).
+
+### Claude sessions in ADK artifacts
+
+New in 0.7.0, nothing to migrate. `ClaudeAgentSdkDriver`'s `sessionStore` also
+takes a factory such as `adkArtifactSessionStore()` (subpath
+`adk-llm-bridge/agents/session-store/adk-artifacts`), which keeps transcripts in
+the run's ADK artifact service. Without an artifact service the run ends with
+`CLAUDE_SESSION_STORE_UNAVAILABLE` before the SDK starts. See
+[Persisting Claude sessions](./claude-session-store.md#adk-artifacts).
 
 ### Coming in 0.8
 

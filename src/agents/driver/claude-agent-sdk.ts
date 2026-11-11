@@ -21,6 +21,7 @@ import {
   safeCollectContents,
 } from "../runtime/content-collector.js";
 import { classifyRecoverable } from "../runtime/error-classification.js";
+import type { SessionStoreFactory } from "../session-store/adk-artifacts.js";
 import type { SessionStore } from "../session-store/types.js";
 import {
   BRIDGE_MCP_SERVER,
@@ -61,6 +62,7 @@ import {
   dependencyMissing,
   EXTERNAL_AGENT_ISOLATION_VIOLATED,
   EXTERNAL_AGENT_MISSING_BINARY,
+  EXTERNAL_AGENT_NO_RESULT,
   EXTERNAL_AGENT_NO_TURN,
   EXTERNAL_AGENT_PATHS_UNENFORCEABLE,
   EXTERNAL_AGENT_TOOL_NOT_OFFERED,
@@ -134,7 +136,7 @@ type ClaudeAgentSdkOptions = {
   sandbox?: Record<string, unknown>;
   resume?: string;
   forkSession?: boolean;
-  sessionStore?: SessionStore;
+  sessionStore?: SessionStore | SessionStoreFactory;
   sessionStoreFlush?: ClaudeSessionStoreFlush;
   loadTimeoutMs?: number;
   canUseTool?: ClaudeAgentSdkCanUseTool;
@@ -467,7 +469,7 @@ export interface ClaudeAgentSdkDriverConfig {
    * contract, which can change in a minor SDK release.
    * @defaultValue `undefined` (no store: only the local transcript is written)
    */
-  sessionStore?: SessionStore;
+  sessionStore?: SessionStore | SessionStoreFactory;
   /**
    * How eagerly the SDK sends transcript entries to {@link sessionStore}
    * (the SDK `sessionStoreFlush` option): `"batched"` or `"eager"`.
@@ -553,6 +555,23 @@ export const DEFAULT_CLAUDE_SDK_TOOLS: readonly string[] = DEFAULT_CLAUDE_TOOLS;
 export const CLAUDE_SESSION_STORE_MIRROR_ERROR =
   "CLAUDE_SESSION_STORE_MIRROR_ERROR";
 
+/**
+ * Code of the non-recoverable `error` event a run reports, before the SDK
+ * starts, when a `sessionStore` factory (such as `adkArtifactSessionStore()`)
+ * cannot build its store, for example because the run has no ADK artifact
+ * service.
+ */
+export const CLAUDE_SESSION_STORE_UNAVAILABLE =
+  "CLAUDE_SESSION_STORE_UNAVAILABLE";
+
+/** A `sessionStore` factory failed; reported as CLAUDE_SESSION_STORE_UNAVAILABLE. */
+class SessionStoreUnavailableError extends Error {
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause });
+    this.name = "SessionStoreUnavailableError";
+  }
+}
+
 /** The bridge's delegation tool; it maps to transfer events, not tool events. */
 const BRIDGE_SUBAGENT_TOOL = `${BRIDGE_TOOL_PREFIX}run_adk_subagent`;
 
@@ -621,6 +640,9 @@ export const CLAUDE_STRICT_BINARY_CHECK: StrictBinaryCheck = {
  *   any turn activity does not end the run: the turn that runs the input
  *   follows. A stream that ends after only such results fails with
  *   `EXTERNAL_AGENT_NO_TURN` instead of completing empty.
+ * - A stream that ends with no result message at all (the child exited or
+ *   the pipe closed mid-run) fails with `EXTERNAL_AGENT_NO_RESULT` and exit
+ *   code 1, not a clean exit 0.
  */
 export class ClaudeAgentSdkDriver {
   /** Provider id of this driver (`claude`). */
@@ -641,7 +663,8 @@ export class ClaudeAgentSdkDriver {
   readonly #requiredMcpServers: readonly string[];
   readonly #resumeSessionId?: string;
   readonly #forkSession?: boolean;
-  readonly #sessionStore?: SessionStore;
+  readonly #sessionStore?: SessionStore | SessionStoreFactory;
+  readonly #resolvedStores = new WeakMap<object, SessionStore>();
   readonly #sessionStoreFlush?: ClaudeSessionStoreFlush;
   readonly #sessionStoreLoadTimeoutMs?: number;
   readonly #systemPrompt?: string;
@@ -802,7 +825,9 @@ export class ClaudeAgentSdkDriver {
    * @remarks
    * Never throws for run failures: they are reported as an `error` event and a
    * `completed` event with exit code 1. `started` is always emitted first (it
-   * waits for `system/init` to carry the resolved model).
+   * waits for `system/init` to carry the resolved model). A stream that ends
+   * with no `result` message ends with an `EXTERNAL_AGENT_NO_RESULT` error
+   * (`EXTERNAL_AGENT_NO_TURN` after only model-less results) and exit code 1.
    *
    * @param request - The run request (instruction, context, permissions,
    * credential, working directory, abort signal and bridge tools).
@@ -876,6 +901,11 @@ export class ClaudeAgentSdkDriver {
     const backgroundTasks = new ClaudeBackgroundTaskTracker();
     let runTemp: ClaudeRunTempDir | undefined;
     try {
+      // A session store factory that cannot build its store ends the run
+      // here, before the SDK is loaded: a store that fails inside append()
+      // would only be reported as mirror_error and the run would go on
+      // without its transcript.
+      this.resolveSessionStore(request);
       // A model variable in the child environment would change the model
       // the runtime runs: refuse before anything else.
       const envRefusal = modelEnvRefusal(
@@ -1002,6 +1032,18 @@ export class ClaudeAgentSdkDriver {
               yield startedEvent(initModel);
             }
             yield noTurnEvent(modelLessSession ?? resolvedResume);
+          } else if (
+            backgroundTasks.pending().length === 0 &&
+            !resolveAbortSignal(request)?.aborted
+          ) {
+            // No result message at all: the run was cut off. (Tasks still
+            // running are reported below, under their own error; a caller's
+            // abort is not a cut-off.)
+            failed = true;
+            if (!startedEmitted) {
+              yield startedEvent(initModel);
+            }
+            yield noResultEvent(resolvedResume);
           }
           break;
         }
@@ -1119,7 +1161,15 @@ export class ClaudeAgentSdkDriver {
       if (!startedEmitted) {
         yield startedEvent();
       }
-      if (error instanceof ExternalAgentPolicyError) {
+      if (error instanceof SessionStoreUnavailableError) {
+        yield {
+          type: "error",
+          message: error.message,
+          code: CLAUDE_SESSION_STORE_UNAVAILABLE,
+          recoverable: false,
+          timestamp: Date.now(),
+        };
+      } else if (error instanceof ExternalAgentPolicyError) {
         yield policyErrorEvent(error);
       } else {
         const { message, missingExecutable } = this.describeError(
@@ -1178,6 +1228,33 @@ export class ClaudeAgentSdkDriver {
   }
 
   /**
+   * The store for one run: a configured store as is, or the product of a
+   * configured factory (built once per request).
+   *
+   * @throws `SessionStoreUnavailableError` when the factory throws.
+   */
+  private resolveSessionStore(
+    request: ExternalAgentRunRequest,
+  ): SessionStore | undefined {
+    const configured = this.#sessionStore;
+    if (typeof configured !== "function") {
+      return configured;
+    }
+    const cached = this.#resolvedStores.get(request);
+    if (cached) {
+      return cached;
+    }
+    let store: SessionStore;
+    try {
+      store = configured({ context: request.context });
+    } catch (error) {
+      throw new SessionStoreUnavailableError(error);
+    }
+    this.#resolvedStores.set(request, store);
+    return store;
+  }
+
+  /**
    * SDK `query()` options for a request, without the bridge MCP server (see
    * {@link ClaudeAgentSdkDriver.buildOptionsForRun}). Undefined keys are
    * removed.
@@ -1210,7 +1287,7 @@ export class ClaudeAgentSdkDriver {
         permission.allowDangerouslySkipPermissions,
       resume,
       forkSession: this.#forkSession,
-      sessionStore: this.#sessionStore,
+      sessionStore: this.resolveSessionStore(request),
       sessionStoreFlush: this.#sessionStoreFlush,
       loadTimeoutMs: this.#sessionStoreLoadTimeoutMs,
       canUseTool: this.buildCanUseTool(request),
@@ -2735,6 +2812,21 @@ function noTurnEvent(sessionId: string | undefined): ExternalAgentEvent {
     type: "error",
     message: `Claude Agent SDK: Claude Code ended the run without running the input: it wrote only a model-less result (success, num_turns 0, empty result)${sessionId ? ` in session ${sessionId}` : ""}, so the input was not worked on. A new run of the same input can work.`,
     code: EXTERNAL_AGENT_NO_TURN,
+    recoverable: true,
+    timestamp: Date.now(),
+  };
+}
+
+/**
+ * The error of a run whose stream ended with no result message.
+ *
+ * @param sessionId - The SDK session the run was in, if known.
+ */
+function noResultEvent(sessionId: string | undefined): ExternalAgentEvent {
+  return {
+    type: "error",
+    message: `Claude Agent SDK: the stream ended without a result message${sessionId ? ` in session ${sessionId}` : ""}, so the run has no outcome. Claude Code may have exited early. A new run of the same input can work.`,
+    code: EXTERNAL_AGENT_NO_RESULT,
     recoverable: true,
     timestamp: Date.now(),
   };

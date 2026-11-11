@@ -33,6 +33,7 @@ describe("agents public exports", () => {
   });
 
   test("./agents exposes the driver policy errors and their codes", () => {
+    expect(agents.EXTERNAL_AGENT_NO_RESULT).toBe("EXTERNAL_AGENT_NO_RESULT");
     expect(agents.EXTERNAL_AGENT_ISOLATION_VIOLATED).toBe(
       "EXTERNAL_AGENT_ISOLATION_VIOLATED",
     );
@@ -266,11 +267,20 @@ describe("agents public exports", () => {
       types: "./dist/agents/session-store/sqlite/index.d.ts",
       import: "./dist/agents/session-store/sqlite/index.js",
     });
+    expect(packageJson.exports["./agents/session-store/adk-artifacts"]).toEqual(
+      {
+        types: "./dist/agents/session-store/adk-artifacts/index.d.ts",
+        import: "./dist/agents/session-store/adk-artifacts/index.js",
+      },
+    );
   });
 
   test("./agents exposes the session store codes", () => {
     expect(agents.CLAUDE_SESSION_STORE_MIRROR_ERROR).toBe(
       "CLAUDE_SESSION_STORE_MIRROR_ERROR",
+    );
+    expect(agents.CLAUDE_SESSION_STORE_UNAVAILABLE).toBe(
+      "CLAUDE_SESSION_STORE_UNAVAILABLE",
     );
     expect(agents.EXTERNAL_AGENT_OPTION_UNSUPPORTED).toBe(
       "EXTERNAL_AGENT_OPTION_UNSUPPORTED",

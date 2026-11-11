@@ -702,6 +702,17 @@ from the 0.6.0 tag.
 
 ### Added
 
+- **Claude sessions on ADK artifacts (experimental).** `adkArtifactSessionStore()`
+  from the new `adk-llm-bridge/agents/session-store/adk-artifacts` subpath keeps
+  Claude transcripts in the ADK artifact service of the run (in-memory, file or
+  GCS), scoped to the ADK session, with no extra database. `sessionStore` on
+  `ClaudeAgentSdkDriver` (and `driverOptions` of `ClaudeAgent`) now also takes a
+  `SessionStoreFactory` (type exported from `adk-llm-bridge/agents`), called once
+  per run with the invocation context. A run whose context has no artifact
+  service ends before the SDK starts with the new non-recoverable
+  `CLAUDE_SESSION_STORE_UNAVAILABLE` event (exported from
+  `adk-llm-bridge/agents`). `ClaudeCliDriver` still refuses any `sessionStore`.
+  See [Persisting Claude sessions](./docs/claude-session-store.md#adk-artifacts).
 - **`agentKind` on workflow step events and spans.** `step_started` and
   `step_completed` carry `agentKind: "llm" | "external" | "host" | "workflow"`
   (`WorkflowAgentKind`), derived from the step's agent before it runs:
@@ -1462,6 +1473,14 @@ from the 0.6.0 tag.
   any turn activity, and a run whose stream ends after only model-less
   results fails with `EXTERNAL_AGENT_NO_TURN` (recoverable) and exit code 1.
   A real result still ends the run at once.
+
+- **A Claude Agent SDK stream that ends with no result message no longer
+  reports a clean exit.** When the SDK stream ended without any `result`
+  message (Claude Code exited or the pipe closed mid-run), and no background
+  task was pending, `ClaudeAgentSdkDriver` completed with exit code 0 and no
+  error, so a workflow step could pass after a cut-off run. The run now emits
+  an `EXTERNAL_AGENT_NO_RESULT` error (recoverable) and completes with exit
+  code 1, and the workflow step fails with that code.
 
 - **A Codex SDK run can no longer end the host process with `EPIPE`.**
   `@openai/codex-sdk` writes the prompt to codex's stdin with no error
