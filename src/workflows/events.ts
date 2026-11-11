@@ -1,4 +1,5 @@
 import type { Content } from "@google/genai";
+import type { WorkflowCheckpointStepAcceptanceV1 } from "./checkpoint/replay-acceptance.js";
 import type { WorkflowStepResumeReason } from "./checkpoint/schema.js";
 import type {
   WorkflowExecutionSummary,
@@ -107,7 +108,7 @@ export interface WorkflowStepModelChangedEvent extends WorkflowEventBase {
   type: "step_model_changed";
   /** Id of the step. */
   stepId: string;
-  /** Model the step's agent requested when the step ran; absent when it named none. */
+  /** Model the step's agent requested when the step ran, or the `to` of its latest accepted model change; absent when it named none. */
   savedRequestedModel?: string;
   /** Always `true` here: a step with no model record cannot be compared and gets no event. */
   savedRecorded: boolean;
@@ -117,6 +118,24 @@ export interface WorkflowStepModelChangedEvent extends WorkflowEventBase {
   requestedModel?: string;
   /** What the runtime did: replayed the saved result, replayed a saved failure, or continued a waiting step. */
   action: "replayed" | "replayed-failure" | "resumed";
+}
+
+/**
+ * A host acceptance (`replay.acceptChanges`) was applied to a completed step
+ * and saved in the checkpoint.
+ *
+ * @remarks
+ * Emitted after the `checkpoint_saved` of the save that recorded it and
+ * before the step's `step_replayed`, once per applied entry. Not emitted when
+ * a relaunch carries an entry an earlier turn already applied.
+ */
+export interface WorkflowStepChangeAcceptedEvent extends WorkflowEventBase {
+  /** Event discriminator. */
+  type: "step_change_accepted";
+  /** Id of the step. */
+  stepId: string;
+  /** The audit entry stored on the step. */
+  acceptance: WorkflowCheckpointStepAcceptanceV1;
 }
 
 /** A step's sub-agent stopped waiting for input (HITL); answer to resume. */
@@ -245,6 +264,7 @@ export type WorkflowEvent =
   | WorkflowStepInterruptedEvent
   | WorkflowStepReplayedEvent
   | WorkflowStepModelChangedEvent
+  | WorkflowStepChangeAcceptedEvent
   | WorkflowStepWaitingEvent
   | WorkflowCheckpointSavedEvent
   | WorkflowCheckpointSizeWarningEvent
@@ -262,6 +282,7 @@ const WORKFLOW_EVENT_TYPES = new Set<WorkflowEvent["type"]>([
   "step_interrupted",
   "step_replayed",
   "step_model_changed",
+  "step_change_accepted",
   "step_waiting",
   "checkpoint_saved",
   "checkpoint_size_warning",

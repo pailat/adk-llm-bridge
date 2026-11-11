@@ -11,6 +11,10 @@ import type { WorkflowDefinition } from "../definition.js";
 import { toJsonSafeRecord } from "../internal/json-safe-record.js";
 import { hashWorkflowInput, hashWorkflowSource } from "./hash.js";
 import {
+  effectiveSavedModel,
+  type WorkflowCheckpointStepAcceptanceV1,
+} from "./replay-acceptance.js";
+import {
   WORKFLOW_CHECKPOINT_SCHEMA_VERSION,
   type WorkflowCheckpointStepV1,
   type WorkflowCheckpointV1,
@@ -149,7 +153,7 @@ export function validateWorkflowCheckpoint(
  * one recorded when the step ran.
  */
 export interface WorkflowStepModelChange {
-  /** Model the step's agent requested when the step ran; absent when it had none. */
+  /** Model the step's agent requested when the step ran, or the `to` of its latest accepted model change; absent when it had none. */
   savedRequestedModel?: string;
   /** Models the runtime reported when the step ran, when its result stored them. */
   savedResolvedModels?: readonly string[];
@@ -263,7 +267,12 @@ export interface WorkflowStepMismatchOutcome {
  * name, revision and input hash, the saved step's `savedStatus` and
  * `savedAttempts`, and `mismatch`, the differing parts in the order
  * `agentName`, `agentRevision`, `input`, `model`; for `model` also
- * `savedRequestedModel` and `requestedModel`, each absent when unknown);
+ * `savedRequestedModel` (the effective saved model: the latest accepted model
+ * change, else the requested one) and `requestedModel`, each absent when
+ * unknown; when a host acceptance (`replay.acceptChanges`) named another
+ * current value for a differing kind, the coordinator adds
+ * `acceptanceToDoesNotMatch`, the list of those kinds; it holds no input
+ * information);
  * `WORKFLOW_EXECUTION_ERROR` for a completed step without a result or a failed
  * step without a recorded error; `WORKFLOW_INDETERMINATE_STEP` for a `running`
  * or `interrupted` step that cannot be re-run safely (an `interrupted` step
@@ -350,7 +359,7 @@ function stepMismatchError(
       mismatch: [...parts],
       ...(parts.includes("model")
         ? {
-            savedRequestedModel: saved.model?.requested,
+            savedRequestedModel: effectiveSavedModel(saved),
             requestedModel: model?.requested,
           }
         : {}),
@@ -375,12 +384,15 @@ function reusesSavedOutcome(
   return false;
 }
 
-/** Strict mode: both models known and equal. */
+/**
+ * Strict mode: both models known and equal. The saved side is the effective
+ * saved model (the latest accepted model change, else `model.requested`).
+ */
 function strictModelMatches(
   saved: WorkflowCheckpointStepV1,
   requested: string | undefined,
 ): boolean {
-  const savedRequested = saved.model?.requested;
+  const savedRequested = effectiveSavedModel(saved);
   return (
     savedRequested !== undefined &&
     requested !== undefined &&
@@ -393,13 +405,14 @@ function warnNotes(
   requested: string | undefined,
 ): WorkflowStepModelNotes {
   if (saved.model === undefined) return { modelUnrecorded: true };
-  if (saved.model.requested === requested) return {};
+  const savedRequested = effectiveSavedModel(saved);
+  if (savedRequested === requested) return {};
   const resolved = saved.result?.models?.resolved;
   return {
     modelChanged: {
-      ...(saved.model.requested === undefined
+      ...(savedRequested === undefined
         ? {}
-        : { savedRequestedModel: saved.model.requested }),
+        : { savedRequestedModel: savedRequested }),
       ...(resolved === undefined ? {} : { savedResolvedModels: [...resolved] }),
       ...(requested === undefined ? {} : { requestedModel: requested }),
     },
@@ -604,6 +617,70 @@ export function withWorkflowStepWaiting(
     },
   });
   return { ...updated, input: workflowInput };
+}
+
+/**
+ * Applies host acceptances to a completed step and appends their audit
+ * entries.
+ *
+ * @remarks
+ * An input change sets `inputHash` to the accepted input's hash and replaces
+ * the input fingerprint with `inputRecord` (dropped when `inputRecord` has no
+ * fields). `model.requested` is never changed: an accepted model change is
+ * only its audit entry, whose `to` becomes the effective saved model.
+ *
+ * @param checkpoint - Checkpoint to update; it is not mutated.
+ * @param stepId - The completed step.
+ * @param change - The accepted input hash and its fingerprint, when the input changed.
+ * @param entries - Audit entries to append, in order.
+ * @param now - Timestamp in epoch milliseconds; defaults to `Date.now()`.
+ * @returns A new checkpoint with the workflow status `running`.
+ * @throws {@link WorkflowError} with code `WORKFLOW_EXECUTION_ERROR` when the
+ * step is missing or not `completed`.
+ * @internal
+ */
+export function withWorkflowStepChangesAccepted(
+  checkpoint: WorkflowCheckpointV1,
+  stepId: string,
+  change: {
+    inputHash?: string;
+    inputRecord?: Pick<
+      WorkflowCheckpointStepRecordV1,
+      "inputLength" | "inputDigest"
+    >;
+  },
+  entries: readonly WorkflowCheckpointStepAcceptanceV1[],
+  now = Date.now(),
+): WorkflowCheckpointV1 {
+  const previous = requireStep(checkpoint, stepId);
+  if (previous.status !== "completed") {
+    throw new WorkflowError(
+      "WORKFLOW_EXECUTION_ERROR",
+      `Only a completed step can take an accepted change: ${stepId}`,
+      { stepId, status: previous.status },
+    );
+  }
+  const { inputLength: _length, inputDigest: _digest, ...kept } = previous;
+  const step =
+    change.inputHash === undefined
+      ? { ...previous }
+      : {
+          ...kept,
+          inputHash: change.inputHash,
+          ...(change.inputRecord?.inputLength === undefined
+            ? {}
+            : { inputLength: change.inputRecord.inputLength }),
+          ...(change.inputRecord?.inputDigest === undefined
+            ? {}
+            : { inputDigest: change.inputRecord.inputDigest }),
+        };
+  return updateCheckpoint(checkpoint, now, {
+    [stepId]: {
+      ...step,
+      acceptances: [...(previous.acceptances ?? []), ...entries],
+      updatedAt: Math.max(now, previous.updatedAt),
+    },
+  });
 }
 
 /**

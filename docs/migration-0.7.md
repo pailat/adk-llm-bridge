@@ -1034,6 +1034,17 @@ checkpoints:
   input, set `replay.onStepMismatch` (or read the
   `WORKFLOW_STEP_MISMATCH_HINT` warning) and look at the window with
   `workflowStepInputCanonicalForm(input).slice(start, end)`.
+- Recipe for an input that changed but is known to be equivalent (the
+  "edited a prompt file mid-run" case): read the hint to see what changed. If
+  it is equivalent, copy `savedInputHash` and `inputHash` from the mismatch
+  details into a `replay.acceptChanges` entry (`kind: "input"`, with a
+  reason), in an operator-only file, and relaunch. The step replays and the
+  checkpoint records the acceptance. Do not edit the checkpoint.
+- Acceptances come only from a host-only source: never read them from a file
+  inside an agent's `workingDirectory`, `allowedPaths` or `readPaths`, or a
+  lane worktree. An agent that can write that file can make a gate replay an
+  old verdict for changed code. The new event type `step_change_accepted` joins
+  `WorkflowEvent`; if you match on events exhaustively, handle it.
 
 ## 9. Deprecated names
 

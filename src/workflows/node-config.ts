@@ -5,6 +5,10 @@ import {
   type NodeContext,
 } from "@google/adk";
 import type { WorkflowStepMismatchHint } from "./checkpoint/input-diff.js";
+import {
+  parseWorkflowReplayAcceptances,
+  type WorkflowReplayAcceptance,
+} from "./checkpoint/replay-acceptance.js";
 import { WorkflowError } from "./contracts.js";
 
 export type { WorkflowStepMismatchHint } from "./checkpoint/input-diff.js";
@@ -79,6 +83,43 @@ export interface WorkflowReplayOptions {
    * `workflowStepInputCanonicalForm(input)`.
    */
   onStepMismatch?: (hint: WorkflowStepMismatchHint) => void | Promise<void>;
+  /**
+   * Host-approved changes for completed steps. Each entry keeps one step's
+   * saved result although its input or model changed, and is recorded in the
+   * checkpoint.
+   *
+   * @remarks
+   * An entry names the execution, the step, the kind (`input` or `model`),
+   * the exact saved value (`from`), the exact current value (`to`) and a
+   * reason; there are no wildcards, prefixes or "accept all". Entries for this
+   * execution are checked against the loaded checkpoint before any step runs:
+   * a step that does not exist or is not `completed`, a `from` that is not the
+   * saved value, or a `model` entry for a step without a recorded model fails
+   * the turn with `WORKFLOW_REPLAY_ACCEPTANCE_INVALID`, which is never saved:
+   * the execution stays resumable with a corrected entry. Entries for other
+   * executions are ignored (their count is logged at debug level).
+   *
+   * When the step is reached and its current value equals `to`, the change is
+   * applied and audited in one checkpoint save, then the step replays
+   * (`step_change_accepted`, warn log `WORKFLOW_REPLAY_CHANGE_ACCEPTED`).
+   * After an accepted input change, the step's `inputHash` is the accepted
+   * input's hash; the audit entry keeps the old one. An accepted model change
+   * leaves `model.requested` as the step ran; the entry's `to` becomes the
+   * model every later comparison uses. A relaunch with the same entry is a
+   * no-op. A `to` that does not match is the ordinary `WORKFLOW_STEP_MISMATCH`
+   * (details list the kind in `acceptanceToDoesNotMatch`). Agent name, agent
+   * revision, step status, workflow input, version and source are never
+   * acceptable. An entry this turn did not apply is logged once as
+   * `WORKFLOW_REPLAY_ACCEPTANCE_UNUSED`.
+   *
+   * Security: an acceptance replays an old result for a new input. Load
+   * acceptances only from a host-only source, never from a file inside any
+   * agent's `workingDirectory`, `allowedPaths` or `readPaths`, or a lane
+   * worktree: an agent that can write the file can make a gate replay its old
+   * verdict for changed code. `approvedBy` is a label, not authentication.
+   * Validate an operator file with `parseWorkflowReplayAcceptances`.
+   */
+  acceptChanges?: readonly WorkflowReplayAcceptance[];
 }
 
 /**
@@ -189,26 +230,29 @@ export interface ResolvedWorkflowReplayOptions {
   readonly onStepMismatch?: (
     hint: WorkflowStepMismatchHint,
   ) => void | Promise<void>;
+  readonly acceptChanges: readonly WorkflowReplayAcceptance[];
 }
 
 const REPLAY_KEYS: ReadonlySet<string> = new Set([
   "modelChange",
   "inputDigest",
   "onStepMismatch",
+  "acceptChanges",
 ]);
 
 /**
  * Validates `config.replay`, applies defaults and freezes the result.
  *
  * @remarks
- * Data fields are copied, so a caller that keeps the object and changes it
- * later has no effect. The callback is copied by reference: a function cannot
+ * Data fields are copied (acceptances as frozen copies), so a caller that
+ * keeps the object and changes it later has no effect. The callback is copied by reference: a function cannot
  * be cloned.
  *
  * @throws {@link WorkflowError} with code `WORKFLOW_DEFINITION_INVALID` for a
  * value that is not a plain object, an unknown key, a `modelChange` other
- * than `warn` or `mismatch`, a non-boolean `inputDigest` or a non-function
- * `onStepMismatch`.
+ * than `warn` or `mismatch`, a non-boolean `inputDigest`, a non-function
+ * `onStepMismatch`, or an `acceptChanges` list that
+ * `parseWorkflowReplayAcceptances` refuses.
  * @internal
  */
 export function resolveReplayOptions(
@@ -216,7 +260,11 @@ export function resolveReplayOptions(
 ): ResolvedWorkflowReplayOptions {
   const replay: unknown = config.replay;
   if (replay === undefined) {
-    return Object.freeze({ modelChange: "warn", inputDigest: true });
+    return Object.freeze({
+      modelChange: "warn",
+      inputDigest: true,
+      acceptChanges: Object.freeze([]),
+    });
   }
   if (!isPlainObject(replay)) {
     throw invalidReplay("replay must be an object");
@@ -225,7 +273,7 @@ export function resolveReplayOptions(
     if (!REPLAY_KEYS.has(key))
       throw invalidReplay(`unknown replay key: ${key}`);
   }
-  const { modelChange, inputDigest, onStepMismatch } = replay;
+  const { modelChange, inputDigest, onStepMismatch, acceptChanges } = replay;
   if (
     modelChange !== undefined &&
     modelChange !== "warn" &&
@@ -239,9 +287,14 @@ export function resolveReplayOptions(
   if (onStepMismatch !== undefined && typeof onStepMismatch !== "function") {
     throw invalidReplay("replay.onStepMismatch must be a function");
   }
+  const accepted =
+    acceptChanges === undefined
+      ? Object.freeze([])
+      : parseWorkflowReplayAcceptances(acceptChanges);
   return Object.freeze({
     modelChange: modelChange ?? "warn",
     inputDigest: inputDigest ?? true,
+    acceptChanges: accepted,
     ...(onStepMismatch === undefined
       ? {}
       : {
