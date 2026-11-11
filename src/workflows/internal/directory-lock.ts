@@ -39,6 +39,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
+import { renameRetryingBlockedSync } from "./blocked-rename.js";
 import { fsyncDirectorySync } from "./directory-sync.js";
 import { attachCleanupErrors, isProcessAlive } from "./error-support.js";
 import { hasErrorCode } from "./guards.js";
@@ -282,45 +283,26 @@ export function retiredDirectoryLockPath(
   return `${lockPath}.retired.${directoryLockTokenKey(token)}`;
 }
 
-/** Attempts of a release rename that a Windows open file blocks. */
-const RELEASE_RENAME_ATTEMPTS = 5;
-const RELEASE_RENAME_PAUSE_MS = 20;
-
 function retireDirectoryLock(
   lockPath: string,
   observedToken: string,
   retryBlocked = false,
 ): boolean {
   const retired = retiredDirectoryLockPath(lockPath, observedToken);
-  for (let attempt = 1; ; attempt += 1) {
-    try {
-      renameSync(lockPath, retired);
-      break;
-    } catch (error) {
-      if (hasErrorCode(error, "ENOENT") || isRetireCollision(error, retired)) {
-        return false;
-      }
+  try {
+    if (retryBlocked) {
       // Windows refuses to rename a directory while another process has a
       // file inside it open, such as a waiter reading `owner.json`. Only the
       // owner's own release waits that out: a blocked recovery just fails.
-      if (
-        !retryBlocked ||
-        attempt >= RELEASE_RENAME_ATTEMPTS ||
-        !(
-          hasErrorCode(error, "EPERM") ||
-          hasErrorCode(error, "EBUSY") ||
-          hasErrorCode(error, "EACCES")
-        )
-      ) {
-        throw error;
-      }
-      Atomics.wait(
-        new Int32Array(new SharedArrayBuffer(4)),
-        0,
-        0,
-        RELEASE_RENAME_PAUSE_MS,
-      );
+      renameRetryingBlockedSync(lockPath, retired);
+    } else {
+      renameSync(lockPath, retired);
     }
+  } catch (error) {
+    if (hasErrorCode(error, "ENOENT") || isRetireCollision(error, retired)) {
+      return false;
+    }
+    throw error;
   }
   fsyncDirectorySync(resolve(lockPath, ".."));
   return true;
