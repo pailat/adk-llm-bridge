@@ -4,6 +4,9 @@
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { AsyncLocalStorage } from "node:async_hooks";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   type BaseTool,
   BaseToolset,
@@ -1249,5 +1252,169 @@ describe("hidden tools on the agent span", () => {
     expect(keys.filter((key) => key.includes("external_agent.tools."))).toEqual(
       [],
     );
+  });
+});
+
+describe("ExternalAgent spans: declared MCP servers", () => {
+  test("an MCP tool span names its server", async () => {
+    const agent = new ExternalAgent({
+      name: "coder",
+      provider: CODEX_PROVIDER,
+      driver: new ScriptedDriver(async function* () {
+        yield {
+          type: "started",
+          providerId: CODEX_PROVIDER.id,
+          timestamp: T0,
+        };
+        for (const type of ["tool_call", "tool_result"] as const) {
+          yield {
+            type,
+            name: "mcp__docs__search",
+            callId: "toolu_1",
+            ...(type === "tool_call" ? { input: {} } : { result: "ok" }),
+            metadata: {
+              builtin: true,
+              mcp: { server: "docs", tool: "search" },
+            },
+            timestamp: T0 + (type === "tool_call" ? 10 : 20),
+          } as ExternalAgentEvent;
+        }
+        yield { type: "output", content: "done", timestamp: T0 + 30 };
+        yield { type: "completed", exitCode: 0, timestamp: T0 + 40 };
+      }),
+    });
+    await runTurn(agent);
+    const tool = named("execute_tool mcp__docs__search")[0];
+    expect(tool?.attributes["gcp.vertex.agent.external_agent.mcp_server"]).toBe(
+      "docs",
+    );
+    spans.length = 0;
+    await runTurn(builtinToolRun());
+    expect(
+      named("execute_tool Read")[0]?.attributes[
+        "gcp.vertex.agent.external_agent.mcp_server"
+      ],
+    ).toBeUndefined();
+  });
+
+  test("a declared secret reaches no span or ADK event, with capture on", async () => {
+    const { ClaudeAgentSdkDriver } = await import(
+      "../../src/agents/driver/claude-agent-sdk.js"
+    );
+    const { mcpSecretHost } = await import(
+      "../../src/agents/driver/mcp-secrets.js"
+    );
+    const { CLAUDE_PROVIDER } = await import(
+      "../../src/agents/provider/schema.js"
+    );
+    const canary = "span-canary-9c4f21d0";
+    const savedPlatform = mcpSecretHost.platform;
+    mcpSecretHost.platform = () => "darwin";
+    const steps = [
+      {
+        type: "system",
+        subtype: "init",
+        model: "haiku",
+        session_id: "s",
+        tools: ["mcp__docs__search"],
+        mcp_servers: [{ name: "docs", status: "connected" }],
+      },
+      {
+        type: "assistant",
+        session_id: "s",
+        parent_tool_use_id: null,
+        message: {
+          content: [
+            {
+              type: "tool_use",
+              id: "t1",
+              name: "mcp__docs__search",
+              input: { q: canary },
+            },
+          ],
+        },
+      },
+      {
+        type: "user",
+        session_id: "s",
+        parent_tool_use_id: null,
+        message: {
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "t1",
+              content: `Bearer ${canary}`,
+            },
+          ],
+        },
+      },
+      {
+        type: "assistant",
+        session_id: "s",
+        parent_tool_use_id: null,
+        message: { content: [{ type: "text", text: `done ${canary}` }] },
+      },
+      { type: "result", subtype: "success", result: `done ${canary}` },
+    ];
+    // The run reserves its session path in a config dir of its own.
+    const configDir = mkdtempSync(join(tmpdir(), "spans-config-"));
+    const sdk = {
+      query: (input: {
+        prompt: AsyncIterable<unknown>;
+        options: { sessionId?: string };
+      }) =>
+        Object.assign(
+          (async function* () {
+            for await (const _ of input.prompt) {
+              // The prompt is read first, as the runtime does.
+            }
+            // The runtime reports the session id the driver passed.
+            for (const step of steps) {
+              yield { ...step, session_id: input.options.sessionId };
+            }
+          })(),
+          {
+            setMcpServers: async () => ({ added: ["docs"], removed: [] }),
+            mcpServerStatus: async () => [],
+            interrupt: async () => {},
+          },
+        ),
+      tool: () => ({}),
+      createSdkMcpServer: () => ({ type: "sdk", instance: {} }),
+    };
+    try {
+      const agent = new ExternalAgent({
+        name: "ui",
+        provider: CLAUDE_PROVIDER,
+        driver: new ClaudeAgentSdkDriver({
+          sdk: sdk as never,
+          env: { CLAUDE_CONFIG_DIR: configDir },
+          tools: ["Read"],
+          mcpServers: {
+            docs: {
+              type: "http",
+              url: "http://127.0.0.1:7801/mcp",
+              headers: { Authorization: { resolve: () => canary } },
+              tools: ["search"],
+            },
+          },
+        }),
+      });
+      const events = await runTurn(agent);
+      expect(named("execute_tool mcp__docs__search")).toHaveLength(1);
+      const dump = JSON.stringify({
+        spans: spans.map((span) => ({
+          name: span.name,
+          attributes: span.attributes,
+          status: span.status,
+        })),
+        events,
+      });
+      expect(dump).not.toContain(canary);
+      expect(dump).toContain("[redacted]");
+    } finally {
+      mcpSecretHost.platform = savedPlatform;
+      rmSync(configDir, { recursive: true, force: true });
+    }
   });
 });

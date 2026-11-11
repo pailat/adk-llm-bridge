@@ -56,6 +56,15 @@ const CLAUDE_NETWORK_TOOLS: readonly string[] = ["WebFetch", "WebSearch"];
 /** Tools that run shell commands. */
 const CLAUDE_SHELL_TOOLS: ReadonlySet<string> = new Set(["Bash", "PowerShell"]);
 
+/** Tools that read files by path. */
+const CLAUDE_FILE_READ_TOOLS: ReadonlySet<string> = new Set([
+  "Read",
+  "Glob",
+  "Grep",
+  "LS",
+  "NotebookRead",
+]);
+
 export {
   BRIDGE_MCP_SERVER,
   BRIDGE_TOOL_PREFIX,
@@ -195,6 +204,13 @@ export interface ClaudeIsolationPlan {
    * default tool list is trimmed without a refusal.
    */
   unenforceableWebTools: string[] | undefined;
+  /** Whether a shell tool (`Bash`, `PowerShell`) is offered. */
+  shellOffered: boolean;
+  /**
+   * Whether a file-read tool (`Read`, `Glob`, `Grep`, `LS`, `NotebookRead`)
+   * is offered.
+   */
+  fileReadOffered: boolean;
 }
 
 /**
@@ -318,6 +334,11 @@ export function planClaudeIsolation(
       readOnlyWebTools.length > 0 ? readOnlyWebTools : undefined,
     unenforceableWebTools:
       unenforceableWebTools.length > 0 ? unenforceableWebTools : undefined,
+    shellOffered,
+    // Without a pinned list the runtime default applies, which reads files.
+    fileReadOffered:
+      tools === undefined ||
+      tools.some((name) => CLAUDE_FILE_READ_TOOLS.has(name)),
   };
 }
 
@@ -396,6 +417,43 @@ export interface ClaudeIsolationExpectation {
    * as the bridge's.
    */
   bridgeTools?: readonly string[];
+  /**
+   * Tool allowlists of declared MCP servers, by server name (tool names
+   * without the `mcp__<server>__` prefix). A server listed here is expected
+   * with all its tools in `system/init`, but a call to a tool outside its
+   * list is denied ({@link isListedClaudeMcpTool}). A server without an entry
+   * allows every tool.
+   */
+  mcpToolAllowlists?: Readonly<Record<string, readonly string[]>>;
+}
+
+/**
+ * Whether a call to `name` passes the tool allowlist of its declared MCP
+ * server: true for a tool that is not of a server with an allowlist, or one
+ * its server lists.
+ *
+ * @param name - The tool name as the runtime reports it.
+ * @param expected - The tools and MCP servers the driver configured.
+ * @returns False only for an unlisted tool of a server with an allowlist.
+ */
+export function isListedClaudeMcpTool(
+  name: string,
+  expected: ClaudeIsolationExpectation,
+): boolean {
+  let server: string | undefined;
+  for (const candidate of Object.keys(expected.mcpToolAllowlists ?? {})) {
+    if (
+      name.startsWith(`mcp__${candidate}__`) &&
+      (server === undefined || candidate.length > server.length)
+    ) {
+      server = candidate;
+    }
+  }
+  if (server === undefined) {
+    return true;
+  }
+  const tool = name.slice(`mcp__${server}__`.length);
+  return expected.mcpToolAllowlists?.[server]?.includes(tool) ?? false;
 }
 
 /**

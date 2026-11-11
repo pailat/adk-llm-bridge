@@ -573,15 +573,23 @@ the host has configured, never a location or a secret:
 - `agent.mcp: []` and no `agent.mcp` mean the same thing and hash the same.
 
 The plan lists the grant on each agent (`RunPlanAgent.mcp`). The host turns it
-into servers (see [host duty 14](#what-the-host-must-do-at-run-time)). In
-this release the library only validates and plans the grant: an isolated
-`ClaudeAgent` loads no MCP server but the bridge's own, and without
-`allowNetwork: true` the confirmation guard denies every other MCP tool (see
-[External agent isolation](external-agent-isolation.md)). A host that grants
-MCP providers must attach the resolved servers itself and keep the
-credentials out of the agent. Until the host can attach declared servers to
-a confined agent, it should refuse a lane whose `mcp` is not empty, or run
-that lane with network access allowed and its own checks.
+into servers (see [host duty 14](#what-the-host-must-do-at-run-time)) with
+`selectMcpServers(planAgent.mcp, registry)`, which returns exactly the
+granted entries of the host's registry and throws
+`EXTERNAL_AGENT_MCP_PROVIDER_UNKNOWN` for an id with no entry. Pass the
+result as the Claude Agent SDK driver's `mcpServers`:
+
+```ts
+driver: { mcpServers: selectMcpServers(planAgent.mcp, hostMcpServers) }
+```
+
+An isolated `ClaudeAgent` loads no MCP server but the bridge's own and the
+declared ones; the confirmation guard denies every other MCP tool without
+`allowNetwork: true`. The driver checks each declared server and keeps its
+secrets out of the agent; see
+[Host MCP servers and secrets](external-agent-isolation.md#host-mcp-servers-and-secrets).
+Other drivers have no `mcpServers` in this release: a host should refuse a
+lane on them whose `mcp` is not empty.
 
 ## JSON Schema
 

@@ -9,6 +9,7 @@ import {
 import {
   EXTERNAL_AGENT_MODEL_OVERRIDE,
   EXTERNAL_AGENT_NETWORK_UNENFORCEABLE,
+  EXTERNAL_AGENT_OPTION_UNKNOWN,
   EXTERNAL_AGENT_OPTION_UNSUPPORTED,
   EXTERNAL_AGENT_PATHS_UNENFORCEABLE,
 } from "../../../src/agents/driver/policy-errors.js";
@@ -596,7 +597,12 @@ describe("capabilities and sessions", () => {
   });
 
   test("untyped session options are refused", async () => {
-    for (const option of ["resumeSessionId", "sessionStore"]) {
+    for (const option of [
+      "resumeSessionId",
+      "sessionStore",
+      "sessionStoreFlush",
+      "sessionStoreLoadTimeoutMs",
+    ]) {
       const error = await refusalCode(
         () =>
           new FxCliDriver({
@@ -607,7 +613,21 @@ describe("capabilities and sessions", () => {
       );
       expect(error.code).toBe(EXTERNAL_AGENT_OPTION_UNSUPPORTED);
       expect(error.message).toContain(option);
+      expect(error.message).toContain("stateless");
     }
+  });
+
+  test("an unknown key, such as a typo of a session option, is still unknown", async () => {
+    const error = await refusalCode(
+      () =>
+        new FxCliDriver({
+          ...baseConfig(),
+          resumeSesionId: "x",
+        } as never),
+      request(),
+    );
+    expect(error.code).toBe(EXTERNAL_AGENT_OPTION_UNKNOWN);
+    expect(error.message).toContain("resumeSesionId");
   });
 
   test("a missing binary is reported as MISSING_BINARY", async () => {

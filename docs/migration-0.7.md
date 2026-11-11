@@ -853,6 +853,58 @@ the run's ADK artifact service. Without an artifact service the run ends with
 `CLAUDE_SESSION_STORE_UNAVAILABLE` before the SDK starts. See
 [Persisting Claude sessions](./claude-session-store.md#adk-artifacts).
 
+### Driver options and host MCP servers
+
+- **Driver options are checked by name.** A misspelled or unsupported key,
+  or a config that is not a plain object, now throws
+  `EXTERNAL_AGENT_OPTION_UNKNOWN` instead of being ignored. If you build a
+  driver config by spreading a larger object or a class instance, pick the
+  driver's keys first.
+- **Host MCP servers** (new, `ClaudeAgentSdkDriver` only): declare them in
+  `mcpServers`; see
+  [Host MCP servers and secrets](./external-agent-isolation.md#host-mcp-servers-and-secrets).
+  Header and env values are secret references or `{ public: "..." }`; a
+  plain string is refused.
+- Pass MCP secrets as `{ resolve }`, and best as a per-run token minted by a
+  host proxy that keeps the long-lived credential (host duty 14). A resolver
+  is only as safe as its source: `{ resolve: () => process.env.X }` is
+  exposed like `{ env }`, and a file or keychain read is safe only if the
+  agent's shell cannot do the same read. `{ env: "NAME" }` is accepted in
+  isolated mode only when the agent cannot read process environments: no
+  shell tool (on macOS, a shell in the no-network sandbox is fine; with
+  `allowNetwork: true` or `allowUnsandboxedShell: true` it is not), and on
+  Linux, file-read tools confined by `allowedPaths` or `readPaths`. A
+  variable that Claude Code itself receives cannot be an `{ env }` source.
+  On Linux with a shell, declared secrets also need
+  `kernel.yama.ptrace_scope` 1 or higher; on Windows, no shell tool.
+  Put the secret in the `Authorization` header.
+- With a declared `{ resolve }` or `{ env }` secret, `ClaudeAgentSdkDriver`
+  keeps Claude Code's session transcript off disk (`persistSession: false`),
+  because a transcript stores raw tool results and a server that echoes its
+  credential would leave it there. Such an agent resumes nothing: each turn
+  folds the scrubbed ADK history into its prompt. `sessionStore`,
+  `resumeSessionId` and `runtimeSession.id` are refused with
+  `EXTERNAL_AGENT_MCP_SECRET_UNENFORCEABLE`. The driver also picks the
+  session id and reserves that session's folder path, so Claude Code keeps
+  a large tool result inline instead of saving it under `tool-results/`.
+  A working directory whose real path is longer than 200 characters, or a
+  config dir that is not an absolute path, is refused (see
+  [Large tool results](./external-agent-isolation.md#large-tool-results)).
+- Every other runtime keeps its transcript in the host's directory, which
+  the bridge does not own and cannot scrub. That covers the Claude drivers
+  without a declared secret, Codex and Gemini CLI. See
+  [Transcripts on disk](./external-agent-isolation.md#transcripts-on-disk)
+  for where each one writes.
+- A stdio server's `env` cannot set code-loading variables (`NODE_OPTIONS`,
+  `PYTHONPATH`, `LD_*`, `DYLD_*`, `GIT_*`, …), and its arguments cannot load
+  code or open a debugger (`-m`, `-r`, `--require`, `-e`, `--import`, `-M`,
+  `-I<path>`, `--inspect*`, any clustered single-dash argument). Put that
+  setup in a host wrapper script.
+- A stdio MCP server runs in the agent's working directory: give an
+  absolute `command` outside the agent's folders, absolute paths or
+  `--flag=value` arguments only, and use a wrapper script that changes
+  directory if it needs one.
+
 ### Coming in 0.8
 
 0.8 is planned to replace the `args` denylist of `ClaudeCliDriver` and
