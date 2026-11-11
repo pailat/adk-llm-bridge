@@ -175,6 +175,17 @@ Related behavior changes:
   tokens, as ADK expects. Cached tokens are also reported in
   `cachedContentTokenCount`. If you added the cache counts yourself, stop
   doing so.
+- Anthropic prompt caching is now **on by default** (native `AnthropicLlm` and
+  `anthropic/*` on AI Gateway), where the native option used to be opt-in. It
+  does not change outputs, but a cache write costs 1.25x the input price and a
+  read 0.1x or less, so it pays off from the second turn. If you make
+  high-volume one-shot calls with prompts above the minimum cacheable size
+  (512 tokens on Haiku/Sonnet/Opus 5.5), set `promptCaching: false`.
+  OpenRouter is opt-in. See [Prompt caching](prompt-caching.md).
+- The tokens a call wrote to the prompt cache are in
+  `customMetadata.cacheCreationTokenCount` (genai has no field for them), and
+  in the optional `cacheCreationTokens` of `AgentInvocationUsage` and
+  `WorkflowStepUsage`.
 - Claude Agent SDK: a resumed session reports usage and cost per run instead
   of the session total, marked `usage.scope: "run"`. When the driver has no
   baseline for the session (first run after a restart or on another replica,

@@ -16,4 +16,6 @@ export const AI_GATEWAY_DEFINITION: ProviderDefinition = {
   // AI Gateway proxies arbitrary vendor/model ids (same permissive reasoning
   // semantics as OpenRouter): always send the native reasoning object.
   reasoning: { style: "openrouter" },
+  // The gateway places the Anthropic cache breakpoints itself when asked.
+  promptCaching: { style: "gateway-auto", defaultModel: /^anthropic\//i },
 };

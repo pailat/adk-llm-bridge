@@ -9,6 +9,7 @@ Guides and references for `adk-llm-bridge`. The package overview is in the
 |----------|-------------|
 | [Migrating to 0.7.0](migration-0.7.md) | Breaking changes and upgrade steps for 0.7.0 |
 | [Models](models.md) | Current model ids per provider path, with the date they were verified |
+| [Prompt caching](prompt-caching.md) | Anthropic prompt caching: defaults per provider, the `promptCaching` option, cost, cache usage fields |
 | [Custom provider configuration](custom-provider-configuration.md) | Connect any OpenAI-compatible endpoint |
 | [OpenAI-compatible feature matrix](openai-compatible-feature-matrix.md) | Which ADK features each provider supports and how they degrade |
 | [Provider requests and responses](provider-requests-and-responses.md) | The model sent, `LLMRegistry` matching, finish reasons, tool-call ids, telemetry names, a keyless sample |

@@ -91,6 +91,11 @@ export interface WorkflowStepUsage {
   totalTokens: number;
   /** Summed cached prompt tokens; part of `promptTokens`, not added on top. */
   cachedTokens: number;
+  /**
+   * Summed prompt-cache write tokens. Absent when no provider in the step
+   * reported a cache write (and in results saved before it existed).
+   */
+  cacheCreationTokens?: number;
   /** Function calls requested on non-partial events. */
   toolCalls: number;
   /**

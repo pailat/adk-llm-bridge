@@ -89,6 +89,24 @@ describe("annotateLlmSpan", () => {
     expect(JSON.stringify(record.attributes)).not.toContain("p@");
   });
 
+  it("records cache read and write tokens when present (0 included)", () => {
+    const { span, record } = fakeSpan();
+    annotateLlmSpan(
+      { provider: "anthropic", cacheReadTokens: 0, cacheCreationTokens: 12 },
+      span,
+    );
+    expect(record.attributes["gen_ai.usage.cache_read.input_tokens"]).toBe(0);
+    expect(record.attributes["gen_ai.usage.cache_creation.input_tokens"]).toBe(
+      12,
+    );
+  });
+
+  it("omits the cache attributes when absent", () => {
+    const { span, record } = fakeSpan();
+    annotateLlmSpan({ provider: "anthropic" }, span);
+    expect(Object.keys(record.attributes)).toEqual(["gen_ai.provider.name"]);
+  });
+
   it("skips undefined values", () => {
     const { span, record } = fakeSpan();
     annotateLlmSpan({ provider: "openai" }, span);

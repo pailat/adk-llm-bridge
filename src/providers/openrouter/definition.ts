@@ -12,6 +12,9 @@ export const OPENROUTER_DEFINITION: ProviderDefinition = {
   // params on non-reasoning models (HTTP 200, silently ignored), so always
   // send the native reasoning object and round-trip signed reasoning details.
   reasoning: { style: "openrouter" },
+  // Opt-in (no `defaultModel`): the top-level `cache_control` is documented
+  // but not yet probed against every backend OpenRouter may route to.
+  promptCaching: { style: "openrouter-auto" },
   buildHeaders: (config) => {
     const headers: Record<string, string> = {};
     const siteUrl =

@@ -237,6 +237,7 @@ describe("AnthropicLlm", () => {
       tool_choice?: ToolChoice;
       system?: unknown;
       tools?: Array<{ name: string; cache_control?: unknown }>;
+      messages: Array<{ role: string; content: unknown }>;
     };
     class TestableAnthropicLlm extends AnthropicLlm {
       callBuild(
@@ -245,6 +246,7 @@ describe("AnthropicLlm", () => {
           system?: string;
           tools?: unknown;
           toolChoice?: ToolChoice;
+          messages?: unknown[];
         },
       ): BuildResult {
         return (
@@ -258,7 +260,7 @@ describe("AnthropicLlm", () => {
             ) => BuildResult;
           }
         ).buildRequestParams(
-          [],
+          opts?.messages ?? [],
           opts?.system,
           opts?.tools,
           params,
@@ -457,16 +459,82 @@ describe("AnthropicLlm", () => {
         expect(result.tools?.[0].cache_control).toEqual({ type: "ephemeral" });
       });
 
-      it("does not apply cache_control when promptCaching is disabled (default)", () => {
-        const disabled = new TestableAnthropicLlm({
+      it("applies cache_control by default (promptCaching unset): system, last tool, last message", () => {
+        const llm = new TestableAnthropicLlm({
           model: "claude-sonnet-4-5-20250929",
           apiKey: "sk-ant-test",
         });
 
-        const result = disabled.callBuild({}, { system: "sys", tools: [tool] });
-        // System stays a plain string; tool carries no cache_control.
+        const result = llm.callBuild(
+          {},
+          {
+            system: "sys",
+            tools: [tool],
+            messages: [{ role: "user", content: "hi" }],
+          },
+        );
+        expect(result.system).toEqual([
+          { type: "text", text: "sys", cache_control: { type: "ephemeral" } },
+        ]);
+        expect(result.tools?.[0].cache_control).toEqual({ type: "ephemeral" });
+        expect(result.messages[0].content).toEqual([
+          { type: "text", text: "hi", cache_control: { type: "ephemeral" } },
+        ]);
+      });
+
+      it("sends no cache_control anywhere when promptCaching is false", () => {
+        const disabled = new TestableAnthropicLlm({
+          model: "claude-sonnet-4-5-20250929",
+          apiKey: "sk-ant-test",
+          promptCaching: false,
+        });
+
+        const result = disabled.callBuild(
+          {},
+          {
+            system: "sys",
+            tools: [tool],
+            messages: [{ role: "user", content: "hi" }],
+          },
+        );
         expect(result.system).toBe("sys");
         expect(result.tools?.[0].cache_control).toBeUndefined();
+        expect(result.messages[0].content).toBe("hi");
+        expect(JSON.stringify(result)).not.toContain("cache_control");
+      });
+
+      it("honors { ttl: '1h' } on every marker", () => {
+        const llm = new TestableAnthropicLlm({
+          model: "claude-sonnet-4-5-20250929",
+          apiKey: "sk-ant-test",
+          promptCaching: { ttl: "1h" },
+        });
+        const result = llm.callBuild(
+          {},
+          {
+            system: "sys",
+            tools: [tool],
+            messages: [{ role: "user", content: "hi" }],
+          },
+        );
+        expect(JSON.stringify(result).match(/"ttl":"1h"/g)).toHaveLength(3);
+      });
+
+      it("resolves instance over global over default (on)", () => {
+        setProviderConfig("anthropic", { promptCaching: false });
+        const fromGlobal = new TestableAnthropicLlm({
+          model: "claude-sonnet-4-5-20250929",
+          apiKey: "sk-ant-test",
+        });
+        expect(fromGlobal.callBuild({}, { system: "s" }).system).toBe("s");
+        const instanceWins = new TestableAnthropicLlm({
+          model: "claude-sonnet-4-5-20250929",
+          apiKey: "sk-ant-test",
+          promptCaching: true,
+        });
+        expect(
+          Array.isArray(instanceWins.callBuild({}, { system: "s" }).system),
+        ).toBe(true);
       });
     });
   });

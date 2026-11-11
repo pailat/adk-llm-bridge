@@ -13,16 +13,20 @@ import {
   type LlmResponse,
 } from "@google/adk";
 import OpenAI from "openai";
+import { getProviderConfig } from "../config.js";
+import { withCacheCreation } from "../converters/cache-usage.js";
 import { convertRequest } from "../converters/request.js";
 import {
   convertResponse,
   convertStreamChunk,
   createStreamAccumulator,
 } from "../converters/response.js";
-import type { BaseProviderConfig } from "../types.js";
+import type { BaseProviderConfig, PromptCachingConfig } from "../types.js";
+import { LogCode, warnOnce } from "../utils/log.js";
 import { BaseProviderLlm } from "./base-provider-llm.js";
 import { resolveConfig } from "./config-resolver.js";
 import type {
+  PromptCachingCapability,
   ProviderDefinition,
   ReasoningCapability,
 } from "./provider-definition.js";
@@ -30,7 +34,11 @@ import {
   PROVIDER_ERROR_INCOMPLETE_STREAM,
   PROVIDER_ERROR_NO_CHOICE,
 } from "./provider-llm-error.js";
-import { annotateLlmSpan, recordLlmError } from "./telemetry.js";
+import {
+  annotateCacheUsage,
+  annotateLlmSpan,
+  recordLlmError,
+} from "./telemetry.js";
 
 /**
  * Configuration for the underlying OpenAI client.
@@ -186,6 +194,10 @@ export class OpenAICompatibleLlm extends BaseProviderLlm {
    * `"openai-effort"` default in the request converter.
    */
   private readonly _reasoning?: ReasoningCapability;
+  /** Prompt-caching capability from the provider definition (undefined = never). */
+  private readonly _promptCaching?: PromptCachingCapability;
+  /** Resolved `promptCaching` setting: instance, then global, then undefined. */
+  private readonly _promptCachingConfig?: PromptCachingConfig;
   /** Output-limit parameter from the provider definition (undefined = `max_tokens`). */
   private readonly _maxTokensParam?: ProviderDefinition["maxTokensParam"];
 
@@ -214,6 +226,15 @@ export class OpenAICompatibleLlm extends BaseProviderLlm {
       this._providerId = definition.id;
       this._reasoning = definition.reasoning;
       this._maxTokensParam = definition.maxTokensParam;
+      this._promptCaching = definition.promptCaching;
+      if (definition.promptCaching) {
+        const global = getProviderConfig(
+          definition.id as Parameters<typeof getProviderConfig>[0],
+        ) as { promptCaching?: PromptCachingConfig } | undefined;
+        this._promptCachingConfig =
+          (config as { promptCaching?: PromptCachingConfig }).promptCaching ??
+          global?.promptCaching;
+      }
       this._modelPatterns = definition.modelPatterns;
 
       const resolved = resolveConfig(definition, config);
@@ -266,6 +287,37 @@ export class OpenAICompatibleLlm extends BaseProviderLlm {
   /** Returns provider-specific request options. */
   protected getProviderRequestOptions(): Record<string, unknown> {
     return this._getRequestOptions?.() ?? {};
+  }
+
+  /**
+   * Request-body fields that turn prompt caching on for `model`, or `{}`.
+   *
+   * Markers live in the provider body only, never in the `LlmRequest`. The
+   * default is judged on the model actually sent, so a routed or overridden
+   * model is decided per call.
+   */
+  private cachingRequestOptions(model: string): Record<string, unknown> {
+    const capability = this._promptCaching;
+    const setting = this._promptCachingConfig;
+    if (!capability || setting === false) return {};
+    const explicit = setting !== undefined;
+    if (!explicit && !capability.defaultModel?.test(model)) return {};
+
+    const ttl = typeof setting === "object" ? setting.ttl : undefined;
+    if (capability.style === "gateway-auto") {
+      if (ttl === "1h") {
+        warnOnce(
+          LogCode.PROMPT_CACHE_TTL_IGNORED,
+          "AI Gateway chat completions cache for 5 minutes only; " +
+            "promptCaching ttl '1h' is ignored and the 5-minute lifetime is used.",
+        );
+      }
+      return { providerOptions: { gateway: { caching: "auto" } } };
+    }
+    return {
+      cache_control:
+        ttl === "1h" ? { type: "ephemeral", ttl: "1h" } : { type: "ephemeral" },
+    };
   }
 
   /**
@@ -406,12 +458,15 @@ export class OpenAICompatibleLlm extends BaseProviderLlm {
         ...params,
         ...(tools?.length ? { tools } : {}),
         ...(toolChoice && tools?.length ? { tool_choice: toolChoice } : {}),
+        ...this.cachingRequestOptions(model),
         ...this.getProviderRequestOptions(),
       },
       abortSignal ? { signal: abortSignal } : undefined,
     );
     this.annotateSpan(response);
-    return convertResponse(response);
+    const converted = convertResponse(response);
+    annotateCacheUsage(this._providerId, converted);
+    return converted;
   }
 
   /**
@@ -435,6 +490,7 @@ export class OpenAICompatibleLlm extends BaseProviderLlm {
         ...params,
         ...(tools?.length ? { tools } : {}),
         ...(toolChoice && tools?.length ? { tool_choice: toolChoice } : {}),
+        ...this.cachingRequestOptions(model),
         ...this.getProviderRequestOptions(),
       },
       abortSignal ? { signal: abortSignal } : undefined,
@@ -482,6 +538,13 @@ export class OpenAICompatibleLlm extends BaseProviderLlm {
     // acc.usage is repopulated by a post-finish usage chunk (if any); prefer
     // it over whatever was captured before finish.
     if (acc.usage) finalResponse.usageMetadata = acc.usage;
+    if (acc.cacheCreationTokens !== undefined) {
+      finalResponse.customMetadata = withCacheCreation(
+        finalResponse.customMetadata,
+        acc.cacheCreationTokens,
+      );
+    }
+    annotateCacheUsage(this._providerId, finalResponse);
     yield finalResponse;
     return true;
   }

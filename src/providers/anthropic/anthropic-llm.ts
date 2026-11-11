@@ -13,8 +13,15 @@ import { BaseProviderLlm } from "../../core/base-provider-llm.js";
 import { resolveConfig } from "../../core/config-resolver.js";
 import type { ProviderDefinition } from "../../core/provider-definition.js";
 import { PROVIDER_ERROR_INCOMPLETE_STREAM } from "../../core/provider-llm-error.js";
-import { annotateLlmSpan, recordLlmError } from "../../core/telemetry.js";
-import type { AnthropicProviderConfig } from "../../types.js";
+import {
+  annotateCacheUsage,
+  annotateLlmSpan,
+  recordLlmError,
+} from "../../core/telemetry.js";
+import type {
+  AnthropicProviderConfig,
+  PromptCachingConfig,
+} from "../../types.js";
 import { parseJson } from "../../utils/json.js";
 import { LogCode, resetWarnOnce, warnOnce } from "../../utils/log.js";
 import { resolveIntegerOption } from "../../utils/validate.js";
@@ -112,7 +119,8 @@ export class AnthropicLlm extends BaseProviderLlm {
   /**
    * Whether opt-in prompt caching is enabled for this instance.
    */
-  private readonly promptCaching: boolean;
+  /** Resolved setting; `false` is the opt-out, anything else is on. */
+  private readonly promptCaching: PromptCachingConfig;
 
   /**
    * Creates a new Anthropic LLM instance.
@@ -147,7 +155,7 @@ export class AnthropicLlm extends BaseProviderLlm {
     });
 
     this.promptCaching =
-      config.promptCaching ?? globalConfig.promptCaching ?? false;
+      config.promptCaching ?? globalConfig.promptCaching ?? true;
 
     this.client = new AnthropicSDK({
       apiKey: resolved.apiKey,
@@ -277,15 +285,21 @@ export class AnthropicLlm extends BaseProviderLlm {
       }
     }
 
-    // Opt-in prompt caching: attach ephemeral cache breakpoints to the static
-    // prefix (system block + last tool). When disabled, the system string and
-    // tools pass through unchanged (no behavior change).
+    // Prompt caching (on by default): attach ephemeral cache breakpoints to
+    // the system block, the last tool and the last message block. `false`
+    // passes everything through unchanged.
     let systemField: AnthropicSDK.MessageCreateParams["system"] = system;
     let toolsField = tools;
-    if (this.promptCaching) {
-      const cached = applyAnthropicPromptCaching(system, tools);
+    let messagesField = messages;
+    if (this.promptCaching !== false) {
+      const ttl =
+        typeof this.promptCaching === "object"
+          ? this.promptCaching.ttl
+          : undefined;
+      const cached = applyAnthropicPromptCaching(system, tools, messages, ttl);
       if (cached.system) systemField = cached.system;
       if (cached.tools) toolsField = cached.tools;
+      if (cached.messages) messagesField = cached.messages;
     }
 
     // thinking + forced tool_choice -> 400. Anthropic only allows tool_choice
@@ -313,7 +327,7 @@ export class AnthropicLlm extends BaseProviderLlm {
     return {
       model,
       max_tokens: resolvedMaxTokens,
-      messages,
+      messages: messagesField,
       ...sampling,
       ...(systemField ? { system: systemField } : {}),
       ...(toolsField?.length ? { tools: toolsField } : {}),
@@ -372,7 +386,9 @@ export class AnthropicLlm extends BaseProviderLlm {
       model: response.model,
       responseId: response.id,
     });
-    return convertAnthropicResponse(response, { structuredOutput });
+    const converted = convertAnthropicResponse(response, { structuredOutput });
+    annotateCacheUsage("anthropic", converted);
+    return converted;
   }
 
   /**
@@ -414,6 +430,7 @@ export class AnthropicLlm extends BaseProviderLlm {
         });
       }
       const { response, isComplete } = convertAnthropicStreamEvent(event, acc);
+      if (response && isComplete) annotateCacheUsage("anthropic", response);
       if (response) yield response;
       if (isComplete) return true;
     }

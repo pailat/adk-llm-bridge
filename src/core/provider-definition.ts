@@ -17,6 +17,23 @@ export interface ProviderEnvKeys {
 }
 
 /**
+ * Declarative prompt-caching capability.
+ *
+ * - `"gateway-auto"`: AI Gateway. Sends the gateway's automatic caching
+ *   switch (`providerOptions.gateway.caching` set to `auto`), and the gateway
+ *   places the Anthropic markers itself.
+ * - `"openrouter-auto"`: OpenRouter. Sends a top-level `cache_control`.
+ *
+ * `defaultModel` names the models that cache when the user sets nothing. A
+ * provider without it is opt-in: only `promptCaching: true` (or `{ ttl }`)
+ * turns it on.
+ */
+export interface PromptCachingCapability {
+  style: "gateway-auto" | "openrouter-auto";
+  defaultModel?: RegExp;
+}
+
+/**
  * Declarative reasoning capability for a provider.
  *
  * Controls how ADK `config.thinkingConfig` is mapped onto the request body and
@@ -122,6 +139,14 @@ export interface ProviderDefinition {
    * @see {@link ReasoningCapability}
    */
   reasoning?: ReasoningCapability;
+
+  /**
+   * Declarative prompt-caching capability. Omitted for providers whose caching
+   * is implicit (OpenAI, xAI) or unknown (custom): they never get a marker.
+   *
+   * @see {@link PromptCachingCapability}
+   */
+  promptCaching?: PromptCachingCapability;
 
   /**
    * Output-limit parameter for models that are not OpenAI reasoning models

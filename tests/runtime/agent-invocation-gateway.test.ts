@@ -1960,7 +1960,11 @@ describe("AgentInvocationGateway", () => {
 describe("AgentInvocationGateway usage", () => {
   function modelEvent(
     usageMetadata?: Event["usageMetadata"],
-    options: { partial?: boolean; calls?: number } = {},
+    options: {
+      partial?: boolean;
+      calls?: number;
+      customMetadata?: Record<string, unknown>;
+    } = {},
   ): Event {
     const parts = Array.from({ length: options.calls ?? 0 }, (_, i) => ({
       functionCall: { id: `call-${i}`, name: "lookup", args: {} },
@@ -1974,6 +1978,9 @@ describe("AgentInvocationGateway usage", () => {
       },
       ...(options.partial ? { partial: true } : {}),
       ...(usageMetadata ? { usageMetadata } : {}),
+      ...(options.customMetadata
+        ? { customMetadata: options.customMetadata }
+        : {}),
     });
   }
 
@@ -2079,6 +2086,56 @@ describe("AgentInvocationGateway usage", () => {
       toolCalls: 0,
       llmCalls: 2,
     });
+  });
+
+  test("cache creation tokens are summed from non-partial events only", async () => {
+    const usage = (n: number) => ({
+      promptTokenCount: n,
+      candidatesTokenCount: 1,
+      totalTokenCount: n + 1,
+    });
+    const result = await usageOf([
+      modelEvent(usage(10), {
+        partial: true,
+        customMetadata: { cacheCreationTokenCount: 999 },
+      }),
+      modelEvent(usage(10), {
+        customMetadata: { cacheCreationTokenCount: 30 },
+      }),
+      modelEvent(usage(20), {
+        customMetadata: { cacheCreationTokenCount: 12 },
+      }),
+    ]);
+    expect(result.cacheCreationTokens).toBe(42);
+    // The write count is part of promptTokens, not added on top.
+    expect(result.promptTokens).toBe(30);
+  });
+
+  test("cacheCreationTokens stays absent when no event reported a valid write", async () => {
+    const usage = {
+      promptTokenCount: 10,
+      candidatesTokenCount: 1,
+      totalTokenCount: 11,
+    };
+    for (const bad of ["7", -3, Number.NaN, Number.POSITIVE_INFINITY, null]) {
+      const result = await usageOf([
+        modelEvent(usage, { customMetadata: { cacheCreationTokenCount: bad } }),
+      ]);
+      expect(result.cacheCreationTokens).toBeUndefined();
+    }
+    expect(
+      (await usageOf([modelEvent(usage)])).cacheCreationTokens,
+    ).toBeUndefined();
+  });
+
+  test("a reported write of 0 is kept, not dropped", async () => {
+    const result = await usageOf([
+      modelEvent(
+        { promptTokenCount: 10, candidatesTokenCount: 1, totalTokenCount: 11 },
+        { customMetadata: { cacheCreationTokenCount: 0 } },
+      ),
+    ]);
+    expect(result.cacheCreationTokens).toBe(0);
   });
 
   test("model calls count only the events that reported usage, and tool calls count function calls", async () => {

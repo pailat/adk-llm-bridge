@@ -23,6 +23,7 @@ import {
 import type { Content } from "@google/genai";
 import { EXTERNAL_AGENT_MODEL_METADATA_KEY } from "../agents/events.js";
 import { inheritSessionPermissions } from "../agents/permissions/inheritance.js";
+import { CACHE_CREATION_METADATA_KEY } from "../converters/cache-usage.js";
 import { isTempStateKey, withoutTempStateKeys } from "../utils/state.js";
 
 /**
@@ -47,6 +48,13 @@ export interface AgentInvocationUsage {
    * `promptTokens`, not added on top of it.
    */
   cachedTokens: number;
+  /**
+   * Summed `customMetadata.cacheCreationTokenCount`: tokens written to the
+   * prompt cache. Part of `promptTokens` for providers that count them there
+   * (Anthropic); for the others it is as the provider reports. Absent when no
+   * event in the run reported a cache write.
+   */
+  cacheCreationTokens?: number;
   /** Function calls requested on non-partial events. */
   toolCalls: number;
   /**
@@ -1531,5 +1539,9 @@ function addUsage(usage: AgentInvocationUsage, event: Event): void {
   usage.completionTokens += completion;
   usage.totalTokens += meta.totalTokenCount ?? prompt + completion;
   usage.cachedTokens += meta.cachedContentTokenCount ?? 0;
+  const written = event.customMetadata?.[CACHE_CREATION_METADATA_KEY];
+  if (typeof written === "number" && Number.isFinite(written) && written >= 0) {
+    usage.cacheCreationTokens = (usage.cacheCreationTokens ?? 0) + written;
+  }
   usage.llmCalls++;
 }

@@ -18,16 +18,19 @@ import { WorkflowAgent } from "../../src/workflows/workflow-agent.js";
 /** Yields one model event per `[prompt, completion]` pair, with usage. */
 class UsageAgent extends BaseAgent {
   calls = 0;
-  readonly #usages: Array<[number, number]>;
+  readonly #usages: Array<[number, number] | [number, number, number]>;
 
-  constructor(name: string, usages: Array<[number, number]>) {
+  constructor(
+    name: string,
+    usages: Array<[number, number] | [number, number, number]>,
+  ) {
     super({ name });
     this.#usages = usages;
   }
 
   protected async *runAsyncImpl(context: InvocationContext) {
     this.calls++;
-    for (const [prompt, completion] of this.#usages) {
+    for (const [prompt, completion, written] of this.#usages) {
       yield createEvent({
         invocationId: context.invocationId,
         author: this.name,
@@ -38,6 +41,9 @@ class UsageAgent extends BaseAgent {
           candidatesTokenCount: completion,
           totalTokenCount: prompt + completion,
         },
+        ...(written === undefined
+          ? {}
+          : { customMetadata: { cacheCreationTokenCount: written } }),
       });
     }
   }
@@ -126,6 +132,20 @@ describe("workflow step results carry the agent run's usage", () => {
 
     const done = events.map(workflowEventOf).find(isStepCompleted);
     expect(done?.result.usage).toEqual(TWO_RESPONSES);
+  });
+
+  test("a step reports summed cache writes only when a provider reported them", async () => {
+    const worker = new UsageAgent("worker", [
+      [10, 5, 4],
+      [20, 8, 6],
+    ]);
+    const workflow = singleStepWorkflow(worker);
+    const events = await collect(workflow, invocation(workflow));
+    const done = events.map(workflowEventOf).find(isStepCompleted);
+    expect(done?.result.usage).toEqual({
+      ...TWO_RESPONSES,
+      cacheCreationTokens: 10,
+    });
   });
 
   test("a nested workflow step reports its child workflow's summed usage", async () => {
