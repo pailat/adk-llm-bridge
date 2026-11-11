@@ -299,3 +299,82 @@ describe("createAdkToolBridge output schema", () => {
     });
   });
 });
+
+describe("createAdkToolBridge uniqueNames", () => {
+  const tool = (name: string) =>
+    new FunctionTool({
+      name,
+      description: name,
+      parameters: z.object({}),
+      execute: () => name,
+    });
+
+  it("skips every tool of a listed name that occurs more than once, as ambiguous", async () => {
+    const bridge = await createAdkToolBridge(
+      [tool("get"), new StaticToolset([tool("get"), tool("other")])],
+      invocation(),
+      { uniqueNames: new Set(["get"]) },
+    );
+    expect(bridge.declarations.map((d) => d.name)).toEqual(["adk_tool__other"]);
+    expect(bridge.skipped).toEqual([
+      { name: "get", reason: "ambiguous" },
+      { name: "get", reason: "ambiguous" },
+    ]);
+  });
+
+  it("keeps the _2 rename for a duplicate that is not in uniqueNames", async () => {
+    const bridge = await createAdkToolBridge(
+      [tool("get"), tool("get"), tool("solo")],
+      invocation(),
+      { uniqueNames: new Set(["solo"]) },
+    );
+    expect(bridge.declarations.map((d) => d.name)).toEqual([
+      "adk_tool__get",
+      "adk_tool__get_2",
+      "adk_tool__solo",
+    ]);
+    expect(bridge.skipped).toEqual([]);
+  });
+
+  it("counts an in-model tool, and a toolset that failed contributes nothing", async () => {
+    const inModel = Object.assign(Object.create(GOOGLE_SEARCH), {
+      name: "get",
+    });
+    const counted = await createAdkToolBridge(
+      [tool("get"), new StaticToolset([inModel])],
+      invocation(),
+      { uniqueNames: new Set(["get"]) },
+    );
+    expect(counted.declarations).toEqual([]);
+    expect(counted.skipped.map((s) => s.reason)).toEqual([
+      "ambiguous",
+      "ambiguous",
+    ]);
+    const failed = await createAdkToolBridge(
+      [tool("get"), new FailingToolset(new Error("x"))],
+      invocation(),
+      { uniqueNames: new Set(["get"]) },
+    );
+    expect(failed.declarations.map((d) => d.name)).toEqual(["adk_tool__get"]);
+  });
+});
+
+describe("createAdkToolBridge ambiguous warning", () => {
+  it("warns once per ambiguous name with ADK_TOOL_AMBIGUOUS_SKIPPED", async () => {
+    const warnings = captureWarnings();
+    const tool = (name: string) =>
+      new FunctionTool({
+        name,
+        description: name,
+        parameters: z.object({}),
+        execute: () => name,
+      });
+    await createAdkToolBridge(
+      [tool("get"), tool("get"), tool("get"), tool("solo")],
+      invocation(),
+      { uniqueNames: new Set(["get", "solo"]) },
+    );
+    expect(warnings.codes).toEqual([LogCode.ADK_TOOL_AMBIGUOUS_SKIPPED]);
+    expect(String(warnings.mock.calls[0]?.[0])).toContain("get");
+  });
+});
