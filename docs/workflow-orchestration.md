@@ -97,6 +97,38 @@ it cannot know the aliases: it relies on the driver refusing them and on the
 driver reporting a `model`. Pair it with full model ids and with the run spec's
 `allowedModels` and `allowedModelsByRole`.
 
+### Which agent ran a step
+
+`step_started.agentKind` and `step_completed.agentKind` say what kind of agent
+runs the step, read from the agent before it runs:
+
+| `agentKind` | The step's agent is |
+| --- | --- |
+| `external` | an `ExternalAgent` |
+| `llm` | an `LlmAgent`, or a subclass of it |
+| `workflow` | a `WorkflowAgent` or `ScriptWorkflowAgent`, or ADK's `Workflow`, `SequentialAgent`, `ParallelAgent` or `LoopAgent` |
+| `host` | any other `BaseAgent` (a custom agent, a `RoutedAgent`) |
+
+The kind is that of the step's own agent, not of its sub-agents: an `LlmAgent`
+that delegates to an external agent is `llm`. It is detected by brand, not
+`instanceof`, so an agent from another copy of the package is classified the
+same way. Events recorded before 0.7.0 have no `agentKind`.
+
+Where to read `agentKind`:
+
+| Where | When it is set |
+| --- | --- |
+| `step_started` and `step_completed` events | always |
+| the parent `execute_node` span of the step, attribute `gcp.vertex.agent.agent_kind` | always |
+| the `invoke_agent` span, same attribute | only for `ExternalAgent` runs |
+
+The `invoke_agent` span of an `llm`, `workflow` or `host` agent does not carry
+it. ADK 2.4 creates that span privately in `BaseAgent.runAsync`, and the bridge
+has no hook inside it: ADK never calls the plugin `beforeAgentCallback`, and
+the only code that runs in that span is the agent's own `beforeAgentCallback`,
+which belongs to the user's agent. To get the kind of those agents, read it
+from the `execute_node` span, their parent.
+
 ### Which models a step ran
 
 `step_started.requestedModel` names the model the step's agent was configured

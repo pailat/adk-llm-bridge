@@ -34,6 +34,7 @@
  */
 
 import { context, type Span, SpanStatusCode, trace } from "@opentelemetry/api";
+import { AGENT_KIND_ATTRIBUTE, type AgentKind } from "../runtime/agent-kind.js";
 
 const TRACER_NAME = "gcp.vertex.agent";
 const TRACER_VERSION = "adk-llm-bridge";
@@ -79,6 +80,8 @@ export interface WorkflowStepSpanMeta {
   runId?: string;
   /** Attempt number, starting at 0 (`adk.node.attempt`). Defaults to 0. */
   attempt?: number;
+  /** Kind of the step's agent (`gcp.vertex.agent.agent_kind`). */
+  agentKind?: AgentKind;
 }
 
 /**
@@ -234,6 +237,7 @@ function startStep(meta: WorkflowStepSpanMeta): StepState {
     "gen_ai.operation.name": "execute_node",
     "adk.node.path": ident(meta.nodePath ?? meta.name),
     ...(meta.runId ? { "adk.node.run_id": ident(meta.runId) } : {}),
+    ...(meta.agentKind ? { [AGENT_KIND_ATTRIBUTE]: meta.agentKind } : {}),
   });
   return new StepState(span, meta.attempt ?? 0);
 }

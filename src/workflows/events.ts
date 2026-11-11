@@ -9,6 +9,18 @@ import type {
   WorkflowStepResult,
 } from "./contracts.js";
 
+/**
+ * Kind of the agent that runs a workflow step.
+ *
+ * - `external`: an `ExternalAgent` (a coding-agent runtime behind a driver).
+ * - `llm`: an ADK `LlmAgent`, subclasses included.
+ * - `workflow`: an agent that runs a workflow of its own: `WorkflowAgent`,
+ *   `ScriptWorkflowAgent`, ADK's `Workflow`, `SequentialAgent`,
+ *   `ParallelAgent` and `LoopAgent`.
+ * - `host`: any other `BaseAgent` (a custom agent, a `RoutedAgent`, ...).
+ */
+export type WorkflowAgentKind = "llm" | "external" | "host" | "workflow";
+
 /** Fields carried by every workflow event. */
 export interface WorkflowEventBase {
   /** Id of the workflow definition. */
@@ -52,6 +64,15 @@ export interface WorkflowStepStartedEvent extends WorkflowEventBase {
    * see `result.models` on `step_completed`.
    */
   requestedModel?: string;
+  /**
+   * What kind of agent runs the step, read from the agent before it runs:
+   * `external` (an `ExternalAgent`), `llm` (an `LlmAgent`, subclasses
+   * included), `workflow` (an agent that runs a workflow of its own: the
+   * bridge's workflow agents and ADK's `Workflow`, `SequentialAgent`,
+   * `ParallelAgent` and `LoopAgent`) or `host` (any other `BaseAgent`).
+   * Absent on events recorded before 0.7.0.
+   */
+  agentKind?: WorkflowAgentKind;
 }
 
 /** A step finished successfully. */
@@ -60,6 +81,8 @@ export interface WorkflowStepCompletedEvent extends WorkflowEventBase {
   type: "step_completed";
   /** Result of the step. */
   result: WorkflowStepResult;
+  /** Kind of the step's agent, as on `step_started`. Absent on older events. */
+  agentKind?: WorkflowAgentKind;
 }
 
 /** A step failed after exhausting its retries. */

@@ -12,6 +12,7 @@ import {
 } from "@opentelemetry/api";
 // One copy of the capture rules (OTel GenAI variable, then the ADK 2.4 one).
 import { shouldCaptureMessageContent } from "../core/telemetry.js";
+import { AGENT_KIND_ATTRIBUTE } from "../runtime/agent-kind.js";
 import {
   itemTitle,
   stringOrEmpty,
@@ -92,6 +93,7 @@ export class ExternalAgentRunTracer {
     this.#parent = otelContext.active();
     this.#agentSpan = trace.getSpan(this.#parent);
     this.#turnStart = Date.now();
+    this.#agentSpan?.setAttribute(AGENT_KIND_ATTRIBUTE, "external");
     if (this.#requestModel) {
       this.#agentSpan?.setAttribute("gen_ai.request.model", this.#requestModel);
     }
