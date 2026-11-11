@@ -331,6 +331,7 @@ export type {
 export type { WorkflowScriptHost } from "./sandbox/protocol.js";
 export type { QuickJSSyncGeneratorRuntimeOptions } from "./sandbox/quickjs-generator-runtime.js";
 export {
+  QUICKJS_MAX_STACK_BYTES,
   QUICKJS_SYNC_CAPABILITIES,
   QuickJSSyncGeneratorRuntime,
 } from "./sandbox/quickjs-generator-runtime.js";

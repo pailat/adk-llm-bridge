@@ -292,7 +292,12 @@ export interface WorkflowExecutionLimits {
   cpuTimeMs?: number;
   /** Sandbox heap limit in bytes. */
   memoryBytes?: number;
-  /** Sandbox stack limit in bytes. */
+  /**
+   * Sandbox stack limit in bytes. A value above 32768 (32 KiB) is refused with
+   * `WORKFLOW_DEFINITION_INVALID`: QuickJS runs on the host's own stack, and a
+   * larger limit lets the host overflow before QuickJS reports the limit,
+   * which leaks the runtime. 32 KiB allows about 190 nested calls.
+   */
   stackBytes?: number;
   /** Maximum script source size in bytes. */
   maxSourceBytes?: number;
@@ -311,7 +316,7 @@ export const DEFAULT_WORKFLOW_EXECUTION_LIMITS: Readonly<
   timeoutMs: 5 * 60 * 1000,
   cpuTimeMs: 5 * 1000,
   memoryBytes: 64 * 1024 * 1024,
-  stackBytes: 512 * 1024,
+  stackBytes: 32 * 1024,
   maxSourceBytes: 256 * 1024,
   maxMessageBytes: 1024 * 1024,
 });

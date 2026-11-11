@@ -859,6 +859,21 @@ checkpoints:
   see
   [Host sleep and wall-clock steps](./workflow-durability.md#host-sleep-and-wall-clock-steps).
 
+### Script sandbox stack limit
+
+- **`stackBytes` default is 32 KiB and the maximum is 32 KiB.** A script
+  workflow with a larger `stackBytes` (the default was 512 KiB) throws
+  `WORKFLOW_DEFINITION_INVALID` when its `ScriptWorkflowAgent` is built; remove
+  the override or set 32768 or less. `QUICKJS_MAX_STACK_BYTES` is exported from
+  `adk-llm-bridge/workflows`. The limit allows about 190 nested calls; flatten a
+  deeper recursion into a loop. A custom `WorkflowScriptRuntime` can implement
+  `validateLimits` to be checked at construction too.
+- **A host stack overflow resets the sandbox.** A script that exhausts the host
+  stack (for example `eval` of a deeply nested source) ends with
+  `WORKFLOW_LIMIT_EXCEEDED`. Other script sessions running at that moment fail
+  their next turn with `WORKFLOW_EXECUTION_ERROR`; start them again. See
+  [Script sandbox stack](./workflow-orchestration.md#script-sandbox-stack).
+
 ## 9. Deprecated names
 
 These names still work: each is a `@deprecated` alias of the same type, class
