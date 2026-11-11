@@ -721,6 +721,18 @@ from the 0.6.0 tag.
   `CLAUDE_SESSION_STORE_UNAVAILABLE` event (exported from
   `adk-llm-bridge/agents`). `ClaudeCliDriver` still refuses any `sessionStore`.
   See [Persisting Claude sessions](./docs/claude-session-store.md#adk-artifacts).
+- **Cost of gateway model calls.** The cost a provider reports on a call (AI
+  Gateway and OpenRouter `usage.cost`, streaming and not) is in
+  `customMetadata.costUsd`, and `customMetadata.costSource` names the field it
+  came from (`cost`, `cost+upstream` or `market_cost`). A BYOK gateway key
+  reports `cost: 0`: `costUsd` then adds `cost_details.upstream_inference_cost`
+  when that is positive, otherwise it is the gateway's `market_cost`, also
+  kept as `marketCostUsd`. A call that is not BYOK keeps `cost`.
+  `AgentInvocationUsage` and `WorkflowStepUsage` gain an optional `costUsd` (a
+  sum of the reported values, absent when none was reported, so an
+  `ExternalAgent` step has none), and the model-call span gets
+  `adk_llm_bridge.usage.cost_usd`. Before, a run's cost counted only the
+  external agents. See [Prompt caching](./docs/prompt-caching.md#reading-the-cache-usage).
 - **`agentKind` on workflow step events and spans.** `step_started` and
   `step_completed` carry `agentKind: "llm" | "external" | "host" | "workflow"`
   (`WorkflowAgentKind`), derived from the step's agent before it runs:

@@ -14,7 +14,7 @@ import {
 } from "@google/adk";
 import OpenAI from "openai";
 import { getProviderConfig } from "../config.js";
-import { withCacheCreation } from "../converters/cache-usage.js";
+import { withCacheCreation, withCost } from "../converters/cache-usage.js";
 import { convertRequest } from "../converters/request.js";
 import {
   convertResponse,
@@ -544,6 +544,11 @@ export class OpenAICompatibleLlm extends BaseProviderLlm {
         acc.cacheCreationTokens,
       );
     }
+    finalResponse.customMetadata = withCost(finalResponse.customMetadata, {
+      costUsd: acc.costUsd,
+      costSource: acc.costSource,
+      marketCostUsd: acc.marketCostUsd,
+    });
     annotateCacheUsage(this._providerId, finalResponse);
     yield finalResponse;
     return true;

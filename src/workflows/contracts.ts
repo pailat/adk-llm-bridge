@@ -80,7 +80,8 @@ export interface WorkflowStep {
  * events, including events of nested workflow agents. Only the successful
  * attempt is counted: failed attempts that were retried, and failed steps,
  * report no usage. Values are summed as each runtime reports them, so any
- * double counting there carries into the totals. Cost is not computed.
+ * double counting there carries into the totals. `costUsd` sums the cost the
+ * providers reported; it is not computed from a price table.
  */
 export interface WorkflowStepUsage {
   /** Summed prompt tokens. */
@@ -96,6 +97,14 @@ export interface WorkflowStepUsage {
    * reported a cache write (and in results saved before it existed).
    */
   cacheCreationTokens?: number;
+  /**
+   * Summed cost in US dollars the providers reported for the step's model
+   * calls (AI Gateway and OpenRouter `usage.cost`; for a BYOK gateway
+   * call, the upstream or market cost the gateway reports, see
+   * `COST_METADATA_KEY`). Absent when no call reported one, and in results
+   * saved before it existed. An `ExternalAgent` step reports none here.
+   */
+  costUsd?: number;
   /** Function calls requested on non-partial events. */
   toolCalls: number;
   /**
