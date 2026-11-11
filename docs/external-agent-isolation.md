@@ -909,6 +909,106 @@ it may.
   reachable only through the policy key `agents` under
   `allowPolicyOverrideArgs`), which Codex does not report.
 
+## fx
+
+`FxAgent` runs `fx ask --json --no-save --no-color --model <id>` (reviewed
+against fx 0.0.16) with the prompt on stdin, never in argv. `--system` is never
+sent: it replaces fx's base prompt, so the instruction goes inside the stdin
+prompt. The child environment is `PATH`, `HOME`, the credential keys
+`AI_GATEWAY_API_KEY` and `VERCEL_OIDC_TOKEN`, and the variables the driver
+sets: `FX_PERMISSION_MODE`, `FX_AUTO_UPGRADE=0` and `NO_COLOR=1`.
+
+fx has no sandbox, no read-only mode, no path confinement and no network
+block. The driver refuses what it cannot enforce, as events, before anything
+starts:
+
+| Policy mode | fx | Verdict |
+|---|---|---|
+| `read-only` | none | Refused with `EXTERNAL_AGENT_OPTION_UNSUPPORTED`: fx has no read-only mode. |
+| `ask` (default) | `FX_PERMISSION_MODE=ask`, no flag | The first write or shell command ends the run with exit 1 and nothing is written or run (`FX_CLI_PERMISSION_REQUIRED`), unless the user's fx permission rules in `~/.fx/settings.json` allow it: a rule that allows `bash` or `edit` runs the action without a prompt, and the driver cannot turn those rules off. Reads run. |
+| `workspace-write` | `--auto` | Refused with `EXTERNAL_AGENT_OPTION_UNSUPPORTED` unless the driver has `allowUnsandboxedShell: true`. fx `auto` mode runs shell work and writes beyond the workspace, and asks a reviewer model to hold clearly harmful actions. That reviewer's cost is not in `usage`. |
+| `full-access` | `--full-access` | Only for this mode, and only with `allowNetwork: true` or `allowUnenforcedNetwork: true`. `--yolo` is never sent. |
+
+Other refusals:
+
+- **Network.** Every run without `allowNetwork: true` is refused with
+  `EXTERNAL_AGENT_NETWORK_UNENFORCEABLE` unless the driver has
+  `allowUnenforcedNetwork: true`: fx's shell is not sandboxed, it has web
+  tools, and every run loads the MCP servers of the user's profile.
+- **Paths.** `allowedPaths`, `readPaths` and the path bounds are refused with
+  `EXTERNAL_AGENT_PATHS_UNENFORCEABLE` unless the driver has
+  `allowUnenforcedPaths: true`. Then each `allowedPaths` entry becomes a global
+  `--add-dir` (before `ask`), which widens what fx reaches and confines
+  nothing. An entry that is not an absolute path (`rel/dir`, `-rf`, an empty
+  string) is refused with `EXTERNAL_AGENT_OPTION_UNSUPPORTED`, and fx is not
+  started.
+- **Host configuration.** fx always reads the user's `~/.fx` rules, skills and
+  MCP servers and the project's `AGENTS.md`, and `FX_HOME` does not isolate
+  them on 0.0.16. A run without `inheritHostConfig: true` is refused with
+  `EXTERNAL_AGENT_OPTION_UNSUPPORTED`.
+- **Model.** `requireExplicitModel` defaults to `true` for fx: without
+  `--model` fx silently runs the model saved in the user's settings.
+  `FX_MODEL` and `FX_PROVIDER` in the run's environment are refused with
+  `EXTERNAL_AGENT_MODEL_OVERRIDE`. fx model ids are `provider/model` and no
+  router alias is known.
+- **Effort.** `effort` is sent as `--effort`. fx accepts any level without an
+  error and runs an unknown one at the model default, so only the syntax is
+  checked.
+- **Extra `args`.** Only flags go in `args`. An entry that is not a flag and
+  does not follow a flag that takes a value (`--image <path>`) is refused with
+  `EXTERNAL_AGENT_OPTION_UNSUPPORTED`: fx would read it as the prompt and
+  ignore stdin. The refusal names `args` and the entry's index, never more than
+  its first 40 characters. The flags the driver sets from the policy or its
+  options, or that choose the permission mode, configuration or timeout, need
+  `allowPolicyOverrideArgs: true`: `--auto`, `--full-access`, `--yolo`,
+  `--prompt-permissions`, `--permission-mode`, `--ask`, `--config`,
+  `--timeout`, `--profile`, `--provider-order`, `--provider-strict`,
+  `--no-provider-strict`, `--system`, `--add-dir`, `--no-additional-dirs`,
+  `--context-limit`, `--quiet` and `--`. Never allowed, even with
+  `allowPolicyOverrideArgs`: `--model` and `--provider` (both as
+  `EXTERNAL_AGENT_MODEL_OVERRIDE`: they change which model answers), and, as
+  `EXTERNAL_AGENT_OPTION_UNSUPPORTED`, `--effort`, `--json`, `--no-save`,
+  `--no-color` and the session flags `--resume`, `--resume-id`,
+  `--resume-last`, any `--resume-<id>`, `--continue`, `-c` and `-r`. Every
+  flag is refused in the `--flag value` and the `--flag=value` form, and a
+  cluster such as `-vc` is split first. The refusal names the entry; use the
+  matching driver option or policy field instead.
+- **Boolean options.** `requireExplicitModel`, `allowPolicyOverrideArgs`,
+  `allowUnenforcedNetwork`, `allowUnenforcedPaths`, `allowUnsandboxedShell` and
+  `inheritHostConfig` must be `true` or `false`. Anything else (the string
+  `"false"`, `0`, `null`) throws `InputValidationError` when the driver is
+  built, so an untyped host cannot turn an opt-in on by accident.
+- **Sessions.** Every run is stateless. `resumeSessionId` and `sessionStore*`
+  are refused with `EXTERNAL_AGENT_OPTION_UNSUPPORTED`. ADK tools and
+  `confirmation` approvers are refused by `ExternalAgent`
+  (`EXTERNAL_AGENT_TOOLS_UNSUPPORTED`, `EXTERNAL_AGENT_APPROVALS_UNSUPPORTED`).
+
+What a run reports:
+
+- fx prints one JSON object when the run ends, so there is no streaming and
+  the `tool_call` and `tool_result` events arrive after the run
+  (`metadata.fx.replayed: true`). fx gives no arguments, ids or times for
+  them; the ids are `fx-tool-<n>`.
+- A run failed when the process exit is not 0, the JSON `exit_code` is not the
+  number `0` (a string, `null`, missing or any other number), or the JSON has an
+  `error` field. A failed run reports no `output` event: fx's text (cut to 4096
+  characters) is in the `error` event message instead. `completed.exitCode` is
+  the process exit when it is not 0, else the JSON `exit_code` when it is a
+  non-zero number, else 1. A result whose only problem is an `exit_code` that
+  is not a number is `FX_CLI_ERROR` (not recoverable), and the message names
+  `exit_code`.
+- A stdout line longer than 8 MiB (`FX_CLI_MAX_LINE_CHARS`, fx's own message
+  limit) is not parsed: the run ends with `FX_CLI_RESULT_TOO_LARGE` and exit
+  code 1, even if fx exits 0.
+- Usage has `inputTokens`, `outputTokens`, `cacheReadInputTokens` and
+  `cacheCreationInputTokens`. A counter fx reports as `null` is left out.
+  There is no `totalCostUsd`: fx reports no dollars.
+- fx retries provider failures forever. Pass an `abortSignal` with a deadline;
+  the driver then sends SIGTERM, and SIGKILL after `killGraceMs`.
+- The version is not checked at run time. fx is `0.0.x` and its flags change
+  between releases; the driver sets `FX_AUTO_UPGRADE=0` and the pinned flags
+  were reviewed against fx 0.0.16 (`FX_CLI_PINNED_FLAGS_REVIEW`).
+
 ## Credentials
 
 `ClaudeAgent`, `CodexAgent` and `GeminiCliAgent` read credentials with
@@ -1273,13 +1373,19 @@ because the tool was not offered. The other codes in the table (`CLAUDE_*`,
 | `EXTERNAL_AGENT_CREDENTIAL_UNSUPPORTED` | `EXTERNAL_AGENT_CREDENTIAL_UNSUPPORTED` | No | The credential provider returned a `kind` other than `env` or `none`. |
 | `EXTERNAL_AGENT_OPTION_UNSUPPORTED` | `EXTERNAL_AGENT_OPTION_UNSUPPORTED` | No | Thrown (not an event) when a driver is built with an option its runtime cannot honor: `sessionStore` on `ClaudeCliDriver`. |
 | `EXTERNAL_AGENT_MODEL_INVALID` | `EXTERNAL_AGENT_MODEL_INVALID` | No | Thrown when a driver is built with a `model` that is not a model id (not a string, empty, over 256 characters, with whitespace or a control character, or starting with `-`). See [Model](#model). |
-| `EXTERNAL_AGENT_MODEL_REQUIRED` | `EXTERNAL_AGENT_MODEL_REQUIRED` | No | Thrown when a driver with `requireExplicitModel: true` has no `model`, or a router or default alias (`default`, `best`, `opusplan`, Gemini `auto`), or a Claude driver has no `smallFastModel` or one that is an alias instead of a full id. |
+| `EXTERNAL_AGENT_MODEL_REQUIRED` | `EXTERNAL_AGENT_MODEL_REQUIRED` | No | Thrown when a driver with `requireExplicitModel: true` has no `model`, or a router or default alias (`default`, `best`, `opusplan`, Gemini `auto`; fx has none), or a Claude driver has no `smallFastModel` or one that is an alias instead of a full id. |
 | `EXTERNAL_AGENT_MODEL_OVERRIDE` | `EXTERNAL_AGENT_MODEL_OVERRIDE` | No | Something other than `model` would set or route the model: thrown for model-setting `args` or Codex SDK `config` keys (even with `allowPolicyOverrideArgs`); an error event for a model variable in the run's environment, or a Gemini CLI read-only run with a model (plan mode may route turns to another model). |
 | `CLAUDE_SESSION_STORE_MIRROR_ERROR` | `CLAUDE_SESSION_STORE_MIRROR_ERROR` | Yes | The Claude Agent SDK dropped a transcript batch its `sessionStore` rejected or timed out on (3 attempts in total); the run goes on. See [Persisting Claude sessions](claude-session-store.md). |
-| `MISSING_BINARY` | `EXTERNAL_AGENT_MISSING_BINARY` | No | The `claude`, `codex` or `gemini` binary was not found, or, with `interpreter` and `entry`, the interpreter or the entry file. |
+| `MISSING_BINARY` | `EXTERNAL_AGENT_MISSING_BINARY` | No | The `claude`, `codex`, `gemini` or `fx` binary was not found, or, with `interpreter` and `entry`, the interpreter or the entry file. |
 | `EXTERNAL_AGENT_BATCH_COMMAND_REFUSED` | `EXTERNAL_AGENT_BATCH_COMMAND_REFUSED` | No | On Windows, the CLI command (or `interpreter`) is or resolves to a `.cmd` or `.bat` file (for example an npm shim). Remedy per CLI: [Windows: batch files and npm installs](#windows-batch-files-and-npm-installs). |
 | `EXTERNAL_AGENT_INTERPRETER_UNSAFE` | `EXTERNAL_AGENT_INTERPRETER_UNSAFE` | No | The driver's `entry`, or its `interpreter` given as a path, (or the entry's directory, where the interpreter starts) is at or under the run's working directory, an `allowedPaths` root or a temp directory a runtime sandbox keeps writable (symlinks resolved), or the interpreter is not the native Node binary (its real path is not named `node`/`node.exe`, or the file is not a native executable, such as an asdf or nodenv script shim). Install the CLI outside every directory the agent can write; see [Interpreter and entry](#interpreter-and-entry). |
 | `CLAUDE_CLI_EXIT`, `CODEX_CLI_EXIT`, `GEMINI_CLI_EXIT` | - | From the message | The CLI exited with a nonzero code (Codex: and reported no error of its own). The message holds the stderr tail; auth, billing and quota failures are not recoverable. |
+| `FX_CLI_PERMISSION_REQUIRED` | - | No | An fx `ask` run needed an approval a noninteractive run cannot give (fx reported `NonInteractivePermissionRequired`). The message names the modes that allow it and carries fx's `blocked action` lines and fx's own output; nothing ran. |
+| `FX_CLI_ERROR` | - | From the message | The fallback code of an fx failure the shared classifier does not know, and the code (not recoverable) of a result whose `exit_code` is not a number. fx failures carry the classifier code when they have one: `AUTH_ERROR` (`auth_failure`), `QUOTA_EXHAUSTED` (`recovery.need` `quota`) and `INVALID_REQUEST` (`recovery.need` `content_filter`, `rejected` or `too_long`, and `model_not_found`), none recoverable, and whatever `classifyRecoverable` gives the message of an `error` name or a reason only in `output` (for example `RATE_LIMIT`, `TRANSPORT_ERROR`). |
+| `FX_CLI_EXIT` | - | From the message | fx exited non-zero and printed no JSON result. The message holds the stderr tail. |
+| `FX_CLI_NO_RESULT` | - | No | fx exited 0 and printed no JSON result object. |
+| `FX_CLI_RESULT_TOO_LARGE` | - | No | An fx stdout line was longer than the 8 MiB bound (`FX_CLI_MAX_LINE_CHARS`). It was not parsed and the run is reported as failed with exit code 1; no `output` event. |
+| `FX_CLI_NON_JSON_LINE` | - | Yes | A warning: a stdout line was not JSON and was skipped. |
 | `CLAUDE_PERMISSION_DENIED` | - | No | The Claude Agent SDK denied a tool call (the message names the tool and the reason). |
 | `CLAUDE_AGENT_SDK_ERROR` | - | From the message | The Claude Agent SDK threw; used when the message matches no known failure. |
 | `CLAUDE_AGENT_SDK_RESULT_ERROR` | - | From the message | A Claude Agent SDK `result` reported an error with no known subtype. A known subtype such as `error_max_turns` gives its code instead (`MAX_TURNS_EXCEEDED`). |

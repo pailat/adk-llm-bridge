@@ -15,6 +15,7 @@ describe("agents public exports", () => {
     expect("CodexAgent" in root).toBe(false);
     expect("ClaudeAgent" in root).toBe(false);
     expect("GeminiCliAgent" in root).toBe(false);
+    expect("FxAgent" in root).toBe(false);
     expect("ExternalAgent" in root).toBe(false);
     expect("EnvCredentialProvider" in root).toBe(false);
   });
@@ -156,6 +157,15 @@ describe("agents public exports", () => {
     expect(agents.GEMINI_CLI_AGENT_DEFINITION.provider).toBe(
       agents.GEMINI_CLI_PROVIDER,
     );
+    expect(agents.FxAgent).toBeFunction();
+    expect(agents.FxCliDriver).toBeFunction();
+    expect(agents.FX_AGENT_DEFINITION.provider).toBe(agents.FX_PROVIDER);
+    expect(agents.FX_PROVIDER.id).toBe("fx");
+    expect(agents.FX_PROVIDER.command).toBe("fx");
+    expect(agents.FX_ENV_ALLOWLIST).toEqual([
+      "AI_GATEWAY_API_KEY",
+      "VERCEL_OIDC_TOKEN",
+    ]);
     expect(agents.ExternalAgentProviderRegistry).toBeFunction();
     expect(agents.EnvCredentialProvider).toBeFunction();
     expect(agents.NoopCredentialProvider).toBeFunction();
@@ -184,6 +194,10 @@ describe("agents public exports", () => {
       "mapClaudePermissionArgs",
       "mapGeminiPermissionArgs",
       "buildGeminiArgs",
+      "mapFxPermission",
+      "FX_CLI_PINNED_FLAGS",
+      "FX_MODEL_ENV",
+      "MODEL_ALIAS_DENYLIST",
       "mapPermissionPolicyToFlags",
       // shared mutable singletons
       "externalAgentProviderRegistry",

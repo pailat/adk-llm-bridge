@@ -3,6 +3,7 @@ export type ExternalAgentProviderId =
   | "codex"
   | "claude"
   | "gemini-cli"
+  | "fx"
   | (string & {});
 
 /** Static description of an external runtime provider. */
