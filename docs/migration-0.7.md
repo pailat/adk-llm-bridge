@@ -633,6 +633,10 @@ new in 0.7.0. If you already use them, these changes apply:
   results, the run ends with `EXTERNAL_AGENT_NO_TURN` (recoverable) and exit
   code 1 instead of completing with empty output, so a workflow step fails
   instead of completing empty.
+- **A Claude Agent SDK stream with no result message fails.** When the
+  stream ends without any `result` message, the run ends with
+  `EXTERNAL_AGENT_NO_RESULT` (recoverable) and exit code 1 instead of a clean
+  exit 0, so a cut-off run no longer passes as a success.
 - **Private temp directory per Claude run.** Both Claude drivers create a
   fresh `0700` directory under `/tmp` for each run and set
   `CLAUDE_CODE_TMPDIR` to it and `TMPDIR` to the `claude-<uid>` directory
