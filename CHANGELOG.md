@@ -1948,6 +1948,10 @@ from the 0.6.0 tag.
   close, and do other work between reads. Antivirus scanners, indexers and
   editors that watch the checkpoint directory can hold files open too.
   See [Checkpoint commit semantics](docs/workflow-durability.md#checkpoint-commit-semantics).
+  Known limitation on Windows: several saves of the same checkpoint at once
+  (from one or more processes) can fail to take the lock
+  (`checkpoint_lock_acquire_failed`, `EPERM`) instead of waiting; see
+  [issue 117](https://github.com/pailat/adk-llm-bridge/issues/117).
 
 ### Docs
 
