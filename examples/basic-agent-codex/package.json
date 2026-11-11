@@ -16,7 +16,7 @@
   },
   "dependencies": {
     "@google/adk": "^2.4.0",
-    "@openai/codex-sdk": "^0.167.0",
+    "@openai/codex-sdk": "0.167.0",
     "adk-llm-bridge": "file:../.."
   },
   "devDependencies": {

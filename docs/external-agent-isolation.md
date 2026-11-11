@@ -303,6 +303,23 @@ the guard checks every bound when a request arrives. A kept root that a
 symlink later points outside the parent's roots (a link created or retargeted
 after delegation) is therefore still denied.
 
+### Approvers and ADK confirmation need a driver that asks
+
+`confirmation.approver` and `confirmation.adk` only work when the driver hands
+the runtime's permission prompts to the host (`capabilities().approvals` is
+`true`, which means the driver calls `request.requestPermission`). Only the
+Claude Agent SDK driver (`ClaudeAgent`) does. The Claude CLI, Codex SDK, Codex
+CLI and Gemini CLI drivers enforce the policy through the runtime's own flags
+and never ask the host: a tool that needs approval is denied, and an approver
+or ADK confirmation there would be ignored.
+
+So an agent built with either option on one of those drivers throws
+`ExternalAgentPolicyError` `EXTERNAL_AGENT_APPROVALS_UNSUPPORTED`, naming the
+driver. `clone()` re-checks, so a clone onto such a driver throws too. A custom
+driver without `capabilities()` is not checked. The checks run in the order
+tools (`EXTERNAL_AGENT_TOOLS_UNSUPPORTED`), approvals, then the `readOnlyTools`
+checks.
+
 ### Reading wider than you write
 
 `allowedPaths` holds the roots an agent may read and write. `readPaths` adds
@@ -395,6 +412,75 @@ name its permission prompts and `PreToolUse` hooks see. An instruction that name
 does not match any tool the model sees: describe what the tool does, or use
 the exposed name. Read-only filters (`readOnlyTools`) match the tool's own
 name, before it is rewritten.
+
+### Read-only agents and host tools
+
+`permissions.mode: "read-only"` constrains **the runtime's own tools**. It
+cannot see inside a host function: an ADK `FunctionTool` is host code that
+runs in your process with your authority (files, network, credentials),
+outside every runtime sandbox, and no static check proves a closure has no
+side effects. So "read-only" for a host tool is **your declaration**, made
+with `readOnlyTools` (original tool names). **The bridge cannot verify it.**
+
+```ts
+new ClaudeAgent({
+  permissions: { mode: "read-only" },
+  tools: [getComponent, validateUsage],
+  readOnlyTools: ["reui_get_component", "reui_validate_usage"],
+});
+```
+
+What the bridge does guarantee: only declared tools are exposed under
+`read-only`, a declaration that names no tool is caught, and nothing is
+dropped silently.
+
+| Code (`ExternalAgentPolicyError`, thrown when the agent is built) | When |
+|---|---|
+| `EXTERNAL_AGENT_TOOLS_UNSUPPORTED` | `tools` on a driver whose `capabilities().tools` is not `true` (Codex, Gemini CLI, Claude CLI). Only the Claude Agent SDK driver (`ClaudeAgent`) hosts ADK tools. A custom driver without `capabilities()` is not checked. |
+| `EXTERNAL_AGENT_APPROVALS_UNSUPPORTED` | `confirmation.approver` or `confirmation.adk: true` on a driver whose `capabilities().approvals` is not `true` (Codex, Gemini CLI, Claude CLI): the runtime decides alone and the setting would be ignored. Only the Claude Agent SDK driver (`ClaudeAgent`) asks the host. A custom driver without `capabilities()` is not checked. See [Approvers and ADK confirmation](#approvers-and-adk-confirmation-need-a-driver-that-asks). |
+| `EXTERNAL_AGENT_READ_ONLY_TOOL_UNKNOWN` | A `readOnlyTools` entry that is empty, listed twice, names no direct tool (when `tools` has no toolset), or names two or more direct tools. |
+| `EXTERNAL_AGENT_TOOL_NOT_READ_ONLY` | The agent's **own** mode is `read-only` and a direct tool is not in `readOnlyTools`. Add it if it has no side effects, or remove it. |
+
+The checks run in that order, so a typo in `readOnlyTools` is reported as
+unknown before an undeclared tool. Toolsets are listed only at run time, so
+they are not checked at construction.
+
+When the run is under a `read-only` policy it inherited (for example a
+`workspace-write` child of a `read-only` coordinator), hiding the tools is the
+designed narrowing, so the agent still builds. The run reports what it hid, in
+three places:
+
+- **A warning, always.** One warning per run with the code
+  `EXTERNAL_AGENT_TOOLS_HIDDEN` names the hidden, ambiguous and unmatched
+  tools. It is logged when the tools are resolved, so it does not depend on how
+  the run ends (a driver error, a pause, a run without a final event) or on
+  tracing. An ambiguous name also gets its own `ADK_TOOL_AMBIGUOUS_SKIPPED`
+  warning.
+- **The final event**, when the run completes: `customMetadata.externalAgentTools`
+  (on the last error event when there is no final text). A run that fails,
+  pauses or ends without a completion has no event copy.
+- **The span**, when tracing is on: the attributes
+  `gcp.vertex.agent.external_agent.tools.hidden`, `.ambiguous` and
+  `.unmatched_read_only`.
+
+```ts
+{ hidden: string[]; ambiguous?: string[]; unmatchedReadOnlyTools?: string[]; reason: "read-only" }
+```
+
+The names are original names, sorted. Nothing is set when nothing was hidden.
+
+**A `readOnlyTools` entry declares one tool.** If a toolset can add a tool with
+the same name (an MCP server that grows a `get_component` that writes), the
+declaration is void at run time: neither tool is exposed and the run reports
+the name as `ambiguous`. Give read-only tools names that are unique across the
+agent's tools and toolsets, or filter the toolset. Edge cases: a toolset whose
+`getTools()` fails adds nothing to the count, so a listed direct tool stays
+exposed; a tool the bridge would skip anyway (an in-model tool, a tool with no
+declaration) still counts, so it makes the name ambiguous. That fails closed.
+
+Read-only MCP servers follow the same model: the host's declaration
+(`readOnly: true` with a `tools` list) is the attestation, and the guard
+enforces it as an allowlist.
 
 ### Confirmations compared with ADK
 
@@ -1059,6 +1145,7 @@ because the tool was not offered. The other codes in the table (`CLAUDE_*`,
 | `CODEX_TURN_FAILED` | - | From the message | A Codex SDK `turn.failed` event. |
 | `CODEX_SDK_STREAM_ERROR` | - | From the message | A Codex SDK `error` stream event. |
 | `CODEX_SDK_ERROR` | - | From the message | The Codex SDK threw. |
+| `CODEX_SDK_INPUT_NOT_DELIVERED` | - | No | Codex did not read the prompt from stdin: it closed stdin while it kept running (the driver stops it), it exited 0 without reading it, or a process it started kept the pipe without reading. A Codex that exits non-zero before reading reports `CODEX_SDK_ERROR` with its stderr instead. Neither ends the host process; see [Codex SDK prompt delivery](#codex-sdk-prompt-delivery). |
 | `CODEX_ITEM_ERROR` | - | From the message | A Codex SDK `error` item. |
 
 "From the message" means `classifyRecoverable` sorts the message. Auth,
@@ -1069,6 +1156,104 @@ reports that failure's code instead (for example `RATE_LIMIT` or
 `QUOTA_EXHAUSTED`); the CLI exit codes stay as shown, and for them only the
 last stderr line is sorted. A Codex CLI that writes to stderr and exits 0 only
 logs a `CODEX_CLI_STDERR` warning.
+
+### Codex SDK prompt delivery
+
+`@openai/codex-sdk` writes the prompt to the codex process's stdin without
+an `error` listener on that stream. If the process is gone before it has read
+the whole prompt (it exited early, the run was aborted, or it closed stdin),
+the failed write would be an uncaught `EPIPE` that ends the host process. With
+a prompt larger than the pipe buffer this happens at any exit time, not only
+right after the start.
+
+`CodexSdkDriver` therefore replaces the exec of the client it uses (the one it
+builds and a prebuilt `sdk` client) with a copy of the SDK's exec path that
+handles the error. The copy sends the same arguments and environment and uses
+the same binary and abort signal. The result:
+
+- An abort is reported as before.
+- A non-zero exit of codex's own is `CODEX_SDK_ERROR` with its stderr, as
+  before.
+- A prompt codex did not read in any other way is `CODEX_SDK_INPUT_NOT_DELIVERED`.
+  A codex that closed stdin and kept running is stopped.
+
+The copy follows `@openai/codex-sdk` 0.167.0, and the driver uses it only on
+that version. The optional peer is exactly `0.167.0`, and on each run the
+driver also reads the installed SDK's version (from the `package.json` beside
+the resolved `@openai/codex-sdk` entry, once per process), because a package
+manager can still install another one. The run is refused with
+`EXTERNAL_AGENT_DEPENDENCY_MISSING`, before codex starts, when:
+
+- the installed version is another one, such as 0.167.1. Its exec may build a
+  different command line, so the driver does not run the 0.167.0 copy for it.
+  The message names the supported version, the installed one and the ways
+  forward: install `@openai/codex-sdk@0.167.0`, set
+  `allowUncontainedCodexSdk: true`, or use `CodexCliDriver`;
+- the version cannot be read. The driver finds the SDK with
+  `import.meta.resolve`, so a bundler that rewrites or drops that call (or
+  inlines the SDK without its `package.json`) makes every Codex SDK run fail
+  closed with this message. Keep `@openai/codex-sdk` external to the bundle;
+- the version is 0.167.0 but the client's exec does not have the 0.167.0
+  fields.
+
+The version checked is the one the bridge resolves, not the copy a prebuilt
+`sdk` client came from: a prebuilt client must come from the same
+`@openai/codex-sdk` install the bridge resolves. A client from another copy
+(a second version nested under the host's own dependencies) is checked only
+by the shape of its exec, not by its version.
+
+A client with no SDK exec (for example a test double) is used as is.
+`CodexCliDriver` writes the prompt through its own spawn helper, which already
+handles the error.
+
+#### Running another SDK version uncontained
+
+`allowUncontainedCodexSdk: true` lets a host run an installed SDK version the
+driver cannot contain (a patch release such as 0.167.1, or a version it cannot
+read) instead of being refused. Such a run goes through the SDK's own exec
+**without the containment**: a codex that exits, is aborted or closes stdin
+before it has read the prompt can again end the host process with an uncaught
+`EPIPE`. The driver logs one `CODEX_SDK_UNCONTAINED` warning per driver
+instance. On 0.167.0 the option changes nothing: the contained copy is still
+used, and a client whose exec does not match 0.167.0 is still refused.
+
+The optional peer is exactly `0.167.0`, so npm (7 and later) fails with
+`ERESOLVE` when another version is installed beside the bridge. With npm,
+override the bridge's peer with the version the host installs:
+
+```json
+{
+  "dependencies": {
+    "adk-llm-bridge": "^0.7.0",
+    "@openai/codex-sdk": "0.167.1"
+  },
+  "overrides": {
+    "adk-llm-bridge": {
+      "@openai/codex-sdk": "$@openai/codex-sdk"
+    }
+  }
+}
+```
+
+or install with `npm install --legacy-peer-deps`. Bun and pnpm install it
+without failing on the peer.
+
+#### Supporting a new SDK version
+
+A new 0.167.x patch (or a later release) becomes supported when it is added to
+the verified list, `SUPPORTED_CODEX_SDK_VERSIONS` in
+`src/agents/driver/codex-sdk-exec.ts`, together with the exact peer range. That
+happens only after the copied `CodexExec.run` is compared with the new SDK's,
+and the pin test (`tests/agents/driver/codex-sdk-exec.test.ts`) and the fault
+tests (`tests/agents/driver/codex-sdk-epipe.test.ts`) pass on it.
+
+The copy is temporary. It stays until `@openai/codex-sdk` handles stdin errors
+itself, and is removed once an SDK version with that fix is verified: the
+fault tests pass on it with the SDK's own exec.
+
+A prebuilt `sdk` client is changed in place: its exec is replaced on the first
+run, so the host's own later uses of that client go through the contained
+copy too.
 
 ### Classified codes
 

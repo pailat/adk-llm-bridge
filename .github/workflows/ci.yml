@@ -47,14 +47,28 @@ jobs:
   # The `interpreter` + `entry` route runs a fake JavaScript entry through the
   # native node.exe (the only interpreter accepted), under Bun and under Node,
   # with a prompt cmd.exe would re-parse.
-  # Only Windows-safe checks run here: the rest of the driver tests assume POSIX.
-  # The storage suites run here too: the SQLite stores, the JSONL exporter, the
-  # session store and the file-system provider, under Bun, and the conformance
-  # cases of the SQLite stores and the JSONL exporter under Node, from dist.
+  # Only Windows-safe driver checks run here: the rest assume POSIX. The
+  # file-system store and storage provider suites run whole, under Bun and
+  # under Node.
   windows-shims:
     name: windows shims (Bun and Node)
     runs-on: windows-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
+    env:
+      # `./` makes `bun test` take each entry as a path, not a name filter, so
+      # both legs run exactly these files.
+      FS_STORE_SUITES: >-
+        ./tests/workflows/checkpoint
+        ./tests/workflows/internal
+        ./tests/workflows/checkpoint-store.test.ts
+        ./tests/workflows/checkpoint-size-limit.test.ts
+        ./tests/workflows/workspace/file-system-workspace-adapter.test.ts
+        ./tests/workflows/wall-clock-step.test.ts
+        ./tests/workflows/storage
+        ./tests/utils/sqlite-database.test.ts
+        ./tests/utils/sqlite-open-while-locked.test.ts
+        ./tests/utils/windows-contract.test.ts
+        ./tests/agents/session-store
     defaults:
       run:
         shell: bash
@@ -71,18 +85,22 @@ jobs:
       - run: bun install --frozen-lockfile
       - name: Fake .cmd shims and the interpreter + entry route under Bun
         run: bun test tests/agents/driver/windows-command.test.ts tests/agents/driver/cli-interpreter-entry.test.ts
-      - name: Storage providers under Bun
-        run: bun test tests/workflows/storage tests/utils/sqlite-database.test.ts tests/utils/sqlite-open-while-locked.test.ts tests/utils/windows-contract.test.ts tests/agents/session-store
-      # The steps below run even when the Bun storage step fails, so the Node
+      # The steps below run even when an earlier step fails, so the Node
       # Windows contract is reported on its own.
       - run: bun run build
         if: ${{ !cancelled() }}
       - name: Fake .cmd shims and the interpreter + entry route under Node
         if: ${{ !cancelled() }}
         run: node scripts/windows-shim-smoke.mjs
-      - name: Storage conformance under Node
+      # The file-system stores, the storage providers and the lock protocol on
+      # NTFS, under Bun and under Node (their file-system implementations
+      # differ on Windows). Both legs run even when the other fails, so one run
+      # shows every failure.
+      - name: File-system stores and lock protocol on NTFS under Bun
+        run: bun test ${{ env.FS_STORE_SUITES }}
+      - name: File-system stores and lock protocol on NTFS under Node
         if: ${{ !cancelled() }}
-        run: node --test scripts/node-storage-conformance.mjs
+        run: node scripts/node-test.mjs ${{ env.FS_STORE_SUITES }}
 
   # Installs the packed tarball with npm into an empty project, which pulls in
   # the required peers and skips the optional ones, then imports every entry.

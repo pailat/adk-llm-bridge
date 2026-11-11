@@ -18,7 +18,9 @@
  * error class is recorded.
  */
 
+import type { LlmResponse } from "@google/adk";
 import { type Span, SpanStatusCode, trace } from "@opentelemetry/api";
+import { CACHE_CREATION_METADATA_KEY } from "../converters/cache-usage.js";
 import { httpStatusOf } from "./provider-llm-error.js";
 
 /**
@@ -82,6 +84,10 @@ export interface LlmSpanInfo {
   responseId?: string;
   /** Endpoint base URL; only its host (and port) is recorded. */
   baseURL?: string;
+  /** Prompt tokens served from the cache (`gen_ai.usage.cache_read.input_tokens`). */
+  cacheReadTokens?: number;
+  /** Prompt tokens written to the cache (`gen_ai.usage.cache_creation.input_tokens`). */
+  cacheCreationTokens?: number;
 }
 
 /**
@@ -100,6 +106,29 @@ export function serverAddress(baseURL: string | undefined): {
   } catch {
     return {};
   }
+}
+
+/**
+ * Records the cache usage of a finished call on the active model-call span:
+ * the cache-read tokens from `usageMetadata.cachedContentTokenCount` and the
+ * cache-write tokens from `customMetadata.cacheCreationTokenCount`. Attributes
+ * the provider did not report are skipped.
+ *
+ * @param provider - Bridge provider id
+ * @param response - The converted response of the call
+ */
+export function annotateCacheUsage(
+  provider: string,
+  response: Pick<LlmResponse, "usageMetadata" | "customMetadata">,
+): void {
+  const read = response.usageMetadata?.cachedContentTokenCount;
+  const written = response.customMetadata?.[CACHE_CREATION_METADATA_KEY];
+  if (read === undefined && typeof written !== "number") return;
+  annotateLlmSpan({
+    provider,
+    ...(read !== undefined ? { cacheReadTokens: read } : {}),
+    ...(typeof written === "number" ? { cacheCreationTokens: written } : {}),
+  });
 }
 
 /**
@@ -124,6 +153,13 @@ export function annotateLlmSpan(
   };
   if (info.model) attributes["gen_ai.response.model"] = info.model;
   if (info.responseId) attributes["gen_ai.response.id"] = info.responseId;
+  if (info.cacheReadTokens !== undefined) {
+    attributes["gen_ai.usage.cache_read.input_tokens"] = info.cacheReadTokens;
+  }
+  if (info.cacheCreationTokens !== undefined) {
+    attributes["gen_ai.usage.cache_creation.input_tokens"] =
+      info.cacheCreationTokens;
+  }
   if (address) attributes["server.address"] = address;
   if (port !== undefined && Number.isFinite(port)) {
     attributes["server.port"] = port;

@@ -93,44 +93,123 @@ export interface CachedAnthropicPrefix {
    * there are no tools.
    */
   tools?: Anthropic.Tool[];
+
+  /**
+   * Messages with `cache_control` on the last eligible block of the last
+   * message. Undefined when no message block can carry a marker.
+   */
+  messages?: Anthropic.MessageParam[];
 }
 
-/** Anthropic ephemeral cache breakpoint. */
-const EPHEMERAL_CACHE_CONTROL = { type: "ephemeral" } as const;
+/** Anthropic cache breakpoint lifetime. `"5m"` is the API default. */
+export type AnthropicCacheTtl = "5m" | "1h";
+
+/** Builds the `cache_control` value; the default 5m TTL is left implicit. */
+function cacheControl(ttl?: AnthropicCacheTtl): {
+  type: "ephemeral";
+  ttl?: "1h";
+} {
+  return ttl === "1h"
+    ? { type: "ephemeral", ttl: "1h" }
+    : { type: "ephemeral" };
+}
+
+/** Block types that can carry `cache_control` (thinking blocks cannot). */
+function isCacheEligible(block: Anthropic.ContentBlockParam): boolean {
+  switch (block.type) {
+    case "text":
+      return block.text.length > 0;
+    case "image":
+    case "document":
+    case "tool_use":
+    case "tool_result":
+      return true;
+    default:
+      return false;
+  }
+}
 
 /**
- * Applies opt-in Anthropic prompt caching to a converted request's prefix.
+ * Marks the last cache-eligible block of the last message. A string content is
+ * widened to a one-block array. Returns the messages unchanged when the last
+ * message has no eligible block.
+ */
+function markLastMessage(
+  messages: Anthropic.MessageParam[],
+  control: ReturnType<typeof cacheControl>,
+): Anthropic.MessageParam[] {
+  const lastIndex = messages.length - 1;
+  const last = messages[lastIndex];
+  if (!last) return messages;
+
+  let content: Anthropic.ContentBlockParam[];
+  if (typeof last.content === "string") {
+    if (!last.content) return messages;
+    content = [{ type: "text", text: last.content }];
+  } else {
+    content = last.content;
+  }
+
+  let target = -1;
+  for (let i = content.length - 1; i >= 0; i--) {
+    if (isCacheEligible(content[i])) {
+      target = i;
+      break;
+    }
+  }
+  if (target < 0) return messages;
+
+  const marked = content.map((block, i) =>
+    i === target
+      ? ({ ...block, cache_control: control } as Anthropic.ContentBlockParam)
+      : block,
+  );
+  return messages.map((m, i) =>
+    i === lastIndex ? ({ ...m, content: marked } as Anthropic.MessageParam) : m,
+  );
+}
+
+/**
+ * Applies Anthropic prompt caching to a converted request.
  *
- * Marks the largely-static prefix (system instruction + tool schemas) as
- * cacheable by attaching `cache_control: { type: "ephemeral" }` to the system
- * block and to the last tool definition. The system string is widened to a
- * single-element text block array (Anthropic requires a block to carry
- * `cache_control`).
+ * Places up to three of the four allowed breakpoints: the system block, the
+ * last tool definition and the last cache-eligible block of the last message
+ * (the newest turn, so the next call reads this call's whole prefix). A string
+ * system or message is widened to a text block array, because only a block can
+ * carry `cache_control`. One slot stays free.
  *
- * This is a pure transform; the caller decides whether to invoke it based on
- * the bridge's `promptCaching` instance config. It never mutates its inputs.
+ * This is a pure transform; the caller decides whether to invoke it. It never
+ * mutates its inputs.
  *
  * @param system - The converted system instruction string (if any)
  * @param tools - The converted tool definitions (if any)
- * @returns System blocks and tools carrying cache breakpoints
+ * @param messages - The converted messages (if any)
+ * @param ttl - Breakpoint lifetime; `"1h"` is sent on every marker
+ * @returns System blocks, tools and messages carrying cache breakpoints
  */
 export function applyAnthropicPromptCaching(
   system: string | undefined,
   tools: Anthropic.Tool[] | undefined,
+  messages?: Anthropic.MessageParam[],
+  ttl?: AnthropicCacheTtl,
 ): CachedAnthropicPrefix {
   const result: CachedAnthropicPrefix = {};
+  const control = cacheControl(ttl);
 
   if (system) {
-    result.system = [
-      { type: "text", text: system, cache_control: EPHEMERAL_CACHE_CONTROL },
-    ];
+    result.system = [{ type: "text", text: system, cache_control: control }];
   }
 
   if (tools?.length) {
     const last = tools.length - 1;
     result.tools = tools.map((tool, i) =>
-      i === last ? { ...tool, cache_control: EPHEMERAL_CACHE_CONTROL } : tool,
+      i === last ? { ...tool, cache_control: control } : tool,
     );
+  }
+
+  if (messages?.length) {
+    const marked = markLastMessage(messages, control);
+    if (marked !== messages) result.messages = marked;
   }
 
   return result;

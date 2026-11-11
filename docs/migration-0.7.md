@@ -175,6 +175,17 @@ Related behavior changes:
   tokens, as ADK expects. Cached tokens are also reported in
   `cachedContentTokenCount`. If you added the cache counts yourself, stop
   doing so.
+- Anthropic prompt caching is now **on by default** (native `AnthropicLlm` and
+  `anthropic/*` on AI Gateway), where the native option used to be opt-in. It
+  does not change outputs, but a cache write costs 1.25x the input price and a
+  read 0.1x or less, so it pays off from the second turn. If you make
+  high-volume one-shot calls with prompts above the minimum cacheable size
+  (512 tokens on Haiku/Sonnet/Opus 5.5), set `promptCaching: false`.
+  OpenRouter is opt-in. See [Prompt caching](prompt-caching.md).
+- The tokens a call wrote to the prompt cache are in
+  `customMetadata.cacheCreationTokenCount` (genai has no field for them), and
+  in the optional `cacheCreationTokens` of `AgentInvocationUsage` and
+  `WorkflowStepUsage`.
 - Claude Agent SDK: a resumed session reports usage and cost per run instead
   of the session total, marked `usage.scope: "run"`. When the driver has no
   baseline for the session (first run after a restart or on another replica,
@@ -527,6 +538,29 @@ new in 0.7.0. If you already use them, these changes apply:
   `EXTERNAL_AGENT_OPTION_UNSUPPORTED`: codex would read it as an option.
   Codex's own thread ids never start with `-`, so only a forged or corrupted
   id is affected. Clear it from session state to start a new thread.
+- **Codex SDK prompt delivery.** `CodexSdkDriver` runs codex through a
+  copy of the `@openai/codex-sdk` 0.167.0 exec path that handles a failed
+  write of the prompt (see [Codex SDK prompt delivery](external-agent-isolation.md#codex-sdk-prompt-delivery)).
+  A prompt codex did not read is the new error code
+  `CODEX_SDK_INPUT_NOT_DELIVERED` instead of an uncaught `EPIPE` that ended
+  the process.
+  - **The optional peer range narrows** from `>=0.167.0 <0.168` to exactly
+    `0.167.0`, because the contained copy is verified against that exact
+    version. Install exactly `@openai/codex-sdk@0.167.0`.
+  - Another installed version, one the driver cannot read, or a prebuilt
+    `sdk` client whose exec differs from 0.167.0 is refused with
+    `EXTERNAL_AGENT_DEPENDENCY_MISSING`, naming the supported and the
+    installed version. To run another version anyway, set
+    `allowUncontainedCodexSdk: true`: the run then uses the SDK's own exec
+    without the containment (an `EPIPE` from it can end the host again) and
+    logs one `CODEX_SDK_UNCONTAINED` warning per driver. Or use
+    `CodexCliDriver`. npm refuses another version beside the exact peer
+    (`ERESOLVE`): add `"overrides": { "adk-llm-bridge": { "@openai/codex-sdk":
+    "$@openai/codex-sdk" } }` to the host's `package.json`, or install with
+    `--legacy-peer-deps` (see [Running another SDK version uncontained](external-agent-isolation.md#running-another-sdk-version-uncontained)).
+  - A bundled host must keep `@openai/codex-sdk` external, or the version
+    cannot be read and every run is refused; a prebuilt `sdk` client must
+    come from the same SDK install the bridge resolves.
 - **Codex approvals reviewer.** `CodexCliDriver` and `CodexSdkDriver` pass
   `-c approvals_reviewer="user"` outside `full-access`, so an
   `approvals_reviewer = "auto_review"` in `~/.codex/config.toml` no longer
@@ -718,6 +752,33 @@ Recommended for hosts:
 - Set `requireExplicitModel: true` on drivers.
 - Use **full model ids** (`claude-opus-5-5`, not `opus`), so a substituted
   model shows as a reported id that differs from the requested one.
+
+### Read-only agents and tools
+
+`ExternalAgent` now refuses configurations that used to drop ADK tools
+silently. See
+[Read-only agents and host tools](./external-agent-isolation.md#read-only-agents-and-host-tools).
+
+- List the tools that are safe in a `read-only` agent in `readOnlyTools`, by
+  their original names. A `read-only` agent with an unlisted direct tool throws
+  `EXTERNAL_AGENT_TOOL_NOT_READ_ONLY`; an entry that names no tool, or more
+  than one tool, throws `EXTERNAL_AGENT_READ_ONLY_TOOL_UNKNOWN`.
+- Remove `tools` from Codex, Gemini CLI and Claude CLI agents: they never
+  reached the runtime, and now throw `EXTERNAL_AGENT_TOOLS_UNSUPPORTED`. Use
+  `ClaudeAgent` to host ADK tools.
+- The bridge cannot verify that a host function is read-only. The declaration
+  is yours.
+
+### Approvers and confirmation
+
+`confirmation: { approver }` and `confirmation: { adk: true }` now throw
+`EXTERNAL_AGENT_APPROVALS_UNSUPPORTED` when the agent is built on a driver that
+never asks the host for permission: the Claude CLI, Codex SDK, Codex CLI and
+Gemini CLI drivers. Before, the setting was ignored and the runtime denied
+whatever needed approval. Remove `confirmation` from those agents, or use
+`ClaudeAgent` (the Claude Agent SDK driver), the only built-in driver that
+routes prompts to the approver. See
+[Approvers and ADK confirmation](./external-agent-isolation.md#approvers-and-adk-confirmation-need-a-driver-that-asks).
 
 ### Coming in 0.8
 

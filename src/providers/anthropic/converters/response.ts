@@ -8,6 +8,7 @@
 import type Anthropic from "@anthropic-ai/sdk";
 import type { LlmResponse } from "@google/adk";
 import { FinishReason, type Part } from "@google/genai";
+import { withCacheCreation } from "../../../converters/cache-usage.js";
 import {
   contentFilteredError,
   modelVersionOf,
@@ -314,11 +315,16 @@ export function convertAnthropicResponse(
       })
     : undefined;
 
+  const customMetadata = withCacheCreation(
+    undefined,
+    message.usage?.cache_creation_input_tokens ?? undefined,
+  );
   const modelVersion = modelVersionOf(message.model);
 
   if (malformed.length) {
     return malformedToolCallResponse(parts, malformed, {
       usageMetadata,
+      customMetadata,
       ...modelVersion,
     });
   }
@@ -330,6 +336,7 @@ export function convertAnthropicResponse(
     finishReason,
     ...contentFilteredError(finishReason, parts.length > 0),
     usageMetadata,
+    customMetadata,
     ...modelVersion,
   };
 }
@@ -576,6 +583,10 @@ export function convertAnthropicStreamEvent(
           })
         : undefined;
 
+      const customMetadata = withCacheCreation(
+        undefined,
+        acc.cacheCreationTokens,
+      );
       const finishReason = mapAnthropicStopReason(acc.stopReason);
       const modelVersion = modelVersionOf(acc.model);
 
@@ -596,6 +607,7 @@ export function convertAnthropicStreamEvent(
           response: {
             ...malformedToolCallResponse(parts, malformed, {
               usageMetadata,
+              customMetadata,
               ...modelVersion,
             }),
             partial: false,
@@ -612,6 +624,7 @@ export function convertAnthropicStreamEvent(
           finishReason,
           ...contentFilteredError(finishReason, parts.length > 0),
           usageMetadata,
+          customMetadata,
           ...modelVersion,
         },
         isComplete: true,

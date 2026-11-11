@@ -5,12 +5,16 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { AsyncLocalStorage } from "node:async_hooks";
 import {
+  type BaseTool,
+  BaseToolset,
   type Event,
+  FunctionTool,
   InMemorySessionService,
   type InvocationContext,
   Runner,
 } from "@google/adk";
 import { type Context, context, type Span, trace } from "@opentelemetry/api";
+import { z } from "zod";
 import {
   ExternalAgent,
   type ExternalAgentDriver,
@@ -439,6 +443,32 @@ describe("ExternalAgent spans: one agent with a built-in tool", () => {
         expect(final?.usageMetadata).toEqual(expected);
         expect(final?.customMetadata?.externalAgentUsageScope).toBe(scope);
       }
+    });
+
+    test("cache creation tokens go to customMetadata, merged with the scope and the agent's own metadata", async () => {
+      const events = await run([
+        { type: "output", content: "A" },
+        {
+          type: "completed",
+          usage: { ...usage, cacheCreationInputTokens: 7, scope: "run" },
+        },
+      ]);
+      const final = events.find((event) => textOf(event) === "A");
+      expect(final?.customMetadata?.cacheCreationTokenCount).toBe(7);
+      expect(final?.customMetadata?.externalAgentUsageScope).toBe("run");
+      // The agent's own stamp is kept, not replaced (mutant j').
+      expect(final?.customMetadata?.externalAgent).toBe(true);
+    });
+
+    test("usage without cache creation adds no cacheCreationTokenCount", async () => {
+      const events = await run([
+        { type: "output", content: "A" },
+        { type: "completed", usage },
+      ]);
+      const final = events.find((event) => textOf(event) === "A");
+      expect(final?.customMetadata).not.toHaveProperty(
+        "cacheCreationTokenCount",
+      );
     });
 
     test("usage without a scope adds no scope metadata", async () => {
@@ -1029,5 +1059,136 @@ describe("ExternalAgent spans: the model option of the Codex and Gemini CLI driv
     for (const span of named("call_llm")) {
       expect(span.attributes["gen_ai.request.model"]).toBe("gemini-3-pro");
     }
+  });
+});
+
+describe("hidden tools on the agent span", () => {
+  class ListToolset extends BaseToolset {
+    constructor(private readonly members: BaseTool[]) {
+      super([]);
+    }
+    async getTools() {
+      return this.members;
+    }
+    async close() {}
+  }
+  const named = (name: string) =>
+    new FunctionTool({
+      name,
+      description: name,
+      parameters: z.object({}),
+      execute: () => name,
+    });
+  /**
+   * ADK wraps `runAsync` in its own `invoke_agent` span, which these tests
+   * make transparent, so the agent span the tracer annotates cannot be read
+   * back through a run. The wiring is observed on the tracer instead, and
+   * the attributes on a tracer built directly.
+   */
+  async function reportsOf(agent: ExternalAgent): Promise<unknown[]> {
+    const calls: unknown[] = [];
+    const original = ExternalAgentRunTracer.prototype.traceToolsReport;
+    ExternalAgentRunTracer.prototype.traceToolsReport = function (report) {
+      calls.push(report);
+      return original.call(this, report);
+    };
+    try {
+      const invocation = {
+        invocationId: "inv-1",
+        agent,
+        session: {
+          id: "s-1",
+          appName: "a",
+          userId: "u",
+          state: {},
+          events: [],
+        },
+      } as unknown as InvocationContext;
+      for await (const _event of agent.runAsync(invocation)) {
+        // drain
+      }
+    } finally {
+      ExternalAgentRunTracer.prototype.traceToolsReport = original;
+    }
+    return calls;
+  }
+
+  function tracerAttributes(
+    report: Parameters<ExternalAgentRunTracer["traceToolsReport"]>[0],
+  ): Record<string, unknown> {
+    const agentSpan = trace.getTracer("test").startSpan("invoke_agent coder");
+    context.with(trace.setSpan(context.active(), agentSpan), () => {
+      new ExternalAgentRunTracer({
+        context: {
+          invocationId: "inv-1",
+          agent: { name: "coder" },
+          session: { id: "s-1" },
+        } as unknown as InvocationContext,
+        providerId: CODEX_PROVIDER.id,
+      }).traceToolsReport(report);
+    });
+    agentSpan.end();
+    return (
+      spans.find((span) => span.name === "invoke_agent coder")?.attributes ?? {}
+    );
+  }
+  const quick = () =>
+    new ScriptedDriver(async function* () {
+      yield { type: "output", content: "done" };
+      yield { type: "completed", exitCode: 0 };
+    });
+
+  test("the run hands its report to the tracer, and the tracer sets the attributes", async () => {
+    const agent = new ExternalAgent({
+      name: "coder",
+      provider: CODEX_PROVIDER,
+      driver: quick(),
+      permissions: { mode: "read-only" },
+      tools: [
+        named("dup"),
+        new ListToolset([named("dup"), named("write"), named("read")]),
+      ],
+      readOnlyTools: ["dup", "read", "ghost"],
+    });
+    const reports = await reportsOf(agent);
+    expect(reports).toEqual([
+      {
+        hidden: ["dup", "write"],
+        ambiguous: ["dup"],
+        unmatchedReadOnlyTools: ["ghost"],
+        reason: "read-only",
+      },
+    ]);
+    const attributes = tracerAttributes(
+      reports[0] as Parameters<ExternalAgentRunTracer["traceToolsReport"]>[0],
+    );
+    expect(attributes["gcp.vertex.agent.external_agent.tools.hidden"]).toEqual([
+      "dup",
+      "write",
+    ]);
+    expect(
+      attributes["gcp.vertex.agent.external_agent.tools.ambiguous"],
+    ).toEqual(["dup"]);
+    expect(
+      attributes["gcp.vertex.agent.external_agent.tools.unmatched_read_only"],
+    ).toEqual(["ghost"]);
+  });
+
+  test("nothing hidden: no report and no tools attribute", async () => {
+    const agent = new ExternalAgent({
+      name: "coder",
+      provider: CODEX_PROVIDER,
+      driver: quick(),
+      permissions: { mode: "read-only" },
+      tools: [new ListToolset([named("read")])],
+      readOnlyTools: ["read"],
+    });
+    expect(await reportsOf(agent)).toEqual([]);
+    const keys = Object.keys(
+      tracerAttributes({ hidden: [], reason: "read-only" }),
+    );
+    expect(keys.filter((key) => key.includes("external_agent.tools."))).toEqual(
+      [],
+    );
   });
 });

@@ -15,13 +15,13 @@ import {
   type DirectoryLockOwner,
   directoryLockTokenKey,
   directoryLockTokenMatches,
-  fsyncDirectorySync,
   parseDirectoryLockOwner,
   recoverDeadDirectoryLock,
   releaseDirectoryLock,
   tryAcquireDirectoryLock,
   writeDurableFileSync,
 } from "../internal/directory-lock.js";
+import { fsyncDirectorySync } from "../internal/directory-sync.js";
 import { attachCleanupErrors } from "../internal/error-support.js";
 import { hasErrorCode, isRecord } from "../internal/guards.js";
 import { monotonicNow } from "../internal/monotonic-clock.js";
@@ -228,7 +228,9 @@ export function collectFileSystemWorkspaceTombstonesOffline(
  * @remarks
  * Leases live in per-workspace state files guarded by a lock directory and
  * expire unless renewed by the heartbeat, so a crashed process loses its
- * leases after `leaseTtlMs`.
+ * leases after `leaseTtlMs`. State files are flushed to disk before they are
+ * renamed into place, and the directory after it, except on Windows, which
+ * cannot flush a directory (NTFS journals the rename itself).
  */
 export class FileSystemWorkspaceAdapter implements WorkspaceAdapter {
   readonly #options: NormalizedOptions;

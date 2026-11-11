@@ -7,9 +7,9 @@
  */
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { InvocationContext } from "@google/adk";
 import { newQuickJSWASMModuleFromVariant } from "quickjs-emscripten-core";
 import {
@@ -22,6 +22,7 @@ import {
   workflowCheckpointRevision,
 } from "../../src/workflows/checkpoint/store.js";
 import { defineWorkflow } from "../../src/workflows/definition.js";
+import { releaseDirectoryLock } from "../../src/workflows/internal/directory-lock.js";
 import { FileSystemWorkflowRepositoryMutationLock } from "../../src/workflows/node/git-worktree-change-driver.js";
 import { QuickJSSyncGeneratorRuntime } from "../../src/workflows/sandbox/quickjs-generator-runtime.js";
 import { FileSystemWorkspaceAdapter } from "../../src/workflows/workspace/file-system-workspace-adapter.js";
@@ -57,13 +58,35 @@ async function temporaryDirectory(): Promise<string> {
   return directory;
 }
 
-/** Publishes a lock directory owned by this (live) process. */
+/**
+ * Publishes a lock directory owned by this (live) process the way the lock
+ * protocol does: the owner file is written into a candidate directory that is
+ * then renamed onto the lock path, so the lock never exists without its owner.
+ */
 async function holdLock(lockPath: string, token: string): Promise<void> {
-  await mkdir(lockPath, { recursive: true, mode: 0o700 });
+  const candidate = `${lockPath}.test-candidate`;
+  await mkdir(dirname(lockPath), { recursive: true, mode: 0o700 });
+  await mkdir(candidate, { mode: 0o700 });
   await writeFile(
-    join(lockPath, "owner.json"),
+    join(candidate, "owner.json"),
     JSON.stringify({ token, pid: process.pid, acquiredAt: realNow() }),
   );
+  await rename(candidate, lockPath);
+}
+
+/**
+ * Releases a lock from {@link holdLock} with the protocol's own release: one
+ * rename moves the whole directory away, then it is removed. A recursive
+ * removal of the lock path would delete the owner file first, and a waiter
+ * that polls in that gap sees a lock without an owner, which the checkpoint
+ * store rejects as `checkpoint_lock_corrupt`. On Windows that rename is
+ * refused while the waiter has the lock open for a read, and the release
+ * retries it, as a real holder's does.
+ */
+function releaseHeldLock(lockPath: string, token: string): void {
+  if (!releaseDirectoryLock(lockPath, token)) {
+    throw new Error(`the lock is not held by ${token}: ${lockPath}`);
+  }
 }
 
 function outcome<T>(promise: Promise<T>): Promise<"settled" | unknown> {
@@ -100,7 +123,7 @@ describe("lock waits ignore wall-clock steps", () => {
     await delay(20);
     step(HOUR_MS);
     await delay(40);
-    await rm(lockPath, { recursive: true });
+    releaseHeldLock(lockPath, "live-holder");
 
     expect(await pending).toBe("settled");
   });
@@ -152,7 +175,7 @@ describe("lock waits ignore wall-clock steps", () => {
     await delay(20);
     step(HOUR_MS);
     await delay(40);
-    await rm(lockPath, { recursive: true });
+    releaseHeldLock(lockPath, "live-holder");
 
     expect(await pending).toBe("settled");
   });

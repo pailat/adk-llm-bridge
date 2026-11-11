@@ -4,8 +4,10 @@
  * @remarks
  * A capability that is `false` or absent means the driver does not provide
  * it. The flags describe the driver to callers through
- * `driver.capabilities()`, the only place they are declared. Nothing is gated
- * on them at runtime.
+ * `driver.capabilities()`, the only place they are declared. `tools` and
+ * `approvals` are also checked when an `ExternalAgent` is built: tools, an
+ * approver or ADK confirmation on a driver that implements `capabilities()`
+ * without the flag are refused. Nothing else is gated on them at runtime.
  */
 export interface AgentRuntimeCapabilities {
   /**
@@ -21,7 +23,10 @@ export interface AgentRuntimeCapabilities {
   /**
    * The driver can route the runtime's permission prompts to the host
    * (`ExternalAgentConfig.confirmation`). Without it, `ask` is enforced by the
-   * runtime alone and the host's approver is never consulted.
+   * runtime alone and the host's approver is never consulted, so an agent
+   * built with an approver or ADK confirmation on such a driver is refused
+   * (`EXTERNAL_AGENT_APPROVALS_UNSUPPORTED`). Set it only when the driver
+   * calls `request.requestPermission`.
    */
   approvals?: boolean;
   /** The driver emits partial output (token or chunk deltas) while the run is in progress. */

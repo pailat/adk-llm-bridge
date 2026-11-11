@@ -72,6 +72,7 @@ export type {
 export { GeminiCliDriver } from "./driver/gemini-cli.js";
 export type { ExternalAgentPolicyErrorCode } from "./driver/policy-errors.js";
 export {
+  EXTERNAL_AGENT_APPROVALS_UNSUPPORTED,
   EXTERNAL_AGENT_BACKGROUND_TASK_PENDING,
   EXTERNAL_AGENT_BATCH_COMMAND_REFUSED,
   EXTERNAL_AGENT_CREDENTIAL_UNSUPPORTED,
@@ -85,7 +86,10 @@ export {
   EXTERNAL_AGENT_NETWORK_UNENFORCEABLE,
   EXTERNAL_AGENT_OPTION_UNSUPPORTED,
   EXTERNAL_AGENT_PATHS_UNENFORCEABLE,
+  EXTERNAL_AGENT_READ_ONLY_TOOL_UNKNOWN,
   EXTERNAL_AGENT_TOOL_NOT_OFFERED,
+  EXTERNAL_AGENT_TOOL_NOT_READ_ONLY,
+  EXTERNAL_AGENT_TOOLS_UNSUPPORTED,
   ExternalAgentPolicyError,
 } from "./driver/policy-errors.js";
 export type {
@@ -174,6 +178,7 @@ export type {
   AdkToolErrorCode,
   AdkToolExecuteOptions,
   AdkToolExecutionResult,
+  ExternalAgentToolsReport,
   PortableToolDeclaration,
   SkippedTool,
 } from "./tools/adk-tool-bridge.js";

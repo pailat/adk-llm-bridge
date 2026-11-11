@@ -519,7 +519,11 @@ function isWorkflowStepUsage(value: unknown): value is WorkflowStepUsage {
     WORKFLOW_STEP_USAGE_FIELDS.every((field) => {
       const count = value[field];
       return isFiniteNumber(count) && count >= 0;
-    })
+    }) &&
+    // Optional: results saved before cache writes were reported carry none.
+    (value.cacheCreationTokens === undefined ||
+      (isFiniteNumber(value.cacheCreationTokens) &&
+        value.cacheCreationTokens >= 0))
   );
 }
 

@@ -2,6 +2,7 @@ import { existsSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { delimiter, dirname, join } from "node:path";
 import type { Content } from "@google/genai";
+import { warn } from "../../utils/log.js";
 import type { ExternalAgentEvent } from "../events.js";
 import {
   type ExternalAgentRunRequest,
@@ -23,6 +24,16 @@ import {
   codexApprovalsReviewerOverrides,
   codexMcpDisableOverrides,
 } from "./codex-mcp.js";
+import {
+  CODEX_SDK_INPUT_NOT_DELIVERED,
+  CODEX_SDK_UNCONTAINED,
+  CONTAINED_CODEX_SDK_VERSION,
+  CodexSdkInputError,
+  containCodexSdkClient,
+  installedCodexSdkVersion,
+  SUPPORTED_CODEX_SDK_VERSIONS,
+  threadUsesExec,
+} from "./codex-sdk-exec.js";
 import {
   assertModelOption,
   assertNoCodexConfigModelOverride,
@@ -181,6 +192,10 @@ export interface CodexSdkDriverConfig {
    * A prebuilt Codex client. When set, the driver uses it as is and cannot
    * add `configOverrides` to it, so a run without `allowNetwork: true` is
    * refused unless `allowUnenforcedNetwork` is set.
+   *
+   * When it is a `@openai/codex-sdk` client, the driver replaces its exec
+   * with a contained copy on the first run (see {@link CodexSdkDriver}), so
+   * the host's own later uses of the same client run through it too.
    */
   sdk?: CodexSdkClientLike;
   /** The `Codex` constructor to build the client with, instead of importing `@openai/codex-sdk`. */
@@ -282,6 +297,21 @@ export interface CodexSdkDriverConfig {
    */
   allowUnenforcedPaths?: boolean;
   /**
+   * Opt-in: run an installed `@openai/codex-sdk` version the driver cannot
+   * contain (any version other than 0.167.0, or one it cannot read) through
+   * the SDK's own exec, **without the containment**. Without it such a run is
+   * refused with `EXTERNAL_AGENT_DEPENDENCY_MISSING`.
+   *
+   * With it, a codex that exits, is aborted or closes stdin before it reads
+   * the prompt can end the host process with an uncaught `EPIPE` from the
+   * SDK. The driver logs one `CODEX_SDK_UNCONTAINED` warning per driver
+   * instance. On 0.167.0 the option changes nothing: the contained exec is
+   * still used, and a client whose exec it cannot contain is still refused.
+   *
+   * @defaultValue false
+   */
+  allowUncontainedCodexSdk?: boolean;
+  /**
    * Opt-in: refuse a run with `MISSING_BINARY` instead of letting the SDK
    * fall back to the Codex binary it finds next to its own install, when no
    * binary was found outside the directories the agent can write and this
@@ -353,6 +383,18 @@ const CODEX_SDK_INSTALL = "npm install @openai/codex-sdk";
  * Thread ids are persisted in session state so later invocations resume the
  * same thread.
  *
+ * The SDK writes the prompt to codex's stdin without handling a write error,
+ * so a codex gone before it read the prompt would end the host with an
+ * uncaught `EPIPE`. The driver replaces the client's exec with a contained
+ * copy of the SDK 0.167.0 exec path: such a run ends with
+ * `CODEX_SDK_INPUT_NOT_DELIVERED` (or `CODEX_SDK_ERROR` for a non-zero exit of
+ * codex's own). The copy is used only on the installed SDK versions it was
+ * copied from (0.167.0, read at run time); another version, or a client
+ * whose exec it cannot contain, is refused with
+ * `EXTERNAL_AGENT_DEPENDENCY_MISSING` before codex starts, unless
+ * `allowUncontainedCodexSdk` runs another version uncontained. The copy is
+ * temporary, until the SDK handles stdin errors itself.
+ *
  * @example
  * ```ts
  * const driver = new CodexSdkDriver({ model: "gpt-5-codex" });
@@ -378,6 +420,8 @@ export class CodexSdkDriver {
   readonly #threadStateKey: (agentName: string) => string;
   readonly #allowUnenforcedNetwork: boolean;
   readonly #allowUnenforcedPaths: boolean;
+  readonly #allowUncontainedCodexSdk: boolean;
+  #warnedUncontained = false;
   readonly #strictBinaryResolution: boolean;
   readonly #listMcpServers?: CodexMcpLister;
 
@@ -414,6 +458,9 @@ export class CodexSdkDriver {
     this.#outputSchema = config.outputSchema;
     this.#allowUnenforcedNetwork = config.allowUnenforcedNetwork ?? false;
     this.#allowUnenforcedPaths = config.allowUnenforcedPaths ?? false;
+    // Only `true` enables it: a truthy value such as the string "false"
+    // from an env-driven host must not turn the containment off.
+    this.#allowUncontainedCodexSdk = config.allowUncontainedCodexSdk === true;
     this.#strictBinaryResolution = config.strictBinaryResolution ?? false;
     if (this.#strictBinaryResolution && this.#sdk) {
       throw new ExternalAgentPolicyError(
@@ -572,6 +619,20 @@ export class CodexSdkDriver {
         new (Codex as CodexSdkConstructor)(
           this.buildClientOptions(request, configOverrides),
         );
+      // The SDK writes the prompt to codex's stdin with no error listener,
+      // so a codex that is gone before it read the prompt would end the host
+      // with an uncaught EPIPE. Its exec is replaced by a contained copy.
+      const containment = containCodexSdkClient(sdk);
+      if (containment === "unknown-shape") {
+        throw codexSdkUncontainable(installedCodexSdkVersion());
+      }
+      if (containment === "unsupported-version") {
+        const installed = installedCodexSdkVersion();
+        if (!this.#allowUncontainedCodexSdk) {
+          throw codexSdkUnsupportedVersion(installed);
+        }
+        this.#warnUncontained(installed);
+      }
       const threadOptions = this.buildThreadOptions(request);
       const agentName = request.agent?.name ?? request.context?.agent?.name;
       const stateKey = agentName ? this.#threadStateKey(agentName) : undefined;
@@ -605,6 +666,13 @@ export class CodexSdkDriver {
         const mapping = mapLastContentOrFallback(lastContent, request);
         cleanup = mapping.cleanup;
         input = applyInstruction(request.instruction, mapping.input);
+      }
+
+      if (
+        containment === "contained" &&
+        !threadUsesExec(thread, (sdk as { exec?: unknown }).exec)
+      ) {
+        throw codexSdkUncontainable(installedCodexSdkVersion());
       }
 
       const { events } = await thread.runStreamed(input, {
@@ -969,6 +1037,16 @@ export class CodexSdkDriver {
     return module.Codex;
   }
 
+  /** Logs, once per driver, that a run goes through the SDK's own exec. */
+  #warnUncontained(installed: string | undefined): void {
+    if (this.#warnedUncontained) return;
+    this.#warnedUncontained = true;
+    warn(
+      CODEX_SDK_UNCONTAINED,
+      `CodexSdkDriver runs @openai/codex-sdk ${installedLabel(installed)} without the contained exec (allowUncontainedCodexSdk): a codex that exits, is aborted or closes stdin before it reads the prompt can end the host process with an uncaught EPIPE. Install @openai/codex-sdk@${CONTAINED_CODEX_SDK_VERSION} to restore the containment.`,
+    );
+  }
+
   /** The `error` event for a failure thrown inside a run. */
   private errorEvent(
     error: unknown,
@@ -976,6 +1054,18 @@ export class CodexSdkDriver {
   ): ExternalAgentEvent {
     if (error instanceof ExternalAgentPolicyError) {
       return policyErrorEvent(error);
+    }
+    if (error instanceof CodexSdkInputError) {
+      // Not through the message heuristics: stderr in the message could
+      // read as a transport error, and a retry does not fix a codex that
+      // stops before it reads its prompt.
+      return {
+        type: "error",
+        message: error.message,
+        code: CODEX_SDK_INPUT_NOT_DELIVERED,
+        recoverable: false,
+        timestamp: Date.now(),
+      };
     }
     const rawMessage = error instanceof Error ? error.message : String(error);
     const { recoverable, code } = classifyRecoverable({
@@ -1069,6 +1159,47 @@ export function mapPolicyToCodexSdkThreadOptions(
         approvalPolicy: "never",
       }) as CodexSdkThreadOptions;
   }
+}
+
+/** The ways forward a Codex SDK refusal names. */
+const CODEX_SDK_WAYS_FORWARD = `set allowUncontainedCodexSdk: true on CodexSdkDriver to run the installed SDK without the containment (a codex that stops before it reads the prompt can then end the host), or use driver: new CodexCliDriver(...)`;
+
+function installedLabel(installed: string | undefined): string {
+  return installed ?? "a version the driver could not read";
+}
+
+/**
+ * The refusal for a Codex SDK client whose exec the driver cannot contain on
+ * a supported version: its internals differ from the SDK version the
+ * containment copies (for example a client from another SDK copy), so a
+ * codex that stops before it reads the prompt could end the host.
+ *
+ * @param installed - The installed version, when it could be read.
+ */
+function codexSdkUncontainable(installed: string | undefined): Error {
+  return dependencyMissing(
+    "package",
+    `A Codex SDK client whose exec matches @openai/codex-sdk ${CONTAINED_CODEX_SDK_VERSION} (installed: ${installedLabel(installed)}; pass a client from that install)`,
+    `npm install @openai/codex-sdk@${CONTAINED_CODEX_SDK_VERSION}`,
+    "use driver: new CodexCliDriver(...)",
+  );
+}
+
+/**
+ * The refusal for an installed Codex SDK version the contained exec was not
+ * copied from: its exec may build a different command line, so the driver
+ * does not run the copy for it, and runs it uncontained only on opt-in.
+ *
+ * @param installed - The installed version, when it could be read.
+ */
+function codexSdkUnsupportedVersion(installed: string | undefined): Error {
+  const supported = SUPPORTED_CODEX_SDK_VERSIONS.join(" or ");
+  return dependencyMissing(
+    "package",
+    `@openai/codex-sdk ${supported}, the only version${SUPPORTED_CODEX_SDK_VERSIONS.length > 1 ? "s" : ""} whose exec this driver guards (installed: ${installedLabel(installed)}),`,
+    `npm install @openai/codex-sdk@${CONTAINED_CODEX_SDK_VERSION}`,
+    CODEX_SDK_WAYS_FORWARD,
+  );
 }
 
 async function importCodexSdk(): Promise<CodexSdkModuleLike> {

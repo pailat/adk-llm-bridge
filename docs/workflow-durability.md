@@ -36,18 +36,43 @@ occurs after that store commit and does not roll it back.
 
 The filesystem store writes and syncs a temporary file, verifies lock
 ownership, atomically renames the file, and syncs the containing directory.
-That rename is the commit. If the release then fails only on I/O (the rename
-of the lock or the directory sync), `save` still resolves and logs the warning
+That rename is the commit. Windows cannot sync a directory (it refuses the
+flush with `EPERM`), so there the store skips that one step: NTFS journals the
+rename, so after a crash it is there whole or not at all, but a save that
+already resolved can be lost to a power failure right after it. File contents
+are synced on every platform. Off Windows, a failed directory sync after the
+commit rename fails the save. The workspace and repository mutation locks
+follow the same rule; a lock whose directory sync fails right after it is
+taken is released, and the operation fails. If the release after a commit
+fails only on I/O (the rename of the lock or its directory sync), `save` still
+resolves and logs the warning
 `[adk-llm-bridge] [WORKFLOW_CHECKPOINT_LOCK_RELEASE_FAILED]` through ADK's
 logger. If the lock now belongs to another owner, `save` rejects with
 `checkpoint_lock_ownership_lost`: another process recovered the lock and may
 have written the same checkpoint, so the revision check no longer holds. A
 lock with no valid owner at that point rejects with `checkpoint_lock_corrupt`.
 A lock left behind by a live process makes the next save of that execution
-fail with `checkpoint_lock_timeout`. A load opens the checkpoint file
-once without following symlinks (`O_NOFOLLOW`, where the platform has it) and
-checks and reads it through that handle, so a path swapped for a symlink after
-the check is never read.
+fail with `checkpoint_lock_timeout`. The store publishes a lock by renaming a
+directory that already holds its owner file onto the lock path, and retires it
+by renaming the whole directory away, so a concurrent writer never sees a lock
+without its owner. To clear a stuck lock by hand while writers may run, rename
+the `.lock` directory away first and delete it afterwards: a recursive delete
+of the lock path removes the owner file before the directory, and a writer
+that looks in between fails with `checkpoint_lock_corrupt`. On Windows a
+directory cannot be renamed while another process has a file inside it open,
+so a release retries a blocked rename a few times (5 tries over about 100 ms)
+before it gives up with the `checkpoint_lock_release_failed` warning. A load
+refuses a symlink at the checkpoint path before opening it, opens the file
+once (without following symlinks where the platform has `O_NOFOLLOW`), and
+reads through that handle only when the path names the opened file (device and
+inode; volume and file id on Windows). A load takes no lock, so a save can
+rename a new checkpoint over the path while it runs: that file is read. A path
+that has become a symlink or names another file is refused, so a path swapped
+for a symlink after the check is never read, also on Windows, where the open
+follows symlinks. On Linux kernels older than about 4.19, `stat` and `fstat`
+of a file on overlayfs (container image layers) can report different device
+and inode numbers; there every load fails with `checkpoint_file_unsafe`, so keep
+the checkpoint root on a volume, not in the image layers.
 Checkpoint contents and their deterministic revision are validated on load.
 New writes remove runtime-only step events and replay markers before hashing or
 persistence. Both bundled checkpoint stores reject malformed durable graphs
@@ -68,7 +93,7 @@ carry `details.causeCode` (the system error code) and, when available,
 | `checkpoint_revision_invalid` | The supplied revision does not match the checkpoint, or a stored file carries an invalid revision. |
 | `checkpoint_schema_invalid` | A save was given an invalid checkpoint. |
 | `checkpoint_file_corrupt` | A stored file is not valid JSON or not a valid checkpoint file. |
-| `checkpoint_file_unsafe` | The checkpoint path is a symlink or not a regular file (a directory, a FIFO). |
+| `checkpoint_file_unsafe` | The checkpoint path is a symlink or not a regular file (a directory, a FIFO), or it changed to a symlink or another file while it was read. |
 | `checkpoint_directory_create_failed`, `checkpoint_read_failed`, `checkpoint_stat_failed`, `checkpoint_write_failed` | A file system call on the checkpoint failed. |
 | `checkpoint_lock_timeout` | The per-checkpoint lock was not acquired in time. |
 | `checkpoint_lock_corrupt` | The lock is not a safe directory or has no valid owner; it is never taken over automatically. |
@@ -848,7 +873,9 @@ What the operator should do:
 Both filesystem adapters retire lock directories to deterministic, token-bound
 tombstones. When a recoverer retires the lock of a dead owner, the tombstone is
 kept: it makes a delayed second recoverer of the same owner fail instead of
-moving a newer owner's lock away (the ABA problem). A recoverer reads the owner
+moving a newer owner's lock away (the ABA problem). That recoverer's rename
+onto the tombstone fails with `EEXIST` or `ENOTEMPTY`, or with `EPERM` on
+Windows, and it goes back to waiting for the lock. A recoverer reads the owner
 again after finding its process dead and retires only a lock that still
 carries that owner's token.
 

@@ -107,6 +107,19 @@ license and copyright notice. The check flags any comment under `src/` and
 that legitimately quotes a third-party notice can carry
 `check-comments-allow: <reason>`.
 
+Code adapted from a third-party project is the exception, because its license
+travels with the code. Such a file:
+
+- opens with a `/*!` legal comment that names the source project, version and
+  file, keeps the source's copyright line and license (`@license <SPDX id>`),
+  and lists what was changed. The bundler keeps `/*!` comments in `dist`;
+- is named in `THIRD-PARTY-NOTICES` at the repository root, with the full
+  license text. That file is in `package.json` `files`.
+
+`check:comments` accepts that legal comment only in a file that
+`THIRD-PARTY-NOTICES` names, and `check:dist` checks that the built `dist` keeps
+it and that the package ships `THIRD-PARTY-NOTICES`.
+
 ## 6. Tests
 
 The `describe` and `test` names carry the meaning of a test, including the

@@ -68,7 +68,9 @@ from the 0.6.0 tag.
   - `zod` is an optional peer at `^4` (ADK 2.4 requires zod 4); zod 3 is no
     longer supported.
   - `@anthropic-ai/claude-agent-sdk` `>=0.3.319 <0.4` and `@openai/codex-sdk`
-    `>=0.167.0 <0.168` (optional, for `adk-llm-bridge/agents`).
+    exactly `0.167.0` (optional, for `adk-llm-bridge/agents`). The Codex SDK
+    range narrows from `>=0.167.0 <0.168` to `0.167.0`, because the contained
+    exec copy (see Fixed) is verified against that exact version.
   - `quickjs-emscripten-core` and `@jitl/quickjs-wasmfile-release-sync`
     `>=0.32.0 <0.33.0` (optional, new, for `ScriptWorkflowAgent`).
 - **Providers throw by default.** With the new `errorMode: "throw"` default, a
@@ -673,6 +675,16 @@ from the 0.6.0 tag.
 
 ### Added
 
+- **Prompt caching for Anthropic models** (see [Prompt caching](./docs/prompt-caching.md)):
+  a `promptCaching` option, `boolean | { ttl?: "5m" | "1h" }`, on `AnthropicProviderConfig`,
+  `AIGatewayProviderConfig` and `OpenRouterProviderConfig`, and on their register options.
+  - cache writes are reported in `customMetadata.cacheCreationTokenCount` (Anthropic,
+    AI Gateway, OpenRouter, `ExternalAgent`) and on the model-call span as
+    `gen_ai.usage.cache_creation.input_tokens`; reads also set
+    `gen_ai.usage.cache_read.input_tokens`;
+  - `AgentInvocationUsage.cacheCreationTokens` and `WorkflowStepUsage.cacheCreationTokens`
+    (optional, absent when no provider reported a write; old checkpoints still load).
+
 - Workflow replay records the model each step's agent requested (`model.requested`
   on the checkpoint step) and reports a change on a replayed or resumed step: a
   `step_model_changed` event and a `WORKFLOW_STEP_MODEL_CHANGED` warning.
@@ -1110,6 +1122,39 @@ from the 0.6.0 tag.
 
 ### Changed
 
+- **Prompt caching is on by default for Anthropic models** (fixes zero cache reads on
+  AI Gateway, where every turn paid the full prompt again):
+  - native `AnthropicLlm`: `promptCaching` was opt-in and marked only the system block and
+    the last tool; it is now on and also marks the last message block, so later turns read
+    earlier turns from the cache;
+  - AI Gateway `anthropic/*`: sends `providerOptions.gateway.caching = "auto"`;
+  - OpenRouter stays opt-in (`promptCaching: true`), and OpenAI, xAI and custom endpoints
+    are unchanged;
+  - a cache write costs 1.25x the input price and a read 0.1x or less, so it pays off from
+    the second turn; one-shot calls that are never reused pay the 25% write surcharge on
+    the cached part: set `promptCaching: false` for them.
+
+- **`ExternalAgent` no longer drops ADK tools silently** (see
+  [Read-only agents and host tools](./docs/external-agent-isolation.md#read-only-agents-and-host-tools)):
+  - a `read-only` agent with tools not listed in `readOnlyTools` throws
+    `EXTERNAL_AGENT_TOOL_NOT_READ_ONLY`;
+  - `readOnlyTools` entries that name no tool, or more than one tool, throw
+    `EXTERNAL_AGENT_READ_ONLY_TOOL_UNKNOWN`;
+  - a listed name that resolves to more than one tool at run time exposes none
+    of them and is reported as `ambiguous`;
+  - tools on a driver that cannot host them (Codex, Gemini CLI, Claude CLI)
+    throw `EXTERNAL_AGENT_TOOLS_UNSUPPORTED`;
+  - tools hidden by a `read-only` policy (an inherited one included) are
+    reported by one `EXTERNAL_AGENT_TOOLS_HIDDEN` warning per run, on the final
+    event (`customMetadata.externalAgentTools`) and on the span.
+- **An approver or ADK confirmation on a driver that never asks is refused**
+  (see
+  [Approvers and ADK confirmation](./docs/external-agent-isolation.md#approvers-and-adk-confirmation-need-a-driver-that-asks)):
+  `confirmation.approver` or `confirmation.adk` on the Claude CLI, Codex or
+  Gemini CLI drivers used to be ignored silently (the runtime decided alone and
+  denied what needed approval). It now throws `EXTERNAL_AGENT_APPROVALS_UNSUPPORTED`
+  when the agent is built, also on `clone()`. Only `ClaudeAgent` asks the host.
+
 - **The script sandbox stack limit is lower and capped.**
   `DEFAULT_WORKFLOW_EXECUTION_LIMITS.stackBytes` is 32 KiB (32768, was
   512 KiB), and a script workflow whose `stackBytes` is above 32 KiB is refused
@@ -1277,6 +1322,29 @@ from the 0.6.0 tag.
 
 ### Fixed
 
+- **A Codex SDK run can no longer end the host process with `EPIPE`.**
+  `@openai/codex-sdk` writes the prompt to codex's stdin with no error
+  handler. When codex was gone before it read the whole prompt (it exited
+  early, the run was aborted, or it closed stdin), the failed write was an
+  uncaught exception that ended the host. With a prompt larger than the pipe
+  buffer (256 KiB on Linux, 1 MiB on macOS) this happened at any exit time.
+  `CodexSdkDriver` now replaces the client's exec with a copy of the SDK
+  0.167.0 exec path that handles the error, with the same arguments,
+  environment, binary and abort signal. An abort and a non-zero exit of
+  codex's own are reported as before (`CODEX_SDK_ERROR` with stderr). A prompt
+  codex did not read in any other way is the new `CODEX_SDK_INPUT_NOT_DELIVERED`
+  (not recoverable), and a codex that closed stdin and kept running is
+  stopped. The copy is used only on `@openai/codex-sdk` 0.167.0, read from the
+  installed package at run time. Another version, an unreadable version, or a
+  client whose exec differs from 0.167.0 is refused with
+  `EXTERNAL_AGENT_DEPENDENCY_MISSING` before codex starts; the message names
+  the supported and the installed version and the ways forward. The new
+  opt-in `CodexSdkDriver` option `allowUncontainedCodexSdk: true` runs another
+  version through the SDK's own exec without the containment, so an `EPIPE`
+  from that SDK can end the host again; the driver logs one
+  `CODEX_SDK_UNCONTAINED` warning per driver. The copy is temporary, until the
+  SDK handles stdin errors itself. The adapted code is Apache-2.0: its legal
+  comment stays in `dist`, and the package ships `THIRD-PARTY-NOTICES`.
 - **A script that exhausted the host stack could leave the sandbox unable to
   run scripts.** QuickJS runs on the host's own stack inside a WebAssembly
   module. When the host stack overflowed first (deep recursion under the old
@@ -1783,6 +1851,47 @@ from the 0.6.0 tag.
   TypeError: the agents passed only part of their config to `BaseAgent`. The
   whole config is forwarded now, so a clone keeps the definition and adapters.
 
+- Windows: a workspace or repository mutation lock taken by another process
+  between the occupancy check and the publishing rename is waited for instead
+  of failing the mutation. Windows reports a rename onto a non-empty directory
+  as `EPERM`, which the checkpoint store already treated as contention.
+- Windows: a delayed recovery of an abandoned lock (the checkpoint store, and
+  the workspace and repository mutation locks) failed with `EPERM` when another
+  recoverer had already retired the same lock, instead of waiting for the new
+  owner. `MoveFileExW` never replaces a directory, so Windows reports a rename
+  onto the existing tombstone as `EPERM`, not `EEXIST`. That `EPERM` now counts
+  as the collision when a directory (the tombstone) is at that path; any other
+  `EPERM` still fails.
+- Windows: loading a checkpoint could read through a symlink swapped in after
+  the store checked the path, because Windows has no `O_NOFOLLOW` and the open
+  follows it. On every platform the load now checks the path with `lstat`
+  (refusing a symlink before opening it) and reads only when the path names
+  the opened file (device and inode; volume and file id on Windows). A file a
+  concurrent save renamed over the path is read; a path that became a symlink
+  or names another file fails with `checkpoint_file_unsafe` everywhere. On
+  Linux kernels older than about 4.19, overlayfs can report different device
+  and inode numbers to `stat` and `fstat`, which fails every load there; keep
+  the checkpoint root on a volume.
+- Windows: releasing a lock (the checkpoint store, and the workspace and
+  repository mutation locks) retries a rename that a waiter's open `owner.json`
+  blocks (`EPERM`, `EBUSY`, `EACCES`; 5 tries over about 100 ms) instead of
+  leaving the lock behind under a live process.
+- Linux and Windows: a checkpoint save that waited while the lock was
+  released and taken by another writer could fail with
+  `checkpoint_lock_corrupt`. The new lock directory often reuses the old one's
+  inode number (ext4, NTFS), so the store took it for the same lock without
+  its owner. The store now holds the lock directory open while it reads the
+  owner, so its number cannot be reused in between.
+- Windows: the file-system checkpoint store failed every save
+  (`checkpoint_lock_candidate_failed`, `EPERM` from `fsync`), because Windows
+  cannot flush a directory. The checkpoint store, the workspace adapter and the
+  repository mutation lock now skip the directory flush on Windows only, where
+  NTFS journals the rename; a save that already resolved can still be lost to a
+  power failure right after it. File contents are flushed on every platform.
+  Elsewhere a failed directory flush is an error, including the codes the
+  workspace and repository locks used to ignore; a lock whose flush fails
+  right after it is taken is released instead of left behind.
+
 
 ### Docs
 
@@ -1803,6 +1912,10 @@ from the 0.6.0 tag.
   case-insensitive built-in name match also applies to the start check, the
   `PreToolUse` hook and the `canUseTool` wrapper.
 - `docs/workflow-control-plane.md`: which error class carries which code type.
+- `docs/workflow-durability.md`: how to clear a stuck checkpoint lock while
+  writers may run (rename the `.lock` directory away, then delete it; a
+  recursive delete in place makes a concurrent writer fail with
+  `checkpoint_lock_corrupt`).
 - `docs/external-agent-isolation.md` and `docs/migration-0.7.md`: a "Planned
   changes" note: 0.8 is planned to replace the CLI drivers' `args` denylist
   with an allowlist, so other flags would need `allowPolicyOverrideArgs`.

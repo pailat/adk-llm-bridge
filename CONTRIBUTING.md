@@ -113,7 +113,7 @@ and include:
 
 ## License
 
-By contributing, you agree that your contributions are licensed under the MIT License of this project (see LICENSE). Contributors keep the copyright of their contributions. Do not add per-file license or copyright headers.
+By contributing, you agree that your contributions are licensed under the MIT License of this project (see LICENSE). Contributors keep the copyright of their contributions. Do not add per-file license or copyright headers. Code adapted from another project keeps its own license: see [third-party code](docs/contributing/comments.md#5-no-license-headers-checked) and `THIRD-PARTY-NOTICES`.
 
 ## Questions?
 
