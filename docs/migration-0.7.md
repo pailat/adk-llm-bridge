@@ -626,6 +626,13 @@ new in 0.7.0. If you already use them, these changes apply:
   exit code 1. To keep background tasks, pass `allowBackgroundTasks: true`
   (for example `new ClaudeAgent({ driverOptions: { allowBackgroundTasks:
   true } })`); the check stays on.
+- **A Claude Agent SDK run that never ran its input fails.** Claude Code can
+  write a "model-less" result (success, `num_turns` 0, empty `result`) before
+  the turn that runs the input, most often on a resumed session.
+  `ClaudeAgentSdkDriver` reads past it; when the stream ends with only such
+  results, the run ends with `EXTERNAL_AGENT_NO_TURN` (recoverable) and exit
+  code 1 instead of completing with empty output, so a workflow step fails
+  instead of completing empty.
 - **Private temp directory per Claude run.** Both Claude drivers create a
   fresh `0700` directory under `/tmp` for each run and set
   `CLAUDE_CODE_TMPDIR` to it and `TMPDIR` to the `claude-<uid>` directory
@@ -816,6 +823,21 @@ ON. The check covers `allowUnsandboxedShell`, `inheritHostConfig`,
 `strictBinaryResolution`, `requireExplicitModel`, `forkSession`, `debugEvents`,
 `skipGitRepoCheck` and `webSearchEnabled`. Parse the value yourself (for
 example `process.env.X === "true"`) before you pass it.
+
+### Sub-agents, permissions and delegation are checked
+
+- `subAgents` now throws `EXTERNAL_AGENT_SUBAGENTS_UNSUPPORTED` on the Claude
+  CLI, Codex CLI, Codex SDK and Gemini CLI drivers: they never exposed the
+  sub-agents. Use `ClaudeAgent`, or put the sub-agents on an ADK `LlmAgent`
+  parent.
+- `permissions` with an unknown key throws `InputValidationError` naming it;
+  before, the key was dropped (a misspelled `allowedPaths` left paths
+  unrestricted).
+- `delegation` accepts only `finalAnswer: "subagent" | "coordinator"`.
+- `tools` entries must be ADK tools or toolsets.
+
+See
+[Sub-agents need a driver that exposes them](./external-agent-isolation.md#sub-agents-need-a-driver-that-exposes-them).
 
 ### Coming in 0.8
 
@@ -1099,6 +1121,17 @@ checkpoints:
   runs awake (`caffeinate -i` on macOS) and resume with the same execution id;
   see
   [Host sleep and wall-clock steps](./workflow-durability.md#host-sleep-and-wall-clock-steps).
+
+### Unknown options
+
+- Unknown factory options and limits throw `WORKFLOW_AGENT_INVALID_REQUEST`
+  (ceilings go under `policy`): `allowFullAccess` at the top level of
+  `ExternalAgentWorkflowFactory` options, or `limits: { maxTurnz: 2 }`.
+- Unknown checkpoint store options throw `WORKFLOW_DEFINITION_INVALID`
+  (`unknown checkpoint store option: <key>`), for
+  `FileSystemWorkflowCheckpointStore` and
+  `FileSystemWorkflowCheckpointProvider`. Before, a misspelled
+  `maxCheckpointBytes` or `lockTimeoutMs` kept the default.
 
 ### Script sandbox stack limit
 

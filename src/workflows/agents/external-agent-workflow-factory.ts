@@ -40,6 +40,14 @@ const CONFIG_KEYS = new Set([
   "smallFastModel",
 ]);
 const PERMISSION_KEYS = new Set(["mode", "allowNetwork", "allowedPaths"]);
+const FACTORY_OPTION_KEYS = new Set([
+  "registry",
+  "allowedProviderIds",
+  "limits",
+  "policy",
+  "requireExplicitModel",
+]);
+const LIMIT_KEYS = new Set(Object.keys(DEFAULT_WORKFLOW_AGENT_FACTORY_LIMITS));
 const POLICY_KEYS = new Set([
   "allowFullAccess",
   "allowNetwork",
@@ -124,10 +132,22 @@ export class ExternalAgentWorkflowFactory implements WorkflowAgentFactory {
   readonly #requireExplicitModel: boolean;
   readonly #handles = new Map<string, WorkflowAgentHandle>();
 
+  /**
+   * @param options - Registry, provider allowlist, limits, policy ceilings and model requirement.
+   * @throws {@link WorkflowAgentFactoryError} with code `WORKFLOW_AGENT_INVALID_REQUEST`
+   * when the registry is missing, an option, a `limits` key or a `policy` key is unknown
+   * (the message names it; ceilings such as `allowFullAccess` go under `policy`),
+   * or a value is malformed.
+   */
   constructor(options: ExternalAgentWorkflowFactoryOptions) {
     if (!options?.registry) {
       invalid("Workflow agent factory requires an external-agent registry");
     }
+    assertOnlyKeys(
+      options as unknown as Record<string, unknown>,
+      FACTORY_OPTION_KEYS,
+      "factory options",
+    );
     this.#registry = options.registry;
     this.#limits = normalizeLimits(options.limits);
     this.#policy = normalizePolicyCeilings(options.policy, this.#limits);
@@ -717,6 +737,9 @@ function normalizeLimits(
 ): Readonly<WorkflowAgentFactoryLimits> {
   if (limits !== undefined && !isRecord(limits)) {
     invalid("Workflow agent factory limits must be an object");
+  }
+  if (limits !== undefined) {
+    assertOnlyKeys(limits as Record<string, unknown>, LIMIT_KEYS, "limits");
   }
   const normalized = {
     ...DEFAULT_WORKFLOW_AGENT_FACTORY_LIMITS,

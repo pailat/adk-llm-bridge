@@ -340,6 +340,25 @@ driver without `capabilities()` is not checked. The checks run in the order
 tools (`EXTERNAL_AGENT_TOOLS_UNSUPPORTED`), approvals, then the `readOnlyTools`
 checks.
 
+### Sub-agents need a driver that exposes them
+
+`subAgents` only work when the driver hands the delegation tool to the runtime
+(`capabilities().subagents` is `true`, which means the driver reads
+`request.toolGateway`). Only the Claude Agent SDK driver (`ClaudeAgent`) does.
+On the Claude CLI, Codex SDK, Codex CLI and Gemini CLI drivers the sub-agents
+could never be called, so an agent built with `subAgents` there throws
+`ExternalAgentPolicyError` `EXTERNAL_AGENT_SUBAGENTS_UNSUPPORTED`, naming the
+driver. `clone()` re-checks. A custom driver without `capabilities()` is not
+checked; an empty `subAgents` list is accepted. To delegate from one of those
+runtimes, put the sub-agents on an ADK `LlmAgent` parent.
+
+Other option shapes are checked at construction as well: `permissions` with an
+unknown key and `delegation` with an unknown key or a `finalAnswer` other than
+`"subagent"` or `"coordinator"` throw `InputValidationError`, and so does a
+`tools` entry that is not an ADK tool or toolset. The `tools` shape check runs
+first, then tools, approvals and sub-agents capabilities, then the
+`readOnlyTools` checks.
+
 ### Reading wider than you write
 
 `allowedPaths` holds the roots an agent may read and write. `readPaths` adds
@@ -458,6 +477,7 @@ dropped silently.
 |---|---|
 | `EXTERNAL_AGENT_TOOLS_UNSUPPORTED` | `tools` on a driver whose `capabilities().tools` is not `true` (Codex, Gemini CLI, Claude CLI). Only the Claude Agent SDK driver (`ClaudeAgent`) hosts ADK tools. A custom driver without `capabilities()` is not checked. |
 | `EXTERNAL_AGENT_APPROVALS_UNSUPPORTED` | `confirmation.approver` or `confirmation.adk: true` on a driver whose `capabilities().approvals` is not `true` (Codex, Gemini CLI, Claude CLI): the runtime decides alone and the setting would be ignored. Only the Claude Agent SDK driver (`ClaudeAgent`) asks the host. A custom driver without `capabilities()` is not checked. See [Approvers and ADK confirmation](#approvers-and-adk-confirmation-need-a-driver-that-asks). |
+| `EXTERNAL_AGENT_SUBAGENTS_UNSUPPORTED` | `subAgents` on a driver whose `capabilities().subagents` is not `true` (Codex, Gemini CLI, Claude CLI): the delegation tool never reaches the runtime, so the sub-agents would never be called. Only the Claude Agent SDK driver (`ClaudeAgent`) exposes them. A custom driver without `capabilities()` is not checked. See [Sub-agents need a driver that exposes them](#sub-agents-need-a-driver-that-exposes-them). |
 | `EXTERNAL_AGENT_READ_ONLY_TOOL_UNKNOWN` | A `readOnlyTools` entry that is empty, listed twice, names no direct tool (when `tools` has no toolset), or names two or more direct tools. |
 | `EXTERNAL_AGENT_TOOL_NOT_READ_ONLY` | The agent's **own** mode is `read-only` and a direct tool is not in `readOnlyTools`. Add it if it has no side effects, or remove it. |
 
@@ -1226,6 +1246,27 @@ fake process. Prefer `interpreter` and `entry`: they keep the bridge's
 lookup and the writable-root check. The policy (`allowNetwork`, paths) applies as for any other
 run; the custom `spawn` only replaces how the process starts.
 
+## Unknown options
+
+A misspelled option can silently drop a limit, so the objects below refuse
+keys they do not know and name the key in the error:
+
+- The run spec (`RUN_SPEC_UNKNOWN_KEY`).
+- `ExternalAgentWorkflowFactory` options and `limits`, and the request, config,
+  `permissions` and `policy` it accepts (`WORKFLOW_AGENT_INVALID_REQUEST`).
+- `FileSystemWorkflowCheckpointStore` and `FileSystemWorkflowCheckpointProvider`
+  options (`WORKFLOW_DEFINITION_INVALID`).
+- Replay options of a workflow step (`WORKFLOW_DEFINITION_INVALID`).
+- `ExternalAgent` `permissions` and `delegation` (`InputValidationError`).
+
+These do not reject unknown top-level keys: the driver constructors, the
+`ExternalAgent` config (it is forwarded whole to ADK's `BaseAgent`), the
+`createExternalAgent` definition and its `driverOptions`, and the provider
+factories such as `AIGateway`. Each driver checks the fields it reads, one by
+one, and a typo there falls back to the default. Let TypeScript catch it:
+write the object literal where its type is known, or add `satisfies` to a
+shared config (`const config = { ... } satisfies ClaudeCliDriverConfig`).
+
 ## Error codes
 
 An error event's code lands on the ADK event's `errorCode`. The constants are
@@ -1270,6 +1311,7 @@ because the tool was not offered. The other codes in the table (`CLAUDE_*`,
 | `EXTERNAL_AGENT_PATHS_UNENFORCEABLE` | `EXTERNAL_AGENT_PATHS_UNENFORCEABLE` | No | The policy sets `allowedPaths` (or a parent agent passed `pathBounds`) and the driver cannot check tool paths: Claude CLI, Codex and Gemini CLI (remedy: `ClaudeAgentSdkDriver`, no `allowedPaths`, or `allowUnenforcedPaths: true` on the driver). On the Claude Agent SDK: a shell tool is on offer and the working directory is outside `allowedPaths` or the shell is unsandboxed (remedy: a working directory inside `allowedPaths`, or `tools` without `Bash`). |
 | `EXTERNAL_AGENT_DEPENDENCY_MISSING` | `EXTERNAL_AGENT_DEPENDENCY_MISSING` | No | An optional SDK package is not installed. |
 | `EXTERNAL_AGENT_BACKGROUND_TASK_PENDING` | `EXTERNAL_AGENT_BACKGROUND_TASK_PENDING` | No | A Claude run (SDK or CLI driver) reached its result while Claude Code still reported a background task (from `system/background_tasks_changed`; ambient tasks do not count). The task's work is not done; the run ends with exit code 1. Background tasks are off by default (`CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`); `allowBackgroundTasks: true` turns them on. |
+| `EXTERNAL_AGENT_NO_TURN` | `EXTERNAL_AGENT_NO_TURN` | Yes | A Claude Agent SDK run whose stream ended after only "model-less" results (success, `num_turns` 0, empty `result`): Claude Code never ran the input. The run ends with exit code 1 instead of an empty success; a new run of the same input can work. A model-less result followed by a real turn is not an error: the driver reads past it. |
 | `EXTERNAL_AGENT_CREDENTIAL_UNSUPPORTED` | `EXTERNAL_AGENT_CREDENTIAL_UNSUPPORTED` | No | The credential provider returned a `kind` other than `env` or `none`. |
 | `EXTERNAL_AGENT_OPTION_UNSUPPORTED` | `EXTERNAL_AGENT_OPTION_UNSUPPORTED` | No | Thrown (not an event) when a driver is built with an option its runtime cannot honor: `sessionStore` on `ClaudeCliDriver`. |
 | `EXTERNAL_AGENT_MODEL_INVALID` | `EXTERNAL_AGENT_MODEL_INVALID` | No | Thrown when a driver is built with a `model` that is not a model id (not a string, empty, over 256 characters, with whitespace or a control character, or starting with `-`). See [Model](#model). |

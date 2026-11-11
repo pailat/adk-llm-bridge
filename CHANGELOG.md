@@ -396,6 +396,20 @@ from the 0.6.0 tag.
   JSON file) turned the escape hatch ON. Most of these options are new in
   0.7.0; `skipGitRepoCheck` and `webSearchEnabled` on `CodexSdkDriver` exist in
   0.6.0 and only a non-boolean from untyped JavaScript is refused.
+- **Unknown options are refused where a typo drops a host limit** (`ExternalAgentWorkflowFactory`
+  and `FileSystemWorkflowCheckpointStore`, both new in 0.7.0; see
+  [Unknown options](./docs/external-agent-isolation.md#unknown-options)):
+  - `new ExternalAgentWorkflowFactory(...)` throws `WorkflowAgentFactoryError`
+    `WORKFLOW_AGENT_INVALID_REQUEST` for an unknown top-level option (for
+    example `allowFullAccess`, which belongs under `policy`) or an unknown
+    `limits` key (for example `maxTurnz`). The message names the key.
+  - `new FileSystemWorkflowCheckpointStore(...)` and
+    `FileSystemWorkflowCheckpointProvider` throw `WorkflowError`
+    `WORKFLOW_DEFINITION_INVALID` (`unknown checkpoint store option: <key>`)
+    for an option that is not `root`, `lockTimeoutMs`, `lockRetryMs`, `signal`
+    or `maxCheckpointBytes` (the provider also takes `operationTimeoutMs`,
+    `retry` and `onOperation`). A misspelled `maxCheckpointBytes` or
+    `lockTimeoutMs` used to keep the default silently.
 
 ### Security
 
@@ -1218,6 +1232,23 @@ from the 0.6.0 tag.
   `model_context_window`, `model_auto_compact_token_limit`,
   `model_auto_compact_token_limit_scope`). A workflow step is `unknown` when an
   external run in it reported no `used`.
+- **Sub-agents, `permissions`, `delegation` and `tools` entries are checked
+  when an `ExternalAgent` is built**, instead of being ignored silently (see
+  [Sub-agents need a driver that exposes them](./docs/external-agent-isolation.md#sub-agents-need-a-driver-that-exposes-them)):
+  - `subAgents` on the Claude CLI, Codex CLI, Codex SDK or Gemini CLI driver
+    (any driver whose `capabilities()` lacks `subagents`) throws
+    `EXTERNAL_AGENT_SUBAGENTS_UNSUPPORTED`, also on `clone()`. Those drivers
+    never exposed the sub-agents, so they were never called. Use
+    `ClaudeAgent`, or put the sub-agents on an ADK `LlmAgent` parent.
+  - `permissions` with a key that is not a policy field throws
+    `InputValidationError` naming the key(s). Before, the key was dropped: a
+    misspelled `allowedPaths` left paths unrestricted.
+  - `delegation` throws `InputValidationError` unless it is a plain object
+    with only `finalAnswer: "subagent" | "coordinator"` (a misspelled value
+    used to mean `"coordinator"`, a misspelled key the default).
+  - A `tools` entry that is not an ADK tool or toolset throws
+    `InputValidationError` naming its index, before the capability check.
+
 - **The script sandbox stack limit is lower and capped.**
   `DEFAULT_WORKFLOW_EXECUTION_LIMITS.stackBytes` is 32 KiB (32768, was
   512 KiB), and a script workflow whose `stackBytes` is above 32 KiB is refused
@@ -1397,6 +1428,19 @@ from the 0.6.0 tag.
   the run's `models` (and a workflow step's `result.models`) now include the
   sub-agent's `used` and `unexpected`. See
   [Reports under delegation](./docs/external-agent-isolation.md#reports-under-delegation).
+
+- **A resumed Claude Agent SDK run no longer completes empty without running
+  its input.** Claude Code can write a "model-less" result (success,
+  `num_turns` 0, empty `result`) when display rows arrive while no turn is
+  under way, for example at the start of a resumed session before the new
+  input is queued; the turn that runs the input follows in the same query.
+  `ClaudeAgentSdkDriver` ended the run at that first result, so a second
+  workflow step of the same Claude agent could complete with empty output and
+  no error. The driver now reads past a model-less result that comes before
+  any turn activity, and a run whose stream ends after only model-less
+  results fails with `EXTERNAL_AGENT_NO_TURN` (recoverable) and exit code 1.
+  A real result still ends the run at once.
+
 - **A Codex SDK run can no longer end the host process with `EPIPE`.**
   `@openai/codex-sdk` writes the prompt to codex's stdin with no error
   handler. When codex was gone before it read the whole prompt (it exited

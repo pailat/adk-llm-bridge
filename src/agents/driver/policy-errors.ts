@@ -37,6 +37,15 @@ export const EXTERNAL_AGENT_BACKGROUND_TASK_PENDING =
   "EXTERNAL_AGENT_BACKGROUND_TASK_PENDING";
 
 /**
+ * Not a refusal: the code of the `error` event of a Claude Agent SDK run
+ * whose stream ended with no turn run: Claude Code wrote only "model-less"
+ * results (success, `num_turns` 0, empty `result`) and never ran the input.
+ * The run ends with exit code 1 instead of an empty success. Recoverable: a
+ * new run of the same input can work.
+ */
+export const EXTERNAL_AGENT_NO_TURN = "EXTERNAL_AGENT_NO_TURN";
+
+/**
  * The policy does not set `allowNetwork: true` (network is off), and the
  * runtime cannot keep its
  * tools (shell commands, web tools, MCP servers) off the network in the
@@ -165,6 +174,17 @@ export const EXTERNAL_AGENT_SESSIONS_UNSUPPORTED =
   "EXTERNAL_AGENT_SESSIONS_UNSUPPORTED";
 
 /**
+ * `subAgents` are set on an `ExternalAgent` whose driver does not expose them
+ * (`capabilities().subagents` is not `true`): the delegation tool reaches the
+ * runtime only through the Claude Agent SDK driver, so the sub-agents could
+ * never be called and the run would complete without them. Thrown when the
+ * agent is built. Use `ClaudeAgent` (the Claude Agent SDK driver), or put the
+ * sub-agents on an ADK `LlmAgent` parent.
+ */
+export const EXTERNAL_AGENT_SUBAGENTS_UNSUPPORTED =
+  "EXTERNAL_AGENT_SUBAGENTS_UNSUPPORTED";
+
+/**
  * A `readOnlyTools` entry that cannot attest exactly one tool: it is empty,
  * listed twice, matches no direct tool (when no toolset could add it), or
  * names two or more direct tools. Thrown when the agent is built.
@@ -198,6 +218,7 @@ export type ExternalAgentPolicyErrorCode =
   | typeof EXTERNAL_AGENT_TOOLS_UNSUPPORTED
   | typeof EXTERNAL_AGENT_APPROVALS_UNSUPPORTED
   | typeof EXTERNAL_AGENT_SESSIONS_UNSUPPORTED
+  | typeof EXTERNAL_AGENT_SUBAGENTS_UNSUPPORTED
   | typeof EXTERNAL_AGENT_READ_ONLY_TOOL_UNKNOWN
   | typeof EXTERNAL_AGENT_TOOL_NOT_READ_ONLY;
 
