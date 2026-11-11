@@ -702,6 +702,17 @@ from the 0.6.0 tag.
 
 ### Added
 
+- **Claude sessions on ADK artifacts (experimental).** `adkArtifactSessionStore()`
+  from the new `adk-llm-bridge/agents/session-store/adk-artifacts` subpath keeps
+  Claude transcripts in the ADK artifact service of the run (in-memory, file or
+  GCS), scoped to the ADK session, with no extra database. `sessionStore` on
+  `ClaudeAgentSdkDriver` (and `driverOptions` of `ClaudeAgent`) now also takes a
+  `SessionStoreFactory` (type exported from `adk-llm-bridge/agents`), called once
+  per run with the invocation context. A run whose context has no artifact
+  service ends before the SDK starts with the new non-recoverable
+  `CLAUDE_SESSION_STORE_UNAVAILABLE` event (exported from
+  `adk-llm-bridge/agents`). `ClaudeCliDriver` still refuses any `sessionStore`.
+  See [Persisting Claude sessions](./docs/claude-session-store.md#adk-artifacts).
 - **Cost of gateway model calls.** The cost a provider reports on a call (AI
   Gateway and OpenRouter `usage.cost`, streaming and not) is in
   `customMetadata.costUsd`, and `customMetadata.costSource` names the field it
