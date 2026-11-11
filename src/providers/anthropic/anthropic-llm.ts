@@ -117,10 +117,7 @@ export class AnthropicLlm extends BaseProviderLlm {
    */
   private readonly maxTokens: number;
 
-  /**
-   * Whether opt-in prompt caching is enabled for this instance.
-   */
-  /** Resolved setting; `false` is the opt-out, anything else is on. */
+  /** Resolved setting: `false` off, `true` or `{ ttl }` always on, `undefined` automatic (only when the request can be reused). */
   private readonly promptCaching: PromptCachingConfig | undefined;
 
   /**

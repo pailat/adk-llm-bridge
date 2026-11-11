@@ -4,8 +4,11 @@ import {
   createEvent,
   type Event,
   InvocationContext,
+  LlmAgent,
   PluginManager,
 } from "@google/adk";
+import { OpenAICompatibleLlm } from "../../src/core/openai-compatible-llm.js";
+import { AI_GATEWAY_DEFINITION } from "../../src/providers/ai-gateway/definition.js";
 import type { WorkflowStepUsage } from "../../src/workflows/contracts.js";
 import { defineWorkflow } from "../../src/workflows/definition.js";
 import type {
@@ -205,5 +208,49 @@ describe("workflow step results carry the agent run's usage", () => {
     const replayed = second.map(workflowEventOf).find(isStepReplayed);
     expect(replayed?.result.usage).toEqual(TWO_RESPONSES);
     expect(replayed?.result.usage).toEqual(completed?.result.usage);
+  });
+});
+
+describe("a one-shot workflow step on an Anthropic gateway model", () => {
+  test("sends no cache markers and reports no cache writes", async () => {
+    const llm = new OpenAICompatibleLlm(AI_GATEWAY_DEFINITION, {
+      model: "anthropic/claude-haiku-5.5",
+      apiKey: "k",
+    });
+    const seen: Array<Record<string, unknown>> = [];
+    // biome-ignore lint/suspicious/noExplicitAny: test access to private client
+    (llm as any).client.chat.completions.create = async (
+      params: Record<string, unknown>,
+    ) => {
+      seen.push(params);
+      return {
+        id: "c1",
+        object: "chat.completion",
+        created: 0,
+        model: "served",
+        choices: [
+          {
+            index: 0,
+            message: { role: "assistant", content: "done", refusal: null },
+            finish_reason: "stop",
+            logprobs: null,
+          },
+        ],
+        usage: { prompt_tokens: 100, completion_tokens: 5, total_tokens: 105 },
+      };
+    };
+    const worker = new LlmAgent({
+      name: "worker",
+      model: llm,
+      instruction: "Summarize.",
+      includeContents: "none",
+    });
+    const workflow = singleStepWorkflow(worker);
+    const events = await collect(workflow, invocation(workflow));
+
+    expect(seen).toHaveLength(1);
+    expect("providerOptions" in seen[0]).toBe(false);
+    const done = events.map(workflowEventOf).find(isStepCompleted);
+    expect(done?.result.usage?.cacheCreationTokens ?? 0).toBe(0);
   });
 });

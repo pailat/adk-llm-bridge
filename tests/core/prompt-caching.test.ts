@@ -5,7 +5,13 @@
  */
 
 import { beforeEach, describe, expect, it, spyOn } from "bun:test";
-import { type LlmRequest, RoutedLlm } from "@google/adk";
+import {
+  FunctionTool,
+  InMemoryRunner,
+  LlmAgent,
+  type LlmRequest,
+  RoutedLlm,
+} from "@google/adk";
 import { type Span, trace } from "@opentelemetry/api";
 import { resetAllConfigs, setProviderConfig } from "../../src/config.js";
 import { OpenAICompatibleLlm } from "../../src/core/openai-compatible-llm.js";
@@ -299,6 +305,67 @@ describe("AI Gateway prompt caching", () => {
       gateway: { caching: "auto" },
     });
     expect("providerOptions" in gptSeen[0]).toBe(false);
+  });
+
+  it("caches every call of a 3-turn tool loop, the first included", async () => {
+    const llm = gateway("anthropic/claude-haiku-5.5");
+    const seen: Body[] = [];
+    const toolCall = (id: string) => ({
+      ...COMPLETION,
+      choices: [
+        {
+          index: 0,
+          message: {
+            role: "assistant",
+            content: null,
+            refusal: null,
+            tool_calls: [
+              {
+                id,
+                type: "function",
+                function: { name: "read_file", arguments: "{}" },
+              },
+            ],
+          },
+          finish_reason: "tool_calls",
+          logprobs: null,
+        },
+      ],
+    });
+    const replies = [toolCall("c1"), toolCall("c2"), COMPLETION];
+    // biome-ignore lint/suspicious/noExplicitAny: test access to private client
+    (llm as any).client.chat.completions.create = async (params: Body) => {
+      seen.push(params);
+      return replies[seen.length - 1];
+    };
+    const agent = new LlmAgent({
+      name: "loop",
+      model: llm,
+      instruction: "Read the files.",
+      tools: [
+        new FunctionTool({
+          name: "read_file",
+          description: "Reads a file.",
+          execute: () => ({ text: "contents" }),
+        }),
+      ],
+    });
+    const runner = new InMemoryRunner({ agent, appName: "app" });
+    const session = await runner.sessionService.createSession({
+      appName: "app",
+      userId: "u",
+    });
+    for await (const _ of runner.runAsync({
+      userId: "u",
+      sessionId: session.id,
+      newMessage: { role: "user", parts: [{ text: "go" }] },
+    })) {
+      // drain
+    }
+    expect(seen).toHaveLength(3);
+    for (const body of seen) {
+      expect(body.providerOptions).toEqual({ gateway: { caching: "auto" } });
+    }
   });
 });
 

@@ -1193,7 +1193,7 @@ from the 0.6.0 tag.
 - **Prompt caching is automatic by default for Anthropic models** (fixes zero cache reads on
   AI Gateway, where every turn paid the full prompt again):
   - native `AnthropicLlm`: `promptCaching` was opt-in and marked only the system block and
-    the last tool; it is now on and also marks the last message block, so later turns read
+    the last tool; it is now automatic by default (see below) and also marks the last message block, so later turns read
     earlier turns from the cache;
   - AI Gateway `anthropic/*`: sends `providerOptions.gateway.caching = "auto"`;
   - OpenRouter stays opt-in (`promptCaching: true`), and OpenAI, xAI and custom endpoints
