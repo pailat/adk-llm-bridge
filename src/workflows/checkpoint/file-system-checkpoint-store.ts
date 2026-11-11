@@ -14,6 +14,7 @@ import {
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { warn } from "../../utils/log.js";
 import { WorkflowError } from "../contracts.js";
+import { renameRetryingBlocked } from "../internal/blocked-rename.js";
 import {
   DIRECTORY_LOCK_OWNER_FILE,
   type DirectoryLockOwner,
@@ -823,7 +824,7 @@ async function atomicWriteCheckpoint(
       await handle.close();
     }
     await assertOwnership();
-    await rename(temporaryPath, checkpointPath);
+    await renameRetryingBlocked(temporaryPath, checkpointPath);
     temporaryExists = false;
     await fsyncDirectory(directory);
   } catch (error) {
@@ -1068,6 +1069,14 @@ async function assertLockOwnership(
   }
 }
 
+/**
+ * Renames, waiting out a Windows open file within a time budget (see
+ * `internal/blocked-rename.ts`). Re-exported for the fault fixtures.
+ *
+ * @internal
+ */
+export { renameRetryingBlocked };
+
 async function releaseLock(
   lockPath: string,
   token: string,
@@ -1086,45 +1095,6 @@ async function releaseLock(
   // Removing it keeps the root from growing on every save; a leftover after a
   // crash is collected offline.
   await rm(retiredPath, { recursive: true, force: true }).catch(() => {});
-}
-
-/**
- * Renames, waiting out a Windows open file a few times: a directory cannot be
- * renamed while another process has a file inside it open, such as a waiter
- * reading `owner.json`. Retries only `EPERM`, `EBUSY` and `EACCES`, 5 attempts
- * 20 ms apart; any other error is thrown at once.
- *
- * @param from - Path to rename.
- * @param to - New path.
- * @param renamePath - The rename to run; the file system's by default. The
- * test fixtures pass their own so they retire a lock with the same policy.
- * @throws The rename's error when it is not a blocked rename, or when the
- * rename is still blocked after the last attempt.
- * @internal
- */
-export async function renameRetryingBlocked(
-  from: string,
-  to: string,
-  renamePath: (from: string, to: string) => Promise<void> = rename,
-): Promise<void> {
-  for (let attempt = 1; ; attempt += 1) {
-    try {
-      await renamePath(from, to);
-      return;
-    } catch (error) {
-      if (
-        attempt >= 5 ||
-        !(
-          hasErrorCode(error, "EPERM") ||
-          hasErrorCode(error, "EBUSY") ||
-          hasErrorCode(error, "EACCES")
-        )
-      ) {
-        throw error;
-      }
-      await new Promise((done) => setTimeout(done, 20));
-    }
-  }
 }
 
 async function recoverAbandonedLock(

@@ -1888,7 +1888,19 @@ from the 0.6.0 tag.
   Elsewhere a failed directory flush is an error, including the codes the
   workspace and repository locks used to ignore; a lock whose flush fails
   right after it is taken is released instead of left behind.
-
+- Windows: saving a checkpoint failed with `checkpoint_write_failed` when
+  another process held the checkpoint file open, such as a reader or another
+  saver, because the rename that publishes the file is refused (`EPERM`,
+  `EBUSY`, `EACCES`) while the handle is open. The file-system checkpoint store
+  and the file-system workspace adapter now retry that rename. The checkpoint
+  lock release, which retried a fixed 5 times 20 ms apart, uses the same retry:
+  a 5 second budget with jittered exponential backoff (5 ms doubling to
+  250 ms), so many polling waiters cannot exhaust it. Any other error fails at
+  once, and a rename still blocked after the budget fails with its own error.
+  On macOS and Linux a rename is not blocked by an open file, so the retry
+  does not run in the normal path; but `EPERM` and `EACCES` there are also real
+  permission errors (a read-only directory, say), and a save that hits one now
+  fails with the same error after the 5 second budget, not at once.
 
 ### Docs
 
