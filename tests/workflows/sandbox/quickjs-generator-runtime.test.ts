@@ -373,7 +373,8 @@ describe("QuickJSSyncGeneratorRuntime stack limit and the host stack", () => {
   // unable to start.
   describe("a host that overflows before QuickJS does", () => {
     const FORCED = 2 * 1024 * 1024;
-    const PARSER_BOMB = `return eval(${JSON.stringify("(".repeat(5000))} + "1" + ${JSON.stringify(")".repeat(5000))});`;
+    // Parentheses need no escaping inside a string literal.
+    const PARSER_BOMB = `return eval("${"(".repeat(5000)}" + "1" + "${")".repeat(5000)}");`;
 
     slowTest(
       "fifteen forced overflows leave the next script able to run",
