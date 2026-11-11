@@ -32,6 +32,7 @@ describe("agents public exports", () => {
   });
 
   test("./agents exposes the driver policy errors and their codes", () => {
+    expect(agents.EXTERNAL_AGENT_NO_RESULT).toBe("EXTERNAL_AGENT_NO_RESULT");
     expect(agents.EXTERNAL_AGENT_ISOLATION_VIOLATED).toBe(
       "EXTERNAL_AGENT_ISOLATION_VIOLATED",
     );
