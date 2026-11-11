@@ -1980,6 +1980,9 @@ from the 0.6.0 tag.
 
 ### Docs
 
+- `docs/external-agent-isolation.md`: the per-run `/tmp/adk-claude-*` temp
+  directory of the Claude drivers stays behind when the host is killed with
+  `SIGKILL` before the run ends; how a host cleans stale ones safely.
 - `docs/workflow-durability.md`: writing your own checkpoint store, with
   `workflowCheckpointRevision`, `assertWorkflowCheckpointSize`,
   `workflowCheckpointByteLength`, `workflowCheckpointSizeLimitError` and
