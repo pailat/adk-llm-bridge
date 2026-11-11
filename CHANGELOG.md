@@ -1185,6 +1185,11 @@ from the 0.6.0 tag.
 
 ### Changed
 
+- **CLI drivers refuse `runtimeSession`.** `ClaudeCliDriver`, `CodexCliDriver` and
+  `GeminiCliDriver` used to ignore `request.runtimeSession`. They now fail the run with
+  `EXTERNAL_AGENT_SESSIONS_UNSUPPORTED` (exported from `adk-llm-bridge/agents`) before any
+  process starts. `ClaudeAgentSdkDriver` now declares `capabilities().sessions = true`,
+  matching what it already did.
 - **Prompt caching is on by default for Anthropic models** (fixes zero cache reads on
   AI Gateway, where every turn paid the full prompt again):
   - native `AnthropicLlm`: `promptCaching` was opt-in and marked only the system block and

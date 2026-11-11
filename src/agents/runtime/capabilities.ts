@@ -37,7 +37,11 @@ export interface AgentRuntimeCapabilities {
   approvals?: boolean;
   /** The driver emits partial output (token or chunk deltas) while the run is in progress. */
   streaming?: boolean;
-  /** The driver can resume a runtime session across turns. */
+  /**
+   * The driver resumes a runtime session across turns. A request with
+   * `runtimeSession` on a driver without it is refused
+   * (`EXTERNAL_AGENT_SESSIONS_UNSUPPORTED`).
+   */
   sessions?: boolean;
   /** The driver maps the effective permission policy onto the runtime's own controls. */
   permissions?: boolean;
