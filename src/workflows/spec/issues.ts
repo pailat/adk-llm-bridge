@@ -157,8 +157,10 @@ export const RUN_SPEC_ISSUE_FAMILIES = {
    * set's `allowedWorkflows`.
    */
   RUN_SPEC_WORKFLOW_NOT_ALLOWED: "models",
-  /** A lane's agent or reviewer names a model outside the rule set's `allowedModels`. */
+  /** A lane's agent or reviewer names a model outside the rule set's `allowedModels`, or outside the list `allowedModelsByRole` holds for its role. */
   RUN_SPEC_MODEL_NOT_ALLOWED: "models",
+  /** A lane agent's or an agent reviewer's `model` is missing, empty or only whitespace. Replaces the generic shape code for these two paths. */
+  RUN_SPEC_MODEL_REQUIRED: "models",
   /** A lane's agent asks for a permission mode outside the rule set's `allowedPermissionModes`; `full-access` is always outside. */
   RUN_SPEC_PERMISSION_MODE_NOT_ALLOWED: "models",
   /** A lane's agent sets `allowNetwork` to true and the rule set's `allowNetwork` is false. */
@@ -256,6 +258,7 @@ export const RUN_SPEC_SCHEMA_ISSUE_CODES = Object.freeze([
   "RUN_SPEC_TOO_MANY_DEPENDENCIES",
   "RUN_SPEC_NUMBER_OUT_OF_RANGE",
   "RUN_SPEC_EXTENSION_KEY_INVALID",
+  "RUN_SPEC_MODEL_REQUIRED",
 ] as const satisfies readonly RunSpecIssueCode[]);
 
 /**

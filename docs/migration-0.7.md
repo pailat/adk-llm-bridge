@@ -703,6 +703,15 @@ Event changes:
 - **`ClaudeCliDriver` `started`** now arrives with the first output line, so
   it can carry the model of `system/init`. Its timestamp is still the start
   of the run, and it is still the first event on every path.
+- **New fields.** An external agent's final event (or its last error event)
+  carries `customMetadata.externalAgentModel` and, when a trusted runtime
+  reported the model, `modelVersion`. Workflow `step_started` has
+  `requestedModel`, and `step_completed` `result.models`; the gateway's
+  `AgentInvocationResult` has `models`. Nothing existing changed shape. An
+  external agent's last error event is now delivered after any state-only event
+  that arrives right behind it (as the final text already was), so the model
+  info can ride on it. Checkpoints from before this change load without
+  `models`.
 
 Recommended for hosts:
 
@@ -767,6 +776,32 @@ checkpoints:
 - `ExternalAgentWorkflowFactory` checks `workingDirectoryRoots` on real
   paths: a `workingDirectory` or `allowedPaths` entry that leaves the roots
   through a symlink is rejected with `WORKFLOW_AGENT_POLICY_EXCEEDED`.
+- **Explicit models in the factory and in run specs** (see also
+  [Explicit models](#explicit-models) for the drivers):
+  - `config.model` is forwarded to the driver, recorded as
+    `descriptor.model` and part of the revision. The factory fails closed with
+    `WORKFLOW_AGENT_MODEL_NOT_APPLIED` when the driver does not keep exactly
+    that id, or the definition has no `createDriver`. A custom definition that
+    turns an alias into a full id must be given the id the driver keeps.
+  - With `config.model`, `createDriver` receives `{ model }` (and
+    `requireExplicitModel`) where it received no options before. **A custom
+    definition must merge these into its own defaults:**
+    `createDriver: (o) => new MyDriver({ ...hardening, ...o })`. A definition
+    written as `new MyDriver(o ?? hardening)` loses `hardening` as soon as a
+    request sets a model; the factory cannot detect it.
+  - `requireExplicitModel: true` on the factory refuses a request without a
+    model (`WORKFLOW_AGENT_MODEL_REQUIRED`), and a router or default alias for
+    the built-in ids `claude` and `gemini-cli`. For a custom provider id the
+    factory relies on the driver, which must refuse such aliases and report a
+    `model`.
+  - Run specs: a missing, empty or blank agent or reviewer `model` is
+    `RUN_SPEC_MODEL_REQUIRED` (before: `RUN_SPEC_MISSING_KEY`,
+    `RUN_SPEC_STRING_TOO_SHORT` or `RUN_SPEC_INVALID_FORMAT`). The run spec is
+    new in 0.7.0. A model id may end in one bracket suffix (`opus[1m]`).
+  - `allowedModelsByRole` narrows `allowedModels` per role. Nothing in the
+    bridge executes a `RunPlan`: the run-spec checks protect only hosts that
+    validate before they build agents, and the factory's `requireExplicitModel`
+    and the drivers' checks are the run-time guard.
 - If you call the workflow control plane with hand-built payloads: every
   payload is now validated first, and malformed ones fail with
   `WORKFLOW_CONTROL_INVALID_REQUEST` instead of a controller-specific code.

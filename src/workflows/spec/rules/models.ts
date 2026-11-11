@@ -50,7 +50,9 @@ function allowSet(list: readonly unknown[] | undefined): Set<string> {
  * grammar, and a message never echoes an `env` entry. An MCP provider id must
  * be in `allowedMcpProviders` (an empty list allows none) and unique in its
  * agent ignoring case. The workflow id and version must equal one
- * entry of `allowedWorkflows`; an empty list allows none.
+ * entry of `allowedWorkflows`; an empty list allows none. A model must also
+ * be in the `allowedModelsByRole` list of its role when the rule set has one
+ * (a lane agent by the lane's role, an agent reviewer as `reviewer`).
  *
  * @param spec - The spec, already shape-checked.
  * @param rules - The host's rules.
@@ -92,10 +94,12 @@ export function checkModelRules(
       );
     }
   };
+  const byRole = rules.allowedModelsByRole;
   const checkModel = (
     value: string,
     path: (string | number)[],
     who: string,
+    role: string,
   ): void => {
     if (!models.has(value) || !MODEL_SCHEMA.safeParse(value).success) {
       issues.push(
@@ -103,6 +107,27 @@ export function checkModelRules(
           "RUN_SPEC_MODEL_NOT_ALLOWED",
           path,
           `The ${who} model ${echo(value)} is not in the allowed models.`,
+        ),
+      );
+      return;
+    }
+    // A role with a list may use only the models of both lists.
+    const entry =
+      byRole !== undefined &&
+      byRole !== null &&
+      typeof byRole === "object" &&
+      Object.hasOwn(byRole, role)
+        ? (byRole as Record<string, unknown>)[role]
+        : undefined;
+    if (
+      entry !== undefined &&
+      !allowSet(entry as readonly unknown[]).has(value)
+    ) {
+      issues.push(
+        runSpecIssue(
+          "RUN_SPEC_MODEL_NOT_ALLOWED",
+          path,
+          `The ${who} model ${echo(value)} is not in the allowedModelsByRole list of the ${role} role.`,
         ),
       );
     }
@@ -113,7 +138,7 @@ export function checkModelRules(
     const base = ["lanes", index];
     const agent = lane.agent;
     checkProvider(agent.providerId, [...base, "agent", "providerId"], "agent");
-    checkModel(agent.model, [...base, "agent", "model"], "agent");
+    checkModel(agent.model, [...base, "agent", "model"], "agent", lane.role);
 
     if (!modes.has(agent.mode)) {
       issues.push(
@@ -216,7 +241,12 @@ export function checkModelRules(
         [...reviewBase, "providerId"],
         "reviewer",
       );
-      checkModel(review.model, [...reviewBase, "model"], "reviewer");
+      checkModel(
+        review.model,
+        [...reviewBase, "model"],
+        "reviewer",
+        "reviewer",
+      );
     }
   });
 

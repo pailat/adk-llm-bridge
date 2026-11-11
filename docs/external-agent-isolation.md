@@ -574,6 +574,22 @@ which reports no model, and Gemini CLI, whose `init` model is kept on
 with the first output line, so it can carry the init model; its timestamp is
 still the start of the run, and it is still the first event on every path.
 
+`ExternalAgent` turns this into `customMetadata.externalAgentModel` on the run's
+final event (or its last error event when the run has no final text; partial
+events never carry it):
+
+| `status` | When | `resolved`, `modelVersion` |
+| --- | --- | --- |
+| `reported` | `reportsResolvedModel` is `true` and `completed.model` or `started.model` is a non-empty id | the reported id |
+| `not-reported` | `reportsResolvedModel` is `true` and neither event carried an id | absent |
+| `unsupported` | `reportsResolvedModel` is not `true`, or the run's `started` has `modelRouting: "plan-mode"` | absent, whatever the events carry |
+
+`requested` is the driver's `model`, when it has one. A mismatch between
+`requested` and `resolved` is a reliable signal only for a **full model id**:
+an alias such as `opus` always differs from the full id the runtime reports.
+Loaded Claude settings can replace the start model, and a `fallbackModel`
+switch in the middle of a run shows only in `usage.byModel`.
+
 ### Model-setting `args` and `config`
 
 These are refused when the driver is built with

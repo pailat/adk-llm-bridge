@@ -185,6 +185,7 @@ limit and allowlist, so a missing rule never means "allowed". The rule set's
 | `maxAgentRuns` | Most agent runs the whole spec may need in the worst case |
 | `allowedProviderIds` | Provider ids an agent or a reviewer may name, compared exactly |
 | `allowedModels` | Model ids an agent or a reviewer may name, compared exactly, case included |
+| `allowedModelsByRole` | Optional. Narrows `allowedModels` per role (`architect`, `worker`, `integration`, `critic`, `reviewer`): a lane agent may use only the models in both lists, an agent reviewer those of `reviewer`. A role without a list uses `allowedModels`. Any other key is `RUN_SPEC_RULES_INVALID`. A merge narrows each key and never adds a model |
 | `allowedPermissionModes` | Permission modes an agent may ask for. Never `full-access` |
 | `allowNetwork` | Whether an agent may ask for network access |
 | `allowedTools` | Tool names an agent may list, compared exactly |
@@ -218,6 +219,27 @@ match `RunRulesOverrideSchema`, or a rule would record more than
 `DEFAULT_DENIED_PATH_PATTERNS` lists file name patterns that usually hold
 secrets, such as `.env`, `*.pem` and `.git`. It is a starting list for a host's
 rule set, and the library does not apply it on its own.
+
+### Model ids and roles
+
+A model id is 1 to 256 characters in all: it starts with a letter or digit and
+continues with letters, digits and `.`, `_`, `:`, `+`, `/`, `@`, `-`. It may
+end in **one** bracket suffix of letters and digits, such as `opus[1m]` or
+`claude-opus-5-5[1m]`; brackets anywhere else, an empty suffix (`opus[]`) and
+a second suffix are `RUN_SPEC_INVALID_FORMAT`. The same grammar applies to the
+`allowedModels` and `allowedModelsByRole` entries. A missing, empty or blank
+`model` of an agent or an agent reviewer is `RUN_SPEC_MODEL_REQUIRED`.
+
+`allowedModelsByRole` is optional. A lane agent may use only the models that
+are in `allowedModels` **and** in the list of the lane's role, and an agent
+reviewer only those in the `reviewer` list. A role without a list uses
+`allowedModels`. In a merge each key narrows, and a role the base lacks takes
+the override's list limited to the models still allowed overall.
+
+The checks protect hosts that validate a spec before they build agents.
+Nothing in the bridge executes a `RunPlan`; at run time, set
+`requireExplicitModel` on the `ExternalAgentWorkflowFactory` and on the
+drivers, and give each agent `config.model`.
 
 ## Rule table
 
@@ -323,7 +345,8 @@ family order.
 | --- | --- |
 | `RUN_SPEC_WORKFLOW_NOT_ALLOWED` | `workflowId` and `workflowVersion` are not an entry of `allowedWorkflows`; reported at `workflowVersion` when the id is listed in another version |
 | `RUN_SPEC_PROVIDER_NOT_ALLOWED` | An agent or a reviewer names a provider outside `allowedProviderIds` |
-| `RUN_SPEC_MODEL_NOT_ALLOWED` | An agent or a reviewer names a model outside `allowedModels` |
+| `RUN_SPEC_MODEL_NOT_ALLOWED` | An agent or a reviewer names a model outside `allowedModels`, or outside the `allowedModelsByRole` list of its role |
+| `RUN_SPEC_MODEL_REQUIRED` | An agent's or an agent reviewer's `model` is missing, empty or only whitespace (the generic shape codes do not apply to these two paths) |
 | `RUN_SPEC_PERMISSION_MODE_NOT_ALLOWED` | An agent asks for a mode outside `allowedPermissionModes`. `full-access` is always outside |
 | `RUN_SPEC_NETWORK_NOT_ALLOWED` | An agent sets `allowNetwork` to true and the rule set's `allowNetwork` is false |
 | `RUN_SPEC_TOOL_NOT_ALLOWED` | An agent lists a tool outside `allowedTools` |

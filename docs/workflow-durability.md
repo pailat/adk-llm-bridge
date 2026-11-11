@@ -441,6 +441,14 @@ To continue a run stopped by either bound, raise that limit in the definition
 (limits are not part of the checkpoint identity) and resume the same execution
 id: finished steps replay and the run goes on from where it stopped.
 
+## Stored step models
+
+A completed step's checkpoint result may carry `models` (`requested`,
+`resolved` as arrays of non-empty strings, `unknown` as a boolean), next to
+`usage`. A checkpoint written before 0.7, or for a step whose agent has no
+model information, has none and loads as before. A stored `models` that is not
+exactly that shape makes the checkpoint corrupt, like a malformed `usage`.
+
 ## Re-entered steps
 
 When a step runs again, the `step_started` event and the step record in the
