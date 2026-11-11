@@ -1111,6 +1111,17 @@ checkpoints:
   see
   [Host sleep and wall-clock steps](./workflow-durability.md#host-sleep-and-wall-clock-steps).
 
+### Unknown options
+
+- Unknown factory options and limits throw `WORKFLOW_AGENT_INVALID_REQUEST`
+  (ceilings go under `policy`): `allowFullAccess` at the top level of
+  `ExternalAgentWorkflowFactory` options, or `limits: { maxTurnz: 2 }`.
+- Unknown checkpoint store options throw `WORKFLOW_DEFINITION_INVALID`
+  (`unknown checkpoint store option: <key>`), for
+  `FileSystemWorkflowCheckpointStore` and
+  `FileSystemWorkflowCheckpointProvider`. Before, a misspelled
+  `maxCheckpointBytes` or `lockTimeoutMs` kept the default.
+
 ### Script sandbox stack limit
 
 - **`stackBytes` default is 32 KiB and the maximum is 32 KiB.** A script

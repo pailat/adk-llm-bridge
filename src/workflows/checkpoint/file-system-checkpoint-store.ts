@@ -156,6 +156,14 @@ export async function collectFileSystemCheckpointTombstonesOffline(
   return Object.freeze({ removedTombstones: tombstones.length });
 }
 
+const CHECKPOINT_STORE_OPTION_KEYS: ReadonlySet<string> = new Set([
+  "root",
+  "lockTimeoutMs",
+  "lockRetryMs",
+  "signal",
+  "maxCheckpointBytes",
+]);
+
 /**
  * Durable single-host checkpoint adapter with cross-process file locking.
  *
@@ -186,10 +194,21 @@ export class FileSystemWorkflowCheckpointStore
 
   /**
    * @param options - Root directory, lock timing, abort signal and size limit.
-   * @throws {@link WorkflowError} with code `WORKFLOW_DEFINITION_INVALID` when `root` is not absolute
+   * @throws {@link WorkflowError} with code `WORKFLOW_DEFINITION_INVALID` when an option is unknown
+   * (the message names it), `root` is not absolute
    * or a numeric option is not a positive integer.
    */
   constructor(options: FileSystemWorkflowCheckpointStoreOptions) {
+    const unknown = Object.keys(options)
+      .filter((key) => !CHECKPOINT_STORE_OPTION_KEYS.has(key))
+      .sort();
+    if (unknown.length > 0) {
+      throw new WorkflowError(
+        "WORKFLOW_DEFINITION_INVALID",
+        `unknown checkpoint store option: ${unknown.join(", ")}`,
+        { unknownOptions: unknown },
+      );
+    }
     if (!isAbsolute(options.root)) {
       throw new WorkflowError(
         "WORKFLOW_DEFINITION_INVALID",

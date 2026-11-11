@@ -1246,6 +1246,27 @@ fake process. Prefer `interpreter` and `entry`: they keep the bridge's
 lookup and the writable-root check. The policy (`allowNetwork`, paths) applies as for any other
 run; the custom `spawn` only replaces how the process starts.
 
+## Unknown options
+
+A misspelled option can silently drop a limit, so the objects below refuse
+keys they do not know and name the key in the error:
+
+- The run spec (`RUN_SPEC_UNKNOWN_KEY`).
+- `ExternalAgentWorkflowFactory` options and `limits`, and the request, config,
+  `permissions` and `policy` it accepts (`WORKFLOW_AGENT_INVALID_REQUEST`).
+- `FileSystemWorkflowCheckpointStore` and `FileSystemWorkflowCheckpointProvider`
+  options (`WORKFLOW_DEFINITION_INVALID`).
+- Replay options of a workflow step (`WORKFLOW_DEFINITION_INVALID`).
+- `ExternalAgent` `permissions` and `delegation` (`InputValidationError`).
+
+These do not reject unknown top-level keys: the driver constructors, the
+`ExternalAgent` config (it is forwarded whole to ADK's `BaseAgent`), the
+`createExternalAgent` definition and its `driverOptions`, and the provider
+factories such as `AIGateway`. Each driver checks the fields it reads, one by
+one, and a typo there falls back to the default. Let TypeScript catch it:
+write the object literal where its type is known, or add `satisfies` to a
+shared config (`const config = { ... } satisfies ClaudeCliDriverConfig`).
+
 ## Error codes
 
 An error event's code lands on the ADK event's `errorCode`. The constants are
