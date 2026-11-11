@@ -2166,7 +2166,7 @@
       "run:resolved:ok",
       "gw:resolve:third",
       "gw:sink:third:error:Max number of llm calls limit of 3 exceeded",
-      "run:resolved:agent-error"
+      "run:resolved:llm-calls-limit"
     ],
     "results": [
       {
@@ -2298,7 +2298,7 @@
         },
         "stateDelta": null,
         "error": "Max number of llm calls limit of 3 exceeded",
-        "errorKind": "agent-error",
+        "errorKind": "llm-calls-limit",
         "interrupt": null
       }
     ],

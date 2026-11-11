@@ -638,6 +638,11 @@ If you call `AgentInvocationGateway` (or `ToolGateway`) directly:
   `resume: { events: result.interrupt.events }`. The gateway trusts those
   events as given and does not guard against replay: resume each interrupt
   once, and keep the events where tools cannot write them.
+- `result.errorKind` is `"llm-calls-limit"` when a child `LlmAgent` goes over
+  the shared `RunConfig.maxLlmCalls` budget. ADK reports that overflow as an
+  error event, and the gateway used to classify it as `"agent-error"`. Match on
+  `errorKind`, not on the error text. Any other error event is still
+  `"agent-error"`.
 
 ## 8. Workflows (`adk-llm-bridge/workflows`)
 

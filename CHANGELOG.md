@@ -1155,6 +1155,12 @@ from the 0.6.0 tag.
   `package.json` `exports` names; before, Bun used the lowest common ancestor
   of the entries and a change to the list could move every file to
   `dist/src/`.
+- **`AgentInvocationGateway` reports `errorKind: "llm-calls-limit"` for a real
+  `LlmAgent` that goes over `maxLlmCalls`.** ADK catches the limit error inside
+  `LlmAgent` and yields an error event, so the gateway reported `agent-error`.
+  It now recognises that event (`errorCode` `UNKNOWN_ERROR` and ADK's message
+  for the run's own `maxLlmCalls`) as `llm-calls-limit`; any other error event
+  stays `agent-error`.
 - **A checkpoint mismatch inside `ctx.parallel` fails the run.** With
   `failureMode: "all-settled"` too, it now throws at the changed step after a
   `step_failed` event, instead of returning a failed outcome.
