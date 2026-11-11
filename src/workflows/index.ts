@@ -47,13 +47,22 @@ export type {
   WorkflowCheckpointLocator,
   WorkflowCheckpointRevision,
   WorkflowCheckpointStatus,
+  WorkflowCheckpointStepInputDigestV1,
+  WorkflowCheckpointStepModelV1,
+  WorkflowCheckpointStepRecordV1,
   WorkflowCheckpointStepResultV1,
   WorkflowCheckpointStepStatus,
   WorkflowCheckpointStepV1,
   WorkflowCheckpointStore,
   WorkflowCheckpointV1,
   WorkflowCheckpointWrite,
+  WorkflowInputFingerprint,
+  WorkflowStepMismatchDiff,
+  WorkflowStepMismatchHint,
+  WorkflowStepMismatchPart,
+  WorkflowStepModelChange,
   WorkflowStepResolution,
+  WorkflowStepResolveOptions,
   WorkflowStepResumeReason,
 } from "./checkpoint/index.js";
 export {
@@ -84,6 +93,7 @@ export {
   workflowCheckpointRevision,
   workflowCheckpointRevisionMatches,
   workflowCheckpointSizeLimitError,
+  workflowStepInputCanonicalForm,
   workflowStepResultFromCheckpoint,
 } from "./checkpoint/index.js";
 export type {
@@ -160,6 +170,7 @@ export type {
   WorkflowStepCompletedEvent,
   WorkflowStepFailedEvent,
   WorkflowStepInterruptedEvent,
+  WorkflowStepModelChangedEvent,
   WorkflowStepReplayedEvent,
   WorkflowStepStartedEvent,
   WorkflowStepWaitingEvent,
@@ -203,6 +214,7 @@ export {
   WorkflowExecutionControlError,
   WorkflowExecutionController,
 } from "./execution/index.js";
+export type { WorkflowReplayOptions } from "./node-config.js";
 export type {
   WorkflowActorAuthorizationContext,
   WorkflowActorPermission,

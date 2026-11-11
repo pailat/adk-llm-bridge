@@ -469,6 +469,109 @@ is rejected as `checkpoint_file_corrupt`. A `running` step is re-entered only
 when its `resumePolicy` is `retry`; otherwise the resume fails with
 `WORKFLOW_INDETERMINATE_STEP`.
 
+## Model and input changes on replayed steps
+
+A step's identity is its agent name, agent revision and input hash. Any
+difference is `WORKFLOW_STEP_MISMATCH`. The model is **not** identity:
+
+| Part | Role |
+| --- | --- |
+| `agentName`, `agentRevision`, input hash | Identity. A difference stops the run. |
+| `model.requested` | Recorded when each attempt starts. Reported when it changes, or compared in strict mode. |
+| `result.models` | Recorded when the step completes: `requested`, `resolved`, `unknown`. History only. |
+| Workflow input, version, script source | Identity of the whole execution. |
+
+A completed step's result is history: the model the checkpoint recorded
+produced it, and replaying it does not claim the new model did. Changing the
+model table to tune cost between runs is normal, so by default it is a report,
+not a stop. `agentRevision` stays the explicit, host-chosen "a different build
+must not replay" signal. `ExternalAgentWorkflowFactory` leaves its top-level
+`config.model` out of the revision for this reason.
+
+### Warn (default) and strict
+
+`replay: { modelChange: "warn" | "mismatch" }` on `WorkflowAgent` and
+`ScriptWorkflowAgent`:
+
+- `warn`: the step replays; the runtime emits `step_model_changed` and logs
+  `WORKFLOW_STEP_MODEL_CHANGED`. A replayed or resumed step whose checkpoint
+  has no model record (written before the field existed) cannot be compared:
+  it gets no event, and the turn logs one `WORKFLOW_STEP_MODEL_UNRECORDED`
+  with the count and the first ten step ids.
+- `mismatch`: the same situation throws `WORKFLOW_STEP_MISMATCH` with
+  `mismatch: ["model"]`, `savedRequestedModel` and `requestedModel`. Strict
+  mode needs both models known: a missing record, or an agent with no model,
+  also throws. Pair it with `requireExplicitModel` and full model ids, since an
+  alias hides a remap. An execution started before the field existed fails on
+  every reused step in strict mode: resume it in `warn` mode.
+
+Only a step whose saved outcome is reused is checked (a completed step, a
+recorded failure, a waiting step). A step that runs again uses the current
+model. Only the step's own agent is compared (see the residuals below).
+
+`WORKFLOW_STEP_MISMATCH` details name every differing part in `mismatch`, in
+the order `agentName`, `agentRevision`, `input`, `model`. The details never
+carry input text, lengths of the input or any hint about where it changed.
+
+### Finding what changed in an input
+
+A step whose input changed after it completed (for example a prompt file read
+into the input was edited) stops with `mismatch: ["input"]`. To find the
+change, the checkpoint stores a fingerprint of each step input while
+`replay.inputDigest` is on (the default): `inputLength` for every step, and
+`inputDigest` (`chunkSize` and 2 to 32 digests of 12 hex characters) for an
+input longer than 256 UTF-16 code units. On a mismatch the host gets a hint:
+both lengths, the first differing window (a whole chunk) and a structural path
+such as `parts[2].text`, built only from a fixed list of `Content` field names
+(any other key is `?`). Truncation at a chunk boundary gives an empty window
+at the end of the current input. The window refers to
+`workflowStepInputCanonicalForm(input)`: read it locally with
+`.slice(start, end)`.
+
+The hint goes to **host-only** channels, never into the error: the mismatch
+details are saved as the execution's error and emitted in `step_failed` and
+`error` events, where a parent agent can read them.
+
+- `replay.onStepMismatch(hint)`: called once and awaited before the error is
+  thrown, so the host has the hint first. A callback that never settles holds
+  the turn, like any host hook. Its own errors are logged and ignored; the
+  mismatch is thrown regardless. The hint is `{ stepId, diff }`, where `diff`
+  is `{ available: true, savedLength, length, chunkSize?, firstDifference:
+  { start, end }, path? }` or `{ available: false, reason }`, with `reason`
+  `not-recorded` (an older or legacy-form step, saved without a fingerprint), `disabled` or
+  `inconclusive` (every compared chunk equal although the hashes differ).
+- Without a callback, a `WORKFLOW_STEP_MISMATCH_HINT` warning with the same
+  lengths, window and path. If your logs land where agents can read them (a
+  workspace `run.log`), set the callback or `inputDigest: false`.
+
+**Residual, exactly.**
+
+- At rest: for a multi-chunk input, an unsalted 48-bit digest per chunk of at
+  least 256 code units, at known offsets. A reader of the checkpoint can
+  confirm guesses one chunk at a time. That matters for a low-entropy secret in
+  an otherwise predictable chunk (a 6-digit code in a template chunk is about
+  10^6 hashes); the whole-input `inputHash` alone does not allow that unless
+  every other byte is known. The same reader already sees every completed
+  step's output.
+- At rest: `inputLength` is stored for every step while the option is on,
+  including single-chunk inputs, which store no digest.
+- Online: whoever sees the hint and can shape a step's input learns which chunk
+  first differs. Each guess costs a relaunch by the host, and the hint stays on
+  the host-only channels above.
+- Mitigations: keep secrets out of step inputs (credentials go through the
+  credential environment, not prompts); `replay.inputDigest: false` writes
+  nothing and the hint says `disabled`; a single-chunk input stores no digest.
+  There is no salt: one stored in the checkpoint would not stop its reader.
+- Only the step's own agent's requested model is compared. Models of nested
+  agents are recorded in `result.models` and shown as `savedResolvedModels`,
+  but a change in them neither warns nor fails strict mode. Put nested models
+  in the step agent's `agentRevision` if they must be identity.
+- Resolved models are not compared: nothing runs on a replay, so the current
+  resolved model is unknown.
+- The saved record keeps the model the step ran with, so after a warning it
+  still names the old model. A step that waited and resumes keeps the model its
+  attempt started with.
+
 ## Workspace leases and fencing
 
 `FileSystemWorkspaceAdapter` assigns every acquired lease a monotonic

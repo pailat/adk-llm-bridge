@@ -8,6 +8,10 @@ import type {
   WorkflowStepUsage,
 } from "../contracts.js";
 import { MAX_WORKFLOW_AGENT_REVISION_LENGTH } from "../contracts.js";
+import {
+  isStepRecordFields,
+  type WorkflowCheckpointStepRecordV1,
+} from "./step-record.js";
 
 /** Schema version written to and required of every durable checkpoint. */
 export const WORKFLOW_CHECKPOINT_SCHEMA_VERSION = 1 as const;
@@ -62,7 +66,8 @@ export interface WorkflowCheckpointStepResultV1 extends WorkflowStepResult {
 }
 
 /** Durable record of one workflow step. */
-export interface WorkflowCheckpointStepV1 {
+export interface WorkflowCheckpointStepV1
+  extends WorkflowCheckpointStepRecordV1 {
   /** Step id, unique within the execution. */
   id: string;
   /** Name of the agent that runs the step. */
@@ -346,7 +351,8 @@ function isStep(
     isFiniteNumber(value.startedAt) &&
     isFiniteNumber(value.updatedAt) &&
     value.updatedAt >= value.startedAt &&
-    isOptionalFiniteNumber(value.completedAt)
+    isOptionalFiniteNumber(value.completedAt) &&
+    isStepRecordFields(value)
   ) {
     if (
       value.status === "running" &&
