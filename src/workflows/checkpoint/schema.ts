@@ -524,7 +524,9 @@ function isWorkflowStepUsage(value: unknown): value is WorkflowStepUsage {
     // Optional: results saved before cache writes were reported carry none.
     (value.cacheCreationTokens === undefined ||
       (isFiniteNumber(value.cacheCreationTokens) &&
-        value.cacheCreationTokens >= 0))
+        value.cacheCreationTokens >= 0)) &&
+    (value.costUsd === undefined ||
+      (isFiniteNumber(value.costUsd) && value.costUsd >= 0))
   );
 }
 

@@ -23,7 +23,10 @@ import {
 import type { Content } from "@google/genai";
 import { EXTERNAL_AGENT_MODEL_METADATA_KEY } from "../agents/events.js";
 import { inheritSessionPermissions } from "../agents/permissions/inheritance.js";
-import { CACHE_CREATION_METADATA_KEY } from "../converters/cache-usage.js";
+import {
+  CACHE_CREATION_METADATA_KEY,
+  COST_METADATA_KEY,
+} from "../converters/cache-usage.js";
 import { isTempStateKey, withoutTempStateKeys } from "../utils/state.js";
 import { isWorkflowAgent } from "../workflows/internal/workflow-agent-brand.js";
 
@@ -35,7 +38,8 @@ import { isWorkflowAgent } from "../workflows/internal/workflow-agent-brand.js";
  * and workflow events included, since the gateway sees them) plus the function
  * calls requested on those same events. Values are summed as each runtime
  * reports them, so any double counting in a runtime's report carries into the
- * totals. Cost is not computed: the gateway has no price source.
+ * totals. Cost is not computed here: `costUsd` sums what the providers
+ * reported (`customMetadata.costUsd`), and is absent when none did.
  */
 export interface AgentInvocationUsage {
   /** Summed `promptTokenCount`. */
@@ -56,6 +60,15 @@ export interface AgentInvocationUsage {
    * event in the run reported a cache write.
    */
   cacheCreationTokens?: number;
+  /**
+   * Summed `customMetadata.costUsd`: US dollars the providers reported
+   * charging for the run's model calls (AI Gateway and OpenRouter `usage.cost`;
+   * for a BYOK gateway call, the upstream or market cost the gateway
+   * reports, see `COST_METADATA_KEY`). Absent when no event reported one,
+   * which includes `ExternalAgent` runs: their cost is on their own usage
+   * report and spans, not on the event.
+   */
+  costUsd?: number;
   /** Function calls requested on non-partial events. */
   toolCalls: number;
   /**
@@ -1738,6 +1751,10 @@ function addUsage(usage: AgentInvocationUsage, event: Event): void {
   const written = event.customMetadata?.[CACHE_CREATION_METADATA_KEY];
   if (typeof written === "number" && Number.isFinite(written) && written >= 0) {
     usage.cacheCreationTokens = (usage.cacheCreationTokens ?? 0) + written;
+  }
+  const cost = event.customMetadata?.[COST_METADATA_KEY];
+  if (typeof cost === "number" && Number.isFinite(cost) && cost >= 0) {
+    usage.costUsd = (usage.costUsd ?? 0) + cost;
   }
   usage.llmCalls++;
 }

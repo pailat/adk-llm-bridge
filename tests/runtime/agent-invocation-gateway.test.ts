@@ -2128,6 +2128,40 @@ describe("AgentInvocationGateway usage", () => {
     ).toBeUndefined();
   });
 
+  test("costUsd sums customMetadata.costUsd of non-partial events, 0 included", async () => {
+    const usage = {
+      promptTokenCount: 10,
+      candidatesTokenCount: 1,
+      totalTokenCount: 11,
+    };
+    const result = await usageOf([
+      modelEvent(usage, { partial: true, customMetadata: { costUsd: 99 } }),
+      modelEvent(usage, { customMetadata: { costUsd: 0.25 } }),
+      modelEvent(usage, { customMetadata: { costUsd: 0 } }),
+      modelEvent(usage, { customMetadata: { costUsd: 0.5 } }),
+    ]);
+    expect(result.costUsd).toBe(0.75);
+    const zero = await usageOf([
+      modelEvent(usage, { customMetadata: { costUsd: 0 } }),
+    ]);
+    expect(zero.costUsd).toBe(0);
+  });
+
+  test("costUsd stays absent when no event reported a valid cost", async () => {
+    const usage = {
+      promptTokenCount: 10,
+      candidatesTokenCount: 1,
+      totalTokenCount: 11,
+    };
+    for (const bad of ["7", -3, Number.NaN, Number.POSITIVE_INFINITY, null]) {
+      const result = await usageOf([
+        modelEvent(usage, { customMetadata: { costUsd: bad } }),
+      ]);
+      expect(result.costUsd).toBeUndefined();
+    }
+    expect((await usageOf([modelEvent(usage)])).costUsd).toBeUndefined();
+  });
+
   test("a reported write of 0 is kept, not dropped", async () => {
     const result = await usageOf([
       modelEvent(
