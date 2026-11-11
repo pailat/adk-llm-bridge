@@ -15,10 +15,12 @@ from the 0.6.0 tag.
 
 - **Driver options are checked by name.** Every built-in driver
   (`ClaudeAgentSdkDriver`, `ClaudeCliDriver`, `CodexSdkDriver`,
-  `CodexCliDriver`, `GeminiCliDriver`, `SubprocessJsonlDriver`) throws
-  `ExternalAgentPolicyError` `EXTERNAL_AGENT_OPTION_UNKNOWN` for a config key
-  it does not know, and for a config that is not a plain object, instead of
-  ignoring it. An option of another driver says which driver supports it.
+  `CodexCliDriver`, `GeminiCliDriver`, `FxCliDriver`,
+  `SubprocessJsonlDriver`) throws `ExternalAgentPolicyError`
+  `EXTERNAL_AGENT_OPTION_UNKNOWN` for a config key it does not know, and for a
+  config that is not a plain object, instead of ignoring it. An option of
+  another driver says which driver supports it. `FxCliDriver` keeps its
+  `EXTERNAL_AGENT_OPTION_UNSUPPORTED` refusal for the session options.
 - **Model checks on the external agent drivers** (`EXTERNAL_AGENT_MODEL_*`,
   see [Model](./docs/external-agent-isolation.md#model)):
   - `ClaudeCliDriver` with a blank `model` throws `ExternalAgentPolicyError`
