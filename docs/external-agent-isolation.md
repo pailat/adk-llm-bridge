@@ -340,6 +340,25 @@ driver without `capabilities()` is not checked. The checks run in the order
 tools (`EXTERNAL_AGENT_TOOLS_UNSUPPORTED`), approvals, then the `readOnlyTools`
 checks.
 
+### Sub-agents need a driver that exposes them
+
+`subAgents` only work when the driver hands the delegation tool to the runtime
+(`capabilities().subagents` is `true`, which means the driver reads
+`request.toolGateway`). Only the Claude Agent SDK driver (`ClaudeAgent`) does.
+On the Claude CLI, Codex SDK, Codex CLI and Gemini CLI drivers the sub-agents
+could never be called, so an agent built with `subAgents` there throws
+`ExternalAgentPolicyError` `EXTERNAL_AGENT_SUBAGENTS_UNSUPPORTED`, naming the
+driver. `clone()` re-checks. A custom driver without `capabilities()` is not
+checked; an empty `subAgents` list is accepted. To delegate from one of those
+runtimes, put the sub-agents on an ADK `LlmAgent` parent.
+
+Other option shapes are checked at construction as well: `permissions` with an
+unknown key and `delegation` with an unknown key or a `finalAnswer` other than
+`"subagent"` or `"coordinator"` throw `InputValidationError`, and so does a
+`tools` entry that is not an ADK tool or toolset. The `tools` shape check runs
+first, then tools, approvals and sub-agents capabilities, then the
+`readOnlyTools` checks.
+
 ### Reading wider than you write
 
 `allowedPaths` holds the roots an agent may read and write. `readPaths` adds
@@ -458,6 +477,7 @@ dropped silently.
 |---|---|
 | `EXTERNAL_AGENT_TOOLS_UNSUPPORTED` | `tools` on a driver whose `capabilities().tools` is not `true` (Codex, Gemini CLI, Claude CLI). Only the Claude Agent SDK driver (`ClaudeAgent`) hosts ADK tools. A custom driver without `capabilities()` is not checked. |
 | `EXTERNAL_AGENT_APPROVALS_UNSUPPORTED` | `confirmation.approver` or `confirmation.adk: true` on a driver whose `capabilities().approvals` is not `true` (Codex, Gemini CLI, Claude CLI): the runtime decides alone and the setting would be ignored. Only the Claude Agent SDK driver (`ClaudeAgent`) asks the host. A custom driver without `capabilities()` is not checked. See [Approvers and ADK confirmation](#approvers-and-adk-confirmation-need-a-driver-that-asks). |
+| `EXTERNAL_AGENT_SUBAGENTS_UNSUPPORTED` | `subAgents` on a driver whose `capabilities().subagents` is not `true` (Codex, Gemini CLI, Claude CLI): the delegation tool never reaches the runtime, so the sub-agents would never be called. Only the Claude Agent SDK driver (`ClaudeAgent`) exposes them. A custom driver without `capabilities()` is not checked. See [Sub-agents need a driver that exposes them](#sub-agents-need-a-driver-that-exposes-them). |
 | `EXTERNAL_AGENT_READ_ONLY_TOOL_UNKNOWN` | A `readOnlyTools` entry that is empty, listed twice, names no direct tool (when `tools` has no toolset), or names two or more direct tools. |
 | `EXTERNAL_AGENT_TOOL_NOT_READ_ONLY` | The agent's **own** mode is `read-only` and a direct tool is not in `readOnlyTools`. Add it if it has no side effects, or remove it. |
 

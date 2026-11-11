@@ -4,10 +4,11 @@
  * @remarks
  * A capability that is `false` or absent means the driver does not provide
  * it. The flags describe the driver to callers through
- * `driver.capabilities()`, the only place they are declared. `tools` and
- * `approvals` are also checked when an `ExternalAgent` is built: tools, an
- * approver or ADK confirmation on a driver that implements `capabilities()`
- * without the flag are refused. Nothing else is gated on them at runtime.
+ * `driver.capabilities()`, the only place they are declared. `tools`,
+ * `subagents` and `approvals` are also checked when an `ExternalAgent` is
+ * built: tools, sub-agents, an approver or ADK confirmation on a driver that
+ * implements `capabilities()` without the flag are refused. Nothing else is
+ * gated on them at runtime.
  */
 export interface AgentRuntimeCapabilities {
   /**
@@ -16,7 +17,12 @@ export interface AgentRuntimeCapabilities {
    * tools (every runtime has those).
    */
   tools?: boolean;
-  /** The driver exposes ADK sub-agents (`subAgents`) to the runtime. */
+  /**
+   * The driver exposes ADK sub-agents (`subAgents`) to the runtime, through
+   * `request.toolGateway`. Without it, an agent built with `subAgents` on such
+   * a driver is refused (`EXTERNAL_AGENT_SUBAGENTS_UNSUPPORTED`). Set it only
+   * when the driver reads `request.toolGateway`.
+   */
   subagents?: boolean;
   /** The driver can attach MCP servers to the runtime. */
   mcpServers?: boolean;

@@ -1213,6 +1213,23 @@ from the 0.6.0 tag.
   `model_context_window`, `model_auto_compact_token_limit`,
   `model_auto_compact_token_limit_scope`). A workflow step is `unknown` when an
   external run in it reported no `used`.
+- **Sub-agents, `permissions`, `delegation` and `tools` entries are checked
+  when an `ExternalAgent` is built**, instead of being ignored silently (see
+  [Sub-agents need a driver that exposes them](./docs/external-agent-isolation.md#sub-agents-need-a-driver-that-exposes-them)):
+  - `subAgents` on the Claude CLI, Codex CLI, Codex SDK or Gemini CLI driver
+    (any driver whose `capabilities()` lacks `subagents`) throws
+    `EXTERNAL_AGENT_SUBAGENTS_UNSUPPORTED`, also on `clone()`. Those drivers
+    never exposed the sub-agents, so they were never called. Use
+    `ClaudeAgent`, or put the sub-agents on an ADK `LlmAgent` parent.
+  - `permissions` with a key that is not a policy field throws
+    `InputValidationError` naming the key(s). Before, the key was dropped: a
+    misspelled `allowedPaths` left paths unrestricted.
+  - `delegation` throws `InputValidationError` unless it is a plain object
+    with only `finalAnswer: "subagent" | "coordinator"` (a misspelled value
+    used to mean `"coordinator"`, a misspelled key the default).
+  - A `tools` entry that is not an ADK tool or toolset throws
+    `InputValidationError` naming its index, before the capability check.
+
 - **The script sandbox stack limit is lower and capped.**
   `DEFAULT_WORKFLOW_EXECUTION_LIMITS.stackBytes` is 32 KiB (32768, was
   512 KiB), and a script workflow whose `stackBytes` is above 32 KiB is refused
