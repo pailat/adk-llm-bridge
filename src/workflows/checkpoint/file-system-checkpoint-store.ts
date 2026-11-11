@@ -18,6 +18,7 @@ import {
   DIRECTORY_LOCK_OWNER_FILE,
   type DirectoryLockOwner,
   directoryLockTokenKey,
+  isRetireCollision,
   parseDirectoryLockOwner,
   retiredDirectoryLockPath,
 } from "../internal/directory-lock.js";
@@ -1114,7 +1115,7 @@ async function recoverAbandonedLock(
     if (hasErrorCode(error, "ENOENT")) {
       return true;
     }
-    if (hasErrorCode(error, "EEXIST") || hasErrorCode(error, "ENOTEMPTY")) {
+    if (isRetireCollision(error, retiredPath)) {
       return false;
     }
     throw ioError("checkpoint_lock_recovery_failed", checkpointKey, error);

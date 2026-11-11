@@ -26,6 +26,13 @@
  * reports every mutating call on a lock path other than the two renames the
  * protocol allows, plus whether the owner file was complete and synced before
  * the publishing rename.
+ * `recover-race`, `recover-race-win32` and `recover-blocked-win32` save a
+ * second time over an abandoned lock (dead pid). In the race modes a faster
+ * recoverer retires it and a live writer publishes a new lock (released 50 ms
+ * later) just before this store's recovery rename, which so lands on an
+ * existing tombstone; `-win32` runs as Windows and reports that as `EPERM`,
+ * as `MoveFileExW` does. `recover-blocked-win32` fails the recovery rename
+ * with `EPERM` while no tombstone exists.
  * `dir-sync-win32` runs as `win32` and fails every directory flush with
  * `EPERM`, as Windows does; `dir-sync-posix` is the same fault as `linux`.
  * `file-sync-win32` runs as `win32` and fails the owner file's flush instead.
@@ -55,6 +62,9 @@ const MODES = [
   "dir-sync-win32",
   "dir-sync-posix",
   "file-sync-win32",
+  "recover-race",
+  "recover-race-win32",
+  "recover-blocked-win32",
 ];
 if (!root || !mode || !MODES.includes(mode)) {
   throw new Error(`usage: <${MODES.join("|")}> <root> [swapTarget]`);
@@ -72,6 +82,7 @@ if (mode.endsWith("-win32")) {
 } else if (mode === "dir-sync-posix") {
   Object.defineProperty(process, "platform", { value: "linux" });
 }
+let raceArmed = false;
 let swapArmed = false;
 let waitArmed = false;
 let replaceLockPath: string | undefined;
@@ -191,6 +202,25 @@ mock.module("node:fs/promises", () => ({
         setTimeout(() => void retireLock(to), 50);
       }
       throw Object.assign(new Error("injected EPERM"), { code: "EPERM" });
+    }
+    if (raceArmed && retiring) {
+      raceArmed = false;
+      if (mode === "recover-blocked-win32") {
+        throw Object.assign(new Error("injected EPERM"), { code: "EPERM" });
+      }
+      await real.rename(from, to);
+      await publishLock(from, "next-token", process.pid);
+      setTimeout(() => void retireLock(from), 50);
+      try {
+        await real.rename(from, to);
+      } catch (error) {
+        if (mode === "recover-race") throw error;
+        throw Object.assign(new Error("EPERM, rename"), {
+          code: "EPERM",
+          syscall: "rename",
+        });
+      }
+      return;
     }
     if (mode === "busy-release" && retiring && busyLeft > 0) {
       busyLeft -= 1;
@@ -321,7 +351,12 @@ try {
 } catch (error) {
   result.reason = (error as { details?: { reason?: unknown } }).details?.reason;
 }
-if (mode.startsWith("wait-") || mode === "eperm-live" || mode === "trace") {
+if (
+  mode.startsWith("wait-") ||
+  mode.startsWith("recover-") ||
+  mode === "eperm-live" ||
+  mode === "trace"
+) {
   const shardPath = join(root, (await real.readdir(root))[0] ?? "");
   const checkpointName = (await real.readdir(shardPath)).find((name) =>
     name.endsWith(".json"),
@@ -330,13 +365,14 @@ if (mode.startsWith("wait-") || mode === "eperm-live" || mode === "trace") {
   await publishLock(
     heldLockPath,
     "holder-token",
-    mode === "trace" ? deadPid() : process.pid,
+    mode === "trace" || mode.startsWith("recover-") ? deadPid() : process.pid,
   );
   if (mode === "eperm-live") {
     epermArmed = true;
     epermLockPath = heldLockPath;
   }
   waitArmed = mode.startsWith("wait-");
+  raceArmed = mode.startsWith("recover-");
   if (mode === "wait-vanish") vanishLockPath = heldLockPath;
   result.saved = false;
   try {

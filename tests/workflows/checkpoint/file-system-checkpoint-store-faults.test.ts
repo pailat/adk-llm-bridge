@@ -22,7 +22,10 @@ async function runFault(
     | "trace"
     | "dir-sync-win32"
     | "dir-sync-posix"
-    | "file-sync-win32",
+    | "file-sync-win32"
+    | "recover-race"
+    | "recover-race-win32"
+    | "recover-blocked-win32",
   swapTarget?: string,
 ) {
   const root = await mkdtemp(join(tmpdir(), "adk-checkpoint-fault-"));
@@ -194,6 +197,30 @@ describe("FileSystemWorkflowCheckpointStore under file-system faults", () => {
       saved: false,
       loaded: false,
       reason: "checkpoint_lock_candidate_failed",
+    });
+  });
+
+  // A delayed recoverer's rename lands on the tombstone a faster one made,
+  // after a new writer took the lock: it backs off and waits for that writer.
+  test("a recovery that collides with another recoverer's tombstone waits for the new owner", async () => {
+    const { result } = await runFault("recover-race");
+
+    expect(result).toEqual({ saved: true, loaded: true });
+  });
+
+  test("on Windows that collision (EPERM onto an existing tombstone) is the same wait", async () => {
+    const { result } = await runFault("recover-race-win32");
+
+    expect(result).toEqual({ saved: true, loaded: true });
+  });
+
+  test("on Windows an EPERM from a recovery rename with no tombstone fails the save", async () => {
+    const { result } = await runFault("recover-blocked-win32");
+
+    expect(result).toEqual({
+      saved: false,
+      loaded: true,
+      reason: "checkpoint_lock_recovery_failed",
     });
   });
 });

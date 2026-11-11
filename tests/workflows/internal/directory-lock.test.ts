@@ -36,7 +36,11 @@ async function runFault(
     | "sync-eperm-linux"
     | "sync-eio-linux"
     | "sync-enotsup-darwin"
-    | "sync-eperm-win32",
+    | "sync-eperm-win32"
+    | "recover-race"
+    | "recover-race-win32"
+    | "recover-race-linux-eperm"
+    | "recover-blocked-win32",
 ): Promise<Record<string, unknown>> {
   const root = await mkdtemp(join(tmpdir(), "adk-directory-lock-fault-"));
   roots.push(root);
@@ -178,7 +182,14 @@ describe("directory lock", () => {
     } catch (error) {
       code = (error as NodeJS.ErrnoException).code;
     }
-    expect(code).toMatch(/^(EEXIST|ENOTEMPTY)$/u);
+    // Windows never renames onto an existing directory: MoveFileExW refuses
+    // it with ERROR_ACCESS_DENIED, which Node and Bun report as EPERM. POSIX
+    // refuses a non-empty one with ENOTEMPTY (or EEXIST).
+    if (process.platform === "win32") {
+      expect(code).toBe("EPERM");
+    } else {
+      expect(code).toMatch(/^(EEXIST|ENOTEMPTY)$/u);
+    }
     expect(directoryLockTokenMatches(path, next.token)).toBe(true);
   });
 
@@ -248,6 +259,32 @@ describe("directory lock", () => {
     expect(await runFault("sync-eperm-win32")).toEqual({
       acquired: true,
       lockLeft: true,
+    });
+  });
+
+  // A delayed recoverer's rename lands on the tombstone the faster one made,
+  // after a new owner took the lock. Nothing is moved; the recoverer backs off.
+  test("a delayed recovery that collides with the first one's tombstone leaves the next owner's lock", async () => {
+    expect(await runFault("recover-race")).toEqual({ holder: "next" });
+  });
+
+  test("on Windows that collision (EPERM onto an existing tombstone) is the same back-off", async () => {
+    expect(await runFault("recover-race-win32")).toEqual({ holder: "next" });
+  });
+
+  // Off Windows an EPERM is not a collision report, and on Windows an EPERM
+  // with no tombstone is a blocked or refused rename: both stay errors.
+  test("an EPERM from a recovery rename off Windows is an error", async () => {
+    expect(await runFault("recover-race-linux-eperm")).toEqual({
+      code: "EPERM",
+      holder: "next",
+    });
+  });
+
+  test("on Windows an EPERM with no tombstone in the way is an error", async () => {
+    expect(await runFault("recover-blocked-win32")).toEqual({
+      code: "EPERM",
+      holder: "dead",
     });
   });
 });

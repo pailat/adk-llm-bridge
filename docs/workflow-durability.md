@@ -772,7 +772,9 @@ What the operator should do:
 Both filesystem adapters retire lock directories to deterministic, token-bound
 tombstones. When a recoverer retires the lock of a dead owner, the tombstone is
 kept: it makes a delayed second recoverer of the same owner fail instead of
-moving a newer owner's lock away (the ABA problem). A recoverer reads the owner
+moving a newer owner's lock away (the ABA problem). That recoverer's rename
+onto the tombstone fails with `EEXIST` or `ENOTEMPTY`, or with `EPERM` on
+Windows, and it goes back to waiting for the lock. A recoverer reads the owner
 again after finding its process dead and retires only a lock that still
 carries that owner's token.
 

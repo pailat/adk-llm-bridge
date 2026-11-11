@@ -297,11 +297,7 @@ function retireDirectoryLock(
       renameSync(lockPath, retired);
       break;
     } catch (error) {
-      if (
-        hasErrorCode(error, "ENOENT") ||
-        hasErrorCode(error, "EEXIST") ||
-        hasErrorCode(error, "ENOTEMPTY")
-      ) {
+      if (hasErrorCode(error, "ENOENT") || isRetireCollision(error, retired)) {
         return false;
       }
       // Windows refuses to rename a directory while another process has a
@@ -328,6 +324,36 @@ function retireDirectoryLock(
   }
   fsyncDirectorySync(resolve(lockPath, ".."));
   return true;
+}
+
+/**
+ * Whether a failed retiring rename means another process already retired the
+ * same owner, so the tombstone exists. POSIX reports that as `EEXIST` or
+ * `ENOTEMPTY`. Windows reports `EPERM`, because `MoveFileExW` never replaces
+ * a directory; `EPERM` there can also mean the source is in use, so it counts
+ * only on Windows and only when the tombstone exists.
+ *
+ * @param error - Error from the rename of the lock to `retiredPath`.
+ * @param retiredPath - The rename's destination.
+ * @returns `false` for any other error, which the caller rethrows.
+ * @internal
+ */
+export function isRetireCollision(
+  error: unknown,
+  retiredPath: string,
+): boolean {
+  if (hasErrorCode(error, "EEXIST") || hasErrorCode(error, "ENOTEMPTY")) {
+    return true;
+  }
+  if (process.platform !== "win32" || !hasErrorCode(error, "EPERM")) {
+    return false;
+  }
+  try {
+    lstatSync(retiredPath);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**

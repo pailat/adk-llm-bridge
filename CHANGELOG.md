@@ -1769,6 +1769,12 @@ from the 0.6.0 tag.
   between the occupancy check and the publishing rename is waited for instead
   of failing the mutation. Windows reports a rename onto a non-empty directory
   as `EPERM`, which the checkpoint store already treated as contention.
+- Windows: a delayed recovery of an abandoned lock (the checkpoint store, and
+  the workspace and repository mutation locks) failed with `EPERM` when another
+  recoverer had already retired the same lock, instead of waiting for the new
+  owner. `MoveFileExW` never replaces a directory, so Windows reports a rename
+  onto the existing tombstone as `EPERM`, not `EEXIST`. That `EPERM` now counts
+  as the collision when the tombstone exists; any other `EPERM` still fails.
 - Windows: releasing a lock (the checkpoint store, and the workspace and
   repository mutation locks) retries a rename that a waiter's open `owner.json`
   blocks (`EPERM`, `EBUSY`, `EACCES`; 5 tries over about 100 ms) instead of
