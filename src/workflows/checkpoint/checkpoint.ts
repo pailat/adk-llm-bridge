@@ -11,11 +11,17 @@ import type { WorkflowDefinition } from "../definition.js";
 import { toJsonSafeRecord } from "../internal/json-safe-record.js";
 import { hashWorkflowInput, hashWorkflowSource } from "./hash.js";
 import {
+  effectiveSavedModel,
+  type WorkflowCheckpointStepAcceptanceV1,
+} from "./replay-acceptance.js";
+import {
   WORKFLOW_CHECKPOINT_SCHEMA_VERSION,
+  type WorkflowCheckpointStepV1,
   type WorkflowCheckpointV1,
   type WorkflowStepResumeReason,
   workflowStepResultFromCheckpoint,
 } from "./schema.js";
+import type { WorkflowCheckpointStepRecordV1 } from "./step-record.js";
 
 /** Input to {@link createWorkflowCheckpoint}. */
 export interface CreateWorkflowCheckpointInput {
@@ -142,6 +148,27 @@ export function validateWorkflowCheckpoint(
   }
 }
 
+/**
+ * A replayed or resumed step whose agent now requests another model than the
+ * one recorded when the step ran.
+ */
+export interface WorkflowStepModelChange {
+  /** Model the step's agent requested when the step ran, or the `to` of its latest accepted model change; absent when it had none. */
+  savedRequestedModel?: string;
+  /** Models the runtime reported when the step ran, when its result stored them. */
+  savedResolvedModels?: readonly string[];
+  /** Model the step's agent requests now; absent when it has none or it cannot be read. */
+  requestedModel?: string;
+}
+
+/** What {@link resolveWorkflowStep} reports besides the action, in warn mode. */
+export interface WorkflowStepModelNotes {
+  /** The recorded model differs from the current one. */
+  modelChanged?: WorkflowStepModelChange;
+  /** The saved step has no model record (written before the field existed), so no comparison was possible. */
+  modelUnrecorded?: true;
+}
+
 /** What the runtime does with a step, as decided by {@link resolveWorkflowStep}. */
 export type WorkflowStepResolution =
   | {
@@ -150,11 +177,56 @@ export type WorkflowStepResolution =
       /** Set when the step ran before; see {@link WorkflowStepResumeReason}. */
       resumeReason?: WorkflowStepResumeReason;
     }
-  | { action: "replay"; result: WorkflowStepResult }
+  | ({ action: "replay"; result: WorkflowStepResult } & WorkflowStepModelNotes)
   /** The step ended with a recorded failure; report the same failure again. */
-  | { action: "replay-failure"; failure: WorkflowStepFailure }
+  | ({
+      action: "replay-failure";
+      failure: WorkflowStepFailure;
+    } & WorkflowStepModelNotes)
   /** The step is waiting for input; continue it with the answer. */
-  | { action: "resume"; attempt: number; interrupt: WorkflowStepInterrupt };
+  | ({
+      action: "resume";
+      attempt: number;
+      interrupt: WorkflowStepInterrupt;
+    } & WorkflowStepModelNotes);
+
+/** Which parts of a saved step differ from the current one, in the order they are listed. */
+export type WorkflowStepMismatchPart =
+  | "agentName"
+  | "agentRevision"
+  | "input"
+  | "model";
+
+/** Options of {@link resolveWorkflowStep}. */
+export interface WorkflowStepResolveOptions {
+  /** Re-run steps that ended with a recorded failure or were `interrupted`. */
+  retryFailed?: boolean;
+  /** This turn answers a waiting step of this execution. */
+  answerTurn?: boolean;
+  /**
+   * How a change of the requested model is treated on a step whose saved
+   * outcome is reused; see `WorkflowReplayOptions.modelChange`.
+   *
+   * @defaultValue `"warn"`
+   */
+  modelChange?: "warn" | "mismatch";
+  /**
+   * Model the step's agent requests now. Without it no model check runs.
+   * `requested` is absent when the agent names no model.
+   */
+  currentModel?: { requested?: string };
+}
+
+/** A step whose identity differs from the saved one, with the error to throw. */
+export interface WorkflowStepMismatchOutcome {
+  action: "mismatch";
+  /** Differing parts, in a fixed order. */
+  parts: readonly WorkflowStepMismatchPart[];
+  /** The `WORKFLOW_STEP_MISMATCH` error {@link resolveWorkflowStep} throws. */
+  error: WorkflowError;
+  /** The saved step. */
+  saved: WorkflowCheckpointStepV1;
+}
 
 /**
  * Decides whether a step runs, is replayed from the checkpoint, or resumes after an interrupt.
@@ -176,17 +248,31 @@ export type WorkflowStepResolution =
  * turn; otherwise it is `WORKFLOW_INDETERMINATE_STEP`, never replayed as a
  * failure.
  *
+ * The model is not part of a step's identity. With `options.currentModel`, a
+ * step whose saved outcome is reused (replay, replayed failure, resume) is
+ * compared with the model its agent requests now: in `warn` mode a difference
+ * is reported on the resolution (`modelChanged`), and a saved step with no
+ * model record is marked `modelUnrecorded`; in `mismatch` mode a difference,
+ * a missing record or an absent model on either side is a mismatch. A step
+ * that runs again uses the current model and is never compared.
+ *
  * @param checkpoint - Checkpoint holding the saved steps.
  * @param step - Step about to run.
  * @param inputHash - Hash of the step input for this run.
- * @param options - `retryFailed` re-runs steps that ended with a recorded
- * failure or were `interrupted`; `answerTurn` marks a turn that answers a
- * waiting step of this execution.
+ * @param options - See {@link WorkflowStepResolveOptions}.
  * @returns The resolution for the step.
  * @throws {@link WorkflowError} with code `WORKFLOW_STEP_MISMATCH` when the
- * saved step used a different agent, agent revision or input (details: the
- * saved and current agent name, revision and input hash, and the saved
- * step's `savedStatus` and `savedAttempts`);
+ * saved step used a different agent, agent revision or input, or, in
+ * `mismatch` model mode, another model (details: the saved and current agent
+ * name, revision and input hash, the saved step's `savedStatus` and
+ * `savedAttempts`, and `mismatch`, the differing parts in the order
+ * `agentName`, `agentRevision`, `input`, `model`; for `model` also
+ * `savedRequestedModel` (the effective saved model: the latest accepted model
+ * change, else the requested one) and `requestedModel`, each absent when
+ * unknown; when a host acceptance (`replay.acceptChanges`) named another
+ * current value for a differing kind, the coordinator adds
+ * `acceptanceToDoesNotMatch`, the list of those kinds; it holds no input
+ * information);
  * `WORKFLOW_EXECUTION_ERROR` for a completed step without a result or a failed
  * step without a recorded error; `WORKFLOW_INDETERMINATE_STEP` for a `running`
  * or `interrupted` step that cannot be re-run safely (an `interrupted` step
@@ -196,33 +282,148 @@ export function resolveWorkflowStep(
   checkpoint: WorkflowCheckpointV1,
   step: WorkflowStep,
   inputHash: string,
-  options: { retryFailed?: boolean; answerTurn?: boolean } = {},
+  options: WorkflowStepResolveOptions = {},
 ): WorkflowStepResolution {
+  const outcome = classifyWorkflowStep(checkpoint, step, inputHash, options);
+  if (outcome.action === "mismatch") throw outcome.error;
+  return outcome;
+}
+
+/**
+ * Like {@link resolveWorkflowStep}, but returns a step mismatch instead of
+ * throwing it, so the caller can act on it first.
+ *
+ * @internal
+ */
+export function classifyWorkflowStep(
+  checkpoint: WorkflowCheckpointV1,
+  step: WorkflowStep,
+  inputHash: string,
+  options: WorkflowStepResolveOptions = {},
+): WorkflowStepResolution | WorkflowStepMismatchOutcome {
   const saved = checkpoint.steps[step.id];
   if (!saved) {
     return { action: "execute", attempt: 1 };
   }
+  const strict = options.modelChange === "mismatch";
+  const model = options.currentModel;
+  const reuses =
+    model !== undefined && reusesSavedOutcome(saved, step, options);
+  const parts: WorkflowStepMismatchPart[] = [];
+  if (saved.agentName !== step.agentName) parts.push("agentName");
+  if (saved.agentRevision !== step.agentRevision) parts.push("agentRevision");
+  if (saved.inputHash !== inputHash) parts.push("input");
+  if (strict && reuses && !strictModelMatches(saved, model?.requested)) {
+    parts.push("model");
+  }
+  if (parts.length > 0) {
+    return {
+      action: "mismatch",
+      parts,
+      saved,
+      error: stepMismatchError(saved, step, inputHash, parts, model),
+    };
+  }
+  const resolution = decideSavedStep(saved, step, options);
   if (
-    saved.agentName !== step.agentName ||
-    saved.agentRevision !== step.agentRevision ||
-    saved.inputHash !== inputHash
+    strict ||
+    model === undefined ||
+    resolution.action === "execute" ||
+    !reuses
   ) {
-    throw new WorkflowError(
-      "WORKFLOW_STEP_MISMATCH",
-      `Checkpoint step does not match current step: ${step.id}`,
-      {
-        stepId: step.id,
-        savedAgentName: saved.agentName,
-        agentName: step.agentName,
-        savedAgentRevision: saved.agentRevision,
-        agentRevision: step.agentRevision,
-        savedInputHash: saved.inputHash,
-        inputHash,
-        savedStatus: saved.status,
-        savedAttempts: saved.attempts,
-      },
+    return resolution;
+  }
+  return { ...resolution, ...warnNotes(saved, model.requested) };
+}
+
+function stepMismatchError(
+  saved: WorkflowCheckpointStepV1,
+  step: WorkflowStep,
+  inputHash: string,
+  parts: readonly WorkflowStepMismatchPart[],
+  model: { requested?: string } | undefined,
+): WorkflowError {
+  return new WorkflowError(
+    "WORKFLOW_STEP_MISMATCH",
+    `Checkpoint step does not match current step: ${step.id}`,
+    {
+      stepId: step.id,
+      savedAgentName: saved.agentName,
+      agentName: step.agentName,
+      savedAgentRevision: saved.agentRevision,
+      agentRevision: step.agentRevision,
+      savedInputHash: saved.inputHash,
+      inputHash,
+      savedStatus: saved.status,
+      savedAttempts: saved.attempts,
+      mismatch: [...parts],
+      ...(parts.includes("model")
+        ? {
+            savedRequestedModel: effectiveSavedModel(saved),
+            requestedModel: model?.requested,
+          }
+        : {}),
+    },
+  );
+}
+
+/** Whether the saved step's outcome (result, failure or wait) is reused as it is. */
+function reusesSavedOutcome(
+  saved: WorkflowCheckpointStepV1,
+  step: WorkflowStep,
+  options: WorkflowStepResolveOptions,
+): boolean {
+  if (saved.status === "completed") return true;
+  if (saved.status === "waiting") return saved.interrupt !== undefined;
+  if (saved.status === "failed") {
+    return !(
+      options.answerTurn !== true &&
+      (options.retryFailed === true || step.resumePolicy === "retry")
     );
   }
+  return false;
+}
+
+/**
+ * Strict mode: both models known and equal. The saved side is the effective
+ * saved model (the latest accepted model change, else `model.requested`).
+ */
+function strictModelMatches(
+  saved: WorkflowCheckpointStepV1,
+  requested: string | undefined,
+): boolean {
+  const savedRequested = effectiveSavedModel(saved);
+  return (
+    savedRequested !== undefined &&
+    requested !== undefined &&
+    savedRequested === requested
+  );
+}
+
+function warnNotes(
+  saved: WorkflowCheckpointStepV1,
+  requested: string | undefined,
+): WorkflowStepModelNotes {
+  if (saved.model === undefined) return { modelUnrecorded: true };
+  const savedRequested = effectiveSavedModel(saved);
+  if (savedRequested === requested) return {};
+  const resolved = saved.result?.models?.resolved;
+  return {
+    modelChanged: {
+      ...(savedRequested === undefined
+        ? {}
+        : { savedRequestedModel: savedRequested }),
+      ...(resolved === undefined ? {} : { savedResolvedModels: [...resolved] }),
+      ...(requested === undefined ? {} : { requestedModel: requested }),
+    },
+  };
+}
+
+function decideSavedStep(
+  saved: WorkflowCheckpointStepV1,
+  step: WorkflowStep,
+  options: WorkflowStepResolveOptions,
+): WorkflowStepResolution {
   if (saved.status === "completed") {
     if (!saved.result) {
       throw new WorkflowError(
@@ -330,6 +531,9 @@ export function resolveWorkflowStep(
  * @param attempt - Attempt number, starting at 1.
  * @param now - Timestamp in epoch milliseconds; defaults to `Date.now()`.
  * @param resumeReason - Why the attempt was entered; omitted on a first attempt.
+ * @param record - The model the step's agent requested and the input
+ * fingerprint to store on the step; fields left out are not recorded, and
+ * fields an earlier attempt stored are dropped.
  * @returns A new checkpoint with the workflow status `running`.
  */
 export function withWorkflowStepRunning(
@@ -339,6 +543,7 @@ export function withWorkflowStepRunning(
   attempt: number,
   now = Date.now(),
   resumeReason?: WorkflowStepResumeReason,
+  record?: WorkflowCheckpointStepRecordV1,
 ): WorkflowCheckpointV1 {
   const previous = checkpoint.steps[step.id];
   return updateCheckpoint(checkpoint, now, {
@@ -349,6 +554,7 @@ export function withWorkflowStepRunning(
         ? {}
         : { agentRevision: step.agentRevision }),
       inputHash,
+      ...recordFields(record),
       status: "running",
       attempts: attempt,
       ...(resumeReason === undefined ? {} : { resumeReason }),
@@ -375,6 +581,8 @@ export function withWorkflowStepRunning(
  * @param interrupt - Pending interrupt to persist.
  * @param workflowInput - Original workflow input to keep for the resume turn.
  * @param now - Timestamp in epoch milliseconds; defaults to `Date.now()`.
+ * @param record - The model and input fingerprint to store on the step, as in
+ * {@link withWorkflowStepRunning}.
  * @returns A new checkpoint with the step `waiting`.
  */
 export function withWorkflowStepWaiting(
@@ -385,6 +593,7 @@ export function withWorkflowStepWaiting(
   interrupt: WorkflowStepInterrupt,
   workflowInput: Content,
   now = Date.now(),
+  record?: WorkflowCheckpointStepRecordV1,
 ): WorkflowCheckpointV1 {
   const previous = checkpoint.steps[step.id];
   const updated = updateCheckpoint(checkpoint, now, {
@@ -395,6 +604,7 @@ export function withWorkflowStepWaiting(
         ? {}
         : { agentRevision: step.agentRevision }),
       inputHash,
+      ...recordFields(record),
       status: "waiting",
       attempts: attempt,
       // Same attempt: it still entered for the same reason.
@@ -407,6 +617,70 @@ export function withWorkflowStepWaiting(
     },
   });
   return { ...updated, input: workflowInput };
+}
+
+/**
+ * Applies host acceptances to a completed step and appends their audit
+ * entries.
+ *
+ * @remarks
+ * An input change sets `inputHash` to the accepted input's hash and replaces
+ * the input fingerprint with `inputRecord` (dropped when `inputRecord` has no
+ * fields). `model.requested` is never changed: an accepted model change is
+ * only its audit entry, whose `to` becomes the effective saved model.
+ *
+ * @param checkpoint - Checkpoint to update; it is not mutated.
+ * @param stepId - The completed step.
+ * @param change - The accepted input hash and its fingerprint, when the input changed.
+ * @param entries - Audit entries to append, in order.
+ * @param now - Timestamp in epoch milliseconds; defaults to `Date.now()`.
+ * @returns A new checkpoint with the workflow status `running`.
+ * @throws {@link WorkflowError} with code `WORKFLOW_EXECUTION_ERROR` when the
+ * step is missing or not `completed`.
+ * @internal
+ */
+export function withWorkflowStepChangesAccepted(
+  checkpoint: WorkflowCheckpointV1,
+  stepId: string,
+  change: {
+    inputHash?: string;
+    inputRecord?: Pick<
+      WorkflowCheckpointStepRecordV1,
+      "inputLength" | "inputDigest"
+    >;
+  },
+  entries: readonly WorkflowCheckpointStepAcceptanceV1[],
+  now = Date.now(),
+): WorkflowCheckpointV1 {
+  const previous = requireStep(checkpoint, stepId);
+  if (previous.status !== "completed") {
+    throw new WorkflowError(
+      "WORKFLOW_EXECUTION_ERROR",
+      `Only a completed step can take an accepted change: ${stepId}`,
+      { stepId, status: previous.status },
+    );
+  }
+  const { inputLength: _length, inputDigest: _digest, ...kept } = previous;
+  const step =
+    change.inputHash === undefined
+      ? { ...previous }
+      : {
+          ...kept,
+          inputHash: change.inputHash,
+          ...(change.inputRecord?.inputLength === undefined
+            ? {}
+            : { inputLength: change.inputRecord.inputLength }),
+          ...(change.inputRecord?.inputDigest === undefined
+            ? {}
+            : { inputDigest: change.inputRecord.inputDigest }),
+        };
+  return updateCheckpoint(checkpoint, now, {
+    [stepId]: {
+      ...step,
+      acceptances: [...(previous.acceptances ?? []), ...entries],
+      updatedAt: Math.max(now, previous.updatedAt),
+    },
+  });
 }
 
 /**
@@ -579,6 +853,27 @@ function guardedRead(value: unknown, key: string): unknown {
     // A throwing getter on a caller-built error drops only that field.
     return undefined;
   }
+}
+
+/** The model and fingerprint fields to write on a rebuilt step record; none are invented. */
+function recordFields(
+  record: WorkflowCheckpointStepRecordV1 | undefined,
+): WorkflowCheckpointStepRecordV1 {
+  if (!record) return {};
+  return {
+    ...(record.model === undefined ? {} : { model: { ...record.model } }),
+    ...(record.inputLength === undefined
+      ? {}
+      : { inputLength: record.inputLength }),
+    ...(record.inputDigest === undefined
+      ? {}
+      : {
+          inputDigest: {
+            chunkSize: record.inputDigest.chunkSize,
+            chunks: [...record.inputDigest.chunks],
+          },
+        }),
+  };
 }
 
 function updateCheckpoint(

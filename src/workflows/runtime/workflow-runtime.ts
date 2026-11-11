@@ -14,11 +14,16 @@ import type {
   AgentInvocationGateway,
   AgentInvocationResult,
 } from "../../runtime/agent-invocation-gateway.js";
-import { rootSessionOf } from "../../runtime/agent-invocation-gateway.js";
+import {
+  describeAgentModel,
+  rootSessionOf,
+} from "../../runtime/agent-invocation-gateway.js";
 import { parseJson } from "../../utils/json.js";
-import { warn } from "../../utils/log.js";
+import { LogCode, warn } from "../../utils/log.js";
 import { isTempStateKey, withoutTempStateKeys } from "../../utils/state.js";
+import type { WorkflowStepResolution } from "../checkpoint/checkpoint.js";
 import { hashWorkflowValue } from "../checkpoint/hash.js";
+import type { WorkflowCheckpointStepAcceptanceV1 } from "../checkpoint/replay-acceptance.js";
 import type {
   WorkflowCheckpointStore,
   WorkflowCheckpointWrite,
@@ -61,9 +66,11 @@ import type {
   WorkflowEvent,
   WorkflowOutputEvent,
   WorkflowStartedEvent,
+  WorkflowStepChangeAcceptedEvent,
   WorkflowStepCompletedEvent,
   WorkflowStepFailedEvent,
   WorkflowStepInterruptedEvent,
+  WorkflowStepModelChangedEvent,
   WorkflowStepReplayedEvent,
   WorkflowStepStartedEvent,
   WorkflowStepWaitingEvent,
@@ -76,7 +83,9 @@ import { isRecord } from "../internal/guards.js";
 import { monotonicNow } from "../internal/monotonic-clock.js";
 import { resolveStepLimits, StepBudget } from "../internal/step-limit.js";
 import { isWorkflowAgent } from "../internal/workflow-agent-brand.js";
+import type { ResolvedWorkflowReplayOptions } from "../node-config.js";
 import {
+  recordWorkflowSpanEvent,
   setWorkflowExecutionIdOnActiveSpan,
   withStepSpan,
   withWorkflowSpan,
@@ -213,6 +222,8 @@ export interface WorkflowRuntimeConfig {
    * `running` stay indeterminate unless they declare `resumePolicy: "retry"`.
    */
   retryFailedSteps?: boolean;
+  /** Model and input-change handling on replayed steps; see `WorkflowReplayOptions`. */
+  replay?: ResolvedWorkflowReplayOptions;
 }
 
 /**
@@ -223,6 +234,11 @@ const PARALLEL_STEPS_SHARE_AGENT = "WORKFLOW_PARALLEL_STEPS_SHARE_AGENT";
 
 /** Step ids named in that warning before it shortens the list. */
 const MAX_LISTED_SHARED_STEPS = 5;
+
+/** Step ids named in the unrecorded-model warning before it shortens the list. */
+const MAX_LISTED_UNRECORDED_STEPS = 10;
+/** Characters of an input digest shown in logs and spans: `sha256:` and 12 hex. */
+const INPUT_DIGEST_SHOWN = 19;
 
 /**
  * Executes one trusted workflow definition inside an ADK invocation.
@@ -249,6 +265,9 @@ export class WorkflowRuntime {
   readonly #abortSignal?: AbortSignal;
   readonly #structuredOutput: boolean;
   readonly #retryFailedSteps: boolean;
+  readonly #replay?: ResolvedWorkflowReplayOptions;
+  /** Replayed or resumed steps whose saved record has no model, this turn. */
+  readonly #unrecordedModelSteps: string[] = [];
   readonly #limits: Required<WorkflowExecutionLimits>;
   readonly #globalSemaphore: AsyncSemaphore;
   readonly #agentSemaphores = new WeakMap<BaseAgent, AsyncSemaphore>();
@@ -286,6 +305,7 @@ export class WorkflowRuntime {
     this.#abortSignal = config.abortSignal;
     this.#structuredOutput = config.structuredOutput === true;
     this.#retryFailedSteps = config.retryFailedSteps === true;
+    this.#replay = config.replay;
     this.#limits = validateLimits(config.definition.limits);
     this.#stepBudget = new StepBudget(this.#limits);
     this.#globalSemaphore = new AsyncSemaphore(this.#limits.maxConcurrency);
@@ -331,6 +351,7 @@ export class WorkflowRuntime {
         context: this.#parentContext,
         store: this.#checkpointStore,
         retryFailedSteps: this.#retryFailedSteps,
+        replay: this.#replay,
         answerTurn: this.#inputOverride !== undefined,
         onWrite: (write, stepId) => this.emitCheckpointSaved(write, stepId),
         onSizeWarning: (warning) => this.emitCheckpointSizeWarning(warning),
@@ -386,6 +407,8 @@ export class WorkflowRuntime {
       );
       throw error;
     } finally {
+      this.logUnrecordedModels();
+      this.#checkpointCoordinator?.reportUnusedAcceptances();
       abortScope.dispose();
       await this.persistCheckpointsAfterAbort();
       delegatedRun?.();
@@ -545,16 +568,20 @@ export class WorkflowRuntime {
     // The step limits are checked once the checkpoint tells whether the step
     // replays or executes, before it is saved `running`.
     const prepared = await this.checkpointCoordinator()
-      .prepareStep(step, (resolution) => {
-        if (
-          resolution.action === "replay" ||
-          resolution.action === "replay-failure"
-        ) {
-          this.#stepBudget.takeReplayed(step.id);
-        } else {
-          this.#stepBudget.takeExecuted(step.id);
-        }
-      })
+      .prepareStep(
+        step,
+        (resolution) => {
+          if (
+            resolution.action === "replay" ||
+            resolution.action === "replay-failure"
+          ) {
+            this.#stepBudget.takeReplayed(step.id);
+          } else {
+            this.#stepBudget.takeExecuted(step.id);
+          }
+        },
+        { requested: describeAgentModel(declaredAgent).requested },
+      )
       .catch(async (caught: unknown) => {
         if (isReplayIntegrityError(caught)) {
           await this.emitWorkflowEvent({
@@ -568,6 +595,12 @@ export class WorkflowRuntime {
     // A step about to execute is already saved `running`, so its abort check
     // runs inside the try below, where the abort is recorded as `interrupted`.
     if (prepared.resolution.action !== "execute") throwIfRunAborted(signal);
+    if (prepared.accepted) {
+      await this.reportAcceptedChanges(step.id, prepared.accepted);
+    }
+    if (prepared.resolution.action !== "execute") {
+      await this.reportModelNotes(step.id, prepared.resolution);
+    }
     if (prepared.resolution.action === "replay") {
       const result = {
         ...prepared.resolution.result,
@@ -694,12 +727,14 @@ export class WorkflowRuntime {
               : prepared.resolution.action === "execute"
                 ? prepared.resolution.resumeReason
                 : undefined;
+          const requestedModel = describeAgentModel(declaredAgent).requested;
           await this.emitWorkflowEvent({
             ...this.envelope(),
             type: "step_started",
             step,
             attempt,
             ...(resumeReason === undefined ? {} : { resumeReason }),
+            ...(requestedModel === undefined ? {} : { requestedModel }),
           } satisfies WorkflowStepStartedEvent);
 
           const replay = await this.#hooks?.beforeAttempt?.(attemptContext);
@@ -1159,6 +1194,118 @@ export class WorkflowRuntime {
       } satisfies WorkflowCheckpointSavedEvent,
       { actions: createEventActions({ stateDelta: write.stateDelta }) },
     );
+  }
+
+  /**
+   * Reports what the model check found on a step whose saved outcome is
+   * reused: a `step_model_changed` event with a warn log, or a count of steps
+   * the check could not cover (logged once per turn).
+   */
+  private async reportModelNotes(
+    stepId: string,
+    resolution: Exclude<WorkflowStepResolution, { action: "execute" }>,
+  ): Promise<void> {
+    if (resolution.modelUnrecorded === true) {
+      this.#unrecordedModelSteps.push(stepId);
+      return;
+    }
+    const change = resolution.modelChanged;
+    if (!change) return;
+    const action = (
+      {
+        replay: "replayed",
+        "replay-failure": "replayed-failure",
+        resume: "resumed",
+      } as const
+    )[resolution.action];
+    warn(
+      LogCode.WORKFLOW_STEP_MODEL_CHANGED,
+      `step "${stepId}" ${action} from the checkpoint with model ${
+        change.savedRequestedModel ?? "(none)"
+      }, but its agent now requests ${change.requestedModel ?? "(none)"}`,
+    );
+    recordWorkflowSpanEvent("step_model_changed", {
+      "adk.workflow.step.id": stepId,
+      "adk.workflow.step.action": action,
+      ...(change.savedRequestedModel === undefined
+        ? {}
+        : { "adk.workflow.step.saved_model": change.savedRequestedModel }),
+      ...(change.requestedModel === undefined
+        ? {}
+        : { "adk.workflow.step.requested_model": change.requestedModel }),
+    });
+    await this.emitWorkflowEvent({
+      ...this.envelope(),
+      type: "step_model_changed",
+      stepId,
+      savedRecorded: true,
+      ...(change.savedRequestedModel === undefined
+        ? {}
+        : { savedRequestedModel: change.savedRequestedModel }),
+      ...(change.savedResolvedModels === undefined
+        ? {}
+        : { savedResolvedModels: change.savedResolvedModels }),
+      ...(change.requestedModel === undefined
+        ? {}
+        : { requestedModel: change.requestedModel }),
+      action,
+    } satisfies WorkflowStepModelChangedEvent);
+  }
+
+  /**
+   * Reports host acceptances applied to a step and already saved: a warn log
+   * (it weakens a durability check, so it is always visible), a span event and
+   * a `step_change_accepted` event per entry. The reason text goes only into
+   * the event; the log and the span carry its length.
+   */
+  private async reportAcceptedChanges(
+    stepId: string,
+    accepted: readonly WorkflowCheckpointStepAcceptanceV1[],
+  ): Promise<void> {
+    for (const acceptance of accepted) {
+      const from = telemetryValue(acceptance.kind, acceptance.from);
+      const to = telemetryValue(acceptance.kind, acceptance.to);
+      warn(
+        LogCode.WORKFLOW_REPLAY_CHANGE_ACCEPTED,
+        `step ${JSON.stringify(stepId)} replays its saved result after a host-accepted ${acceptance.kind} change from ${from} to ${to}${
+          acceptance.approvedBy === undefined
+            ? ""
+            : ` (approved by ${JSON.stringify(acceptance.approvedBy)})`
+        }`,
+      );
+      recordWorkflowSpanEvent("step_change_accepted", {
+        "adk.workflow.step.id": stepId,
+        "adk.workflow.acceptance.kind": acceptance.kind,
+        "adk.workflow.acceptance.from": from,
+        "adk.workflow.acceptance.to": to,
+        ...(acceptance.approvedBy === undefined
+          ? {}
+          : { "adk.workflow.acceptance.approved_by": acceptance.approvedBy }),
+        "adk.workflow.acceptance.reason_length": acceptance.reason.length,
+      });
+      await this.emitWorkflowEvent({
+        ...this.envelope(),
+        type: "step_change_accepted",
+        stepId,
+        acceptance,
+      } satisfies WorkflowStepChangeAcceptedEvent);
+    }
+  }
+
+  /** Logs once the steps this turn replayed without a saved model to compare. */
+  private logUnrecordedModels(): void {
+    const steps = this.#unrecordedModelSteps;
+    if (steps.length === 0) return;
+    const listed = steps.slice(0, MAX_LISTED_UNRECORDED_STEPS).join(", ");
+    const more =
+      steps.length > MAX_LISTED_UNRECORDED_STEPS
+        ? `, and ${steps.length - MAX_LISTED_UNRECORDED_STEPS} more`
+        : "";
+    warn(
+      LogCode.WORKFLOW_STEP_MODEL_UNRECORDED,
+      `${steps.length} replayed or resumed step(s) have no saved model, so a model change could not be checked: ${listed}${more}`,
+    );
+    steps.length = 0;
   }
 
   private async emitCheckpointSizeWarning(
@@ -1764,6 +1911,15 @@ function stepResult(
     events: invocation.events,
     ...stepStateDelta(invocation.stateDelta),
     usage: { ...invocation.usage },
+    ...(invocation.models
+      ? {
+          models: {
+            requested: [...invocation.models.requested],
+            resolved: [...invocation.models.resolved],
+            unknown: invocation.models.unknown,
+          },
+        }
+      : {}),
     attempts,
     startedAt,
     completedAt: Date.now(),
@@ -2166,6 +2322,10 @@ function workflowEventTitle(event: WorkflowEvent): string {
       return `Workflow ${event.workflowId}: ${event.stepId} interrupted`;
     case "step_replayed":
       return `Workflow ${event.workflowId}: ${event.result.id} replayed`;
+    case "step_model_changed":
+      return `Workflow ${event.workflowId}: ${event.stepId} model changed`;
+    case "step_change_accepted":
+      return `Workflow ${event.workflowId}: ${event.stepId} ${event.acceptance.kind} change accepted`;
     case "step_waiting":
       return `Workflow ${event.workflowId}: ${event.stepId} waiting for input`;
     case "workflow_waiting":
@@ -2316,4 +2476,17 @@ function latestWaitingExecutionId(
     }
   }
   return undefined;
+}
+
+/**
+ * An acceptance value as logs and spans show it: a model id whole, an input
+ * digest cut to `sha256:` and its first 12 hex characters. A full digest of
+ * a short input can be reversed by guessing; the checkpoint and the
+ * `step_change_accepted` event keep the full value.
+ */
+function telemetryValue(
+  kind: WorkflowCheckpointStepAcceptanceV1["kind"],
+  value: string,
+): string {
+  return kind === "input" ? value.slice(0, INPUT_DIGEST_SHOWN) : value;
 }

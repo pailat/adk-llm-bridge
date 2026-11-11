@@ -503,6 +503,7 @@ describe("workflow checkpoints", () => {
       WORKFLOW_INDETERMINATE_STEP: true,
       WORKFLOW_INPUT_MISMATCH: true,
       WORKFLOW_LIMIT_EXCEEDED: true,
+      WORKFLOW_REPLAY_ACCEPTANCE_INVALID: true,
       WORKFLOW_SANDBOX_UNAVAILABLE: true,
       WORKFLOW_SCRIPT_INVALID: true,
       WORKFLOW_SOURCE_MISMATCH: true,
@@ -809,3 +810,62 @@ function expectWorkflowCode(
     expect((error as WorkflowError).code).toBe(code);
   }
 }
+
+describe("stored step models", () => {
+  const models = {
+    requested: ["claude-opus-5-5"],
+    resolved: ["claude-opus-5-5"],
+    unknown: false,
+  };
+
+  async function withModels(value: unknown): Promise<unknown> {
+    const copy = structuredClone(await completedCheckpoint()) as unknown as {
+      steps: Record<string, { result: Record<string, unknown> }>;
+    };
+    const saved = copy.steps.plan;
+    if (!saved) throw new Error("missing plan step");
+    saved.result.models = value;
+    return copy;
+  }
+
+  test("valid models round-trip, and a checkpoint from before models existed loads", async () => {
+    expect(isWorkflowCheckpointV1(await withModels(models))).toBe(true);
+    expect(
+      isWorkflowCheckpointV1(
+        await withModels({ requested: [], resolved: [], unknown: true }),
+      ),
+    ).toBe(true);
+    expect(isWorkflowCheckpointV1(await completedCheckpoint())).toBe(true);
+    expect(requiredResult(await completedCheckpoint()).models).toBeUndefined();
+    const copy = (await withModels(models)) as {
+      steps: Record<string, { result: { models: unknown } }>;
+    };
+    expect(copy.steps.plan?.result.models).toEqual(models);
+  });
+
+  test("malformed models are rejected as corrupt", async () => {
+    const corrupt: Record<string, unknown> = {
+      null: null,
+      "a string": "claude",
+      "an array": [models],
+      "an empty record": {},
+      "no requested": { resolved: [], unknown: false },
+      "no resolved": { requested: [], unknown: false },
+      "no unknown": { requested: [], resolved: [] },
+      "requested not an array": { ...models, requested: "x" },
+      "resolved not an array": { ...models, resolved: "x" },
+      "a number in requested": { ...models, requested: [1] },
+      "an empty string in resolved": { ...models, resolved: [""] },
+      "a null in requested": { ...models, requested: [null] },
+      "unknown a string": { ...models, unknown: "false" },
+      "unknown a number": { ...models, unknown: 0 },
+      "an extra key": { ...models, extra: 1 },
+    };
+    for (const [name, value] of Object.entries(corrupt)) {
+      expect({
+        name,
+        valid: isWorkflowCheckpointV1(await withModels(value)),
+      }).toEqual({ name, valid: false });
+    }
+  });
+});

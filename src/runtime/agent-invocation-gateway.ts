@@ -9,6 +9,7 @@ import {
   getPendingUserInputRequests,
   InvocationContext,
   isBaseAgent,
+  isBaseLlm,
   isBaseToolset,
   isFinalResponse,
   isLlmAgent,
@@ -20,6 +21,7 @@ import {
   type UserInputRequest,
 } from "@google/adk";
 import type { Content } from "@google/genai";
+import { EXTERNAL_AGENT_MODEL_METADATA_KEY } from "../agents/events.js";
 import { inheritSessionPermissions } from "../agents/permissions/inheritance.js";
 import { isTempStateKey, withoutTempStateKeys } from "../utils/state.js";
 
@@ -161,6 +163,12 @@ export interface AgentInvocationResult {
   /** Aggregate token and tool-call usage of the run; see {@link AgentInvocationUsage}. */
   usage: AgentInvocationUsage;
   /**
+   * The models of the run; see {@link AgentInvocationModels}. Absent when the
+   * run has no model information and nothing is unknown, such as a plain
+   * custom agent.
+   */
+  models?: AgentInvocationModels;
+  /**
    * Merged state delta of the non-partial events, without ADK `temp:` keys;
    * absent when empty.
    */
@@ -171,6 +179,30 @@ export interface AgentInvocationResult {
   errorKind?: AgentInvocationErrorKind;
   /** Present when the child stopped waiting for input; see the type docs. */
   interrupt?: AgentInvocationInterrupt;
+}
+
+/**
+ * The models of one delegated agent run.
+ *
+ * @remarks
+ * Collected over the run's non-partial events, nested agents included. A
+ * model id appears once, in first-seen order. `requested` holds the ids the
+ * agents were configured with, and `resolved` the ids a trusted runtime
+ * reported (an external agent's reported model, or the `modelVersion` of an
+ * LLM response). `unknown` is true when a run was not fully explicit and
+ * reported: an external run with no requested model, a status other than
+ * `reported`, or no model information at all, or an `LlmAgent` whose model is
+ * inherited or cannot be read. Agents nested below the delegated agent are
+ * read from the `author` of the events they yield, so an agent that yields no
+ * event is not seen.
+ */
+export interface AgentInvocationModels {
+  /** Requested model ids, unique, in first-seen order. */
+  requested: string[];
+  /** Model ids a trusted runtime reported, unique, in first-seen order. */
+  resolved: string[];
+  /** Whether any run was not fully explicit and reported. */
+  unknown: boolean;
 }
 
 /** Request to run a named agent in an isolated child session. */
@@ -405,7 +437,7 @@ export class AgentInvocationGateway {
         }
         await this.#eventSink?.(persisted, childContext);
         await request.eventSink?.(persisted, childContext);
-        countEvent(tally, persisted, childContext);
+        countEvent(tally, persisted, childContext, agent);
       }
     } catch (caught) {
       recordFailure(tally, caught, "agent-error", signal);
@@ -551,12 +583,30 @@ interface RunTally {
   toolCalls: number;
   /** Token usage summed over non-partial events. */
   usage: AgentInvocationUsage;
+  /** Model ids seen on non-partial events. */
+  models: ModelTally;
   /** Errors seen (event errors and thrown errors). */
   errors: number;
   /** Message of the last error. */
   error: string | undefined;
   /** Classification of the last error. */
   errorKind: AgentInvocationErrorKind | undefined;
+}
+
+/** Model ids and flags collected from the events of one run. */
+interface ModelTally {
+  requested: string[];
+  resolved: string[];
+  /** A run reported a status other than `reported`, or no requested model. */
+  unknown: boolean;
+  /** Authors with at least one well-formed external model info. */
+  infoAuthors: Set<string>;
+  /** Authors of non-partial events that were already described. */
+  describedAuthors: Set<string>;
+  /** Described authors that are external agents, whose events must carry info. */
+  externalAuthors: Set<string>;
+  /** Authors found in no agent tree, which need their own info. */
+  unfoundAuthors: Set<string>;
 }
 
 /** A tally with nothing counted yet. */
@@ -570,6 +620,15 @@ function emptyTally(): RunTally {
     textEvents: 0,
     toolCalls: 0,
     usage: emptyUsage(),
+    models: {
+      requested: [],
+      resolved: [],
+      unknown: false,
+      infoAuthors: new Set(),
+      describedAuthors: new Set(),
+      externalAuthors: new Set(),
+      unfoundAuthors: new Set(),
+    },
     errors: 0,
     error: undefined,
     errorKind: undefined,
@@ -600,6 +659,7 @@ function countEvent(
   tally: RunTally,
   persisted: Event,
   context: InvocationContext,
+  agent: BaseAgent,
 ): void {
   const visible = persisted.partial ? undefined : extractVisibleText(persisted);
   if (visible) {
@@ -618,6 +678,7 @@ function countEvent(
     // A streamed function call is repeated on the final event.
     tally.toolCalls += getFunctionCalls(persisted).length;
     addUsage(tally.usage, persisted);
+    countModels(tally.models, persisted, agent);
   }
   if (persisted.errorMessage) {
     tally.errors++;
@@ -674,6 +735,174 @@ function readLlmCallCount(context: InvocationContext): number | undefined {
     : undefined;
 }
 
+/** Appends a model id when it is not in the list yet. */
+function addModelId(list: string[], id: string): void {
+  if (!list.includes(id)) list.push(id);
+}
+
+/**
+ * Reads the model info `ExternalAgent` puts on an event, or `undefined` when
+ * the value is missing or malformed (so a forged value cannot name a model).
+ */
+function readExternalModelInfo(
+  event: Event,
+): { requested?: string; resolved?: string; status: string } | undefined {
+  const value: unknown =
+    event.customMetadata?.[EXTERNAL_AGENT_MODEL_METADATA_KEY];
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return undefined;
+  }
+  const { requested, resolved, status } = value as Record<string, unknown>;
+  const optionalId = (id: unknown) =>
+    id === undefined || (typeof id === "string" && id.length > 0);
+  if (!optionalId(requested) || !optionalId(resolved)) return undefined;
+  if (status === "reported") {
+    if (resolved === undefined) return undefined;
+  } else if (
+    (status !== "not-reported" && status !== "unsupported") ||
+    resolved !== undefined
+  ) {
+    return undefined;
+  }
+  return {
+    ...(requested !== undefined ? { requested: requested as string } : {}),
+    ...(resolved !== undefined ? { resolved: resolved as string } : {}),
+    status,
+  };
+}
+
+/**
+ * Counts the model ids of one non-partial event: an external run's model info,
+ * or the `modelVersion` of an LLM response.
+ */
+function countModels(models: ModelTally, event: Event, agent: BaseAgent): void {
+  const author = event.author ?? "";
+  describeAuthor(models, author, agent);
+  const info = readExternalModelInfo(event);
+  if (info) {
+    models.infoAuthors.add(author);
+    if (info.requested) addModelId(models.requested, info.requested);
+    else models.unknown = true;
+    if (info.status === "reported" && info.resolved) {
+      addModelId(models.resolved, info.resolved);
+    } else {
+      models.unknown = true;
+    }
+    return;
+  }
+  if (typeof event.modelVersion === "string" && event.modelVersion.length > 0) {
+    addModelId(models.resolved, event.modelVersion);
+  }
+}
+
+/**
+ * Describes the author of an event once: an agent below the step's agent (an
+ * ADK composite's children, sub-agents) is read like the step's own agent, so
+ * its requested id is named and an inherited or unreadable model makes the
+ * run unknown. An author found in no tree needs a model info of its own, and
+ * an external author must carry one too (checked in {@link runModels}). The
+ * step's own agent is described by `runModels`, and the user is not an agent.
+ */
+function describeAuthor(
+  models: ModelTally,
+  author: string,
+  agent: BaseAgent,
+): void {
+  if (author === "" || author === agent.name || author === "user") return;
+  if (models.describedAuthors.has(author)) return;
+  models.describedAuthors.add(author);
+  const found = agent.findAgent(author);
+  if (!found) {
+    models.unfoundAuthors.add(author);
+    return;
+  }
+  const described = describeAgentModel(found);
+  if (described.requested) addModelId(models.requested, described.requested);
+  if (described.unknown) models.unknown = true;
+  if (described.external) models.externalAuthors.add(author);
+}
+
+/**
+ * What an agent was configured to run, read without running it.
+ *
+ * @remarks
+ * `requested` is the model id the agent names: an external agent's driver
+ * `model`, an `LlmAgent`'s string or model instance. An `LlmAgent` without a
+ * model of its own inherits one from an ancestor `LlmAgent`: the inherited id
+ * is named and `unknown` is true. When no model can be read (`canonicalModel`
+ * throws) there is no `requested` and `unknown` is true. `external` marks an
+ * agent that has a driver, whose events decide `unknown`.
+ *
+ * @param agent - The agent to describe.
+ * @returns What the agent names.
+ * @internal
+ */
+export function describeAgentModel(agent: BaseAgent): {
+  requested?: string;
+  unknown: boolean;
+  external: boolean;
+} {
+  if (isLlmAgent(agent)) {
+    const model: unknown = agent.model;
+    if (typeof model === "string" && model.length > 0) {
+      return { requested: model, unknown: false, external: false };
+    }
+    if (isBaseLlm(model)) {
+      const id: unknown = model.model;
+      return typeof id === "string" && id.length > 0
+        ? { requested: id, unknown: false, external: false }
+        : { unknown: true, external: false };
+    }
+    try {
+      const inherited: unknown = agent.canonicalModel.model;
+      return typeof inherited === "string" && inherited.length > 0
+        ? { requested: inherited, unknown: true, external: false }
+        : { unknown: true, external: false };
+    } catch {
+      return { unknown: true, external: false };
+    }
+  }
+  const driver: unknown = (agent as { driver?: unknown }).driver;
+  if (
+    typeof driver === "object" &&
+    driver !== null &&
+    typeof (driver as { providerId?: unknown }).providerId === "string"
+  ) {
+    const model: unknown = (driver as { model?: unknown }).model;
+    return {
+      ...(typeof model === "string" && model.length > 0
+        ? { requested: model }
+        : {}),
+      unknown: false,
+      external: true,
+    };
+  }
+  return { unknown: false, external: false };
+}
+
+/** The run's models, or `undefined` when there is nothing to report. */
+function runModels(
+  agent: BaseAgent,
+  tally: RunTally,
+): AgentInvocationModels | undefined {
+  const own = describeAgentModel(agent);
+  const requested: string[] = [];
+  if (own.requested) addModelId(requested, own.requested);
+  for (const id of tally.models.requested) addModelId(requested, id);
+  const resolved = [...tally.models.resolved];
+  const { infoAuthors } = tally.models;
+  const unknown =
+    tally.models.unknown ||
+    own.unknown ||
+    (own.external && !infoAuthors.has(agent.name)) ||
+    [...tally.models.externalAuthors].some((name) => !infoAuthors.has(name)) ||
+    [...tally.models.unfoundAuthors].some((name) => !infoAuthors.has(name));
+  if (requested.length === 0 && resolved.length === 0 && !unknown) {
+    return undefined;
+  }
+  return { requested, resolved, unknown };
+}
+
 /**
  * Builds the public result of a delegation from its tally.
  *
@@ -720,11 +949,19 @@ function aggregateResult(
       durationMs: Date.now() - startedAt,
     },
     usage: { ...tally.usage, toolCalls: tally.toolCalls },
+    ...modelsKey(runModels(agent, tally)),
     ...(Object.keys(stateDelta).length > 0 ? { stateDelta } : {}),
     ...(error ? { error } : {}),
     ...(error && errorKind ? { errorKind } : {}),
     ...(interrupt ? { interrupt } : {}),
   };
+}
+
+/** `{ models }`, or nothing when there are no models to report. */
+function modelsKey(
+  models: AgentInvocationModels | undefined,
+): { models: AgentInvocationModels } | Record<string, never> {
+  return models ? { models } : {};
 }
 
 function createChildInvocationContext({

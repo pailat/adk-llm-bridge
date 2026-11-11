@@ -1,6 +1,16 @@
 import { isAbsolute, resolve } from "node:path";
 import type { ExternalAgentDefinitionRegistry } from "../../agents/agent-registry.js";
 import type { ExternalAgentDefinitionConfig } from "../../agents/agent-schema.js";
+import {
+  isModelId,
+  isRouterAlias,
+  MODEL_ALIAS_DENYLIST,
+} from "../../agents/driver/model.js";
+import {
+  EXTERNAL_AGENT_MODEL_REQUIRED,
+  ExternalAgentPolicyError,
+} from "../../agents/driver/policy-errors.js";
+import type { ExternalAgent } from "../../agents/external-agent.js";
 import { canonicalPath, isUnderAny } from "../../agents/permissions/paths.js";
 import type { ExternalAgentPermissionPolicy } from "../../agents/permissions/schema.js";
 import { rememberLegacyDigest } from "../internal/canonical-hash.js";
@@ -26,6 +36,7 @@ const CONFIG_KEYS = new Set([
   "instruction",
   "workingDirectory",
   "permissions",
+  "model",
 ]);
 const PERMISSION_KEYS = new Set(["mode", "allowNetwork", "allowedPaths"]);
 const POLICY_KEYS = new Set([
@@ -56,6 +67,21 @@ export interface ExternalAgentWorkflowFactoryOptions {
   limits?: Partial<WorkflowAgentFactoryLimits>;
   /** Host ceilings for capabilities a workflow may request. */
   policy?: WorkflowAgentPolicyCeilings;
+  /**
+   * Refuse an agent without an explicit model.
+   *
+   * @remarks
+   * A request without `config.model` fails with
+   * `WORKFLOW_AGENT_MODEL_REQUIRED`, and so does a router or default alias of
+   * a built-in provider id (`claude`: `default`, `best`, `opusplan`;
+   * `gemini-cli`: `auto`, `auto-*`), which the factory checks itself. The
+   * option is also forwarded to the driver. For a custom provider id the
+   * factory cannot know the aliases: it relies on the driver refusing them,
+   * and on the driver reporting a `model`.
+   *
+   * @defaultValue false
+   */
+  requireExplicitModel?: boolean;
 }
 
 /** Host-owned ceilings. Omitted capabilities are denied by default. */
@@ -94,6 +120,7 @@ export class ExternalAgentWorkflowFactory implements WorkflowAgentFactory {
   readonly #allowedProviderIds?: ReadonlySet<string>;
   readonly #limits: Readonly<WorkflowAgentFactoryLimits>;
   readonly #policy: Readonly<NormalizedPolicyCeilings>;
+  readonly #requireExplicitModel: boolean;
   readonly #handles = new Map<string, WorkflowAgentHandle>();
 
   constructor(options: ExternalAgentWorkflowFactoryOptions) {
@@ -103,6 +130,13 @@ export class ExternalAgentWorkflowFactory implements WorkflowAgentFactory {
     this.#registry = options.registry;
     this.#limits = normalizeLimits(options.limits);
     this.#policy = normalizePolicyCeilings(options.policy, this.#limits);
+    if (
+      options.requireExplicitModel !== undefined &&
+      typeof options.requireExplicitModel !== "boolean"
+    ) {
+      invalid("Workflow agent requireExplicitModel must be boolean");
+    }
+    this.#requireExplicitModel = options.requireExplicitModel === true;
     this.#allowedProviderIds = normalizeProviderAllowlist(
       options.allowedProviderIds,
       this.#limits,
@@ -118,8 +152,11 @@ export class ExternalAgentWorkflowFactory implements WorkflowAgentFactory {
    * for a malformed request, `WORKFLOW_AGENT_POLICY_EXCEEDED` when the request
    * exceeds the host ceilings, `WORKFLOW_AGENT_PROVIDER_NOT_ALLOWED` or
    * `WORKFLOW_AGENT_UNKNOWN_PROVIDER` for the provider, `WORKFLOW_AGENT_DUPLICATE_NAME`
-   * when the name is active, and `WORKFLOW_AGENT_LIMIT_EXCEEDED` when `maxAgents`
-   * agents are active.
+   * when the name is active, `WORKFLOW_AGENT_LIMIT_EXCEEDED` when `maxAgents`
+   * agents are active, `WORKFLOW_AGENT_MODEL_REQUIRED` under
+   * `requireExplicitModel` when no usable model is set, and
+   * `WORKFLOW_AGENT_MODEL_NOT_APPLIED` when `config.model` is given and the
+   * driver does not keep exactly that id.
    */
   create(request: WorkflowAgentFactoryRequest): WorkflowAgentHandle {
     const normalized = normalizeRequest(request, this.#limits, this.#policy);
@@ -146,18 +183,99 @@ export class ExternalAgentWorkflowFactory implements WorkflowAgentFactory {
       );
     }
 
+    const model = normalized.config?.model;
+    this.assertModelAllowed(normalized.providerId, model);
+    const definition = this.#registry.get(normalized.providerId);
+    if (model !== undefined && !definition?.createDriver) {
+      throw notApplied(
+        `Workflow agent provider ${normalized.providerId} has no default driver, so the model cannot be applied`,
+        normalized.providerId,
+        model,
+      );
+    }
+
     const descriptor = Object.freeze({
       providerId: normalized.providerId,
       name: normalized.name,
-      revision: agentRevision(normalized),
+      revision: agentRevisionFor(normalized),
+      ...(model !== undefined ? { model } : {}),
     });
-    const agent = this.#registry.create(
-      normalized.providerId,
-      externalAgentConfig(normalized),
-    );
+    const agent = this.#createAgent(normalized);
+    this.#assertModelApplied(agent, normalized.providerId, model);
     const handle = Object.freeze({ descriptor, agent });
     this.#handles.set(normalized.name, handle);
     return handle;
+  }
+
+  /** Builds the agent, turning a driver's own model refusal into the factory's code. */
+  #createAgent(request: WorkflowAgentFactoryRequest): ExternalAgent {
+    try {
+      return this.#registry.create(
+        request.providerId,
+        externalAgentConfig(request, this.#requireExplicitModel),
+      );
+    } catch (error) {
+      if (
+        error instanceof ExternalAgentPolicyError &&
+        error.code === EXTERNAL_AGENT_MODEL_REQUIRED
+      ) {
+        throw new WorkflowAgentFactoryError(
+          "WORKFLOW_AGENT_MODEL_REQUIRED",
+          `Workflow agent provider ${request.providerId} refused the model: ${error.message}`,
+          { providerId: request.providerId },
+          { cause: error },
+        );
+      }
+      throw error;
+    }
+  }
+
+  /** The checks that need the created driver: it must report and keep the model. */
+  #assertModelApplied(
+    agent: ExternalAgent,
+    providerId: string,
+    model: string | undefined,
+  ): void {
+    const kept: unknown = agent.driver.model;
+    if (
+      this.#requireExplicitModel &&
+      !(typeof kept === "string" && kept.length > 0)
+    ) {
+      throw new WorkflowAgentFactoryError(
+        "WORKFLOW_AGENT_MODEL_REQUIRED",
+        `Workflow agent provider ${providerId} created a driver that reports no model`,
+        { providerId },
+      );
+    }
+    if (model !== undefined && kept !== model) {
+      throw notApplied(
+        `Workflow agent provider ${providerId} did not keep the requested model`,
+        providerId,
+        model,
+      );
+    }
+  }
+
+  /** Under `requireExplicitModel`: a model must be set and not a built-in router alias. */
+  private assertModelAllowed(providerId: string, model: string | undefined) {
+    if (!this.#requireExplicitModel) return;
+    if (model === undefined) {
+      throw new WorkflowAgentFactoryError(
+        "WORKFLOW_AGENT_MODEL_REQUIRED",
+        "Workflow agent requires an explicit model: set config.model",
+        { providerId },
+      );
+    }
+    const denylist = Object.hasOwn(MODEL_ALIAS_DENYLIST, providerId)
+      ? MODEL_ALIAS_DENYLIST[providerId as keyof typeof MODEL_ALIAS_DENYLIST]
+      : undefined;
+    if (denylist !== undefined && isRouterAlias(model, denylist)) {
+      throw new WorkflowAgentFactoryError(
+        "WORKFLOW_AGENT_MODEL_REQUIRED",
+        `Workflow agent model ${JSON.stringify(model)} lets the ${providerId} runtime choose the model: set a model id or a plain alias`,
+        { providerId },
+      );
+    }
   }
 
   /** {@inheritDoc WorkflowAgentFactory.get} */
@@ -195,10 +313,24 @@ export class ExternalAgentWorkflowFactory implements WorkflowAgentFactory {
   }
 }
 
-function agentRevision(request: WorkflowAgentFactoryRequest): string {
+/**
+ * Revision of a factory request: a digest of the provider id and the config
+ * without its top-level `model` key.
+ *
+ * @remarks
+ * The model is not part of the revision, so changing it is reported by the
+ * replay model check (`replay.modelChange`) and does not stop completed steps
+ * from replaying. Only that one key is left out: a `model` key nested anywhere
+ * else in the config stays in the revision. A host that wants the model to be
+ * identity sets `replay.modelChange: "mismatch"`.
+ *
+ * @internal
+ */
+export function agentRevisionFor(request: WorkflowAgentFactoryRequest): string {
+  const { model: _model, ...config } = request.config ?? {};
   const fingerprint = {
     providerId: request.providerId,
-    config: request.config ?? {},
+    config,
   };
   const revision = canonicalDigestSync(fingerprint);
   // Steps checkpointed before 0.7.0 hold the localeCompare-ordered revision
@@ -255,6 +387,12 @@ function normalizeConfig(
     limits,
     policy,
   );
+  if (config.model !== undefined && !isModelId(config.model)) {
+    invalid(
+      "Workflow agent model must be a model id: 1 to 256 characters, no whitespace or control characters, not starting with a dash",
+    );
+  }
+  const model = config.model;
   const permissions = normalizePermissions(
     config.permissions,
     limits,
@@ -267,6 +405,7 @@ function normalizeConfig(
     ...(instruction !== undefined ? { instruction } : {}),
     ...(workingDirectory !== undefined ? { workingDirectory } : {}),
     ...(permissions ? { permissions } : {}),
+    ...(model !== undefined ? { model } : {}),
   });
 }
 
@@ -402,7 +541,9 @@ function normalizeAllowedPath(
 
 function externalAgentConfig(
   request: WorkflowAgentFactoryRequest,
+  requireExplicitModel: boolean,
 ): ExternalAgentDefinitionConfig {
+  const model = request.config?.model;
   return {
     name: request.name,
     ...(request.config?.description !== undefined
@@ -417,7 +558,27 @@ function externalAgentConfig(
     ...(request.config?.permissions
       ? { permissions: request.config.permissions }
       : {}),
+    ...(model !== undefined
+      ? {
+          driverOptions: {
+            model,
+            ...(requireExplicitModel ? { requireExplicitModel: true } : {}),
+          },
+        }
+      : {}),
   };
+}
+
+function notApplied(
+  message: string,
+  providerId: string,
+  model: string,
+): WorkflowAgentFactoryError {
+  return new WorkflowAgentFactoryError(
+    "WORKFLOW_AGENT_MODEL_NOT_APPLIED",
+    message,
+    { providerId, model },
+  );
 }
 
 function normalizeProviderAllowlist(

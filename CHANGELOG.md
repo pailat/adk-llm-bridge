@@ -673,6 +673,34 @@ from the 0.6.0 tag.
 
 ### Added
 
+- Workflow replay records the model each step's agent requested (`model.requested`
+  on the checkpoint step) and reports a change on a replayed or resumed step: a
+  `step_model_changed` event and a `WORKFLOW_STEP_MODEL_CHANGED` warning.
+  `replay.modelChange: "mismatch"` makes it a `WORKFLOW_STEP_MISMATCH` instead
+  (both models must be known). A saved step without a record is not compared;
+  the turn logs one `WORKFLOW_STEP_MODEL_UNRECORDED` with the count. See
+  [Model and input changes on replayed steps](docs/workflow-durability.md#model-and-input-changes-on-replayed-steps).
+- `WORKFLOW_STEP_MISMATCH` details gain `mismatch` (the differing parts). An
+  input mismatch also gives the host a hint (input lengths and the first
+  differing window of the canonical input, with a structural path, never
+  input text) through `replay.onStepMismatch` or a
+  `WORKFLOW_STEP_MISMATCH_HINT` warning, and never in events, the persisted
+  error or the checkpoint. It comes from a per-step input fingerprint
+  (`inputLength`, `inputDigest`); `replay.inputDigest: false` turns that off.
+  The new `workflowStepInputCanonicalForm()` returns the text the window
+  refers to. The residual of the fingerprint is documented in the durability
+  guide.
+- `replay.acceptChanges`: host-approved input or model changes for completed
+  steps, so a relaunch keeps a step's saved result after a known-equivalent
+  change. Each entry is bound to the execution, the step and the exact saved
+  and current values, with a reason; entries are checked against the
+  checkpoint before any step runs (`WORKFLOW_REPLAY_ACCEPTANCE_INVALID`, never
+  saved) and applied in one save with an audit entry on the step
+  (`acceptances`, `step_change_accepted`, `WORKFLOW_REPLAY_CHANGE_ACCEPTED`).
+  A relaunch with the same entry is a no-op. `parseWorkflowReplayAcceptances()`
+  validates an operator file. Acceptances must come from a host-only source,
+  never a file an agent can write; see
+  [Accepting a known-equivalent change](docs/workflow-durability.md#accepting-a-known-equivalent-change).
 - **Opt-in strict binary resolution for the SDK drivers.**
   `ClaudeAgentSdkDriver` and `CodexSdkDriver` take `strictBinaryResolution`
   (default `false`, behaviour unchanged). When it is on, no explicit path is
@@ -691,6 +719,27 @@ from the 0.6.0 tag.
   optional `validateLimits(limits)`; `ScriptWorkflowAgent` calls it when it is
   built, so a `stackBytes` above the maximum throws `WORKFLOW_DEFINITION_INVALID`
   at construction, not at the first run.
+- Workflow factory `config.model`: `ExternalAgentWorkflowFactory` forwards it
+  to the driver as the `model` option, checks it as applied
+  (`WORKFLOW_AGENT_MODEL_NOT_APPLIED`: nothing is registered when the driver
+  does not keep exactly that id) and records it in the agent descriptor. The
+  revision leaves out the top-level `config.model`, so an agent keeps its
+  revision whatever model it names (see Changed below). With a model, the
+  definition's `createDriver` receives `{ model }` (and `requireExplicitModel`)
+  where it received no options: a custom definition must merge them into its
+  own defaults.
+- `requireExplicitModel` on `ExternalAgentWorkflowFactory`: a request without
+  `config.model`, or with a router or default alias of a built-in provider id
+  (`claude`, `gemini-cli`), fails with `WORKFLOW_AGENT_MODEL_REQUIRED` before
+  the driver is created. The option is forwarded to the driver, whose refusal
+  is rethrown with the same code and the original as `cause`.
+- Run rules `allowedModelsByRole` (keys `architect`, `worker`, `integration`,
+  `critic`, `reviewer`) narrow `allowedModels` per role; a merge narrows each
+  key. A run spec with a missing, empty or blank agent or reviewer `model`
+  reports `RUN_SPEC_MODEL_REQUIRED` (it used to be a generic shape code).
+- Run spec model ids may end in one bracket suffix of letters and digits
+  (`opus[1m]`, `claude-opus-5-5[1m]`), in lanes, reviewers, `allowedModels`
+  and `allowedModelsByRole`; 256 characters in all.
 - `model` option on `CodexCliDriver` and `GeminiCliDriver`, sent as
   `--model=<id>` and reported as `gen_ai.request.model`.
 - `requireExplicitModel` on every built-in driver: refuses a driver without a
@@ -701,6 +750,18 @@ from the 0.6.0 tag.
   `EXTERNAL_AGENT_MODEL_REQUIRED` and `EXTERNAL_AGENT_MODEL_OVERRIDE`.
 - `ExternalAgentStartedEvent.modelRouting` (`"plan-mode"`), set on a Gemini
   CLI read-only run without a model.
+- `customMetadata.externalAgentModel` (`ExternalAgentModelInfo`: `requested`,
+  `resolved`, `status` of `reported`, `not-reported` or `unsupported`) on an
+  external agent run's final event, or its last error event when it has no
+  final text, and `modelVersion` on that event when a trusted runtime reported
+  the model. Only a driver with `reportsResolvedModel: true` is trusted, and a
+  `modelRouting: "plan-mode"` run is always `unsupported`.
+- Workflow `step_started.requestedModel`, and `step_completed`
+  `result.models` (`requested`, `resolved`, `unknown`) on every step whose
+  agent names or reports a model, also on `AgentInvocationResult.models`. A
+  Codex or Gemini step has an empty `resolved` and `unknown: true`, and so does
+  a step whose `LlmAgent` inherits its model. Checkpoints written before this
+  have no `models` and still load; a malformed `models` is rejected as corrupt.
 - **Run spec, `adk-llm-bridge/workflows/spec` (experimental).** Validation,
   planning and the JSON Schema of a lanes job submitted as data: `validateRunSpec`,
   `resolveRunPlan`, `mergeRunRules`, `layerRunSpecLanes`, `runSpecHash` and
@@ -1055,6 +1116,10 @@ from the 0.6.0 tag.
   190 nested calls. The limit does not cover the QuickJS parser: a deeply
   nested source given to `eval` can exhaust the host stack from 32 KiB (24 KiB
   on Bun). That case is contained, not prevented; see Fixed.
+- `ExternalAgentWorkflowFactory` leaves the top-level `config.model` out of the
+  agent revision: a model change no longer changes the revision (and so no
+  longer stops completed steps from replaying); it is reported by the replay
+  model check. A `model` key nested elsewhere in `config` stays in the revision.
 - The Claude CLI driver emits `started` on the first output line, with the
   resolved model from `system/init` (still first on every path, including
   failures before any output; the timestamp is still the start of the run).

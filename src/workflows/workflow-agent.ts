@@ -10,6 +10,8 @@ import type { TrustedWorkflowDefinition } from "./definition.js";
 import { WORKFLOW_AGENT_BRAND } from "./internal/workflow-agent-brand.js";
 import {
   invocationContextForNode,
+  type ResolvedWorkflowReplayOptions,
+  resolveReplayOptions,
   resolveRetryFailedSteps,
   type WorkflowNodeConfig,
   workflowAgentBaseConfig,
@@ -81,6 +83,7 @@ export class WorkflowAgent extends BaseAgent {
   readonly #gateway: AgentInvocationGateway;
   readonly #checkpointStore?: WorkflowCheckpointStore;
   readonly #retryFailedSteps: boolean;
+  readonly #replay: ResolvedWorkflowReplayOptions;
   readonly #activeExecutions = new ActiveExecutions();
   readonly #resolveExecutionId?: WorkflowExecutionIdResolver;
   readonly #runtimeHooks?: WorkflowRuntimeHooks;
@@ -102,6 +105,7 @@ export class WorkflowAgent extends BaseAgent {
     this.#checkpointStore = config.checkpointStore;
     this.#resolveExecutionId = config.resolveExecutionId;
     this.#retryFailedSteps = resolveRetryFailedSteps(config);
+    this.#replay = resolveReplayOptions(config);
     this.#runtimeHooks = config.runtimeHooks;
     this.#workspace = config.workspace;
     this.#declaredAgents = new Map(
@@ -133,6 +137,7 @@ export class WorkflowAgent extends BaseAgent {
           abortSignal: signal,
           structuredOutput: this.outputSchema !== undefined,
           retryFailedSteps: this.#retryFailedSteps,
+          replay: this.#replay,
         }),
       this.#activeExecutions,
     );
