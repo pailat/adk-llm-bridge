@@ -1,4 +1,3 @@
-import { InputValidationError } from "@google/adk";
 import { parseJson } from "../../utils/json.js";
 import { warn } from "../../utils/log.js";
 import type { ExternalAgentEvent } from "../events.js";
@@ -32,6 +31,14 @@ import {
 import { resolveCliLaunch, validateLaunchConfig } from "./launch.js";
 import { collectTail, type LineSource, readLines } from "./lines.js";
 import {
+  assertModelOption,
+  assertNoModelOverride,
+  CLAUDE_CLI_MODEL_FLAGS,
+  CLAUDE_MODEL_ENV,
+  MODEL_ALIAS_DENYLIST,
+  modelEnvRefusal,
+} from "./model.js";
+import {
   batchCommandRefusal,
   dependencyMissing,
   EXTERNAL_AGENT_OPTION_UNSUPPORTED,
@@ -43,6 +50,7 @@ import {
   webToolsRefusal,
 } from "./policy-errors.js";
 import {
+  claudeInitModel,
   claudeResultSummary,
   type ExternalAgentRunSummary,
 } from "./run-summary.js";
@@ -125,6 +133,15 @@ export const CLAUDE_CLI_PINNED_FLAGS_REVIEW = Object.freeze({
   reviewedSdkVersion: "0.3.319",
   reviewedBundledCliVersion: "2.1.319",
 });
+
+/** Marks the first parsed output line of a run, so `started` goes out with it. */
+const FIRST_OUTPUT_LINE = Symbol("first output line");
+
+/** What a Claude CLI run learns before `started` is emitted. */
+interface ClaudeCliRunState {
+  /** The model of the `system/init` line. */
+  initModel?: string;
+}
 
 /** The running `claude` process as the driver sees it. */
 export interface ClaudeCliSubprocess {
@@ -243,6 +260,14 @@ export interface ClaudeCliDriverConfig {
    * built, unless `allowPolicyOverrideArgs` is set. A cluster of one-letter
    * flags is split first (`-pw` is `-p -w`). Use `model`, `maxTurns`,
    * `systemPrompt`, `tools` and the permission policy instead.
+   *
+   * `--model` and `--fallback-model` are refused even with
+   * `allowPolicyOverrideArgs` (`EXTERNAL_AGENT_MODEL_OVERRIDE`): only the
+   * `model` option sets the model. With `allowPolicyOverrideArgs`,
+   * `--settings`, `--setting-sources`, `--agent`, `--agents`, `--plugin-dir`
+   * and `--plugin-url` may still change it: settings can remap or restrict
+   * models, and a main-thread agent with its own `model` switches the
+   * session's model.
    */
   args?: readonly string[];
   /**
@@ -254,11 +279,22 @@ export interface ClaudeCliDriverConfig {
    */
   allowPolicyOverrideArgs?: boolean;
   /**
-   * Model id (`--model`); also reported as `gen_ai.request.model`.
+   * Model id, sent as `--model=<id>` and reported as `gen_ai.request.model`.
+   * A string of 1 to 256 characters without whitespace or control
+   * characters, not starting with `-`; anything else is refused with
+   * `EXTERNAL_AGENT_MODEL_INVALID` when the driver is built.
    *
-   * @defaultValue the CLI's own default
+   * @defaultValue the CLI's own default (the account or host settings)
    */
   model?: string;
+  /**
+   * Refuse to build the driver without a `model`, or with an alias that lets
+   * Claude Code choose (`default`, `best`, `opusplan`, `opusplan[1m]`):
+   * `EXTERNAL_AGENT_MODEL_REQUIRED`.
+   *
+   * @defaultValue false
+   */
+  requireExplicitModel?: boolean;
   /**
    * Maximum agent turns per run (`--max-turns`), a positive integer. A run
    * that reaches it ends with a `MAX_TURNS_EXCEEDED` error.
@@ -441,7 +477,7 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
    * Creates a driver that runs the `claude` CLI.
    *
    * @param config - Driver options; all optional.
-   * @throws InputValidationError (from `@google/adk`) when `command` or `model`
+   * @throws InputValidationError (from `@google/adk`) when `command`
    * is empty, `killGraceMs` is not a finite number of at least 0, or
    * `maxTurns` is not a positive integer.
    * @throws InputValidationError when `args` is not an array of strings.
@@ -450,6 +486,11 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
    * `sessionStoreFlush` or `sessionStoreLoadTimeoutMs` is given, or when
    * an `args` entry overrides a policy or isolation flag and
    * `allowPolicyOverrideArgs` is not set.
+   * @throws {@link ExternalAgentPolicyError} with code
+   * `EXTERNAL_AGENT_MODEL_OVERRIDE` when an `args` entry sets the model,
+   * `EXTERNAL_AGENT_MODEL_INVALID` when `model` is not a model id, and
+   * `EXTERNAL_AGENT_MODEL_REQUIRED` when `requireExplicitModel` is set and
+   * `model` is absent or a router alias.
    */
   constructor(config: ClaudeCliDriverConfig = {}) {
     for (const option of [
@@ -472,14 +513,17 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
       CLAUDE_CLI_PINNED_FLAGS,
       config.allowPolicyOverrideArgs ?? false,
     );
-    if (
-      config.model !== undefined &&
-      (typeof config.model !== "string" || config.model.trim() === "")
-    ) {
-      throw new InputValidationError(
-        "ClaudeCliDriver: model must be a non-empty string.",
-      );
-    }
+    assertNoModelOverride(
+      "ClaudeCliDriver",
+      config.args,
+      CLAUDE_CLI_MODEL_FLAGS,
+    );
+    const model = assertModelOption(
+      "ClaudeCliDriver",
+      config.model,
+      config.requireExplicitModel ?? false,
+      MODEL_ALIAS_DENYLIST.claude,
+    );
     super({
       providerId: CLAUDE_PROVIDER.id,
       command:
@@ -500,7 +544,7 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
     this.#allowLocalBinding = config.allowLocalBinding ?? false;
     this.#allowBackgroundTasks = config.allowBackgroundTasks ?? false;
     this.#allowUnenforcedPaths = config.allowUnenforcedPaths ?? false;
-    this.#model = config.model;
+    this.#model = model;
     this.#maxTurns = config.maxTurns;
     this.#systemPrompt = config.systemPrompt;
   }
@@ -508,6 +552,11 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
   /** The configured model id (`gen_ai.request.model`), if any. */
   get model(): string | undefined {
     return this.#model;
+  }
+
+  /** `true`: the CLI's `system/init` line and `result` name the model it ran. */
+  get reportsResolvedModel(): boolean {
+    return true;
   }
 
   /** Features this driver supports: it maps the permission policy onto CLI flags. It emits whole messages, not token deltas. */
@@ -518,6 +567,14 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
   /**
    * Starts `claude` for one request and streams its events.
    *
+   * @remarks
+   * `started` is emitted with the first output line, so it carries the model
+   * the CLI's `system/init` line names; its timestamp is still the start of
+   * the run. A run that ends before any output (a refusal, a spawn failure,
+   * an abort, a process that writes only to stderr) still emits `started`
+   * first, without a model. `completed` carries the model of the `result`
+   * line, or the init model when the result names several.
+   *
    * @param request - The run request (instruction, context, permissions,
    * credential, working directory and abort signal).
    * @returns Events starting with `started` and, unless aborted, ending with
@@ -526,15 +583,61 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
   override async *run(
     request: ExternalAgentRunRequest,
   ): AsyncIterable<ExternalAgentEvent> {
+    const startedAt = Date.now();
+    const state: ClaudeCliRunState = {};
+    let started = false;
+    const startedEvent = (): ExternalAgentEvent => ({
+      type: "started",
+      providerId: this.providerId,
+      ...(state.initModel === undefined ? {} : { model: state.initModel }),
+      timestamp: startedAt,
+    });
+    try {
+      for await (const event of this.#runEvents(request, state)) {
+        if (!started) {
+          started = true;
+          yield startedEvent();
+        }
+        if (event === FIRST_OUTPUT_LINE) {
+          continue;
+        }
+        yield event.type === "completed" &&
+        event.model === undefined &&
+        state.initModel !== undefined
+          ? { ...event, model: state.initModel }
+          : event;
+      }
+    } catch (error) {
+      if (!started) {
+        yield startedEvent();
+      }
+      throw error;
+    }
+    // A run that ended without any event (an abort before output) still
+    // reports its start.
+    if (!started) {
+      yield startedEvent();
+    }
+  }
+
+  async *#runEvents(
+    request: ExternalAgentRunRequest,
+    state: ClaudeCliRunState,
+  ): AsyncIterable<ExternalAgentEvent | typeof FIRST_OUTPUT_LINE> {
     const isolation = this.isolationPlan(request);
     const args = this.buildArgs(request);
     const env = this.buildEnv(request);
 
-    yield {
-      type: "started",
-      providerId: this.providerId,
-      timestamp: Date.now(),
-    };
+    const envRefusal = modelEnvRefusal(
+      "ClaudeCliDriver",
+      env,
+      CLAUDE_MODEL_ENV,
+    );
+    if (envRefusal) {
+      yield policyErrorEvent(envRefusal);
+      yield { type: "completed", exitCode: 1, timestamp: Date.now() };
+      return;
+    }
 
     if (isolation.unenforceableWebTools) {
       yield policyErrorEvent(
@@ -626,6 +729,7 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
       let offeredTools: string[] | undefined;
       // Background tasks still live when the run ends fail it.
       const backgroundTasks = new ClaudeBackgroundTaskTracker();
+      let sawOutput = false;
       for await (const line of readLines(child.stdout)) {
         if (signal?.aborted) {
           return;
@@ -633,6 +737,11 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
         const raw = parseJsonLine(line);
         if (raw === undefined) {
           continue;
+        }
+        state.initModel ??= claudeInitModel(raw);
+        if (!sawOutput) {
+          sawOutput = true;
+          yield FIRST_OUTPUT_LINE;
         }
         if (isolation.isolated) {
           // Fail closed when the CLI reports, or the model is about to use,
@@ -803,7 +912,7 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
       ...mapClaudePermissionArgs(request.permissions),
       ...claudeCliIsolationArgs(this.isolationPlan(request)),
       // Joined to the flag, so a value that starts with `-` stays a value.
-      ...(this.#model ? [`--model=${this.#model}`] : []),
+      ...(this.#model === undefined ? [] : [`--model=${this.#model}`]),
       ...(this.#maxTurns !== undefined
         ? [`--max-turns=${this.#maxTurns}`]
         : []),

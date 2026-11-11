@@ -71,7 +71,7 @@ describe.skipIf(process.platform === "win32")(
       const fake = fakeClaude();
       const driver = new ClaudeCliDriver({
         command: fake.command,
-        args: ["--model", "haiku"],
+        args: ["--max-budget-usd", "2"],
         env: { PATH: "/usr/bin:/bin" },
       });
 
@@ -88,8 +88,8 @@ describe.skipIf(process.platform === "win32")(
         "--output-format",
       ]);
       // Every argument is a flag or a flag's value; no operand follows.
-      expect(argv.at(-2)).toBe("--model");
-      expect(argv.at(-1)).toBe("haiku");
+      expect(argv.at(-2)).toBe("--max-budget-usd");
+      expect(argv.at(-1)).toBe("2");
     });
 
     test("a prompt that looks like a flag is stdin text, not an argument", async () => {

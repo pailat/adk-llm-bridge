@@ -429,13 +429,18 @@ describe("Codex CLI driver", () => {
 
   test("user args stay flags: they come before -- and the prompt", () => {
     const args = new CodexCliDriver({
-      args: ["--model", "gpt-x"],
+      args: ["--output-last-message", "last.txt"],
       listMcpServers: noHostMcpServers,
     }).buildArgs({
       provider: CODEX_PROVIDER,
       context: { input: "hi" } as never,
     });
-    expect(args.slice(-4)).toEqual(["--model", "gpt-x", "--", "hi"]);
+    expect(args.slice(-4)).toEqual([
+      "--output-last-message",
+      "last.txt",
+      "--",
+      "hi",
+    ]);
   });
 
   test("skipGitRepoCheck is off by default", () => {

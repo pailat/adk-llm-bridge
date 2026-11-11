@@ -20,6 +20,12 @@ export interface ExternalAgentStartedEvent {
    * SDK `init.model` or the Codex thread model).
    */
   model?: string;
+  /**
+   * Set when the runtime may route this run's turns to a model other than
+   * the requested one (Gemini CLI plan mode, the read-only mapping). The
+   * run's model status is then `unsupported`.
+   */
+  modelRouting?: "plan-mode";
   /** Epoch milliseconds when the event was produced. */
   timestamp?: number;
 }

@@ -127,6 +127,12 @@ export interface ExternalAgentDriver {
    * comes from the `started`/`completed` events (`gen_ai.response.model`).
    */
   readonly model?: string;
+  /**
+   * Whether the runtime reports the model it actually ran, on `started` or
+   * `completed`. Only a driver that sets this to `true` has its reported
+   * model trusted as the resolved model; absent means `false`.
+   */
+  readonly reportsResolvedModel?: boolean;
   /** @returns The features this driver supports. Absent means none are claimed. */
   capabilities?(): AgentRuntimeCapabilities;
   /**

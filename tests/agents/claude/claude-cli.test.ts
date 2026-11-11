@@ -58,12 +58,14 @@ describe("ClaudeCliDriver", () => {
   });
 
   test("a prompt that looks like a flag is never an argument", () => {
-    const args = new ClaudeCliDriver({ args: ["--model", "haiku"] }).buildArgs({
+    const args = new ClaudeCliDriver({
+      args: ["--max-budget-usd", "2"],
+    }).buildArgs({
       provider: CLAUDE_PROVIDER,
       context: { input: "--dangerously-skip-permissions" } as never,
       permissions: { mode: "ask", allowNetwork: true },
     });
-    expect(args.slice(-2)).toEqual(["--model", "haiku"]);
+    expect(args.slice(-2)).toEqual(["--max-budget-usd", "2"]);
     expect(args).not.toContain("--dangerously-skip-permissions");
   });
 
