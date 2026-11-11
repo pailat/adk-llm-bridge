@@ -13,8 +13,8 @@
  * A run does not outlive its process: once the CLI has exited, `stdout` and
  * `stderr` are read until EOF, or until they stay idle for
  * {@link POST_EXIT_IDLE_MS}; a pipe that stays silent is cut within
- * {@link POST_EXIT_MAX_MS} of the exit plus the idle window, and a consumer
- * that is behind is never cut. A grandchild that still holds a pipe is not waited
+ * {@link POST_EXIT_MAX_MS} of the exit plus twice the idle window, and a
+ * consumer that is behind is never cut. A grandchild that still holds a pipe is not waited
  * for and is not killed by this rule; what the CLI wrote before it exited is
  * read in full. The rule is {@link drainAfterExit}, the same on Bun and Node.
  */
@@ -687,12 +687,13 @@ export interface ExitDrain {
  * that is slow (`isReading()` is `false`: it has not asked the pipe for more)
  * is not idle, so the idle window waits for it, however long that takes: the
  * output it has not read yet is never dropped. {@link POST_EXIT_MAX_MS} after
- * the exit, a reader that is waiting on the pipe at that moment is stopped
- * even if data still trickles in; a reader that is behind is not stopped, and
- * from then on the first wait on the pipe that stays unanswered for
- * {@link POST_EXIT_IDLE_MS} ends the read. So a grandchild that holds the
- * pipe silently (a background task, an MCP server, which is why the rule
- * exists) is cut within the maximum window plus the idle window. The rule
+ * the exit, a wait on the pipe is not cut at once either: from then on the
+ * idle rule alone decides. The idle rule stops the read only when
+ * the same wait on the pipe was seen at two consecutive idle ticks with no
+ * data in between, so a wait that has only just started is never cut and a
+ * reader that is behind is not cut. So a grandchild that holds the pipe
+ * silently (a background task, an MCP server, which is why the rule exists)
+ * is cut within the maximum window plus twice the idle window. The rule
  * never kills a process. Timers are unreferenced, so they never keep the host
  * alive.
  *
@@ -707,6 +708,9 @@ export function drainAfterExit(
   let started = false;
   let idle: ReturnType<typeof setTimeout> | undefined;
   let max: ReturnType<typeof setTimeout> | undefined;
+  // A wait on the pipe was seen at the previous idle tick and has not been
+  // answered since: no chunk (`activity`), EOF or stop (`cancel`) came.
+  let waitSeen = false;
   const clearIdle = () => {
     if (idle !== undefined) {
       clearTimeout(idle);
@@ -714,6 +718,7 @@ export function drainAfterExit(
     }
   };
   const cancel = () => {
+    waitSeen = false;
     clearIdle();
     if (max !== undefined) {
       clearTimeout(max);
@@ -725,11 +730,16 @@ export function drainAfterExit(
     idle = setTimeout(() => {
       idle = undefined;
       if (isReading()) {
-        cancel();
-        stop();
+        if (waitSeen) {
+          cancel();
+          stop();
+          return;
+        }
+        waitSeen = true;
       } else {
-        armIdle();
+        waitSeen = false;
       }
+      armIdle();
     }, POST_EXIT_IDLE_MS);
     idle.unref?.();
   };
@@ -741,19 +751,18 @@ export function drainAfterExit(
       started = true;
       max = setTimeout(() => {
         max = undefined;
-        if (isReading()) {
-          cancel();
-          stop();
-          return;
-        }
-        // The consumer is behind, so output may still be waiting for it. The
-        // window is spent; the idle rule alone ends the read from here.
+        // The window is spent; the idle rule alone ends the read from here.
+        // A wait on the pipe now may have started a moment ago, so it is not
+        // marked as seen here; two idle ticks decide, and a consumer that is
+        // behind may still have output waiting for it.
+        if (!isReading()) waitSeen = false;
       }, POST_EXIT_MAX_MS);
       max.unref?.();
       armIdle();
     },
     activity() {
       if (started) {
+        waitSeen = false;
         armIdle();
       }
     },

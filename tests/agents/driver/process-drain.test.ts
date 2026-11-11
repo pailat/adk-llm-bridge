@@ -1,9 +1,9 @@
 /**
  * A process that exited does not keep its run open. Once the CLI has exited,
  * its stdout and stderr are read until EOF, or until they stay idle for
- * 500 ms; a pipe that stays silent is cut within 5 s of the exit plus the
- * idle window, and a consumer that is behind is never cut. A grandchild that still holds a pipe
- * (a background task, an MCP server) is not waited for, and is not killed by
+ * 500 ms; a pipe that stays silent is cut within 5 s of the exit plus twice
+ * the idle window, and a consumer that is behind is never cut. A grandchild
+ * that still holds a pipe (a background task, an MCP server) is not waited for, and is not killed by
  * this rule. What the process wrote before it exited is read in full.
  */
 
@@ -12,6 +12,9 @@ import { ClaudeCliDriver } from "../../../src/agents/driver/claude-cli.js";
 import { collectTail, readLines } from "../../../src/agents/driver/lines.js";
 import {
   type DriverSubprocess,
+  drainAfterExit,
+  POST_EXIT_IDLE_MS,
+  POST_EXIT_MAX_MS,
   type SpawnRuntime,
   spawnSubprocess,
 } from "../../../src/agents/driver/spawn.js";
@@ -193,3 +196,80 @@ describe.skipIf(process.platform === "win32")(
     });
   },
 );
+
+describe("drainAfterExit idle rule", () => {
+  test("a wait that has only just started is not cut; one that stays unanswered for a full window is", async () => {
+    let reading = false;
+    let stops = 0;
+    const drain = drainAfterExit(
+      () => {
+        stops += 1;
+      },
+      () => reading,
+    );
+    drain.start();
+    try {
+      // Not reading at the first tick; the consumer asks for more just before
+      // the second one.
+      await sleep(POST_EXIT_IDLE_MS * 2 - 40);
+      reading = true;
+      await sleep(40 + 60);
+      // The second tick saw a wait that began a moment ago.
+      expect(stops).toBe(0);
+      // The same wait, unanswered for a whole window, ends the read.
+      await sleep(POST_EXIT_IDLE_MS);
+      expect(stops).toBe(1);
+    } finally {
+      drain.cancel();
+    }
+  });
+
+  test("the max window does not cut a wait that has only just started", async () => {
+    let reading = false;
+    let stops = 0;
+    const drain = drainAfterExit(
+      () => {
+        stops += 1;
+      },
+      () => reading,
+    );
+    drain.start();
+    try {
+      // Activity puts an idle tick 30 ms after the max window ends.
+      await sleep(POST_EXIT_MAX_MS - POST_EXIT_IDLE_MS + 30);
+      drain.activity();
+      // The consumer asks for more just before the max window ends.
+      await sleep(POST_EXIT_IDLE_MS - 30 - 10);
+      reading = true;
+      await sleep(10 + 60 + 30);
+      // The tick after max saw a wait that began a moment ago.
+      expect(stops).toBe(0);
+      // The same wait, unanswered for a whole window, ends the read.
+      await sleep(POST_EXIT_IDLE_MS);
+      expect(stops).toBe(1);
+    } finally {
+      drain.cancel();
+    }
+  }, 10_000);
+
+  test("activity restarts the wait", async () => {
+    let stops = 0;
+    const drain = drainAfterExit(
+      () => {
+        stops += 1;
+      },
+      () => true,
+    );
+    drain.start();
+    try {
+      await sleep(POST_EXIT_IDLE_MS + 100);
+      drain.activity();
+      await sleep(POST_EXIT_IDLE_MS + 100);
+      expect(stops).toBe(0);
+      await sleep(POST_EXIT_IDLE_MS);
+      expect(stops).toBe(1);
+    } finally {
+      drain.cancel();
+    }
+  });
+});

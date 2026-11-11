@@ -1435,8 +1435,8 @@ from the 0.6.0 tag.
   are read until EOF or until they stay idle for 500 ms, the same on Bun and
   Node, so a grandchild that keeps a pipe open (a background task, an MCP
   server) does not hold the run: a pipe that stays silent is cut within 5 s of
-  the exit plus the idle window. What the CLI wrote before it exited is still
-  read in full, however slowly the consumer takes it: a consumer that is behind
+  the exit plus twice the idle window. What the CLI wrote before it exited is
+  still read in full, however slowly the consumer takes it: a consumer that is behind
   at 5 s is not cut, only a wait on the pipe that stays unanswered for 500 ms
   ends the read. The Codex SDK driver now ends the turn
   at once when the process fails to start (it used to wait for an exit that never
