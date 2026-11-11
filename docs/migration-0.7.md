@@ -735,6 +735,17 @@ silently. See
 - The bridge cannot verify that a host function is read-only. The declaration
   is yours.
 
+### Approvers and confirmation
+
+`confirmation: { approver }` and `confirmation: { adk: true }` now throw
+`EXTERNAL_AGENT_APPROVALS_UNSUPPORTED` when the agent is built on a driver that
+never asks the host for permission: the Claude CLI, Codex SDK, Codex CLI and
+Gemini CLI drivers. Before, the setting was ignored and the runtime denied
+whatever needed approval. Remove `confirmation` from those agents, or use
+`ClaudeAgent` (the Claude Agent SDK driver), the only built-in driver that
+routes prompts to the approver. See
+[Approvers and ADK confirmation](./external-agent-isolation.md#approvers-and-adk-confirmation-need-a-driver-that-asks).
+
 ### Coming in 0.8
 
 0.8 is planned to replace the `args` denylist of `ClaudeCliDriver` and
