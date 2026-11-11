@@ -86,10 +86,8 @@ export const FX_CLI_PINNED_FLAGS: PinnedFlags = Object.freeze({
     "--context-limit",
     "--permission-mode",
     "--ask",
-    "--config",
     "--timeout",
     "--profile",
-    "--",
   ]),
 });
 
@@ -125,11 +123,13 @@ export const FX_CLI_MAX_LINE_CHARS = 8 * 1024 * 1024;
 
 /**
  * Flags the driver owns: the ones it needs for its own parsing and
- * statelessness, and the ones that resume or continue a session. `args` may
- * never pass them, even with `allowPolicyOverrideArgs`: a run without `--json`
- * or `--no-save` could not be read, a resumed session is not stateless, and
- * `--effort` has the driver's `effort` option. Any `--resume-<id>` entry is
- * refused too (see `assertNoFixedArg`).
+ * statelessness, the ones that resume or continue a session, `--config` and
+ * `--`. `args` may never pass them, even with `allowPolicyOverrideArgs`: a run
+ * without `--json` or `--no-save` could not be read, a resumed session is not
+ * stateless, `--effort` has the driver's `effort` option, a `--config` key such
+ * as `provider` or `model` would change which model answers, and fx reads
+ * what follows `--` as the prompt. Any `--resume-<id>` entry is refused too
+ * (see `assertNoFixedArg`).
  *
  * @internal
  */
@@ -139,6 +139,8 @@ export const FX_CLI_FIXED_FLAGS: PinnedFlags = Object.freeze({
     "--no-save",
     "--no-color",
     "--effort",
+    "--config",
+    "--",
     "--resume",
     "--resume-id",
     "--resume-last",
@@ -166,7 +168,7 @@ const FX_CLI_BOOLEAN_OPTIONS = [
  * @internal
  */
 export const FX_CLI_PINNED_FLAGS_REVIEW =
-  "fx 0.0.16 `fx --help` and `fx ask --help`";
+  "fx 0.0.16 `fx --help` and `fx ask --help`; fx 0.0.16 rejects shortened flags (`--full`, `--yol`, `--resum`) and other letter cases (`--Full-Access`), checked 2026-11-11: repeat that check on every fx version review";
 
 /** Options the driver passes to a {@link FxCliSpawn}. */
 export interface FxCliSpawnOptions {
@@ -296,7 +298,8 @@ export interface FxCliDriverConfig {
   /**
    * Opt-in: let `args` carry the pinned policy flags. It never lifts the
    * model flags (`--model`, `--provider`) or {@link FX_CLI_FIXED_FLAGS}
-   * (the output and session flags). Must be `true` or `false`.
+   * (the output and session flags, `--config` and `--`). Must be `true` or
+   * `false`.
    *
    * @defaultValue false
    */
@@ -371,6 +374,16 @@ function assertNoFixedArg(args: readonly string[] | undefined): void {
   const entry =
     findPinnedArgOverride(args, FX_CLI_FIXED_FLAGS) ??
     args.find((arg) => arg.startsWith("--resume"));
+  if (entry === "--") {
+    throw unsupported(
+      'FxCliDriver: the args entry "--" ends the flags, and fx would read what follows as the prompt and ignore stdin. Remove it; allowPolicyOverrideArgs does not lift this.',
+    );
+  }
+  if (entry !== undefined && /^--config(=|$)/.test(entry)) {
+    throw unsupported(
+      `FxCliDriver: the args entry "${cut(entry, 40)}" sets a --config key, and a key such as provider or model would change which model answers. Remove it; allowPolicyOverrideArgs does not lift this.`,
+    );
+  }
   if (entry !== undefined) {
     throw unsupported(
       `FxCliDriver: the args entry "${cut(entry, 40)}" sets a flag the driver owns: the output format, statelessness (--no-save), the effort or a session to resume. The run could not be read or would not be stateless. Remove it; allowPolicyOverrideArgs does not lift this.`,
@@ -389,6 +402,11 @@ function assertNoPromptArgs(args: readonly string[] | undefined): void {
   }
   for (let index = 0; index < args.length; index++) {
     const arg = args[index] ?? "";
+    if (arg === "-") {
+      throw unsupported(
+        `FxCliDriver: args entry ${index} ("-") is the prompt marker of fx: fx would read it as the prompt and ignore stdin. Pass only flags in args; the prompt comes from the run.`,
+      );
+    }
     if (arg.startsWith("-")) {
       if (FX_CLI_VALUE_FLAGS.includes(arg)) {
         // The next entry is this flag's value.
@@ -504,10 +522,9 @@ export class FxCliDriver extends SubprocessJsonlDriver {
    * `EXTERNAL_AGENT_OPTION_UNSUPPORTED` when a session option
    * (`resumeSessionId`, `sessionStore*`) is given, `effort` is not a plain
    * token, an `args` entry overrides a pinned flag or names a flag the driver
-   * owns (`--json`, `--no-save`, `--resume*`, `--continue`, `-c`, `-r`), or an
-   * `args` entry is not
-   * a flag and not the value of the flag before it (fx would read it as the
-   * prompt).
+   * owns (`--json`, `--no-save`, `--config`, `--`, `--resume*`, `--continue`,
+   * `-c`, `-r`), or an `args` entry is a lone `-` or is not a flag and not the
+   * value of the flag before it (fx would read it as the prompt).
    * @throws {@link ExternalAgentPolicyError} with code
    * `EXTERNAL_AGENT_MODEL_OVERRIDE` when `args` sets the model or provider,
    * `EXTERNAL_AGENT_MODEL_INVALID` when `model` is not a model id, and

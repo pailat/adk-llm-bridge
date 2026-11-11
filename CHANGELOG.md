@@ -1151,9 +1151,10 @@ from the 0.6.0 tag.
   rules in `~/.fx/settings.json` allow it; `workspace-write` (fx `auto` mode)
   asks a reviewer model whose cost is not in `usage`. The driver's boolean
   options must be `true` or `false`. `args` holds only flags: the policy flags
-  (`--permission-mode`, `--ask`, `--config`, `--timeout`, `--profile`, ...)
-  need `allowPolicyOverrideArgs`; `--model`, `--provider` and the session
-  flags (`--resume*`, `--continue`, `-c`, `-r`) are never allowed. A
+  (`--permission-mode`, `--ask`, `--timeout`, `--profile`, ...)
+  need `allowPolicyOverrideArgs`; `--model`, `--provider`, `--config`, `--`,
+  a lone `-` and the session flags (`--resume*`, `--continue`, `-c`, `-r`)
+  are never allowed. A
   run fails on a non-zero process exit, an `exit_code` that is not `0` or an
   `error` field, and then reports no `output`. A stdout line over 8 MiB ends
   the run with `FX_CLI_RESULT_TOO_LARGE`. See

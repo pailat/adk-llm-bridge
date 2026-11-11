@@ -925,7 +925,7 @@ starts:
 | Policy mode | fx | Verdict |
 |---|---|---|
 | `read-only` | none | Refused with `EXTERNAL_AGENT_OPTION_UNSUPPORTED`: fx has no read-only mode. |
-| `ask` (default) | `FX_PERMISSION_MODE=ask`, no flag | The first write or shell command ends the run with exit 1 and nothing is written or run (`FX_CLI_PERMISSION_REQUIRED`), unless the user's fx permission rules in `~/.fx/settings.json` allow it: a rule that allows `bash` or `edit` runs the action without a prompt, and the driver cannot turn those rules off. Reads run. |
+| `ask` (default) | `FX_PERMISSION_MODE=ask`, no flag | The first write or shell command ends the run with exit 1 and nothing is written or run (`FX_CLI_PERMISSION_REQUIRED`), unless the user's fx permission rules in `~/.fx/settings.json` allow it: a rule that allows `bash` or `edit` runs the action without a prompt, and the driver cannot turn those rules off. Reads run. A project `.fx.json`, which the agent can write between runs, also sets fx settings for the run (it cannot define permission rules). |
 | `workspace-write` | `--auto` | Refused with `EXTERNAL_AGENT_OPTION_UNSUPPORTED` unless the driver has `allowUnsandboxedShell: true`. fx `auto` mode runs shell work and writes beyond the workspace, and asks a reviewer model to hold clearly harmful actions. That reviewer's cost is not in `usage`. |
 | `full-access` | `--full-access` | Only for this mode, and only with `allowNetwork: true` or `allowUnenforcedNetwork: true`. `--yolo` is never sent. |
 
@@ -945,7 +945,10 @@ Other refusals:
 - **Host configuration.** fx always reads the user's `~/.fx` rules, skills and
   MCP servers and the project's `AGENTS.md`, and `FX_HOME` does not isolate
   them on 0.0.16. A run without `inheritHostConfig: true` is refused with
-  `EXTERNAL_AGENT_OPTION_UNSUPPORTED`.
+  `EXTERNAL_AGENT_OPTION_UNSUPPORTED`. A project `.fx.json` in the working
+  directory also sets fx settings for the run, and the agent itself can write
+  that file between runs; per the fx docs it cannot define permission rules
+  (<https://fx.sh/docs/configure-fx/permissions.md>).
 - **Model.** `requireExplicitModel` defaults to `true` for fx: without
   `--model` fx silently runs the model saved in the user's settings.
   `FX_MODEL` and `FX_PROVIDER` in the run's environment are refused with
@@ -961,18 +964,21 @@ Other refusals:
   its first 40 characters. The flags the driver sets from the policy or its
   options, or that choose the permission mode, configuration or timeout, need
   `allowPolicyOverrideArgs: true`: `--auto`, `--full-access`, `--yolo`,
-  `--prompt-permissions`, `--permission-mode`, `--ask`, `--config`,
-  `--timeout`, `--profile`, `--provider-order`, `--provider-strict`,
+  `--prompt-permissions`, `--permission-mode`, `--ask`, `--timeout`,
+  `--profile`, `--provider-order`, `--provider-strict`,
   `--no-provider-strict`, `--system`, `--add-dir`, `--no-additional-dirs`,
-  `--context-limit`, `--quiet` and `--`. Never allowed, even with
+  `--context-limit` and `--quiet`. Never allowed, even with
   `allowPolicyOverrideArgs`: `--model` and `--provider` (both as
   `EXTERNAL_AGENT_MODEL_OVERRIDE`: they change which model answers), and, as
   `EXTERNAL_AGENT_OPTION_UNSUPPORTED`, `--effort`, `--json`, `--no-save`,
-  `--no-color` and the session flags `--resume`, `--resume-id`,
-  `--resume-last`, any `--resume-<id>`, `--continue`, `-c` and `-r`. Every
-  flag is refused in the `--flag value` and the `--flag=value` form, and a
-  cluster such as `-vc` is split first. The refusal names the entry; use the
-  matching driver option or policy field instead.
+  `--no-color`, `--config` (a key such as `provider` or `model` would change
+  which model answers), `--` and a lone `-` (fx would read what follows, or
+  the `-`, as the prompt and ignore stdin) and the session flags `--resume`,
+  `--resume-id`, `--resume-last`, any `--resume-<id>`, `--continue`, `-c` and
+  `-r`. A lone `-` is accepted only as the value of a flag that takes one
+  (`--image -`). Every flag is refused in the `--flag value` and the
+  `--flag=value` form, and a cluster such as `-vc` is split first. The refusal
+  names the entry; use the matching driver option or policy field instead.
 - **Boolean options.** `requireExplicitModel`, `allowPolicyOverrideArgs`,
   `allowUnenforcedNetwork`, `allowUnenforcedPaths`, `allowUnsandboxedShell` and
   `inheritHostConfig` must be `true` or `false`. Anything else (the string
@@ -1007,7 +1013,10 @@ What a run reports:
   the driver then sends SIGTERM, and SIGKILL after `killGraceMs`.
 - The version is not checked at run time. fx is `0.0.x` and its flags change
   between releases; the driver sets `FX_AUTO_UPGRADE=0` and the pinned flags
-  were reviewed against fx 0.0.16 (`FX_CLI_PINNED_FLAGS_REVIEW`).
+  were reviewed against fx 0.0.16 (`FX_CLI_PINNED_FLAGS_REVIEW`). fx 0.0.16
+  rejects shortened flags (`--full`, `--yol`, `--resum`) and other letter
+  case (`--Full-Access`), checked 2026-11-11: repeat that check on every fx
+  version review.
 
 ## Credentials
 

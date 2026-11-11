@@ -4,8 +4,12 @@
  * a driver that wrongly accepts an entry never starts the real `fx`.
  */
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
+  FX_CLI_FIXED_FLAGS,
   FX_CLI_PINNED_FLAGS,
+  FX_CLI_PINNED_FLAGS_REVIEW,
   FxCliDriver,
 } from "../../../src/agents/driver/fx-cli.js";
 import {
@@ -186,13 +190,8 @@ describe("allowPolicyOverrideArgs", () => {
     );
   });
 
-  test("the permission, config, timeout and profile flags are in the lifted set: --ask, --config, --timeout, --profile", () => {
-    for (const args of [
-      ["--ask"],
-      ["--config", "k=v"],
-      ["--timeout", "1"],
-      ["--profile", "x"],
-    ]) {
+  test("the permission, timeout and profile flags are in the lifted set: --ask, --timeout, --profile", () => {
+    for (const args of [["--ask"], ["--timeout", "1"], ["--profile", "x"]]) {
       expect(construct(args)?.code, args.join(" ")).toBe(
         EXTERNAL_AGENT_OPTION_UNSUPPORTED,
       );
@@ -310,7 +309,6 @@ describe("no prompt text in args", () => {
     "--image",
     "--system",
     "--permission-mode",
-    "--config",
     "--timeout",
     "--add-dir",
     "--context-limit",
@@ -387,5 +385,118 @@ describe("allowedPaths entries become --add-dir values only when absolute", () =
       "--add-dir",
       "/tmp",
     ]);
+  });
+});
+
+describe("a lone - is the prompt marker of fx", () => {
+  test('args ["-"] is refused with and without the opt-in, naming args and the index', () => {
+    for (const allowPolicyOverrideArgs of [false, true]) {
+      const refusal = construct(["-"], { allowPolicyOverrideArgs });
+      expectRefused(refusal, EXTERNAL_AGENT_OPTION_UNSUPPORTED, "args");
+      expect(refusal?.message).toMatch(/\b0\b/);
+    }
+  });
+
+  test('["--fast", "-"] is refused at index 1', () => {
+    for (const allowPolicyOverrideArgs of [false, true]) {
+      const refusal = construct(["--fast", "-"], { allowPolicyOverrideArgs });
+      expectRefused(refusal, EXTERNAL_AGENT_OPTION_UNSUPPORTED, "args");
+      expect(refusal?.message).toMatch(/\b1\b/);
+    }
+  });
+
+  test("a - that is the value of a value flag in the space form is accepted", () => {
+    expect(construct(["--image", "-"])).toBeUndefined();
+    expect(
+      construct(["--image", "-"], { allowPolicyOverrideArgs: true }),
+    ).toBeUndefined();
+  });
+
+  test("a - after that value is refused again", () => {
+    expectRefused(
+      construct(["--image", "-", "-"]),
+      EXTERNAL_AGENT_OPTION_UNSUPPORTED,
+      "args",
+    );
+  });
+});
+
+describe("-- ends the flags of fx and is never allowed", () => {
+  const cases: ReadonlyArray<readonly string[]> = [
+    ["--"],
+    ["--", "--foo"],
+    ["--fast", "--"],
+  ];
+  for (const args of cases) {
+    test(`${JSON.stringify(args)} is refused with and without the opt-in`, () => {
+      for (const allowPolicyOverrideArgs of [false, true]) {
+        const refusal = construct(args, { allowPolicyOverrideArgs });
+        expectRefused(refusal, EXTERNAL_AGENT_OPTION_UNSUPPORTED, "--");
+        expect(refusal?.message).toContain("prompt");
+        expect(refusal?.message).not.toContain("allowPolicyOverrideArgs: true");
+      }
+    });
+  }
+
+  test("-- is a fixed flag, not a pinned one", () => {
+    expect(FX_CLI_FIXED_FLAGS.flags).toContain("--");
+    expect(FX_CLI_PINNED_FLAGS.flags).not.toContain("--");
+  });
+});
+
+describe("--config is never allowed: a key such as provider or model changes which model answers", () => {
+  const cases: ReadonlyArray<readonly string[]> = [
+    ["--config", "provider=x"],
+    ["--config=provider=x"],
+    ["--config", "max_agent_steps=3"],
+    ["--config=k=v"],
+  ];
+  for (const args of cases) {
+    test(`${args.join(" ")} is refused with and without the opt-in`, () => {
+      for (const allowPolicyOverrideArgs of [false, true]) {
+        const refusal = construct(args, { allowPolicyOverrideArgs });
+        expectRefused(refusal, EXTERNAL_AGENT_OPTION_UNSUPPORTED, "--config");
+        expect(refusal?.message).not.toContain("allowPolicyOverrideArgs: true");
+      }
+    });
+  }
+
+  test("--config is a fixed flag, not a pinned one", () => {
+    expect(FX_CLI_FIXED_FLAGS.flags).toContain("--config");
+    expect(FX_CLI_PINNED_FLAGS.flags).not.toContain("--config");
+  });
+});
+
+describe("the pinned-flags review record", () => {
+  test("names the fx version, both help pages, and both checks of unknown flag spellings, with the date", () => {
+    expect(FX_CLI_PINNED_FLAGS_REVIEW).toContain("0.0.16");
+    expect(FX_CLI_PINNED_FLAGS_REVIEW).toContain("`fx --help`");
+    expect(FX_CLI_PINNED_FLAGS_REVIEW).toContain("`fx ask --help`");
+    expect(FX_CLI_PINNED_FLAGS_REVIEW).toContain("shortened");
+    expect(FX_CLI_PINNED_FLAGS_REVIEW).toContain("letter case");
+    expect(FX_CLI_PINNED_FLAGS_REVIEW).toContain("2026-11-11");
+    expect(FX_CLI_PINNED_FLAGS_REVIEW).toContain("every fx version review");
+  });
+});
+
+describe("the isolation doc for fx", () => {
+  const doc = readFileSync(
+    join(import.meta.dir, "../../../docs/external-agent-isolation.md"),
+    "utf8",
+  );
+  const fxStart = doc.indexOf("\n## fx\n");
+  const fxSection = doc.slice(fxStart, doc.indexOf("\n## ", fxStart + 1));
+
+  test("says a project .fx.json also sets fx settings and the agent can write it", () => {
+    expect(fxSection).toContain(".fx.json");
+    expect(fxSection).toContain(
+      "https://fx.sh/docs/configure-fx/permissions.md",
+    );
+  });
+
+  test("records the shortened-flag and letter-case check with its date", () => {
+    expect(fxSection).toContain("shortened");
+    expect(fxSection.replace(/\s+/g, " ")).toContain("letter case");
+    expect(fxSection).toContain("2026-11-11");
   });
 });
