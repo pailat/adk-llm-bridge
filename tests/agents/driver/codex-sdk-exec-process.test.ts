@@ -145,6 +145,27 @@ describe("an error on the child's stdout or stderr stays in the turn", () => {
     if (outcome.kind !== "error") return;
     expect(outcome.error).toBe(failure);
   });
+
+  test("a stdout error after the turn closed does not throw", async () => {
+    const { child, exit } = scriptedChild();
+    const exec = new ContainedCodexExec(fields("/opt/codex"), {
+      spawn: () => child as never,
+      killGraceMs: 50,
+    });
+    const iterator = exec.run({ input: "hi" });
+    const first = iterator.next();
+    await sleep(10);
+    child.stdout.write('{"type":"x"}\n');
+    expect((await first).value).toBe('{"type":"x"}');
+    await iterator.return(undefined);
+    // The line reader is closed and its listeners are gone. With no
+    // listener of its own on stdout this emit throws, which on a real
+    // stream is an uncaught error that ends the host.
+    expect(() =>
+      child.stdout.emit("error", new Error("late stdout error")),
+    ).not.toThrow();
+    exit(143);
+  });
 });
 
 describe("a child that ignores SIGTERM is killed", () => {

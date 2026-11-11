@@ -8,7 +8,7 @@
 
 import { describe, expect, test } from "bun:test";
 import { ClaudeCliDriver } from "../../../src/agents/driver/claude-cli.js";
-import { collectTail } from "../../../src/agents/driver/lines.js";
+import { collectTail, readLines } from "../../../src/agents/driver/lines.js";
 import {
   type DriverSubprocess,
   type SpawnRuntime,
@@ -110,6 +110,45 @@ describe.skipIf(process.platform === "win32")(
           expect(run.stderrLines).toEqual(["err"]);
         });
       });
+    }
+  },
+);
+
+const BACKLOG_LINES = 400;
+const LINE_DELAY_MS = 20;
+const FINAL_MARKER = "final-marker-line";
+// About 200 B per line, then a marker, then exit: the output is all in the
+// pipe (or the stream buffer) when the process exits, long before the
+// consumer has read it.
+const PRINTS_BACKLOG = `i=0; while [ $i -lt ${BACKLOG_LINES} ]; do printf '%0200d\\n' $i; i=$((i+1)); done; echo ${FINAL_MARKER}; exit 0`;
+
+describe.skipIf(process.platform === "win32")(
+  "a slow consumer keeps what the process wrote before it exited",
+  () => {
+    for (const [name, runtime] of runtimes) {
+      test(`${name}: every line is read, the last one too, past the 5 s window`, async () => {
+        const child = spawnSubprocess(
+          "/bin/sh",
+          ["-c", PRINTS_BACKLOG],
+          {},
+          runtime,
+        );
+        const lines: string[] = [];
+        const startedAt = performance.now();
+        try {
+          for await (const line of readLines(child.stdout)) {
+            lines.push(line);
+            await sleep(LINE_DELAY_MS);
+          }
+        } finally {
+          child.killGroup?.("SIGKILL");
+          child.kill("SIGKILL");
+        }
+        // The consumer outlasted the post-exit max window.
+        expect(performance.now() - startedAt).toBeGreaterThan(5_000);
+        expect(lines.length).toBe(BACKLOG_LINES + 1);
+        expect(lines.at(-1)).toBe(FINAL_MARKER);
+      }, 30_000);
     }
   },
 );

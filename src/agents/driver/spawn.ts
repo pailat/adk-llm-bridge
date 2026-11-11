@@ -658,7 +658,11 @@ function signalExitCode(signal: NodeJS.Signals | null): number {
 /** How long a stream may stay idle after its process exited before it is ended. */
 export const POST_EXIT_IDLE_MS = 500;
 
-/** The longest a stream is read after its process exited. */
+/**
+ * How long after its process exited a stream that is waiting on the pipe is
+ * still read. A consumer that is behind is not cut by it; see
+ * {@link drainAfterExit}.
+ */
 export const POST_EXIT_MAX_MS = 5_000;
 
 /** The timers of one stream's post-exit drain. */
@@ -674,17 +678,21 @@ export interface ExitDrain {
 /**
  * The post-exit drain rule, shared by every reader of a child's output: once
  * the process has exited, its pipe is read until EOF, or until it has stayed
- * idle for {@link POST_EXIT_IDLE_MS}, and never longer than
- * {@link POST_EXIT_MAX_MS} after the exit; then `stop` ends the read.
+ * idle for {@link POST_EXIT_IDLE_MS}; then `stop` ends the read.
  *
  * @remarks
  * What the process wrote before it exited is already in the pipe and is read
  * at once, so the idle window never starts while data is flowing. A reader
  * that is slow (`isReading()` is `false`: it has not asked the pipe for more)
- * is not idle, so the idle window waits for it; only the maximum window ends
- * a reader that never catches up. A grandchild that still holds the pipe (a
- * background task, an MCP server) is why the rule exists. The rule never
- * kills a process. Timers are unreferenced, so they never keep the host
+ * is not idle, so the idle window waits for it, however long that takes: the
+ * output it has not read yet is never dropped. {@link POST_EXIT_MAX_MS} after
+ * the exit, a reader that is waiting on the pipe at that moment is stopped
+ * even if data still trickles in; a reader that is behind is not stopped, and
+ * from then on the first wait on the pipe that stays unanswered for
+ * {@link POST_EXIT_IDLE_MS} ends the read. So a grandchild that holds the
+ * pipe silently (a background task, an MCP server, which is why the rule
+ * exists) is cut within the maximum window plus the idle window. The rule
+ * never kills a process. Timers are unreferenced, so they never keep the host
  * alive.
  *
  * @param stop - Ends the read for the consumer.
@@ -732,8 +740,13 @@ export function drainAfterExit(
       started = true;
       max = setTimeout(() => {
         max = undefined;
-        cancel();
-        stop();
+        if (isReading()) {
+          cancel();
+          stop();
+          return;
+        }
+        // The consumer is behind, so output may still be waiting for it. The
+        // window is spent; the idle rule alone ends the read from here.
       }, POST_EXIT_MAX_MS);
       max.unref?.();
       armIdle();
