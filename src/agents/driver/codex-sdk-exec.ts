@@ -7,7 +7,11 @@
  * stays after the turn; a kill when stdin fails while the child runs; a wait
  * of at most 1 s for the prompt write to settle after the exit; a typed
  * error for a prompt the child did not read and for a non-zero exit; a
- * no-op child error listener after the cleanup; an injectable spawn.
+ * no-op child error listener after the cleanup; an injectable spawn; the
+ * turn ends at once when the spawn fails; error listeners on the child's
+ * stdout and stderr; the stdout read ends after the child exited (the
+ * spawn layer's post-exit drain rule); SIGKILL after a grace when SIGTERM is
+ * ignored.
  */
 
 /**
@@ -36,6 +40,7 @@ import { readFileSync } from "node:fs";
 import { delimiter, dirname, join } from "node:path";
 import readline from "node:readline";
 import { fileURLToPath } from "node:url";
+import { DEFAULT_KILL_GRACE_MS, drainAfterExit } from "./spawn.js";
 
 /**
  * The `@openai/codex-sdk` version whose exec path this module copies. A test
@@ -162,17 +167,26 @@ export class ContainedCodexExec {
   readonly rawConfigOverrides: string[] | undefined;
 
   readonly #spawn: CodexExecSpawn;
+  readonly #killGraceMs: number;
 
   /**
    * @param source - The SDK's own exec instance (its fields are copied).
    * @param options - `spawn` replaces `node:child_process` `spawn`, for
-   * tests that script the child's events.
+   * tests that script the child's events. `killGraceMs` is how long a
+   * stopped child gets to exit after SIGTERM before it gets SIGKILL.
+   * @defaultValue `killGraceMs` is {@link DEFAULT_KILL_GRACE_MS}.
    */
   constructor(
     source: CodexExecFields,
-    options: { spawn?: CodexExecSpawn } = {},
+    options: { spawn?: CodexExecSpawn; killGraceMs?: number } = {},
   ) {
     this.#spawn = options.spawn ?? nodeSpawn;
+    this.#killGraceMs =
+      typeof options.killGraceMs === "number" &&
+      Number.isFinite(options.killGraceMs) &&
+      options.killGraceMs >= 0
+        ? options.killGraceMs
+        : DEFAULT_KILL_GRACE_MS;
     this.executablePath = source.executablePath;
     this.pathDirs = [...source.pathDirs];
     this.envOverride = source.envOverride;
@@ -184,8 +198,14 @@ export class ContainedCodexExec {
    * Runs one `codex exec` turn and yields its stdout lines.
    *
    * @param args - What `Thread` passes for the turn.
-   * @returns The JSONL lines Codex prints.
-   * @throws The abort error when `args.signal` aborts the turn; else the
+   * @returns The JSONL lines Codex prints. The stream ends when the child's
+   * stdout reaches EOF, or, once the child has exited, when stdout stays idle
+   * for 500 ms (at most 5 s after the exit): a grandchild that holds the pipe
+   * does not hold the turn. A child that was stopped (cleanup, abort, a
+   * failed stdin) and ignores SIGTERM gets SIGKILL after the kill grace.
+   * @throws The spawn error as soon as the spawn fails (the turn does not
+   * wait for an exit that never comes); the `error` of the child's stdout;
+   * the abort error when `args.signal` aborts the turn; else the
    * SDK's own error for a non-zero exit of the child's own; else a
    * {@link CodexSdkInputError} when the prompt was not read (the child closed
    * stdin and was stopped, or exited 0 without reading it).
@@ -198,8 +218,13 @@ export class ContainedCodexExec {
       signal: args.signal,
     });
     let spawnError: Error | null = null;
+    let outputError: Error | null = null;
+    let rl: readline.Interface | undefined;
+    // Neither runtime ends the child's stdout when the spawn fails (Bun
+    // never does), so the error itself ends the read.
     child.once("error", (err) => {
       spawnError = err;
+      rl?.close();
     });
     if (!child.stdin) {
       child.kill();
@@ -228,6 +253,7 @@ export class ContainedCodexExec {
         } catch {
           // Reported by the child's `error` event.
         }
+        escalate();
       }
     });
     stdin.once("finish", () => {
@@ -246,24 +272,70 @@ export class ContainedCodexExec {
       child.stderr.on("data", (data: Buffer) => {
         stderrChunks.push(data);
       });
+      // Contained: an uncaught stream error ends the host. The turn reports
+      // how the process ended, so a stderr error is not one of its outcomes.
+      child.stderr.on("error", () => {});
     }
+    // Contained: the same for stdout, whose error ends the turn.
+    child.stdout.on("error", (err) => {
+      outputError ??= err;
+      // Later than the interface's own forwarding of this error, which
+      // needs the interface open.
+      queueMicrotask(() => rl?.close());
+    });
+    const stdout = child.stdout;
+    // The spawn layer's rule: after the exit, stdout is read until EOF or
+    // until it stays idle, then the read ends.
+    const drain = drainAfterExit(
+      () => rl?.close(),
+      () => !stdout.isPaused() && stdout.readableLength === 0,
+    );
+    stdout.on("data", () => drain.activity());
     const exitPromise = new Promise<{
       code: number | null;
       signal: NodeJS.Signals | null;
     }>((resolve) => {
       child.once("exit", (code, signal) => {
+        drain.start();
         resolve({ code, signal });
       });
     });
-    const rl = readline.createInterface({
+    // SIGTERM is not enough for a child that ignores it: it never exits, and
+    // the drain above never starts.
+    let escalation: ReturnType<typeof setTimeout> | undefined;
+    const escalate = () => {
+      // Armed once per turn.
+      if (escalation !== undefined) return;
+      escalation = setTimeout(() => {
+        escalation = undefined;
+        if (child.exitCode === null && child.signalCode === null) {
+          try {
+            child.kill("SIGKILL");
+          } catch {
+            // The child is gone.
+          }
+        }
+      }, this.#killGraceMs);
+      escalation.unref?.();
+    };
+    const clearEscalation = () => {
+      if (escalation !== undefined) {
+        clearTimeout(escalation);
+        escalation = undefined;
+      }
+    };
+    args.signal?.addEventListener("abort", escalate, { once: true });
+    rl = readline.createInterface({
       input: child.stdout,
       crlfDelay: Number.POSITIVE_INFINITY,
     });
+    if (spawnError || outputError) rl.close();
     try {
       for await (const line of rl) {
         yield line;
       }
       if (spawnError) throw spawnError;
+      if (outputError) throw outputError;
       const { code, signal } = await exitPromise;
       // An abort was thrown above as the SDK throws it. Wait for the prompt
       // write to settle, so an EPIPE that arrives just after the exit is
@@ -294,6 +366,8 @@ export class ContainedCodexExec {
         );
       }
     } finally {
+      drain.cancel();
+      args.signal?.removeEventListener("abort", escalate);
       rl.close();
       child.removeAllListeners();
       // Contained: `removeAllListeners` also drops the runtime's own `exit`
@@ -306,6 +380,12 @@ export class ContainedCodexExec {
         if (!child.killed) child.kill();
       } catch {
         // The child is gone.
+      }
+      if (child.exitCode === null && child.signalCode === null) {
+        // `removeAllListeners` above dropped the exit listener of the
+        // escalation, so it is set again here.
+        escalate();
+        child.once("exit", clearEscalation);
       }
     }
   }

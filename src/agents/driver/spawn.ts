@@ -9,6 +9,13 @@
  * On POSIX the CLI starts in its own process group, so a kill reaches what it
  * started too (shells, MCP servers, sandbox helpers). Windows has no process
  * groups: there only the CLI process itself is signaled.
+ *
+ * A run does not outlive its process: once the CLI has exited, `stdout` and
+ * `stderr` are read until EOF, or until they stay idle for
+ * {@link POST_EXIT_IDLE_MS} (at most {@link POST_EXIT_MAX_MS} after the
+ * exit), and then end. A grandchild that still holds a pipe is not waited
+ * for and is not killed by this rule; what the CLI wrote before it exited is
+ * read in full. The rule is {@link drainAfterExit}, the same on Bun and Node.
  */
 
 import {
@@ -544,8 +551,8 @@ function spawnWithBun(
     stderr: "pipe",
     ...(USE_PROCESS_GROUPS ? { detached: true } : {}),
   });
-  const stdout = stoppable(child.stdout);
-  const stderr = stoppable(child.stderr);
+  const stdout = stoppable(child.stdout, child.exited);
+  const stderr = stoppable(child.stderr, child.exited);
   const pid = child.pid;
   trackGroup(pid, child.exited);
 
@@ -604,8 +611,8 @@ function spawnWithNode(
   // spawn failure (for example ENOENT) is not reported as unhandled meanwhile.
   exited.catch(() => undefined);
 
-  const stdout = stoppable(toWebStream(child.stdout));
-  const stderr = stoppable(toWebStream(child.stderr));
+  const stdout = stoppable(toWebStream(child.stdout), exited);
+  const stderr = stoppable(toWebStream(child.stderr), exited);
   const pid = child.pid;
   trackGroup(pid, exited);
 
@@ -648,11 +655,107 @@ function signalExitCode(signal: NodeJS.Signals | null): number {
   return typeof number === "number" ? 128 + number : 1;
 }
 
+/** How long a stream may stay idle after its process exited before it is ended. */
+export const POST_EXIT_IDLE_MS = 500;
+
+/** The longest a stream is read after its process exited. */
+export const POST_EXIT_MAX_MS = 5_000;
+
+/** The timers of one stream's post-exit drain. */
+export interface ExitDrain {
+  /** The process exited: start the idle and maximum windows. */
+  start(): void;
+  /** Data arrived: the idle window starts again. */
+  activity(): void;
+  /** Stops the timers (the stream ended or was stopped). */
+  cancel(): void;
+}
+
+/**
+ * The post-exit drain rule, shared by every reader of a child's output: once
+ * the process has exited, its pipe is read until EOF, or until it has stayed
+ * idle for {@link POST_EXIT_IDLE_MS}, and never longer than
+ * {@link POST_EXIT_MAX_MS} after the exit; then `stop` ends the read.
+ *
+ * @remarks
+ * What the process wrote before it exited is already in the pipe and is read
+ * at once, so the idle window never starts while data is flowing. A reader
+ * that is slow (`isReading()` is `false`: it has not asked the pipe for more)
+ * is not idle, so the idle window waits for it; only the maximum window ends
+ * a reader that never catches up. A grandchild that still holds the pipe (a
+ * background task, an MCP server) is why the rule exists. The rule never
+ * kills a process. Timers are unreferenced, so they never keep the host
+ * alive.
+ *
+ * @param stop - Ends the read for the consumer.
+ * @param isReading - Whether the consumer is waiting on the pipe now.
+ * @returns The drain's controls.
+ */
+export function drainAfterExit(
+  stop: () => void,
+  isReading: () => boolean,
+): ExitDrain {
+  let started = false;
+  let idle: ReturnType<typeof setTimeout> | undefined;
+  let max: ReturnType<typeof setTimeout> | undefined;
+  const clearIdle = () => {
+    if (idle !== undefined) {
+      clearTimeout(idle);
+      idle = undefined;
+    }
+  };
+  const cancel = () => {
+    clearIdle();
+    if (max !== undefined) {
+      clearTimeout(max);
+      max = undefined;
+    }
+  };
+  const armIdle = () => {
+    clearIdle();
+    idle = setTimeout(() => {
+      idle = undefined;
+      if (isReading()) {
+        cancel();
+        stop();
+      } else {
+        armIdle();
+      }
+    }, POST_EXIT_IDLE_MS);
+    idle.unref?.();
+  };
+  return {
+    start() {
+      if (started) {
+        return;
+      }
+      started = true;
+      max = setTimeout(() => {
+        max = undefined;
+        cancel();
+        stop();
+      }, POST_EXIT_MAX_MS);
+      max.unref?.();
+      armIdle();
+    },
+    activity() {
+      if (started) {
+        armIdle();
+      }
+    },
+    cancel,
+  };
+}
+
 /**
  * Wraps a stream so `stop()` ends it for the consumer right away, without
  * waiting for the underlying pipe to reach EOF. A read error also ends it.
+ * Once `exited` settles, the stream follows {@link drainAfterExit}.
  */
-function stoppable(source: ReadableStream<Uint8Array> | null): {
+function stoppable(
+  source: ReadableStream<Uint8Array> | null,
+  exited: Promise<unknown>,
+): {
   stream: ReadableStream<Uint8Array> | null;
   stop(): void;
 } {
@@ -663,54 +766,67 @@ function stoppable(source: ReadableStream<Uint8Array> | null): {
   const reader = source.getReader();
   let controller: ReadableStreamDefaultController<Uint8Array> | undefined;
   let stopped = false;
+  let reading = false;
+  const drain = drainAfterExit(
+    () => stop(),
+    () => reading,
+  );
+  const stop = () => {
+    drain.cancel();
+    if (stopped) {
+      return;
+    }
+    stopped = true;
+    try {
+      controller?.close();
+    } catch {
+      // Already closed or errored.
+    }
+    reader.cancel().catch(() => undefined);
+  };
+  // A rejected `exited` (a failed spawn) also ends the process's run.
+  exited.then(drain.start, drain.start);
 
   const stream = new ReadableStream<Uint8Array>({
     start(value) {
       controller = value;
     },
     async pull(value) {
+      reading = true;
       try {
         const chunk = await reader.read();
+        reading = false;
         if (stopped) {
           return;
         }
         if (chunk.done) {
           stopped = true;
+          drain.cancel();
           value.close();
           return;
         }
+        drain.activity();
         value.enqueue(chunk.value);
       } catch {
+        reading = false;
         // A broken pipe means the process went away (or never started, as
         // with ENOENT, where Node reports "Premature close"). End the stream
         // and let `exited` carry the real outcome.
         if (!stopped) {
           stopped = true;
+          drain.cancel();
           value.close();
         }
       }
     },
     cancel(reason) {
       stopped = true;
+      drain.cancel();
       return reader.cancel(reason);
     },
   });
 
-  return {
-    stream,
-    stop() {
-      if (stopped) {
-        return;
-      }
-      stopped = true;
-      try {
-        controller?.close();
-      } catch {
-        // Already closed or errored.
-      }
-      reader.cancel().catch(() => undefined);
-    },
-  };
+  return { stream, stop };
 }
 
 /** Default time a cancelled CLI gets to exit after SIGTERM before SIGKILL. */
