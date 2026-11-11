@@ -1190,7 +1190,7 @@ from the 0.6.0 tag.
   `EXTERNAL_AGENT_SESSIONS_UNSUPPORTED` (exported from `adk-llm-bridge/agents`) before any
   process starts. `ClaudeAgentSdkDriver` now declares `capabilities().sessions = true`,
   matching what it already did.
-- **Prompt caching is on by default for Anthropic models** (fixes zero cache reads on
+- **Prompt caching is automatic by default for Anthropic models** (fixes zero cache reads on
   AI Gateway, where every turn paid the full prompt again):
   - native `AnthropicLlm`: `promptCaching` was opt-in and marked only the system block and
     the last tool; it is now on and also marks the last message block, so later turns read
@@ -1199,8 +1199,10 @@ from the 0.6.0 tag.
   - OpenRouter stays opt-in (`promptCaching: true`), and OpenAI, xAI and custom endpoints
     are unchanged;
   - a cache write costs 1.25x the input price and a read 0.1x or less, so it pays off from
-    the second turn; one-shot calls that are never reused pay the 25% write surcharge on
-    the cached part: set `promptCaching: false` for them.
+    the second turn. With `promptCaching` unset, markers are sent only when the request
+    declares a tool of the caller (not the structured-output tool) or already holds an
+    earlier model turn: tool loops cache from their first call, and one-shot calls send no
+    marker and pay no write surcharge. `true` or `{ ttl }` always caches, `false` never.
 
 - **`ExternalAgent` no longer drops ADK tools silently** (see
   [Read-only agents and host tools](./docs/external-agent-isolation.md#read-only-agents-and-host-tools)):

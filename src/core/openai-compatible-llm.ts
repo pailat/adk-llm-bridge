@@ -293,15 +293,27 @@ export class OpenAICompatibleLlm extends BaseProviderLlm {
    * Request-body fields that turn prompt caching on for `model`, or `{}`.
    *
    * Markers live in the provider body only, never in the `LlmRequest`. The
-   * default is judged on the model actually sent, so a routed or overridden
-   * model is decided per call.
+   * default is judged on the model actually sent and on the request itself, so
+   * a routed or overridden model, or a one-shot step, is decided per call.
    */
-  private cachingRequestOptions(model: string): Record<string, unknown> {
+  private cachingRequestOptions(
+    model: string,
+    tools: OpenAI.ChatCompletionTool[] | undefined,
+    messages: OpenAI.ChatCompletionMessageParam[],
+  ): Record<string, unknown> {
     const capability = this._promptCaching;
     const setting = this._promptCachingConfig;
     if (!capability || setting === false) return {};
     const explicit = setting !== undefined;
-    if (!explicit && !capability.defaultModel?.test(model)) return {};
+    if (!explicit) {
+      if (!capability.defaultModel?.test(model)) return {};
+      // Automatic: cache only a request that can be reused, one that declares
+      // a tool or already holds an earlier model turn.
+      const reusable =
+        (tools?.length ?? 0) > 0 ||
+        messages.some((m) => m.role === "assistant");
+      if (!reusable) return {};
+    }
 
     const ttl = typeof setting === "object" ? setting.ttl : undefined;
     if (capability.style === "gateway-auto") {
@@ -458,7 +470,7 @@ export class OpenAICompatibleLlm extends BaseProviderLlm {
         ...params,
         ...(tools?.length ? { tools } : {}),
         ...(toolChoice && tools?.length ? { tool_choice: toolChoice } : {}),
-        ...this.cachingRequestOptions(model),
+        ...this.cachingRequestOptions(model, tools, messages),
         ...this.getProviderRequestOptions(),
       },
       abortSignal ? { signal: abortSignal } : undefined,
@@ -490,7 +502,7 @@ export class OpenAICompatibleLlm extends BaseProviderLlm {
         ...params,
         ...(tools?.length ? { tools } : {}),
         ...(toolChoice && tools?.length ? { tool_choice: toolChoice } : {}),
-        ...this.cachingRequestOptions(model),
+        ...this.cachingRequestOptions(model, tools, messages),
         ...this.getProviderRequestOptions(),
       },
       abortSignal ? { signal: abortSignal } : undefined,

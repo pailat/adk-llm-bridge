@@ -296,9 +296,9 @@ reasoning tokens, as OpenAI's `completion_tokens` does, and
 `thoughtsTokenCount` is that reasoning part: do not add the two.
 
 Tokens written to the prompt cache are in
-`customMetadata.cacheCreationTokenCount`. Anthropic models cache by default
-(see [Prompt caching](./docs/prompt-caching.md)); set `promptCaching: false`
-to turn it off.
+`customMetadata.cacheCreationTokenCount`. Anthropic models cache by default when the request can be reused (tools or
+earlier turns; see [Prompt caching](./docs/prompt-caching.md)); set
+`promptCaching: true` to always cache or `false` to turn it off.
 
 ### Telemetry
 
