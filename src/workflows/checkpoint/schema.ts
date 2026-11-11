@@ -495,7 +495,8 @@ function isStepResult(
     (value.stateDelta === undefined ||
       (isPlainRecord(value.stateDelta) && isJsonSafe(value.stateDelta))) &&
     (value.usage === undefined || isWorkflowStepUsage(value.usage)) &&
-    (value.models === undefined || isWorkflowStepModels(value.models))
+    (value.models === undefined || isWorkflowStepModels(value.models)) &&
+    (value.finishReason === undefined || isNonEmptyString(value.finishReason))
   );
 }
 
@@ -582,6 +583,7 @@ const WORKFLOW_ERROR_CODES: Readonly<Record<WorkflowErrorCode, true>> = {
   WORKFLOW_SANDBOX_UNAVAILABLE: true,
   WORKFLOW_SCRIPT_INVALID: true,
   WORKFLOW_SOURCE_MISMATCH: true,
+  WORKFLOW_STEP_INCOMPLETE: true,
   WORKFLOW_STEP_INTERRUPTED: true,
   WORKFLOW_STEP_MISMATCH: true,
   WORKFLOW_UNKNOWN_AGENT: true,

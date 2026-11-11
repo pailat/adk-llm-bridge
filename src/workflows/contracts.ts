@@ -68,6 +68,14 @@ export interface WorkflowStep {
    * `WORKFLOW_INDETERMINATE_STEP`.
    */
   resumePolicy?: WorkflowResumePolicy;
+  /**
+   * Accept a model response that stopped early (`MAX_TOKENS` or a content
+   * filter) as the step's output. Defaults to `false`: such a step fails with
+   * `WORKFLOW_STEP_INCOMPLETE`. A completed step reports the reason in
+   * {@link WorkflowStepResult.finishReason}. Does not change the step's
+   * identity, so a resume picks it up.
+   */
+  allowIncompleteOutput?: boolean;
   /** Free-form JSON-safe data attached to the step for observers. */
   metadata?: Record<string, unknown>;
 }
@@ -177,6 +185,12 @@ export interface WorkflowStepResult {
    * strings, or the checkpoint is rejected as corrupt.
    */
   models?: WorkflowStepModels;
+  /**
+   * Finish reason of the response that produced `output`, such as `STOP`, or
+   * `MAX_TOKENS` for a step that opted into `allowIncompleteOutput`. Absent
+   * when the provider reported none, and in checkpoints saved before it existed.
+   */
+  finishReason?: string;
   /** Attempts used, including the successful one. */
   attempts: number;
   /** Epoch milliseconds when the step started. */
@@ -463,6 +477,7 @@ export type WorkflowErrorCode =
   | "WORKFLOW_SANDBOX_UNAVAILABLE"
   | "WORKFLOW_SCRIPT_INVALID"
   | "WORKFLOW_SOURCE_MISMATCH"
+  | "WORKFLOW_STEP_INCOMPLETE"
   | "WORKFLOW_STEP_INTERRUPTED"
   | "WORKFLOW_STEP_MISMATCH"
   | "WORKFLOW_UNKNOWN_AGENT"

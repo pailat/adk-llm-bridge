@@ -113,6 +113,7 @@ const STEP_KEYS = [
   "writePaths",
   "retry",
   "resumePolicy",
+  "allowIncompleteOutput",
   "metadata",
 ] as const;
 const RETRY_KEYS = [
@@ -141,6 +142,8 @@ function isStep(value: unknown): value is WorkflowStep {
     (value.resumePolicy === undefined ||
       value.resumePolicy === "fail" ||
       value.resumePolicy === "retry") &&
+    (value.allowIncompleteOutput === undefined ||
+      typeof value.allowIncompleteOutput === "boolean") &&
     (value.metadata === undefined || isObject(value.metadata))
   );
 }
