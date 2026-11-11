@@ -283,6 +283,26 @@ confirmation sees it. Its denials are final; no approval overrides them.
   `workspace-write` (and `ask`) a Bash call also needs an approver
   (`confirmation.approver` or `confirmation: { adk: true }`); without one
   every Bash call is denied.
+  - **Residual: a killed host leaves the directory behind.** The directory is
+    `/tmp/adk-claude-<random>` (made by `mkdtemp`, with one `claude-<uid>`
+    subdirectory) and is removed on every normal, error and cancel path, in
+    the `finally` of both Claude drivers. A host process that is killed with
+    `SIGKILL` (or loses power) before that `finally` runs cannot remove it,
+    so the directory stays, holding only an empty `claude-<uid>`
+    subdirectory. The library's own tests leave none. The runtime never
+    reuses or sweeps old directories, so they only add up on hosts that kill
+    runs often. To clean them safely, delete only directories that are
+    yours, are not symlinks, and are old enough that no run can still own
+    them (a longer age than your longest run), or sweep at host start,
+    before any run begins. List them first, and delete only the ones whose
+    `claude-<uid>` is empty: files inside it are the work of a run that was
+    killed mid-command, so look at them before you delete anything. On
+    macOS `/tmp` is a symlink, so give `find` the path with a trailing
+    slash:
+    `find /tmp/ -maxdepth 1 -type d -user "$(id -u)" -name 'adk-claude-*' -mmin +1440`
+    lists the candidates (the age is the time since the run started); once
+    you have checked them, `rmdir` the empty `claude-<uid>` inside each and
+    then the directory itself.
 
 A delegated agent's `allowedPaths` are the intersection of its own and its
 parent's, by containment: a root inside a root of the other side is kept, so
