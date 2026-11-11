@@ -44,6 +44,17 @@ export type {
 } from "./driver/claude-cli.js";
 export { ClaudeCliDriver } from "./driver/claude-cli.js";
 export { DEFAULT_CLAUDE_TOOLS } from "./driver/claude-isolation.js";
+export type {
+  ClaudeMcpHttpServer,
+  ClaudeMcpServer,
+  ClaudeMcpServerCommon,
+  ClaudeMcpStdioServer,
+  McpPublicValue,
+  McpSecretRef,
+  McpSecretResolver,
+  McpValue,
+} from "./driver/claude-mcp-servers.js";
+export { selectMcpServers } from "./driver/claude-mcp-servers.js";
 // Named by public signatures: `ClaudeAgentSdkDriver.buildPromptInput()`
 // returns `SDKUserMessage`s.
 export type {
@@ -87,6 +98,14 @@ export {
   EXTERNAL_AGENT_DEPENDENCY_MISSING,
   EXTERNAL_AGENT_INTERPRETER_UNSAFE,
   EXTERNAL_AGENT_ISOLATION_VIOLATED,
+  EXTERNAL_AGENT_MCP_PROVIDER_UNKNOWN,
+  EXTERNAL_AGENT_MCP_SECRET_LITERAL,
+  EXTERNAL_AGENT_MCP_SECRET_UNENFORCEABLE,
+  EXTERNAL_AGENT_MCP_SECRET_UNRESOLVED,
+  EXTERNAL_AGENT_MCP_SERVER_INVALID,
+  EXTERNAL_AGENT_MCP_SERVER_NETWORK_REQUIRED,
+  EXTERNAL_AGENT_MCP_SERVER_UNAVAILABLE,
+  EXTERNAL_AGENT_MCP_STDIO_UNSAFE,
   EXTERNAL_AGENT_MISSING_BINARY,
   EXTERNAL_AGENT_MODEL_INVALID,
   EXTERNAL_AGENT_MODEL_OVERRIDE,
@@ -94,6 +113,7 @@ export {
   EXTERNAL_AGENT_NETWORK_UNENFORCEABLE,
   EXTERNAL_AGENT_NO_RESULT,
   EXTERNAL_AGENT_NO_TURN,
+  EXTERNAL_AGENT_OPTION_UNKNOWN,
   EXTERNAL_AGENT_OPTION_UNSUPPORTED,
   EXTERNAL_AGENT_PATHS_UNENFORCEABLE,
   EXTERNAL_AGENT_READ_ONLY_TOOL_UNKNOWN,
@@ -130,6 +150,7 @@ export type { ExternalAgentConfig } from "./external-agent.js";
 export { ExternalAgent } from "./external-agent.js";
 export type {
   ExternalAgentDriver,
+  ExternalAgentMcpServerGrant,
   ExternalAgentRunRequest,
 } from "./external-agent-driver.js";
 export {

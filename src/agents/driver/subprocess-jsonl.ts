@@ -7,11 +7,16 @@ import type {
   ExternalAgentDriver,
   ExternalAgentRunRequest,
 } from "../external-agent-driver.js";
+import { SUBPROCESS_JSONL_OPTION_KEYS } from "./option-keys.js";
 import {
   EXTERNAL_AGENT_OPTION_UNSUPPORTED,
   ExternalAgentPolicyError,
 } from "./policy-errors.js";
-import { agentWritableRoots, isSearchableExecutable } from "./shared.js";
+import {
+  agentWritableRoots,
+  assertKnownDriverOptions,
+  isSearchableExecutable,
+} from "./shared.js";
 import { windowsExecutableKind } from "./spawn.js";
 
 /** Options for {@link SubprocessJsonlDriver}. */
@@ -333,6 +338,14 @@ export class SubprocessJsonlDriver implements ExternalAgentDriver {
 
   /** @param config - Provider id, command, entry and arguments. */
   constructor(config: SubprocessJsonlDriverConfig) {
+    // Each subclass checks its own keys before calling `super()`.
+    if (new.target === SubprocessJsonlDriver) {
+      assertKnownDriverOptions(
+        "SubprocessJsonlDriver",
+        config,
+        SUBPROCESS_JSONL_OPTION_KEYS,
+      );
+    }
     this.providerId = config.providerId;
     this.command = config.command;
     if (config.entry !== undefined) {

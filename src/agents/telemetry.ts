@@ -144,6 +144,7 @@ export class ExternalAgentRunTracer {
           name: event.name,
           start: Math.min(progressStart ?? time, time),
           builtin: event.metadata?.builtin === true,
+          mcpServer: mcpServerOf(event.metadata),
           event: adkEvent,
         });
         return;
@@ -162,6 +163,7 @@ export class ExternalAgentRunTracer {
           start: open?.start ?? time,
           end: time,
           builtin: open?.builtin ?? event.metadata?.builtin === true,
+          mcpServer: open?.mcpServer ?? mcpServerOf(event.metadata),
           callEvent: open?.event,
           resultEvent: adkEvent,
           error: event.error !== undefined,
@@ -310,6 +312,7 @@ export class ExternalAgentRunTracer {
         start: open.start,
         end: Math.max(open.start, time),
         builtin: open.builtin,
+        mcpServer: open.mcpServer,
         callEvent: open.event,
         incomplete: true,
       });
@@ -401,6 +404,7 @@ export class ExternalAgentRunTracer {
     start: number;
     end: number;
     builtin: boolean;
+    mcpServer?: string;
     callEvent?: Event;
     resultEvent?: Event;
     error?: boolean;
@@ -429,6 +433,9 @@ export class ExternalAgentRunTracer {
         tool.callId ?? named?.id ?? "<not specified>",
       );
       if (tool.builtin) span.setAttribute(`${EXT}.builtin_tool`, true);
+      if (tool.mcpServer !== undefined) {
+        span.setAttribute(`${EXT}.mcp_server`, tool.mcpServer);
+      }
       if (tool.incomplete) span.setAttribute(`${EXT}.tool_incomplete`, true);
       if (tool.error) {
         span.setAttribute("error.type", "TOOL_ERROR");
@@ -515,7 +522,18 @@ interface OpenTool {
   name: string;
   start: number;
   builtin: boolean;
+  mcpServer?: string;
   event?: Event;
+}
+
+/** The MCP server a tool event's `metadata.mcp` names, if any. */
+function mcpServerOf(
+  metadata: Record<string, unknown> | undefined,
+): string | undefined {
+  const mcp = metadata?.mcp;
+  if (typeof mcp !== "object" || mcp === null) return undefined;
+  const server = (mcp as Record<string, unknown>).server;
+  return typeof server === "string" ? server : undefined;
 }
 
 /**
