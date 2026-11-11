@@ -121,10 +121,22 @@ export interface WorkflowStepModels {
   /** Ids a trusted runtime reported: an external agent's resolved model and the `modelVersion` of LLM responses. */
   resolved: string[];
   /**
+   * Every model the step's external runs billed, unique, first-seen order: the
+   * union of `externalAgentModel.used`. Present only when at least one run
+   * reported it. Absent in checkpoints written before the field existed.
+   */
+  used?: string[];
+  /**
+   * The ids of `used` that were not requested, resolved or the pinned small
+   * model of their run (the union of `externalAgentModel.unexpected`). Present
+   * exactly when `used` is. Never an error: the run was already billed.
+   */
+  unexpected?: string[];
+  /**
    * True when any run in the step was not fully explicit and reported: an
-   * external run with no `requested`, a status other than `reported`, or no
-   * model info at all; or an `LlmAgent` whose model was inherited or could not
-   * be read.
+   * external run with no `requested`, a status other than `reported`, no
+   * `used` (its helper models are not known), or no model info at all; or an
+   * `LlmAgent` whose model was inherited or could not be read.
    */
   unknown: boolean;
 }
@@ -160,8 +172,9 @@ export interface WorkflowStepResult {
    * The models of the successful attempt's agent run. Absent in checkpoints
    * written before 0.7 and for a step whose agent has no model information.
    * When present in a stored checkpoint it must hold `requested` and
-   * `resolved` as arrays of non-empty strings and `unknown` as a boolean, or
-   * the checkpoint is rejected as corrupt.
+   * `resolved` as arrays of non-empty strings and `unknown` as a boolean, and
+   * `used` and `unexpected` (together, or neither) as arrays of non-empty
+   * strings, or the checkpoint is rejected as corrupt.
    */
   models?: WorkflowStepModels;
   /** Attempts used, including the successful one. */

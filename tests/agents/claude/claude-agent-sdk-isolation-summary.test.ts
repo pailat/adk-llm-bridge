@@ -371,6 +371,8 @@ describe("model, usage, turns and duration", () => {
       type: "completed",
       exitCode: 1,
       model: "claude-haiku-5-5",
+      // No modelUsage: the model came from system/init.
+      modelFromInit: true,
       usage: {
         inputTokens: 3,
         outputTokens: 4,

@@ -37,6 +37,7 @@ const CONFIG_KEYS = new Set([
   "workingDirectory",
   "permissions",
   "model",
+  "smallFastModel",
 ]);
 const PERMISSION_KEYS = new Set(["mode", "allowNetwork", "allowedPaths"]);
 const POLICY_KEYS = new Set([
@@ -185,6 +186,10 @@ export class ExternalAgentWorkflowFactory implements WorkflowAgentFactory {
 
     const model = normalized.config?.model;
     this.assertModelAllowed(normalized.providerId, model);
+    this.assertSmallFastModelAllowed(
+      normalized.providerId,
+      normalized.config?.smallFastModel,
+    );
     const definition = this.#registry.get(normalized.providerId);
     if (model !== undefined && !definition?.createDriver) {
       throw notApplied(
@@ -202,6 +207,11 @@ export class ExternalAgentWorkflowFactory implements WorkflowAgentFactory {
     });
     const agent = this.#createAgent(normalized);
     this.#assertModelApplied(agent, normalized.providerId, model);
+    this.#assertSmallFastModelApplied(
+      agent,
+      normalized.providerId,
+      normalized.config?.smallFastModel,
+    );
     const handle = Object.freeze({ descriptor, agent });
     this.#handles.set(normalized.name, handle);
     return handle;
@@ -252,6 +262,43 @@ export class ExternalAgentWorkflowFactory implements WorkflowAgentFactory {
         `Workflow agent provider ${providerId} did not keep the requested model`,
         providerId,
         model,
+      );
+    }
+  }
+
+  /** Under `requireExplicitModel`, the built-in `claude` id needs a `smallFastModel`. */
+  private assertSmallFastModelAllowed(
+    providerId: string,
+    smallFastModel: string | undefined,
+  ) {
+    if (!this.#requireExplicitModel || providerId !== "claude") return;
+    if (smallFastModel === undefined) {
+      throw new WorkflowAgentFactoryError(
+        "WORKFLOW_AGENT_MODEL_REQUIRED",
+        "Workflow agent requires an explicit small model for the claude provider: set config.smallFastModel",
+        { providerId },
+      );
+    }
+  }
+
+  /** Under `requireExplicitModel`, the `claude` driver must keep exactly the pin. */
+  #assertSmallFastModelApplied(
+    agent: ExternalAgent,
+    providerId: string,
+    smallFastModel: string | undefined,
+  ): void {
+    if (
+      !this.#requireExplicitModel ||
+      providerId !== "claude" ||
+      smallFastModel === undefined
+    ) {
+      return;
+    }
+    if (agent.driver.smallFastModel !== smallFastModel) {
+      throw notApplied(
+        `Workflow agent provider ${providerId} did not keep the requested smallFastModel`,
+        providerId,
+        smallFastModel,
       );
     }
   }
@@ -393,6 +440,15 @@ function normalizeConfig(
     );
   }
   const model = config.model;
+  if (
+    config.smallFastModel !== undefined &&
+    !isModelId(config.smallFastModel)
+  ) {
+    invalid(
+      "Workflow agent smallFastModel must be a model id: 1 to 256 characters, no whitespace or control characters, not starting with a dash",
+    );
+  }
+  const smallFastModel = config.smallFastModel;
   const permissions = normalizePermissions(
     config.permissions,
     limits,
@@ -406,6 +462,7 @@ function normalizeConfig(
     ...(workingDirectory !== undefined ? { workingDirectory } : {}),
     ...(permissions ? { permissions } : {}),
     ...(model !== undefined ? { model } : {}),
+    ...(smallFastModel !== undefined ? { smallFastModel } : {}),
   });
 }
 
@@ -544,6 +601,7 @@ function externalAgentConfig(
   requireExplicitModel: boolean,
 ): ExternalAgentDefinitionConfig {
   const model = request.config?.model;
+  const smallFastModel = request.config?.smallFastModel;
   return {
     name: request.name,
     ...(request.config?.description !== undefined
@@ -558,10 +616,11 @@ function externalAgentConfig(
     ...(request.config?.permissions
       ? { permissions: request.config.permissions }
       : {}),
-    ...(model !== undefined
+    ...(model !== undefined || smallFastModel !== undefined
       ? {
           driverOptions: {
-            model,
+            ...(model !== undefined ? { model } : {}),
+            ...(smallFastModel !== undefined ? { smallFastModel } : {}),
             ...(requireExplicitModel ? { requireExplicitModel: true } : {}),
           },
         }

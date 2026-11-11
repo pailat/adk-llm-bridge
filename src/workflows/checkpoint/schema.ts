@@ -528,16 +528,23 @@ function isWorkflowStepUsage(value: unknown): value is WorkflowStepUsage {
 }
 
 /**
- * Whether a stored value is a {@link WorkflowStepModels}: exactly its three
- * fields, two arrays of non-empty strings and a boolean. Results saved before
+ * Whether a stored value is a {@link WorkflowStepModels}: its three fields
+ * (two arrays of non-empty strings and a boolean), plus `used` and
+ * `unexpected` together when present (two more such arrays). Results saved before
  * models existed carry none and are accepted by the caller.
  */
 function isWorkflowStepModels(value: unknown): value is WorkflowStepModels {
+  if (!isPlainRecord(value)) return false;
+  // `used` and `unexpected` came later: both or neither, so a checkpoint
+  // written before them still loads.
+  const hasUsed = value.used !== undefined;
+  const expectedKeys = hasUsed ? 5 : 3;
   return (
-    isPlainRecord(value) &&
-    Object.keys(value).length === 3 &&
+    Object.keys(value).length === expectedKeys &&
     isModelIdList(value.requested) &&
     isModelIdList(value.resolved) &&
+    (!hasUsed ||
+      (isModelIdList(value.used) && isModelIdList(value.unexpected))) &&
     typeof value.unknown === "boolean"
   );
 }

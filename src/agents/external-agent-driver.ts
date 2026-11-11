@@ -128,6 +128,17 @@ export interface ExternalAgentDriver {
    */
   readonly model?: string;
   /**
+   * The small/fast model pin the driver was configured with, if any (the
+   * Claude drivers' `smallFastModel`). Compared with the models a run billed:
+   * see `ExternalAgentModelInfo.unexpected`.
+   */
+  readonly smallFastModel?: string;
+  /**
+   * Whether the driver was built with `requireExplicitModel`. A run that then
+   * billed an unexpected model gets the `UNEXPECTED_MODEL` warning.
+   */
+  readonly requireExplicitModel?: boolean;
+  /**
    * Whether the runtime reports the model it actually ran, on `started` or
    * `completed`. Only a driver that sets this to `true` has its reported
    * model trusted as the resolved model; absent means `false`.
