@@ -31,6 +31,7 @@ export type {
 } from "./driver/claude-agent-sdk.js";
 export {
   CLAUDE_SESSION_STORE_MIRROR_ERROR,
+  CLAUDE_SESSION_STORE_UNAVAILABLE,
   ClaudeAgentSdkDriver,
   claudeSdkSessionStateKey,
   DEFAULT_CLAUDE_SDK_TOOLS,
@@ -170,6 +171,7 @@ export {
   normalizeRecoverableErrorCode,
 } from "./runtime/error-classification.js";
 export type { AgentRuntimeSession } from "./runtime/runtime-session.js";
+export type { SessionStoreFactory } from "./session-store/adk-artifacts.js";
 export type {
   SessionKey,
   SessionStore,

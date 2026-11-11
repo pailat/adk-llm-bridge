@@ -28,7 +28,7 @@ can pick 3.x, which is outside the supported range.
 The package is ESM only. Use `import`, or `await import()` from CommonJS.
 Shared code and its type declarations now live in `dist/shared/` chunks
 (`.js` and `.d.ts`). Import only the documented
-subpaths (`adk-llm-bridge`, `/agents`, `/agents/session-store/sqlite`,
+subpaths (`adk-llm-bridge`, `/agents`, `/agents/session-store/sqlite`, `/agents/session-store/adk-artifacts`,
 `/workflows`, `/workflows/node`, `/package.json`), never a file under `dist/`: chunk names change between
 builds. The package declares `"sideEffects": false`, so bundlers can drop the
 modules you do not import.
@@ -837,6 +837,15 @@ example `process.env.X === "true"`) before you pass it.
 
 See
 [Sub-agents need a driver that exposes them](./external-agent-isolation.md#sub-agents-need-a-driver-that-exposes-them).
+
+### Claude sessions in ADK artifacts
+
+New in 0.7.0, nothing to migrate. `ClaudeAgentSdkDriver`'s `sessionStore` also
+takes a factory such as `adkArtifactSessionStore()` (subpath
+`adk-llm-bridge/agents/session-store/adk-artifacts`), which keeps transcripts in
+the run's ADK artifact service. Without an artifact service the run ends with
+`CLAUDE_SESSION_STORE_UNAVAILABLE` before the SDK starts. See
+[Persisting Claude sessions](./claude-session-store.md#adk-artifacts).
 
 ### Coming in 0.8
 
