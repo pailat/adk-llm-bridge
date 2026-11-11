@@ -717,6 +717,30 @@ an alias such as `opus` always differs from the full id the runtime reports.
 Loaded Claude settings can replace the start model, and a `fallbackModel`
 switch in the middle of a run shows only in `usage.byModel`.
 
+#### Reports under delegation
+
+When an `ExternalAgent` delegates to a sub-agent (`subAgents`, through the
+bridge's delegation), each sub-agent's own `externalAgentModel` and
+`externalAgentTools` reports ride on **that sub-agent's final event** in the
+host stream, with `author` set to the sub-agent's name. The reports are not
+merged: the coordinator's report describes the coordinator's run only, and a
+host that wants the whole picture reads the report of every author. The run's
+`models` (and a workflow step's `result.models`) are the exception: they count
+every run that reported, so they now include the sub-agents' `used` and
+`unexpected`. The bridge keeps
+those two keys only; the rest of a sub-agent event's `customMetadata` is still
+stripped so the timeline looks like a native transfer.
+
+Two limits:
+
+- With the default `delegation: { finalAnswer: "subagent" }` the coordinator's
+  closing text after a delegation is dropped from the timeline, and its report
+  has no event to ride on. Use `finalAnswer: "coordinator"` when the host needs
+  the coordinator's own report.
+- A sub-agent run through ADK's `AgentTool` returns text only; its reports
+  never reach the host. Use `subAgents`, as the permission model already
+  requires.
+
 ### Model-setting `args` and `config`
 
 These are refused when the driver is built with
