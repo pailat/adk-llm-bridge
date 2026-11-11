@@ -19,7 +19,10 @@ async function runFault(
     | "eperm-live"
     | "eperm-none"
     | "busy-release"
-    | "trace",
+    | "trace"
+    | "dir-sync-win32"
+    | "dir-sync-posix"
+    | "file-sync-win32",
   swapTarget?: string,
 ) {
   const root = await mkdtemp(join(tmpdir(), "adk-checkpoint-fault-"));
@@ -164,6 +167,33 @@ describe("FileSystemWorkflowCheckpointStore under file-system faults", () => {
       publishes: 2,
       incompleteOwnerAtPublish: 0,
       unsyncedOwnerAtPublish: 0,
+    });
+  });
+
+  // Windows refuses to flush a directory (EPERM); only there is that skipped.
+  test("saves and loads when the platform cannot flush a directory (Windows)", async () => {
+    const { result } = await runFault("dir-sync-win32");
+
+    expect(result).toEqual({ saved: true, loaded: true });
+  });
+
+  test("a directory flush that fails off Windows fails the save", async () => {
+    const { result } = await runFault("dir-sync-posix");
+
+    expect(result).toEqual({
+      saved: false,
+      loaded: false,
+      reason: "checkpoint_lock_candidate_failed",
+    });
+  });
+
+  test("a file flush that fails fails the save on Windows too", async () => {
+    const { result } = await runFault("file-sync-win32");
+
+    expect(result).toEqual({
+      saved: false,
+      loaded: false,
+      reason: "checkpoint_lock_candidate_failed",
     });
   });
 });

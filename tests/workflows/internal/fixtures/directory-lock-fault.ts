@@ -12,6 +12,12 @@
  *   release to retry and succeed.
  * - `busy-recover`: the same `EBUSY` on a recovery rename. Expect the error
  *   (only a release retries).
+ * - `sync-<code>-<platform>` (`sync-eperm-linux`, `sync-eio-linux`,
+ *   `sync-enotsup-darwin`, `sync-eperm-win32`): runs as that platform, and
+ *   every flush of the lock's parent directory fails with that code, as on a
+ *   mount that refuses a directory flush. The publishing rename itself works.
+ *   Prints whether the lock was acquired, the error code, whether the lock
+ *   path is still there, and how many cleanup errors were attached.
  * - `trace`: acquire, release, then recovery of an abandoned lock and a second
  *   acquire and release. Prints every mutating call whose path is the lock or
  *   inside it, other than the two renames the protocol allows, and whether the
@@ -29,12 +35,21 @@ const MODES = [
   "busy-release",
   "busy-recover",
   "trace",
+  "sync-eperm-linux",
+  "sync-eio-linux",
+  "sync-enotsup-darwin",
+  "sync-eperm-win32",
 ];
 if (!root || !mode || !MODES.includes(mode)) {
   throw new Error(`usage: <${MODES.join("|")}> <root>`);
 }
 
 const real = { ...(await import("node:fs")) };
+const syncFault = /^sync-([a-z]+)-([a-z0-9]+)$/u.exec(mode);
+if (syncFault) {
+  Object.defineProperty(process, "platform", { value: syncFault[2] });
+}
+const parentDescriptors = new Set<number>();
 const lockPath = join(root, "lock");
 const slashes = (path: unknown): string => String(path).replaceAll("\\", "/");
 const isLock = (path: unknown): boolean => {
@@ -65,7 +80,20 @@ mock.module("node:fs", () => ({
   },
   openSync: (path: string, flags?: unknown, ...rest: [unknown?]) => {
     if (writeFlags(flags)) record("open-write", path);
-    return real.openSync(path, flags as string, ...(rest as []));
+    const descriptor = real.openSync(path, flags as string, ...(rest as []));
+    if (syncFault && slashes(path) === slashes(root)) {
+      parentDescriptors.add(descriptor);
+    }
+    return descriptor;
+  },
+  fsyncSync: (descriptor: number) => {
+    if (syncFault && parentDescriptors.has(descriptor)) {
+      throw Object.assign(new Error(`injected ${syncFault[1]}, fsync`), {
+        code: syncFault[1]?.toUpperCase(),
+        syscall: "fsync",
+      });
+    }
+    return real.fsyncSync(descriptor);
   },
   writeFileSync: (path: unknown, ...rest: unknown[]) => {
     if (typeof path === "string") record("writeFile", path);
@@ -141,6 +169,16 @@ const result: Record<string, unknown> = {};
 try {
   if (mode === "eperm-held" || mode === "eperm-free") {
     result.held = tryAcquireDirectoryLock(lockPath) === undefined;
+  } else if (syncFault) {
+    try {
+      result.acquired = tryAcquireDirectoryLock(lockPath) !== undefined;
+    } catch (error) {
+      result.code = (error as { code?: string }).code;
+      result.cleanupErrors = (
+        (error as { cleanupErrors?: unknown[] }).cleanupErrors ?? []
+      ).length;
+    }
+    result.lockLeft = real.existsSync(lockPath);
   } else if (mode === "busy-release") {
     const owner = tryAcquireDirectoryLock(lockPath);
     if (!owner) throw new Error("lock not acquired");

@@ -39,7 +39,8 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
-import { isProcessAlive } from "./error-support.js";
+import { fsyncDirectorySync } from "./directory-sync.js";
+import { attachCleanupErrors, isProcessAlive } from "./error-support.js";
 import { hasErrorCode } from "./guards.js";
 
 /**
@@ -73,7 +74,8 @@ export interface DirectoryLockOwner {
  * owner holds the lock, or an owner-less directory is there (never taken over).
  * @throws The file-system error when the path cannot be inspected, or the
  * candidate cannot be written or renamed for another reason than an existing
- * lock.
+ * lock, or the parent directory cannot be flushed after the rename (the lock
+ * is released first; a failed release is in the error's `cleanupErrors`).
  * @internal
  */
 export function tryAcquireDirectoryLock(
@@ -98,12 +100,26 @@ export function tryAcquireDirectoryLock(
     );
     try {
       renameSync(candidate, lockPath);
-      fsyncDirectorySync(resolve(lockPath, ".."));
-      return owner;
     } catch (error) {
       if (isLockContention(error, lockPath)) return undefined;
       throw error;
     }
+    // The lock on the path is this process's own now, so a failed flush is
+    // not contention. Release it rather than leave a live owner's lock that
+    // nothing would retire, and report the flush error.
+    try {
+      fsyncDirectorySync(resolve(lockPath, ".."));
+    } catch (error) {
+      const cleanupErrors: unknown[] = [];
+      try {
+        releaseDirectoryLock(lockPath, owner.token);
+      } catch (releaseError) {
+        cleanupErrors.push(releaseError);
+      }
+      attachCleanupErrors(error, cleanupErrors);
+      throw error;
+    }
+    return owner;
   } finally {
     rmSync(candidate, { recursive: true, force: true });
   }
@@ -248,34 +264,6 @@ export function writeDurableFileSync(path: string, content: string): void {
     fsyncSync(descriptor);
   } finally {
     closeSync(descriptor);
-  }
-}
-
-/**
- * Flushes a directory entry change to disk where the platform supports it.
- *
- * @param directory - Directory to flush.
- * @throws The file-system error, except the codes of platforms that cannot
- * flush a directory.
- * @internal
- */
-export function fsyncDirectorySync(directory: string): void {
-  let descriptor: number | undefined;
-  try {
-    descriptor = openSync(directory, "r");
-    fsyncSync(descriptor);
-  } catch (error) {
-    if (
-      hasErrorCode(error, "EINVAL") ||
-      hasErrorCode(error, "ENOTSUP") ||
-      hasErrorCode(error, "EPERM") ||
-      hasErrorCode(error, "EISDIR")
-    ) {
-      return;
-    }
-    throw error;
-  } finally {
-    if (descriptor !== undefined) closeSync(descriptor);
   }
 }
 

@@ -21,6 +21,7 @@ import {
   parseDirectoryLockOwner,
   retiredDirectoryLockPath,
 } from "../internal/directory-lock.js";
+import { fsyncDirectory } from "../internal/directory-sync.js";
 import {
   attachCause,
   attachCleanupErrors,
@@ -160,6 +161,11 @@ export async function collectFileSystemCheckpointTombstonesOffline(
  * The lock protects compare-and-swap plus rename as one critical section.
  * Readers need no lock because checkpoint replacement is atomic on one local
  * filesystem. The configured root must not span filesystems via symlinks.
+ *
+ * File contents are flushed to disk before each rename, and the directory
+ * after it. Windows cannot flush a directory, so there a rename is journaled
+ * by NTFS but a save that already resolved can still be lost to a power
+ * failure right after it. Elsewhere a failed directory flush fails the save.
  */
 export class FileSystemWorkflowCheckpointStore
   implements WorkflowCheckpointStore
@@ -554,7 +560,7 @@ async function removeCheckpointTombstone(
   }
   await assertValidCheckpointTombstone(tombstone.path, match[1] as string);
   await rm(tombstone.path, { recursive: true });
-  await syncDirectory(dirname(tombstone.path));
+  await fsyncDirectory(dirname(tombstone.path));
 }
 
 function offlineOptionsError(message: string): WorkflowError {
@@ -791,7 +797,7 @@ async function atomicWriteCheckpoint(
     await assertOwnership();
     await rename(temporaryPath, checkpointPath);
     temporaryExists = false;
-    await syncDirectory(directory);
+    await fsyncDirectory(directory);
   } catch (error) {
     if (error instanceof WorkflowError) {
       throw error;
@@ -801,15 +807,6 @@ async function atomicWriteCheckpoint(
     if (temporaryExists) {
       await unlink(temporaryPath).catch(() => {});
     }
-  }
-}
-
-async function syncDirectory(directory: string): Promise<void> {
-  const handle = await open(directory, constants.O_RDONLY);
-  try {
-    await handle.sync();
-  } finally {
-    await handle.close();
   }
 }
 
@@ -840,7 +837,7 @@ async function createLockCandidate(
     } finally {
       await ownerHandle.close();
     }
-    await syncDirectory(candidatePath);
+    await fsyncDirectory(candidatePath);
     return candidatePath;
   } catch (error) {
     await rm(candidatePath, { recursive: true, force: true }).catch(() => {});
@@ -1052,7 +1049,7 @@ async function releaseLock(
   const retiredPath = retiredDirectoryLockPath(lockPath, token);
   try {
     await renameRetryingBlocked(lockPath, retiredPath);
-    await syncDirectory(dirname(lockPath));
+    await fsyncDirectory(dirname(lockPath));
   } catch (error) {
     throw ioError("checkpoint_lock_release_failed", checkpointKey, error);
   }
@@ -1111,7 +1108,7 @@ async function recoverAbandonedLock(
   const retiredPath = retiredDirectoryLockPath(lockPath, metadata.token);
   try {
     await rename(lockPath, retiredPath);
-    await syncDirectory(dirname(lockPath));
+    await fsyncDirectory(dirname(lockPath));
     return true;
   } catch (error) {
     if (hasErrorCode(error, "ENOENT")) {

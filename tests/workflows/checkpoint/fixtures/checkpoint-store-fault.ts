@@ -19,12 +19,16 @@
  * occupied and before it inspects the lock directory.
  * `eperm-live` makes the waiter's publishing rename fail with `EPERM` while a
  * live holder owns the lock (Windows reports that, not `EEXIST`); the holder
- * retires shortly after. `eperm-none` is the same `EPERM` with no lock present.
+ * retires 50 ms after that refusal. `eperm-none` is the same `EPERM` with no
+ * lock present.
  * `busy-release` fails the first two lock-to-tombstone renames with `EBUSY`.
  * `trace` saves twice, the second time over an abandoned lock (dead pid), and
  * reports every mutating call on a lock path other than the two renames the
  * protocol allows, plus whether the owner file was complete and synced before
  * the publishing rename.
+ * `dir-sync-win32` runs as `win32` and fails every directory flush with
+ * `EPERM`, as Windows does; `dir-sync-posix` is the same fault as `linux`.
+ * `file-sync-win32` runs as `win32` and fails the owner file's flush instead.
  * Prints one JSON line: `{ saved, loaded, reason }`, plus the trace fields in
  * `trace` mode.
  */
@@ -48,12 +52,26 @@ const MODES = [
   "eperm-none",
   "busy-release",
   "trace",
+  "dir-sync-win32",
+  "dir-sync-posix",
+  "file-sync-win32",
 ];
 if (!root || !mode || !MODES.includes(mode)) {
   throw new Error(`usage: <${MODES.join("|")}> <root> [swapTarget]`);
 }
 
 const real = { ...(await import("node:fs/promises")) };
+const syncFault =
+  mode === "dir-sync-win32" || mode === "dir-sync-posix"
+    ? "directory"
+    : mode === "file-sync-win32"
+      ? "file"
+      : undefined;
+if (mode.endsWith("-win32")) {
+  Object.defineProperty(process, "platform", { value: "win32" });
+} else if (mode === "dir-sync-posix") {
+  Object.defineProperty(process, "platform", { value: "linux" });
+}
 let swapArmed = false;
 let waitArmed = false;
 let replaceLockPath: string | undefined;
@@ -167,6 +185,11 @@ mock.module("node:fs/promises", () => ({
     }
     if (publishing && epermArmed) {
       epermArmed = false;
+      // Windows refuses the rename because the holder's lock is there; the
+      // holder retires it shortly after, not on a clock started earlier.
+      if (mode === "eperm-live") {
+        setTimeout(() => void retireLock(to), 50);
+      }
       throw Object.assign(new Error("injected EPERM"), { code: "EPERM" });
     }
     if (mode === "busy-release" && retiring && busyLeft > 0) {
@@ -227,6 +250,25 @@ mock.module("node:fs/promises", () => ({
     }
     if (mode === "trace" && isWriteFlags(rest[0])) trace("open-write", path);
     const handle = await real.open(path, ...rest);
+    if (syncFault !== undefined) {
+      const isDirectory = (await handle.stat()).isDirectory();
+      if (isDirectory === (syncFault === "directory")) {
+        return new Proxy(handle, {
+          get(target, key) {
+            if (key === "sync") {
+              return async () => {
+                throw Object.assign(new Error("injected EPERM, fsync"), {
+                  code: "EPERM",
+                  syscall: "fsync",
+                });
+              };
+            }
+            const value = Reflect.get(target, key);
+            return typeof value === "function" ? value.bind(target) : value;
+          },
+        });
+      }
+    }
     if (mode !== "trace" || !isWriteFlags(rest[0])) return handle;
     return new Proxy(handle, {
       get(target, key) {
@@ -293,7 +335,6 @@ if (mode.startsWith("wait-") || mode === "eperm-live" || mode === "trace") {
   if (mode === "eperm-live") {
     epermArmed = true;
     epermLockPath = heldLockPath;
-    setTimeout(() => void retireLock(heldLockPath), 50);
   }
   waitArmed = mode.startsWith("wait-");
   if (mode === "wait-vanish") vanishLockPath = heldLockPath;

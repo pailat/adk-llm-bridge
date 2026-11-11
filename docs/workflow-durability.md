@@ -36,8 +36,16 @@ occurs after that store commit and does not roll it back.
 
 The filesystem store writes and syncs a temporary file, verifies lock
 ownership, atomically renames the file, and syncs the containing directory.
-That rename is the commit. If the release then fails only on I/O (the rename
-of the lock or the directory sync), `save` still resolves and logs the warning
+That rename is the commit. Windows cannot sync a directory (it refuses the
+flush with `EPERM`), so there the store skips that one step: NTFS journals the
+rename, so after a crash it is there whole or not at all, but a save that
+already resolved can be lost to a power failure right after it. File contents
+are synced on every platform. Off Windows, a failed directory sync after the
+commit rename fails the save. The workspace and repository mutation locks
+follow the same rule; a lock whose directory sync fails right after it is
+taken is released, and the operation fails. If the release after a commit
+fails only on I/O (the rename of the lock or its directory sync), `save` still
+resolves and logs the warning
 `[adk-llm-bridge] [WORKFLOW_CHECKPOINT_LOCK_RELEASE_FAILED]` through ADK's
 logger. If the lock now belongs to another owner, `save` rejects with
 `checkpoint_lock_ownership_lost`: another process recovered the lock and may

@@ -1634,6 +1634,15 @@ from the 0.6.0 tag.
   inode number (ext4, NTFS), so the store took it for the same lock without
   its owner. The store now holds the lock directory open while it reads the
   owner, so its number cannot be reused in between.
+- Windows: the file-system checkpoint store failed every save
+  (`checkpoint_lock_candidate_failed`, `EPERM` from `fsync`), because Windows
+  cannot flush a directory. The checkpoint store, the workspace adapter and the
+  repository mutation lock now skip the directory flush on Windows only, where
+  NTFS journals the rename; a save that already resolved can still be lost to a
+  power failure right after it. File contents are flushed on every platform.
+  Elsewhere a failed directory flush is an error, including the codes the
+  workspace and repository locks used to ignore; a lock whose flush fails
+  right after it is taken is released instead of left behind.
 
 
 ### Docs

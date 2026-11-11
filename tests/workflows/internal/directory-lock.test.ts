@@ -27,7 +27,16 @@ const FIXTURE = join(import.meta.dir, "fixtures", "directory-lock-fault.ts");
 
 /** Runs the lock under an injected fault in a child process. */
 async function runFault(
-  mode: "eperm-held" | "eperm-free" | "busy-release" | "busy-recover" | "trace",
+  mode:
+    | "eperm-held"
+    | "eperm-free"
+    | "busy-release"
+    | "busy-recover"
+    | "trace"
+    | "sync-eperm-linux"
+    | "sync-eio-linux"
+    | "sync-enotsup-darwin"
+    | "sync-eperm-win32",
 ): Promise<Record<string, unknown>> {
   const root = await mkdtemp(join(tmpdir(), "adk-directory-lock-fault-"));
   roots.push(root);
@@ -214,6 +223,31 @@ describe("directory lock", () => {
       violations: [],
       publishes: 2,
       incompleteOwnerAtPublish: 0,
+    });
+  });
+
+  // The publishing rename succeeded, so the lock on the path is this
+  // process's own. A failed flush after it must not read as contention or
+  // leave that lock behind: the lock is released and the flush error thrown.
+  for (const mode of [
+    "sync-eperm-linux",
+    "sync-eio-linux",
+    "sync-enotsup-darwin",
+  ] as const) {
+    test(`a directory flush that fails after the publishing rename releases the lock and throws (${mode})`, async () => {
+      const code = mode.split("-")[1]?.toUpperCase();
+      expect(await runFault(mode)).toEqual({
+        code,
+        cleanupErrors: 1,
+        lockLeft: false,
+      });
+    });
+  }
+
+  test("on Windows a refused directory flush after the publishing rename keeps the lock", async () => {
+    expect(await runFault("sync-eperm-win32")).toEqual({
+      acquired: true,
+      lockLeft: true,
     });
   });
 });
