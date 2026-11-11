@@ -23,6 +23,7 @@ import {
   EXTERNAL_AGENT_ERROR,
   type ExternalAgentCompletedEvent,
   type ExternalAgentEvent,
+  type ExternalAgentModelInfo,
   type ExternalAgentUsage,
 } from "./events.js";
 import type { ExternalAgentToolsReport } from "./tools/adk-tool-bridge.js";
@@ -335,6 +336,27 @@ export class ExternalAgentRunTracer {
       if (names && names.length > 0) {
         this.#agentSpan.setAttribute(key, [...names]);
       }
+    }
+  }
+
+  /**
+   * Writes the run's model report to the `invoke_agent` span: the small/fast
+   * pin, every model the run billed, and the ones nobody asked for (only when
+   * there are some).
+   *
+   * @param info - The run's {@link ExternalAgentModelInfo}.
+   */
+  onModelInfo(info: ExternalAgentModelInfo): void {
+    const span = this.#agentSpan;
+    if (!span) return;
+    if (info.smallFast !== undefined) {
+      span.setAttribute(`${EXT}.model.small_fast`, info.smallFast);
+    }
+    if (info.used !== undefined) {
+      span.setAttribute(`${EXT}.models.used`, [...info.used]);
+    }
+    if (info.unexpected !== undefined && info.unexpected.length > 0) {
+      span.setAttribute(`${EXT}.models.unexpected`, [...info.unexpected]);
     }
   }
 

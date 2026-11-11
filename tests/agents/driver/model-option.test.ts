@@ -49,7 +49,14 @@ interface ModelOptions {
 }
 
 function build(kind: DriverKind, options: ModelOptions): ExternalAgentDriver {
-  const config = options as never;
+  // A Claude driver with requireExplicitModel also needs a full-id
+  // smallFastModel; these tests are about `model`, so they give one.
+  const isClaude = kind === "claude-sdk" || kind === "claude-cli";
+  const config = (
+    isClaude && options.requireExplicitModel
+      ? { smallFastModel: "claude-haiku-5-5", ...options }
+      : options
+  ) as never;
   switch (kind) {
     case "claude-sdk":
       return new ClaudeAgentSdkDriver({

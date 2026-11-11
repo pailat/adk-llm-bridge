@@ -385,6 +385,62 @@ describe("ExternalAgent spans: one agent with a built-in tool", () => {
     ).toEqual({ "haiku-real-1": { inputTokens: 8, outputTokens: 873 } });
   });
 
+  test("the model report goes on the agent's span", async () => {
+    const attributesFor = async (info: {
+      smallFast?: string;
+      used?: string[];
+      unexpected?: string[];
+    }) => {
+      const agentSpan = trace.getTracer("test").startSpan("invoke_agent coder");
+      await context.with(
+        trace.setSpan(context.active(), agentSpan),
+        async () => {
+          const tracer = new ExternalAgentRunTracer({
+            context: {
+              invocationId: "inv-1",
+              branch: undefined,
+              agent: { name: "coder" },
+              session: { id: "s-1" },
+            } as unknown as InvocationContext,
+            providerId: CODEX_PROVIDER.id,
+            requestModel: "haiku",
+          });
+          tracer.onModelInfo({ status: "reported", ...info });
+        },
+      );
+      agentSpan.end();
+      return spans.filter((span) => span.name === "invoke_agent coder").at(-1)
+        ?.attributes as Record<string, unknown>;
+    };
+    const filled = await attributesFor({
+      smallFast: "h",
+      used: ["a", "h"],
+      unexpected: ["x"],
+    });
+    expect(filled["gcp.vertex.agent.external_agent.model.small_fast"]).toBe(
+      "h",
+    );
+    expect(filled["gcp.vertex.agent.external_agent.models.used"]).toEqual([
+      "a",
+      "h",
+    ]);
+    expect(filled["gcp.vertex.agent.external_agent.models.unexpected"]).toEqual(
+      ["x"],
+    );
+    const clean = await attributesFor({ used: ["a"], unexpected: [] });
+    expect(clean["gcp.vertex.agent.external_agent.models.used"]).toEqual(["a"]);
+    expect(Object.keys(clean)).not.toContain(
+      "gcp.vertex.agent.external_agent.models.unexpected",
+    );
+    expect(Object.keys(clean)).not.toContain(
+      "gcp.vertex.agent.external_agent.model.small_fast",
+    );
+    const none = await attributesFor({});
+    expect(Object.keys(none)).not.toContain(
+      "gcp.vertex.agent.external_agent.models.used",
+    );
+  });
+
   test("unknown usage fields are left out, never zero", () => {
     expect(usageMetadataFor(undefined)).toBeUndefined();
     expect(usageMetadataFor({ totalCostUsd: 0.1 })).toBeUndefined();

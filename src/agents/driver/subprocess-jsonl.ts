@@ -51,6 +51,11 @@ export interface PinnedFlags {
   /** Config keys the driver pins; see `configFlags`. */
   configKeys?: readonly string[];
   /**
+   * Refuses a config override when this returns `true` for its normalized
+   * key (lower case, no quotes or spaces), in addition to `configKeys`.
+   */
+  configKeyMatches?: (key: string) => boolean;
+  /**
    * The CLI's one-letter flags that take no value (`-h`, `-p`). Both CLIs
    * read `-pw` as `-p -w`, so a cluster is split through these letters
    * before the match: `-pw` is refused when `-w` is pinned, while `-nwork`
@@ -144,7 +149,8 @@ export function findPinnedArgOverride(
         if (
           (pinned.configKeys ?? []).some(
             (pinnedKey) => key === pinnedKey || key.startsWith(`${pinnedKey}.`),
-          )
+          ) ||
+          pinned.configKeyMatches?.(key) === true
         ) {
           return attached === "" ? `${arg} ${override}` : arg;
         }

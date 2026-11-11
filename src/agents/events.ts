@@ -67,6 +67,30 @@ export interface ExternalAgentModelInfo {
    * run is routed (`modelRouting`); any model on its events is ignored.
    */
   status: "reported" | "not-reported" | "unsupported";
+  /** The driver's `smallFastModel` pin; absent when unset or unsupported. */
+  smallFast?: string;
+  /**
+   * Every model this run billed, sorted. It is the keys of the run's
+   * `usage.byModel`; a run with one billed model has no `byModel`, so a
+   * driver that sets `reportsResolvedModel: true` contributes the model of
+   * its `completed` event instead, unless that model came from the start of
+   * the run (`modelFromInit`). Absent when neither exists (Codex, Gemini,
+   * a run whose runtime reported no model usage), never an empty guess.
+   */
+  used?: string[];
+  /**
+   * The entries of `used` that are none of `requested`, `resolved` or
+   * `smallFast`, sorted. Present (maybe empty) exactly when `used` is. An
+   * alias in `requested` or `smallFast` matches nothing here: pass full ids.
+   * It is never an error: the run already ran and was billed.
+   */
+  unexpected?: string[];
+  /**
+   * `["UNEXPECTED_MODEL"]`, set only when the driver was built with
+   * `requireExplicitModel` and `unexpected` is not empty, so a dashboard can
+   * filter on it.
+   */
+  warnings?: ["UNEXPECTED_MODEL"];
 }
 
 /** Text produced by the runtime. */
@@ -216,6 +240,12 @@ export interface ExternalAgentCompletedEvent {
   signal?: string;
   /** Resolved model id when the runtime reports it. */
   model?: string;
+  /**
+   * `true` when `model` was filled from the start of the run (Claude's
+   * `system/init`) because the result named none. It is then not billing
+   * data, and the run reports no `used`. Absent otherwise.
+   */
+  modelFromInit?: boolean;
   /** Token usage the runtime reports for the run. */
   usage?: ExternalAgentUsage;
   /** Number of model turns the runtime reports for the run. */

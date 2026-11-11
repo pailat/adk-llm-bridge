@@ -153,7 +153,7 @@ describe("CodexCliDriver: model-setting args", () => {
       'model_reasoning_effort="high"',
       "--config=model_reasoning_summary=auto",
       "-c",
-      "models_extra=1",
+      "model_verbosity=low",
       "--skip-git-repo-check",
       "-ishot.png",
     ];
@@ -163,6 +163,21 @@ describe("CodexCliDriver: model-setting args", () => {
     });
     expect(argv.slice(-(args.length + 2), -2)).toEqual(args);
   });
+
+  for (const args of [
+    ["-c", "review_model=x"],
+    ["--config=auto_review_model_override=x"],
+    ["-c", "profiles.p.model=x"],
+    ["-c", "agents.a.model=x"],
+    ["-c", "models_extra=1"],
+  ]) {
+    test(`refuses by pattern: ${JSON.stringify(args)}`, () => {
+      const error = refusal(
+        () => new CodexCliDriver({ args, allowPolicyOverrideArgs: true }),
+      );
+      expect(error.code).toBe(EXTERNAL_AGENT_MODEL_OVERRIDE);
+    });
+  }
 
   test("the model flag comes before the user args", () => {
     const argv = new CodexCliDriver({
@@ -218,11 +233,31 @@ describe("CodexSdkDriver: model-setting config", () => {
       config: {
         model_reasoning_effort: "high",
         mcp_servers: { docs: { command: "docs-mcp" } },
-        models_extra: 1,
+        model_reasoning_summary: "auto",
+        model_verbosity: "low",
+        model_context_window: 1000,
+        model_auto_compact_token_limit: 1000,
+        model_auto_compact_token_limit_scope: "turn",
       },
     });
     expect(driver.model).toBeUndefined();
   });
+
+  for (const config of [
+    { review_model: "x" },
+    { auto_review_model_override: "x" },
+    { profiles: { p: { model: "x" } } },
+    { agents: { a: { model: "x" } } },
+    { models_extra: 1 },
+    { "agents.b.Model": "x" },
+  ]) {
+    test(`refuses by pattern: config ${JSON.stringify(config)}`, () => {
+      const error = refusal(
+        () => new CodexSdkDriver({ config: config as never }),
+      );
+      expect(error.code).toBe(EXTERNAL_AGENT_MODEL_OVERRIDE);
+    });
+  }
 
   test("the model key list matches the Codex CLI table", () => {
     expect([...CODEX_MODEL_CONFIG_KEYS].sort()).toEqual(
@@ -342,7 +377,12 @@ describe("order of the constructor checks", () => {
         .code,
     ).toBe(EXTERNAL_AGENT_MODEL_REQUIRED);
     expect(
-      new ClaudeCliDriver({ ...all, args: [], model: "claude-opus-5-5" }).model,
+      new ClaudeCliDriver({
+        ...all,
+        args: [],
+        model: "claude-opus-5-5",
+        smallFastModel: "claude-haiku-5-5",
+      }).model,
     ).toBe("claude-opus-5-5");
   });
 

@@ -647,7 +647,10 @@ aliases are compared without regard to case:
 | `GeminiCliDriver` | `auto`, and any id that starts with `auto-` |
 | `CodexSdkDriver`, `CodexCliDriver` | none |
 
-Plain aliases (`opus`, `sonnet`, `haiku`, `fable`, `opus[1m]`) stay allowed.
+Plain aliases (`opus`, `sonnet`, `haiku`, `fable`, `opus[1m]`) stay allowed
+for `model`. The two Claude drivers also need `smallFastModel` under
+`requireExplicitModel`, and it must be a full id (see
+[The small/fast model](#the-smallfast-model-claude)).
 Recommended for hosts: set `requireExplicitModel: true`, and use full model
 ids (`claude-opus-5-5`, not `opus`), so a model the runtime replaced shows as
 a requested id that differs from the reported one.
@@ -670,6 +673,24 @@ events never carry it):
 | `not-reported` | `reportsResolvedModel` is `true` and neither event carried an id | absent |
 | `unsupported` | `reportsResolvedModel` is not `true`, or the run's `started` has `modelRouting: "plan-mode"` | absent, whatever the events carry |
 
+`externalAgentModel` also carries what the run billed:
+
+| Field | Meaning |
+|---|---|
+| `smallFast` | the driver's `smallFastModel` pin, when set |
+| `used` | every model the run billed, sorted. It is the keys of `usage.byModel`; a run with one billed model has no `byModel`, so a driver with `reportsResolvedModel: true` contributes the model of its `completed` event instead (a routed plan-mode run does not). With neither, `used` is absent: the run's models are unknown (Codex, Gemini). A model the Claude drivers filled from `system/init` because the result had no `modelUsage` (`completed.modelFromInit`) is a guess, not billing: it counts for `resolved` only, and `used` stays absent |
+| `unexpected` | the entries of `used` that are none of `requested`, `resolved` or `smallFast`, sorted. Present exactly when `used` is. It is never an error: the run already ran and was billed |
+| `warnings` | `["UNEXPECTED_MODEL"]`, only when the driver has `requireExplicitModel` and `unexpected` is not empty |
+
+The same values go to the `gcp.vertex.agent.external_agent.model.small_fast`,
+`gcp.vertex.agent.external_agent.models.used` and
+`gcp.vertex.agent.external_agent.models.unexpected`
+span attributes (`unexpected` only when not empty), and a workflow step's
+`result.models` gets the union as `used` and `unexpected`, and is `unknown`
+when any external run in it reported no `used`. Comparison is exact string
+equality: pass full ids, because an alias in `requested` or `smallFast`
+matches nothing in `used`.
+
 `requested` is the driver's `model`, when it has one. A mismatch between
 `requested` and `resolved` is a reliable signal only for a **full model id**:
 an alias such as `opus` always differs from the full id the runtime reports.
@@ -688,8 +709,15 @@ These are refused when the driver is built with
 | `CodexSdkDriver` | - | the same keys, at any depth of `config` (`{profiles: {x: {model}}}`), quoted (`{'"model"': …}`) or dotted (`{"model_providers.x": …}`) |
 
 Flags are matched in every spelling (`--model x`, `--model=x`, `-mx`, a
-cluster such as `-hm x`). A key covers the keys below it (`profiles.x.model`),
-but not a longer name: `model_reasoning_effort` stays allowed. Without the
+cluster such as `-hm x`). A key covers the keys below it (`profiles.x.model`).
+Beyond that list, **any config key that contains `model`** (any case, at any
+depth: `review_model`, `auto_review_model_override`, `agents.y.model`) is
+refused, except the whole-key tuning keys that never choose a model:
+`model_reasoning_effort`, `model_reasoning_summary`, `model_verbosity`,
+`model_context_window`, `model_auto_compact_token_limit` and
+`model_auto_compact_token_limit_scope`. The rule also refuses a config key
+that only contains `model` by chance, such as an MCP server named
+`model-registry` under `mcp_servers.`: rename the server. Without the
 opt-in, `--profile`/`-p`, `profile` and `profiles` are refused by the policy
 check first, with `EXTERNAL_AGENT_OPTION_UNSUPPORTED`.
 
@@ -703,20 +731,82 @@ policy flag lists.
 
 ### Model variables in the environment
 
-A run whose child environment would carry one of these variables (compared
+A run whose child environment would carry a model variable (compared
 without regard to case) is refused before anything starts: `started`, an
 `EXTERNAL_AGENT_MODEL_OVERRIDE` error that names the variable (never its
 value), and `completed` with `exitCode: 1`.
 
-| Driver | Variables |
+| Driver | Refused |
 |---|---|
-| Claude (SDK and CLI) | `ANTHROPIC_MODEL`, `ANTHROPIC_DEFAULT_MODEL`, `ANTHROPIC_DEFAULT_OPUS_MODEL`, `ANTHROPIC_DEFAULT_SONNET_MODEL`, `ANTHROPIC_DEFAULT_HAIKU_MODEL`, `ANTHROPIC_DEFAULT_FABLE_MODEL`, `ANTHROPIC_SMALL_FAST_MODEL`, `CLAUDE_CODE_SUBAGENT_MODEL` |
+| Claude (SDK and CLI) | any variable whose name contains `MODEL` (any case), `CLAUDE_CODE_CLIENT_DATA_URL`, and every `CLAUDE_CODE_3P_*` variable |
 | Codex (SDK and CLI) | `OPENAI_BASE_URL`, `CODEX_OSS_BASE_URL`, `CODEX_OSS_PORT` |
 | Gemini CLI | `GEMINI_MODEL` |
 
+The Claude rule is a pattern, not a list, because each Claude Code release adds
+variables (`CLAUDE_CODE_MODEL_CATALOG`, `ANTHROPIC_CUSTOM_MODEL_OPTION*`,
+`CLAUDE_CODE_AUTO_MODE_MODEL`, ...). A drift test
+(`tests/agents/driver/model-env-drift.test.ts`) reads the Claude Code binary
+bundled with `@anthropic-ai/claude-agent-sdk` and fails when it names a model
+variable the rule does not refuse, so a Claude Code upgrade cannot leave a
+silent gap. The one reviewed exception is a **region** variable:
+`ANTHROPIC_SMALL_FAST_MODEL_AWS_REGION` selects the AWS region of the small
+model and never the model id, so a Bedrock host can still place the pin's
+region. The `VERTEX_REGION_CLAUDE_*` variables do not match the pattern and
+stay allowed for the same reason. Under Bedrock or Vertex, the ids in `used`
+may be the provider's own (inference profiles), so "a full id" means the id
+the runtime reports under that provider; this was not verified, because there
+is no Bedrock or Vertex account to test with.
+
 The built-in providers forward none of them. Only a custom provider whose
 `envAllowlist` names one can, and the check comes before every other
-pre-spawn refusal.
+pre-spawn refusal. The driver's own `smallFastModel` pin is added after the
+check, so a host can never forward `ANTHROPIC_SMALL_FAST_MODEL` itself.
+
+### The small/fast model (Claude)
+
+Claude Code sends some calls to a second, small model instead of the main one.
+In Claude Code 2.1.319 these are traced to it: WebFetch's page processing
+(`web_fetch_apply`, in the default tool set), the tool-use summary, the
+conversation summaries, `mcp_datetime_parse`, the bug-report title,
+`extract_memories_first_look`, the artifact comment triage, the plugin
+classifier, and `web_search_tool` when its feature flag is on. These were not
+traced: `compact`, `generate_session_title`, `agent_summary`, `away_summary`,
+`prompt_suggestion`, `hook_prompt` and `side_question`.
+
+`smallFastModel` on `ClaudeAgentSdkDriver` and `ClaudeCliDriver` pins it. The
+driver sets `ANTHROPIC_SMALL_FAST_MODEL` in the child environment after the
+model environment check, and does not set `ANTHROPIC_DEFAULT_HAIKU_MODEL`,
+which would also remap the `haiku` alias for the main model and the
+sub-agents. Pinned, the runtime's helper fallback chain is off: it calls
+exactly that model. The grammar is the one of `model`
+(`EXTERNAL_AGENT_MODEL_INVALID`).
+
+- With `requireExplicitModel`, `smallFastModel` is required
+  (`EXTERNAL_AGENT_MODEL_REQUIRED`) and must be a **full model id**: `haiku`,
+  `sonnet`, `opus`, `fable`, `default`, `best` and `opusplan`, with or without
+  a `[…]` suffix, are refused, because the small model has no `resolved` field
+  to absorb an alias. Without `requireExplicitModel` an alias is accepted and
+  shows up in `unexpected`.
+- Not pinned: the quota and key-check probes of a first-party subscription
+  login (they are tiny and use a built-in haiku id), and an organization
+  `deniedModels` policy, which replaces a denied pin with the main model. Both
+  show in `used` when the runtime bills them.
+- `requireExplicitModel` with `inheritHostConfig: true` or a non-empty
+  `settingSources` **reports, it does not enforce**. Host settings `env` can
+  replace the pin and remap the main model, and the run shows that only in
+  `used` and `unexpected`. For an enforced pin, keep the default isolated mode.
+- Through the workflow factory, pass `config.smallFastModel`. The run spec has
+  no field for it in 0.7.0: the host maps its spec to `smallFastModel` itself.
+
+**Reporting.** `externalAgentModel.used` lists every model the run billed and
+`unexpected` the ones nobody asked for (see the field table above). `used`
+comes from `usage.byModel` when the runtime reported two or more models; for a
+single billed model the Claude drivers put it on `completed.model`, and
+`ExternalAgent` uses that for a driver with `reportsResolvedModel: true`. A
+model the drivers filled from `system/init` because the result had no
+`modelUsage` is flagged (`completed.modelFromInit`) and never counts as
+billed. A driver or run with none of these has no `used`, and its workflow
+step is `unknown`.
 
 ### Gemini CLI read-only runs
 
@@ -762,6 +852,13 @@ it may.
 - **Claude server-side substitution** (organization model lists, entitlement
   and refusal fallbacks) can replace an explicit `--model`; a mid-run switch
   shows only in the usage per model.
+- **Codex helper models** (`review_model`, `auto_review_model_override`, the
+  compact fallback and the hosted image tool models) cannot be pinned beyond
+  the refused override keys, and Codex usage has no per-model breakdown, so
+  they are not reported (`used` is absent, the step is `unknown`).
+- **Gemini helper models** (the router classifier, loop detection, compression
+  and similar flash calls) are not reported: Gemini CLI gives no per-model
+  usage, and the CLI is not bundled, so this is not verified here.
 - **Helper models and subagents** run other models: Claude's WebFetch helper
   and `Agent`/`Task` subagents (they show only in the usage per model), and
   Codex's `review_model` and subagent model (`agents.default_subagent_model`,
@@ -1132,7 +1229,7 @@ because the tool was not offered. The other codes in the table (`CLAUDE_*`,
 | `EXTERNAL_AGENT_CREDENTIAL_UNSUPPORTED` | `EXTERNAL_AGENT_CREDENTIAL_UNSUPPORTED` | No | The credential provider returned a `kind` other than `env` or `none`. |
 | `EXTERNAL_AGENT_OPTION_UNSUPPORTED` | `EXTERNAL_AGENT_OPTION_UNSUPPORTED` | No | Thrown (not an event) when a driver is built with an option its runtime cannot honor: `sessionStore` on `ClaudeCliDriver`. |
 | `EXTERNAL_AGENT_MODEL_INVALID` | `EXTERNAL_AGENT_MODEL_INVALID` | No | Thrown when a driver is built with a `model` that is not a model id (not a string, empty, over 256 characters, with whitespace or a control character, or starting with `-`). See [Model](#model). |
-| `EXTERNAL_AGENT_MODEL_REQUIRED` | `EXTERNAL_AGENT_MODEL_REQUIRED` | No | Thrown when a driver with `requireExplicitModel: true` has no `model`, or a router or default alias (`default`, `best`, `opusplan`, Gemini `auto`). |
+| `EXTERNAL_AGENT_MODEL_REQUIRED` | `EXTERNAL_AGENT_MODEL_REQUIRED` | No | Thrown when a driver with `requireExplicitModel: true` has no `model`, or a router or default alias (`default`, `best`, `opusplan`, Gemini `auto`), or a Claude driver has no `smallFastModel` or one that is an alias instead of a full id. |
 | `EXTERNAL_AGENT_MODEL_OVERRIDE` | `EXTERNAL_AGENT_MODEL_OVERRIDE` | No | Something other than `model` would set or route the model: thrown for model-setting `args` or Codex SDK `config` keys (even with `allowPolicyOverrideArgs`); an error event for a model variable in the run's environment, or a Gemini CLI read-only run with a model (plan mode may route turns to another model). |
 | `CLAUDE_SESSION_STORE_MIRROR_ERROR` | `CLAUDE_SESSION_STORE_MIRROR_ERROR` | Yes | The Claude Agent SDK dropped a transcript batch its `sessionStore` rejected or timed out on (3 attempts in total); the run goes on. See [Persisting Claude sessions](claude-session-store.md). |
 | `MISSING_BINARY` | `EXTERNAL_AGENT_MISSING_BINARY` | No | The `claude`, `codex` or `gemini` binary was not found, or, with `interpreter` and `entry`, the interpreter or the entry file. |

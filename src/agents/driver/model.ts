@@ -187,6 +187,45 @@ export const CODEX_MODEL_CONFIG_KEYS: readonly string[] = Object.freeze([
 ]);
 
 /**
+ * Codex config keys that contain `model` but only tune the model, never
+ * choose or route it. Reviewed against the `ConfigToml` keys of the
+ * `@openai/codex` 0.167.0 binary; a key not found there is dropped from this
+ * list, which fails closed.
+ *
+ * @internal
+ */
+export const CODEX_MODEL_CONFIG_KEY_EXCEPTIONS: readonly string[] =
+  Object.freeze([
+    "model_reasoning_effort",
+    "model_reasoning_summary",
+    "model_verbosity",
+    "model_context_window",
+    "model_auto_compact_token_limit",
+    "model_auto_compact_token_limit_scope",
+  ]);
+
+/**
+ * Whether a normalized Codex config key (lower case, no quotes or spaces)
+ * sets or routes the model: it is one of {@link CODEX_MODEL_CONFIG_KEYS} (or
+ * below one), or it contains `model` anywhere (`review_model`,
+ * `auto_review_model_override`, `profiles.x.model`, `agents.y.model`). The
+ * tuning keys of {@link CODEX_MODEL_CONFIG_KEY_EXCEPTIONS} never choose a
+ * model and are allowed, but only as the whole key.
+ *
+ * @param key - The normalized dotted key.
+ * @returns `true` when the key must be refused.
+ * @internal
+ */
+export function isCodexModelConfigKey(key: string): boolean {
+  if (CODEX_MODEL_CONFIG_KEY_EXCEPTIONS.includes(key)) return false;
+  return (
+    CODEX_MODEL_CONFIG_KEYS.some(
+      (name) => key === name || key.startsWith(`${name}.`),
+    ) || /model/i.test(key)
+  );
+}
+
+/**
  * Codex CLI flags and config keys that set or route the model. `args` may
  * never pass them, even with `allowPolicyOverrideArgs`.
  *
@@ -203,6 +242,7 @@ export const CODEX_CLI_MODEL_FLAGS: PinnedFlags = Object.freeze({
   ]),
   configFlags: Object.freeze(["-c", "--config"]),
   configKeys: CODEX_MODEL_CONFIG_KEYS,
+  configKeyMatches: isCodexModelConfigKey,
   // Clap reads `-hm x` as `-h -m x`.
   booleanShortFlags: Object.freeze(["-h", "-V"]),
 });
@@ -318,6 +358,7 @@ export function assertNoCodexConfigModelOverride(
     flags: [],
     configFlags: ["--config"],
     configKeys: CODEX_MODEL_CONFIG_KEYS,
+    configKeyMatches: isCodexModelConfigKey,
   });
   if (override !== undefined) {
     const key = override.replace(/^--config /, "").replace(/=$/, "");
@@ -329,21 +370,49 @@ export function assertNoCodexConfigModelOverride(
 }
 
 /**
- * Environment variables that make Claude Code run another model than
- * `--model`, or remap the aliases it resolves.
+ * What makes a Claude Code environment variable a model variable. A fixed
+ * list of names was always behind the runtime (each release adds some), so
+ * the rule is a pattern: any name containing `MODEL` (any case), the listed
+ * names and prefixes, minus the reviewed exceptions. The drift test reads the
+ * Claude Code binary bundled with the Agent SDK and fails on a model-named
+ * variable this rule does not refuse.
  *
  * @internal
  */
-export const CLAUDE_MODEL_ENV: readonly string[] = Object.freeze([
-  "ANTHROPIC_MODEL",
-  "ANTHROPIC_DEFAULT_MODEL",
-  "ANTHROPIC_DEFAULT_OPUS_MODEL",
-  "ANTHROPIC_DEFAULT_SONNET_MODEL",
-  "ANTHROPIC_DEFAULT_HAIKU_MODEL",
-  "ANTHROPIC_DEFAULT_FABLE_MODEL",
-  "ANTHROPIC_SMALL_FAST_MODEL",
-  "CLAUDE_CODE_SUBAGENT_MODEL",
-]);
+export const CLAUDE_MODEL_ENV_RULE = Object.freeze({
+  /** Any name containing MODEL. */
+  pattern: /MODEL/i,
+  /** Further names (compared upper-cased). */
+  names: Object.freeze(["CLAUDE_CODE_CLIENT_DATA_URL"]),
+  /** Further prefixes (matched on the upper-cased name). */
+  prefixes: Object.freeze(["CLAUDE_CODE_3P_"]),
+  /**
+   * Names the pattern would match that are not refused: a region variable
+   * routes the model's calls, it never changes the model id.
+   */
+  exceptions: Object.freeze(["ANTHROPIC_SMALL_FAST_MODEL_AWS_REGION"]),
+  review:
+    "Claude Code 2.1.319 (@anthropic-ai/claude-agent-sdk 0.3.319): strings of the native binary",
+});
+
+/**
+ * Whether an environment variable name would change the model Claude Code
+ * runs, or remap its aliases, so the model the bridge reports would be
+ * wrong.
+ *
+ * @param name - The variable name, any case.
+ * @returns `true` when the run must be refused.
+ * @internal
+ */
+export function isClaudeModelEnv(name: string): boolean {
+  const upper = name.toUpperCase();
+  if (CLAUDE_MODEL_ENV_RULE.exceptions.includes(upper)) return false;
+  return (
+    CLAUDE_MODEL_ENV_RULE.pattern.test(name) ||
+    CLAUDE_MODEL_ENV_RULE.names.includes(upper) ||
+    CLAUDE_MODEL_ENV_RULE.prefixes.some((prefix) => upper.startsWith(prefix))
+  );
+}
 
 /**
  * Environment variables that send Codex requests to another endpoint or
@@ -372,27 +441,36 @@ export const GEMINI_MODEL_ENV: readonly string[] = Object.freeze([
  * @internal
  */
 export const MODEL_ENV_REVIEW = Object.freeze({
-  claude:
-    "variable names in the Claude Code 2.1.319 bundle (@anthropic-ai/claude-agent-sdk 0.3.319)",
+  claude: CLAUDE_MODEL_ENV_RULE.review,
   codex: "variable names in the @openai/codex 0.167.0 binary",
   gemini: "Gemini CLI configuration reference",
 });
 
 /**
- * The first variable of `env` whose name (compared case-insensitively) is in
- * `names`.
+ * A predicate over the names of a fixed table, compared case-insensitively.
+ *
+ * @param names - The runtime's model variables.
+ * @returns The predicate for {@link modelEnvRefusal}.
+ * @internal
+ */
+export function envNameIn(names: readonly string[]): (name: string) => boolean {
+  return (name) => names.includes(name.toUpperCase());
+}
+
+/**
+ * The first variable of `env` that `isModelEnv` accepts.
  *
  * @param env - The complete environment the run would start with.
- * @param names - The runtime's model variables.
+ * @param isModelEnv - The runtime's model variable rule.
  * @returns The variable's name as it appears in `env`, or `undefined`.
  * @internal
  */
 export function findModelEnv(
   env: Readonly<Record<string, string | undefined>>,
-  names: readonly string[],
+  isModelEnv: (name: string) => boolean,
 ): string | undefined {
   return Object.keys(env).find(
-    (name) => env[name] !== undefined && names.includes(name.toUpperCase()),
+    (name) => env[name] !== undefined && isModelEnv(name),
   );
 }
 
@@ -402,7 +480,7 @@ export function findModelEnv(
  *
  * @param driver - Driver name for the message.
  * @param env - The complete environment the run would start with.
- * @param names - The runtime's model variables.
+ * @param isModelEnv - The runtime's model variable rule.
  * @returns An `EXTERNAL_AGENT_MODEL_OVERRIDE` error, or `undefined` when the
  * environment carries none.
  * @internal
@@ -410,15 +488,94 @@ export function findModelEnv(
 export function modelEnvRefusal(
   driver: string,
   env: Readonly<Record<string, string | undefined>>,
-  names: readonly string[],
+  isModelEnv: (name: string) => boolean,
 ): ExternalAgentPolicyError | undefined {
-  const name = findModelEnv(env, names);
+  const name = findModelEnv(env, isModelEnv);
   return name === undefined
     ? undefined
     : new ExternalAgentPolicyError(
         EXTERNAL_AGENT_MODEL_OVERRIDE,
         `${driver}: the run's environment sets ${name}, which would change the model the runtime runs, so the model the bridge reports would be wrong. Remove ${name} from the provider's envAllowlist or the credential, and set the driver's model option instead.`,
       );
+}
+
+/** Environment variable that sets the Claude Code small/fast model. */
+export const CLAUDE_SMALL_FAST_MODEL_ENV = "ANTHROPIC_SMALL_FAST_MODEL";
+
+/** Tier aliases a full model id is not (lower case, `[…]` suffix removed). */
+const CLAUDE_TIER_ALIASES: readonly string[] = Object.freeze([
+  "haiku",
+  "sonnet",
+  "opus",
+  "fable",
+  "default",
+  "best",
+  "opusplan",
+]);
+
+/**
+ * Checks a Claude driver's `smallFastModel` option when the driver is built.
+ *
+ * @param driver - Driver name for the message.
+ * @param smallFastModel - The configured `smallFastModel`.
+ * @param model - The driver's validated `model`.
+ * @param requireExplicitModel - The driver option of the same name.
+ * @returns The id, or `undefined` when none is configured.
+ * @throws {@link ExternalAgentPolicyError} `EXTERNAL_AGENT_MODEL_INVALID`
+ * when the value is given and is not a well-formed id (see
+ * {@link isModelId}).
+ * @throws {@link ExternalAgentPolicyError} `EXTERNAL_AGENT_MODEL_REQUIRED`
+ * when `requireExplicitModel` is set and `smallFastModel` is absent or is a
+ * tier or router alias rather than a full model id.
+ * @internal
+ */
+export function assertSmallFastModelOption(
+  driver: string,
+  smallFastModel: unknown,
+  requireExplicitModel: boolean,
+): string | undefined {
+  if (smallFastModel !== undefined && !isModelId(smallFastModel)) {
+    throw new ExternalAgentPolicyError(
+      EXTERNAL_AGENT_MODEL_INVALID,
+      `${driver}: smallFastModel must be a model id: a string of 1 to ${MODEL_ID_MAX_LENGTH} characters, without whitespace or control characters, that does not start with "-".`,
+    );
+  }
+  if (!requireExplicitModel) {
+    return smallFastModel;
+  }
+  if (smallFastModel === undefined) {
+    throw new ExternalAgentPolicyError(
+      EXTERNAL_AGENT_MODEL_REQUIRED,
+      `${driver}: smallFastModel is required with requireExplicitModel. Set smallFastModel to the id the runtime's helper calls must use, for example "claude-haiku-5-5".`,
+    );
+  }
+  const tier = smallFastModel.toLowerCase().replace(/\[[^\]]*\]$/u, "");
+  if (CLAUDE_TIER_ALIASES.includes(tier)) {
+    throw new ExternalAgentPolicyError(
+      EXTERNAL_AGENT_MODEL_REQUIRED,
+      `${driver}: smallFastModel must be a full model id under requireExplicitModel, not the alias "${tier}": the small model has no resolved id to absorb an alias.`,
+    );
+  }
+  return smallFastModel;
+}
+
+/**
+ * The child environment with the small/fast model pin added. Called after
+ * {@link modelEnvRefusal} has checked the host-built environment, so a host
+ * can never forward the variable itself.
+ *
+ * @param env - The checked environment.
+ * @param smallFastModel - The driver's pin, if any.
+ * @returns `env` itself without a pin, else a copy that holds it.
+ * @internal
+ */
+export function withModelPins<T extends Record<string, string | undefined>>(
+  env: T,
+  smallFastModel: string | undefined,
+): T {
+  return smallFastModel === undefined
+    ? env
+    : { ...env, [CLAUDE_SMALL_FAST_MODEL_ENV]: smallFastModel };
 }
 
 /**

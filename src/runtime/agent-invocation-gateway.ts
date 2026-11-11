@@ -209,7 +209,22 @@ export interface AgentInvocationModels {
   requested: string[];
   /** Model ids a trusted runtime reported, unique, in first-seen order. */
   resolved: string[];
-  /** Whether any run was not fully explicit and reported. */
+  /**
+   * Every model the step's external runs billed (`externalAgentModel.used`),
+   * unique, first-seen order. Present only when at least one run reported
+   * `used`.
+   */
+  used?: string[];
+  /**
+   * The models of `used` nobody asked for (`externalAgentModel.unexpected`),
+   * unique, first-seen order. Present exactly when `used` is.
+   */
+  unexpected?: string[];
+  /**
+   * Whether any run was not fully explicit and reported. An external run that
+   * reported no `used` (Codex, Gemini, or a Claude run with no model usage)
+   * also makes it `true`: its helper models are not known.
+   */
   unknown: boolean;
 }
 
@@ -605,7 +620,11 @@ interface RunTally {
 interface ModelTally {
   requested: string[];
   resolved: string[];
-  /** A run reported a status other than `reported`, or no requested model. */
+  /** Union of the runs' `used`; `undefined` until a run reports one. */
+  used: string[] | undefined;
+  /** Union of the runs' `unexpected`; set together with `used`. */
+  unexpected: string[] | undefined;
+  /** A run reported a status other than `reported`, no requested model, or no `used`. */
   unknown: boolean;
   /** Authors with at least one well-formed external model info. */
   infoAuthors: Set<string>;
@@ -631,6 +650,8 @@ function emptyTally(): RunTally {
     models: {
       requested: [],
       resolved: [],
+      used: undefined,
+      unexpected: undefined,
       unknown: false,
       infoAuthors: new Set(),
       describedAuthors: new Set(),
@@ -752,18 +773,34 @@ function addModelId(list: string[], id: string): void {
  * Reads the model info `ExternalAgent` puts on an event, or `undefined` when
  * the value is missing or malformed (so a forged value cannot name a model).
  */
-function readExternalModelInfo(
-  event: Event,
-): { requested?: string; resolved?: string; status: string } | undefined {
+function readExternalModelInfo(event: Event):
+  | {
+      requested?: string;
+      resolved?: string;
+      status: string;
+      used?: string[];
+      unexpected?: string[];
+    }
+  | undefined {
   const value: unknown =
     event.customMetadata?.[EXTERNAL_AGENT_MODEL_METADATA_KEY];
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return undefined;
   }
-  const { requested, resolved, status } = value as Record<string, unknown>;
+  const { requested, resolved, status, used, unexpected } = value as Record<
+    string,
+    unknown
+  >;
   const optionalId = (id: unknown) =>
     id === undefined || (typeof id === "string" && id.length > 0);
   if (!optionalId(requested) || !optionalId(resolved)) return undefined;
+  const idList = (list: unknown) =>
+    list === undefined ||
+    (Array.isArray(list) &&
+      list.every((id) => typeof id === "string" && id.length > 0));
+  if (!idList(used) || !idList(unexpected)) return undefined;
+  // `unexpected` exists exactly when `used` does.
+  if ((used === undefined) !== (unexpected === undefined)) return undefined;
   if (status === "reported") {
     if (resolved === undefined) return undefined;
   } else if (
@@ -776,6 +813,9 @@ function readExternalModelInfo(
     ...(requested !== undefined ? { requested: requested as string } : {}),
     ...(resolved !== undefined ? { resolved: resolved as string } : {}),
     status,
+    ...(used !== undefined
+      ? { used: used as string[], unexpected: unexpected as string[] }
+      : {}),
   };
 }
 
@@ -795,6 +835,14 @@ function countModels(models: ModelTally, event: Event, agent: BaseAgent): void {
       addModelId(models.resolved, info.resolved);
     } else {
       models.unknown = true;
+    }
+    if (info.used === undefined) {
+      models.unknown = true;
+    } else {
+      models.used ??= [];
+      models.unexpected ??= [];
+      for (const id of info.used) addModelId(models.used, id);
+      for (const id of info.unexpected ?? []) addModelId(models.unexpected, id);
     }
     return;
   }
@@ -908,7 +956,17 @@ function runModels(
   if (requested.length === 0 && resolved.length === 0 && !unknown) {
     return undefined;
   }
-  return { requested, resolved, unknown };
+  return {
+    requested,
+    resolved,
+    ...(tally.models.used !== undefined
+      ? {
+          used: [...tally.models.used],
+          unexpected: [...(tally.models.unexpected ?? [])],
+        }
+      : {}),
+    unknown,
+  };
 }
 
 /**

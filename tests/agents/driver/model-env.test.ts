@@ -13,10 +13,23 @@ import { CodexCliDriver } from "../../../src/agents/driver/codex-cli.js";
 import { CodexSdkDriver } from "../../../src/agents/driver/codex-sdk.js";
 import { GeminiCliDriver } from "../../../src/agents/driver/gemini-cli.js";
 import {
-  CLAUDE_MODEL_ENV,
   CODEX_MODEL_ENV,
   GEMINI_MODEL_ENV,
+  isClaudeModelEnv,
 } from "../../../src/agents/driver/model.js";
+
+/** The names the fixed Claude list held before it became a pattern. */
+const CLAUDE_MODEL_ENV: readonly string[] = [
+  "ANTHROPIC_MODEL",
+  "ANTHROPIC_DEFAULT_MODEL",
+  "ANTHROPIC_DEFAULT_OPUS_MODEL",
+  "ANTHROPIC_DEFAULT_SONNET_MODEL",
+  "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+  "ANTHROPIC_DEFAULT_FABLE_MODEL",
+  "ANTHROPIC_SMALL_FAST_MODEL",
+  "CLAUDE_CODE_SUBAGENT_MODEL",
+];
+
 import { EXTERNAL_AGENT_MODEL_OVERRIDE } from "../../../src/agents/driver/policy-errors.js";
 import {
   CLAUDE_PROVIDER,
@@ -212,13 +225,12 @@ describe("the built-in providers forward no model variable", () => {
     GEMINI_CLI_PROVIDER,
   ]) {
     test(provider.id, () => {
-      const all = [
-        ...CLAUDE_MODEL_ENV,
-        ...CODEX_MODEL_ENV,
-        ...GEMINI_MODEL_ENV,
-      ];
-      const forwarded = (provider.envAllowlist ?? []).filter((name) =>
-        all.includes(name.toUpperCase()),
+      const forwarded = (provider.envAllowlist ?? []).filter(
+        (name) =>
+          isClaudeModelEnv(name) ||
+          [...CODEX_MODEL_ENV, ...GEMINI_MODEL_ENV].includes(
+            name.toUpperCase(),
+          ),
       );
       expect(forwarded).toEqual([]);
     });
@@ -226,19 +238,13 @@ describe("the built-in providers forward no model variable", () => {
 });
 
 describe("the model env tables", () => {
-  test("list the reviewed variables", () => {
-    expect([...CLAUDE_MODEL_ENV].sort()).toEqual(
-      [
-        "ANTHROPIC_MODEL",
-        "ANTHROPIC_DEFAULT_MODEL",
-        "ANTHROPIC_DEFAULT_OPUS_MODEL",
-        "ANTHROPIC_DEFAULT_SONNET_MODEL",
-        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
-        "ANTHROPIC_DEFAULT_FABLE_MODEL",
-        "ANTHROPIC_SMALL_FAST_MODEL",
-        "CLAUDE_CODE_SUBAGENT_MODEL",
-      ].sort(),
-    );
+  test("the Claude predicate refuses every name the old list held", () => {
+    for (const name of CLAUDE_MODEL_ENV) {
+      expect(isClaudeModelEnv(name)).toBe(true);
+    }
+  });
+
+  test("the Codex and Gemini tables list the reviewed variables", () => {
     expect([...CODEX_MODEL_ENV].sort()).toEqual(
       ["CODEX_OSS_BASE_URL", "CODEX_OSS_PORT", "OPENAI_BASE_URL"].sort(),
     );

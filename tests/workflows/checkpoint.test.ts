@@ -876,6 +876,17 @@ describe("stored step models", () => {
     expect(copy.steps.plan?.result.models).toEqual(models);
   });
 
+  test("used and unexpected load when they are string arrays, and an old checkpoint without them loads", async () => {
+    const full = { ...models, used: ["claude-opus-5-5"], unexpected: [] };
+    expect(isWorkflowCheckpointV1(await withModels(full))).toBe(true);
+    const copy = (await withModels(full)) as {
+      steps: Record<string, { result: { models: unknown } }>;
+    };
+    // Replay returns the stored value.
+    expect(copy.steps.plan?.result.models).toEqual(full);
+    expect(isWorkflowCheckpointV1(await withModels(models))).toBe(true);
+  });
+
   test("malformed models are rejected as corrupt", async () => {
     const corrupt: Record<string, unknown> = {
       null: null,
@@ -893,6 +904,13 @@ describe("stored step models", () => {
       "unknown a string": { ...models, unknown: "false" },
       "unknown a number": { ...models, unknown: 0 },
       "an extra key": { ...models, extra: 1 },
+      "used a string": { ...models, used: "x" },
+      "used a string with unexpected": { ...models, used: "x", unexpected: [] },
+      "used without unexpected": { ...models, used: [] },
+      "used a null with unexpected": { ...models, used: null, unexpected: [] },
+      "used an empty string inside": { ...models, used: [""] },
+      "unexpected a number": { ...models, unexpected: [1] },
+      "unexpected null": { ...models, unexpected: null },
     };
     for (const [name, value] of Object.entries(corrupt)) {
       expect({

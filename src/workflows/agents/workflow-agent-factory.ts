@@ -67,6 +67,19 @@ export interface WorkflowExternalAgentConfig {
    * defaults, not use them instead, or it loses those defaults.
    */
   model?: string;
+  /**
+   * Model id of the runtime's small/fast model (Claude Code's helper calls).
+   *
+   * @remarks
+   * Forwarded to the driver as the `smallFastModel` option, checked with the
+   * same grammar as `model`. Unlike `model` it is part of the revision when
+   * given: a request without it keeps its earlier digest. Under the factory's
+   * `requireExplicitModel`, the built-in `claude` provider id needs it
+   * (`WORKFLOW_AGENT_MODEL_REQUIRED`) and the driver must keep exactly that
+   * id (`WORKFLOW_AGENT_MODEL_NOT_APPLIED`). The run spec has no field for it:
+   * the host maps its spec to `smallFastModel` itself.
+   */
+  smallFastModel?: string;
 }
 
 /** Request to create a named agent for a registered provider. */

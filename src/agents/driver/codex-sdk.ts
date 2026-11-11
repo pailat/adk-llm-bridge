@@ -38,6 +38,7 @@ import {
   assertModelOption,
   assertNoCodexConfigModelOverride,
   CODEX_MODEL_ENV,
+  envNameIn,
   MODEL_ALIAS_DENYLIST,
   modelEnvRefusal,
 } from "./model.js";
@@ -522,7 +523,7 @@ export class CodexSdkDriver {
       modelEnvRefusal(
         "CodexSdkDriver",
         this.buildEnv(request),
-        CODEX_MODEL_ENV,
+        envNameIn(CODEX_MODEL_ENV),
       ) ??
       unenforceablePathsRefusal(request.permissions, {
         runtime: "Codex",

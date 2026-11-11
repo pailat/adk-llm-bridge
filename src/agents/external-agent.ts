@@ -1000,6 +1000,7 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
           if (event.type === "completed") {
             tracer.onDriverEvent(event);
             const modelInfo = modelInfoFor(this.driver, startedEvent, event);
+            tracer.onModelInfo(modelInfo.info);
             const carrier = heldFinal ?? heldError;
             if (carrier) {
               carrier.customMetadata = {
@@ -1705,18 +1706,72 @@ function modelInfoFor(
     typeof driver.model === "string" && driver.model.length > 0
       ? { requested: driver.model }
       : {};
-  if (started?.modelRouting === "plan-mode") {
-    return { info: { ...requested, status: "unsupported" } };
+  const smallFast =
+    typeof driver.smallFastModel === "string" &&
+    driver.smallFastModel.length > 0
+      ? { smallFast: driver.smallFastModel }
+      : {};
+  const base = { ...requested, ...smallFast };
+  const routed = started?.modelRouting === "plan-mode";
+  const withUsed = (info: ExternalAgentModelInfo): ExternalAgentModelInfo =>
+    addUsedModels(info, driver, completed, !routed);
+  if (routed) {
+    return { info: withUsed({ ...base, status: "unsupported" }) };
   }
   if (driver.reportsResolvedModel !== true) {
-    return { info: { ...requested, status: "unsupported" } };
+    return { info: withUsed({ ...base, status: "unsupported" }) };
   }
   const reported = completed.model ?? started?.model;
   if (typeof reported === "string" && reported.length > 0) {
     return {
-      info: { ...requested, resolved: reported, status: "reported" },
+      info: withUsed({ ...base, resolved: reported, status: "reported" }),
       modelVersion: reported,
     };
   }
-  return { info: { ...requested, status: "not-reported" } };
+  return { info: withUsed({ ...base, status: "not-reported" }) };
+}
+
+/**
+ * Adds `used`, `unexpected` and the warning to a model info.
+ *
+ * @remarks
+ * `used` is the keys of the run's `usage.byModel`. A run with one billed
+ * model has no `byModel`, so a driver that sets `reportsResolvedModel: true`
+ * contributes `completed.model` instead (the Claude drivers set it from a
+ * single-entry `modelUsage`), unless the run was routed (plan mode) or the
+ * model was filled from the start of the run (`modelFromInit`), which is
+ * not billing data. With
+ * neither, `used` is absent and the run's
+ * models are unknown. `unexpected` compares by exact string equality with
+ * `requested`, `resolved` and `smallFast`.
+ */
+function addUsedModels(
+  info: ExternalAgentModelInfo,
+  driver: ExternalAgentDriver,
+  completed: ExternalAgentCompletedEvent,
+  trustSingle: boolean,
+): ExternalAgentModelInfo {
+  const keys = Object.keys(completed.usage?.byModel ?? {}).filter(
+    (name) => name.length > 0,
+  );
+  const single =
+    trustSingle &&
+    completed.modelFromInit !== true &&
+    driver.reportsResolvedModel === true &&
+    typeof completed.model === "string" &&
+    completed.model.length > 0
+      ? [completed.model]
+      : [];
+  const used = [...new Set(keys.length > 0 ? keys : single)].sort();
+  if (used.length === 0) return info;
+  const known = [info.requested, info.resolved, info.smallFast];
+  const unexpected = used.filter((model) => !known.includes(model));
+  return {
+    ...info,
+    used,
+    unexpected,
+    ...(driver.requireExplicitModel === true && unexpected.length > 0
+      ? { warnings: ["UNEXPECTED_MODEL"] as ["UNEXPECTED_MODEL"] }
+      : {}),
+  };
 }

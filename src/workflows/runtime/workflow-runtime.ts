@@ -1920,6 +1920,12 @@ function stepResult(
           models: {
             requested: [...invocation.models.requested],
             resolved: [...invocation.models.resolved],
+            ...(invocation.models.used !== undefined
+              ? {
+                  used: [...invocation.models.used],
+                  unexpected: [...(invocation.models.unexpected ?? [])],
+                }
+              : {}),
             unknown: invocation.models.unknown,
           },
         }
