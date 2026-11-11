@@ -1,0 +1,5 @@
+Running touch touched.txt
+fx ask: permission required for tool execution in noninteractive mode
+fx ask: blocked action: Running touch touched.txt
+fx ask: reason=noninteractive_permission_prompt_unavailable
+fx ask: rerun with --auto to review this exact action automatically, or use the interactive shell to approve it
