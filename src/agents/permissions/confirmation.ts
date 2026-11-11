@@ -24,6 +24,7 @@ import {
 } from "@google/adk";
 import { parseJson } from "../../utils/json.js";
 import { isPlainRecord } from "../event-titles.js";
+import type { ExternalAgentMcpServerGrant } from "../external-agent-driver.js";
 import { networkAllowed } from "./network.js";
 import {
   canonicalPath,
@@ -281,6 +282,77 @@ export interface GuardPermissionOptions {
    * @defaultValue none: every MCP tool is denied without `allowNetwork: true`
    */
   bridgeToolNames?: ReadonlySet<string>;
+  /**
+   * The MCP servers the host declared on the driver
+   * (`ExternalAgentDriver.declaredMcpServers`). A tool of one of them is
+   * admitted without `allowNetwork: true` when its server lists it (or lists
+   * no tools), and under `read-only` only when the server is `readOnly` and
+   * lists it. A tool its server does not list is denied in every mode.
+   *
+   * @defaultValue none
+   */
+  declaredMcpServers?: readonly ExternalAgentMcpServerGrant[];
+}
+
+/**
+ * The declared server a runtime tool name belongs to, and whether its
+ * allowlist admits the tool. The longest matching server name wins.
+ *
+ * @param toolName - The tool name as the runtime reports it.
+ * @param servers - The declared servers.
+ * @returns The server and the tool part, with `listed` true when the
+ * server lists the tool or lists no tools; `undefined` when the name is not
+ * `mcp__<declared server>__<tool>` with a non-empty tool.
+ * @internal
+ */
+export function declaredMcpTool(
+  toolName: string,
+  servers: readonly ExternalAgentMcpServerGrant[] | undefined,
+):
+  | { server: ExternalAgentMcpServerGrant; tool: string; listed: boolean }
+  | undefined {
+  let best: ExternalAgentMcpServerGrant | undefined;
+  for (const server of servers ?? []) {
+    const prefix = `mcp__${server.name}__`;
+    if (
+      toolName.startsWith(prefix) &&
+      toolName.length > prefix.length &&
+      (best === undefined || server.name.length > best.name.length)
+    ) {
+      best = server;
+    }
+  }
+  if (best === undefined) return undefined;
+  const tool = toolName.slice(`mcp__${best.name}__`.length);
+  return {
+    server: best,
+    tool,
+    listed: best.tools === undefined || best.tools.includes(tool),
+  };
+}
+
+/**
+ * Whether a `read-only` policy lets a declared MCP tool run: its server is
+ * `readOnly` and lists it.
+ *
+ * @param policy - Effective policy of the agent.
+ * @param toolName - The tool name as the runtime reports it.
+ * @param servers - The declared servers.
+ * @returns `true` only under `read-only` for such a tool.
+ * @internal
+ */
+export function readOnlyMcpToolAllowed(
+  policy: ExternalAgentPermissionPolicy | undefined,
+  toolName: string,
+  servers: readonly ExternalAgentMcpServerGrant[] | undefined,
+): boolean {
+  const declared = declaredMcpTool(toolName, servers);
+  return (
+    policy?.mode === "read-only" &&
+    declared !== undefined &&
+    declared.server.readOnly &&
+    declared.server.tools?.includes(declared.tool) === true
+  );
 }
 
 /**
@@ -288,12 +360,16 @@ export interface GuardPermissionOptions {
  * when the request would exceed the effective policy, `undefined` otherwise.
  *
  * @remarks
- * Fail-closed rules: `read-only` denies every request (with the path reason
- * when a path is outside `allowedPaths`, so the model is told why) except a
- * web tool when the policy sets `allowNetwork: true`; network
+ * Fail-closed rules: a tool of a declared MCP server that its server does
+ * not list is denied in every mode; `read-only` denies every request (with
+ * the path reason when a path is outside `allowedPaths`, so the model is told
+ * why) except a web tool when the policy sets `allowNetwork: true` and a
+ * listed tool of a declared `readOnly` server; network
  * tools are denied unless `allowNetwork` is `true`; without
  * `allowNetwork: true`, MCP tools other than the registered bridge tools
- * ({@link GuardPermissionOptions.bridgeToolNames}) and shell tools without a
+ * ({@link GuardPermissionOptions.bridgeToolNames}) and the listed tools of
+ * declared servers ({@link GuardPermissionOptions.declaredMcpServers}), and
+ * shell tools without a
  * network sandbox are denied; under `allowedPaths`, any path outside the
  * roots is denied, and so is any path outside one of the `pathBounds` lists.
  *
@@ -325,8 +401,26 @@ export function guardPermissionRequest(
   options: GuardPermissionOptions = {},
 ): PermissionDecision | undefined {
   const pathDenial = guardRequestPaths(policy, request, options);
+  const declared = declaredMcpTool(
+    request.toolName,
+    options.declaredMcpServers,
+  );
+  if (declared && !declared.listed) {
+    return {
+      behavior: "deny",
+      message: `Denied: MCP server ${declared.server.name} does not list the tool ${declared.tool} for this agent.`,
+    };
+  }
   if (policy?.mode === "read-only") {
-    if (pathDenial || readOnlyWebToolAllowed(policy, request.toolName)) {
+    if (
+      pathDenial ||
+      readOnlyWebToolAllowed(policy, request.toolName) ||
+      readOnlyMcpToolAllowed(
+        policy,
+        request.toolName,
+        options.declaredMcpServers,
+      )
+    ) {
       return pathDenial;
     }
     return { behavior: "deny", message: DENY_READ_ONLY };
@@ -338,7 +432,11 @@ export function guardPermissionRequest(
     };
   }
   if (!networkAllowed(policy)) {
-    const denial = denyWithoutNetwork(request, options.bridgeToolNames);
+    const denial = denyWithoutNetwork(
+      request,
+      options.bridgeToolNames,
+      declared !== undefined,
+    );
     if (denial) {
       return denial;
     }
@@ -464,16 +562,23 @@ function rootLists(
 
 /**
  * Without `allowNetwork: true`, MCP tools other than the registered bridge
- * tools are denied (the guard cannot see where a remote server sends data),
+ * tools and the listed tools of declared servers are denied (the guard cannot see where a remote server sends data),
  * and shell tools are denied unless the runtime sandbox keeps them off the
  * network.
  */
 function denyWithoutNetwork(
   request: PermissionRequest,
   bridgeToolNames: ReadonlySet<string> | undefined,
+  declaredListed: boolean,
 ): PermissionDecision | undefined {
   const name = request.toolName;
-  if (name.startsWith("mcp__") && !bridgeToolNames?.has(name)) {
+  // A listed tool of a declared server: the driver refused the run before it
+  // started unless that server is on loopback or a host stdio process.
+  if (
+    name.startsWith("mcp__") &&
+    !bridgeToolNames?.has(name) &&
+    !declaredListed
+  ) {
     return {
       behavior: "deny",
       message: `Denied: MCP tool ${name} may reach the network, which this agent's policy does not allow.`,

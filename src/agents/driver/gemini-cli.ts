@@ -20,6 +20,7 @@ import {
   MODEL_ALIAS_DENYLIST,
   modelEnvRefusal,
 } from "./model.js";
+import { GEMINI_CLI_OPTION_KEYS } from "./option-keys.js";
 import {
   batchCommandRefusal,
   dependencyMissing,
@@ -32,6 +33,7 @@ import {
   unenforceablePathsRefusal,
 } from "./policy-errors.js";
 import {
+  assertKnownDriverOptions,
   bridgeEvent,
   buildChildEnv,
   exitErrorEvent,
@@ -304,6 +306,7 @@ export class GeminiCliDriver extends SubprocessJsonlDriver {
    * `model` is absent or a router alias.
    */
   constructor(config: GeminiCliDriverConfig = {}) {
+    assertKnownDriverOptions("GeminiCliDriver", config, GEMINI_CLI_OPTION_KEYS);
     validateDriverConfig("GeminiCliDriver", config, GEMINI_CLI_BOOLEAN_OPTIONS);
     validateLaunchConfig("GeminiCliDriver", config);
     const model = assertModelOption(
