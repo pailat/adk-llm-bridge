@@ -9,17 +9,22 @@ import {
   type Event,
   type InvocationContext,
   isBaseTool,
+  isBaseToolset,
   type SingleAfterToolCallback,
   type SingleBeforeToolCallback,
   type ToolUnion,
 } from "@google/adk";
 import type { Content } from "@google/genai";
 import { parseJson } from "../utils/json.js";
+import { LogCode, warn } from "../utils/log.js";
 import type { ExternalAgentCredentialProvider } from "./auth/credential-provider.js";
 import { NoopCredentialProvider } from "./auth/credential-provider.js";
 import { snapshotCredential } from "./auth/snapshot.js";
 import {
   EXTERNAL_AGENT_CREDENTIAL_UNSUPPORTED,
+  EXTERNAL_AGENT_READ_ONLY_TOOL_UNKNOWN,
+  EXTERNAL_AGENT_TOOL_NOT_READ_ONLY,
+  EXTERNAL_AGENT_TOOLS_UNSUPPORTED,
   ExternalAgentPolicyError,
   policyErrorEvent,
 } from "./driver/policy-errors.js";
@@ -75,6 +80,8 @@ import {
   type AdkToolExecutionResult,
   BRIDGE_TOOL_PREFIX,
   createAdkToolBridge,
+  EXTERNAL_AGENT_TOOLS_METADATA_KEY,
+  type ExternalAgentToolsReport,
   isBridgedToolName,
   toResponseObject,
 } from "./tools/adk-tool-bridge.js";
@@ -285,8 +292,10 @@ export interface ExternalAgentConfig extends BaseAgentConfig {
   /**
    * ADK tools and toolsets to expose to the external runtime (as in
    * `LlmAgent.tools`). Supported by drivers that can host tools (Claude Agent
-   * SDK, through its in-process MCP server); other drivers ignore them and do
-   * not advertise `capabilities.tools`. Tools that require confirmation go
+   * SDK, through its in-process MCP server); the other built-in drivers refuse
+   * them at construction (`EXTERNAL_AGENT_TOOLS_UNSUPPORTED`). A custom driver
+   * without `capabilities()` is not checked, because the bridge cannot know
+   * whether it reads `request.adkTools`. Tools that require confirmation go
    * through {@link ExternalAgentConfig.confirmation}. Expose sub-agents with
    * `subAgents`, never with `AgentTool` (it breaks permission inheritance).
    *
@@ -348,8 +357,30 @@ export interface ExternalAgentConfig extends BaseAgentConfig {
   tools?: ToolUnion[];
   /**
    * Tools that stay available when the effective policy is `read-only`, by
-   * original tool name. In `read-only` every other ADK tool is hidden, because
-   * a tool can have side effects the policy cannot see.
+   * original tool name (the name before the bridge adds `adk_tool__`).
+   *
+   * @remarks
+   * Listing a tool is your declaration that it has no side effects. The
+   * bridge cannot verify it: a tool is host code that runs in the host
+   * process with the host's authority, outside every runtime sandbox, and
+   * `permissions.mode: "read-only"` only constrains the runtime's own tools.
+   * What the bridge guarantees is that, in `read-only`, only listed tools are
+   * exposed, that a declaration naming no tool is caught, and that nothing is
+   * dropped silently:
+   * - an agent whose own mode is `read-only` throws
+   *   `EXTERNAL_AGENT_TOOL_NOT_READ_ONLY` for a direct tool that is not listed;
+   * - an entry that is empty, listed twice, names no direct tool (when `tools`
+   *   has no toolset) or names two or more direct tools throws
+   *   `EXTERNAL_AGENT_READ_ONLY_TOOL_UNKNOWN`;
+   * - an entry names one tool: when a listed name resolves to more than one
+   *   tool in a run (a direct tool plus a toolset's, two toolsets), none of
+   *   them is exposed and the name is reported as `ambiguous`;
+   * - every tool hidden by an effective `read-only` policy (an inherited one
+   *   included) is reported: one warning (`EXTERNAL_AGENT_TOOLS_HIDDEN`) per
+   *   run when the tools are resolved, whatever the run does next; the final
+   *   event's `customMetadata.externalAgentTools` (the last error event when
+   *   there is no final text) when the run completes; and the span, when
+   *   tracing is on.
    *
    * @defaultValue `[]`
    */
@@ -438,10 +469,94 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
     this.delegation = config.delegation;
     this.confirmation = config.confirmation;
     this.tools = config.tools ?? [];
-    this.readOnlyTools = config.readOnlyTools ?? [];
+    this.readOnlyTools = Object.freeze([...(config.readOnlyTools ?? [])]);
+    this.assertToolDeclarations();
     this.beforeToolCallbacks = asCallbackList(config.beforeToolCallback);
     this.afterToolCallbacks = asCallbackList(config.afterToolCallback);
     brandExternalAgent(this);
+  }
+
+  /**
+   * Refuses tool configurations that could only drop tools silently: tools on
+   * a driver that cannot host them, `readOnlyTools` entries that do not name
+   * exactly one tool, and (under the agent's own `read-only` mode) direct
+   * tools that are not listed. In that order, so a typo in `readOnlyTools` is
+   * reported as unknown before an undeclared tool.
+   */
+  private assertToolDeclarations(): void {
+    const driver = this.driver;
+    if (this.tools.length > 0 && typeof driver.capabilities === "function") {
+      if (driver.capabilities().tools !== true) {
+        throw new ExternalAgentPolicyError(
+          EXTERNAL_AGENT_TOOLS_UNSUPPORTED,
+          `ExternalAgent "${this.name}": ${driver.constructor.name} cannot host ADK tools, so \`tools\` would be ignored. Use ClaudeAgent (ClaudeAgentSdkDriver), or remove \`tools\`.`,
+        );
+      }
+    }
+
+    const direct = this.tools.filter(isBaseTool);
+    const hasToolset = this.tools.some(isBaseToolset);
+    const counts = new Map<string, number>();
+    for (const tool of direct) {
+      counts.set(tool.name, (counts.get(tool.name) ?? 0) + 1);
+    }
+    const unknownCode = EXTERNAL_AGENT_READ_ONLY_TOOL_UNKNOWN;
+    const where = `ExternalAgent "${this.name}"`;
+    const listed = this.readOnlyTools;
+    const sorted = (names: Iterable<string>) =>
+      [...new Set(names)].sort().join(", ");
+
+    const invalid = listed.filter(
+      (entry) => typeof entry !== "string" || entry.length === 0,
+    );
+    if (invalid.length > 0) {
+      throw new ExternalAgentPolicyError(
+        unknownCode,
+        `${where}: readOnlyTools entries must be non-empty strings.`,
+      );
+    }
+    const seen = new Set<string>();
+    const repeated = listed.filter((entry) => {
+      const again = seen.has(entry);
+      seen.add(entry);
+      return again;
+    });
+    if (repeated.length > 0) {
+      throw new ExternalAgentPolicyError(
+        unknownCode,
+        `${where}: readOnlyTools lists ${sorted(repeated)} more than once.`,
+      );
+    }
+    const ambiguous = listed.filter((entry) => (counts.get(entry) ?? 0) > 1);
+    if (ambiguous.length > 0) {
+      const entry = [...new Set(ambiguous)].sort()[0] as string;
+      throw new ExternalAgentPolicyError(
+        unknownCode,
+        `${where}: readOnlyTools entry "${entry}" is ambiguous: ${counts.get(entry)} tools are named ${entry}; a read-only declaration must name exactly one tool.`,
+      );
+    }
+    if (!hasToolset) {
+      const unmatched = listed.filter((entry) => !counts.has(entry));
+      if (unmatched.length > 0) {
+        throw new ExternalAgentPolicyError(
+          unknownCode,
+          `${where}: readOnlyTools names no tool of this agent: ${sorted(unmatched)}.`,
+        );
+      }
+    }
+
+    if (this.permissions?.mode === "read-only") {
+      const declared = new Set(listed);
+      const undeclared = direct
+        .map((tool) => tool.name)
+        .filter((name) => !declared.has(name));
+      if (undeclared.length > 0) {
+        throw new ExternalAgentPolicyError(
+          EXTERNAL_AGENT_TOOL_NOT_READ_ONLY,
+          `${where} runs in read-only mode, so these tools could never run: ${sorted(undeclared)}. Add a tool to readOnlyTools if it has no side effects, or remove it.`,
+        );
+      }
+    }
   }
 
   /**
@@ -759,10 +874,13 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
       );
     };
 
-    const resolvedTools =
+    const resolution =
       this.tools.length > 0
         ? await this.resolveAdkTools(context, permissions)
         : undefined;
+    const resolvedTools = resolution?.bridge;
+    const toolsReport = resolution?.report;
+    if (toolsReport) tracer.traceToolsReport(toolsReport);
     const adkTools = resolvedTools
       ? routeAdkToolActions(resolvedTools, {
           requestPermission,
@@ -878,6 +996,12 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
               };
               if (modelInfo.modelVersion !== undefined) {
                 carrier.modelVersion = modelInfo.modelVersion;
+              }
+              if (toolsReport) {
+                carrier.customMetadata = {
+                  ...carrier.customMetadata,
+                  [EXTERNAL_AGENT_TOOLS_METADATA_KEY]: toolsReport,
+                };
               }
             }
             const usageMetadata = usageMetadataFor(event.usage);
@@ -1054,27 +1178,68 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
 
   /**
    * Resolves the configured ADK tools for this invocation and applies the
-   * permission policy: under `read-only` only `readOnlyTools` stay exposed.
+   * permission policy: under `read-only` only `readOnlyTools` stay exposed,
+   * and everything the policy hid is reported.
    */
   private async resolveAdkTools(
     context: InvocationContext,
     permissions: ExternalAgentPermissionPolicy | undefined,
-  ): Promise<AdkToolBridge> {
+  ): Promise<{ bridge: AdkToolBridge; report?: ExternalAgentToolsReport }> {
     const callbacks = {
       beforeToolCallbacks: this.beforeToolCallbacks,
       afterToolCallbacks: this.afterToolCallbacks,
     };
     if (permissions?.mode !== "read-only") {
-      return createAdkToolBridge(this.tools, context, callbacks);
+      return {
+        bridge: await createAdkToolBridge(this.tools, context, callbacks),
+      };
     }
     // Filter on the tool objects by their original name BEFORE the bridge
     // names them: matching generated names (`adk_tool__get_2`) would let an
     // unrelated tool literally named `get_2` through `readOnlyTools: ["get"]`.
     const allowed = new Set(this.readOnlyTools);
-    return createAdkToolBridge(this.tools, context, {
+    const seen = new Set<string>();
+    const rejected = new Set<string>();
+    const bridge = await createAdkToolBridge(this.tools, context, {
       ...callbacks,
-      filter: (tool) => isBaseTool(tool) && allowed.has(tool.name),
+      // A listed name attests one tool: the bridge exposes none of a name
+      // that more than one resolved tool has.
+      uniqueNames: allowed,
+      filter: (tool) => {
+        seen.add(tool.name);
+        if (allowed.has(tool.name)) return true;
+        rejected.add(tool.name);
+        return false;
+      },
     });
+    const ambiguous = new Set(
+      bridge.skipped
+        .filter((entry) => entry.reason === "ambiguous")
+        .map((entry) => entry.name),
+    );
+    const hidden = [...new Set([...rejected, ...ambiguous])].sort();
+    const unmatched = this.readOnlyTools
+      .filter((name) => !seen.has(name) && !ambiguous.has(name))
+      .sort();
+    if (hidden.length === 0 && unmatched.length === 0) return { bridge };
+    const report: ExternalAgentToolsReport = {
+      hidden,
+      ...(ambiguous.size > 0 ? { ambiguous: [...ambiguous].sort() } : {}),
+      ...(unmatched.length > 0 ? { unmatchedReadOnlyTools: unmatched } : {}),
+      reason: "read-only",
+    };
+    // The one report that does not depend on how the run ends or on tracing:
+    // the event copy needs a completed driver, the span copy a tracer.
+    const parts = [
+      hidden.length > 0 ? `hidden: ${hidden.join(", ")}` : "",
+      report.ambiguous ? `ambiguous: ${report.ambiguous.join(", ")}` : "",
+      unmatched.length > 0 ? `not found: ${unmatched.join(", ")}` : "",
+    ].filter(Boolean);
+    warn(
+      LogCode.EXTERNAL_AGENT_TOOLS_HIDDEN,
+      `ExternalAgent "${this.name}" runs under a read-only policy, so some ADK tools are not exposed (${parts.join("; ")}). Only tools in readOnlyTools stay available.`,
+    );
+    return { bridge, report };
   }
 
   /** Live mode is not supported natively; it runs the same turn as {@link ExternalAgent.runAsyncImpl}. */

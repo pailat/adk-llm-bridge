@@ -99,6 +99,40 @@ export function isBridgedToolName(name: string, exposed: string): boolean {
   return name === exposed || name === `${BRIDGE_TOOL_PREFIX}${exposed}`;
 }
 
+/**
+ * Key of {@link ExternalAgentToolsReport} in the `customMetadata` of an ADK
+ * event.
+ *
+ * @internal
+ */
+export const EXTERNAL_AGENT_TOOLS_METADATA_KEY = "externalAgentTools";
+
+/**
+ * The ADK tools an effective `read-only` policy kept from a run.
+ *
+ * @remarks
+ * `ExternalAgent` writes it to `customMetadata.externalAgentTools` of the
+ * run's final event (its last error event when the run has no final text) and
+ * to the agent span. Absent when nothing was hidden. Names are the tools'
+ * original names, sorted.
+ */
+export interface ExternalAgentToolsReport {
+  /** Tools the policy did not expose: not in `readOnlyTools`, or ambiguous. */
+  hidden: string[];
+  /**
+   * Listed names that more than one tool had in this run. None of those tools
+   * was exposed, and they are also in `hidden`. Present only when non-empty.
+   */
+  ambiguous?: string[];
+  /**
+   * `readOnlyTools` entries that matched no tool in this run (a typo, or a
+   * toolset that did not list the tool). Present only when non-empty.
+   */
+  unmatchedReadOnlyTools?: string[];
+  /** Why the tools were hidden. */
+  reason: "read-only";
+}
+
 /** Longest tool name most external runtimes accept. */
 const MAX_NAME_LENGTH = 64;
 
@@ -143,6 +177,9 @@ export interface PortableToolDeclaration {
  *   workflow node).
  * - `toolset-failed`: a toolset's `getTools` threw; `cause` holds the error.
  *   Logged as `ADK_TOOLSET_FAILED`.
+ * - `ambiguous`: the tool's name is in the `uniqueNames` option and more than
+ *   one resolved tool has it, so none of them is exposed. Logged as
+ *   `ADK_TOOL_AMBIGUOUS_SKIPPED`.
  *
  * Each warning is logged once per tool for each bridge, that is once per
  * `ExternalAgent` run.
@@ -156,7 +193,8 @@ export interface SkippedTool {
     | "request-processor"
     | "no-declaration"
     | "not-a-tool"
-    | "toolset-failed";
+    | "toolset-failed"
+    | "ambiguous";
   /** What a toolset's `getTools` threw; set for `toolset-failed`. */
   cause?: unknown;
 }
@@ -546,6 +584,10 @@ export function toResponseObject(value: unknown): Record<string, unknown> {
  * @param options - `filter` keeps only the tools it accepts. It sees each
  * tool, a toolset's tools included, by its own name before the bridge names
  * it; a tool it rejects is left out without a `skipped` entry.
+ * `uniqueNames` lists names that must identify exactly one tool: over the
+ * whole resolved list (direct tools, every toolset's tools, in-model tools
+ * included), a listed name that occurs more than once admits none of its
+ * tools; each goes to `skipped` as `ambiguous`, before `filter` runs.
  * `beforeToolCallbacks` and `afterToolCallbacks` are the agent's tool
  * callbacks (as in `LlmAgent`); they run after the plugins' callbacks of the
  * invocation's `pluginManager`. After callbacks see the results the tool
@@ -558,7 +600,10 @@ export function toResponseObject(value: unknown): Record<string, unknown> {
 export async function createAdkToolBridge(
   tools: readonly ToolUnion[],
   invocationContext: InvocationContext,
-  options: { filter?: (tool: BaseTool) => boolean } & AdkToolCallbacks = {},
+  options: {
+    filter?: (tool: BaseTool) => boolean;
+    uniqueNames?: ReadonlySet<string>;
+  } & AdkToolCallbacks = {},
 ): Promise<AdkToolBridge> {
   const skipped: SkippedTool[] = [];
   const resolved: { tool: BaseTool; toolset?: BaseToolset }[] = [];
@@ -597,7 +642,28 @@ export async function createAdkToolBridge(
   const byName = new Map<string, BaseTool>();
   const taken = new Set<string>();
 
+  // Counted over everything resolved, before the filter and before the later
+  // skips, so a tool that would be skipped still makes its name ambiguous.
+  const counts = new Map<string, number>();
+  if (options.uniqueNames && options.uniqueNames.size > 0) {
+    for (const { tool } of resolved) {
+      counts.set(tool.name, (counts.get(tool.name) ?? 0) + 1);
+    }
+  }
+
   for (const { tool, toolset } of resolved) {
+    if (
+      options.uniqueNames?.has(tool.name) &&
+      (counts.get(tool.name) ?? 0) > 1
+    ) {
+      skipped.push({ name: tool.name, reason: "ambiguous" });
+      warnings.warnOnce(
+        LogCode.ADK_TOOL_AMBIGUOUS_SKIPPED,
+        `ADK tool name "${tool.name}" is declared read-only but ${counts.get(tool.name)} tools have it, so none of them is exposed in this run. A read-only declaration must name exactly one tool.`,
+        `tool:${tool.name}`,
+      );
+      continue;
+    }
     if (options.filter && !options.filter(tool)) {
       continue;
     }

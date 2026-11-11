@@ -4,7 +4,9 @@
  * @remarks
  * A capability that is `false` or absent means the driver does not provide
  * it. The flags describe the driver to callers through
- * `driver.capabilities()`, the only place they are declared. Nothing is gated
+ * `driver.capabilities()`, the only place they are declared. `tools` is also
+ * checked when an `ExternalAgent` is built: tools on a driver that implements
+ * `capabilities()` without `tools: true` are refused. Nothing else is gated
  * on them at runtime.
  */
 export interface AgentRuntimeCapabilities {
