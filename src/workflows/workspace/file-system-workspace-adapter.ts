@@ -10,6 +10,7 @@ import {
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { WorkflowError } from "../contracts.js";
 import { throwIfAborted } from "../internal/abort.js";
+import { renameRetryingBlockedSync } from "../internal/blocked-rename.js";
 import {
   DIRECTORY_LOCK_OWNER_FILE,
   type DirectoryLockOwner,
@@ -769,7 +770,7 @@ function writeStateSync(
     if (!directoryLockTokenMatches(files.lock, lockToken)) {
       throw new Error("Workspace lock ownership changed before state commit");
     }
-    renameSync(temporary, files.state);
+    renameRetryingBlockedSync(temporary, files.state);
     fsyncDirectorySync(files.directory);
   } finally {
     rmSync(temporary, { force: true });

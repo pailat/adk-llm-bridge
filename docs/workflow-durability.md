@@ -60,8 +60,8 @@ the `.lock` directory away first and delete it afterwards: a recursive delete
 of the lock path removes the owner file before the directory, and a writer
 that looks in between fails with `checkpoint_lock_corrupt`. On Windows a
 directory cannot be renamed while another process has a file inside it open,
-so a release retries a blocked rename a few times (5 tries over about 100 ms)
-before it gives up with the `checkpoint_lock_release_failed` warning. A load
+so a release retries a blocked rename (for up to 5 s, see below) before it
+gives up with the `checkpoint_lock_release_failed` warning. A load
 refuses a symlink at the checkpoint path before opening it, opens the file
 once (without following symlinks where the platform has `O_NOFOLLOW`), and
 reads through that handle only when the path names the opened file (device and
@@ -77,6 +77,32 @@ Checkpoint contents and their deterministic revision are validated on load.
 New writes remove runtime-only step events and replay markers before hashing or
 persistence. Both bundled checkpoint stores reject malformed durable graphs
 and enforce a configurable 4 MiB UTF-8 JSON limit by default.
+
+#### Saving while another process has the checkpoint open (Windows)
+
+On Windows a rename is refused (`EPERM`, `EBUSY` or `EACCES`) while another
+process holds the destination, or a file inside the renamed directory, open.
+A save publishes the checkpoint with a rename, so it retries a refused rename
+with jittered exponential backoff (5 ms doubling to 250 ms) for up to 5 s.
+The workspace store's state commit and a lock release use the same wait. A
+save therefore waits up to 5 s for other processes that hold the checkpoint
+file open, such as readers and other savers, to release it. If one still holds
+it after that, the save fails with `checkpoint_write_failed` and
+`details.causeCode` `EPERM`, `EBUSY` or `EACCES`; it leaves no temporary file
+and the previous revision stays in place. Any other error is not retried.
+The wait is bounded, not a guarantee: a reader that re-opens the file with no
+gap, so that it is open almost all the time, can make saves fail. A host
+should read with open, read, close (the bridge's own `load` does) and do other
+work between reads. Tools that tail or watch the checkpoint directory on
+Windows, such as antivirus scanners, indexers and editors, can hold files open
+too; the error names the cause: `details.causeCode` is `EPERM`, `EBUSY` or
+`EACCES`, and `details.waitedMs` is the time the save waited. The wait holds the
+checkpoint lock, so under contention a waiting writer may reach
+`lockTimeoutMs` first and fail with `checkpoint_lock_timeout`. On macOS and
+Linux an open file does not block a rename, so the wait does not run in the
+normal path; a real permission error there (`EPERM` or `EACCES`, such as a
+read-only directory) now fails after the 5 s instead of at once. The workspace
+store and the lock release block the thread while they wait.
 
 ### Checkpoint failure reasons
 

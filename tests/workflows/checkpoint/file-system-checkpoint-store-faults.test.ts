@@ -70,6 +70,8 @@ async function runFault(
     | "eperm-live"
     | "eperm-none"
     | "busy-release"
+    | "publish-blocked"
+    | "publish-blocked-forever"
     | "trace"
     | "dir-sync-win32"
     | "dir-sync-posix"
@@ -295,6 +297,38 @@ describe("FileSystemWorkflowCheckpointStore under file-system faults", () => {
 
     expect(result).toEqual({ saved: true, loaded: true });
     expect(output).not.toContain("[WORKFLOW_CHECKPOINT_LOCK_RELEASE_FAILED]");
+  });
+
+  // Windows: a reader or another saver holding the checkpoint open blocks the
+  // publishing rename with EPERM, EBUSY or EACCES until it lets go.
+  test("a save retries a publishing rename another process's open file blocks", async () => {
+    const { result } = await runFault("publish-blocked");
+
+    expect(result).toEqual({
+      saved: true,
+      loaded: true,
+      blocks: 4,
+      tmpLeft: 0,
+    });
+  });
+
+  // The documented limit: a holder that keeps the file open past the budget
+  // makes the save fail, promptly, naming the cause and the time waited.
+  test("a publishing rename blocked past the budget fails the save after the budget, names the cause and the wait, and leaves no temporary file", async () => {
+    const { result } = await runFault("publish-blocked-forever");
+
+    expect(result).toMatchObject({
+      saved: false,
+      reason: "checkpoint_write_failed",
+      causeCode: "EBUSY",
+      tmpLeft: 0,
+    });
+    expect(result.blocks).toBeGreaterThan(5);
+    // The wait is the 5 s budget: not cut short, and not a hang.
+    expect(result.waitedMs as number).toBeGreaterThanOrEqual(5000);
+    expect(result.waitedMs as number).toBeLessThan(5000 + 250 + 1000);
+    expect(result.elapsedMs as number).toBeGreaterThanOrEqual(5000);
+    expect(result.elapsedMs as number).toBeLessThan(5000 + 250 + 3000);
   });
 
   // The claim behind the wall-clock fix: the lock path is only ever replaced

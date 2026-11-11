@@ -161,6 +161,7 @@ export {
   isWorkflowDefinition,
 } from "./definition.js";
 export type {
+  WorkflowAgentKind,
   WorkflowCheckpointSavedEvent,
   WorkflowCheckpointSizeContributor,
   WorkflowCheckpointSizeWarningEvent,

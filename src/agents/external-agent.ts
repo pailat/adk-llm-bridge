@@ -52,6 +52,7 @@ import {
 } from "./events.js";
 import type { ExternalAgentDriver } from "./external-agent-driver.js";
 import { PlaceholderExternalAgentDriver } from "./external-agent-driver.js";
+import { EXTERNAL_AGENT_BRAND } from "./internal/external-agent-brand.js";
 import {
   createAnswersConsumedEvent,
   createConfirmationRequestEvent,
@@ -108,15 +109,6 @@ function normalizeToolCallArgs(input: unknown): Record<string, unknown> {
 
   return { input };
 }
-
-/**
- * Brand carried by every `ExternalAgent` instance. `Symbol.for` makes it the
- * same key in every copy of this module (a duplicated install or a bundle
- * split), where `instanceof` would fail and silently skip the ancestor.
- */
-const EXTERNAL_AGENT_BRAND = Symbol.for(
-  "adk-llm-bridge.agents.external-agent.v1",
-);
 
 /** Read by every brand reader; anything else counts as unreadable. */
 type PolicyReader = () => ExternalAgentPermissionPolicy | undefined;

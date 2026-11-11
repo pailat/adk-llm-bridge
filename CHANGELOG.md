@@ -675,6 +675,19 @@ from the 0.6.0 tag.
 
 ### Added
 
+- **`agentKind` on workflow step events and spans.** `step_started` and
+  `step_completed` carry `agentKind: "llm" | "external" | "host" | "workflow"`
+  (`WorkflowAgentKind`), derived from the step's agent before it runs:
+  `ExternalAgent` is `external`, `LlmAgent` (subclasses included) is `llm`, the
+  bridge's workflow agents and ADK's `Workflow`, `SequentialAgent`,
+  `ParallelAgent` and `LoopAgent` are `workflow`, and any other `BaseAgent` is
+  `host`. The same value is the span attribute
+  `gcp.vertex.agent.agent_kind`, always on the step's parent `execute_node` span and on `invoke_agent` only for
+  `ExternalAgent` runs: ADK 2.4 creates the `invoke_agent` span of `llm`,
+  `workflow` and `host` agents privately in `BaseAgent.runAsync`, and the bridge
+  has no hook inside it. Additive: events recorded before this have no
+  `agentKind` and are still valid. See
+  [Which agent ran a step](./docs/workflow-orchestration.md#which-agent-ran-a-step).
 - **Prompt caching for Anthropic models** (see [Prompt caching](./docs/prompt-caching.md)):
   a `promptCaching` option, `boolean | { ttl?: "5m" | "1h" }`, on `AnthropicProviderConfig`,
   `AIGatewayProviderConfig` and `OpenRouterProviderConfig`, and on their register options.
@@ -1893,8 +1906,9 @@ from the 0.6.0 tag.
   the checkpoint root on a volume.
 - Windows: releasing a lock (the checkpoint store, and the workspace and
   repository mutation locks) retries a rename that a waiter's open `owner.json`
-  blocks (`EPERM`, `EBUSY`, `EACCES`; 5 tries over about 100 ms) instead of
-  leaving the lock behind under a live process.
+  blocks (`EPERM`, `EBUSY`, `EACCES`; within a time budget, see the entry on
+  the checkpoint publish below) instead of leaving the lock behind under a live
+  process.
 - Linux and Windows: a checkpoint save that waited while the lock was
   released and taken by another writer could fail with
   `checkpoint_lock_corrupt`. The new lock directory often reuses the old one's
@@ -1910,7 +1924,27 @@ from the 0.6.0 tag.
   Elsewhere a failed directory flush is an error, including the codes the
   workspace and repository locks used to ignore; a lock whose flush fails
   right after it is taken is released instead of left behind.
-
+- Windows: saving a checkpoint failed with `checkpoint_write_failed` when
+  another process held the checkpoint file open, such as a reader or another
+  saver, because the rename that publishes the file is refused (`EPERM`,
+  `EBUSY`, `EACCES`) while the handle is open. The file-system checkpoint store
+  and the file-system workspace adapter now retry that rename. The checkpoint
+  lock release, which retried a fixed 5 times 20 ms apart, uses the same retry:
+  a 5 second budget with jittered exponential backoff (5 ms doubling to
+  250 ms), so many polling waiters cannot exhaust it. Any other error fails at
+  once, and a rename still blocked after the budget fails with its own error.
+  On macOS and Linux a rename is not blocked by an open file, so the retry
+  does not run in the normal path; but `EPERM` and `EACCES` there are also real
+  permission errors (a read-only directory, say), and a save that hits one now
+  fails with the same error after the 5 second budget, not at once.
+  On Windows a save waits up to 5 s for other processes that hold the
+  checkpoint file open (readers, other savers) to release it, then fails with
+  `checkpoint_write_failed` (`details.causeCode` `EPERM`, `EBUSY` or
+  `EACCES`; `details.waitedMs` is the time waited). A reader that keeps the
+  file open almost continuously can make saves fail: read with open, read,
+  close, and do other work between reads. Antivirus scanners, indexers and
+  editors that watch the checkpoint directory can hold files open too.
+  See [Checkpoint commit semantics](docs/workflow-durability.md#checkpoint-commit-semantics).
 
 ### Docs
 

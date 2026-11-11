@@ -4,6 +4,7 @@ import {
   BaseAgent,
   createEvent,
   InvocationContext,
+  LlmAgent,
   PluginManager,
   REQUEST_INPUT_FUNCTION_CALL_NAME,
 } from "@google/adk";
@@ -183,6 +184,25 @@ describe("workflow runtime spans", () => {
     expect(spans.filter((s) => s.name.startsWith("execute_node"))).toHaveLength(
       1,
     );
+  });
+
+  test("the step span carries the agent kind of the step's agent", async () => {
+    await run(workflowOf(new TracedAgent("worker")));
+
+    expect(byName("execute_node build")?.attributes).toMatchObject({
+      "gcp.vertex.agent.agent_kind": "host",
+    });
+  });
+
+  test("a step span of an LlmAgent step is llm", async () => {
+    // The model is not callable here; the span is tagged before the run.
+    await run(workflowOf(new LlmAgent({ name: "worker", model: "m" }))).catch(
+      () => undefined,
+    );
+
+    expect(
+      byName("execute_node build")?.attributes["gcp.vertex.agent.agent_kind"],
+    ).toBe("llm");
   });
 
   test("a step waiting for input ends its span as waiting, not failed", async () => {

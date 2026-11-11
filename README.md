@@ -309,6 +309,11 @@ model span and sets ERROR status on failures. It also emits its own spans:
 `call_llm` and `execute_tool <name>` for external agents (see
 [Events and spans](#events-and-spans)), and `invoke_workflow` and
 `execute_node` for workflows.
+The `execute_node` step span carries `gcp.vertex.agent.agent_kind` (`llm`,
+`external`, `host` or `workflow`), the same value as `agentKind` on workflow
+`step_started` and `step_completed`; `invoke_agent` carries it only for
+`ExternalAgent` runs (see
+[Which agent ran a step](./docs/workflow-orchestration.md#which-agent-ran-a-step)).
 
 To keep prompts, tool arguments and results out of traces on ADK 2.4, set
 both variables:

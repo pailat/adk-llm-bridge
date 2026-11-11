@@ -18,6 +18,7 @@ import {
   describeAgentModel,
   rootSessionOf,
 } from "../../runtime/agent-invocation-gateway.js";
+import { describeAgentKind } from "../../runtime/agent-kind.js";
 import { parseJson } from "../../utils/json.js";
 import { LogCode, warn } from "../../utils/log.js";
 import { isTempStateKey, withoutTempStateKeys } from "../../utils/state.js";
@@ -728,6 +729,7 @@ export class WorkflowRuntime {
                 ? prepared.resolution.resumeReason
                 : undefined;
           const requestedModel = describeAgentModel(declaredAgent).requested;
+          const agentKind = describeAgentKind(declaredAgent);
           await this.emitWorkflowEvent({
             ...this.envelope(),
             type: "step_started",
@@ -735,6 +737,7 @@ export class WorkflowRuntime {
             attempt,
             ...(resumeReason === undefined ? {} : { resumeReason }),
             ...(requestedModel === undefined ? {} : { requestedModel }),
+            agentKind,
           } satisfies WorkflowStepStartedEvent);
 
           const replay = await this.#hooks?.beforeAttempt?.(attemptContext);
@@ -797,6 +800,7 @@ export class WorkflowRuntime {
               ...this.envelope(),
               type: "step_completed",
               result: completed,
+              agentKind,
             } satisfies WorkflowStepCompletedEvent);
             return completed;
           }
@@ -1039,7 +1043,7 @@ export class WorkflowRuntime {
     }
     return agentSemaphore.use(signal, () =>
       this.#globalSemaphore.use(signal, () =>
-        this.runGatewayAttempt(step, signal, attemptContext, resume),
+        this.runGatewayAttempt(step, agent, signal, attemptContext, resume),
       ),
     );
   }
@@ -1047,6 +1051,7 @@ export class WorkflowRuntime {
   /** One `execute_node` span per step attempt; sub-agent spans nest under it. */
   private async runGatewayAttempt(
     step: WorkflowStep,
+    agent: BaseAgent,
     signal: AbortSignal,
     attemptContext: WorkflowAttemptContext,
     resume?: StepResume,
@@ -1056,6 +1061,7 @@ export class WorkflowRuntime {
         {
           name: step.id,
           nodePath: `${this.#agentName}.${step.id}`,
+          agentKind: describeAgentKind(agent),
           runId: attemptContext.executionId,
           attempt: attemptContext.attempt - 1,
         },

@@ -38,6 +38,13 @@
  * retires 50 ms after that refusal. `eperm-none` is the same `EPERM` with no
  * lock present.
  * `busy-release` fails the first two lock-to-tombstone renames with `EBUSY`.
+ * `publish-blocked` fails the first three checkpoint publishing renames
+ * (temporary file to checkpoint) with `EPERM`, as Windows does while a reader
+ * holds the checkpoint open; `publish-blocked-forever` fails every one with
+ * `EBUSY`. Both report `blocks` (publishing renames tried) and `tmpLeft`
+ * (temporary files left in the shard); a failed save also reports `causeCode`,
+ * `waitedMs` (the retry time the error carries) and `elapsedMs` (wall time of
+ * the save).
  * `trace` saves twice, the second time over an abandoned lock (dead pid), and
  * reports every mutating call on a lock path other than the two renames the
  * protocol allows, plus whether the owner file was complete and synced before
@@ -92,6 +99,8 @@ const MODES = [
   "eperm-live",
   "eperm-none",
   "busy-release",
+  "publish-blocked",
+  "publish-blocked-forever",
   "trace",
   "dir-sync-win32",
   "dir-sync-posix",
@@ -244,6 +253,7 @@ let vanishLstats = 0;
 let epermLockPath: string | undefined;
 let epermArmed = false;
 let busyLeft = 2;
+let publishBlocks = 0;
 const violations: string[] = [];
 const syncedOwners = new Set<string>();
 let publishes = 0;
@@ -381,6 +391,17 @@ const faultFs = {
     if (mode === "busy-release" && retiring && busyLeft > 0) {
       busyLeft -= 1;
       throw Object.assign(new Error("injected EBUSY"), { code: "EBUSY" });
+    }
+    if (
+      (mode === "publish-blocked" || mode === "publish-blocked-forever") &&
+      String(from).endsWith(".tmp") &&
+      String(to).endsWith(".json")
+    ) {
+      publishBlocks += 1;
+      if (mode === "publish-blocked-forever" || publishBlocks <= 3) {
+        const code = mode === "publish-blocked" ? "EPERM" : "EBUSY";
+        throw Object.assign(new Error(`injected ${code}`), { code });
+      }
     }
     if (mode === "release" && to.includes(".retired.")) {
       throw Object.assign(new Error("injected release failure"), {
@@ -560,11 +581,29 @@ const result: {
 } = {
   saved: false,
 };
+const saveStartedAt = performance.now();
 try {
   await store.save({ context, checkpoint, expectedRevision: null });
   result.saved = true;
 } catch (error) {
-  result.reason = (error as { details?: { reason?: unknown } }).details?.reason;
+  const details = (
+    error as {
+      details?: { reason?: unknown; causeCode?: unknown; waitedMs?: unknown };
+    }
+  ).details;
+  result.reason = details?.reason;
+  if (mode.startsWith("publish-blocked")) {
+    result.causeCode = details?.causeCode;
+    result.waitedMs = details?.waitedMs;
+    result.elapsedMs = Math.round(performance.now() - saveStartedAt);
+  }
+}
+if (mode.startsWith("publish-blocked")) {
+  const shard = join(root, (await real.readdir(root))[0] ?? "");
+  result.blocks = publishBlocks;
+  result.tmpLeft = (await real.readdir(shard)).filter((name) =>
+    name.endsWith(".tmp"),
+  ).length;
 }
 if (
   mode.startsWith("wait-") ||

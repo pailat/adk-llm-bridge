@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { once } from "node:events";
 import {
@@ -571,4 +571,53 @@ describe("FileSystemWorkspaceAdapter state written by older releases", () => {
       legacy.leaseId,
     );
   });
+});
+
+// Windows refuses to rename onto the state file while another process holds it
+// open (a reader's `readFileSync`). The state publish waits that out.
+describe("FileSystemWorkspaceAdapter state publish", () => {
+  const FIXTURE = join(
+    import.meta.dir,
+    "fixtures",
+    "workspace-publish-fault.ts",
+  );
+
+  async function publishFault(mode: "blocked" | "blocked-forever") {
+    const directory = await stateDirectory();
+    const child = spawnSync(process.execPath, [FIXTURE, mode, directory], {
+      encoding: "utf8",
+      timeout: 30_000,
+    });
+    const line = (child.stdout ?? "").trim().split("\n").at(-1) ?? "";
+    try {
+      return JSON.parse(line) as {
+        acquired: boolean;
+        code?: string;
+        thrown: number;
+        tmpLeft: number;
+        stateWritten: boolean;
+      };
+    } catch {
+      throw new Error(`fixture gave no result: ${child.stderr}${child.stdout}`);
+    }
+  }
+
+  test("a state commit blocked three times by an open file succeeds", async () => {
+    expect(await publishFault("blocked")).toMatchObject({
+      acquired: true,
+      thrown: 3,
+      tmpLeft: 0,
+      stateWritten: true,
+    });
+  });
+
+  test("a state commit blocked past the budget fails and leaves no temporary file", async () => {
+    const result = await publishFault("blocked-forever");
+
+    expect(result.acquired).toBe(false);
+    expect(result.code).toBe("EBUSY");
+    expect(result.thrown).toBeGreaterThan(5);
+    expect(result.tmpLeft).toBe(0);
+    expect(result.stateWritten).toBe(false);
+  }, 20_000);
 });
