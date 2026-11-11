@@ -105,7 +105,31 @@ export interface BaseProviderConfig {
  *
  * @see {@link BaseProviderConfig} for inherited options
  */
-export interface AIGatewayProviderConfig extends BaseProviderConfig {}
+export interface AIGatewayProviderConfig extends BaseProviderConfig {
+  /**
+   * Prompt caching for Anthropic models (`anthropic/*`), on by default.
+   *
+   * Sends `providerOptions.gateway.caching = "auto"`, and the gateway places
+   * the Anthropic cache breakpoints itself. Other models are left untouched
+   * unless this is `true`. `false` disables it. The chat endpoint has a
+   * 5-minute lifetime only: `ttl: "1h"` warns and uses 5 minutes.
+   *
+   * @defaultValue true for `anthropic/*` models, off for others
+   * @see {@link PromptCachingConfig}
+   */
+  promptCaching?: PromptCachingConfig;
+}
+
+/**
+ * Prompt caching setting for Anthropic models.
+ *
+ * - `true`: on, 5-minute lifetime.
+ * - `{ ttl }`: on with that lifetime. `"1h"` writes cost 2x the base input
+ *   price instead of 1.25x; the AI Gateway chat endpoint only supports `"5m"`
+ *   and warns (`PROMPT_CACHE_TTL_IGNORED`) when `"1h"` is requested.
+ * - `false`: off, no marker of any kind.
+ */
+export type PromptCachingConfig = boolean | { ttl?: "5m" | "1h" };
 
 /**
  * Options every `register*()` function accepts. They are stored as the
@@ -171,6 +195,13 @@ export interface AIGatewayRegisterOptions extends BaseRegisterOptions {
    * @defaultValue process.env.AI_GATEWAY_API_KEY
    */
   apiKey?: string;
+
+  /**
+   * Prompt caching for all AI Gateway models created through the registry.
+   *
+   * @see {@link AIGatewayProviderConfig.promptCaching}
+   */
+  promptCaching?: PromptCachingConfig;
 }
 
 // =============================================================================
@@ -302,6 +333,20 @@ export interface OpenRouterProviderConfig extends BaseProviderConfig {
    * @see {@link OpenRouterProviderPreferences}
    */
   provider?: OpenRouterProviderPreferences;
+
+  /**
+   * Prompt caching for Anthropic models (`anthropic/*`). **Opt-in** in 0.7.0.
+   *
+   * `true` or `{ ttl }` sends OpenRouter's top-level automatic
+   * `cache_control`. It is off by default because this form is documented but
+   * not yet probed against every backend OpenRouter may route to (Bedrock,
+   * Vertex), where an unsupported marker may be rejected. An explicit `true`
+   * also applies to models that are not `anthropic/*`.
+   *
+   * @defaultValue false
+   * @see {@link PromptCachingConfig}
+   */
+  promptCaching?: PromptCachingConfig;
 }
 
 /**
@@ -362,6 +407,14 @@ export interface OpenRouterRegisterOptions extends BaseRegisterOptions {
    * @example "My AI Assistant"
    */
   appName?: string;
+
+  /**
+   * Prompt caching for all OpenRouter models created through the registry.
+   * Opt-in.
+   *
+   * @see {@link OpenRouterProviderConfig.promptCaching}
+   */
+  promptCaching?: PromptCachingConfig;
 }
 
 // =============================================================================
@@ -666,21 +719,32 @@ export interface AnthropicProviderConfig extends BaseProviderConfig {
   maxTokens?: number;
 
   /**
-   * Opt-in Anthropic prompt caching.
+   * Anthropic prompt caching, on by default.
    *
-   * When `true`, attaches `cache_control: { type: "ephemeral" }` to the
-   * system prompt block and the last tool definition, marking the largely
-   * static prefix of the request (system instruction + tool schemas) as
-   * cacheable. This can substantially reduce cost and latency for prompts
-   * that reuse the same system instruction and tools across turns.
+   * Attaches `cache_control` to the system prompt block, the last tool
+   * definition and the last block of the last message (3 of the 4 allowed
+   * breakpoints), so each turn of a multi-turn agent reads the earlier turns
+   * from the cache instead of paying for them again. Below the model's minimum
+   * cacheable size (512 tokens on Haiku/Sonnet/Opus 5.5) nothing is cached and
+   * nothing extra is billed.
    *
-   * This is a bridge-level instance setting, NOT derived from ADK's
+   * A cache write costs 1.25x the base input price (2x with `ttl: "1h"`) and a
+   * read 0.1x or less, so caching pays off from the first reuse. A one-shot
+   * call that is never reused pays the write surcharge for nothing: set
+   * `false` for those.
+   *
+   * - `true` / unset: on, 5-minute lifetime.
+   * - `{ ttl: "1h" }`: on, 1-hour lifetime on every breakpoint.
+   * - `false`: no `cache_control` anywhere.
+   *
+   * This is a bridge-level setting, NOT derived from ADK's
    * `config.cachedContent` (which is a non-portable Gemini resource name).
    *
-   * @defaultValue false
-   * @see {@link https://platform.claude.com/docs/en/docs/build-with-claude/prompt-caching|Anthropic Prompt Caching}
+   * @defaultValue true
+   * @see {@link PromptCachingConfig}
+   * @see {@link https://platform.claude.com/docs/en/build-with-claude/prompt-caching|Anthropic Prompt Caching}
    */
-  promptCaching?: boolean;
+  promptCaching?: PromptCachingConfig;
 }
 
 /**
@@ -735,16 +799,12 @@ export interface AnthropicRegisterOptions extends BaseRegisterOptions {
   maxTokens?: number;
 
   /**
-   * Opt-in Anthropic prompt caching for all models created through the
-   * registry.
+   * Anthropic prompt caching for all models created through the registry.
    *
-   * When `true`, attaches `cache_control: { type: "ephemeral" }` to the
-   * system prompt block and the last tool definition.
-   *
-   * @defaultValue false
+   * @defaultValue true
    * @see {@link AnthropicProviderConfig.promptCaching}
    */
-  promptCaching?: boolean;
+  promptCaching?: PromptCachingConfig;
 }
 
 // =============================================================================
@@ -836,6 +896,13 @@ export interface StreamAccumulator {
    * the provider reports `completion_tokens_details.reasoning_tokens`.
    */
   usage?: LlmResponse["usageMetadata"];
+
+  /**
+   * Tokens written to the prompt cache, from the same usage chunk as
+   * {@link StreamAccumulator.usage}. Emitted as
+   * `customMetadata.cacheCreationTokenCount` on the final response.
+   */
+  cacheCreationTokens?: number;
 }
 
 /**

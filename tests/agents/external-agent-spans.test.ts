@@ -445,6 +445,32 @@ describe("ExternalAgent spans: one agent with a built-in tool", () => {
       }
     });
 
+    test("cache creation tokens go to customMetadata, merged with the scope and the agent's own metadata", async () => {
+      const events = await run([
+        { type: "output", content: "A" },
+        {
+          type: "completed",
+          usage: { ...usage, cacheCreationInputTokens: 7, scope: "run" },
+        },
+      ]);
+      const final = events.find((event) => textOf(event) === "A");
+      expect(final?.customMetadata?.cacheCreationTokenCount).toBe(7);
+      expect(final?.customMetadata?.externalAgentUsageScope).toBe("run");
+      // The agent's own stamp is kept, not replaced (mutant j').
+      expect(final?.customMetadata?.externalAgent).toBe(true);
+    });
+
+    test("usage without cache creation adds no cacheCreationTokenCount", async () => {
+      const events = await run([
+        { type: "output", content: "A" },
+        { type: "completed", usage },
+      ]);
+      const final = events.find((event) => textOf(event) === "A");
+      expect(final?.customMetadata).not.toHaveProperty(
+        "cacheCreationTokenCount",
+      );
+    });
+
     test("usage without a scope adds no scope metadata", async () => {
       const events = await run([
         { type: "output", content: "A" },

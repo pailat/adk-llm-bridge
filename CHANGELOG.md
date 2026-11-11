@@ -675,6 +675,16 @@ from the 0.6.0 tag.
 
 ### Added
 
+- **Prompt caching for Anthropic models** (see [Prompt caching](./docs/prompt-caching.md)):
+  a `promptCaching` option, `boolean | { ttl?: "5m" | "1h" }`, on `AnthropicProviderConfig`,
+  `AIGatewayProviderConfig` and `OpenRouterProviderConfig`, and on their register options.
+  - cache writes are reported in `customMetadata.cacheCreationTokenCount` (Anthropic,
+    AI Gateway, OpenRouter, `ExternalAgent`) and on the model-call span as
+    `gen_ai.usage.cache_creation.input_tokens`; reads also set
+    `gen_ai.usage.cache_read.input_tokens`;
+  - `AgentInvocationUsage.cacheCreationTokens` and `WorkflowStepUsage.cacheCreationTokens`
+    (optional, absent when no provider reported a write; old checkpoints still load).
+
 - Workflow replay records the model each step's agent requested (`model.requested`
   on the checkpoint step) and reports a change on a replayed or resumed step: a
   `step_model_changed` event and a `WORKFLOW_STEP_MODEL_CHANGED` warning.
@@ -1093,6 +1103,18 @@ from the 0.6.0 tag.
   `savedAttempts`.
 
 ### Changed
+
+- **Prompt caching is on by default for Anthropic models** (fixes zero cache reads on
+  AI Gateway, where every turn paid the full prompt again):
+  - native `AnthropicLlm`: `promptCaching` was opt-in and marked only the system block and
+    the last tool; it is now on and also marks the last message block, so later turns read
+    earlier turns from the cache;
+  - AI Gateway `anthropic/*`: sends `providerOptions.gateway.caching = "auto"`;
+  - OpenRouter stays opt-in (`promptCaching: true`), and OpenAI, xAI and custom endpoints
+    are unchanged;
+  - a cache write costs 1.25x the input price and a read 0.1x or less, so it pays off from
+    the second turn; one-shot calls that are never reused pay the 25% write surcharge on
+    the cached part: set `promptCaching: false` for them.
 
 - **`ExternalAgent` no longer drops ADK tools silently** (see
   [Read-only agents and host tools](./docs/external-agent-isolation.md#read-only-agents-and-host-tools)):

@@ -15,6 +15,7 @@ import {
   type ToolUnion,
 } from "@google/adk";
 import type { Content } from "@google/genai";
+import { withCacheCreation } from "../converters/cache-usage.js";
 import { parseJson } from "../utils/json.js";
 import { LogCode, warn } from "../utils/log.js";
 import type { ExternalAgentCredentialProvider } from "./auth/credential-provider.js";
@@ -1026,6 +1027,17 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
             const usageMetadata = usageMetadataFor(event.usage);
             if (heldFinal && usageMetadata) {
               heldFinal.usageMetadata = usageMetadata;
+            }
+            // genai usage metadata has no cache-write field either: it rides
+            // on customMetadata, merged with what the event already carries.
+            if (
+              heldFinal &&
+              typeof event.usage?.cacheCreationInputTokens === "number"
+            ) {
+              heldFinal.customMetadata = withCacheCreation(
+                heldFinal.customMetadata,
+                event.usage.cacheCreationInputTokens,
+              );
             }
             // genai usage metadata has no scope field: a session total is
             // labeled here so consumers do not add it to earlier runs.

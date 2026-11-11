@@ -580,6 +580,39 @@ describe("stored step usage", () => {
     expect(requiredResult(await completedCheckpoint()).usage).toBeUndefined();
   });
 
+  test("cacheCreationTokens is optional: an old usage loads, a valid one loads", async () => {
+    // `usage` is the pre-cacheCreationTokens shape.
+    expect("cacheCreationTokens" in usage).toBe(false);
+    expect(isWorkflowCheckpointV1(await withUsage(usage))).toBe(true);
+    expect(
+      isWorkflowCheckpointV1(
+        await withUsage({ ...usage, cacheCreationTokens: 0 }),
+      ),
+    ).toBe(true);
+    expect(
+      isWorkflowCheckpointV1(
+        await withUsage({ ...usage, cacheCreationTokens: 1200 }),
+      ),
+    ).toBe(true);
+  });
+
+  test("a bad cacheCreationTokens is rejected as corrupt", async () => {
+    for (const bad of [
+      "10",
+      -1,
+      null,
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      {},
+    ]) {
+      expect(
+        isWorkflowCheckpointV1(
+          await withUsage({ ...usage, cacheCreationTokens: bad }),
+        ),
+      ).toBe(false);
+    }
+  });
+
   test("a result whose usage is malformed is rejected as corrupt", async () => {
     const corrupt: Record<string, unknown> = {
       null: null,

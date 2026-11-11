@@ -10,6 +10,7 @@ import { FinishReason, type Part } from "@google/genai";
 import type OpenAI from "openai";
 import { PROVIDER_ERROR_NO_CHOICE } from "../core/provider-llm-error.js";
 import type { StreamAccumulator, StreamChunkResult } from "../types.js";
+import { withCacheCreation } from "./cache-usage.js";
 import { contentFilteredError, modelVersionOf } from "./finish.js";
 import {
   type MalformedToolCall,
@@ -123,9 +124,12 @@ export function convertResponse(response: OpenAI.ChatCompletion): LlmResponse {
     ? buildUsageMetadata(response.usage)
     : undefined;
   // Namespaced key so downstream code can read per-token logprobs.
-  const customMetadata = choice.logprobs?.content?.length
-    ? { logprobs: choice.logprobs }
-    : undefined;
+  const customMetadata = withCacheCreation(
+    choice.logprobs?.content?.length
+      ? { logprobs: choice.logprobs }
+      : undefined,
+    cacheWriteTokens(response.usage),
+  );
 
   const modelVersion = modelVersionOf(response.model);
 
@@ -262,6 +266,30 @@ function buildThoughtPart(source: unknown): Part | undefined {
 }
 
 /**
+ * Tokens written to the prompt cache, when the provider reports them:
+ * `prompt_tokens_details.cache_write_tokens` (OpenRouter) or the top-level
+ * `cache_creation_input_tokens` (AI Gateway, seen in a live probe). Absent or
+ * non-numeric: `undefined`.
+ *
+ * @internal
+ */
+function cacheWriteTokens(
+  usage: OpenAI.CompletionUsage | undefined,
+): number | undefined {
+  const details = usage?.prompt_tokens_details as
+    | { cache_write_tokens?: unknown }
+    | undefined;
+  for (const value of [
+    details?.cache_write_tokens,
+    (usage as { cache_creation_input_tokens?: unknown } | undefined)
+      ?.cache_creation_input_tokens,
+  ]) {
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+  }
+  return undefined;
+}
+
+/**
  * Maps an OpenAI usage object to ADK `usageMetadata`.
  *
  * `completion_tokens_details.reasoning_tokens` (present on reasoning models) is
@@ -353,6 +381,7 @@ export function convertStreamChunk(
   // carries the cumulative token usage — capture it without completing.
   if (chunk.usage) {
     acc.usage = buildUsageMetadata(chunk.usage);
+    acc.cacheCreationTokens = cacheWriteTokens(chunk.usage);
   }
   if (chunk.model) acc.model = chunk.model;
 
@@ -454,6 +483,10 @@ export function convertStreamChunk(
 
     const finishReason = mapOpenAIFinishReason(choice.finish_reason);
     const usageMetadata = acc.usage;
+    const customMetadata = withCacheCreation(
+      undefined,
+      acc.cacheCreationTokens,
+    );
     const modelVersion = modelVersionOf(acc.model);
 
     acc.text = "";
@@ -461,12 +494,14 @@ export function convertStreamChunk(
     acc.reasoningDetails.clear();
     acc.toolCalls.clear();
     acc.usage = undefined;
+    acc.cacheCreationTokens = undefined;
 
     if (malformed.length) {
       return {
         response: {
           ...malformedToolCallResponse(parts, malformed, {
             usageMetadata,
+            customMetadata,
             ...modelVersion,
           }),
           partial: false,
@@ -483,6 +518,7 @@ export function convertStreamChunk(
         finishReason,
         ...contentFilteredError(finishReason, parts.length > 0),
         usageMetadata,
+        customMetadata,
         ...modelVersion,
       },
       isComplete: true,
