@@ -499,6 +499,30 @@ in `~/.codex/config.toml` turns `--ask-for-approval never` into
 `on-request` with a model reviewer, which could grant a command outside the
 sandbox.
 
+### Planned changes
+
+0.8 is planned to replace the denylist with an allowlist of known-safe
+flags. Every other flag in `args` would then need
+`allowPolicyOverrideArgs: true`, as a policy flag does today. Flags that set
+or route the model stay refused even with the opt-in, as in 0.7.0 (see
+[Model](#model)). This is not in 0.7.0, and the 0.7.0 behavior above stays as
+it is.
+
+It would break a host that passes a flag outside the allowlist in the `args`
+of `ClaudeCliDriver` or `CodexCliDriver`. A host that passes no `args` is not
+affected. Set the model, the turn limit and the system prompt through the
+driver options (`model`, and `maxTurns` and `systemPrompt` on
+`ClaudeCliDriver`), not through `args`.
+
+What to do now:
+
+- List the flags you pass in `args`.
+- If a flag you need would be refused, open an issue in the repository naming
+  the flag and the CLI version, so it can join the allowlist.
+- Or build the driver with `allowPolicyOverrideArgs: true` knowingly: the
+  CLI's handling of a repeated flag then decides, and the run may not keep
+  the policy.
+
 ## Model
 
 On the built-in drivers, the driver's `model` option is the only model id the

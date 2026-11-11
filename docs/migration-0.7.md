@@ -710,6 +710,14 @@ Recommended for hosts:
 - Use **full model ids** (`claude-opus-5-5`, not `opus`), so a substituted
   model shows as a reported id that differs from the requested one.
 
+### Coming in 0.8
+
+0.8 is planned to replace the `args` denylist of `ClaudeCliDriver` and
+`CodexCliDriver` with an allowlist of known-safe flags. Any other flag would
+need `allowPolicyOverrideArgs: true`. See
+[Planned changes](./external-agent-isolation.md#planned-changes) for who is
+affected and what to do now.
+
 ## 7. Agent invocation gateway
 
 If you call `AgentInvocationGateway` (or `ToolGateway`) directly:

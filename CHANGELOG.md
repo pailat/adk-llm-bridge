@@ -1720,6 +1720,9 @@ from the 0.6.0 tag.
   case-insensitive built-in name match also applies to the start check, the
   `PreToolUse` hook and the `canUseTool` wrapper.
 - `docs/workflow-control-plane.md`: which error class carries which code type.
+- `docs/external-agent-isolation.md` and `docs/migration-0.7.md`: a "Planned
+  changes" note: 0.8 is planned to replace the CLI drivers' `args` denylist
+  with an allowlist, so other flags would need `allowPolicyOverrideArgs`.
 
 ## [0.6.0] - 2026-06-20
 
