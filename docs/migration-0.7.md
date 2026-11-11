@@ -118,8 +118,10 @@ Related behavior changes:
   `[adk-llm-bridge]` prefix and a stable code (for example
   `BUILTIN_TOOLS_DROPPED`). Use ADK's `setLogger` / `setLogLevel` to capture or
   silence them.
-- Invalid configuration (for example an empty API key or model id) throws
-  ADK's `InputValidationError`. Credentials are redacted from the message.
+- Invalid configuration (for example a missing API key or an empty model id)
+  throws ADK's `InputValidationError`. Credentials are redacted from the
+  message. A blank `apiKey` counts as missing (see below), so it throws only
+  when no global key or environment variable supplies one.
 - **Integer options are checked.** `timeout`, `maxRetries` and Anthropic
   `maxTokens` throw `InputValidationError` for a non-integer (for example
   `1500.5`, or `Number(process.env.X)` when X is unset, which is `NaN`), and
@@ -205,6 +207,11 @@ Related behavior changes:
 - For providers that require a key, a blank `apiKey` counts as unset, so a
   global key or the environment variable applies instead of an
   `API key is required` error.
+- **`normalizeSchema` keeps instance data and rejects arrays.** If you call it
+  yourself, `default`, `example`, `examples`, `enum` and `const` are copied
+  verbatim (it no longer rewrites a `type` string inside them), and an array
+  argument returns `undefined`. Handle `undefined` for any input that is not a
+  plain object.
 
 ## 5. Telemetry
 
@@ -581,6 +588,10 @@ new in 0.7.0. If you already use them, these changes apply:
   `AUTH_ERROR`; `overloaded` is `SERVER_ERROR`. Retry handlers that matched
   `CLAUDE_AGENT_SDK_ERROR` for these should match the new codes. The message
   is `<subtype>: <SDK text>`.
+- **Claude Agent SDK peer range.** The optional peer
+  `@anthropic-ai/claude-agent-sdk` is declared as `>=0.3.319 <0.4` (it was
+  `^0.3.183` in the 0.6.0 tag). If you use `ClaudeAgent` or
+  `ClaudeAgentSdkDriver`, install a version in that range.
 - **Missing SDKs and binaries.** A missing `@anthropic-ai/claude-agent-sdk`,
   `@openai/codex-sdk`, or `claude`/`codex`/`gemini` binary is now an error
   event (`EXTERNAL_AGENT_DEPENDENCY_MISSING` or `MISSING_BINARY`) with the
@@ -839,6 +850,22 @@ example `process.env.X === "true"`) before you pass it.
 See
 [Sub-agents need a driver that exposes them](./external-agent-isolation.md#sub-agents-need-a-driver-that-exposes-them).
 
+### Custom drivers and the placeholder driver
+
+- `CodexCliDriver.parseLine` now throws for a `codex exec --json` line that
+  carries no bridge event (lifecycle and unknown events), like the other CLI
+  drivers, instead of returning it as `output`. If you subclass the driver or
+  call `parseLine` yourself, switch to the new
+  `CodexCliDriver.parseEvent(line)`, which returns `undefined` for such lines,
+  or catch the throw.
+- `PlaceholderExternalAgentDriver` (what `ExternalAgent` runs when you pass no
+  `driver`) reports `EXTERNAL_AGENT_NOT_CONFIGURED` with `recoverable: false`,
+  so a retry does not help: pass a `driver` or use `CodexAgent`,
+  `ClaudeAgent` or `GeminiCliAgent`.
+- An unknown sub-agent or transfer target sets `RunSubAgentResult.errorKind` to
+  `"agent-error"`, and an error event with an empty `code` is reported as
+  `EXTERNAL_AGENT_ERROR`.
+
 ### Coming in 0.8
 
 0.8 is planned to replace the `args` denylist of `ClaudeCliDriver` and
@@ -871,6 +898,9 @@ If you call `AgentInvocationGateway` (or `ToolGateway`) directly:
   error event, and the gateway used to classify it as `"agent-error"`. Match on
   `errorKind`, not on the error text. Any other error event is still
   `"agent-error"`.
+- `AgentInvocationErrorKind` also has `"invalid-resume"`: a `resume` whose
+  input does not answer a pending interrupt now fails with it. An exhaustive
+  `switch` over the kind must handle it (and `"llm-calls-limit"`).
 
 ## 8. Workflows (`adk-llm-bridge/workflows`)
 
