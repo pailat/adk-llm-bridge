@@ -541,8 +541,55 @@ What the lookup cannot protect:
   inside a directory the agent can write (a host started from the repository
   the agent edits, with the default `workingDirectory`), the agent can change
   that binary or the installed packages themselves. Install the host outside
-  the workspace, or give the run a separate `workingDirectory`.
+  the workspace, or give the run a separate `workingDirectory`. The opt-in
+  `strictBinaryResolution` (below) refuses such a run instead.
 - With `full-access` the agent can write anywhere the host user can.
+
+### Strict binary resolution
+
+`ClaudeAgentSdkDriver` and `CodexSdkDriver` take `strictBinaryResolution:
+true` (default `false`). With it, when no explicit path is set and the lookup
+above finds nothing, the run is refused with `MISSING_BINARY` before the SDK
+starts if any of these overlaps the run's `workingDirectory` or
+`allowedPaths`, that is, it is at or under one of them or one of them is
+inside it (such as a package's `vendor` directory). Symlinks are resolved,
+and a symlink counts both where it lives and where it points:
+
+- the bridge's own install;
+- the SDK package (`@anthropic-ai/claude-agent-sdk`, `@openai/codex-sdk`) as
+  Node finds it from the bridge;
+- the packages the SDK takes its binary from: its installed platform
+  packages, and for Codex `@openai/codex` and its platform package.
+
+It is also refused when the SDK package cannot be located, since then nothing
+shows where the fallback would load from. The message names the location and
+the fix: set `pathToClaudeCodeExecutable` / `CLAUDE_CODE_EXECUTABLE` or
+`codexPathOverride` / `CODEX_EXECUTABLE` to a binary outside the workspace, or
+install the host outside it. `CodexSdkDriver` throws
+`EXTERNAL_AGENT_OPTION_UNSUPPORTED` when the option is combined with a
+prebuilt `sdk` client, whose binary it cannot check.
+
+```ts
+const driver = new ClaudeAgentSdkDriver({ strictBinaryResolution: true });
+```
+
+The mode narrows the hole, it does not close it:
+
+- It stops the SDK from starting a binary the agent could have replaced, but
+  an agent that can write the installed packages can still change the
+  JavaScript the host loads on its next start.
+- It checks the SDK package Node finds from the bridge's install. An SDK the
+  host passes in (`sdk` or `importSdk` for Claude, `Codex` or `importSdk` for
+  Codex) is not inspected, so it must come from that same install; an SDK
+  imported from a copy inside the workspace can still start the binary
+  bundled there.
+
+Only installing the host outside every directory the agent can write closes
+it. With the option on, the common setup "host started from the
+repository the agent edits, no global `claude` or `codex`" needs an explicit
+path. The CLI drivers do not need the option: they never fall back to a
+bundled binary, and with no binary outside the workspace they already end the
+run with `MISSING_BINARY`.
 
 The CLI drivers start `command` without a shell. With the built-in spawn a
 bare `command` (no path separator) is looked up on the child's `PATH`, but
@@ -850,5 +897,7 @@ any other code unchanged), so a stored code still compares:
 
 A failed delegation's `RunSubAgentResult` carries `error` and `errorKind`
 (`"aborted"`, `"llm-calls-limit"`, `"preparation"`, `"agent-error"` or
-`"invalid-resume"`). The registries throw `InputValidationError` from
+`"invalid-resume"`). `"llm-calls-limit"` covers both a thrown
+`LlmCallsLimitExceededError` and the error event a real `LlmAgent` yields when
+it goes over the shared `maxLlmCalls`. The registries throw `InputValidationError` from
 `@google/adk` for an empty provider id or an unknown provider.

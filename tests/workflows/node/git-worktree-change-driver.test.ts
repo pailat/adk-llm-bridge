@@ -55,6 +55,15 @@ interface TestRepository {
   driver: NodeGitWorktreeChangeDriver;
 }
 
+/**
+ * Command limit of the timeout test: well above what real Git needs, even
+ * with several test runs sharing one machine.
+ */
+const SLOW_HOST_COMMAND_TIMEOUT_MS = 2_000;
+
+/** Per-test deadline of the timeout test: the limit above plus ample room to provision. */
+const TIMEOUT_TEST_DEADLINE_MS = 15_000;
+
 async function createRepository(): Promise<TestRepository> {
   const root = await mkdtemp(join(tmpdir(), "adk-git-workflow-"));
   temporaryRoots.add(root);
@@ -1696,38 +1705,74 @@ describe("NodeGitWorktreeChangeDriver error codes", () => {
     );
   });
 
-  test("a Git command that runs past its timeout says so", async () => {
+  test(
+    "a Git command that runs past its timeout says so",
+    async () => {
+      // The limit applies to every Git command of the driver, `git worktree add`
+      // of `provision` included, and a worktree handle works only on the driver
+      // that issued it. So the limit is far above what real Git needs on a
+      // loaded host (a 200 ms limit failed provisioning there), and the fake Git
+      // sleeps far longer than the limit.
+      const repository = await createRepository();
+      const driver = await NodeGitWorktreeChangeDriver.create({
+        repoRoot: repository.repoRoot,
+        worktreesRoot: repository.worktreesRoot,
+        baseRevision: repository.baseRevision,
+        mutationJournal: repository.journal,
+        commandTimeoutMs: SLOW_HOST_COMMAND_TIMEOUT_MS,
+      });
+      const workspace = await driver.provision({
+        executionId: "execution-1",
+        taskId: "task-1",
+      });
+      const bin = await fakeGit(repository.root, "exec sleep 60");
+
+      const error = await withEnvironment({ PATH: bin }, () =>
+        driver.inspect(workspace.host, inspectionRequest(repository)),
+      ).then(
+        () => undefined,
+        (caught: unknown) => caught,
+      );
+      expect(error).toMatchObject({
+        name: "NodeGitWorktreeError",
+        code: "GIT_COMMAND_FAILED",
+      });
+      expect((error as Error).message).toContain(
+        `timed out after ${SLOW_HOST_COMMAND_TIMEOUT_MS} ms`,
+      );
+      // The test spends the limit (2 s) plus provisioning: state its own
+      // timeout, so Bun's 5 s default is not the margin on a loaded host.
+    },
+    TIMEOUT_TEST_DEADLINE_MS,
+  );
+
+  test("the limit of the timeout test lets provisioning finish when `git worktree` commands are slow", async () => {
+    // Guards the limit above: a Git whose `worktree` subcommands (`add`,
+    // `list`, ...) are slow (a loaded host) must not fail the provisioning
+    // that comes before the command under test. 300 ms is more than the
+    // 200 ms that used to fail.
     const repository = await createRepository();
     const driver = await NodeGitWorktreeChangeDriver.create({
       repoRoot: repository.repoRoot,
       worktreesRoot: repository.worktreesRoot,
       baseRevision: repository.baseRevision,
       mutationJournal: repository.journal,
-      commandTimeoutMs: 200,
+      commandTimeoutMs: SLOW_HOST_COMMAND_TIMEOUT_MS,
     });
-    const workspace = await driver.provision({
-      executionId: "execution-1",
-      taskId: "task-1",
-    });
-    const bin = await fakeGit(repository.root, "exec sleep 5");
-
-    const error = await withEnvironment({ PATH: bin }, () =>
-      driver.inspect(workspace.host, inspectionRequest(repository)),
-    ).then(
-      () => undefined,
-      (caught: unknown) => caught,
+    const bin = await fakeGit(
+      repository.root,
+      'if [ "$1" = worktree ]; then sleep 0.3; fi',
     );
-    expect(error).toMatchObject({
-      name: "NodeGitWorktreeError",
-      code: "GIT_COMMAND_FAILED",
-    });
-    expect((error as Error).message).toContain("timed out after 200 ms");
+    const workspace = await withEnvironment({ PATH: bin }, () =>
+      driver.provision({ executionId: "execution-1", taskId: "task-1" }),
+    );
+    expect(workspace.host.worktreePath).toBeString();
   });
 
   test("an abort during a Git command rejects with the signal's reason", async () => {
     const repository = await createRepository();
     const workspace = await provision(repository);
-    const bin = await fakeGit(repository.root, "exec sleep 5");
+    const bin = await fakeGit(repository.root, "exec sleep 30");
     const controller = new AbortController();
     const reason = new Error("caller stopped");
 

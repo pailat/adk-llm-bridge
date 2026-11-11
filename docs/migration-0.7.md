@@ -555,6 +555,17 @@ new in 0.7.0. If you already use them, these changes apply:
   (for example `resolve("node_modules/.bin/claude")`), or install the CLI
   outside the workspace. See
   [Missing dependencies](external-agent-isolation.md#missing-dependencies).
+- **Strict binary resolution (opt-in).** Nothing changes unless you set
+  `strictBinaryResolution: true` on `ClaudeAgentSdkDriver` or
+  `CodexSdkDriver`. With it, a run whose lookup finds no binary outside the
+  workspace is refused with `MISSING_BINARY` when the host install (the
+  bridge, the SDK or the package holding its binary) is inside the run's
+  `workingDirectory` or `allowedPaths`, instead of the SDK starting its
+  bundled binary from there. If your host runs from the repository the agent
+  edits, set `CLAUDE_CODE_EXECUTABLE` / `pathToClaudeCodeExecutable` or
+  `CODEX_EXECUTABLE` / `codexPathOverride` before turning it on. It cannot be
+  combined with a prebuilt Codex `sdk` client. See
+  [Strict binary resolution](external-agent-isolation.md#strict-binary-resolution).
 - **Background tasks are off for Claude runs.** `ClaudeAgentSdkDriver` and
   `ClaudeCliDriver` set `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`: a headless
   run ends at its result, and nothing would deliver a background task's
@@ -627,6 +638,11 @@ If you call `AgentInvocationGateway` (or `ToolGateway`) directly:
   `resume: { events: result.interrupt.events }`. The gateway trusts those
   events as given and does not guard against replay: resume each interrupt
   once, and keep the events where tools cannot write them.
+- `result.errorKind` is `"llm-calls-limit"` when a child `LlmAgent` goes over
+  the shared `RunConfig.maxLlmCalls` budget. ADK reports that overflow as an
+  error event, and the gateway used to classify it as `"agent-error"`. Match on
+  `errorKind`, not on the error text. Any other error event is still
+  `"agent-error"`.
 
 ## 8. Workflows (`adk-llm-bridge/workflows`)
 

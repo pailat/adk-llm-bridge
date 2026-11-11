@@ -79,6 +79,10 @@ import {
   stringValue,
   validateDriverConfig,
 } from "./shared.js";
+import {
+  type StrictBinaryCheck,
+  strictBinaryRefusal,
+} from "./strict-binary.js";
 
 /**
  * Most SDK sessions for which the driver keeps the last usage counters; the
@@ -345,6 +349,30 @@ export interface ClaudeAgentSdkDriverConfig {
   allowBackgroundTasks?: boolean;
 
   /**
+   * Opt-in: refuse a run with `MISSING_BINARY` instead of letting the SDK
+   * fall back to the Claude Code binary bundled with its install, when no
+   * executable was found outside the directories the agent can write and
+   * this package's install, the SDK package or its platform binary package
+   * is at or under the run's working directory or `allowedPaths` (symlinks
+   * resolved), or the SDK package cannot be located.
+   *
+   * @remarks
+   * An explicit `pathToClaudeCodeExecutable`, `CLAUDE_CODE_EXECUTABLE` or
+   * `CLAUDE_CODE_PATH` is used as given. Turning this on breaks a host
+   * started from the directory its agent edits without a global `claude`
+   * until one of those is set. It narrows the hole, it does not close it:
+   * an agent that can write the installed packages can still change the
+   * JavaScript the next host start loads (see the isolation guide). The check
+   * inspects the SDK package as Node finds it from this package's install;
+   * an SDK passed through `sdk` or `importSdk` is not inspected, so it must come from
+   * that same install. A writable root nested inside a checked package
+   * (for example its `vendor` directory) is refused too.
+   *
+   * @defaultValue false
+   */
+  strictBinaryResolution?: boolean;
+
+  /**
    * If set, the driver passes this session id to the Claude SDK
    * `options.resume` field and sends only the current user turn (not the full
    * ADK history) so the SDK appends to the resumed session instead of
@@ -472,6 +500,19 @@ export const CLAUDE_SESSION_STORE_MIRROR_ERROR =
 const BRIDGE_SUBAGENT_TOOL = `${BRIDGE_TOOL_PREFIX}run_adk_subagent`;
 
 /**
+ * What `strictBinaryResolution` checks for Claude: the SDK takes its binary
+ * from its own platform packages (its optional dependencies).
+ *
+ * @internal
+ */
+export const CLAUDE_STRICT_BINARY_CHECK: StrictBinaryCheck = {
+  runtime: "Claude Agent SDK",
+  sdkPackage: "@anthropic-ai/claude-agent-sdk",
+  option: "pathToClaudeCodeExecutable",
+  envVar: "CLAUDE_CODE_EXECUTABLE",
+};
+
+/**
  * Runs Claude Code through `@anthropic-ai/claude-agent-sdk` and maps its
  * messages to {@link ExternalAgentEvent}s.
  *
@@ -546,6 +587,7 @@ export class ClaudeAgentSdkDriver {
   readonly #allowUnsandboxedShell: boolean;
   readonly #allowLocalBinding: boolean;
   readonly #allowBackgroundTasks: boolean;
+  readonly #strictBinaryResolution: boolean;
   // Maps an ADK session id -> the SDK session id captured from the
   // first turn's system/init (or result) message. Subsequent turns of the same
   // ADK session pass it as `options.resume` and send only the newest user turn,
@@ -614,6 +656,7 @@ export class ClaudeAgentSdkDriver {
     this.#allowUnsandboxedShell = config.allowUnsandboxedShell ?? false;
     this.#allowLocalBinding = config.allowLocalBinding ?? false;
     this.#allowBackgroundTasks = config.allowBackgroundTasks ?? false;
+    this.#strictBinaryResolution = config.strictBinaryResolution ?? false;
   }
 
   /** The configured model id (`gen_ai.request.model`), if any. */
@@ -744,6 +787,10 @@ export class ClaudeAgentSdkDriver {
       // Inside the try: a missing SDK package becomes an error event, like
       // every other failure, instead of a throw out of the agent.
       const sdk = await this.loadSdk();
+      const strictRefusal = this.strictBinaryRefusal(request);
+      if (strictRefusal) {
+        throw strictRefusal;
+      }
       const prompt = this.buildPromptInput(request, resolvedResume);
       const built = await this.buildRunOptions(request, sdk, resolvedResume);
       let options = built.options;
@@ -1255,7 +1302,7 @@ export class ClaudeAgentSdkDriver {
    * explicit paths above are used as given. When nothing is found the SDK
    * looks for its own bundled binary next to its install; if that install
    * is inside the workspace, the agent can change it (see the isolation
-   * guide).
+   * guide), unless `strictBinaryResolution` refuses the run.
    *
    * @param request - The run request, for its credential, working directory
    * and permissions.
@@ -1277,6 +1324,29 @@ export class ClaudeAgentSdkDriver {
         executableSearchPaths: this.#executableSearchPaths,
         excluded: agentWritableRoots(request),
       }),
+    );
+  }
+
+  /**
+   * The `strictBinaryResolution` refusal for a run, if any.
+   *
+   * @param request - The run, for its working directory and permissions.
+   * @returns `MISSING_BINARY` when the option is on, no executable was found
+   * and the SDK's bundled-binary fallback could load from a directory the
+   * agent can write; otherwise `undefined`.
+   */
+  private strictBinaryRefusal(
+    request: ExternalAgentRunRequest,
+  ): ExternalAgentPolicyError | undefined {
+    if (
+      !this.#strictBinaryResolution ||
+      this.resolveClaudeExecutable(request).path !== undefined
+    ) {
+      return undefined;
+    }
+    return strictBinaryRefusal(
+      CLAUDE_STRICT_BINARY_CHECK,
+      agentWritableRoots(request),
     );
   }
 

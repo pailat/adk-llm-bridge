@@ -25,6 +25,7 @@ import {
 } from "./codex-mcp.js";
 import {
   dependencyMissing,
+  EXTERNAL_AGENT_OPTION_UNSUPPORTED,
   ExternalAgentPolicyError,
   networkUnenforceable,
   policyErrorEvent,
@@ -47,6 +48,10 @@ import {
   removeUndefined,
   stringValue,
 } from "./shared.js";
+import {
+  type StrictBinaryCheck,
+  strictBinaryRefusal,
+} from "./strict-binary.js";
 
 /**
  * Ambient environment variables forwarded from `this.#env` into the Codex SDK's
@@ -243,6 +248,29 @@ export interface CodexSdkDriverConfig {
    */
   allowUnenforcedPaths?: boolean;
   /**
+   * Opt-in: refuse a run with `MISSING_BINARY` instead of letting the SDK
+   * fall back to the Codex binary it finds next to its own install, when no
+   * binary was found outside the directories the agent can write and this
+   * package's install, `@openai/codex-sdk`, `@openai/codex` or its platform
+   * package is at or under the run's working directory or `allowedPaths`
+   * (symlinks resolved), or `@openai/codex-sdk` cannot be located.
+   *
+   * @remarks
+   * An explicit `codexPathOverride`, `CODEX_EXECUTABLE` or `CODEX_CLI_PATH`
+   * is used as given. A prebuilt `sdk` client cannot be checked, so the
+   * constructor throws `EXTERNAL_AGENT_OPTION_UNSUPPORTED` for the pair.
+   * It narrows the hole, it does not close it: an agent that can write the
+   * installed packages can still change the JavaScript the next host start
+   * loads (see the isolation guide). The check
+   * inspects the SDK package as Node finds it from this package's install;
+   * an SDK passed through `Codex` or `importSdk` is not inspected, so it must come from
+   * that same install. A writable root nested inside a checked package
+   * (for example its `vendor` directory) is refused too.
+   *
+   * @defaultValue false
+   */
+  strictBinaryResolution?: boolean;
+  /**
    * Lists Codex's host MCP servers. Without `allowNetwork: true` each listed
    * server, and each key of `config.mcp_servers`, is turned off through the
    * client's `configOverrides` (`mcp_servers.<name>.enabled=false`), because
@@ -259,6 +287,20 @@ export interface CodexSdkDriverConfig {
    */
   listMcpServers?: CodexMcpLister;
 }
+
+/**
+ * What `strictBinaryResolution` checks for Codex: `@openai/codex-sdk` takes
+ * its binary from `@openai/codex` and that package's platform package.
+ *
+ * @internal
+ */
+export const CODEX_STRICT_BINARY_CHECK: StrictBinaryCheck = {
+  runtime: "Codex",
+  sdkPackage: "@openai/codex-sdk",
+  binaryPackages: ["@openai/codex"],
+  option: "codexPathOverride",
+  envVar: "CODEX_EXECUTABLE",
+};
 
 /** How to install the Codex SDK, for the missing-dependency error. */
 const CODEX_SDK_INSTALL = "npm install @openai/codex-sdk";
@@ -302,9 +344,15 @@ export class CodexSdkDriver {
   readonly #threadStateKey: (agentName: string) => string;
   readonly #allowUnenforcedNetwork: boolean;
   readonly #allowUnenforcedPaths: boolean;
+  readonly #strictBinaryResolution: boolean;
   readonly #listMcpServers?: CodexMcpLister;
 
-  /** @param config - Driver options; all optional. */
+  /**
+   * @param config - Driver options; all optional.
+   * @throws {@link ExternalAgentPolicyError} with code
+   * `EXTERNAL_AGENT_OPTION_UNSUPPORTED` when `strictBinaryResolution` is
+   * set together with a prebuilt `sdk` client.
+   */
   constructor(config: CodexSdkDriverConfig = {}) {
     this.#sdk = config.sdk;
     this.#Codex = config.Codex;
@@ -322,6 +370,13 @@ export class CodexSdkDriver {
     this.#outputSchema = config.outputSchema;
     this.#allowUnenforcedNetwork = config.allowUnenforcedNetwork ?? false;
     this.#allowUnenforcedPaths = config.allowUnenforcedPaths ?? false;
+    this.#strictBinaryResolution = config.strictBinaryResolution ?? false;
+    if (this.#strictBinaryResolution && this.#sdk) {
+      throw new ExternalAgentPolicyError(
+        EXTERNAL_AGENT_OPTION_UNSUPPORTED,
+        "CodexSdkDriver: strictBinaryResolution cannot check the binary of a prebuilt sdk client. Let the driver build the client (pass Codex or nothing), or drop strictBinaryResolution.",
+      );
+    }
     this.#listMcpServers = config.listMcpServers;
     this.#threadStateKey =
       config.threadStateKey ?? ((agentName) => `codex_thread:${agentName}`);
@@ -410,6 +465,18 @@ export class CodexSdkDriver {
         return;
       }
       const binary = this.resolveCodexBinary(request);
+      const strictRefusal =
+        this.#strictBinaryResolution && binary.path === undefined
+          ? strictBinaryRefusal(
+              CODEX_STRICT_BINARY_CHECK,
+              agentWritableRoots(request),
+            )
+          : undefined;
+      if (strictRefusal) {
+        yield policyErrorEvent(strictRefusal);
+        yield { type: "completed", exitCode: 1, timestamp: Date.now() };
+        return;
+      }
       const missingBinary = () =>
         dependencyMissing(
           "binary",
@@ -682,7 +749,7 @@ export class CodexSdkDriver {
    * that needs the MCP listing is refused with `MISSING_BINARY`; otherwise
    * the SDK looks for its own bundled binary next to its install, which the
    * agent can change if that install is inside the workspace (see the
-   * isolation guide).
+   * isolation guide), unless `strictBinaryResolution` refuses the run.
    *
    * @param request - The run, for its credential, working directory and
    * permissions.

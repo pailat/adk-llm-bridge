@@ -72,7 +72,8 @@ export interface AgentInvocationExecutionSummary {
 /**
  * Machine-readable classification of {@link AgentInvocationResult.error}.
  * - `aborted`: the parent or request signal fired.
- * - `llm-calls-limit`: the shared `RunConfig.maxLlmCalls` budget was exhausted.
+ * - `llm-calls-limit`: the shared `RunConfig.maxLlmCalls` budget was exhausted (a thrown
+ *   `LlmCallsLimitExceededError`, or the error event `LlmAgent` yields for it).
  * - `preparation`: `prepareContext` rejected.
  * - `agent-error`: resolution failed or the agent emitted/threw an error.
  * - `invalid-resume`: `resume` did not match a pending interrupt.
@@ -404,7 +405,7 @@ export class AgentInvocationGateway {
         }
         await this.#eventSink?.(persisted, childContext);
         await request.eventSink?.(persisted, childContext);
-        countEvent(tally, persisted);
+        countEvent(tally, persisted, childContext);
       }
     } catch (caught) {
       recordFailure(tally, caught, "agent-error", signal);
@@ -595,7 +596,11 @@ function recordFailure(
 }
 
 /** Counts one persisted event's text, fallback output, calls, usage and error. */
-function countEvent(tally: RunTally, persisted: Event): void {
+function countEvent(
+  tally: RunTally,
+  persisted: Event,
+  context: InvocationContext,
+): void {
   const visible = persisted.partial ? undefined : extractVisibleText(persisted);
   if (visible) {
     tally.textEvents++;
@@ -617,8 +622,56 @@ function countEvent(tally: RunTally, persisted: Event): void {
   if (persisted.errorMessage) {
     tally.errors++;
     tally.error = persisted.errorMessage;
-    tally.errorKind = "agent-error";
+    tally.errorKind = isLlmCallsLimitEvent(persisted, context)
+      ? "llm-calls-limit"
+      : "agent-error";
   }
+}
+
+/**
+ * Whether an error event is `LlmAgent` reporting an exhausted `maxLlmCalls`.
+ *
+ * @remarks
+ * `LlmAgent` catches the `LlmCallsLimitExceededError` thrown by
+ * `incrementLlmCallCount()` and yields an error event instead of rethrowing
+ * (ADK 2.4, `LlmAgent.runAndHandleError`). The event has no typed marker, so
+ * all three signals must hold: `errorCode` `UNKNOWN_ERROR`, the message
+ * `Max number of llm calls limit of <maxLlmCalls> exceeded` with the run's own
+ * positive budget, and ADK's shared call counter over that budget (ADK
+ * increments it before it throws). The counter is a runtime-only field of the
+ * context; when it cannot be read as a number the answer is `false`, so a
+ * future ADK that renames it degrades to `agent-error`, never to a false limit.
+ */
+function isLlmCallsLimitEvent(
+  event: Event,
+  context: InvocationContext,
+): boolean {
+  const maxLlmCalls = context.runConfig?.maxLlmCalls;
+  if (typeof maxLlmCalls !== "number" || !(maxLlmCalls > 0)) {
+    return false;
+  }
+  if (
+    event.errorCode !== "UNKNOWN_ERROR" ||
+    event.errorMessage !==
+      `Max number of llm calls limit of ${maxLlmCalls} exceeded`
+  ) {
+    return false;
+  }
+  const calls = readLlmCallCount(context);
+  return calls !== undefined && calls > maxLlmCalls;
+}
+
+/** Reads ADK's shared LLM call counter, or `undefined` when it is not there. */
+function readLlmCallCount(context: InvocationContext): number | undefined {
+  const manager = (context as unknown as Record<string, unknown>)
+    .invocationCostManager;
+  if (typeof manager !== "object" || manager === null) {
+    return undefined;
+  }
+  const calls = (manager as Record<string, unknown>).numberOfLlmCalls;
+  return typeof calls === "number" && Number.isFinite(calls)
+    ? calls
+    : undefined;
 }
 
 /**
