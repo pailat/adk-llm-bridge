@@ -295,6 +295,7 @@ describe("built-in schemes for checkpoints", () => {
     expect(windowsDrivePath("C:/x")).toBe("C:/x");
   });
 
+  // The URL form of a drive path only exists on Windows.
   test.skipIf(process.platform !== "win32")(
     "file:///C:/dir, the URL form of a Windows path, returns the file-system provider",
     async () => {

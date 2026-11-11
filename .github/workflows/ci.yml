@@ -101,6 +101,7 @@ jobs:
       # differ on Windows). Both legs run even when the other fails, so one run
       # shows every failure.
       - name: File-system stores and lock protocol on NTFS under Bun
+        if: ${{ !cancelled() }}
         run: bun test ${{ env.FS_STORE_SUITES }}
       - name: File-system stores and lock protocol on NTFS under Node
         if: ${{ !cancelled() }}

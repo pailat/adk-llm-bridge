@@ -445,7 +445,7 @@ defineWorkflowStorageConformanceTests(cases, { test });
   transaction. Two hosts must not share one SQLite file. For several hosts, use an
   ADK database session service or your own provider.
 - The `file://` checkpoint provider has the same limit: `multiProcess` is true for
-  one host and one local file system. Known limitation: concurrent saves from
+  one host and one local file system, and false on Windows. Known limitation: concurrent saves from
   several processes on Windows are not yet supported
   ([#117](https://github.com/pailat/adk-llm-bridge/issues/117)).
 - The JSONL event exporter takes one writer per directory. A second writer is

@@ -663,9 +663,9 @@ describe("LeasedWorkflowCheckpointStore check-only loads", () => {
     }
   });
 
-  // Windows timers fire late enough for a 15 ms lease to lapse between
-  // renewals; tracked with the other Windows gaps in
-  // https://github.com/pailat/adk-llm-bridge/issues/117
+  // Skipped on Windows: under Node the other lease holder acquired the lease
+  // (the expected rejection did not happen), though under Bun it passed;
+  // cause not yet diagnosed, probably a late timer lapsing the 15 ms lease.
   test.skipIf(process.platform === "win32")(
     "a lease that has saved keeps renewing",
     async () => {

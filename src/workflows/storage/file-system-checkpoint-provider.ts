@@ -41,6 +41,20 @@ const FILE_FORMAT = "adk-llm-bridge/workflow-checkpoint-file";
 const MAX_CURSOR_LENGTH = 8192;
 // Room for the file envelope around a checkpoint at the size limit.
 const ENVELOPE_ALLOWANCE_BYTES = 4096;
+
+/**
+ * Whether the file-system checkpoint provider claims multi-process safety on a
+ * platform: true everywhere except Windows, which has no such guarantee yet
+ * (https://github.com/pailat/adk-llm-bridge/issues/117).
+ *
+ * @param platform - A `process.platform` value.
+ * @experimental
+ */
+export function fileSystemCheckpointMultiProcess(
+  platform: NodeJS.Platform,
+): boolean {
+  return platform !== "win32";
+}
 /**
  * Options of {@link FileSystemWorkflowCheckpointProvider}: those of
  * `FileSystemWorkflowCheckpointStore` plus the shared provider options.
@@ -72,7 +86,8 @@ export interface FileSystemWorkflowCheckpointProviderOptions
  * macOS and Linux are covered.
  *
  * Capabilities: `compareAndSet: "atomic"`, `durable: true`,
- * `multiProcess: true` (one host, one local file system), `listing: true`,
+ * `multiProcess: true` (one host, one local file system; `false` on Windows),
+ * `listing: true`,
  * `leases: false` and `pruning: false`. Leases and deletes need the
  * directory lock of the store, which this release does not expose.
  *
@@ -110,7 +125,7 @@ export class FileSystemWorkflowCheckpointProvider extends BaseWorkflowCheckpoint
       compareAndSet: "atomic",
       leases: false,
       durable: true,
-      multiProcess: true,
+      multiProcess: fileSystemCheckpointMultiProcess(process.platform),
       listing: true,
       pruning: false,
       maxCheckpointBytes: this.#maxBytes,

@@ -1125,7 +1125,8 @@ from the 0.6.0 tag.
   store does not change: it was `ADKSessionCheckpointStore` before this
   addition and still is; a provider is used only when you pass or select one.
   Known limitation: concurrent multi-process saves to the file-system
-  checkpoint provider are not yet supported on Windows
+  checkpoint provider are not yet supported on Windows, and its
+  `capabilities.multiProcess` is `false` there
   ([#117](https://github.com/pailat/adk-llm-bridge/issues/117)).
   On Windows the SQLite stores and the JSONL exporter set no owner-only mode and
   refuse symbolic links from `lstat`. The Claude SQLite session store now
@@ -1136,7 +1137,10 @@ from the 0.6.0 tag.
   flushes its directory with the same helper as the file-system stores: a
   failed directory flush after it creates or removes a file now fails the call
   instead of being ignored, except on Windows, which cannot flush a
-  directory. See
+  directory. The SQLite session store now sets `PRAGMA synchronous = FULL`
+  explicitly, and a storage URI longer than 8192 characters
+  (`MAX_WORKFLOW_STORAGE_URI_LENGTH`) is rejected with
+  `WORKFLOW_STORAGE_INVALID_URI`. See
   [Choosing storage providers](./docs/storage-providers.md) and
   [Workflow durability](./docs/workflow-durability.md).
 

@@ -159,7 +159,7 @@ A checkpoint store is a provider the host chooses. Each provider extends
 | Provider | `compareAndSet` | `leases` | `durable` | `multiProcess` |
 | --- | --- | --- | --- | --- |
 | `InMemoryWorkflowCheckpointStore` | `atomic` | yes | no | no |
-| `FileSystemWorkflowCheckpointProvider` | `atomic` | no | yes | yes, one host |
+| `FileSystemWorkflowCheckpointProvider` | `atomic` | no | yes | yes, one host; no on Windows ([#117](https://github.com/pailat/adk-llm-bridge/issues/117)) |
 | `SqliteWorkflowCheckpointStore` | `atomic` | yes | yes | yes, one host |
 | `AdkSessionServiceWorkflowCheckpointStore` over `DatabaseSessionService` | `atomic` | yes | yes | yes |
 | `AdkSessionServiceWorkflowCheckpointStore` over ADK's in-memory service | `advisory` | no | no | no |

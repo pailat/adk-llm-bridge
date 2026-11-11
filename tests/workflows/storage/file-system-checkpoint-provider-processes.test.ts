@@ -59,9 +59,11 @@ let startedChildren: { label: string; running: RunningChild }[] = [];
 
 /** A test that prints how each of its children ended when it fails. */
 function test(name: string, body: () => Promise<void>, timeoutMs: number) {
-  // Concurrent saves from several processes do not work on Windows yet (known
-  // limitation, https://github.com/pailat/adk-llm-bridge/issues/117); these
-  // tests keep running on macOS and Linux.
+  // Skipped on Windows; the tests keep running on macOS and Linux. The two
+  // concurrent-save tests: saves from several processes are not yet supported
+  // on Windows (https://github.com/pailat/adk-llm-bridge/issues/117). The kill
+  // test: it timed out there waiting for two acknowledged saves from the child
+  // (30 s); cause not yet diagnosed.
   bunTest.skipIf(process.platform === "win32")(
     name,
     async () => {

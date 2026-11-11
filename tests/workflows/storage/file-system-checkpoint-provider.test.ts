@@ -30,7 +30,10 @@ import {
   defineWorkflowStorageConformanceTests,
   workflowCheckpointStoreConformanceCases,
 } from "../../../src/workflows/storage/conformance/index.js";
-import { FileSystemWorkflowCheckpointProvider } from "../../../src/workflows/storage/file-system-checkpoint-provider.js";
+import {
+  FileSystemWorkflowCheckpointProvider,
+  fileSystemCheckpointMultiProcess,
+} from "../../../src/workflows/storage/file-system-checkpoint-provider.js";
 
 // The file-system store never reads the invocation context.
 const CONTEXT = undefined as unknown as InvocationContext;
@@ -136,11 +139,26 @@ describe("FileSystemWorkflowCheckpointProvider capabilities", () => {
     expect(provider.capabilities).toMatchObject({
       compareAndSet: "atomic",
       durable: true,
-      multiProcess: true,
+      multiProcess: process.platform !== "win32",
       listing: true,
       leases: false,
       pruning: false,
     });
+  });
+
+  test("claims multi-process safety on POSIX platforms and not on win32", () => {
+    expect(fileSystemCheckpointMultiProcess("win32")).toBe(false);
+    expect(fileSystemCheckpointMultiProcess("linux")).toBe(true);
+    expect(fileSystemCheckpointMultiProcess("darwin")).toBe(true);
+  });
+
+  test("the provider reports the multiProcess value of the running platform", async () => {
+    const provider = new FileSystemWorkflowCheckpointProvider({
+      root: await tempRoot(),
+    });
+    expect(provider.capabilities.multiProcess).toBe(
+      fileSystemCheckpointMultiProcess(process.platform),
+    );
   });
 
   test("leases, delete and prune reject with WORKFLOW_STORAGE_UNSUPPORTED", async () => {
