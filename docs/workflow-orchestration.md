@@ -66,6 +66,61 @@ lanes; dynamic child execution follows its declared delegation edge. A host
 that requires strict "dependency must be terminal" semantics must add that
 policy to its dispatcher.
 
+## Models of external agents
+
+`ExternalAgentWorkflowFactory` accepts `config.model` and forwards it to the
+provider's driver as the `model` option. The descriptor records it as `model`
+and the revision includes it, so changing the model changes the revision. The
+factory checks that the driver keeps exactly that id and registers nothing
+otherwise (`WORKFLOW_AGENT_MODEL_NOT_APPLIED`); a custom definition that turns
+an alias into a full id must be given the id the driver keeps.
+
+With `config.model`, the definition's `createDriver` receives `{ model }` (and
+`requireExplicitModel` when the factory has it), where it received no options
+before. A custom definition must **merge** these into its own defaults, not use
+them instead: `createDriver: (o) => new MyDriver({ ...hardening, ...o })`, not
+`new MyDriver(o ?? hardening)`. The second form silently drops `hardening` as
+soon as a request sets a model, and the factory cannot detect that, because the
+model is kept. The built-in definitions pass the options straight to the
+driver and are not affected.
+
+With `requireExplicitModel: true` on the factory, a request without
+`config.model` fails with `WORKFLOW_AGENT_MODEL_REQUIRED` before the driver is
+created. For the built-in ids `claude` and `gemini-cli` the factory also
+refuses router and default aliases itself (`default`, `best`, `opusplan`;
+`auto`, `auto-*`), whatever the definition forwards. For a custom provider id
+it cannot know the aliases: it relies on the driver refusing them and on the
+driver reporting a `model`. Pair it with full model ids and with the run spec's
+`allowedModels` and `allowedModelsByRole`.
+
+### Which models a step ran
+
+`step_started.requestedModel` names the model the step's agent was configured
+with, read before it runs: an external agent's driver `model`, an `LlmAgent`'s
+string or model instance, or the id an `LlmAgent` inherits from an ancestor
+`LlmAgent`. It is absent when the agent names none or its model cannot be read.
+
+`step_completed` carries `result.models` for every step whose agent names or
+reports a model:
+
+- `requested`: the ids the agents in the step were configured with;
+- `resolved`: the ids a trusted runtime reported (an external agent's
+  `externalAgentModel.resolved`, and the `modelVersion` of LLM responses);
+- `unknown`: `true` when some run in the step was not fully explicit and
+  reported: an external run with no requested model, with a status other than
+  `reported`, or with no model information; or an `LlmAgent` whose model is
+  inherited or cannot be read. A Codex or Gemini step is always `unknown`.
+
+Each id appears once, in the order first seen, nested workflow agents
+included. Agents nested inside the step's own agent (the children of an ADK
+`SequentialAgent` or `ParallelAgent`, an `LlmAgent`'s sub-agents) are read from
+the authors of the step's events: their requested ids are listed, an inherited
+model makes the step `unknown`, and so does an external child with no model
+info or an author the step's agent tree does not contain. An agent that runs but
+yields no event at all stays invisible. A replayed step returns the stored value. `models` is a record of
+what the runtimes said, not a guarantee: an alias remap or a mid-run fallback
+can still change what ran (see the external-agent isolation guide).
+
 ## Parallel steps and agent instances
 
 `ctx.parallel(...)` runs steps concurrently up to `maxConcurrency`, but one

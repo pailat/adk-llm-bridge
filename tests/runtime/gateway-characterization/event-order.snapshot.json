@@ -2176,7 +2176,8 @@
           "transcript",
           "events",
           "summary",
-          "usage"
+          "usage",
+          "models"
         ],
         "agentName": "first",
         "output": "first says hi",
@@ -2221,7 +2222,8 @@
           "transcript",
           "events",
           "summary",
-          "usage"
+          "usage",
+          "models"
         ],
         "agentName": "second",
         "output": "second says hi",
@@ -2267,6 +2269,7 @@
           "events",
           "summary",
           "usage",
+          "models",
           "error",
           "errorKind"
         ],
@@ -2342,6 +2345,7 @@
           "events",
           "summary",
           "usage",
+          "models",
           "stateDelta"
         ],
         "agentName": "middle",

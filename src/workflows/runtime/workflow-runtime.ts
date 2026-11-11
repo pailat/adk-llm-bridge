@@ -14,7 +14,10 @@ import type {
   AgentInvocationGateway,
   AgentInvocationResult,
 } from "../../runtime/agent-invocation-gateway.js";
-import { rootSessionOf } from "../../runtime/agent-invocation-gateway.js";
+import {
+  describeAgentModel,
+  rootSessionOf,
+} from "../../runtime/agent-invocation-gateway.js";
 import { parseJson } from "../../utils/json.js";
 import { warn } from "../../utils/log.js";
 import { isTempStateKey, withoutTempStateKeys } from "../../utils/state.js";
@@ -689,12 +692,14 @@ export class WorkflowRuntime {
               : prepared.resolution.action === "execute"
                 ? prepared.resolution.resumeReason
                 : undefined;
+          const requestedModel = describeAgentModel(declaredAgent).requested;
           await this.emitWorkflowEvent({
             ...this.envelope(),
             type: "step_started",
             step,
             attempt,
             ...(resumeReason === undefined ? {} : { resumeReason }),
+            ...(requestedModel === undefined ? {} : { requestedModel }),
           } satisfies WorkflowStepStartedEvent);
 
           const replay = await this.#hooks?.beforeAttempt?.(attemptContext);
@@ -1759,6 +1764,15 @@ function stepResult(
     events: invocation.events,
     ...stepStateDelta(invocation.stateDelta),
     usage: { ...invocation.usage },
+    ...(invocation.models
+      ? {
+          models: {
+            requested: [...invocation.models.requested],
+            resolved: [...invocation.models.resolved],
+            unknown: invocation.models.unknown,
+          },
+        }
+      : {}),
     attempts,
     startedAt,
     completedAt: Date.now(),

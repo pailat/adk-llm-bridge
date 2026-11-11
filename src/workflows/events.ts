@@ -43,6 +43,14 @@ export interface WorkflowStepStartedEvent extends WorkflowEventBase {
    * attempt was entered with.
    */
   resumeReason?: WorkflowStepResumeReason;
+  /**
+   * The model id the step's agent names, read before it runs: an external
+   * agent's driver `model`; an `LlmAgent`'s string or model instance, or the
+   * id it inherits from an ancestor `LlmAgent`. Absent when the agent names
+   * none or the model cannot be read. It is what was requested, not what ran:
+   * see `result.models` on `step_completed`.
+   */
+  requestedModel?: string;
 }
 
 /** A step finished successfully. */

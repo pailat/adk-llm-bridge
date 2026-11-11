@@ -105,6 +105,7 @@ export type {
   WorkflowStepFailure,
   WorkflowStepInputContent,
   WorkflowStepInterrupt,
+  WorkflowStepModels,
   WorkflowStepOutcome,
   WorkflowStepResult,
   WorkflowStepUsage,

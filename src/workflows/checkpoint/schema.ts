@@ -3,6 +3,7 @@ import type {
   WorkflowErrorCode,
   WorkflowSerializedError,
   WorkflowStepInterrupt,
+  WorkflowStepModels,
   WorkflowStepResult,
   WorkflowStepUsage,
 } from "../contracts.js";
@@ -487,7 +488,8 @@ function isStepResult(
       (value.contentFromOutput === true && value.content === undefined)) &&
     (value.stateDelta === undefined ||
       (isPlainRecord(value.stateDelta) && isJsonSafe(value.stateDelta))) &&
-    (value.usage === undefined || isWorkflowStepUsage(value.usage))
+    (value.usage === undefined || isWorkflowStepUsage(value.usage)) &&
+    (value.models === undefined || isWorkflowStepModels(value.models))
   );
 }
 
@@ -512,6 +514,28 @@ function isWorkflowStepUsage(value: unknown): value is WorkflowStepUsage {
       const count = value[field];
       return isFiniteNumber(count) && count >= 0;
     })
+  );
+}
+
+/**
+ * Whether a stored value is a {@link WorkflowStepModels}: exactly its three
+ * fields, two arrays of non-empty strings and a boolean. Results saved before
+ * models existed carry none and are accepted by the caller.
+ */
+function isWorkflowStepModels(value: unknown): value is WorkflowStepModels {
+  return (
+    isPlainRecord(value) &&
+    Object.keys(value).length === 3 &&
+    isModelIdList(value.requested) &&
+    isModelIdList(value.resolved) &&
+    typeof value.unknown === "boolean"
+  );
+}
+
+function isModelIdList(value: unknown): boolean {
+  return (
+    Array.isArray(value) &&
+    value.every((item) => typeof item === "string" && item.length > 0)
   );
 }
 

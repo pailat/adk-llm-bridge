@@ -92,6 +92,7 @@ export type {
   ExternalAgentCompletedEvent,
   ExternalAgentErrorEvent,
   ExternalAgentEvent,
+  ExternalAgentModelInfo,
   ExternalAgentModelUsage,
   ExternalAgentOutputEvent,
   ExternalAgentStartedEvent,

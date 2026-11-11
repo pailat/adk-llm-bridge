@@ -691,6 +691,26 @@ from the 0.6.0 tag.
   optional `validateLimits(limits)`; `ScriptWorkflowAgent` calls it when it is
   built, so a `stackBytes` above the maximum throws `WORKFLOW_DEFINITION_INVALID`
   at construction, not at the first run.
+- Workflow factory `config.model`: `ExternalAgentWorkflowFactory` forwards it
+  to the driver as the `model` option, checks it as applied
+  (`WORKFLOW_AGENT_MODEL_NOT_APPLIED`: nothing is registered when the driver
+  does not keep exactly that id) and records it in the agent descriptor and
+  the revision. An agent without a model keeps its revision. With a model, the
+  definition's `createDriver` receives `{ model }` (and `requireExplicitModel`)
+  where it received no options: a custom definition must merge them into its
+  own defaults.
+- `requireExplicitModel` on `ExternalAgentWorkflowFactory`: a request without
+  `config.model`, or with a router or default alias of a built-in provider id
+  (`claude`, `gemini-cli`), fails with `WORKFLOW_AGENT_MODEL_REQUIRED` before
+  the driver is created. The option is forwarded to the driver, whose refusal
+  is rethrown with the same code and the original as `cause`.
+- Run rules `allowedModelsByRole` (keys `architect`, `worker`, `integration`,
+  `critic`, `reviewer`) narrow `allowedModels` per role; a merge narrows each
+  key. A run spec with a missing, empty or blank agent or reviewer `model`
+  reports `RUN_SPEC_MODEL_REQUIRED` (it used to be a generic shape code).
+- Run spec model ids may end in one bracket suffix of letters and digits
+  (`opus[1m]`, `claude-opus-5-5[1m]`), in lanes, reviewers, `allowedModels`
+  and `allowedModelsByRole`; 256 characters in all.
 - `model` option on `CodexCliDriver` and `GeminiCliDriver`, sent as
   `--model=<id>` and reported as `gen_ai.request.model`.
 - `requireExplicitModel` on every built-in driver: refuses a driver without a
@@ -701,6 +721,18 @@ from the 0.6.0 tag.
   `EXTERNAL_AGENT_MODEL_REQUIRED` and `EXTERNAL_AGENT_MODEL_OVERRIDE`.
 - `ExternalAgentStartedEvent.modelRouting` (`"plan-mode"`), set on a Gemini
   CLI read-only run without a model.
+- `customMetadata.externalAgentModel` (`ExternalAgentModelInfo`: `requested`,
+  `resolved`, `status` of `reported`, `not-reported` or `unsupported`) on an
+  external agent run's final event, or its last error event when it has no
+  final text, and `modelVersion` on that event when a trusted runtime reported
+  the model. Only a driver with `reportsResolvedModel: true` is trusted, and a
+  `modelRouting: "plan-mode"` run is always `unsupported`.
+- Workflow `step_started.requestedModel`, and `step_completed`
+  `result.models` (`requested`, `resolved`, `unknown`) on every step whose
+  agent names or reports a model, also on `AgentInvocationResult.models`. A
+  Codex or Gemini step has an empty `resolved` and `unknown: true`, and so does
+  a step whose `LlmAgent` inherits its model. Checkpoints written before this
+  have no `models` and still load; a malformed `models` is rejected as corrupt.
 - **Run spec, `adk-llm-bridge/workflows/spec` (experimental).** Validation,
   planning and the JSON Schema of a lanes job submitted as data: `validateRunSpec`,
   `resolveRunPlan`, `mergeRunRules`, `layerRunSpecLanes`, `runSpecHash` and
