@@ -62,6 +62,7 @@ import {
   dependencyMissing,
   EXTERNAL_AGENT_ISOLATION_VIOLATED,
   EXTERNAL_AGENT_MISSING_BINARY,
+  EXTERNAL_AGENT_NO_RESULT,
   EXTERNAL_AGENT_NO_TURN,
   EXTERNAL_AGENT_PATHS_UNENFORCEABLE,
   EXTERNAL_AGENT_TOOL_NOT_OFFERED,
@@ -639,6 +640,9 @@ export const CLAUDE_STRICT_BINARY_CHECK: StrictBinaryCheck = {
  *   any turn activity does not end the run: the turn that runs the input
  *   follows. A stream that ends after only such results fails with
  *   `EXTERNAL_AGENT_NO_TURN` instead of completing empty.
+ * - A stream that ends with no result message at all (the child exited or
+ *   the pipe closed mid-run) fails with `EXTERNAL_AGENT_NO_RESULT` and exit
+ *   code 1, not a clean exit 0.
  */
 export class ClaudeAgentSdkDriver {
   /** Provider id of this driver (`claude`). */
@@ -821,7 +825,9 @@ export class ClaudeAgentSdkDriver {
    * @remarks
    * Never throws for run failures: they are reported as an `error` event and a
    * `completed` event with exit code 1. `started` is always emitted first (it
-   * waits for `system/init` to carry the resolved model).
+   * waits for `system/init` to carry the resolved model). A stream that ends
+   * with no `result` message ends with an `EXTERNAL_AGENT_NO_RESULT` error
+   * (`EXTERNAL_AGENT_NO_TURN` after only model-less results) and exit code 1.
    *
    * @param request - The run request (instruction, context, permissions,
    * credential, working directory, abort signal and bridge tools).
@@ -1026,6 +1032,18 @@ export class ClaudeAgentSdkDriver {
               yield startedEvent(initModel);
             }
             yield noTurnEvent(modelLessSession ?? resolvedResume);
+          } else if (
+            backgroundTasks.pending().length === 0 &&
+            !resolveAbortSignal(request)?.aborted
+          ) {
+            // No result message at all: the run was cut off. (Tasks still
+            // running are reported below, under their own error; a caller's
+            // abort is not a cut-off.)
+            failed = true;
+            if (!startedEmitted) {
+              yield startedEvent(initModel);
+            }
+            yield noResultEvent(resolvedResume);
           }
           break;
         }
@@ -2794,6 +2812,21 @@ function noTurnEvent(sessionId: string | undefined): ExternalAgentEvent {
     type: "error",
     message: `Claude Agent SDK: Claude Code ended the run without running the input: it wrote only a model-less result (success, num_turns 0, empty result)${sessionId ? ` in session ${sessionId}` : ""}, so the input was not worked on. A new run of the same input can work.`,
     code: EXTERNAL_AGENT_NO_TURN,
+    recoverable: true,
+    timestamp: Date.now(),
+  };
+}
+
+/**
+ * The error of a run whose stream ended with no result message.
+ *
+ * @param sessionId - The SDK session the run was in, if known.
+ */
+function noResultEvent(sessionId: string | undefined): ExternalAgentEvent {
+  return {
+    type: "error",
+    message: `Claude Agent SDK: the stream ended without a result message${sessionId ? ` in session ${sessionId}` : ""}, so the run has no outcome. Claude Code may have exited early. A new run of the same input can work.`,
+    code: EXTERNAL_AGENT_NO_RESULT,
     recoverable: true,
     timestamp: Date.now(),
   };

@@ -270,10 +270,11 @@ new in 0.7.0. If you already use them, these changes apply:
   silence them with ADK's `setLogLevel` or a custom logger. Code that
   switches on `SkippedTool.reason` must handle `in-model` and
   `request-processor`.
-- **CLI drivers no longer ignore `runtimeSession`.** Claude CLI, Codex CLI and
-  Gemini CLI end a run that sets `request.runtimeSession` with an
+- **CLI drivers no longer ignore `runtimeSession`.** Claude CLI, Codex CLI,
+  and Gemini CLI end a run that sets `request.runtimeSession` with an
   `EXTERNAL_AGENT_SESSIONS_UNSUPPORTED` error before starting the process. Drop
   `runtimeSession` for them, or use `ClaudeAgentSdkDriver` or `CodexSdkDriver`.
+  The new fx driver refuses it the same way.
 - **`ExternalAgentUsage.byModel` entries have no `scope`** (type
   `ExternalAgentModelUsage`); the usage's own `scope` covers them. The
   drivers never set one there.
@@ -633,6 +634,10 @@ new in 0.7.0. If you already use them, these changes apply:
   results, the run ends with `EXTERNAL_AGENT_NO_TURN` (recoverable) and exit
   code 1 instead of completing with empty output, so a workflow step fails
   instead of completing empty.
+- **A Claude Agent SDK stream with no result message fails.** When the
+  stream ends without any `result` message, the run ends with
+  `EXTERNAL_AGENT_NO_RESULT` (recoverable) and exit code 1 instead of a clean
+  exit 0, so a cut-off run no longer passes as a success.
 - **Private temp directory per Claude run.** Both Claude drivers create a
   fresh `0700` directory under `/tmp` for each run and set
   `CLAUDE_CODE_TMPDIR` to it and `TMPDIR` to the `claude-<uid>` directory

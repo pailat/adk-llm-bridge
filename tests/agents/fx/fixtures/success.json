@@ -1,0 +1,1 @@
+{"output":"ok","final_output":"ok","exit_code":0,"model":"anthropic/claude-haiku-5.5","resolved_provider":"anthropic","session_id":"","steps":0,"tool_calls":[],"usage":{"input_tokens":18782,"output_tokens":4,"cache_read_tokens":0,"cache_write_tokens":18778}}

@@ -46,6 +46,15 @@ export const EXTERNAL_AGENT_BACKGROUND_TASK_PENDING =
 export const EXTERNAL_AGENT_NO_TURN = "EXTERNAL_AGENT_NO_TURN";
 
 /**
+ * A Claude Agent SDK stream ended without any `result` message (the child
+ * exited or the pipe closed mid-run), so the run has no outcome to report.
+ * The run ends with exit code 1 instead of a clean exit 0. Recoverable: a new
+ * run of the same input can work. A stream that ended after only
+ * "model-less" results reports {@link EXTERNAL_AGENT_NO_TURN} instead.
+ */
+export const EXTERNAL_AGENT_NO_RESULT = "EXTERNAL_AGENT_NO_RESULT";
+
+/**
  * The policy does not set `allowNetwork: true` (network is off), and the
  * runtime cannot keep its
  * tools (shell commands, web tools, MCP servers) off the network in the
@@ -396,6 +405,7 @@ const BATCH_REMEDY = {
     "Set `command` to the codex.exe inside the @openai/codex package, for example node_modules\\@openai\\codex-win32-x64\\vendor\\x86_64-pc-windows-msvc\\bin\\codex.exe (win32-arm64 uses codex-win32-arm64 and aarch64-pc-windows-msvc).",
   gemini:
     "Gemini CLI has no native .exe: set `interpreter` to node (a native node.exe) and `entry` to the package's JavaScript entry, the file named by `bin.gemini` in @google/gemini-cli's package.json.",
+  fx: "Set `command` to a native fx.exe, not a batch shim.",
 } as const;
 
 /**
