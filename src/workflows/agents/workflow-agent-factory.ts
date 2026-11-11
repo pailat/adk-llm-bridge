@@ -51,6 +51,22 @@ export interface WorkflowExternalAgentConfig {
   workingDirectory?: string;
   /** Requested permission policy; must stay within the host's policy ceilings. */
   permissions?: ExternalAgentPermissionPolicy;
+  /**
+   * Model id the agent must run.
+   *
+   * @remarks
+   * Forwarded to the provider's driver as the `model` option, checked with the
+   * driver's model grammar, and recorded in the descriptor. It is not part of the revision: a model
+   * change is reported by the replay model check (`replay.modelChange`).
+   * The factory fails closed when the driver does not keep exactly this id
+   * (`WORKFLOW_AGENT_MODEL_NOT_APPLIED`), so a custom definition that turns an
+   * alias into a full id must be given the id the driver keeps. With
+   * `config.model`, the definition's `createDriver` receives `{ model }` (and
+   * `requireExplicitModel` when the factory has it) where it received no
+   * options before: a custom definition must merge these into its own
+   * defaults, not use them instead, or it loses those defaults.
+   */
+  model?: string;
 }
 
 /** Request to create a named agent for a registered provider. */
@@ -71,6 +87,8 @@ export interface WorkflowAgentDescriptor {
   name: string;
   /** Secret-free deterministic fingerprint of the effective agent config. */
   revision: string;
+  /** The requested model id; absent when the request named none. */
+  model?: string;
 }
 
 /** Host-only handle. The BaseAgent must never be serialized into a guest VM. */
@@ -123,9 +141,21 @@ export type WorkflowAgentFactoryErrorCode =
   | "WORKFLOW_AGENT_UNKNOWN_PROVIDER"
   | "WORKFLOW_AGENT_POLICY_EXCEEDED"
   | "WORKFLOW_AGENT_DUPLICATE_NAME"
-  | "WORKFLOW_AGENT_LIMIT_EXCEEDED";
+  | "WORKFLOW_AGENT_LIMIT_EXCEEDED"
+  | "WORKFLOW_AGENT_MODEL_REQUIRED"
+  | "WORKFLOW_AGENT_MODEL_NOT_APPLIED";
 
-/** Error thrown by workflow agent factories; branch on `code`. */
+/**
+ * Error thrown by workflow agent factories; branch on `code`.
+ *
+ * @remarks
+ * `WORKFLOW_AGENT_MODEL_REQUIRED`: the factory has `requireExplicitModel`
+ * and the request has no model, names a router or default alias of a built-in
+ * provider, or the driver reports no model or refuses the alias (the driver's
+ * error is the `cause`). `WORKFLOW_AGENT_MODEL_NOT_APPLIED`: the request has a
+ * model and the driver does not keep exactly that id, or the definition cannot
+ * take driver options. Nothing is registered in either case.
+ */
 export class WorkflowAgentFactoryError extends Error {
   /** Stable error code to branch on. */
   readonly code: WorkflowAgentFactoryErrorCode;
@@ -136,8 +166,9 @@ export class WorkflowAgentFactoryError extends Error {
     code: WorkflowAgentFactoryErrorCode,
     message: string,
     details?: Readonly<Record<string, unknown>>,
+    options?: { cause?: unknown },
   ) {
-    super(message);
+    super(message, options);
     this.name = "WorkflowAgentFactoryError";
     this.code = code;
     this.details = details;

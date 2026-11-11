@@ -458,6 +458,14 @@ To continue a run stopped by either bound, raise that limit in the definition
 (limits are not part of the checkpoint identity) and resume the same execution
 id: finished steps replay and the run goes on from where it stopped.
 
+## Stored step models
+
+A completed step's checkpoint result may carry `models` (`requested`,
+`resolved` as arrays of non-empty strings, `unknown` as a boolean), next to
+`usage`. A checkpoint written before 0.7, or for a step whose agent has no
+model information, has none and loads as before. A stored `models` that is not
+exactly that shape makes the checkpoint corrupt, like a malformed `usage`.
+
 ## Re-entered steps
 
 When a step runs again, the `step_started` event and the step record in the
@@ -477,6 +485,188 @@ waits and after it completes. A stored `resumeReason` outside the two values
 is rejected as `checkpoint_file_corrupt`. A `running` step is re-entered only
 when its `resumePolicy` is `retry`; otherwise the resume fails with
 `WORKFLOW_INDETERMINATE_STEP`.
+
+## Model and input changes on replayed steps
+
+A step's identity is its agent name, agent revision and input hash. Any
+difference is `WORKFLOW_STEP_MISMATCH`. The model is **not** identity:
+
+| Part | Role |
+| --- | --- |
+| `agentName`, `agentRevision`, input hash | Identity. A difference stops the run. |
+| `model.requested` | Recorded when each attempt starts. Reported when it changes, or compared in strict mode. |
+| `result.models` | Recorded when the step completes: `requested`, `resolved`, `unknown`. History only. |
+| `acceptances` | Audit entries of host-accepted changes on a completed step (see below). Audit only, never authority. |
+| Workflow input, version, script source | Identity of the whole execution. |
+
+A completed step's result is history: the model the checkpoint recorded
+produced it, and replaying it does not claim the new model did. Changing the
+model table to tune cost between runs is normal, so by default it is a report,
+not a stop. `agentRevision` stays the explicit, host-chosen "a different build
+must not replay" signal. `ExternalAgentWorkflowFactory` leaves its top-level
+`config.model` out of the revision for this reason.
+
+### Warn (default) and strict
+
+`replay: { modelChange: "warn" | "mismatch" }` on `WorkflowAgent` and
+`ScriptWorkflowAgent`:
+
+- `warn`: the step replays; the runtime emits `step_model_changed` and logs
+  `WORKFLOW_STEP_MODEL_CHANGED`. A replayed or resumed step whose checkpoint
+  has no model record (written before the field existed) cannot be compared:
+  it gets no event, and the turn logs one `WORKFLOW_STEP_MODEL_UNRECORDED`
+  with the count and the first ten step ids.
+- `mismatch`: the same situation throws `WORKFLOW_STEP_MISMATCH` with
+  `mismatch: ["model"]`, `savedRequestedModel` and `requestedModel`. Strict
+  mode needs both models known: a missing record, or an agent with no model,
+  also throws. Pair it with `requireExplicitModel` and full model ids, since an
+  alias hides a remap. An execution started before the field existed fails on
+  every reused step in strict mode: resume it in `warn` mode.
+
+Only a step whose saved outcome is reused is checked (a completed step, a
+recorded failure, a waiting step). A step that runs again uses the current
+model. Only the step's own agent is compared (see the residuals below).
+
+`WORKFLOW_STEP_MISMATCH` details name every differing part in `mismatch`, in
+the order `agentName`, `agentRevision`, `input`, `model`. When a host
+acceptance named another current value for a differing kind, the details also
+list that kind in `acceptanceToDoesNotMatch`. The details never carry input
+text, lengths of the input or any hint about where it changed.
+
+### Finding what changed in an input
+
+A step whose input changed after it completed (for example a prompt file read
+into the input was edited) stops with `mismatch: ["input"]`. To find the
+change, the checkpoint stores a fingerprint of each step input while
+`replay.inputDigest` is on (the default): `inputLength` for every step, and
+`inputDigest` (`chunkSize` and 2 to 32 digests of 12 hex characters) for an
+input longer than 256 UTF-16 code units. On a mismatch the host gets a hint:
+both lengths, the first differing window (a whole chunk) and a structural path
+such as `parts[2].text`, built only from a fixed list of `Content` field names
+(any other key is `?`). Truncation at a chunk boundary gives an empty window
+at the end of the current input. The window refers to
+`workflowStepInputCanonicalForm(input)`: read it locally with
+`.slice(start, end)`.
+
+The hint goes to **host-only** channels, never into the error: the mismatch
+details are saved as the execution's error and emitted in `step_failed` and
+`error` events, where a parent agent can read them.
+
+- `replay.onStepMismatch(hint)`: called once and awaited before the error is
+  thrown, so the host has the hint first. A callback that never settles holds
+  the turn, like any host hook. Its own errors are logged and ignored; the
+  mismatch is thrown regardless. The hint is `{ stepId, diff }`, where `diff`
+  is `{ available: true, savedLength, length, chunkSize?, firstDifference:
+  { start, end }, path? }` or `{ available: false, reason }`, with `reason`
+  `not-recorded` (an older or legacy-form step, saved without a fingerprint), `disabled` or
+  `inconclusive` (every compared chunk equal although the hashes differ).
+- Without a callback, a `WORKFLOW_STEP_MISMATCH_HINT` warning with the same
+  lengths, window and path. If your logs land where agents can read them (a
+  workspace `run.log`), set the callback or `inputDigest: false`.
+
+**Residual, exactly.**
+
+- At rest: for a multi-chunk input, an unsalted 48-bit digest per chunk of at
+  least 256 code units, at known offsets. A reader of the checkpoint can
+  confirm guesses one chunk at a time. That matters for a low-entropy secret in
+  an otherwise predictable chunk (a 6-digit code in a template chunk is about
+  10^6 hashes); the whole-input `inputHash` alone does not allow that unless
+  every other byte is known. The same reader already sees every completed
+  step's output.
+- At rest: `inputLength` is stored for every step while the option is on,
+  including single-chunk inputs, which store no digest.
+- Online: whoever sees the hint and can shape a step's input learns which chunk
+  first differs. Each guess costs a relaunch by the host, and the hint stays on
+  the host-only channels above.
+- Mitigations: keep secrets out of step inputs (credentials go through the
+  credential environment, not prompts); `replay.inputDigest: false` writes
+  nothing and the hint says `disabled`; a single-chunk input stores no digest.
+  There is no salt: one stored in the checkpoint would not stop its reader.
+- Only the step's own agent's requested model is compared. Models of nested
+  agents are recorded in `result.models` and shown as `savedResolvedModels`,
+  but a change in them neither warns nor fails strict mode. Put nested models
+  in the step agent's `agentRevision` if they must be identity.
+- Resolved models are not compared: nothing runs on a replay, so the current
+  resolved model is unknown.
+- The saved record keeps the model the step ran with, so after a warning it
+  still names the old model. A step that waited and resumes keeps the model its
+  attempt started with.
+
+### Accepting a known-equivalent change
+
+When the change is known to be equivalent (whitespace in a prompt file, a model
+swap you have checked), the host can keep a completed step's saved result with
+`replay.acceptChanges`. Do not edit the checkpoint.
+
+```ts
+const acceptChanges = parseWorkflowReplayAcceptances(
+  JSON.parse(await readFile(operatorFile, "utf8")), // a host-only file, see below
+);
+new WorkflowAgent({ ..., replay: { acceptChanges } });
+```
+
+Each entry is exact: `executionId`, `stepId`, `kind` (`input` or `model`),
+`from` (the saved value), `to` (the current value) and a `reason` (1 to 512
+characters, no control characters), plus an optional `approvedBy` label. For
+`input`, `from` and `to` are the `savedInputHash` and `inputHash` of the
+mismatch details. For `model`, they are model ids. There are no wildcards,
+prefixes or "accept all".
+
+- **Checked before any step runs.** Entries for this execution are matched to
+  the loaded checkpoint first. A step that does not exist or is not
+  `completed`, a `from` that is not the saved value, a `model` entry for a step
+  without a recorded model, or a step that would hold more than 32 accepted
+  changes fails the turn with `WORKFLOW_REPLAY_ACCEPTANCE_INVALID` (details:
+  `executionId`, `stepId`, `kind`, `reason`, `savedStatus`, `count`; never the
+  reason text). Nothing is saved: the execution keeps its status and resumes
+  with a corrected entry. Entries for other executions are ignored; their
+  count is logged at debug level (`WORKFLOW_REPLAY_ACCEPTANCE_OTHER_EXECUTION`),
+  so a typo in `executionId` is findable.
+- **Applied in one save.** When the step is reached, its agent name and
+  revision are unchanged and its current value equals `to`, the change and its
+  audit entry are saved together, then the step replays: `checkpoint_saved`,
+  `step_change_accepted`, `step_replayed`, and a `WORKFLOW_REPLAY_CHANGE_ACCEPTED`
+  warning. A failed save means no replay. A `to` that does not match is the
+  ordinary `WORKFLOW_STEP_MISMATCH`.
+- **What is recorded.** After an accepted input change, the step's `inputHash`
+  is the accepted input's hash (and its fingerprint is the new input's); the
+  audit entry keeps the old hash. An accepted model change leaves
+  `model.requested` as the step ran; the entry's `to` becomes the model every
+  later comparison uses.
+- **Idempotent.** A relaunch with the same entry is a no-op; without it the
+  step replays, because the saved value now equals the current one. An entry
+  this turn did not apply (a step not reached, or a value that did not change)
+  is logged once as `WORKFLOW_REPLAY_ACCEPTANCE_UNUSED`.
+- **Never acceptable:** agent name, agent revision, step status, workflow
+  input, workflow version and script source. The host owns the revision and
+  can set it back.
+
+**Where acceptances come from.** Acceptances must come from a host-only
+source: the operator's command line, or a file outside every agent's
+`workingDirectory`, `allowedPaths` and `readPaths`, outside every lane
+worktree, and writable only by the operator. No code check can tell where the
+host read them. An agent that can write the acceptance file can turn a changed
+input into a replay of the old result. Example: a review step's input is the
+code diff. An agent changes the code, then writes an acceptance from the old
+diff hash to the new one. On relaunch, the old PASS verdict replays for the new
+code, and the gate is defeated.
+
+- `approvedBy` is a label for the audit, not authentication. Nothing checks
+  it. Two-person approval is the host's job, before it builds the config.
+- Workflow code (a trusted handler or a sandboxed script), hooks, agents and
+  the run spec cannot add, change or read acceptances. The list is validated
+  and copied when the agent is built, so changing the caller's array later has
+  no effect.
+- The checkpoint store is trusted. Stored entries are audit, not authority: a
+  stored entry grants nothing on a later turn. Someone who can write the store
+  can forge any checkpoint anyway.
+- The `step_change_accepted` event carries the whole audit entry, reason and
+  full `from`/`to` included: give event consumers the same trust as the
+  checkpoint. The warning and the span event (`step_change_accepted`, with
+  kind, `from`, `to`, `approvedBy` and the reason length) never carry the
+  reason, and show an input digest only as `sha256:` and its first 12 hex
+  characters: an unsalted digest of a short input (a yes/no decision) can be
+  reversed by guessing. Model ids appear whole.
 
 ## Workspace leases and fencing
 

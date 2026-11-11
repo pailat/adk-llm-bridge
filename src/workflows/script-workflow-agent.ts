@@ -27,6 +27,8 @@ import { attachCause } from "./internal/error-support.js";
 import { WORKFLOW_AGENT_BRAND } from "./internal/workflow-agent-brand.js";
 import {
   invocationContextForNode,
+  type ResolvedWorkflowReplayOptions,
+  resolveReplayOptions,
   resolveRetryFailedSteps,
   type WorkflowNodeConfig,
   workflowAgentBaseConfig,
@@ -107,6 +109,7 @@ export class ScriptWorkflowAgent extends BaseAgent {
     | undefined;
   readonly #checkpointStore: WorkflowCheckpointStore | undefined;
   readonly #retryFailedSteps: boolean;
+  readonly #replay: ResolvedWorkflowReplayOptions;
   readonly #activeExecutions = new ActiveExecutions();
   readonly #resolveExecutionId: WorkflowExecutionIdResolver | undefined;
   readonly #runtimeHooks: WorkflowRuntimeHooks | undefined;
@@ -135,11 +138,13 @@ export class ScriptWorkflowAgent extends BaseAgent {
     this.#checkpointStore = config.checkpointStore;
     this.#resolveExecutionId = config.resolveExecutionId;
     this.#retryFailedSteps = resolveRetryFailedSteps(config);
+    this.#replay = resolveReplayOptions(config);
     this.#runtimeHooks = config.runtimeHooks;
     this.#workspace = config.workspace;
     this.#limits = mergeLimits(config.definition.limits, config.limits);
     this.#onEvent = config.onEvent;
     this.#scriptRuntime = config.runtime ?? new QuickJSSyncGeneratorRuntime();
+    this.#scriptRuntime.validateLimits?.(this.#limits);
     this.#declaredAgents = new Map(
       subAgents.map((agent) => [agent.name, agent]),
     );
@@ -192,6 +197,7 @@ export class ScriptWorkflowAgent extends BaseAgent {
             abortSignal: signal,
             structuredOutput: this.outputSchema !== undefined,
             retryFailedSteps: this.#retryFailedSteps,
+            replay: this.#replay,
           }),
         this.#activeExecutions,
       );

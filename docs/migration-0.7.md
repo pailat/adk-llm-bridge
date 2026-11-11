@@ -507,15 +507,26 @@ new in 0.7.0. If you already use them, these changes apply:
   Also refused, because they widen the run: Claude `--agents`, `--agent`,
   `--plugin-url`, `--permission-prompts`, `--worktree`/`-w`,
   `--remote-control`, `--cloud`, `--teleport`, `--environment`; Codex
-  `--approve-for-me`, `--dangerously-bypass-hook-trust`, `--worktree`, and a
+  `--approve-for-me` (and its hidden alias `--not-so-yolo`),
+  `--dangerously-bypass-hook-trust`, `--ignore-rules`, `--worktree`, and a
   `-c` override of `approvals_reviewer`, `default_permissions`, `permissions`
-  or `agents`. One-letter flag clusters such as `-pw` are split first. See
+  or `agents`. One-letter flag clusters such as `-pw` are split first.
+  `CodexCliDriver` also refuses a positional word (an entry that is neither
+  an option nor the value of the option before it, and `-` or `--`), which
+  `codex exec` would run as a subcommand such as `review` or `resume`, or
+  read as the prompt. Pass several images as `-i a.png -i b.png`, not
+  `-i a.png b.png`. See
   [External agent isolation](./external-agent-isolation.md#extra-args).
   Express the setting through the permission policy or a driver option
   instead, or build the driver with `allowPolicyOverrideArgs: true` to keep
   passing it (the CLI's handling of the repeated flag then decides, and the
   run may not keep the policy). A non-string entry throws
   `InputValidationError`.
+- **Codex SDK thread ids.** `CodexSdkDriver` refuses a thread id to resume
+  that starts with `-` (from `runtimeSession.id` or session state) with
+  `EXTERNAL_AGENT_OPTION_UNSUPPORTED`: codex would read it as an option.
+  Codex's own thread ids never start with `-`, so only a forged or corrupted
+  id is affected. Clear it from session state to start a new thread.
 - **Codex approvals reviewer.** `CodexCliDriver` and `CodexSdkDriver` pass
   `-c approvals_reviewer="user"` outside `full-access`, so an
   `approvals_reviewer = "auto_review"` in `~/.codex/config.toml` no longer
@@ -619,6 +630,103 @@ new in 0.7.0. If you already use them, these changes apply:
   entry runs; a custom `spawn` must keep the `cwd` and `env` it receives; see
   [Interpreter and entry](./external-agent-isolation.md#interpreter-and-entry).
 
+### Explicit models
+
+The external agent drivers now check their model, and nothing but the
+driver's `model` option may set it. See
+[Model](./external-agent-isolation.md#model).
+
+Breaking changes:
+
+- **`ClaudeCliDriver` blank `model`:** it now throws `ExternalAgentPolicyError`
+  (`EXTERNAL_AGENT_MODEL_INVALID`), not `InputValidationError`. Branch on
+  `code`. Other invalid option values (for example `maxTurns`) still throw
+  `InputValidationError`.
+- **`model: ""` on the Claude SDK or Codex SDK driver** now throws when the
+  driver is built. Before, the account, host or Codex default model ran.
+  Remove the key or set an id.
+- **Ids with whitespace or a leading `-`** now throw when the driver is
+  built.
+- **Model-setting `args`/`config`** are now refused, **even with
+  `allowPolicyOverrideArgs`**. That covers:
+  - Claude CLI `--model` and `--fallback-model`;
+  - Codex CLI `--model`/`-m`, `--oss`, `--local-provider`, `--profile`/`-p`,
+    and `-c`/`--config` keys `model`, `model_provider`, `model_providers`,
+    `oss_provider`, `openai_base_url`, `chatgpt_base_url`, `model_catalog_json`,
+    `model_catalog_url`, `profile` and `profiles`;
+  - those keys at any depth of the Codex SDK `config`.
+
+  Set the driver's `model` option instead. Fallback models and Codex
+  profiles are no longer reachable through the bridge. For another endpoint,
+  use the Codex SDK driver's `baseUrl` option.
+- **Custom provider definitions** whose `envAllowlist` forwards
+  `ANTHROPIC_MODEL`, `ANTHROPIC_DEFAULT_*_MODEL`, `ANTHROPIC_SMALL_FAST_MODEL`,
+  `CLAUDE_CODE_SUBAGENT_MODEL`, `GEMINI_MODEL`, `OPENAI_BASE_URL`,
+  `CODEX_OSS_BASE_URL` or `CODEX_OSS_PORT`: runs that would carry one are
+  refused. Remove the name and set `model`.
+- **Gemini read-only runs** (`--approval-mode=plan`, which may route turns to
+  another model) are refused when `model` is set or `requireExplicitModel` is
+  true (`EXTERNAL_AGENT_MODEL_OVERRIDE`). Choices:
+  - Run read-only **without** a model; the CLI then picks the model.
+  - Or switch to `ask` or `workspace-write` with a model. **These modes widen
+    permissions:** `ask` lets the agent write files after approval, and
+    `workspace-write` lets it write in the workspace without asking. Choose
+    them only if the agent may write.
+
+Opt-in behavior:
+
+- **`requireExplicitModel: true`** refuses a driver without a model, and
+  router or default aliases: Claude `default`, `best`, `opusplan` and
+  `opusplan[1m]`; Gemini `auto` and `auto-*`. Use a concrete id or a plain
+  alias (`opus`, `sonnet`).
+
+Not covered by the guarantee:
+
+- **Codex CLI and Gemini CLI users** who relied on `~/.codex/config.toml` or
+  `~/.gemini/settings.json` for the model: set `model` on the driver.
+  Without it the host file still decides. Codex also reads a trusted
+  workspace's `.codex/config.toml`, which the agent can write.
+- **Claude settings, agents and plugins you load on purpose**
+  (`inheritHostConfig`, `settingSources`, or `--settings`,
+  `--setting-sources`, `--agent`, `--agents`, `--plugin-dir` or
+  `--plugin-url` in `args` with `allowPolicyOverrideArgs`) can still remap,
+  restrict or replace the model (`availableModels`, `fallbackModel`,
+  settings `env`, a main-thread agent's `model`). With a full-id
+  `model`, the `started` event shows the model the run started with.
+- **A model mismatch is a reliable signal only with a full id.** With an
+  alias (`opus`), the requested and reported ids always differ. A settings
+  or env remap of the alias is therefore not detectable, and a mid-run
+  `fallbackModel` switch shows only in the usage per model.
+
+Event changes:
+
+- **`ClaudeCliDriver` `started`** now arrives with the first output line, so
+  it can carry the model of `system/init`. Its timestamp is still the start
+  of the run, and it is still the first event on every path.
+- **New fields.** An external agent's final event (or its last error event)
+  carries `customMetadata.externalAgentModel` and, when a trusted runtime
+  reported the model, `modelVersion`. Workflow `step_started` has
+  `requestedModel`, and `step_completed` `result.models`; the gateway's
+  `AgentInvocationResult` has `models`. Nothing existing changed shape. An
+  external agent's last error event is now delivered after any state-only event
+  that arrives right behind it (as the final text already was), so the model
+  info can ride on it. Checkpoints from before this change load without
+  `models`.
+
+Recommended for hosts:
+
+- Set `requireExplicitModel: true` on drivers.
+- Use **full model ids** (`claude-opus-5-5`, not `opus`), so a substituted
+  model shows as a reported id that differs from the requested one.
+
+### Coming in 0.8
+
+0.8 is planned to replace the `args` denylist of `ClaudeCliDriver` and
+`CodexCliDriver` with an allowlist of known-safe flags. Any other flag would
+need `allowPolicyOverrideArgs: true`. See
+[Planned changes](./external-agent-isolation.md#planned-changes) for who is
+affected and what to do now.
+
 ## 7. Agent invocation gateway
 
 If you call `AgentInvocationGateway` (or `ToolGateway`) directly:
@@ -668,6 +776,35 @@ checkpoints:
 - `ExternalAgentWorkflowFactory` checks `workingDirectoryRoots` on real
   paths: a `workingDirectory` or `allowedPaths` entry that leaves the roots
   through a symlink is rejected with `WORKFLOW_AGENT_POLICY_EXCEEDED`.
+- **Explicit models in the factory and in run specs** (see also
+  [Explicit models](#explicit-models) for the drivers):
+  - `config.model` is forwarded to the driver, recorded as
+    `descriptor.model`; it is not part of the revision (a model change is
+    reported by the replay model check, see
+    [Model and input changes on replayed steps](#model-and-input-changes-on-replayed-steps)).
+    The factory fails closed with
+    `WORKFLOW_AGENT_MODEL_NOT_APPLIED` when the driver does not keep exactly
+    that id, or the definition has no `createDriver`. A custom definition that
+    turns an alias into a full id must be given the id the driver keeps.
+  - With `config.model`, `createDriver` receives `{ model }` (and
+    `requireExplicitModel`) where it received no options before. **A custom
+    definition must merge these into its own defaults:**
+    `createDriver: (o) => new MyDriver({ ...hardening, ...o })`. A definition
+    written as `new MyDriver(o ?? hardening)` loses `hardening` as soon as a
+    request sets a model; the factory cannot detect it.
+  - `requireExplicitModel: true` on the factory refuses a request without a
+    model (`WORKFLOW_AGENT_MODEL_REQUIRED`), and a router or default alias for
+    the built-in ids `claude` and `gemini-cli`. For a custom provider id the
+    factory relies on the driver, which must refuse such aliases and report a
+    `model`.
+  - Run specs: a missing, empty or blank agent or reviewer `model` is
+    `RUN_SPEC_MODEL_REQUIRED` (before: `RUN_SPEC_MISSING_KEY`,
+    `RUN_SPEC_STRING_TOO_SHORT` or `RUN_SPEC_INVALID_FORMAT`). The run spec is
+    new in 0.7.0. A model id may end in one bracket suffix (`opus[1m]`).
+  - `allowedModelsByRole` narrows `allowedModels` per role. Nothing in the
+    bridge executes a `RunPlan`: the run-spec checks protect only hosts that
+    validate before they build agents, and the factory's `requireExplicitModel`
+    and the drivers' checks are the run-time guard.
 - If you call the workflow control plane with hand-built payloads: every
   payload is now validated first, and malformed ones fail with
   `WORKFLOW_CONTROL_INVALID_REQUEST` instead of a controller-specific code.
@@ -858,6 +995,56 @@ checkpoints:
   runs awake (`caffeinate -i` on macOS) and resume with the same execution id;
   see
   [Host sleep and wall-clock steps](./workflow-durability.md#host-sleep-and-wall-clock-steps).
+
+### Script sandbox stack limit
+
+- **`stackBytes` default is 32 KiB and the maximum is 32 KiB.** A script
+  workflow with a larger `stackBytes` (the default was 512 KiB) throws
+  `WORKFLOW_DEFINITION_INVALID` when its `ScriptWorkflowAgent` is built; remove
+  the override or set 32768 or less. `QUICKJS_MAX_STACK_BYTES` is exported from
+  `adk-llm-bridge/workflows`. The limit allows about 190 nested calls; flatten a
+  deeper recursion into a loop. A custom `WorkflowScriptRuntime` can implement
+  `validateLimits` to be checked at construction too.
+- **A host stack overflow resets the sandbox.** A script that exhausts the host
+  stack (for example `eval` of a deeply nested source) ends with
+  `WORKFLOW_LIMIT_EXCEEDED`. Other script sessions running at that moment fail
+  their next turn with `WORKFLOW_EXECUTION_ERROR`; start them again. See
+  [Script sandbox stack](./workflow-orchestration.md#script-sandbox-stack).
+
+### Model and input changes on replayed steps
+
+- Nothing breaks. Older checkpoints load: their steps have no model record and
+  no fingerprint, so a model change on them is not reported per step (the turn
+  logs one `WORKFLOW_STEP_MODEL_UNRECORDED` with the count) and an input hint
+  says `not-recorded` until the step runs again.
+- A changed model on a replayed step is now a `step_model_changed` event and a
+  `WORKFLOW_STEP_MODEL_CHANGED` warning; the saved result is still used. If you
+  match on events exhaustively, handle the new type.
+- `ExternalAgentWorkflowFactory` no longer puts `config.model` in the agent
+  revision. If you relied on a model change stopping replay, set
+  `replay: { modelChange: "mismatch" }` with `requireExplicitModel` and full
+  model ids, or put the model in `agentRevision` yourself.
+- Strict mode on an execution started before the upgrade fails on every reused
+  step, because the saved steps have no model record. Resume such executions in
+  the default `warn` mode.
+- Step inputs are fingerprinted by default (`inputLength`, and `inputDigest`
+  for inputs over 256 UTF-16 code units). Keep secrets out of step inputs, or
+  set `replay.inputDigest: false`; see the residual in the durability guide.
+- `WORKFLOW_STEP_MISMATCH` details gain `mismatch`. To see what changed in an
+  input, set `replay.onStepMismatch` (or read the
+  `WORKFLOW_STEP_MISMATCH_HINT` warning) and look at the window with
+  `workflowStepInputCanonicalForm(input).slice(start, end)`.
+- Recipe for an input that changed but is known to be equivalent (the
+  "edited a prompt file mid-run" case): read the hint to see what changed. If
+  it is equivalent, copy `savedInputHash` and `inputHash` from the mismatch
+  details into a `replay.acceptChanges` entry (`kind: "input"`, with a
+  reason), in an operator-only file, and relaunch. The step replays and the
+  checkpoint records the acceptance. Do not edit the checkpoint.
+- Acceptances come only from a host-only source: never read them from a file
+  inside an agent's `workingDirectory`, `allowedPaths` or `readPaths`, or a
+  lane worktree. An agent that can write that file can make a gate replay an
+  old verdict for changed code. The new event type `step_change_accepted` joins
+  `WorkflowEvent`; if you match on events exhaustively, handle it.
 
 ## 9. Deprecated names
 

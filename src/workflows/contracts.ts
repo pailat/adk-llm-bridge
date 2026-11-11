@@ -100,6 +100,30 @@ export interface WorkflowStepUsage {
   llmCalls: number;
 }
 
+/**
+ * The models of one step's agent run, JSON-safe.
+ *
+ * @remarks
+ * Collected over the successful attempt's non-partial events, nested agents
+ * included. Each id appears once, in first-seen order. Neither list is proof
+ * of what ran: `resolved` holds only what a trusted runtime reported (see
+ * `ExternalAgentModelInfo`), so a Codex or Gemini step has an empty
+ * `resolved` and `unknown: true`.
+ */
+export interface WorkflowStepModels {
+  /** Requested ids, unique, first-seen order, nested agents included. */
+  requested: string[];
+  /** Ids a trusted runtime reported: an external agent's resolved model and the `modelVersion` of LLM responses. */
+  resolved: string[];
+  /**
+   * True when any run in the step was not fully explicit and reported: an
+   * external run with no `requested`, a status other than `reported`, or no
+   * model info at all; or an `LlmAgent` whose model was inherited or could not
+   * be read.
+   */
+  unknown: boolean;
+}
+
 /** Successful result returned by `WorkflowContext.run`. */
 export interface WorkflowStepResult {
   /** Discriminator for {@link WorkflowStepOutcome}. */
@@ -127,6 +151,14 @@ export interface WorkflowStepResult {
    * checkpoint is rejected as corrupt.
    */
   usage?: WorkflowStepUsage;
+  /**
+   * The models of the successful attempt's agent run. Absent in checkpoints
+   * written before 0.7 and for a step whose agent has no model information.
+   * When present in a stored checkpoint it must hold `requested` and
+   * `resolved` as arrays of non-empty strings and `unknown` as a boolean, or
+   * the checkpoint is rejected as corrupt.
+   */
+  models?: WorkflowStepModels;
   /** Attempts used, including the successful one. */
   attempts: number;
   /** Epoch milliseconds when the step started. */
@@ -292,7 +324,12 @@ export interface WorkflowExecutionLimits {
   cpuTimeMs?: number;
   /** Sandbox heap limit in bytes. */
   memoryBytes?: number;
-  /** Sandbox stack limit in bytes. */
+  /**
+   * Sandbox stack limit in bytes. A value above 32768 (32 KiB) is refused with
+   * `WORKFLOW_DEFINITION_INVALID`: QuickJS runs on the host's own stack, and a
+   * larger limit lets the host overflow before QuickJS reports the limit,
+   * which leaks the runtime. 32 KiB allows about 190 nested calls.
+   */
   stackBytes?: number;
   /** Maximum script source size in bytes. */
   maxSourceBytes?: number;
@@ -311,7 +348,7 @@ export const DEFAULT_WORKFLOW_EXECUTION_LIMITS: Readonly<
   timeoutMs: 5 * 60 * 1000,
   cpuTimeMs: 5 * 1000,
   memoryBytes: 64 * 1024 * 1024,
-  stackBytes: 512 * 1024,
+  stackBytes: 32 * 1024,
   maxSourceBytes: 256 * 1024,
   maxMessageBytes: 1024 * 1024,
 });
@@ -399,6 +436,7 @@ export type WorkflowErrorCode =
   | "WORKFLOW_INDETERMINATE_STEP"
   | "WORKFLOW_INPUT_MISMATCH"
   | "WORKFLOW_LIMIT_EXCEEDED"
+  | "WORKFLOW_REPLAY_ACCEPTANCE_INVALID"
   | "WORKFLOW_SANDBOX_UNAVAILABLE"
   | "WORKFLOW_SCRIPT_INVALID"
   | "WORKFLOW_SOURCE_MISMATCH"

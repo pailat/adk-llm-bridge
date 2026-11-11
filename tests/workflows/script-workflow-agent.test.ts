@@ -29,7 +29,10 @@ import {
   WORKFLOW_SCRIPT_PROTOCOL,
   WORKFLOW_SCRIPT_PROTOCOL_VERSION,
 } from "../../src/workflows/sandbox/protocol.js";
-import { QUICKJS_SYNC_CAPABILITIES } from "../../src/workflows/sandbox/quickjs-generator-runtime.js";
+import {
+  QUICKJS_MAX_STACK_BYTES,
+  QUICKJS_SYNC_CAPABILITIES,
+} from "../../src/workflows/sandbox/quickjs-generator-runtime.js";
 import type {
   WorkflowScriptGeneratorSession,
   WorkflowScriptGeneratorTurn,
@@ -576,6 +579,53 @@ describe("ScriptWorkflowAgent", () => {
     controller.abort();
 
     await expect(execution).rejects.toMatchObject({ code: "WORKFLOW_ABORTED" });
+  });
+
+  test("refuses a stackBytes the runtime cannot honor when the agent is built", () => {
+    const build = (
+      limits: { stackBytes: number },
+      runtime?: WorkflowScriptRuntime,
+    ) =>
+      new ScriptWorkflowAgent({
+        name: "script_workflow",
+        definition: defineScriptWorkflow({
+          id: "stack-limit",
+          version: "1",
+          source: "return 1;",
+          limits,
+        }),
+        ...(runtime ? { runtime } : {}),
+      });
+
+    expect(() => build({ stackBytes: QUICKJS_MAX_STACK_BYTES + 1 })).toThrow(
+      expect.objectContaining({ code: "WORKFLOW_DEFINITION_INVALID" }),
+    );
+    expect(() => build({ stackBytes: QUICKJS_MAX_STACK_BYTES })).not.toThrow();
+
+    // A runtime without validateLimits is not checked at construction; it
+    // decides at createSession.
+    const unchecked: WorkflowScriptRuntime = {
+      capabilities: QUICKJS_SYNC_CAPABILITIES,
+      async createSession() {
+        throw new Error("not reached");
+      },
+    };
+    expect(() =>
+      build({ stackBytes: 8 * QUICKJS_MAX_STACK_BYTES }, unchecked),
+    ).not.toThrow();
+
+    // A runtime with validateLimits is asked with the merged limits.
+    const seen: unknown[] = [];
+    build(
+      { stackBytes: 1024 },
+      {
+        ...unchecked,
+        validateLimits: (limits) => {
+          seen.push(limits);
+        },
+      },
+    );
+    expect(seen).toEqual([{ stackBytes: 1024 }]);
   });
 
   test("surfaces a stable error when the injected sandbox is unavailable", async () => {

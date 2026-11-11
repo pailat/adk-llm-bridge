@@ -13,6 +13,29 @@ from the 0.6.0 tag.
 
 ### Breaking
 
+- **Model checks on the external agent drivers** (`EXTERNAL_AGENT_MODEL_*`,
+  see [Model](./docs/external-agent-isolation.md#model)):
+  - `ClaudeCliDriver` with a blank `model` throws `ExternalAgentPolicyError`
+    `EXTERNAL_AGENT_MODEL_INVALID` instead of `InputValidationError`.
+  - `ClaudeAgentSdkDriver` and `CodexSdkDriver` reject `model: ""` (it used to
+    run the default model silently), and every driver rejects ids with
+    whitespace or a leading `-` (`EXTERNAL_AGENT_MODEL_INVALID`).
+  - `args`/`config` that set, remap or route the model are refused even with
+    `allowPolicyOverrideArgs` (`EXTERNAL_AGENT_MODEL_OVERRIDE`): Claude CLI
+    `--model`, `--fallback-model`; Codex CLI `--model`/`-m`, `--oss`,
+    `--local-provider`, `--profile`/`-p`, and `-c` keys `model`,
+    `model_provider`, `model_providers`, `oss_provider`, `openai_base_url`,
+    `chatgpt_base_url`, `model_catalog_json`, `model_catalog_url`, `profile`,
+    `profiles`; the same keys anywhere in the Codex SDK `config`.
+  - A run whose environment would carry a model-selection variable
+    (`ANTHROPIC_MODEL`, `ANTHROPIC_DEFAULT_*_MODEL`,
+    `ANTHROPIC_SMALL_FAST_MODEL`, `CLAUDE_CODE_SUBAGENT_MODEL`,
+    `GEMINI_MODEL`, and for Codex `OPENAI_BASE_URL`, `CODEX_OSS_BASE_URL`,
+    `CODEX_OSS_PORT`) through a custom provider `envAllowlist` is refused
+    (`EXTERNAL_AGENT_MODEL_OVERRIDE`).
+  - `GeminiCliDriver` refuses a read-only run (`--approval-mode=plan`) when
+    `model` is set or `requireExplicitModel` is true, because plan mode may
+    route turns to another model (`EXTERNAL_AGENT_MODEL_OVERRIDE`).
 - **OpenAI-compatible `candidatesTokenCount` no longer includes reasoning
   tokens.** It is now `completion_tokens` minus
   `completion_tokens_details.reasoning_tokens`, as genai and Gemini define it,
@@ -438,11 +461,22 @@ from the 0.6.0 tag.
   widen the run another way: Claude `--agents`/`--agent` (subagents with their
   own tools and permission mode), `--plugin-url`, `--permission-prompts`,
   `--worktree`/`-w`, `--remote-control`, `--cloud`, `--teleport`,
-  `--environment`; Codex `--approve-for-me`, `--dangerously-bypass-hook-trust`,
-  `--worktree` and `-c` overrides of `approvals_reviewer`,
-  `default_permissions`, `permissions` and `agents`. One-letter flag clusters
-  (`-pw`, `-hs danger-full-access`) are split before the match. A test pins
-  the CLI versions the list was reviewed against.
+  `--environment`; Codex `--approve-for-me` (and its hidden alias
+  `--not-so-yolo`), `--dangerously-bypass-hook-trust`, `--ignore-rules`
+  (it drops the execpolicy rules), `--worktree` and `-c` overrides of
+  `approvals_reviewer`, `default_permissions`, `permissions` and `agents`.
+  One-letter flag clusters (`-pw`, `-hs danger-full-access`) are split
+  before the match. A test pins the CLI versions the list was reviewed
+  against. `CodexCliDriver` also refuses a positional word in `args` (an
+  entry that is not an option or an option's value, `-` and `--`): `codex
+  exec` would read it as a subcommand (`review`, `resume`, `fork`, `help`) or as
+  the prompt. Repeat `-i` for several images.
+- **`CodexSdkDriver` refuses a thread id that starts with `-`.** The SDK
+  passes the id to resume as its own argv entry after `resume`, where codex
+  reads `-`-prefixed entries as options, so an id from session state such as
+  `--dangerously-bypass-approvals-and-sandbox` would have changed the run's
+  policy. Such an id now ends the run with `EXTERNAL_AGENT_OPTION_UNSUPPORTED`
+  before anything starts.
 - **Codex runs pin the approvals reviewer.** `approvals_reviewer =
   "auto_review"` in `~/.codex/config.toml` turned the CLI's `--ask-for-approval
   never` into `on-request` with a model reviewer, which could approve a
@@ -639,6 +673,34 @@ from the 0.6.0 tag.
 
 ### Added
 
+- Workflow replay records the model each step's agent requested (`model.requested`
+  on the checkpoint step) and reports a change on a replayed or resumed step: a
+  `step_model_changed` event and a `WORKFLOW_STEP_MODEL_CHANGED` warning.
+  `replay.modelChange: "mismatch"` makes it a `WORKFLOW_STEP_MISMATCH` instead
+  (both models must be known). A saved step without a record is not compared;
+  the turn logs one `WORKFLOW_STEP_MODEL_UNRECORDED` with the count. See
+  [Model and input changes on replayed steps](docs/workflow-durability.md#model-and-input-changes-on-replayed-steps).
+- `WORKFLOW_STEP_MISMATCH` details gain `mismatch` (the differing parts). An
+  input mismatch also gives the host a hint (input lengths and the first
+  differing window of the canonical input, with a structural path, never
+  input text) through `replay.onStepMismatch` or a
+  `WORKFLOW_STEP_MISMATCH_HINT` warning, and never in events, the persisted
+  error or the checkpoint. It comes from a per-step input fingerprint
+  (`inputLength`, `inputDigest`); `replay.inputDigest: false` turns that off.
+  The new `workflowStepInputCanonicalForm()` returns the text the window
+  refers to. The residual of the fingerprint is documented in the durability
+  guide.
+- `replay.acceptChanges`: host-approved input or model changes for completed
+  steps, so a relaunch keeps a step's saved result after a known-equivalent
+  change. Each entry is bound to the execution, the step and the exact saved
+  and current values, with a reason; entries are checked against the
+  checkpoint before any step runs (`WORKFLOW_REPLAY_ACCEPTANCE_INVALID`, never
+  saved) and applied in one save with an audit entry on the step
+  (`acceptances`, `step_change_accepted`, `WORKFLOW_REPLAY_CHANGE_ACCEPTED`).
+  A relaunch with the same entry is a no-op. `parseWorkflowReplayAcceptances()`
+  validates an operator file. Acceptances must come from a host-only source,
+  never a file an agent can write; see
+  [Accepting a known-equivalent change](docs/workflow-durability.md#accepting-a-known-equivalent-change).
 - **Opt-in strict binary resolution for the SDK drivers.**
   `ClaudeAgentSdkDriver` and `CodexSdkDriver` take `strictBinaryResolution`
   (default `false`, behaviour unchanged). When it is on, no explicit path is
@@ -652,6 +714,54 @@ from the 0.6.0 tag.
   `sdk` client. It narrows the bundled-binary residual, it does not close
   it: the agent can still edit the installed JavaScript. See
   [Strict binary resolution](docs/external-agent-isolation.md#strict-binary-resolution).
+- `QUICKJS_MAX_STACK_BYTES` (32768) from `adk-llm-bridge/workflows`, the largest
+  `stackBytes` the bundled script runtime accepts. `WorkflowScriptRuntime` has an
+  optional `validateLimits(limits)`; `ScriptWorkflowAgent` calls it when it is
+  built, so a `stackBytes` above the maximum throws `WORKFLOW_DEFINITION_INVALID`
+  at construction, not at the first run.
+- Workflow factory `config.model`: `ExternalAgentWorkflowFactory` forwards it
+  to the driver as the `model` option, checks it as applied
+  (`WORKFLOW_AGENT_MODEL_NOT_APPLIED`: nothing is registered when the driver
+  does not keep exactly that id) and records it in the agent descriptor. The
+  revision leaves out the top-level `config.model`, so an agent keeps its
+  revision whatever model it names (see Changed below). With a model, the
+  definition's `createDriver` receives `{ model }` (and `requireExplicitModel`)
+  where it received no options: a custom definition must merge them into its
+  own defaults.
+- `requireExplicitModel` on `ExternalAgentWorkflowFactory`: a request without
+  `config.model`, or with a router or default alias of a built-in provider id
+  (`claude`, `gemini-cli`), fails with `WORKFLOW_AGENT_MODEL_REQUIRED` before
+  the driver is created. The option is forwarded to the driver, whose refusal
+  is rethrown with the same code and the original as `cause`.
+- Run rules `allowedModelsByRole` (keys `architect`, `worker`, `integration`,
+  `critic`, `reviewer`) narrow `allowedModels` per role; a merge narrows each
+  key. A run spec with a missing, empty or blank agent or reviewer `model`
+  reports `RUN_SPEC_MODEL_REQUIRED` (it used to be a generic shape code).
+- Run spec model ids may end in one bracket suffix of letters and digits
+  (`opus[1m]`, `claude-opus-5-5[1m]`), in lanes, reviewers, `allowedModels`
+  and `allowedModelsByRole`; 256 characters in all.
+- `model` option on `CodexCliDriver` and `GeminiCliDriver`, sent as
+  `--model=<id>` and reported as `gen_ai.request.model`.
+- `requireExplicitModel` on every built-in driver: refuses a driver without a
+  model or with a router/default alias (`default`, `best`, `opusplan`, Gemini
+  `auto`) with `EXTERNAL_AGENT_MODEL_REQUIRED`.
+- `ExternalAgentDriver.reportsResolvedModel` (`true` on the Claude drivers),
+  and the policy codes `EXTERNAL_AGENT_MODEL_INVALID`,
+  `EXTERNAL_AGENT_MODEL_REQUIRED` and `EXTERNAL_AGENT_MODEL_OVERRIDE`.
+- `ExternalAgentStartedEvent.modelRouting` (`"plan-mode"`), set on a Gemini
+  CLI read-only run without a model.
+- `customMetadata.externalAgentModel` (`ExternalAgentModelInfo`: `requested`,
+  `resolved`, `status` of `reported`, `not-reported` or `unsupported`) on an
+  external agent run's final event, or its last error event when it has no
+  final text, and `modelVersion` on that event when a trusted runtime reported
+  the model. Only a driver with `reportsResolvedModel: true` is trusted, and a
+  `modelRouting: "plan-mode"` run is always `unsupported`.
+- Workflow `step_started.requestedModel`, and `step_completed`
+  `result.models` (`requested`, `resolved`, `unknown`) on every step whose
+  agent names or reports a model, also on `AgentInvocationResult.models`. A
+  Codex or Gemini step has an empty `resolved` and `unknown: true`, and so does
+  a step whose `LlmAgent` inherits its model. Checkpoints written before this
+  have no `models` and still load; a malformed `models` is rejected as corrupt.
 - **Run spec, `adk-llm-bridge/workflows/spec` (experimental).** Validation,
   planning and the JSON Schema of a lanes job submitted as data: `validateRunSpec`,
   `resolveRunPlan`, `mergeRunRules`, `layerRunSpecLanes`, `runSpecHash` and
@@ -982,6 +1092,23 @@ from the 0.6.0 tag.
 
 ### Changed
 
+- **The script sandbox stack limit is lower and capped.**
+  `DEFAULT_WORKFLOW_EXECUTION_LIMITS.stackBytes` is 32 KiB (32768, was
+  512 KiB), and a script workflow whose `stackBytes` is above 32 KiB is refused
+  with `WORKFLOW_DEFINITION_INVALID`. With 512 KiB, ordinary deep recursion
+  overflowed the host stack before QuickJS reported its limit; see Fixed. At
+  32 KiB the 22 recursion patterns measured end in QuickJS's own limit error
+  (clean up to 64 KiB on Node 22, 24 and 26 and Bun), and a script gets about
+  190 nested calls. The limit does not cover the QuickJS parser: a deeply
+  nested source given to `eval` can exhaust the host stack from 32 KiB (24 KiB
+  on Bun). That case is contained, not prevented; see Fixed.
+- `ExternalAgentWorkflowFactory` leaves the top-level `config.model` out of the
+  agent revision: a model change no longer changes the revision (and so no
+  longer stops completed steps from replaying); it is reported by the replay
+  model check. A `model` key nested elsewhere in `config` stays in the revision.
+- The Claude CLI driver emits `started` on the first output line, with the
+  resolved model from `system/init` (still first on every path, including
+  failures before any output; the timestamp is still the start of the run).
 - Documented the code comment standard (docs/contributing/comments.md) and added
   check-comments and check-export-docs to ci and prepublishOnly: no internal
   tracking ids, valid TSDoc, no per-file license headers (LICENSE is the single
@@ -1132,6 +1259,24 @@ from the 0.6.0 tag.
 
 ### Fixed
 
+- **A script that exhausted the host stack could leave the sandbox unable to
+  run scripts.** QuickJS runs on the host's own stack inside a WebAssembly
+  module. When the host stack overflowed first (deep recursion under the old
+  512 KiB limit, or a deeply nested source given to `eval`), the host
+  `RangeError` unwound the module without freeing the guest's objects. Freeing
+  the runtime then asserted (`Aborted(Assertion failed:
+  list_empty(&rt->gc_obj_list)...)` on stderr) and the runtime stayed in the
+  process-wide module; after about fifteen such runs a healthy script failed to
+  start. Now any host stack overflow or WebAssembly abort, in a turn, in the
+  parser at set-up, while reading an error or while freeing the runtime, ends
+  that run with `WORKFLOW_LIMIT_EXCEEDED` (the message says the host stack was
+  exhausted and the sandbox was reset). The module is marked poisoned. Every
+  other session on it fails its next turn with `WORKFLOW_EXECUTION_ERROR`, a
+  new session never starts on it (`WORKFLOW_SANDBOX_UNAVAILABLE` when a custom
+  `loader` returns it again), and the default loader builds a new module for
+  the next session. One hostile overflow therefore fails the other live script
+  sessions of the process: they would otherwise run on a module whose heap may
+  be corrupted.
 - **Headless Claude runs no longer report success while their own background
   job is still running.** `ClaudeAgentSdkDriver` and `ClaudeCliDriver` set
   `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` for Claude Code, so the Bash tool
@@ -1668,6 +1813,9 @@ from the 0.6.0 tag.
   writers may run (rename the `.lock` directory away, then delete it; a
   recursive delete in place makes a concurrent writer fail with
   `checkpoint_lock_corrupt`).
+- `docs/external-agent-isolation.md` and `docs/migration-0.7.md`: a "Planned
+  changes" note: 0.8 is planned to replace the CLI drivers' `args` denylist
+  with an allowlist, so other flags would need `allowPolicyOverrideArgs`.
 
 ## [0.6.0] - 2026-06-20
 

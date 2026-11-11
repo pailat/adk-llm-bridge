@@ -139,6 +139,22 @@ function isAbort(error: unknown): boolean {
 }
 
 /**
+ * Adds an event to the active span, when there is one. Attributes must not
+ * carry step input, output or any other content.
+ *
+ * @internal
+ */
+export function recordWorkflowSpanEvent(
+  name: string,
+  attributes: Record<string, string | number | boolean>,
+): void {
+  const span = trace.getActiveSpan();
+  if (span !== undefined && typeof span.addEvent === "function") {
+    span.addEvent(name, attributes);
+  }
+}
+
+/**
  * Runs `fn` inside an `invoke_workflow <workflowName>` span.
  *
  * The span starts synchronously, so its parent is the span active when this is

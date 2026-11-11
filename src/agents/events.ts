@@ -16,12 +16,57 @@ export interface ExternalAgentStartedEvent {
   /** Id of the provider that is running. */
   providerId: string;
   /**
-   * Resolved model id when the runtime reports it (for example the Claude
-   * SDK `init.model` or the Codex thread model).
+   * Model id the runtime reports at the start of the run: the Claude
+   * main-loop model of `system/init` (Agent SDK and CLI). Drivers that do not
+   * set `reportsResolvedModel` may report one for diagnostics, and
+   * `ExternalAgent` ignores it then; Codex reports none. See
+   * {@link ExternalAgentModelInfo}.
    */
   model?: string;
+  /**
+   * Set when the runtime may route this run's turns to a model other than
+   * the requested one (Gemini CLI plan mode, the read-only mapping). The
+   * run's model status is then `unsupported`.
+   */
+  modelRouting?: "plan-mode";
   /** Epoch milliseconds when the event was produced. */
   timestamp?: number;
+}
+
+/** Key of {@link ExternalAgentModelInfo} in the `customMetadata` of an ADK event. */
+export const EXTERNAL_AGENT_MODEL_METADATA_KEY = "externalAgentModel";
+
+/**
+ * The model of one external agent run, as far as a trusted runtime tells.
+ *
+ * @remarks
+ * `ExternalAgent` writes it to `customMetadata.externalAgentModel` of the run's
+ * held final event, or of its last error event when the run has no final
+ * text. Partial events never carry it. Only a driver whose
+ * `reportsResolvedModel` is `true` has its reported model trusted, and a
+ * `started` event with `modelRouting: "plan-mode"` forces `unsupported`.
+ * Compare `requested` with `resolved` only for a full model id: an alias such
+ * as `opus` always differs from the full id the runtime reports.
+ */
+export interface ExternalAgentModelInfo {
+  /** The driver's configured `model`; absent when it had none (runtime or host default). */
+  requested?: string;
+  /**
+   * The model the runtime reported, set only with `status: "reported"`. For
+   * Claude this is the main-loop model at the start of the run (`system/init`);
+   * a mid-run fallback or refusal switch shows only in `usage.byModel`, not
+   * here.
+   */
+  resolved?: string;
+  /**
+   * `reported`: the driver sets `reportsResolvedModel: true` and the run's
+   * `started` or `completed` event carried a model.
+   * `not-reported`: the driver sets `reportsResolvedModel: true` and neither
+   * event carried one.
+   * `unsupported`: the driver does not set `reportsResolvedModel: true`, or the
+   * run is routed (`modelRouting`); any model on its events is ignored.
+   */
+  status: "reported" | "not-reported" | "unsupported";
 }
 
 /** Text produced by the runtime. */

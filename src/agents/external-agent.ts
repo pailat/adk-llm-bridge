@@ -35,9 +35,13 @@ import {
 import {
   EXTERNAL_AGENT_CONFIRMATION_UNUSED,
   EXTERNAL_AGENT_ERROR,
+  EXTERNAL_AGENT_MODEL_METADATA_KEY,
   EXTERNAL_AGENT_TOOL_CREDENTIAL_REQUIRED,
   EXTERNAL_AGENT_TOOL_RESULT_TOO_LARGE,
+  type ExternalAgentCompletedEvent,
   type ExternalAgentEvent,
+  type ExternalAgentModelInfo,
+  type ExternalAgentStartedEvent,
 } from "./events.js";
 import type { ExternalAgentDriver } from "./external-agent-driver.js";
 import { PlaceholderExternalAgentDriver } from "./external-agent-driver.js";
@@ -541,6 +545,10 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
     // event is never changed after it is pushed: the Runner may already have
     // stored it.
     let heldFinal: Event | undefined;
+    // The run's last error event is held the same way, so the model info can
+    // ride on it when the run has no final text.
+    let heldError: Event | undefined;
+    let startedEvent: ExternalAgentStartedEvent | undefined;
     // Events queued and events the consumer has taken back control after.
     // The Runner stores a non-partial event before it asks for the next one,
     // so once both counts match, everything queued so far is in the session.
@@ -565,6 +573,10 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
       if (heldFinal) {
         enqueue(heldFinal);
         heldFinal = undefined;
+      }
+      if (heldError) {
+        enqueue(heldError);
+        heldError = undefined;
       }
     };
     const push = (event: Event) => {
@@ -854,8 +866,20 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
           // it waits for EOF. Waiting for that EOF strands ADK's Runner even though the turn is
           // already complete. Breaking here calls return() on the driver iterator, which lets the
           // provider release its transport in finally.
+          if (event.type === "started") startedEvent = event;
           if (event.type === "completed") {
             tracer.onDriverEvent(event);
+            const modelInfo = modelInfoFor(this.driver, startedEvent, event);
+            const carrier = heldFinal ?? heldError;
+            if (carrier) {
+              carrier.customMetadata = {
+                ...carrier.customMetadata,
+                [EXTERNAL_AGENT_MODEL_METADATA_KEY]: modelInfo.info,
+              };
+              if (modelInfo.modelVersion !== undefined) {
+                carrier.modelVersion = modelInfo.modelVersion;
+              }
+            }
             const usageMetadata = usageMetadataFor(event.usage);
             if (heldFinal && usageMetadata) {
               heldFinal.usageMetadata = usageMetadata;
@@ -926,6 +950,9 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
             if (event.type === "output" && !event.partial) {
               flushHeld();
               heldFinal = adkEvent;
+            } else if (event.type === "error") {
+              flushHeld();
+              heldError = adkEvent;
             } else {
               push(adkEvent);
             }
@@ -1470,4 +1497,38 @@ function readableExternalEventTitle(
     case "completed":
       return `${agentName}: completed`;
   }
+}
+
+/**
+ * The model info of one run, from the driver and the run's `started` and
+ * `completed` events.
+ *
+ * @remarks
+ * A routed run (`modelRouting: "plan-mode"`) and a driver that does not set
+ * `reportsResolvedModel: true` are `unsupported`: whatever model their events
+ * carry is ignored. `modelVersion` is set only for `reported`.
+ */
+function modelInfoFor(
+  driver: ExternalAgentDriver,
+  started: ExternalAgentStartedEvent | undefined,
+  completed: ExternalAgentCompletedEvent,
+): { info: ExternalAgentModelInfo; modelVersion?: string } {
+  const requested =
+    typeof driver.model === "string" && driver.model.length > 0
+      ? { requested: driver.model }
+      : {};
+  if (started?.modelRouting === "plan-mode") {
+    return { info: { ...requested, status: "unsupported" } };
+  }
+  if (driver.reportsResolvedModel !== true) {
+    return { info: { ...requested, status: "unsupported" } };
+  }
+  const reported = completed.model ?? started?.model;
+  if (typeof reported === "string" && reported.length > 0) {
+    return {
+      info: { ...requested, resolved: reported, status: "reported" },
+      modelVersion: reported,
+    };
+  }
+  return { info: { ...requested, status: "not-reported" } };
 }

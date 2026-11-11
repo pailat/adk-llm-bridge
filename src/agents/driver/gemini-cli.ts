@@ -13,9 +13,17 @@ import type { AgentRuntimeCapabilities } from "../runtime/capabilities.js";
 import { resolveCliLaunch, validateLaunchConfig } from "./launch.js";
 import { collectTail, type LineSource, readLines } from "./lines.js";
 import {
+  assertModelOption,
+  GEMINI_MODEL_ENV,
+  GEMINI_PLAN_MODE_REASON,
+  MODEL_ALIAS_DENYLIST,
+  modelEnvRefusal,
+} from "./model.js";
+import {
   batchCommandRefusal,
   dependencyMissing,
-  type ExternalAgentPolicyError,
+  EXTERNAL_AGENT_MODEL_OVERRIDE,
+  ExternalAgentPolicyError,
   isCommandNotFound,
   networkUnenforceable,
   policyErrorEvent,
@@ -187,6 +195,29 @@ export interface GeminiCliDriverConfig {
    * @defaultValue false
    */
   allowUnenforcedPaths?: boolean;
+  /**
+   * Model id, sent as `--model=<id>` and reported as `gen_ai.request.model`.
+   * A string of 1 to 256 characters without whitespace or control
+   * characters, not starting with `-`; anything else is refused with
+   * `EXTERNAL_AGENT_MODEL_INVALID` when the driver is built.
+   *
+   * @remarks
+   * A read-only run (`--approval-mode=plan`) with a model is refused with
+   * `EXTERNAL_AGENT_MODEL_OVERRIDE`: plan mode may route turns to another
+   * model than `--model`. Run read-only without a model, or use another
+   * mode.
+   *
+   * @defaultValue the model of the host `~/.gemini/settings.json`, or Gemini
+   * CLI's default
+   */
+  model?: string;
+  /**
+   * Refuse to build the driver without a `model`, or with a router alias
+   * (`auto`, `auto-*`): `EXTERNAL_AGENT_MODEL_REQUIRED`.
+   *
+   * @defaultValue false
+   */
+  requireExplicitModel?: boolean;
 }
 
 function geminiCliMissing(): ExternalAgentPolicyError {
@@ -246,6 +277,8 @@ export class GeminiCliDriver extends SubprocessJsonlDriver {
   readonly #killGraceMs: number | undefined;
   readonly #allowUnenforcedNetwork: boolean;
   readonly #allowUnenforcedPaths: boolean;
+  readonly #model: string | undefined;
+  readonly #requireExplicitModel: boolean;
 
   /**
    * Creates a driver that runs the `gemini` CLI.
@@ -253,10 +286,20 @@ export class GeminiCliDriver extends SubprocessJsonlDriver {
    * @param config - Driver options; all optional.
    * @throws InputValidationError (from `@google/adk`) when `command` is empty or
    * `killGraceMs` is not a finite number of at least 0.
+   * @throws {@link ExternalAgentPolicyError} with code
+   * `EXTERNAL_AGENT_MODEL_INVALID` when `model` is not a model id, and
+   * `EXTERNAL_AGENT_MODEL_REQUIRED` when `requireExplicitModel` is set and
+   * `model` is absent or a router alias.
    */
   constructor(config: GeminiCliDriverConfig = {}) {
     validateDriverConfig("GeminiCliDriver", config);
     validateLaunchConfig("GeminiCliDriver", config);
+    const model = assertModelOption(
+      "GeminiCliDriver",
+      config.model,
+      config.requireExplicitModel ?? false,
+      MODEL_ALIAS_DENYLIST["gemini-cli"],
+    );
     super({
       providerId: GEMINI_CLI_PROVIDER.id,
       command:
@@ -272,6 +315,21 @@ export class GeminiCliDriver extends SubprocessJsonlDriver {
     this.#killGraceMs = config.killGraceMs;
     this.#allowUnenforcedNetwork = config.allowUnenforcedNetwork ?? false;
     this.#allowUnenforcedPaths = config.allowUnenforcedPaths ?? false;
+    this.#model = model;
+    this.#requireExplicitModel = config.requireExplicitModel ?? false;
+  }
+
+  /** The configured model id (`gen_ai.request.model`), if any. */
+  get model(): string | undefined {
+    return this.#model;
+  }
+
+  /**
+   * `false`: the model of Gemini's `init` line goes on `completed.model` for
+   * diagnostics, but is not trusted as the model the run used.
+   */
+  get reportsResolvedModel(): boolean {
+    return false;
   }
 
   /** Features this driver supports: streaming output and the permission policy mapped onto CLI flags. */
@@ -284,7 +342,11 @@ export class GeminiCliDriver extends SubprocessJsonlDriver {
    *
    * @remarks
    * The stream starts with `started`. A refused run yields one `error` event
-   * with the policy code and `completed` with `exitCode: 1`. A non-zero exit
+   * with the policy code and `completed` with `exitCode: 1`. A model variable
+   * (`GEMINI_MODEL`) in the run's environment is refused first, then a
+   * read-only run (plan mode) with a model or `requireExplicitModel`, both
+   * with `EXTERNAL_AGENT_MODEL_OVERRIDE`. A read-only run without a model
+   * starts with `modelRouting: "plan-mode"` on `started`. A non-zero exit
    * yields a `GEMINI_CLI_EXIT` error carrying the stderr tail before
    * `completed`; it is recoverable unless the text reports an auth, billing,
    * quota or missing-binary failure. If the
@@ -299,12 +361,23 @@ export class GeminiCliDriver extends SubprocessJsonlDriver {
     request: ExternalAgentRunRequest,
   ): AsyncIterable<ExternalAgentEvent> {
     const prompt = promptFromRequest(request);
-    const args = buildGeminiArgs(prompt, request.permissions);
+    const args = buildGeminiArgs(prompt, request.permissions, this.#model);
     const env = buildGeminiEnv(this.#env, request);
+    const envRefusal = modelEnvRefusal(
+      "GeminiCliDriver",
+      env,
+      GEMINI_MODEL_ENV,
+    );
+    const planMode = isGeminiPlanMode(request.permissions);
+    const planModeRefused =
+      planMode && (this.#model !== undefined || this.#requireExplicitModel);
 
     yield {
       type: "started",
       providerId: this.providerId,
+      ...(planMode && !planModeRefused && envRefusal === undefined
+        ? { modelRouting: "plan-mode" as const }
+        : {}),
       timestamp: Date.now(),
     };
 
@@ -313,6 +386,13 @@ export class GeminiCliDriver extends SubprocessJsonlDriver {
       return;
     }
     const refusal =
+      envRefusal ??
+      (planModeRefused
+        ? new ExternalAgentPolicyError(
+            EXTERNAL_AGENT_MODEL_OVERRIDE,
+            `GeminiCliDriver: ${GEMINI_PLAN_MODE_REASON}, so the model the bridge reports could be wrong. Run read-only without a model, or use the ask or workspace-write mode (both let the agent write files).`,
+          )
+        : undefined) ??
       unenforceablePathsRefusal(request.permissions, {
         runtime: "Gemini CLI",
         allowUnenforcedPaths: this.#allowUnenforcedPaths,
@@ -371,11 +451,12 @@ export class GeminiCliDriver extends SubprocessJsonlDriver {
       );
 
       const toolNames = new Map<string, string>();
+      const seen: GeminiRunState = {};
       for await (const line of readLines(child.stdout)) {
         if (signal?.aborted) {
           return;
         }
-        const event = this.parseGeminiLine(line, toolNames);
+        const event = this.parseGeminiLine(line, toolNames, seen);
         if (event) {
           yield event;
         }
@@ -402,8 +483,11 @@ export class GeminiCliDriver extends SubprocessJsonlDriver {
       if (signal?.aborted) {
         return;
       }
+      // The init model is for diagnostics: reportsResolvedModel is false.
+      const model =
+        seen.initModel === undefined ? {} : { model: seen.initModel };
       if (exitCode === 0) {
-        yield { type: "completed", exitCode, timestamp: Date.now() };
+        yield { type: "completed", exitCode, ...model, timestamp: Date.now() };
         return;
       }
 
@@ -413,7 +497,7 @@ export class GeminiCliDriver extends SubprocessJsonlDriver {
         stderr: stderrLines,
         code: "GEMINI_CLI_EXIT",
       });
-      yield { type: "completed", exitCode, timestamp: Date.now() };
+      yield { type: "completed", exitCode, ...model, timestamp: Date.now() };
     } finally {
       supervisor.release();
     }
@@ -425,12 +509,14 @@ export class GeminiCliDriver extends SubprocessJsonlDriver {
    * @param line - One line of stdout.
    * @param toolNames - Tool ids seen so far, to name later `tool_result`
    * events; the driver passes one map per run.
+   * @param seen - Run state the line may fill in: the `init` line's model.
    * @returns The event, or `undefined` for blank lines, non-JSON lines (logged
    * and skipped), echoed user messages and unknown event types.
    */
   parseGeminiLine(
     line: string,
     toolNames: Map<string, string> = new Map(),
+    seen: GeminiRunState = {},
   ): ExternalAgentEvent | undefined {
     const trimmed = line.trim();
     if (!trimmed) {
@@ -448,8 +534,29 @@ export class GeminiCliDriver extends SubprocessJsonlDriver {
       );
       return undefined;
     }
+    if (parsed.type === "init" && seen.initModel === undefined) {
+      seen.initModel = stringValue(parsed.model);
+    }
     return normalizeGeminiEvent(parsed as GeminiStreamEvent, toolNames);
   }
+}
+
+/** What a Gemini CLI run reads from its output besides events. */
+export interface GeminiRunState {
+  /** The `model` of the `init` line. */
+  initModel?: string;
+}
+
+/**
+ * Whether a policy maps to Gemini's plan mode (`--approval-mode=plan`, the
+ * read-only mapping).
+ */
+function isGeminiPlanMode(
+  permissions: ExternalAgentPermissionPolicy | undefined,
+): boolean {
+  return (
+    mapPermissionPolicyToFlags(permissions ?? { mode: "ask" }).readOnly === true
+  );
 }
 
 type GeminiStreamEvent = {
@@ -478,18 +585,22 @@ type GeminiStreamEvent = {
  *
  * @param prompt - The prompt text.
  * @param permissions - The policy; see {@link mapGeminiPermissionArgs}.
- * @returns `--prompt=<prompt> --output-format stream-json` followed by the
- * permission flags. The prompt is joined to its flag, so a prompt that starts
+ * @param model - The model id, if any.
+ * @returns `--prompt=<prompt> --output-format stream-json`, then
+ * `--model=<model>` when a model is given, then the permission flags. The
+ * prompt and the model are joined to their flags, so a value that starts
  * with `-` (for example `--yolo`) is never read as a flag.
  */
 export function buildGeminiArgs(
   prompt: string,
   permissions?: ExternalAgentPermissionPolicy,
+  model?: string,
 ): string[] {
   return [
     `--prompt=${prompt}`,
     "--output-format",
     "stream-json",
+    ...(model === undefined ? [] : [`--model=${model}`]),
     ...mapGeminiPermissionArgs(permissions),
   ];
 }

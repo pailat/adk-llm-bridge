@@ -672,13 +672,19 @@ describe("parseRunSpecShape: missing keys", () => {
         ["lanes", 1, key],
       );
     }
-    for (const key of ["providerId", "model", "mode", "tools"]) {
+    for (const key of ["providerId", "mode", "tools"]) {
       expectOne(
         broken((s) => delete s.lanes[0].agent[key]),
         "RUN_SPEC_MISSING_KEY",
         ["lanes", 0, "agent", key],
       );
     }
+    // A missing model has its own code, not the generic one.
+    expectOne(
+      broken((s) => delete s.lanes[0].agent.model),
+      "RUN_SPEC_MODEL_REQUIRED",
+      ["lanes", 0, "agent", "model"],
+    );
     expectOne(
       broken((s) => delete s.lanes[0].steps.testsFirst),
       "RUN_SPEC_MISSING_KEY",
@@ -699,7 +705,7 @@ describe("parseRunSpecShape: missing keys", () => {
     );
     expectOne(
       broken((s) => delete s.lanes[0].steps.review.model),
-      "RUN_SPEC_MISSING_KEY",
+      "RUN_SPEC_MODEL_REQUIRED",
       ["lanes", 0, "steps", "review", "model"],
     );
     expectOne(

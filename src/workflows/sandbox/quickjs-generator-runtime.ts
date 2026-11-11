@@ -14,7 +14,9 @@ import {
   WORKFLOW_SCRIPT_PROTOCOL_VERSION,
 } from "./protocol.js";
 import {
+  discardReleaseQuickJS,
   loadReleaseQuickJS,
+  type QuickJSModuleLike,
   type QuickJSModuleLoader,
   quickJSModule,
 } from "./quickjs-loader.js";
@@ -56,6 +58,21 @@ export interface QuickJSSyncGeneratorRuntimeOptions {
   limits?: WorkflowExecutionLimits;
   /** Test/diagnostic hook invoked after every created VM is disposed. */
   onDispose?: () => void;
+  /**
+   * Called with the module a run poisoned (a host stack overflow or a wasm
+   * assertion), so the loader can build a new one before the next session.
+   *
+   * @defaultValue Drops the cached release module of the default loader.
+   */
+  discardModule?: (module: QuickJSModuleLike) => void;
+  /**
+   * Largest `stackBytes` accepted. Only a test raises it, to force a host
+   * stack overflow.
+   *
+   * @internal
+   * @defaultValue {@link QUICKJS_MAX_STACK_BYTES}
+   */
+  maxStackBytes?: number;
 }
 
 function positiveInteger(name: string, value: number): number {
@@ -72,6 +89,7 @@ function positiveInteger(name: string, value: number): number {
 function resolveLimits(
   defaults: WorkflowExecutionLimits | undefined,
   overrides: WorkflowExecutionLimits | undefined,
+  maxStackBytes: number,
 ): Required<WorkflowExecutionLimits> {
   const resolved = {
     ...DEFAULT_WORKFLOW_EXECUTION_LIMITS,
@@ -80,6 +98,17 @@ function resolveLimits(
   };
   for (const [name, value] of Object.entries(resolved)) {
     positiveInteger(name, value);
+  }
+  if (resolved.stackBytes > maxStackBytes) {
+    throw new WorkflowError(
+      "WORKFLOW_DEFINITION_INVALID",
+      `stackBytes must not exceed ${maxStackBytes} bytes: a larger sandbox stack can overflow the host stack before QuickJS reports the limit`,
+      {
+        name: "stackBytes",
+        value: resolved.stackBytes,
+        maxBytes: maxStackBytes,
+      },
+    );
   }
   return resolved;
 }
@@ -122,6 +151,84 @@ function serializeMessage(value: unknown, maxBytes: number): string {
   return serialized;
 }
 
+/**
+ * Largest `stackBytes` a script workflow may ask for.
+ *
+ * @remarks
+ * QuickJS runs on the host's own stack inside the wasm module. Its own stack
+ * check (`stackBytes`) sees guest frames, not the native recursion of its
+ * parser or of `JSON`, so a host with a small stack can overflow first. The
+ * limit keeps ordinary deep recursion (the 22 patterns measured, see
+ * `docs/workflow-orchestration.md`) inside QuickJS, where it ends with a clean
+ * `WORKFLOW_LIMIT_EXCEEDED`. It does not make the host path impossible: a
+ * deeply nested source given to `eval` can still exhaust the host stack.
+ * Every host overflow is contained instead: the run ends with
+ * `WORKFLOW_LIMIT_EXCEEDED` and the module is poisoned (see
+ * {@link QuickJSSyncGeneratorRuntime}). A larger `stackBytes` is refused with
+ * `WORKFLOW_DEFINITION_INVALID`.
+ */
+export const QUICKJS_MAX_STACK_BYTES = 32 * 1024;
+
+/**
+ * Modules that a host stack overflow or a wasm abort left in an unknown state.
+ * The host `RangeError` unwinds the wasm without freeing the guest's objects
+ * and can stop inside the allocator, so no session runs on such a module.
+ */
+const poisonedModules = new WeakSet<object>();
+
+const POISONED_MESSAGE =
+  "The QuickJS sandbox was reset after a host stack overflow or a wasm abort";
+
+function isWasmAbort(error: unknown): boolean {
+  return (
+    error instanceof WebAssembly.RuntimeError ||
+    (error instanceof Error && /^Aborted\(/u.test(error.message))
+  );
+}
+
+/**
+ * Maps an error from a call into the wasm that means the host stack was
+ * exhausted or the module aborted; `undefined` for any other error.
+ */
+function hostFailure(
+  error: unknown,
+  phase: "turn" | "set-up",
+): WorkflowError | undefined {
+  const cause = error instanceof Error ? error.message : String(error);
+  if (error instanceof RangeError) {
+    return new WorkflowError(
+      "WORKFLOW_LIMIT_EXCEEDED",
+      `QuickJS ${phase === "turn" ? "execution" : "initialization"} limit exceeded: the host stack was exhausted (${cause}); the sandbox was reset`,
+      { cause },
+    );
+  }
+  if (isWasmAbort(error)) {
+    return new WorkflowError(
+      "WORKFLOW_LIMIT_EXCEEDED",
+      `QuickJS ${phase === "turn" ? "execution" : "initialization"} limit exceeded: the sandbox aborted (${cause}); the sandbox was reset`,
+      { cause },
+    );
+  }
+  return undefined;
+}
+
+/** Disposes a runtime; true when the wasm asserted while freeing it. */
+function disposeRuntime(runtime: QuickJSRuntime): boolean {
+  try {
+    runtime.dispose();
+    return false;
+  } catch (error) {
+    // QuickJS asserts (wasm `Aborted(...)`) when a run left unreachable
+    // objects behind: a host stack overflow, or a QuickJS path that leaks on
+    // overflow. The limit error that caused the disposal must stay the
+    // visible failure, so contain it; the caller discards the module.
+    if (!isWasmAbort(error)) {
+      throw error;
+    }
+    return true;
+  }
+}
+
 function guestError(context: QuickJSContext, handle: QuickJSHandle): string {
   try {
     const dumped = context.dump(handle) as unknown;
@@ -133,7 +240,9 @@ function guestError(context: QuickJSContext, handle: QuickJSHandle): string {
       return `${name}: ${message}`;
     }
     return String(dumped);
-  } catch {
+  } catch (error) {
+    // A host overflow while reading the error poisons the module like any other.
+    if (hostFailure(error, "turn")) throw error;
     return "Unknown QuickJS error";
   }
 }
@@ -146,6 +255,8 @@ class QuickJSSyncGeneratorSession implements WorkflowScriptGeneratorSession {
   readonly #limits: Required<WorkflowExecutionLimits>;
   readonly #signal: AbortSignal | undefined;
   readonly #onDispose: (() => void) | undefined;
+  readonly #poison: () => void;
+  readonly #module: object;
 
   constructor(
     context: QuickJSContext,
@@ -154,7 +265,11 @@ class QuickJSSyncGeneratorSession implements WorkflowScriptGeneratorSession {
     limits: Required<WorkflowExecutionLimits>,
     signal: AbortSignal | undefined,
     onDispose: (() => void) | undefined,
+    poison: () => void,
+    module: object,
   ) {
+    this.#poison = poison;
+    this.#module = module;
     this.#context = context;
     this.#runtime = runtime;
     this.#nextFunction = nextFunction;
@@ -179,6 +294,10 @@ class QuickJSSyncGeneratorSession implements WorkflowScriptGeneratorSession {
         "Sandbox generator session has been disposed",
       );
     }
+    if (poisonedModules.has(this.#module)) {
+      // Another session (or this one) left the module in an unknown state.
+      throw new WorkflowError("WORKFLOW_EXECUTION_ERROR", POISONED_MESSAGE);
+    }
     if (this.#signal?.aborted) {
       throw new WorkflowError(
         "WORKFLOW_ABORTED",
@@ -188,7 +307,12 @@ class QuickJSSyncGeneratorSession implements WorkflowScriptGeneratorSession {
 
     const serialized = serializeMessage(value, this.#limits.maxMessageBytes);
     this.#deadline = monotonicNow() + this.#limits.cpuTimeMs;
-    const argument = context.newString(serialized);
+    let argument: QuickJSHandle;
+    try {
+      argument = context.newString(serialized);
+    } catch (error) {
+      throw this.#contain(error);
+    }
     try {
       let result: ReturnType<QuickJSContext["callFunction"]>;
       try {
@@ -198,17 +322,15 @@ class QuickJSSyncGeneratorSession implements WorkflowScriptGeneratorSession {
           argument,
         );
       } catch (error) {
-        // Unbounded guest recursion can surface as a host RangeError.
-        if (error instanceof RangeError) {
-          throw new WorkflowError(
-            "WORKFLOW_LIMIT_EXCEEDED",
-            `QuickJS execution limit exceeded: ${error.message}`,
-          );
-        }
-        throw error;
+        throw this.#contain(error);
       }
       if (result.error) {
-        const message = guestError(context, result.error);
+        let message: string;
+        try {
+          message = guestError(context, result.error);
+        } catch (error) {
+          throw this.#contain(error);
+        }
         result.error.dispose();
         if (this.#signal?.aborted) {
           throw new WorkflowError(
@@ -227,7 +349,12 @@ class QuickJSSyncGeneratorSession implements WorkflowScriptGeneratorSession {
           `Workflow script failed: ${message}`,
         );
       }
-      const serializedTurn = context.getString(result.value);
+      let serializedTurn: string;
+      try {
+        serializedTurn = context.getString(result.value);
+      } catch (error) {
+        throw this.#contain(error);
+      }
       result.value.dispose();
       if (byteLength(serializedTurn) > this.#limits.maxMessageBytes) {
         throw new WorkflowError(
@@ -250,6 +377,14 @@ class QuickJSSyncGeneratorSession implements WorkflowScriptGeneratorSession {
     }
   }
 
+  /** Poisons the module for a host failure and types it; other errors pass. */
+  #contain(error: unknown): unknown {
+    const failure = hostFailure(error, "turn");
+    if (!failure) return error;
+    this.#poison();
+    return failure;
+  }
+
   dispose(): void {
     if (!this.#context || !this.#runtime) {
       return;
@@ -260,16 +395,7 @@ class QuickJSSyncGeneratorSession implements WorkflowScriptGeneratorSession {
     this.#context = undefined;
     const runtime = this.#runtime;
     this.#runtime = undefined;
-    try {
-      runtime.dispose();
-    } catch (error) {
-      // QuickJS asserts (wasm `Aborted(...)`) when a guest that overflowed the
-      // stack leaves unreachable objects behind. The execution limit error
-      // that caused the disposal must stay the visible failure, so contain it.
-      if (!/^Aborted\(/u.test(error instanceof Error ? error.message : "")) {
-        throw error;
-      }
-    }
+    if (disposeRuntime(runtime)) this.#poison();
     this.#onDispose?.();
   }
 }
@@ -287,14 +413,30 @@ export class QuickJSSyncGeneratorRuntime implements WorkflowScriptRuntime {
   readonly #loader: QuickJSModuleLoader;
   readonly #limits: WorkflowExecutionLimits | undefined;
   readonly #onDispose: (() => void) | undefined;
+  readonly #discardModule: (module: QuickJSModuleLike) => void;
+  readonly #maxStackBytes: number;
 
   /**
-   * @param options - Loader, default limits and dispose hook.
+   * @param options - Loader, default limits, dispose hook and module reset.
    */
   constructor(options: QuickJSSyncGeneratorRuntimeOptions = {}) {
     this.#loader = options.loader ?? loadReleaseQuickJS;
     this.#limits = options.limits;
     this.#onDispose = options.onDispose;
+    this.#discardModule = options.discardModule ?? discardReleaseQuickJS;
+    this.#maxStackBytes = options.maxStackBytes ?? QUICKJS_MAX_STACK_BYTES;
+  }
+
+  /**
+   * Checks limits without creating a session.
+   *
+   * @param limits - Limits a workflow declares; they are merged over the
+   * runtime defaults.
+   * @throws {@link WorkflowError} with code `WORKFLOW_DEFINITION_INVALID` for a
+   * non-positive limit or a `stackBytes` above {@link QUICKJS_MAX_STACK_BYTES}.
+   */
+  validateLimits(limits: WorkflowExecutionLimits | undefined): void {
+    resolveLimits(this.#limits, limits, this.#maxStackBytes);
   }
 
   /**
@@ -307,7 +449,11 @@ export class QuickJSSyncGeneratorRuntime implements WorkflowScriptRuntime {
   async createSession(
     options: WorkflowScriptSessionOptions,
   ): Promise<WorkflowScriptGeneratorSession> {
-    const limits = resolveLimits(this.#limits, options.limits);
+    const limits = resolveLimits(
+      this.#limits,
+      options.limits,
+      this.#maxStackBytes,
+    );
     const sourceSize = byteLength(options.source);
     if (sourceSize > limits.maxSourceBytes) {
       throw new WorkflowError(
@@ -338,9 +484,22 @@ export class QuickJSSyncGeneratorRuntime implements WorkflowScriptRuntime {
       );
     });
 
+    if (poisonedModules.has(module)) {
+      throw new WorkflowError(
+        "WORKFLOW_SANDBOX_UNAVAILABLE",
+        "The QuickJS module was poisoned by a host stack overflow or a wasm abort; the loader must return a new module",
+      );
+    }
     const runtime = quickJSModule(module).newRuntime();
     runtime.setMemoryLimit(limits.memoryBytes);
     runtime.setMaxStackSize(limits.stackBytes);
+    let poisoned = false;
+    const poison = (): void => {
+      if (poisoned) return;
+      poisoned = true;
+      poisonedModules.add(module);
+      this.#discardModule(module);
+    };
     const setupDeadline = monotonicNow() + limits.cpuTimeMs;
     runtime.setInterruptHandler(
       () => options.signal?.aborted === true || monotonicNow() >= setupDeadline,
@@ -418,13 +577,33 @@ ${options.source}
           };
         })()
       `;
-      const evaluated = context.evalCode(
-        program,
-        options.filename ?? "workflow-script.js",
-        { type: "global" },
-      );
+      let evaluated: ReturnType<QuickJSContext["evalCode"]>;
+      try {
+        evaluated = context.evalCode(
+          program,
+          options.filename ?? "workflow-script.js",
+          { type: "global" },
+        );
+      } catch (error) {
+        // A host stack overflow in the parser or a wasm abort while the script
+        // is set up poisons the module like one in a turn.
+        const failure = hostFailure(error, "set-up");
+        if (failure) {
+          poison();
+          throw failure;
+        }
+        throw error;
+      }
       if (evaluated.error) {
-        const message = guestError(context, evaluated.error);
+        let message: string;
+        try {
+          message = guestError(context, evaluated.error);
+        } catch (error) {
+          const failure = hostFailure(error, "set-up");
+          if (!failure) throw error;
+          poison();
+          throw failure;
+        }
         evaluated.error.dispose();
         if (options.signal?.aborted) {
           throw new WorkflowError(
@@ -451,11 +630,13 @@ ${options.source}
         limits,
         options.signal,
         this.#onDispose,
+        poison,
+        module,
       );
     } catch (error) {
       nextFunction?.dispose();
       context.dispose();
-      runtime.dispose();
+      if (disposeRuntime(runtime)) poison();
       this.#onDispose?.();
       throw error;
     }

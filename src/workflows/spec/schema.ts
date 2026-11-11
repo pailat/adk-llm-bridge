@@ -212,7 +212,11 @@ const OPAQUE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:+/-]{0,255}$/u;
 const TARGET_REF_PATTERN =
   /^(?!.*\.\.)(?!.*\/\/)(?!.*\/\.)(?!.*\.lock(?:\/|$))(?!.*[./]$)[A-Za-z0-9][A-Za-z0-9._+/-]{0,255}$/u;
 const PROVIDER_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/u;
-const MODEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:+/@-]{0,255}$/u;
+// A model id may end in one bracket suffix of letters and digits (`opus[1m]`),
+// nowhere else. `modelId()` caps the whole id, suffix included, at 256
+// characters before this pattern runs.
+const MODEL_PATTERN =
+  /^[A-Za-z0-9][A-Za-z0-9._:+/@-]{0,255}(?:\[[A-Za-z0-9]+\])?$/u;
 const TOOL_NAME_PATTERN = /^[A-Za-z0-9_][A-Za-z0-9_.:/-]{0,127}$/u;
 const ENV_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/u;
 // An MCP provider id is a name the host resolves, never a location: ASCII
@@ -761,6 +765,7 @@ export const RUN_RULE_KEYS = [
   "maxAgentRuns",
   "allowedProviderIds",
   "allowedModels",
+  "allowedModelsByRole",
   "allowedPermissionModes",
   "allowNetwork",
   "allowedTools",
@@ -847,6 +852,21 @@ const RULE_FIELDS = {
     description:
       "Model ids a lane or a reviewer may name. Compared exactly, case included.",
   }),
+  allowedModelsByRole: z
+    .strictObject({
+      architect: ruleList(modelId()),
+      worker: ruleList(modelId()),
+      integration: ruleList(modelId()),
+      critic: ruleList(modelId()),
+      reviewer: ruleList(modelId()),
+    })
+    .partial()
+    .optional()
+    .clone()
+    .register(runSpecRegistry, {
+      description:
+        "Narrows allowedModels per role: a lane agent may use only the models in both allowedModels and its role's list, and an agent reviewer the ones in the reviewer list. A role without a list uses allowedModels. Only the keys architect, worker, integration, critic and reviewer exist.",
+    }),
   allowedPermissionModes: z
     .array(
       z.enum(HOST_PERMISSION_MODES).clone().register(runSpecRegistry, {
@@ -1284,6 +1304,9 @@ function mergeCheckedRunRules(
     ...base,
     allowedProviderIds: [...base.allowedProviderIds],
     allowedModels: [...base.allowedModels],
+    ...(base.allowedModelsByRole
+      ? { allowedModelsByRole: copyModelsByRole(base.allowedModelsByRole) }
+      : {}),
     allowedPermissionModes: [...base.allowedPermissionModes],
     allowedTools: [...base.allowedTools],
     allowedEnvNames: [...base.allowedEnvNames],
@@ -1340,6 +1363,15 @@ function mergeCheckedRunRules(
       override.allowedModels,
       String,
     );
+    if (override.allowedModelsByRole !== undefined) {
+      const narrowed = narrowModelsByRole(
+        merged.allowedModelsByRole,
+        override.allowedModelsByRole,
+        merged.allowedModels,
+      );
+      if (narrowed.changed) changed("allowedModelsByRole", override.id);
+      merged.allowedModelsByRole = narrowed.value;
+    }
     merged.allowedPermissionModes = narrow(
       "allowedPermissionModes",
       merged.allowedPermissionModes,
@@ -1400,6 +1432,59 @@ function mergeCheckedRunRules(
     }
   }
   return merged;
+}
+
+type ModelsByRole = NonNullable<RunRules["allowedModelsByRole"]>;
+
+const MODEL_ROLE_KEYS = [
+  "architect",
+  "worker",
+  "integration",
+  "critic",
+  "reviewer",
+] as const;
+
+function copyModelsByRole(source: ModelsByRole): ModelsByRole {
+  const copy: ModelsByRole = {};
+  for (const role of MODEL_ROLE_KEYS) {
+    const list = source[role];
+    if (list !== undefined) copy[role] = [...list];
+  }
+  return copy;
+}
+
+/**
+ * Narrows the per-role model lists with an override's. A list the base has
+ * keeps only the models the override also names. A role the base lacks takes
+ * the override's list limited to the models still allowed overall, so an
+ * override never adds a model.
+ */
+function narrowModelsByRole(
+  current: ModelsByRole | undefined,
+  override: ModelsByRole,
+  allowedModels: readonly string[],
+): { value: ModelsByRole; changed: boolean } {
+  const value = copyModelsByRole(current ?? {});
+  let changed = false;
+  const overall = new Set(allowedModels);
+  for (const role of MODEL_ROLE_KEYS) {
+    const wanted = override[role];
+    if (wanted === undefined) continue;
+    const have = value[role];
+    if (have !== undefined) {
+      const keep = new Set(wanted);
+      const kept = have.filter((model) => keep.has(model));
+      if (kept.length !== have.length) changed = true;
+      value[role] = kept;
+    } else {
+      const keep = new Set(wanted);
+      const kept = allowedModels.filter((model) => keep.has(model));
+      // Restricts only when it leaves out something allowed overall.
+      if (kept.length !== overall.size) changed = true;
+      value[role] = kept;
+    }
+  }
+  return { value, changed };
 }
 
 const CAP_KEYS = [

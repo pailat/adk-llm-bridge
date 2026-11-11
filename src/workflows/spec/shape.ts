@@ -96,6 +96,57 @@ function hasKeyAt(
   return Object.hasOwn(node, key);
 }
 
+/** Whether a path is the `model` of a lane's agent or of an agent reviewer. */
+function isLaneModelPath(path: readonly PropertyKey[]): boolean {
+  if (path[0] !== "lanes" || typeof path[1] !== "number") return false;
+  if (path.length === 4) return path[2] === "agent" && path[3] === "model";
+  return (
+    path.length === 5 &&
+    path[2] === "steps" &&
+    path[3] === "review" &&
+    path[4] === "model"
+  );
+}
+
+/** The value at `path` in the frozen input, or `undefined` when absent. */
+function valueAt(root: unknown, path: readonly PropertyKey[]): unknown {
+  let node: unknown = root;
+  for (const segment of path) {
+    if (node === null || typeof node !== "object") return undefined;
+    if (!Object.hasOwn(node, segment)) return undefined;
+    node = (node as Record<PropertyKey, unknown>)[segment];
+  }
+  return node;
+}
+
+/**
+ * Reports a missing or blank model once per path: a blank string can fail
+ * both the minimum length and the format.
+ */
+function pushModelRequired(
+  path: readonly PropertyKey[],
+  out: RunSpecIssue[],
+): void {
+  const where = toPath(path);
+  if (
+    out.some(
+      (issue) =>
+        issue.code === "RUN_SPEC_MODEL_REQUIRED" &&
+        issue.path.length === where.length &&
+        issue.path.every((segment, index) => segment === where[index]),
+    )
+  ) {
+    return;
+  }
+  out.push(
+    runSpecIssue(
+      "RUN_SPEC_MODEL_REQUIRED",
+      where,
+      "The model is required: name a model id, not an empty or blank string.",
+    ),
+  );
+}
+
 function missingKeyIssue(
   path: readonly PropertyKey[],
   key: string,
@@ -240,6 +291,10 @@ function translate(
         typeof key === "string" &&
         !hasKeyAt(frozen, path.slice(0, -1), key)
       ) {
+        if (isLaneModelPath(path)) {
+          pushModelRequired(path, out);
+          return;
+        }
         out.push(missingKeyIssue(path, key));
         return;
       }
@@ -287,7 +342,14 @@ function translate(
       );
       return;
     }
-    case "invalid_format":
+    case "invalid_format": {
+      if (isLaneModelPath(path)) {
+        const value = valueAt(frozen, path);
+        if (typeof value === "string" && value.trim() === "") {
+          pushModelRequired(path, out);
+          return;
+        }
+      }
       out.push(
         runSpecIssue(
           "RUN_SPEC_INVALID_FORMAT",
@@ -296,6 +358,7 @@ function translate(
         ),
       );
       return;
+    }
     case "invalid_key":
       out.push(
         runSpecIssue(
@@ -306,6 +369,10 @@ function translate(
       );
       return;
     case "too_small": {
+      if (issue.origin === "string" && isLaneModelPath(path)) {
+        pushModelRequired(path, out);
+        return;
+      }
       const { code, message } = tooSmall(issue);
       out.push(runSpecIssue(code, toPath(path), message));
       return;
