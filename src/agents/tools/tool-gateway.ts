@@ -22,10 +22,14 @@ import {
   toolCallTitle,
   toolResponseTitle,
 } from "../event-titles.js";
-import { EXTERNAL_AGENT_TRANSFER_FAILED } from "../events.js";
+import {
+  EXTERNAL_AGENT_MODEL_METADATA_KEY,
+  EXTERNAL_AGENT_TRANSFER_FAILED,
+} from "../events.js";
 import { delegatePermissions } from "../permissions/inheritance.js";
 import { snapshotPermissionPolicy } from "../permissions/policy.js";
 import type { ExternalAgentPermissionPolicy } from "../permissions/schema.js";
+import { EXTERNAL_AGENT_TOOLS_METADATA_KEY } from "./adk-tool-bridge.js";
 
 /** A request to run one ADK sub-agent. */
 export interface RunSubAgentInput {
@@ -571,12 +575,29 @@ export class ToolGateway {
     if (this.#nativeDelegationShape) {
       // Native sub-agent events carry no customMetadata. Strip any leaked from
       // nested ExternalAgent/CodexAgent self-stamping (metadataForExternalEvent)
-      // so the surfaced timeline matches native exactly. Preserve all other
-      // fields (content/actions/finishReason/turnComplete/...) via spread.
-      const { customMetadata: _drop, ...rest } = event as Event & {
-        customMetadata?: unknown;
+      // so the surfaced timeline matches native exactly, except the child's
+      // own model and tools reports: the host must still see them, and the
+      // event's `author` (the child) keeps them attributable. Preserve all
+      // other fields (content/actions/finishReason/turnComplete/...) via
+      // spread.
+      const { customMetadata, ...rest } = event as Event & {
+        customMetadata?: Record<string, unknown>;
       };
-      return rest as Event;
+      const reports = Object.fromEntries(
+        [
+          EXTERNAL_AGENT_MODEL_METADATA_KEY,
+          EXTERNAL_AGENT_TOOLS_METADATA_KEY,
+        ].flatMap((key) =>
+          customMetadata?.[key] === undefined
+            ? []
+            : [[key, customMetadata[key]]],
+        ),
+      );
+      return (
+        Object.keys(reports).length > 0
+          ? { ...rest, customMetadata: reports }
+          : rest
+      ) as Event;
     }
     return enrichSubAgentEvent({
       event,

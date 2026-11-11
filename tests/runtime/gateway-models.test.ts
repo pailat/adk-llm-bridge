@@ -15,7 +15,10 @@ import type {
   ExternalAgentDriver,
   ExternalAgentEvent,
 } from "../../src/agents/index.js";
-import { CODEX_PROVIDER } from "../../src/agents/provider/schema.js";
+import {
+  CLAUDE_PROVIDER,
+  CODEX_PROVIDER,
+} from "../../src/agents/provider/schema.js";
 import {
   AgentInvocationGateway,
   type AgentInvocationResult,
@@ -590,4 +593,78 @@ describe("gateway models: used and unexpected", () => {
       expect(result.models).toBeUndefined();
     });
   }
+});
+
+describe("gateway models: a delegated child", () => {
+  // The child's final event now keeps its model report, so the run's models
+  // count what the child billed (before, the strip dropped it).
+  function delegation(finalAnswer: "subagent" | "coordinator"): ExternalAgent {
+    const child = new ExternalAgent({
+      name: "writer",
+      provider: CLAUDE_PROVIDER,
+      driver: {
+        providerId: CLAUDE_PROVIDER.id,
+        model: "claude-main",
+        reportsResolvedModel: true,
+        async *run() {
+          yield { type: "started", providerId: CLAUDE_PROVIDER.id };
+          yield { type: "output", content: "written" };
+          yield {
+            type: "completed",
+            exitCode: 0,
+            usage: {
+              byModel: {
+                "claude-main": { inputTokens: 1 },
+                "claude-helper": { inputTokens: 1 },
+              },
+            },
+          };
+        },
+      },
+      permissions: { mode: "workspace-write", allowNetwork: false },
+    });
+    return new ExternalAgent({
+      name: "coordinator",
+      provider: CLAUDE_PROVIDER,
+      driver: {
+        providerId: CLAUDE_PROVIDER.id,
+        model: "claude-coord",
+        reportsResolvedModel: true,
+        async *run(request) {
+          yield { type: "started", providerId: CLAUDE_PROVIDER.id };
+          await request.toolGateway?.runSubAgent({
+            agentName: "writer",
+            task: "write it",
+          });
+          yield { type: "output", content: "coordinator done" };
+          yield {
+            type: "completed",
+            exitCode: 0,
+            usage: { byModel: { "claude-coord": { inputTokens: 1 } } },
+          };
+        },
+      },
+      permissions: { mode: "read-only", allowNetwork: false },
+      subAgents: [child],
+      delegation: { finalAnswer },
+    });
+  }
+
+  test("finalAnswer subagent: the child's used and unexpected are in the run's models", async () => {
+    const result = await run(delegation("subagent"));
+    expect(result.models?.used).toEqual(["claude-helper", "claude-main"]);
+    expect(result.models?.unexpected).toEqual(["claude-helper"]);
+    // The coordinator's own report has no event to ride on in this mode.
+    expect(result.models?.used).not.toContain("claude-coord");
+  });
+
+  test("finalAnswer coordinator: the child's models come with the coordinator's", async () => {
+    const result = await run(delegation("coordinator"));
+    expect(result.models?.used).toEqual([
+      "claude-helper",
+      "claude-main",
+      "claude-coord",
+    ]);
+    expect(result.models?.unexpected).toEqual(["claude-helper"]);
+  });
 });

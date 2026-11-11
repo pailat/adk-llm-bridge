@@ -1367,6 +1367,15 @@ from the 0.6.0 tag.
 
 ### Fixed
 
+- **A delegated sub-agent's model and tool reports reach the host.** Its
+  `externalAgentModel` and `externalAgentTools` now ride on the sub-agent's own
+  final event (author = the sub-agent). The native-shape delegation stripped all
+  of its `customMetadata`, so a coordinator's host saw neither the models the
+  sub-agent billed (`used`, `unexpected`) nor its hidden tools. The reports stay
+  on the sub-agent's events and are not merged into the coordinator's report, but
+  the run's `models` (and a workflow step's `result.models`) now include the
+  sub-agent's `used` and `unexpected`. See
+  [Reports under delegation](./docs/external-agent-isolation.md#reports-under-delegation).
 - **A Codex SDK run can no longer end the host process with `EPIPE`.**
   `@openai/codex-sdk` writes the prompt to codex's stdin with no error
   handler. When codex was gone before it read the whole prompt (it exited
