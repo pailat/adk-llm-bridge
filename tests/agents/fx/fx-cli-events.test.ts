@@ -213,6 +213,8 @@ describe("failures", () => {
     expect(error?.code).toBe("FX_CLI_PERMISSION_REQUIRED");
     expect(error?.recoverable).toBe(false);
     expect(error?.message).toContain("workspace-write");
+    expect(error?.message).toContain("That action did not run");
+    expect(error?.message).not.toContain("nothing ran");
     expect(error?.message).toContain("allowUnsandboxedShell");
     expect(error?.message).toContain("full-access");
     expect(error?.message).toContain("blocked action: Writing file");

@@ -271,9 +271,10 @@ new in 0.7.0. If you already use them, these changes apply:
   switches on `SkippedTool.reason` must handle `in-model` and
   `request-processor`.
 - **CLI drivers no longer ignore `runtimeSession`.** Claude CLI, Codex CLI,
-  Gemini CLI and fx (new in 0.7.0) end a run that sets `request.runtimeSession` with an
+  and Gemini CLI end a run that sets `request.runtimeSession` with an
   `EXTERNAL_AGENT_SESSIONS_UNSUPPORTED` error before starting the process. Drop
   `runtimeSession` for them, or use `ClaudeAgentSdkDriver` or `CodexSdkDriver`.
+  The new fx driver refuses it the same way.
 - **`ExternalAgentUsage.byModel` entries have no `scope`** (type
   `ExternalAgentModelUsage`); the usage's own `scope` covers them. The
   drivers never set one there.

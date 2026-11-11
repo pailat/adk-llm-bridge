@@ -1160,7 +1160,7 @@ function failureEvent(
       .map((line) => cut(line, 300));
     return {
       type: "error",
-      message: `fx needed an approval that a noninteractive ask run cannot give, so the run ended at its first sensitive action. and nothing ran. Use the workspace-write mode with allowUnsandboxedShell: true, or the full-access mode, to allow it.${blocked.length > 0 ? ` fx said: ${blocked.join("; ")}` : ""}${output ? ` fx output: ${cut(output)}` : ""}`,
+      message: `fx needed an approval that a noninteractive ask run cannot give, so the run ended at its first sensitive action. That action did not run; actions before it may have run. Use the workspace-write mode with allowUnsandboxedShell: true, or the full-access mode, to allow it.${blocked.length > 0 ? ` fx said: ${blocked.join("; ")}` : ""}${output ? ` fx output: ${cut(output)}` : ""}`,
       code: "FX_CLI_PERMISSION_REQUIRED",
       recoverable: false,
       timestamp,
