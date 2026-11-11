@@ -1124,6 +1124,9 @@ from the 0.6.0 tag.
   `adk-llm-bridge/workflows/storage/conformance`. The default checkpoint
   store does not change: it was `ADKSessionCheckpointStore` before this
   addition and still is; a provider is used only when you pass or select one.
+  Known limitation: concurrent multi-process saves to the file-system
+  checkpoint provider are not yet supported on Windows
+  ([#117](https://github.com/pailat/adk-llm-bridge/issues/117)).
   On Windows the SQLite stores and the JSONL exporter set no owner-only mode and
   refuse symbolic links from `lstat`. The Claude SQLite session store now
   opens through the same shared helper: it still takes the write lock

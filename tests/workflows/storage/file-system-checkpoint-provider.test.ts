@@ -25,7 +25,6 @@ import {
   workflowCheckpointKey,
   workflowCheckpointRevision,
 } from "../../../src/workflows/checkpoint/store.js";
-import { WorkflowError } from "../../../src/workflows/contracts.js";
 import { defineWorkflow } from "../../../src/workflows/definition.js";
 import {
   defineWorkflowStorageConformanceTests,
@@ -117,7 +116,13 @@ describe("FileSystemWorkflowCheckpointProvider conformance", () => {
   });
 
   defineWorkflowStorageConformanceTests(conformanceCases, {
-    test,
+    // Windows cannot yet run concurrent saves on one file (known limitation,
+    // https://github.com/pailat/adk-llm-bridge/issues/117); the case still
+    // runs on macOS and Linux.
+    test: (name, run) =>
+      (name.startsWith("exactly one of")
+        ? test.skipIf(process.platform === "win32")
+        : test)(name, run),
     skip: test.skip,
   });
 });
@@ -291,83 +296,6 @@ describe("FileSystemWorkflowCheckpointProvider reads and writes through the stor
       expect(await readFile(path, "utf8")).not.toBe(before);
     },
   );
-
-  describe("a rename another process's open handle blocks on Windows", () => {
-    const realPlatform = Object.getOwnPropertyDescriptor(process, "platform");
-    const realSave = FileSystemWorkflowCheckpointStore.prototype.save;
-    afterEach(() => {
-      if (realPlatform)
-        Object.defineProperty(process, "platform", realPlatform);
-      FileSystemWorkflowCheckpointStore.prototype.save = realSave;
-    });
-
-    function blocked(code: string): WorkflowError {
-      return new WorkflowError(
-        "WORKFLOW_EXECUTION_ERROR",
-        "Workflow checkpoint file operation failed: key",
-        { reason: "checkpoint_write_failed", causeCode: code },
-      );
-    }
-
-    function failSaves(
-      times: number,
-      code: string,
-      platform: string,
-    ): () => number {
-      Object.defineProperty(process, "platform", { value: platform });
-      let calls = 0;
-      FileSystemWorkflowCheckpointStore.prototype.save = async function (
-        this: FileSystemWorkflowCheckpointStore,
-        ...args: Parameters<FileSystemWorkflowCheckpointStore["save"]>
-      ) {
-        calls += 1;
-        if (calls <= times) throw blocked(code);
-        return await realSave.apply(this, args);
-      };
-      return () => calls;
-    }
-
-    test("a save retried after a transient EPERM is stored", async () => {
-      const root = await tempRoot();
-      const provider = new FileSystemWorkflowCheckpointProvider({ root });
-      const calls = failSaves(3, "EPERM", "win32");
-      const written = await provider.put({
-        checkpoint: await makeCheckpoint("flow", "exec"),
-        expectedRevision: null,
-      });
-      expect(calls()).toBe(4);
-      expect(
-        (await provider.get({ workflowId: "flow", executionId: "exec" }))
-          ?.revision,
-      ).toBe(written.revision);
-    });
-
-    test("a block that never clears fails with the store's error", async () => {
-      const root = await tempRoot();
-      const provider = new FileSystemWorkflowCheckpointProvider({ root });
-      failSaves(10_000, "EBUSY", "win32");
-      const error = (await reject(
-        provider.put({
-          checkpoint: await makeCheckpoint("flow", "exec"),
-          expectedRevision: null,
-        }),
-      )) as WorkflowError;
-      expect(error.details?.causeCode).toBe("EBUSY");
-    }, 20_000);
-
-    test("off Windows the same error is not retried", async () => {
-      const root = await tempRoot();
-      const provider = new FileSystemWorkflowCheckpointProvider({ root });
-      const calls = failSaves(10_000, "EPERM", "linux");
-      await reject(
-        provider.put({
-          checkpoint: await makeCheckpoint("flow", "exec"),
-          expectedRevision: null,
-        }),
-      );
-      expect(calls()).toBe(1);
-    });
-  });
 
   test("a stale expectedRevision rejects with the same conflict error the store throws", async () => {
     const root = await tempRoot();

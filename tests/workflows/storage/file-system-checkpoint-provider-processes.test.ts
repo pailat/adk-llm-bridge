@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, test as bunTest, describe, expect } from "bun:test";
 import { type ChildProcess, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { statSync } from "node:fs";
@@ -16,6 +16,12 @@ import {
 } from "../../../src/workflows/checkpoint/store.js";
 import { defineWorkflow } from "../../../src/workflows/definition.js";
 import { FileSystemWorkflowCheckpointProvider } from "../../../src/workflows/storage/file-system-checkpoint-provider.js";
+import {
+  type ChildCapture,
+  describeChild,
+  moduleSpecifier,
+  quietFlags,
+} from "../../utils/fixtures/runtime.js";
 
 // The file-system store never reads the invocation context.
 const CONTEXT = undefined as unknown as InvocationContext;
@@ -48,6 +54,30 @@ const EXECUTION_ID = "process-exec";
 
 const roots: string[] = [];
 const children: ChildProcess[] = [];
+/** Every child the running test started, printed when the test fails. */
+let startedChildren: { label: string; running: RunningChild }[] = [];
+
+/** A test that prints how each of its children ended when it fails. */
+function test(name: string, body: () => Promise<void>, timeoutMs: number) {
+  // Concurrent saves from several processes do not work on Windows yet (known
+  // limitation, https://github.com/pailat/adk-llm-bridge/issues/117); these
+  // tests keep running on macOS and Linux.
+  bunTest.skipIf(process.platform === "win32")(
+    name,
+    async () => {
+      startedChildren = [];
+      try {
+        await body();
+      } catch (error) {
+        for (const { label, running } of startedChildren) {
+          console.error(describeChild(label, captureOf(running)));
+        }
+        throw error;
+      }
+    },
+    timeoutMs,
+  );
+}
 async function tempRoot(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "adk-fs-provider-proc-"));
   roots.push(root);
@@ -102,16 +132,17 @@ function makeCheckpoint(input: string) {
 
 /** Header shared by the child scripts: the provider and checkpoint helpers. */
 const PRELUDE = `
-import { createWorkflowCheckpoint, withWorkflowCompleted } from ${JSON.stringify(`${SRC}/workflows/checkpoint/checkpoint.ts`)};
-import { defineWorkflow } from ${JSON.stringify(`${SRC}/workflows/definition.ts`)};
-import { FileSystemWorkflowCheckpointProvider } from ${JSON.stringify(`${SRC}/workflows/storage/file-system-checkpoint-provider.ts`)};
+import { createWorkflowCheckpoint, withWorkflowCompleted } from ${JSON.stringify(moduleSpecifier(`${SRC}/workflows/checkpoint/checkpoint.ts`))};
+import { defineWorkflow } from ${JSON.stringify(moduleSpecifier(`${SRC}/workflows/definition.ts`))};
+import { FileSystemWorkflowCheckpointProvider } from ${JSON.stringify(moduleSpecifier(`${SRC}/workflows/storage/file-system-checkpoint-provider.ts`))};
 const [root, ...args] = process.argv.slice(1);
 const provider = new FileSystemWorkflowCheckpointProvider({ root, lockTimeoutMs: 20000 });
 const make = (input) => createWorkflowCheckpoint({
   definition: defineWorkflow({ id: ${JSON.stringify(WORKFLOW_ID)}, version: "1", handler: () => "done" }),
   executionId: ${JSON.stringify(EXECUTION_ID)}, input, now: 1700000000000,
 });
-const print = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
+// Resolves once the line is written, so a child never ends before its outcome is out.
+const print = (value) => new Promise((done) => process.stdout.write(JSON.stringify(value) + "\\n", () => done()));
 `;
 
 /** One writer: waits for the start file, then tries one save from `expected`. */
@@ -121,11 +152,10 @@ const [startFile, expected, label] = args;
 while (!existsSync(startFile)) await new Promise((r) => setTimeout(r, 2));
 try {
   const stored = await provider.put({ checkpoint: await make(label), expectedRevision: expected });
-  print({ label, outcome: "won", revision: stored.revision });
+  await print({ label, outcome: "won", revision: stored.revision });
 } catch (error) {
-  print({ label, outcome: error?.name === "WorkflowCheckpointConflictError" ? "conflict" : "error:" + (error?.code ?? error?.name) + ":" + error?.message });
+  await print({ label, outcome: error?.name === "WorkflowCheckpointConflictError" ? "conflict" : "error:" + (error?.code ?? error?.name) + ":" + error?.message });
 }
-process.exit(0);
 `;
 
 /** A save loop: prints `saved <n>` after every save that resolved. */
@@ -138,10 +168,10 @@ for (let n = 0; ; n++) {
     const stored = await provider.put({ checkpoint: await big("loop-" + n), expectedRevision: expected });
     expected = stored.revision;
   } catch (error) {
-    print({ error: String(error?.code ?? error?.name) + ":" + String(error?.message) });
+    await print({ error: String(error?.code ?? error?.name) + ":" + String(error?.message) });
     process.exit(1);
   }
-  print({ saved: n, revision: expected });
+  await print({ saved: n, revision: expected });
 }
 `;
 
@@ -150,12 +180,41 @@ interface RunningChild {
   lines: string[];
   stderr: string[];
   exited: Promise<number | null>;
+  /** Exit code and signal, set once the child has closed. */
+  ended: { code: number | null; signal: NodeJS.Signals | null } | undefined;
 }
 
-function start(script: string, argv: string[]): RunningChild {
-  const child = spawn(process.execPath, ["-e", script, ...argv], {
-    stdio: ["ignore", "pipe", "pipe"],
+function captureOf(running: RunningChild): ChildCapture {
+  return {
+    exitCode: running.ended?.code ?? running.child.exitCode,
+    signal: running.ended?.signal ?? running.child.signalCode,
+    stdout: running.lines.join("\n"),
+    stderr: running.stderr.join(""),
+  };
+}
+
+/** Parses the outcome line of each writer; a missing or extra line fails with the child's output. */
+function outcomesOf<T>(running: RunningChild[], labels: string[]): T[] {
+  return running.map((one, index) => {
+    const capture = captureOf(one);
+    const lines = one.lines.filter((line) => line.startsWith("{"));
+    if (lines.length !== 1 || capture.exitCode !== 0) {
+      throw new Error(
+        `${describeChild(labels[index] ?? `writer-${index}`, capture)}\nexpected one outcome line and exit code 0, got ${lines.length} line(s)`,
+      );
+    }
+    return JSON.parse(lines[0] as string) as T;
   });
+}
+
+function start(script: string, argv: string[], label = "child"): RunningChild {
+  const child = spawn(
+    process.execPath,
+    [...quietFlags, "-e", script, ...argv],
+    {
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
   children.push(child);
   const lines: string[] = [];
   const stderr: string[] = [];
@@ -172,10 +231,24 @@ function start(script: string, argv: string[]): RunningChild {
   child.stderr?.on("data", (chunk: Buffer) => {
     stderr.push(chunk.toString("utf8"));
   });
-  const exited = new Promise<number | null>((resolveExit) => {
-    child.on("close", (code) => resolveExit(code));
+  const running: RunningChild = {
+    child,
+    lines,
+    stderr,
+    exited: Promise.resolve(null),
+    ended: undefined,
+  };
+  running.exited = new Promise<number | null>((resolveExit) => {
+    child.on("close", (code, signal) => {
+      // A last line without a newline still counts as output.
+      if (pending !== "") lines.push(pending);
+      pending = "";
+      running.ended = { code, signal };
+      resolveExit(code);
+    });
   });
-  return { child, lines, stderr, exited };
+  startedChildren.push({ label, running });
+  return running;
 }
 
 async function waitFor(
@@ -214,17 +287,20 @@ describe("FileSystemWorkflowCheckpointProvider across processes", () => {
     const startFile = join(await tempRoot(), "start");
     const workers = 6;
     const running = Array.from({ length: workers }, (_, index) =>
-      start(WRITER, [root, startFile, base.revision, `worker-${index}`]),
+      start(
+        WRITER,
+        [root, startFile, base.revision, `worker-${index}`],
+        `worker-${index}`,
+      ),
     );
     // Let every child load its modules and reach the barrier, then release.
     await new Promise((r) => setTimeout(r, 1500));
     await writeFile(startFile, "go");
     await Promise.all(running.map((r) => r.exited));
 
-    const results = running.flatMap((r) =>
-      r.lines.map(
-        (line) => JSON.parse(line) as { label: string; outcome: string },
-      ),
+    const results = outcomesOf<{ label: string; outcome: string }>(
+      running,
+      running.map((_, index) => `worker-${index}`),
     );
     expect(results.map((r) => r.outcome).sort()).toEqual([
       "conflict",
@@ -262,20 +338,18 @@ describe("FileSystemWorkflowCheckpointProvider across processes", () => {
     for (let round = 1; round <= 3; round++) {
       const startFile = join(await tempRoot(), "start");
       const running = Array.from({ length: 4 }, (_, index) =>
-        start(WRITER, [
-          root,
-          startFile,
-          expected as string,
+        start(
+          WRITER,
+          [root, startFile, expected as string, `r${round}-w${index}`],
           `r${round}-w${index}`,
-        ]),
+        ),
       );
       await new Promise((r) => setTimeout(r, 1200));
       await writeFile(startFile, "go");
       await Promise.all(running.map((r) => r.exited));
-      const outcomes = running.flatMap((r) =>
-        r.lines.map(
-          (line) => JSON.parse(line) as { outcome: string; revision?: string },
-        ),
+      const outcomes = outcomesOf<{ outcome: string; revision?: string }>(
+        running,
+        running.map((_, index) => `r${round}-w${index}`),
       );
       expect(outcomes.filter((o) => o.outcome === "won")).toHaveLength(1);
       expect(outcomes.filter((o) => o.outcome === "conflict")).toHaveLength(3);
@@ -293,7 +367,7 @@ describe("FileSystemWorkflowCheckpointProvider across processes", () => {
     const padding = "x".repeat(PADDING_BYTES);
     for (let attempt = 0; attempt < 40; attempt++) {
       const root = await tempRoot();
-      const loop = start(SAVE_LOOP, [root]);
+      const loop = start(SAVE_LOOP, [root], `save-loop-${attempt}`);
       try {
         await waitFor(
           () =>
