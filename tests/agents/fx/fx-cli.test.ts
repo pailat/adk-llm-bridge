@@ -9,6 +9,7 @@ import {
 import {
   EXTERNAL_AGENT_MODEL_OVERRIDE,
   EXTERNAL_AGENT_NETWORK_UNENFORCEABLE,
+  EXTERNAL_AGENT_OPTION_UNKNOWN,
   EXTERNAL_AGENT_OPTION_UNSUPPORTED,
   EXTERNAL_AGENT_PATHS_UNENFORCEABLE,
 } from "../../../src/agents/driver/policy-errors.js";
@@ -595,7 +596,7 @@ describe("capabilities and sessions", () => {
     });
   });
 
-  test("untyped session options are refused", async () => {
+  test("session options are unknown options", async () => {
     for (const option of ["resumeSessionId", "sessionStore"]) {
       const error = await refusalCode(
         () =>
@@ -605,7 +606,7 @@ describe("capabilities and sessions", () => {
           } as never),
         request(),
       );
-      expect(error.code).toBe(EXTERNAL_AGENT_OPTION_UNSUPPORTED);
+      expect(error.code).toBe(EXTERNAL_AGENT_OPTION_UNKNOWN);
       expect(error.message).toContain(option);
     }
   });

@@ -13,6 +13,12 @@ from the 0.6.0 tag.
 
 ### Breaking
 
+- **Driver options are checked by name.** Every built-in driver
+  (`ClaudeAgentSdkDriver`, `ClaudeCliDriver`, `CodexSdkDriver`,
+  `CodexCliDriver`, `GeminiCliDriver`, `SubprocessJsonlDriver`) throws
+  `ExternalAgentPolicyError` `EXTERNAL_AGENT_OPTION_UNKNOWN` for a config key
+  it does not know, and for a config that is not a plain object, instead of
+  ignoring it. An option of another driver says which driver supports it.
 - **Model checks on the external agent drivers** (`EXTERNAL_AGENT_MODEL_*`,
   see [Model](./docs/external-agent-isolation.md#model)):
   - `ClaudeCliDriver` with a blank `model` throws `ExternalAgentPolicyError`
@@ -776,6 +782,40 @@ from the 0.6.0 tag.
   validates an operator file. Acceptances must come from a host-only source,
   never a file an agent can write; see
   [Accepting a known-equivalent change](docs/workflow-durability.md#accepting-a-known-equivalent-change).
+- **Host MCP servers for isolated Claude agents** (`@experimental`, see
+  [Host MCP servers and secrets](docs/external-agent-isolation.md#host-mcp-servers-and-secrets)).
+  `ClaudeAgentSdkDriverConfig.mcpServers` declares `http`, `sse` and `stdio`
+  servers, each with a per-server `tools` allowlist and secret references
+  for headers and env (`{ resolve }`, recommended, or `{ env }`; plain
+  values are `{ public }`). Secrets are delivered to Claude Code over its
+  control channel, never on its command line, environment, prompt, events
+  or spans, and echoed secrets are redacted before the model sees tool
+  output. With a declared secret, Claude Code keeps no session transcript
+  on disk (`persistSession: false`), where a raw echo would land: such an
+  agent resumes nothing, and `sessionStore`, `resumeSessionId` and
+  `runtimeSession.id` are refused. A large tool result stays inline too:
+  the driver picks the session id and reserves the session's folder path,
+  so Claude Code cannot save it under `tool-results/`
+  ([Large tool results](docs/external-agent-isolation.md#large-tool-results)).
+  Other runtimes keep transcripts in host
+  directories the bridge does not own (see
+  [Transcripts on disk](docs/external-agent-isolation.md#transcripts-on-disk)).
+  Without `allowNetwork: true`, only loopback IP-literal servers and
+  host stdio servers are accepted. `requiredMcpServers` can name them, and
+  `mcpConnectTimeoutMs` bounds the wait. `selectMcpServers` resolves a run
+  plan's MCP grant. New codes: `EXTERNAL_AGENT_MCP_SERVER_INVALID`,
+  `EXTERNAL_AGENT_MCP_SECRET_LITERAL`,
+  `EXTERNAL_AGENT_MCP_SERVER_NETWORK_REQUIRED`,
+  `EXTERNAL_AGENT_MCP_STDIO_UNSAFE`,
+  `EXTERNAL_AGENT_MCP_SECRET_UNENFORCEABLE`,
+  `EXTERNAL_AGENT_MCP_SECRET_UNRESOLVED`,
+  `EXTERNAL_AGENT_MCP_PROVIDER_UNKNOWN` and the recoverable event code
+  `EXTERNAL_AGENT_MCP_SERVER_UNAVAILABLE`.
+- `readOnly: true` on a declared server with a `tools` list lets those tools
+  run under `read-only`.
+- MCP tool calls carry `metadata.mcp` (`server`, `tool`) and the result
+  `durationMs` (Claude Agent SDK; the Codex SDK driver adds `metadata.mcp`);
+  tool spans carry `gcp.vertex.agent.external_agent.mcp_server`.
 - **Opt-in strict binary resolution for the SDK drivers.**
   `ClaudeAgentSdkDriver` and `CodexSdkDriver` take `strictBinaryResolution`
   (default `false`, behaviour unchanged). When it is on, no explicit path is

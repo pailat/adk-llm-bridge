@@ -26,6 +26,7 @@ import {
   MODEL_ALIAS_DENYLIST,
   modelEnvRefusal,
 } from "./model.js";
+import { FX_CLI_OPTION_KEYS } from "./option-keys.js";
 import {
   batchCommandRefusal,
   dependencyMissing,
@@ -38,6 +39,7 @@ import {
   unenforceablePathsRefusal,
 } from "./policy-errors.js";
 import {
+  assertKnownDriverOptions,
   buildChildEnv,
   exitErrorEvent,
   isJsonObject,
@@ -561,18 +563,7 @@ export class FxCliDriver extends SubprocessJsonlDriver {
    * `true`) is set and `model` is absent.
    */
   constructor(config: FxCliDriverConfig = {}) {
-    for (const option of [
-      "resumeSessionId",
-      "sessionStore",
-      "sessionStoreFlush",
-      "sessionStoreLoadTimeoutMs",
-    ] as const) {
-      if ((config as Record<string, unknown>)[option] !== undefined) {
-        throw unsupported(
-          `FxCliDriver does not support ${option}: every run uses --no-save and is stateless. Remove ${option}.`,
-        );
-      }
-    }
+    assertKnownDriverOptions("FxCliDriver", config, FX_CLI_OPTION_KEYS);
     validateDriverConfig("FxCliDriver", config, FX_CLI_BOOLEAN_OPTIONS);
     validateLaunchConfig("FxCliDriver", config);
     assertNoModelOverride("FxCliDriver", config.args, FX_CLI_MODEL_FLAGS);

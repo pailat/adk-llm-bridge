@@ -111,6 +111,21 @@ export function resolveAbortSignal(
 }
 
 /**
+ * An MCP server the host declared on a driver, as the permission guard sees
+ * it: no URL, command, header or secret.
+ *
+ * @experimental
+ */
+export interface ExternalAgentMcpServerGrant {
+  /** The server name; its tools are `mcp__<name>__<tool>`. */
+  readonly name: string;
+  /** Tool names without the prefix; absent means every tool. */
+  readonly tools?: readonly string[];
+  /** The host's attestation that the listed tools only read. */
+  readonly readOnly: boolean;
+}
+
+/**
  * Runs one external runtime and reports what it does as events.
  *
  * @remarks
@@ -146,6 +161,17 @@ export interface ExternalAgentDriver {
   readonly reportsResolvedModel?: boolean;
   /** @returns The features this driver supports. Absent means none are claimed. */
   capabilities?(): AgentRuntimeCapabilities;
+  /**
+   * The MCP servers the host declared on this driver, with their tool
+   * allowlists and read-only attestation. The permission guard admits a
+   * listed tool of these servers (`mcp__<server>__<tool>`) without
+   * `allowNetwork: true`, and under `read-only` when the server is
+   * `readOnly`. Absent means none.
+   *
+   * @returns One grant per declared server.
+   * @experimental
+   */
+  declaredMcpServers?(): readonly ExternalAgentMcpServerGrant[];
   /**
    * Runs the turn.
    *

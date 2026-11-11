@@ -14,6 +14,8 @@ import {
 } from "../../../src/agents/driver/claude-cli.js";
 import { CodexCliDriver } from "../../../src/agents/driver/codex-cli.js";
 import { CodexSdkDriver } from "../../../src/agents/driver/codex-sdk.js";
+import { FxCliDriver } from "../../../src/agents/driver/fx-cli.js";
+import { GeminiCliDriver } from "../../../src/agents/driver/gemini-cli.js";
 import {
   assertSmallFastModelOption,
   CLAUDE_MODEL_ENV_RULE,
@@ -24,6 +26,7 @@ import {
   EXTERNAL_AGENT_MODEL_INVALID,
   EXTERNAL_AGENT_MODEL_OVERRIDE,
   EXTERNAL_AGENT_MODEL_REQUIRED,
+  EXTERNAL_AGENT_OPTION_UNKNOWN,
   ExternalAgentPolicyError,
 } from "../../../src/agents/driver/policy-errors.js";
 import {
@@ -371,6 +374,61 @@ describe("stripBracketSuffix equals the old end-anchored regex", () => {
     ).toThrow(ExternalAgentPolicyError);
     expect(performance.now() - start).toBeLessThan(50);
   });
+});
+
+describe("a driver without the option refuses it with a typed error", () => {
+  // smallFastModel is Claude-only. Codex and Gemini must not drop it silently:
+  // a host that passes it believes a small/fast model is pinned.
+  const builders: readonly [string, () => unknown][] = [
+    [
+      "CodexSdkDriver",
+      () =>
+        new CodexSdkDriver({
+          sdk: {} as never,
+          model: "gpt-x",
+          smallFastModel: "claude-haiku-5-5",
+        } as never),
+    ],
+    [
+      "CodexCliDriver",
+      () =>
+        new CodexCliDriver({
+          model: "gpt-x",
+          smallFastModel: "claude-haiku-5-5",
+        } as never),
+    ],
+    [
+      "GeminiCliDriver",
+      () =>
+        new GeminiCliDriver({
+          model: "gemini-x",
+          smallFastModel: "claude-haiku-5-5",
+        } as never),
+    ],
+    [
+      "FxCliDriver",
+      () =>
+        new FxCliDriver({
+          model: "fx-x",
+          smallFastModel: "claude-haiku-5-5",
+        } as never),
+    ],
+  ];
+  for (const [name, build] of builders) {
+    test(`${name} throws EXTERNAL_AGENT_OPTION_UNKNOWN naming smallFastModel`, () => {
+      let thrown: unknown;
+      try {
+        build();
+      } catch (error) {
+        thrown = error;
+      }
+      expect(thrown).toBeInstanceOf(ExternalAgentPolicyError);
+      const error = thrown as ExternalAgentPolicyError;
+      expect(error.code).toBe(EXTERNAL_AGENT_OPTION_UNKNOWN);
+      expect(error.message).toContain(name);
+      expect(error.message).toContain('"smallFastModel"');
+    });
+  }
 });
 
 describe("the Claude model environment is refused by pattern", () => {

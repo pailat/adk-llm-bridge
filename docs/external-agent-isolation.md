@@ -1043,6 +1043,347 @@ What a run reports:
   case (`--Full-Access`), checked 2026-11-11: repeat that check on every fx
   version review.
 
+## Host MCP servers and secrets
+
+An isolated `ClaudeAgent` (or `ClaudeAgentSdkDriver`) loads no host MCP
+server. A host that wants the agent to use one declares it with
+`mcpServers`. The bridge checks each server, resolves its secrets when the
+run starts, and hands the servers to Claude Code over the SDK control
+channel (`setMcpServers`) before the first user message. The servers and
+their secrets are never on Claude Code's command line, in its environment,
+in the prompt, in events or in spans.
+
+```ts
+import { ClaudeAgent } from "adk-llm-bridge/agents";
+
+const agent = new ClaudeAgent({
+  name: "ui",
+  driverOptions: {
+    tools: ["Read", "Edit"],
+    mcpServers: {
+      reui: {
+        type: "http",
+        url: "http://127.0.0.1:7801/mcp",
+        headers: {
+          // Minted per run by a host proxy that keeps the long-lived key.
+          Authorization: { resolve: () => proxy.tokenFor(runId), prefix: "Bearer " },
+          Accept: { public: "application/json" },
+        },
+        tools: ["search", "get_component"],
+        readOnly: true,
+      },
+    },
+    requiredMcpServers: ["reui"],
+  },
+});
+```
+
+`mcpServers` and the value types are `@experimental`. Other drivers have no
+`mcpServers` option in 0.7.0; passing one throws
+`EXTERNAL_AGENT_OPTION_UNKNOWN` with a hint that it is supported only by
+`ClaudeAgentSdkDriver`.
+
+### Server options
+
+| Option | Types | Meaning |
+| --- | --- | --- |
+| `type` | all | `"http"`, `"sse"` or `"stdio"`. |
+| `url` | http, sse | `http:` or `https:`, no user info. See the network rules below. |
+| `headers` | http, sse | Header name to value. |
+| `command` | stdio | Absolute path of the server's executable. |
+| `args` | stdio | Arguments; see the stdio rules below. |
+| `env` | stdio | Variable name to value, added to the server's environment. |
+| `tools` | all | The tool names the agent may call. Without it every tool of the server may be called (outside `read-only`). |
+| `readOnly` | all | The host states the listed tools do not change anything; needs `tools`. Lets them run under `read-only`. |
+| `timeoutMs` | all | Per-request timeout, 1000 to 600000. |
+
+Names follow the run-spec MCP provider id grammar: ASCII letters and digits
+in runs joined by one `-` or `_` (no `__`), at most 64 characters, not
+`adk_bridge`, unique ignoring case. At most 16 servers.
+
+`mcpConnectTimeoutMs` (1000 to 120000, default 10000) is how long the first
+message waits for the servers in `requiredMcpServers`. A required server
+that reports `failed`, `needs-auth` or `disabled`, or is not `connected` in
+time, ends the run before the message is sent with the recoverable error
+`EXTERNAL_AGENT_MCP_SERVER_UNAVAILABLE`. A server that is not required and
+fails to connect only logs a warning with that code. `requiredMcpServers`
+may name declared servers in isolated mode.
+
+### Values: secret references
+
+Every header and env value says whether it is secret. A bare string is
+refused with `EXTERNAL_AGENT_MCP_SECRET_LITERAL`, and so is `{ public }`
+under a sensitive name (`Authorization`, and any name containing `token`,
+`secret`, `key`, `auth`, `cookie`, `session`, `passw` or `credential`,
+ignoring case).
+
+- `{ resolve: (signal) => string | Promise<string> }`, recommended. Called
+  once per run, after every other check passed, with a 10 second timeout.
+  The value must be at least 8 characters and at most 8192 bytes. Its error text is never shown.
+- `{ env: "NAME" }`: read when the run starts from the driver's `env`
+  option (the host process environment by default). The variable is not
+  passed to Claude Code. Accepted only where the agent cannot read process environments
+  (see below).
+- `{ public: "value" }`: not secret. No control characters.
+
+`{ resolve }` and `{ env }` take an optional `prefix` (at most 64
+characters, for example `"Bearer "`). A missing or empty value ends the run
+with `EXTERNAL_AGENT_MCP_SECRET_UNRESOLVED`.
+
+A resolver is only as safe as its source. `{ resolve: () => process.env.X }`
+is exposed like `{ env: "X" }`, and a resolver that reads a file or the
+keychain is safe only if the agent's shell cannot do the same read. The
+robust form is a per-run token minted by a host proxy that keeps the
+long-lived credential (see
+[host duty 14](workflow-run-spec.md#what-the-host-must-do-at-run-time)).
+Put the secret in `Authorization`: Node's `fetch` drops it on a
+cross-origin redirect, but keeps custom headers.
+
+### When a secret is refused
+
+A run with a declared secret ends with
+`EXTERNAL_AGENT_MCP_SECRET_UNENFORCEABLE`, before any resolver runs, when:
+
+- a value is `{ env }` (or a stdio server's `env` holds any secret) and the
+  agent can read process environments: a shell tool is offered, or, on
+  Linux, a file-read tool is offered without `allowedPaths` or `readPaths`
+  that keep it out of `/proc`. On macOS a shell inside Claude Code's
+  no-network sandbox cannot read other processes' environments, so the
+  shell term does not apply there; it applies again when the shell runs
+  without that sandbox, that is with `allowNetwork: true` (with or without
+  `allowedPaths`) or `allowUnsandboxedShell: true`;
+- an `{ env }` variable is also in Claude Code's own environment (for
+  example a credential variable added to the provider's `envAllowlist`), or a
+  resolved value appears in one of that environment's values: Claude Code's
+  tools inherit its environment;
+- on Linux, a shell tool is offered and `kernel.yama.ptrace_scope` is `0` or
+  missing (same-user processes could read the `claude` process's memory);
+- on Windows, a shell tool is offered (same-user processes can read process
+  memory);
+- the run's environment carries a debug switch (`DEBUG`, `ANTHROPIC_LOG`,
+  `CLAUDE_DEBUG`, `CLAUDE_CODE_DEBUG*`) that could make Claude Code log
+  request headers. Such variables reach the run only through a custom
+  provider `envAllowlist`.
+
+The same rules apply under `inheritHostConfig: true` to declared servers.
+
+### Network rules (http, sse)
+
+A loopback server is an IP literal, `127.D.D.D` (no leading zeros) or
+`[::1]`, over `http:` or `https:`. Nothing is resolved, so a host name never
+counts as loopback. Any other server must be `https:` with a host name or a
+public-form address. A URL never has a user, query, fragment or `%`.
+`localhost`, `*.localhost`, `0.0.0.0/8`, `127.x` written as a remote name,
+non-canonical IPv6 and IPv6 forms that embed IPv4 are refused with
+`EXTERNAL_AGENT_MCP_SERVER_INVALID` when the driver is built.
+
+Without `allowNetwork: true`, only loopback servers are accepted; any other
+ends the run with `EXTERNAL_AGENT_MCP_SERVER_NETWORK_REQUIRED` before it
+starts, and the server is never contacted.
+
+### stdio rules
+
+A stdio server runs on the host, in the agent's working directory. When the
+run starts, the bridge resolves its command and path arguments to real paths
+and refuses (`EXTERNAL_AGENT_MCP_STDIO_UNSAFE`):
+
+- a command that is not an absolute regular executable, or that is inside
+  the working directory, `allowedPaths`, a sandbox temp directory, `/var/tmp`
+  or `/dev/shm`;
+- a package launcher (`npx`, `npm`, `pnpm`, `yarn`, `bun`, `bunx`, `uv`,
+  `uvx`, `pipx`, `deno`);
+- arguments that load code or open a debugger: `-m`, `-M`, `-r`, `-e`, `-c`,
+  `-p` (alone or attached), any other single-dash argument longer than one
+  letter (such as `-Ec<code>`), `--require`, `--import`, `--eval`,
+  `--inspect*`, and similar; a relative path argument; a path argument
+  inside a directory the agent can write;
+- `env` names that load code or change the program: `NODE_OPTIONS`,
+  `NODE_PATH`, `PYTHONPATH`, `PYTHONSTARTUP`, `RUBYOPT`, `PERL5OPT`,
+  `BASH_ENV`, `JAVA_TOOL_OPTIONS`, `CLASSPATH`, `PATH`, `LD_*`, `DYLD_*`,
+  `GIT_*`, and others (matched ignoring case).
+
+Put such setup in a host wrapper script: an absolute script outside the
+agent's folders that changes directory, sets its environment and starts the
+server. This rule is stricter than a flag list: any clustered single-dash
+argument is refused, because `python -Ec<code>` runs code.
+
+### What the agent may call
+
+- A listed tool of a declared server passes the confirmation guard with the
+  network off. A tool of the server that is not listed may appear in the
+  runtime's listing; a call to it is denied and the run goes on.
+- Declared tools are never pre-approved: they go through the guard and
+  `canUseTool` like any tool.
+- Under `read-only`, only listed tools of a `readOnly: true` server run.
+- MCP tools of servers that were not declared are denied, and in isolated
+  mode a call to one stops the run with `EXTERNAL_AGENT_ISOLATION_VIOLATED`.
+
+### Scrubbing
+
+The resolved values, and their URL-encoded, base64 and JSON-escaped forms,
+are replaced with `[redacted]` in every event, error, warning and
+`sessionStore` batch of the run. A `PostToolUse` hook does the same to a
+declared server's tool output before the model sees it; output of a shape
+the hook does not know is replaced with
+`[output withheld: unrecognized shape]`. Claude Code's `stderr`, `debug` and
+`debugFile` options are never set.
+
+### Events and spans
+
+`tool_call` and `tool_result` events for `mcp__<server>__<tool>` carry
+`metadata.mcp` (`{ server, tool }`, the longest known server name wins), and
+the result carries `metadata.durationMs`. Tool spans carry
+`gcp.vertex.agent.external_agent.mcp_server`. The Codex SDK driver adds the
+same `metadata.mcp` to `mcp_tool_call` items. No server config is ever on an
+event or span.
+
+### Transcripts on disk
+
+Agent runtimes keep session transcripts, and a transcript holds each tool
+result as the runtime received it. When an MCP server echoes its credential
+(in a result, an error, or a large output saved to a side file), the raw
+value lands there, even though the bridge redacts it for the model and in
+its own events. The bridge can scrub or prevent those files only where it
+owns the directory or the runtime's persistence setting. It owns no runtime
+home: every driver passes the host's `CLAUDE_CONFIG_DIR`, `CODEX_HOME` or
+`HOME` through.
+
+| Driver | Where the runtime writes its transcript | Raw tool results on disk |
+| --- | --- | --- |
+| `ClaudeAgentSdkDriver` with a declared `{ resolve }` or `{ env }` secret (isolated or `inheritHostConfig: true`) | Nowhere: the driver sets the SDK's `persistSession: false` and blocks the large-output folder (see [Large tool results](#large-tool-results)) | None. A result too large to inline stays inline, truncated and scrubbed |
+| `ClaudeAgentSdkDriver` without a declared secret, isolated or `inheritHostConfig: true` | `<config dir>/projects/<project>/<session id>.jsonl`, large outputs in `<session id>/tool-results/`; `<config dir>` is the child's `CLAUDE_CONFIG_DIR`, else `~/.claude` | Yes, in the host's directory |
+| `ClaudeCliDriver` | The same Claude Code paths | Yes, in the host's directory |
+| `CodexSdkDriver`, `CodexCliDriver` | `$CODEX_HOME/sessions/<year>/<month>/<day>/rollout-<time>-<thread id>.jsonl` (some Codex versions compress it); `CODEX_HOME` defaults to `~/.codex` | Yes, in the host's directory |
+| `GeminiCliDriver` | Gemini CLI's chat recording under `~/.gemini/tmp/<project hash>/` | Yes, in the host's directory |
+
+With a declared secret, `ClaudeAgentSdkDriver` therefore resumes nothing.
+Each turn folds the ADK history (already scrubbed) into its prompt, saves no
+SDK session id in session state, and refuses what needs a transcript on
+disk: `sessionStore` and `resumeSessionId` (in the constructor) and
+`runtimeSession.id` (at run time), each with
+`EXTERNAL_AGENT_MCP_SECRET_UNENFORCEABLE`.
+
+#### Large tool results
+
+`persistSession: false` does not cover one file: Claude Code saves a tool
+result larger than its inline limit (50,000 characters; an MCP result is
+first cut to `MAX_MCP_OUTPUT_TOKENS`, 25,000 tokens by default) to
+`<config dir>/projects/<project key>/<session id>/tool-results/` and gives
+the model that path. A server that echoes its secret in a large result
+would leave it there, and the agent could read the file back. With a
+declared secret, `ClaudeAgentSdkDriver` therefore:
+
+1. Picks the session id itself (the SDK's `sessionId`) and, before any
+   secret is read, reserves `<config dir>/projects/<project key>/<session
+   id>` as an empty read-only file. Claude Code cannot make the session
+   folder there, so it keeps the result inline, truncated, where the
+   output scrub redacts it. The driver removes the file, and any folder it
+   made for it, when the run ends.
+2. Sets `ENABLE_MCP_LARGE_OUTPUT_FILES=0` in the child environment, so an
+   MCP result too large to inline is truncated rather than saved.
+3. Checks that the runtime uses that session: a `PreToolUse` hook denies a
+   call whose hook input names another session id or another project
+   folder, and the run ends with `EXTERNAL_AGENT_MCP_SECRET_UNENFORCEABLE`,
+   as it does when `system/init` reports another session id.
+4. Checks that the reserved file is still there, unchanged (an empty
+   regular file with the same device, inode and change time), in that
+   same hook before every tool call, on every message, and once more
+   after the run. An agent that can write the config dir (an unsandboxed
+   shell, or a sandbox `allowWrite` or allowed path over it) could remove
+   the file to let the next large result reach disk. The next tool call
+   is then denied and the run ends with
+   `EXTERNAL_AGENT_MCP_SECRET_UNENFORCEABLE`. So a policy that lets the
+   agent write the config dir is covered by this check, not a hole in it.
+   If a folder took the file's place by the end of the run, the driver
+   redacts declared secrets in every regular file under it (links are not
+   followed), keeps the folder, and reports its path in the error, so the
+   host can inspect and delete it.
+
+**Calls in one batch.** Claude Code runs a turn's tool calls in batches:
+consecutive calls that are safe to run together share a batch, and any
+other call runs alone (checked on 2.1.319). A `Bash` call is safe to run
+with others only when Claude Code classifies its command as read-only, and
+an MCP call only when the server marks the tool `readOnlyHint`. `PreToolUse`
+runs when each call starts. So a command that deletes the file runs alone,
+and the guard sees the result before the next call starts. The window
+left is a command that Claude Code wrongly classifies as read-only and that
+deletes the file, in the same batch as a large read-only-hinted MCP call:
+both pass the guard before either runs. The message and end-of-run checks
+still catch it, after the fact: the run fails and the folder is scrubbed
+and reported.
+
+The run is refused with `EXTERNAL_AGENT_MCP_SECRET_UNENFORCEABLE` when the
+config dir is not an absolute path, when the working directory's project
+key is longer than 200 characters (Claude Code then shortens it with a
+hash the driver does not reproduce), or when the path exists or cannot be
+made. The layout is the one of the Claude Code build the SDK bundles
+(checked on 2.1.319); a release that saves large results somewhere else
+would need the guard updated.
+
+Also:
+
+- The reserved file also blocks `<session id>/subagents/`, where Claude
+  Code keeps subagent transcripts. With a declared secret, the `Agent` tool
+  is untested: a subagent may fail, or run without a transcript.
+- Two runs in the same working directory can race: one removes the empty
+  project folder it made while the other is about to reserve inside it.
+  The second run is then refused with
+  `EXTERNAL_AGENT_MCP_SECRET_UNENFORCEABLE`; run it again.
+- A host killed with `SIGKILL` leaves the empty read-only `<session id>`
+  file (and any empty project folder made for it). It holds no data, and a
+  new run never reuses the id. Delete such files when convenient.
+
+A per-run `CLAUDE_CONFIG_DIR` that the driver owns and deletes was the
+other option. Claude Code keeps working with the host login if
+`CLAUDE_SECURESTORAGE_CONFIG_DIR` is set to an empty string, because the
+keychain item name then stays `Claude Code-credentials`. It was not chosen:
+the large-output file would still exist for the length of the run, where
+the agent may read its own session's files, and `inheritHostConfig` needs
+the host's config dir.
+
+Everywhere else, the bridge does not know the values. For example, a host
+MCP server under `inheritHostConfig` takes its credential from host files.
+Treat the runtime's transcript directory as holding raw tool output: keep
+servers from echoing credentials, protect the directory like the
+credentials, and remove the sessions you do not need.
+
+### Residuals
+
+- **Process memory.** A resolved secret lives in the `claude` process
+  memory and, for a stdio `env`, in the server's. On Linux, same-user code
+  can read it through `/proc/<pid>/mem` unless `ptrace_scope` is 1 or higher
+  (the default on Ubuntu, not on every distribution or container) or the
+  sandbox hides the PIDs; hence the refusal above. On macOS, reading another
+  process's memory needs debugger privileges.
+- **`{ env }`** values still sit in the host process environment for other
+  same-user processes outside the run.
+- **Transcripts.** Runtimes write raw tool results to their transcripts;
+  see [Transcripts on disk](#transcripts-on-disk) for each driver. Only
+  `ClaudeAgentSdkDriver` with a declared secret keeps them off disk.
+- **Errors from servers.** Claude Code's `PostToolUseFailure` cannot
+  replace output, so a credential in a server's error text reaches the
+  model; the bridge's events are still scrubbed. Servers must not echo
+  credentials, in results or errors.
+- **The runtime's own login files.** Under the drivers' login scheme, the
+  agent's sandboxed shell can read `~/.claude.json` (and on Linux
+  `~/.claude/.credentials.json`). Declared secrets are not written there,
+  but other host state in those files is readable.
+- **Inherit mode.** With `inheritHostConfig: true`, inherited secrets
+  (values in `~/.claude.json`, inherited env) are readable by an agent with
+  a shell; they are only kept out of the bridge's outputs. Use isolated
+  mode with `mcpServers` when a secret must stay out of the agent's reach.
+  A host `PostToolUse` hook can overwrite the redaction there, and an `env`
+  block in the host's `settings.json` (for example `ANTHROPIC_LOG`) reaches
+  Claude Code without passing the debug-switch check, which sees only the
+  environment the bridge builds.
+- **Trust in servers.** stdio and remote servers are host-trusted. A stdio
+  server may read cwd-relative config the bridge cannot list; use the
+  wrapper-script pattern. With the network on there is no per-host
+  allowlist.
+- **Local binding.** With `allowLocalBinding`, shell commands may reach a
+  loopback server directly. The server must check its per-run token, which
+  the shell cannot see.
+
 ## Credentials
 
 `ClaudeAgent`, `CodexAgent` and `GeminiCliAgent` read credentials with
@@ -1065,7 +1406,8 @@ driver a frozen copy; non-string `env` values are dropped.
 the session to resume: the Codex SDK driver prefers it over the thread id
 saved in session state; the Claude Agent SDK driver uses its
 `resumeSessionId` option first, then `runtimeSession.id`, then session state,
-then its own memory. `ExternalAgent` never sets it.
+then its own memory. With a declared MCP secret it resumes nothing (see
+[Transcripts on disk](#transcripts-on-disk)). `ExternalAgent` never sets it.
 
 ## Cancel and host signals
 
@@ -1393,13 +1735,18 @@ exported from `adk-llm-bridge/agents`. They come from two places, and
   `EXTERNAL_AGENT_DEPENDENCY_MISSING`, `EXTERNAL_AGENT_MISSING_BINARY`
   (value `MISSING_BINARY`), `EXTERNAL_AGENT_BATCH_COMMAND_REFUSED`,
   `EXTERNAL_AGENT_CREDENTIAL_UNSUPPORTED`, `EXTERNAL_AGENT_OPTION_UNSUPPORTED`,
-  `EXTERNAL_AGENT_MODEL_INVALID`, `EXTERNAL_AGENT_MODEL_REQUIRED` and
-  `EXTERNAL_AGENT_MODEL_OVERRIDE`. A driver raises them; during a run the
+  `EXTERNAL_AGENT_MODEL_INVALID`, `EXTERNAL_AGENT_MODEL_REQUIRED`,
+  `EXTERNAL_AGENT_MODEL_OVERRIDE`, `EXTERNAL_AGENT_OPTION_UNKNOWN` and the
+  `EXTERNAL_AGENT_MCP_*` codes of [Host MCP servers and
+  secrets](#host-mcp-servers-and-secrets) (all but
+  `EXTERNAL_AGENT_MCP_SERVER_UNAVAILABLE`). A driver raises them; during a run the
   agent turns them into a non-recoverable error event, so you read them from
   `errorCode`. `EXTERNAL_AGENT_OPTION_UNSUPPORTED`,
   `EXTERNAL_AGENT_MODEL_INVALID` and `EXTERNAL_AGENT_MODEL_REQUIRED` are
-  thrown to you by the driver's constructor, and so is
-  `EXTERNAL_AGENT_MODEL_OVERRIDE` for `args` and `config`.
+  thrown to you by the driver's constructor, and so are
+  `EXTERNAL_AGENT_MODEL_OVERRIDE` for `args` and `config`,
+  `EXTERNAL_AGENT_OPTION_UNKNOWN`, `EXTERNAL_AGENT_MCP_SERVER_INVALID` and
+  `EXTERNAL_AGENT_MCP_SECRET_LITERAL`.
 - **Agent event codes**: `EXTERNAL_AGENT_ERROR`,
   `EXTERNAL_AGENT_TRANSFER_FAILED`, `EXTERNAL_AGENT_NOT_CONFIGURED`,
   `EXTERNAL_AGENT_CONFIRMATION_UNUSED`,
@@ -1432,6 +1779,15 @@ because the tool was not offered. The other codes in the table (`CLAUDE_*`,
 | `EXTERNAL_AGENT_MODEL_INVALID` | `EXTERNAL_AGENT_MODEL_INVALID` | No | Thrown when a driver is built with a `model` that is not a model id (not a string, empty, over 256 characters, with whitespace or a control character, or starting with `-`). See [Model](#model). |
 | `EXTERNAL_AGENT_MODEL_REQUIRED` | `EXTERNAL_AGENT_MODEL_REQUIRED` | No | Thrown when a driver with `requireExplicitModel: true` has no `model`, or a router or default alias (`default`, `best`, `opusplan`, Gemini `auto`; fx has none), or a Claude driver has no `smallFastModel` or one that is an alias instead of a full id. |
 | `EXTERNAL_AGENT_MODEL_OVERRIDE` | `EXTERNAL_AGENT_MODEL_OVERRIDE` | No | Something other than `model` would set or route the model: thrown for model-setting `args` or Codex SDK `config` keys (even with `allowPolicyOverrideArgs`); an error event for a model variable in the run's environment, or a Gemini CLI read-only run with a model (plan mode may route turns to another model). |
+| `EXTERNAL_AGENT_OPTION_UNKNOWN` | `EXTERNAL_AGENT_OPTION_UNKNOWN` | No | Thrown when a built-in driver's config is not a plain object or has a key the driver does not know (a typo, or an option of another driver: the message says which driver supports it). |
+| `EXTERNAL_AGENT_MCP_SERVER_INVALID` | `EXTERNAL_AGENT_MCP_SERVER_INVALID` | No | Thrown for a malformed `mcpServers` entry (name, type, key, URL, `tools`, `readOnly` without `tools`, `timeoutMs`, header or env name) or `mcpConnectTimeoutMs`. |
+| `EXTERNAL_AGENT_MCP_SECRET_LITERAL` | `EXTERNAL_AGENT_MCP_SECRET_LITERAL` | No | Thrown for a header or env value given as a bare string, or as `{ public }` under a sensitive name. |
+| `EXTERNAL_AGENT_MCP_SERVER_NETWORK_REQUIRED` | `EXTERNAL_AGENT_MCP_SERVER_NETWORK_REQUIRED` | No | A declared http or sse server is not on loopback and the policy does not set `allowNetwork: true`. |
+| `EXTERNAL_AGENT_MCP_STDIO_UNSAFE` | `EXTERNAL_AGENT_MCP_STDIO_UNSAFE` | No | A declared stdio server's command, arguments or env names break the stdio rules. |
+| `EXTERNAL_AGENT_MCP_SECRET_UNENFORCEABLE` | `EXTERNAL_AGENT_MCP_SECRET_UNENFORCEABLE` | No | The agent could read a declared secret (environment, process memory or a debug log); see [When a secret is refused](#when-a-secret-is-refused). |
+| `EXTERNAL_AGENT_MCP_SECRET_UNRESOLVED` | `EXTERNAL_AGENT_MCP_SECRET_UNRESOLVED` | No | A secret reference gave no usable value: the variable is unset or empty, the resolver threw, timed out or returned a value shorter than 8 characters or over 8192 bytes. |
+| `EXTERNAL_AGENT_MCP_PROVIDER_UNKNOWN` | `EXTERNAL_AGENT_MCP_PROVIDER_UNKNOWN` | No | Thrown by `selectMcpServers` for a granted provider id with no server. |
+| `EXTERNAL_AGENT_MCP_SERVER_UNAVAILABLE` | `EXTERNAL_AGENT_MCP_SERVER_UNAVAILABLE` | Yes | A required declared server failed or did not connect within `mcpConnectTimeoutMs`; the first message was not sent. For a server that is not required, a warning with this code. |
 | `CLAUDE_SESSION_STORE_MIRROR_ERROR` | `CLAUDE_SESSION_STORE_MIRROR_ERROR` | Yes | The Claude Agent SDK dropped a transcript batch its `sessionStore` rejected or timed out on (3 attempts in total); the run goes on. See [Persisting Claude sessions](claude-session-store.md). |
 | `MISSING_BINARY` | `EXTERNAL_AGENT_MISSING_BINARY` | No | The `claude`, `codex`, `gemini` or `fx` binary was not found, or, with `interpreter` and `entry`, the interpreter or the entry file. |
 | `EXTERNAL_AGENT_BATCH_COMMAND_REFUSED` | `EXTERNAL_AGENT_BATCH_COMMAND_REFUSED` | No | On Windows, the CLI command (or `interpreter`) is or resolves to a `.cmd` or `.bat` file (for example an npm shim). Remedy per CLI: [Windows: batch files and npm installs](#windows-batch-files-and-npm-installs). |
