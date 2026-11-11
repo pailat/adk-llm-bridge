@@ -21,6 +21,7 @@ import type { ExternalAgentCredentialProvider } from "./auth/credential-provider
 import { NoopCredentialProvider } from "./auth/credential-provider.js";
 import { snapshotCredential } from "./auth/snapshot.js";
 import {
+  EXTERNAL_AGENT_APPROVALS_UNSUPPORTED,
   EXTERNAL_AGENT_CREDENTIAL_UNSUPPORTED,
   EXTERNAL_AGENT_READ_ONLY_TOOL_UNKNOWN,
   EXTERNAL_AGENT_TOOL_NOT_READ_ONLY,
@@ -261,8 +262,12 @@ export interface ExternalAgentConfig extends BaseAgentConfig {
   /**
    * How permission prompts of the runtime (the `ask` mode) are answered. Without
    * it every prompt is denied. A confirmation never widens the effective policy
-   * and `read-only` is never confirmable. Supported by drivers that can
-   * intercept prompts (Claude Agent SDK); the Codex SDK exposes no approval hook.
+   * and `read-only` is never confirmable. Supported only by drivers that can
+   * intercept prompts (Claude Agent SDK). An `approver` or `adk: true` on any
+   * other built-in driver (Claude CLI, Codex, Gemini CLI) throws
+   * `EXTERNAL_AGENT_APPROVALS_UNSUPPORTED` at construction, because the
+   * runtime decides alone and the setting would be ignored. A custom driver
+   * without `capabilities()` is not checked.
    *
    * `allowedPaths` (and `readPaths`, for read tools) is checked on the
    * runtime's blocked path and on the path inputs of file tools, after
@@ -477,11 +482,12 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
   }
 
   /**
-   * Refuses tool configurations that could only drop tools silently: tools on
-   * a driver that cannot host them, `readOnlyTools` entries that do not name
-   * exactly one tool, and (under the agent's own `read-only` mode) direct
-   * tools that are not listed. In that order, so a typo in `readOnlyTools` is
-   * reported as unknown before an undeclared tool.
+   * Refuses configurations that could only be ignored silently: tools or an
+   * approver (or ADK confirmation) on a driver that cannot honor them,
+   * `readOnlyTools` entries that do not name exactly one tool, and (under the
+   * agent's own `read-only` mode) direct tools that are not listed. In that
+   * order, so a typo in `readOnlyTools` is reported as unknown before an
+   * undeclared tool.
    */
   private assertToolDeclarations(): void {
     const driver = this.driver;
@@ -492,6 +498,19 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
           `ExternalAgent "${this.name}": ${driver.constructor.name} cannot host ADK tools, so \`tools\` would be ignored. Use ClaudeAgent (ClaudeAgentSdkDriver), or remove \`tools\`.`,
         );
       }
+    }
+    // Only a driver that calls `request.requestPermission` ever reaches the
+    // approver or ADK's confirmation protocol.
+    if (
+      (typeof this.confirmation?.approver === "function" ||
+        this.confirmation?.adk === true) &&
+      typeof driver.capabilities === "function" &&
+      driver.capabilities().approvals !== true
+    ) {
+      throw new ExternalAgentPolicyError(
+        EXTERNAL_AGENT_APPROVALS_UNSUPPORTED,
+        `ExternalAgent "${this.name}": ${driver.constructor.name} never asks the host for permission, so \`confirmation\` would be ignored and the runtime would decide alone. Use ClaudeAgent (ClaudeAgentSdkDriver), or remove \`confirmation\`.`,
+      );
     }
 
     const direct = this.tools.filter(isBaseTool);
