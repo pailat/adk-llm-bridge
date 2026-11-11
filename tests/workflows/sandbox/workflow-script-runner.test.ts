@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect } from "bun:test";
 import type {
   WorkflowStep,
   WorkflowStepOutcome,
@@ -17,6 +17,8 @@ import type {
 } from "../../../src/workflows/sandbox/types.js";
 import { runWorkflowScript } from "../../../src/workflows/sandbox/workflow-script-runner.js";
 import { fromPartial } from "../../helpers/partial.js";
+// Every test here gets a deadline and the host-blocking watchdog.
+import { sandboxTest as test } from "../../helpers/sandbox-test.js";
 
 function result(step: WorkflowStep, output: string): WorkflowStepResult {
   return {

@@ -5,7 +5,7 @@
  * Durable lease expiry is wall time on purpose and is covered in the workspace
  * adapter tests.
  */
-import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { afterEach, describe, expect, spyOn } from "bun:test";
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -27,6 +27,8 @@ import { FileSystemWorkflowRepositoryMutationLock } from "../../src/workflows/no
 import { QuickJSSyncGeneratorRuntime } from "../../src/workflows/sandbox/quickjs-generator-runtime.js";
 import { FileSystemWorkspaceAdapter } from "../../src/workflows/workspace/file-system-workspace-adapter.js";
 import { fromPartial } from "../helpers/partial.js";
+// Every test here gets a deadline and the host-blocking watchdog.
+import { sandboxTest as test } from "../helpers/sandbox-test.js";
 
 const HOUR_MS = 3_600_000;
 const realNow = Date.now.bind(Date);

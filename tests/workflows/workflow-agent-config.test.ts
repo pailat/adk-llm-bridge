@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect } from "bun:test";
 import {
   BaseAgent,
   type BaseAgentConfig,
@@ -14,6 +14,8 @@ import {
 } from "../../src/workflows/definition.js";
 import { ScriptWorkflowAgent } from "../../src/workflows/script-workflow-agent.js";
 import { WorkflowAgent } from "../../src/workflows/workflow-agent.js";
+// Every test here gets a deadline and the host-blocking watchdog.
+import { sandboxTest as test } from "../helpers/sandbox-test.js";
 
 class ReplyAgent extends BaseAgent {
   calls = 0;

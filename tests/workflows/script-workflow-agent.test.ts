@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect } from "bun:test";
 import {
   BaseAgent,
   createEvent,
@@ -44,6 +44,8 @@ import {
   type ScriptWorkflowAgentConfig,
 } from "../../src/workflows/script-workflow-agent.js";
 import { InMemoryWorkspaceAdapter } from "../../src/workflows/workspace/in-memory-workspace-adapter.js";
+// Every test here gets a deadline and the host-blocking watchdog.
+import { sandboxTest as test } from "../helpers/sandbox-test.js";
 
 class ReplyAgent extends BaseAgent {
   calls = 0;
