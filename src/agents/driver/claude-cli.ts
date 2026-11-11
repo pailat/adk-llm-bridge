@@ -40,6 +40,7 @@ import {
   modelEnvRefusal,
   withModelPins,
 } from "./model.js";
+import { CLAUDE_CLI_OPTION_KEYS } from "./option-keys.js";
 import {
   batchCommandRefusal,
   dependencyMissing,
@@ -59,6 +60,7 @@ import {
 } from "./run-summary.js";
 import {
   asRecord,
+  assertKnownDriverOptions,
   bridgeEvent,
   buildChildEnv,
   exitErrorEvent,
@@ -533,6 +535,7 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
    * alias; `EXTERNAL_AGENT_MODEL_INVALID` also covers `smallFastModel`.
    */
   constructor(config: ClaudeCliDriverConfig = {}) {
+    assertKnownDriverOptions("ClaudeCliDriver", config, CLAUDE_CLI_OPTION_KEYS);
     for (const option of [
       "sessionStore",
       "sessionStoreFlush",

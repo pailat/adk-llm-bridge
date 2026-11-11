@@ -34,6 +34,7 @@ import {
   MODEL_ALIAS_DENYLIST,
   modelEnvRefusal,
 } from "./model.js";
+import { CODEX_CLI_OPTION_KEYS } from "./option-keys.js";
 import {
   batchCommandRefusal,
   dependencyMissing,
@@ -48,6 +49,7 @@ import {
 import { codexTurnUsage } from "./run-summary.js";
 import {
   asRecord,
+  assertKnownDriverOptions,
   bridgeEvent,
   buildChildEnv,
   exitErrorEvent,
@@ -535,6 +537,7 @@ export class CodexCliDriver extends SubprocessJsonlDriver {
    * and `model` is absent.
    */
   constructor(config: CodexCliDriverConfig = {}) {
+    assertKnownDriverOptions("CodexCliDriver", config, CODEX_CLI_OPTION_KEYS);
     validateDriverConfig("CodexCliDriver", config, CODEX_CLI_BOOLEAN_OPTIONS);
     validateLaunchConfig("CodexCliDriver", config);
     assertNoPinnedArgOverride(

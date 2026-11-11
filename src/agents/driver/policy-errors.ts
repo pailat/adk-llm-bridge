@@ -210,6 +210,102 @@ export const EXTERNAL_AGENT_READ_ONLY_TOOL_UNKNOWN =
 export const EXTERNAL_AGENT_TOOL_NOT_READ_ONLY =
   "EXTERNAL_AGENT_TOOL_NOT_READ_ONLY";
 
+/**
+ * The driver config is not a plain object, has a symbol key, or has a key the
+ * driver does not know (whatever its value, `undefined` included). Thrown
+ * when the driver is built, before any other check, so a misspelled or
+ * misplaced option is never silently ignored.
+ */
+export const EXTERNAL_AGENT_OPTION_UNKNOWN = "EXTERNAL_AGENT_OPTION_UNKNOWN";
+
+/**
+ * An `mcpServers` entry is malformed: a name outside the provider-id grammar,
+ * the reserved `adk_bridge`, a duplicate after case folding, more than 16
+ * servers, an unknown `type` or key, a URL outside the accepted grammar, a bad
+ * `tools` entry, `readOnly` without `tools`, a `timeoutMs` out of range, a
+ * relative stdio `command`, or a header or env name that is not valid.
+ * Thrown when the driver is built.
+ *
+ * @experimental
+ */
+export const EXTERNAL_AGENT_MCP_SERVER_INVALID =
+  "EXTERNAL_AGENT_MCP_SERVER_INVALID";
+
+/**
+ * An MCP header or env value is a bare string, or a `{ public }` value under a
+ * name that looks secret (`Authorization`, `Cookie`, `X-Api-Key`, or a name
+ * with token, secret, key, auth, cookie, session, passw or credential in it).
+ * Pass a secret as `{ resolve }` or `{ env }`. Thrown when the driver is
+ * built.
+ *
+ * @experimental
+ */
+export const EXTERNAL_AGENT_MCP_SECRET_LITERAL =
+  "EXTERNAL_AGENT_MCP_SECRET_LITERAL";
+
+/**
+ * An http or sse MCP server is not on loopback (`127.x.x.x` or `[::1]`) and
+ * the run's policy does not set `allowNetwork: true`.
+ *
+ * @experimental
+ */
+export const EXTERNAL_AGENT_MCP_SERVER_NETWORK_REQUIRED =
+  "EXTERNAL_AGENT_MCP_SERVER_NETWORK_REQUIRED";
+
+/**
+ * A stdio MCP server could run code the agent controls: its command is not a
+ * regular executable outside every agent-writable and sandbox temp root, is a
+ * package launcher, or an argument or env variable could load code or open a
+ * debugger. The message names the argument or variable.
+ *
+ * @experimental
+ */
+export const EXTERNAL_AGENT_MCP_STDIO_UNSAFE =
+  "EXTERNAL_AGENT_MCP_STDIO_UNSAFE";
+
+/**
+ * The run could not keep an MCP secret from the agent: the agent can read
+ * process environments (an `{ env }` ref, or a stdio env secret), can read
+ * process memory (Linux with `ptrace_scope` 0, or Windows, with a shell tool),
+ * or a debug switch in the runtime's environment would log it. The message
+ * names the fix.
+ *
+ * @experimental
+ */
+export const EXTERNAL_AGENT_MCP_SECRET_UNENFORCEABLE =
+  "EXTERNAL_AGENT_MCP_SECRET_UNENFORCEABLE";
+
+/**
+ * An MCP secret could not be read: the `{ env }` variable is missing or empty,
+ * the resolver threw, timed out or returned a non-string, or the value is
+ * shorter than 8 characters, longer than 8 KiB, or has CR, LF or NUL. The
+ * message names the server, field and key, never the value or the resolver's
+ * error text.
+ *
+ * @experimental
+ */
+export const EXTERNAL_AGENT_MCP_SECRET_UNRESOLVED =
+  "EXTERNAL_AGENT_MCP_SECRET_UNRESOLVED";
+
+/**
+ * `selectMcpServers` was given a provider id with no entry in the registry.
+ *
+ * @experimental
+ */
+export const EXTERNAL_AGENT_MCP_PROVIDER_UNKNOWN =
+  "EXTERNAL_AGENT_MCP_PROVIDER_UNKNOWN";
+
+/**
+ * Code of the recoverable `error` event a run reports when a required MCP
+ * server the driver declared did not connect within `mcpConnectTimeoutMs`, or
+ * the runtime reported an error for it. Not a policy error: the server may
+ * come up on a retry.
+ *
+ * @experimental
+ */
+export const EXTERNAL_AGENT_MCP_SERVER_UNAVAILABLE =
+  "EXTERNAL_AGENT_MCP_SERVER_UNAVAILABLE";
+
 /** Codes of {@link ExternalAgentPolicyError}. */
 export type ExternalAgentPolicyErrorCode =
   | typeof EXTERNAL_AGENT_ISOLATION_VIOLATED
@@ -229,7 +325,15 @@ export type ExternalAgentPolicyErrorCode =
   | typeof EXTERNAL_AGENT_SESSIONS_UNSUPPORTED
   | typeof EXTERNAL_AGENT_SUBAGENTS_UNSUPPORTED
   | typeof EXTERNAL_AGENT_READ_ONLY_TOOL_UNKNOWN
-  | typeof EXTERNAL_AGENT_TOOL_NOT_READ_ONLY;
+  | typeof EXTERNAL_AGENT_TOOL_NOT_READ_ONLY
+  | typeof EXTERNAL_AGENT_OPTION_UNKNOWN
+  | typeof EXTERNAL_AGENT_MCP_SERVER_INVALID
+  | typeof EXTERNAL_AGENT_MCP_SECRET_LITERAL
+  | typeof EXTERNAL_AGENT_MCP_SERVER_NETWORK_REQUIRED
+  | typeof EXTERNAL_AGENT_MCP_STDIO_UNSAFE
+  | typeof EXTERNAL_AGENT_MCP_SECRET_UNENFORCEABLE
+  | typeof EXTERNAL_AGENT_MCP_SECRET_UNRESOLVED
+  | typeof EXTERNAL_AGENT_MCP_PROVIDER_UNKNOWN;
 
 /**
  * A run the driver refuses to start or continue. Never recoverable: retrying
