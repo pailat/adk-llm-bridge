@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import {
   chmodSync,
   existsSync,
@@ -232,7 +233,7 @@ describe("event export pipeline", () => {
     expect(pipeline.stats.exported).toBe(4);
   });
 
-  test("clipping a 10 MB payload made of 600 long strings costs well under a second of CPU", () => {
+  test("clipping a 10 MB payload made of 600 long strings costs a small multiple of one linear pass over it", () => {
     const big = {
       ...record("many-long"),
       payload: {
@@ -242,18 +243,43 @@ describe("event export pipeline", () => {
         ),
       },
     };
-    // CPU time of this process, not wall time: clipping is pure computation
-    // (about 0.2 s here), and a wall clock also counts the time a busy host
-    // keeps the process descheduled. A quadratic clip still costs far more.
-    const before = process.cpuUsage();
-    const { record: clipped } = clipWorkflowEventRecord(big, {
-      maxRecordBytes: 256 * 1024,
+    // CPU time of this process, not wall time: a wall clock also counts the
+    // time a busy host keeps the process descheduled.
+    const cpuMs = (work: () => void): number => {
+      const before = process.cpuUsage();
+      work();
+      const used = process.cpuUsage(before);
+      return (used.user + used.system) / 1000;
+    };
+    // One linear pass over the same payload with the same primitives the clip
+    // uses (serialize, parse, hash, measure). A slow or loaded host slows the
+    // reference and the clip alike, so only their ratio is asserted.
+    const linearPass = () => {
+      const text = JSON.stringify(big.payload);
+      JSON.parse(text);
+      createHash("sha256").update(text).digest("hex");
+      Buffer.byteLength(text);
+    };
+    const clip = () =>
+      clipWorkflowEventRecord(big, { maxRecordBytes: 256 * 1024 });
+    linearPass();
+    clip();
+    const samples = [cpuMs(linearPass), cpuMs(linearPass), cpuMs(linearPass)];
+    const reference = Math.max(samples.sort((a, b) => a - b)[1] as number, 2);
+    let clipped: ReturnType<typeof clip> | undefined;
+    const clipMs = cpuMs(() => {
+      clipped = clip();
     });
-    const used = process.cpuUsage(before);
-    expect((used.user + used.system) / 1000).toBeLessThan(1_000);
-    expect(Buffer.byteLength(JSON.stringify(clipped))).toBeLessThanOrEqual(
-      256 * 1024,
-    );
+    // Measured here: the clip costs 14 to 23 times the reference. A clip that
+    // hashes or re-serializes the payload after every cut costs hundreds.
+    expect(clipMs).toBeLessThan(reference * 80);
+    // Backstop for a host so loaded that the reference itself is noise.
+    expect(clipMs).toBeLessThan(10_000);
+    expect(
+      Buffer.byteLength(
+        JSON.stringify((clipped as ReturnType<typeof clip>).record),
+      ),
+    ).toBeLessThanOrEqual(256 * 1024);
   });
 });
 
