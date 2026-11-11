@@ -1,5 +1,6 @@
 import { InputValidationError } from "@google/adk";
 import { CODEX_PROVIDER } from "./codex.js";
+import { FX_PROVIDER } from "./fx.js";
 import { GEMINI_CLI_PROVIDER } from "./gemini-cli.js";
 import {
   CLAUDE_PROVIDER,
@@ -50,7 +51,7 @@ export class ExternalAgentProviderRegistry {
 /**
  * Creates a registry of the built-in providers.
  *
- * @returns A new registry holding the built-in Codex, Claude and Gemini CLI
+ * @returns A new registry holding the built-in Codex, Claude, Gemini CLI and fx
  *   providers.
  */
 export function createDefaultExternalAgentProviderRegistry(): ExternalAgentProviderRegistry {
@@ -58,5 +59,6 @@ export function createDefaultExternalAgentProviderRegistry(): ExternalAgentProvi
     CODEX_PROVIDER,
     CLAUDE_PROVIDER,
     GEMINI_CLI_PROVIDER,
+    FX_PROVIDER,
   ]);
 }
