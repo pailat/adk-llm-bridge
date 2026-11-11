@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { constants } from "node:fs";
+import { type BigIntStats, constants } from "node:fs";
+import type { FileHandle } from "node:fs/promises";
 import {
   lstat,
   mkdir,
@@ -17,9 +18,11 @@ import {
   DIRECTORY_LOCK_OWNER_FILE,
   type DirectoryLockOwner,
   directoryLockTokenKey,
+  isRetireCollision,
   parseDirectoryLockOwner,
   retiredDirectoryLockPath,
 } from "../internal/directory-lock.js";
+import { fsyncDirectory } from "../internal/directory-sync.js";
 import {
   attachCause,
   attachCleanupErrors,
@@ -159,6 +162,11 @@ export async function collectFileSystemCheckpointTombstonesOffline(
  * The lock protects compare-and-swap plus rename as one critical section.
  * Readers need no lock because checkpoint replacement is atomic on one local
  * filesystem. The configured root must not span filesystems via symlinks.
+ *
+ * File contents are flushed to disk before each rename, and the directory
+ * after it. Windows cannot flush a directory, so there a rename is journaled
+ * by NTFS but a save that already resolved can still be lost to a power
+ * failure right after it. Elsewhere a failed directory flush fails the save.
  */
 export class FileSystemWorkflowCheckpointStore
   implements WorkflowCheckpointStore
@@ -553,7 +561,7 @@ async function removeCheckpointTombstone(
   }
   await assertValidCheckpointTombstone(tombstone.path, match[1] as string);
   await rm(tombstone.path, { recursive: true });
-  await syncDirectory(dirname(tombstone.path));
+  await fsyncDirectory(dirname(tombstone.path));
 }
 
 function offlineOptionsError(message: string): WorkflowError {
@@ -635,27 +643,30 @@ async function readCheckpointFile(
 }
 
 /**
- * Opens the checkpoint file once, without following a symlink, and checks and
- * reads it through that handle, so a path swapped after the check is never
- * read. A FIFO is opened non-blocking and then rejected as not a regular file.
- * Where the platform has no `O_NOFOLLOW` (Windows), a symlink is rejected by
- * an `lstat` before the open instead.
+ * Checks the checkpoint path with an `lstat` (a symlink is rejected), opens it
+ * once, and reads it through that handle only when the path names the opened
+ * file (device and inode; on Windows volume and file id). When the opened
+ * file is not the one checked, the path is checked again: a file a save
+ * renamed over the path in between is read, but a path that is now a symlink
+ * or names another file is refused. A symlink swapped in after the check is so
+ * never read, also where the open follows it (Windows has no `O_NOFOLLOW`);
+ * where `O_NOFOLLOW` exists, the open refuses a symlink too. A FIFO is opened
+ * non-blocking and then rejected as not a regular file.
  */
 async function readCheckpointBytes(
   checkpointPath: string,
   checkpointKey: string,
   maxCheckpointBytes: number,
 ): Promise<string | undefined> {
-  if (constants.O_NOFOLLOW === undefined) {
-    try {
-      if ((await lstat(checkpointPath)).isSymbolicLink()) {
-        throw unsafeCheckpointFileError(checkpointKey);
-      }
-    } catch (error) {
-      if (error instanceof WorkflowError) throw error;
-      if (hasErrorCode(error, "ENOENT")) return undefined;
-      throw ioError("checkpoint_stat_failed", checkpointKey, error);
-    }
+  let checked: BigIntStats;
+  try {
+    checked = await lstat(checkpointPath, { bigint: true });
+  } catch (error) {
+    if (hasErrorCode(error, "ENOENT")) return undefined;
+    throw ioError("checkpoint_stat_failed", checkpointKey, error);
+  }
+  if (checked.isSymbolicLink()) {
+    throw unsafeCheckpointFileError(checkpointKey);
   }
   let handle: Awaited<ReturnType<typeof open>>;
   try {
@@ -676,23 +687,47 @@ async function readCheckpointBytes(
     throw ioError("checkpoint_stat_failed", checkpointKey, error);
   }
   try {
-    let info: Awaited<ReturnType<typeof handle.stat>>;
+    let info: BigIntStats;
     try {
-      info = await handle.stat();
+      info = await handle.stat({ bigint: true });
     } catch (error) {
       throw ioError("checkpoint_stat_failed", checkpointKey, error);
     }
     if (!info.isFile()) {
       throw unsafeCheckpointFileError(checkpointKey);
     }
+    if (info.dev !== checked.dev || info.ino !== checked.ino) {
+      // A concurrent save renames a new file over the path, so the opened
+      // file may be newer than the one checked. Read it only when the path
+      // still names it now and is not a symlink.
+      let current: BigIntStats | undefined;
+      try {
+        current = await lstat(checkpointPath, { bigint: true });
+      } catch {
+        current = undefined;
+      }
+      if (
+        current === undefined ||
+        current.isSymbolicLink() ||
+        current.dev !== info.dev ||
+        current.ino !== info.ino
+      ) {
+        throw checkpointFileError(
+          "checkpoint_file_unsafe",
+          checkpointKey,
+          `Workflow checkpoint path changed while it was read: ${checkpointKey}`,
+        );
+      }
+    }
     const envelopeOverheadBytes =
       checkpointEnvelopeOverheadBytes(checkpointKey);
     const maxFileBytes = maxCheckpointBytes + envelopeOverheadBytes;
-    if (info.size > maxFileBytes) {
+    const size = Number(info.size);
+    if (size > maxFileBytes) {
       throw workflowCheckpointSizeLimitError(
         checkpointKey,
         maxCheckpointBytes,
-        info.size - envelopeOverheadBytes,
+        size - envelopeOverheadBytes,
         "load",
       );
     }
@@ -790,7 +825,7 @@ async function atomicWriteCheckpoint(
     await assertOwnership();
     await rename(temporaryPath, checkpointPath);
     temporaryExists = false;
-    await syncDirectory(directory);
+    await fsyncDirectory(directory);
   } catch (error) {
     if (error instanceof WorkflowError) {
       throw error;
@@ -800,15 +835,6 @@ async function atomicWriteCheckpoint(
     if (temporaryExists) {
       await unlink(temporaryPath).catch(() => {});
     }
-  }
-}
-
-async function syncDirectory(directory: string): Promise<void> {
-  const handle = await open(directory, constants.O_RDONLY);
-  try {
-    await handle.sync();
-  } finally {
-    await handle.close();
   }
 }
 
@@ -839,7 +865,7 @@ async function createLockCandidate(
     } finally {
       await ownerHandle.close();
     }
-    await syncDirectory(candidatePath);
+    await fsyncDirectory(candidatePath);
     return candidatePath;
   } catch (error) {
     await rm(candidatePath, { recursive: true, force: true }).catch(() => {});
@@ -923,36 +949,46 @@ async function readLockOwner(
     throw ioError("checkpoint_lock_read_failed", checkpointKey, error);
   }
   if (info.isSymbolicLink() || !info.isDirectory()) {
-    throw checkpointFileError(
-      "checkpoint_lock_corrupt",
-      checkpointKey,
-      `Workflow checkpoint lock is not a safe directory: ${checkpointKey}`,
-    );
+    throw unsafeLockError(checkpointKey);
   }
 
-  let rawOwner: string;
+  // A missing owner means either that this directory was retired (the path
+  // now names another lock or nothing) or that it lost its owner in place.
+  // (dev, ino) tells the two apart only while the directory is held open:
+  // Linux (ext4) and NTFS give a freed number to the next directory at once,
+  // so a lock retired and republished in between would look unchanged. The
+  // open neither follows a symlink nor blocks on a FIFO swapped in since the
+  // check above (on Windows that check alone rejects a symlink).
+  let pin: FileHandle;
   try {
-    rawOwner = await readFile(join(lockPath, LOCK_OWNER_FILE), "utf8");
+    pin = await open(
+      lockPath,
+      constants.O_RDONLY |
+        (constants.O_NOFOLLOW ?? 0) |
+        (constants.O_NONBLOCK ?? 0),
+    );
   } catch (error) {
     if (hasErrorCode(error, "ENOENT")) {
-      try {
-        const currentInfo = await lstat(lockPath);
-        if (currentInfo.dev !== info.dev || currentInfo.ino !== info.ino) {
-          return await readLockOwner(lockPath, checkpointKey);
-        }
-      } catch (statError) {
-        if (hasErrorCode(statError, "ENOENT")) {
-          return undefined;
-        }
-        throw ioError("checkpoint_lock_read_failed", checkpointKey, statError);
-      }
-      throw checkpointFileError(
-        "checkpoint_lock_corrupt",
-        checkpointKey,
-        `Workflow checkpoint lock has no valid owner: ${checkpointKey}`,
-      );
+      return undefined;
+    }
+    // O_NOFOLLOW reports a symlink as ELOOP (EMLINK on FreeBSD).
+    if (hasErrorCode(error, "ELOOP") || hasErrorCode(error, "EMLINK")) {
+      throw unsafeLockError(checkpointKey);
     }
     throw ioError("checkpoint_lock_read_failed", checkpointKey, error);
+  }
+  let rawOwner: string | "replaced" | "retired";
+  try {
+    rawOwner = await readPinnedLockOwner(lockPath, pin, checkpointKey);
+  } finally {
+    // A read-only handle: closing it cannot lose data.
+    await pin.close().catch(() => {});
+  }
+  if (rawOwner === "retired") {
+    return undefined;
+  }
+  if (rawOwner === "replaced") {
+    return await readLockOwner(lockPath, checkpointKey);
   }
   const metadata = parseLockMetadata(rawOwner);
   if (!metadata) {
@@ -963,6 +999,57 @@ async function readLockOwner(
     );
   }
   return metadata;
+}
+
+function unsafeLockError(checkpointKey: string): WorkflowError {
+  return checkpointFileError(
+    "checkpoint_lock_corrupt",
+    checkpointKey,
+    `Workflow checkpoint lock is not a safe directory: ${checkpointKey}`,
+  );
+}
+
+/**
+ * Reads the owner of the lock directory `pin` holds open: `"replaced"` when
+ * the path now names another directory, `"retired"` when it names nothing.
+ */
+async function readPinnedLockOwner(
+  lockPath: string,
+  pin: FileHandle,
+  checkpointKey: string,
+): Promise<string | "replaced" | "retired"> {
+  let pinned: Awaited<ReturnType<FileHandle["stat"]>>;
+  try {
+    pinned = await pin.stat();
+  } catch (error) {
+    throw ioError("checkpoint_lock_read_failed", checkpointKey, error);
+  }
+  if (!pinned.isDirectory()) {
+    throw unsafeLockError(checkpointKey);
+  }
+  try {
+    return await readFile(join(lockPath, LOCK_OWNER_FILE), "utf8");
+  } catch (error) {
+    if (!hasErrorCode(error, "ENOENT")) {
+      throw ioError("checkpoint_lock_read_failed", checkpointKey, error);
+    }
+  }
+  try {
+    const current = await lstat(lockPath);
+    if (current.dev !== pinned.dev || current.ino !== pinned.ino) {
+      return "replaced";
+    }
+  } catch (error) {
+    if (hasErrorCode(error, "ENOENT")) {
+      return "retired";
+    }
+    throw ioError("checkpoint_lock_read_failed", checkpointKey, error);
+  }
+  throw checkpointFileError(
+    "checkpoint_lock_corrupt",
+    checkpointKey,
+    `Workflow checkpoint lock has no valid owner: ${checkpointKey}`,
+  );
 }
 
 async function assertLockOwnership(
@@ -989,8 +1076,8 @@ async function releaseLock(
   await assertLockOwnership(lockPath, token, checkpointKey);
   const retiredPath = retiredDirectoryLockPath(lockPath, token);
   try {
-    await rename(lockPath, retiredPath);
-    await syncDirectory(dirname(lockPath));
+    await renameRetryingBlocked(lockPath, retiredPath);
+    await fsyncDirectory(dirname(lockPath));
   } catch (error) {
     throw ioError("checkpoint_lock_release_failed", checkpointKey, error);
   }
@@ -999,6 +1086,45 @@ async function releaseLock(
   // Removing it keeps the root from growing on every save; a leftover after a
   // crash is collected offline.
   await rm(retiredPath, { recursive: true, force: true }).catch(() => {});
+}
+
+/**
+ * Renames, waiting out a Windows open file a few times: a directory cannot be
+ * renamed while another process has a file inside it open, such as a waiter
+ * reading `owner.json`. Retries only `EPERM`, `EBUSY` and `EACCES`, 5 attempts
+ * 20 ms apart; any other error is thrown at once.
+ *
+ * @param from - Path to rename.
+ * @param to - New path.
+ * @param renamePath - The rename to run; the file system's by default. The
+ * test fixtures pass their own so they retire a lock with the same policy.
+ * @throws The rename's error when it is not a blocked rename, or when the
+ * rename is still blocked after the last attempt.
+ * @internal
+ */
+export async function renameRetryingBlocked(
+  from: string,
+  to: string,
+  renamePath: (from: string, to: string) => Promise<void> = rename,
+): Promise<void> {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      await renamePath(from, to);
+      return;
+    } catch (error) {
+      if (
+        attempt >= 5 ||
+        !(
+          hasErrorCode(error, "EPERM") ||
+          hasErrorCode(error, "EBUSY") ||
+          hasErrorCode(error, "EACCES")
+        )
+      ) {
+        throw error;
+      }
+      await new Promise((done) => setTimeout(done, 20));
+    }
+  }
 }
 
 async function recoverAbandonedLock(
@@ -1023,13 +1149,13 @@ async function recoverAbandonedLock(
   const retiredPath = retiredDirectoryLockPath(lockPath, metadata.token);
   try {
     await rename(lockPath, retiredPath);
-    await syncDirectory(dirname(lockPath));
+    await fsyncDirectory(dirname(lockPath));
     return true;
   } catch (error) {
     if (hasErrorCode(error, "ENOENT")) {
       return true;
     }
-    if (hasErrorCode(error, "EEXIST") || hasErrorCode(error, "ENOTEMPTY")) {
+    if (isRetireCollision(error, retiredPath)) {
       return false;
     }
     throw ioError("checkpoint_lock_recovery_failed", checkpointKey, error);

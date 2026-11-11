@@ -1,13 +1,82 @@
-import { describe, expect, test } from "bun:test";
+import { test as bunTest, describe, expect } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const FIXTURE = join(import.meta.dir, "fixtures", "checkpoint-store-fault.ts");
+/** The child's own limit; the test's is longer, so the child's output is kept. */
+const CHILD_TIMEOUT_MS = 30_000;
+const TEST_TIMEOUT_MS = 45_000;
+/** Room for the child's trace (Windows); Node's default of 1 MiB overflowed. */
+const CHILD_MAX_BUFFER = 64 * 1024 * 1024;
+
+/** How the last fault child ended, printed when its test fails. */
+let lastChild:
+  | {
+      mode: string;
+      status: number | null;
+      signal: string | null;
+      error?: string;
+      stdout: string;
+      stderr: string;
+    }
+  | undefined;
+
+function describeChild(child: NonNullable<typeof lastChild>): string {
+  return [
+    `fault child "${child.mode}": exit code ${child.status}, signal ${child.signal}${child.error ? `, ${child.error}` : ""}`,
+    "--- stdout ---",
+    child.stdout.trimEnd(),
+    "--- stderr ---",
+    child.stderr.trimEnd(),
+  ].join("\n");
+}
+
+/** A test of the fault fixture that prints how its child ended if it fails. */
+function test(name: string, body: () => Promise<void>) {
+  bunTest(
+    name,
+    async () => {
+      lastChild = undefined;
+      try {
+        await body();
+      } catch (error) {
+        if (lastChild) console.error(describeChild(lastChild));
+        throw error;
+      }
+    },
+    TEST_TIMEOUT_MS,
+  );
+}
 
 async function runFault(
-  mode: "release" | "steal" | "corrupt" | "swap",
+  mode:
+    | "release"
+    | "steal"
+    | "corrupt"
+    | "swap"
+    | "swap-follow"
+    | "load-follow"
+    | "replace"
+    | "replace-follow"
+    | "late-fixture-failure"
+    | "swap-replace-follow"
+    | "link-follow"
+    | "wait-retire"
+    | "wait-replace"
+    | "wait-unlink"
+    | "wait-vanish"
+    | "eperm-live"
+    | "eperm-none"
+    | "busy-release"
+    | "trace"
+    | "dir-sync-win32"
+    | "dir-sync-posix"
+    | "file-sync-win32"
+    | "recover-race"
+    | "recover-race-win32"
+    | "recover-blocked-win32",
   swapTarget?: string,
 ) {
   const root = await mkdtemp(join(tmpdir(), "adk-checkpoint-fault-"));
@@ -15,16 +84,29 @@ async function runFault(
     const child = spawnSync(
       process.execPath,
       [FIXTURE, mode, root, ...(swapTarget ? [swapTarget] : [])],
-      { encoding: "utf8", timeout: 30_000 },
+      {
+        encoding: "utf8",
+        timeout: CHILD_TIMEOUT_MS,
+        maxBuffer: CHILD_MAX_BUFFER,
+      },
     );
-    const line = child.stdout.trim().split("\n").at(-1) ?? "";
+    lastChild = {
+      mode,
+      status: child.status,
+      signal: child.signal,
+      error: child.error?.message,
+      stdout: child.stdout ?? "",
+      stderr: child.stderr ?? "",
+    };
+    const line = lastChild.stdout.trim().split("\n").at(-1) ?? "";
     return {
       result: JSON.parse(line) as {
         saved: boolean;
         loaded?: boolean;
         reason?: string;
+        [key: string]: unknown;
       },
-      output: `${child.stdout}${child.stderr}`,
+      output: `${lastChild.stdout}${lastChild.stderr}`,
     };
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -61,6 +143,14 @@ describe("FileSystemWorkflowCheckpointStore under file-system faults", () => {
     expect(output).not.toContain("[WORKFLOW_CHECKPOINT_LOCK_RELEASE_FAILED]");
   });
 
+  test("when the open follows symlinks (Windows) a checkpoint nobody swapped saves and loads", async () => {
+    const { result } = await runFault("load-follow");
+
+    expect(result).toEqual({ saved: true, loaded: true });
+  });
+
+  // A host that cannot create the symlink reports `symlink: "<code>"` in the
+  // result, so these tests fail and say so instead of passing untested.
   test("load never reads a checkpoint swapped for a symlink after it was checked", async () => {
     const outside = await mkdtemp(join(tmpdir(), "adk-checkpoint-outside-"));
     try {
@@ -76,5 +166,213 @@ describe("FileSystemWorkflowCheckpointStore under file-system faults", () => {
     } finally {
       await rm(outside, { recursive: true, force: true });
     }
+  });
+
+  // `load` takes no lock, so it can overlap a save, which renames a new file
+  // over the path. A file replaced that way after the check is read, not
+  // refused as a swap.
+  test("a load that races a save's replace of the file reads the new file", async () => {
+    const { result } = await runFault("replace");
+
+    expect(result).toEqual({ saved: true, loaded: true });
+  });
+
+  test("when the open follows symlinks (Windows) a load that races a save's replace reads the new file", async () => {
+    const { result } = await runFault("replace-follow");
+
+    expect(result).toEqual({ saved: true, loaded: true });
+  });
+
+  test("when the open follows symlinks (Windows) a file renamed over a swapped symlink after the open is still refused", async () => {
+    const outside = await mkdtemp(join(tmpdir(), "adk-checkpoint-outside-"));
+    try {
+      const target = join(outside, "planted.json");
+      await writeFile(target, "{}", "utf8");
+
+      const { result } = await runFault("swap-replace-follow", target);
+
+      expect(result).toEqual({
+        saved: true,
+        reason: "checkpoint_file_unsafe",
+      });
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  // Refused before the open: where the open follows a symlink, opening it
+  // would already reach the target (on Windows that can be a device or pipe).
+  test("when the open follows symlinks (Windows) load refuses a symlink without opening it", async () => {
+    const outside = await mkdtemp(join(tmpdir(), "adk-checkpoint-outside-"));
+    try {
+      const target = join(outside, "planted.json");
+      await writeFile(target, "{}", "utf8");
+
+      const { result } = await runFault("link-follow", target);
+
+      expect(result).toEqual({
+        saved: true,
+        reason: "checkpoint_file_unsafe",
+        opens: 0,
+      });
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  test("when the open follows symlinks (Windows) load still refuses a checkpoint swapped for a symlink", async () => {
+    const outside = await mkdtemp(join(tmpdir(), "adk-checkpoint-outside-"));
+    try {
+      const target = join(outside, "planted.json");
+      await writeFile(target, "{}", "utf8");
+
+      const { result } = await runFault("swap-follow", target);
+
+      expect(result).toEqual({
+        saved: true,
+        reason: "checkpoint_file_unsafe",
+      });
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  test("a waiter that reads the owner while the holder retires the lock acquires it", async () => {
+    const { result, output } = await runFault("wait-retire");
+
+    expect(result).toEqual({ saved: true, loaded: true });
+    expect(output).not.toContain("checkpoint_lock_corrupt");
+  });
+
+  test("a waiter whose held lock is retired before it inspects it acquires it", async () => {
+    const { result, output } = await runFault("wait-vanish");
+
+    expect(result).toEqual({ saved: true, loaded: true });
+    expect(output).not.toContain("checkpoint_lock_read_failed");
+  });
+
+  test("a waiter that sees the lock replaced between its reads follows the new owner", async () => {
+    const { result, output } = await runFault("wait-replace");
+
+    expect(result).toEqual({ saved: true, loaded: true });
+    expect(output).not.toContain("checkpoint_lock_corrupt");
+  });
+
+  // The protocol never leaves a lock directory without its owner file: locks
+  // are published and retired by renaming the whole directory. Deleting the
+  // owner file in place (what a recursive removal of the live lock path does
+  // first) is foreign tampering, and the store fails closed on it.
+  test("a lock that loses its owner file in place fails closed", async () => {
+    const { result } = await runFault("wait-unlink");
+
+    expect(result).toEqual({
+      saved: false,
+      loaded: true,
+      reason: "checkpoint_lock_corrupt",
+    });
+  });
+
+  // Windows reports a rename onto a non-empty directory as EPERM, not EEXIST.
+  test("an EPERM from the publishing rename while a live holder owns the lock waits for it (Windows)", async () => {
+    const { result, output } = await runFault("eperm-live");
+
+    expect(result).toEqual({ saved: true, loaded: true });
+    expect(output).not.toContain("checkpoint_lock_acquire_failed");
+  });
+
+  test("an EPERM from the publishing rename with no lock present fails the save", async () => {
+    const { result } = await runFault("eperm-none");
+
+    expect(result).toEqual({
+      saved: false,
+      loaded: false,
+      reason: "checkpoint_lock_acquire_failed",
+    });
+  });
+
+  test("a release retries a rename a waiter's open file blocks (Windows EBUSY)", async () => {
+    const { result, output } = await runFault("busy-release");
+
+    expect(result).toEqual({ saved: true, loaded: true });
+    expect(output).not.toContain("[WORKFLOW_CHECKPOINT_LOCK_RELEASE_FAILED]");
+  });
+
+  // The claim behind the wall-clock fix: the lock path is only ever replaced
+  // by a whole-directory rename, with the owner file already complete. An
+  // in-place write or delete lets a reader see a lock without its owner.
+  test("only the publishing and retiring renames touch the lock path, and the owner is complete and synced before it is published", async () => {
+    const { result } = await runFault("trace");
+
+    expect(result).toEqual({
+      saved: true,
+      loaded: true,
+      violations: [],
+      publishes: 2,
+      incompleteOwnerAtPublish: 0,
+      unsyncedOwnerAtPublish: 0,
+    });
+  });
+
+  // Windows refuses to flush a directory (EPERM); only there is that skipped.
+  test("saves and loads when the platform cannot flush a directory (Windows)", async () => {
+    const { result } = await runFault("dir-sync-win32");
+
+    expect(result).toEqual({ saved: true, loaded: true });
+  });
+
+  test("a directory flush that fails off Windows fails the save", async () => {
+    const { result } = await runFault("dir-sync-posix");
+
+    expect(result).toEqual({
+      saved: false,
+      loaded: false,
+      reason: "checkpoint_lock_candidate_failed",
+    });
+  });
+
+  test("a file flush that fails fails the save on Windows too", async () => {
+    const { result } = await runFault("file-sync-win32");
+
+    expect(result).toEqual({
+      saved: false,
+      loaded: false,
+      reason: "checkpoint_lock_candidate_failed",
+    });
+  });
+
+  // A delayed recoverer's rename lands on the tombstone a faster one made,
+  // after a new writer took the lock: it backs off and waits for that writer.
+  test("a recovery that collides with another recoverer's tombstone waits for the new owner", async () => {
+    const { result } = await runFault("recover-race");
+
+    expect(result).toEqual({ saved: true, loaded: true });
+  });
+
+  test("on Windows that collision (EPERM onto an existing tombstone) is the same wait", async () => {
+    const { result } = await runFault("recover-race-win32");
+
+    expect(result).toEqual({ saved: true, loaded: true });
+  });
+
+  test("on Windows an EPERM from a recovery rename with no tombstone fails the save", async () => {
+    const { result } = await runFault("recover-blocked-win32");
+
+    expect(result).toEqual({
+      saved: false,
+      loaded: true,
+      reason: "checkpoint_lock_recovery_failed",
+    });
+  });
+
+  // Every fixture failure is named, also one that happens after the store's
+  // last call: the fixture waits for its pending actions before it reports.
+  test("a fixture action that fails late is still reported", async () => {
+    const { result } = await runFault("late-fixture-failure");
+
+    expect(result).toEqual({
+      saved: true,
+      loaded: true,
+      fixtureErrors: ["late action: EPERM"],
+    });
   });
 });

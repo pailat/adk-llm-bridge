@@ -47,11 +47,22 @@ jobs:
   # The `interpreter` + `entry` route runs a fake JavaScript entry through the
   # native node.exe (the only interpreter accepted), under Bun and under Node,
   # with a prompt cmd.exe would re-parse.
-  # Only Windows-safe checks run here: the rest of the driver tests assume POSIX.
+  # Only Windows-safe driver checks run here: the rest assume POSIX. The
+  # file-system store suites run whole, under Bun and under Node.
   windows-shims:
     name: windows shims (Bun and Node)
     runs-on: windows-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
+    env:
+      # `./` makes `bun test` take each entry as a path, not a name filter, so
+      # both legs run exactly these files.
+      FS_STORE_SUITES: >-
+        ./tests/workflows/checkpoint
+        ./tests/workflows/internal
+        ./tests/workflows/checkpoint-store.test.ts
+        ./tests/workflows/checkpoint-size-limit.test.ts
+        ./tests/workflows/workspace/file-system-workspace-adapter.test.ts
+        ./tests/workflows/wall-clock-step.test.ts
     defaults:
       run:
         shell: bash
@@ -71,6 +82,14 @@ jobs:
       - run: bun run build
       - name: Fake .cmd shims and the interpreter + entry route under Node
         run: node scripts/windows-shim-smoke.mjs
+      # The file-system stores and the lock protocol on NTFS, under Bun and
+      # under Node (their file-system implementations differ on Windows). Both
+      # legs run even when the other fails, so one run shows every failure.
+      - name: File-system stores and lock protocol on NTFS under Bun
+        run: bun test ${{ env.FS_STORE_SUITES }}
+      - name: File-system stores and lock protocol on NTFS under Node
+        if: ${{ !cancelled() }}
+        run: node scripts/node-test.mjs ${{ env.FS_STORE_SUITES }}
 
   # Installs the packed tarball with npm into an empty project, which pulls in
   # the required peers and skips the optional ones, then imports every entry.

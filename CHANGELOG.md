@@ -1786,6 +1786,47 @@ from the 0.6.0 tag.
   TypeError: the agents passed only part of their config to `BaseAgent`. The
   whole config is forwarded now, so a clone keeps the definition and adapters.
 
+- Windows: a workspace or repository mutation lock taken by another process
+  between the occupancy check and the publishing rename is waited for instead
+  of failing the mutation. Windows reports a rename onto a non-empty directory
+  as `EPERM`, which the checkpoint store already treated as contention.
+- Windows: a delayed recovery of an abandoned lock (the checkpoint store, and
+  the workspace and repository mutation locks) failed with `EPERM` when another
+  recoverer had already retired the same lock, instead of waiting for the new
+  owner. `MoveFileExW` never replaces a directory, so Windows reports a rename
+  onto the existing tombstone as `EPERM`, not `EEXIST`. That `EPERM` now counts
+  as the collision when a directory (the tombstone) is at that path; any other
+  `EPERM` still fails.
+- Windows: loading a checkpoint could read through a symlink swapped in after
+  the store checked the path, because Windows has no `O_NOFOLLOW` and the open
+  follows it. On every platform the load now checks the path with `lstat`
+  (refusing a symlink before opening it) and reads only when the path names
+  the opened file (device and inode; volume and file id on Windows). A file a
+  concurrent save renamed over the path is read; a path that became a symlink
+  or names another file fails with `checkpoint_file_unsafe` everywhere. On
+  Linux kernels older than about 4.19, overlayfs can report different device
+  and inode numbers to `stat` and `fstat`, which fails every load there; keep
+  the checkpoint root on a volume.
+- Windows: releasing a lock (the checkpoint store, and the workspace and
+  repository mutation locks) retries a rename that a waiter's open `owner.json`
+  blocks (`EPERM`, `EBUSY`, `EACCES`; 5 tries over about 100 ms) instead of
+  leaving the lock behind under a live process.
+- Linux and Windows: a checkpoint save that waited while the lock was
+  released and taken by another writer could fail with
+  `checkpoint_lock_corrupt`. The new lock directory often reuses the old one's
+  inode number (ext4, NTFS), so the store took it for the same lock without
+  its owner. The store now holds the lock directory open while it reads the
+  owner, so its number cannot be reused in between.
+- Windows: the file-system checkpoint store failed every save
+  (`checkpoint_lock_candidate_failed`, `EPERM` from `fsync`), because Windows
+  cannot flush a directory. The checkpoint store, the workspace adapter and the
+  repository mutation lock now skip the directory flush on Windows only, where
+  NTFS journals the rename; a save that already resolved can still be lost to a
+  power failure right after it. File contents are flushed on every platform.
+  Elsewhere a failed directory flush is an error, including the codes the
+  workspace and repository locks used to ignore; a lock whose flush fails
+  right after it is taken is released instead of left behind.
+
 
 ### Docs
 
@@ -1806,6 +1847,10 @@ from the 0.6.0 tag.
   case-insensitive built-in name match also applies to the start check, the
   `PreToolUse` hook and the `canUseTool` wrapper.
 - `docs/workflow-control-plane.md`: which error class carries which code type.
+- `docs/workflow-durability.md`: how to clear a stuck checkpoint lock while
+  writers may run (rename the `.lock` directory away, then delete it; a
+  recursive delete in place makes a concurrent writer fail with
+  `checkpoint_lock_corrupt`).
 - `docs/external-agent-isolation.md` and `docs/migration-0.7.md`: a "Planned
   changes" note: 0.8 is planned to replace the CLI drivers' `args` denylist
   with an allowlist, so other flags would need `allowPolicyOverrideArgs`.

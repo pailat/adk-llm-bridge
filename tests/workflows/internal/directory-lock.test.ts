@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import {
   mkdir,
@@ -22,6 +23,39 @@ import {
 /** Above the default `pid_max` of Linux and macOS, so no process has it. */
 const DEAD_PID = 2_147_483_646;
 const roots: string[] = [];
+const FIXTURE = join(import.meta.dir, "fixtures", "directory-lock-fault.ts");
+
+/** Runs the lock under an injected fault in a child process. */
+async function runFault(
+  mode:
+    | "eperm-held"
+    | "eperm-free"
+    | "busy-release"
+    | "busy-recover"
+    | "trace"
+    | "sync-eperm-linux"
+    | "sync-eio-linux"
+    | "sync-enotsup-darwin"
+    | "sync-eperm-win32"
+    | "recover-race"
+    | "recover-race-win32"
+    | "recover-race-linux-eperm"
+    | "recover-blocked-win32"
+    | "recover-file-win32",
+): Promise<Record<string, unknown>> {
+  const root = await mkdtemp(join(tmpdir(), "adk-directory-lock-fault-"));
+  roots.push(root);
+  const child = spawnSync(process.execPath, [FIXTURE, mode, root], {
+    encoding: "utf8",
+    timeout: 30_000,
+  });
+  const line = child.stdout.trim().split("\n").at(-1) ?? "";
+  try {
+    return JSON.parse(line) as Record<string, unknown>;
+  } catch {
+    throw new Error(`no result from the fault fixture: ${child.stderr}`);
+  }
+}
 
 afterEach(async () => {
   for (const root of roots.splice(0)) {
@@ -149,7 +183,14 @@ describe("directory lock", () => {
     } catch (error) {
       code = (error as NodeJS.ErrnoException).code;
     }
-    expect(code).toMatch(/^(EEXIST|ENOTEMPTY)$/u);
+    // Windows never renames onto an existing directory: MoveFileExW refuses
+    // it with ERROR_ACCESS_DENIED, which Node and Bun report as EPERM. POSIX
+    // refuses a non-empty one with ENOTEMPTY (or EEXIST).
+    if (process.platform === "win32") {
+      expect(code).toBe("EPERM");
+    } else {
+      expect(code).toMatch(/^(EEXIST|ENOTEMPTY)$/u);
+    }
     expect(directoryLockTokenMatches(path, next.token)).toBe(true);
   });
 
@@ -164,5 +205,94 @@ describe("directory lock", () => {
     recoverDeadDirectoryLock(corrupt);
     expect(await readdir(corrupt)).toEqual([DIRECTORY_LOCK_OWNER_FILE]);
     expect(tryAcquireDirectoryLock(corrupt)).toBeUndefined();
+  });
+
+  // Windows reports a rename onto a non-empty directory as EPERM, not EEXIST.
+  test("a lock published between the occupancy check and the rename is held, not an error (Windows EPERM)", async () => {
+    expect(await runFault("eperm-held")).toEqual({ held: true });
+  });
+
+  test("an EPERM from the publishing rename with no lock present is rethrown", async () => {
+    expect(await runFault("eperm-free")).toEqual({ code: "EPERM" });
+  });
+
+  test("a release retries a rename a waiter's open file blocks (Windows EBUSY)", async () => {
+    expect(await runFault("busy-release")).toEqual({
+      released: true,
+      left: [],
+    });
+  });
+
+  test("a recovery does not retry a blocked rename", async () => {
+    expect(await runFault("busy-recover")).toEqual({ code: "EBUSY" });
+  });
+
+  // The claim behind the wall-clock fix: the lock path is only ever replaced
+  // by a whole-directory rename. An in-place write or delete would let a
+  // reader see a lock without its owner.
+  test("only the publishing and retiring renames touch the lock path, and the owner is complete before it is published", async () => {
+    expect(await runFault("trace")).toEqual({
+      violations: [],
+      publishes: 2,
+      incompleteOwnerAtPublish: 0,
+    });
+  });
+
+  // The publishing rename succeeded, so the lock on the path is this
+  // process's own. A failed flush after it must not read as contention or
+  // leave that lock behind: the lock is released and the flush error thrown.
+  for (const mode of [
+    "sync-eperm-linux",
+    "sync-eio-linux",
+    "sync-enotsup-darwin",
+  ] as const) {
+    test(`a directory flush that fails after the publishing rename releases the lock and throws (${mode})`, async () => {
+      const code = mode.split("-")[1]?.toUpperCase();
+      expect(await runFault(mode)).toEqual({
+        code,
+        cleanupErrors: 1,
+        lockLeft: false,
+      });
+    });
+  }
+
+  test("on Windows a refused directory flush after the publishing rename keeps the lock", async () => {
+    expect(await runFault("sync-eperm-win32")).toEqual({
+      acquired: true,
+      lockLeft: true,
+    });
+  });
+
+  // A delayed recoverer's rename lands on the tombstone the faster one made,
+  // after a new owner took the lock. Nothing is moved; the recoverer backs off.
+  test("a delayed recovery that collides with the first one's tombstone leaves the next owner's lock", async () => {
+    expect(await runFault("recover-race")).toEqual({ holder: "next" });
+  });
+
+  test("on Windows that collision (EPERM onto an existing tombstone) is the same back-off", async () => {
+    expect(await runFault("recover-race-win32")).toEqual({ holder: "next" });
+  });
+
+  // Off Windows an EPERM is not a collision report, and on Windows an EPERM
+  // with no tombstone is a blocked or refused rename: both stay errors.
+  test("an EPERM from a recovery rename off Windows is an error", async () => {
+    expect(await runFault("recover-race-linux-eperm")).toEqual({
+      code: "EPERM",
+      holder: "next",
+    });
+  });
+
+  test("on Windows an EPERM with no tombstone in the way is an error", async () => {
+    expect(await runFault("recover-blocked-win32")).toEqual({
+      code: "EPERM",
+      holder: "dead",
+    });
+  });
+
+  test("on Windows an EPERM with a plain file at the tombstone path is an error", async () => {
+    expect(await runFault("recover-file-win32")).toEqual({
+      code: "EPERM",
+      holder: "dead",
+    });
   });
 });
