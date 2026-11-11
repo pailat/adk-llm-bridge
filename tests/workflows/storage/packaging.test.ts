@@ -2,7 +2,12 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { preloadFlag, quietFlags } from "../../utils/fixtures/runtime.js";
+import {
+  describeChild,
+  moduleSpecifier,
+  preloadArgs,
+  quietFlags,
+} from "../../utils/fixtures/runtime.js";
 
 // Importing the workflows entry or a provider subpath must never load
 // `node:sqlite`; only opening a database does. Each import runs in a child
@@ -41,7 +46,7 @@ function runChild(
   const file = join(scratch, `${name}.mjs`);
   writeFileSync(file, source);
   const result = Bun.spawnSync(
-    [process.execPath, ...quietFlags, preloadFlag, preload, file],
+    [process.execPath, ...quietFlags, ...preloadArgs(preload), file],
     {
       cwd: root,
       stdout: "pipe",
@@ -55,6 +60,13 @@ function runChild(
   };
 }
 
+function childMessage(
+  label: string,
+  result: { status: number | null; stdout: string; stderr: string },
+): string {
+  return describeChild(label, { exitCode: result.status, ...result });
+}
+
 const entries = [
   ["workflows entry", "src/workflows/index.ts"],
   ["workflows storage barrel", "src/workflows/storage/index.ts"],
@@ -66,7 +78,7 @@ const entries = [
 describe("workflow storage packaging", () => {
   test("the preload really blocks node:sqlite (control)", () => {
     const result = runChild(
-      `import { SqliteWorkflowCheckpointStore } from ${JSON.stringify(join(root, "src/workflows/checkpoint/sqlite/index.ts"))};
+      `import { SqliteWorkflowCheckpointStore } from ${JSON.stringify(moduleSpecifier(join(root, "src/workflows/checkpoint/sqlite/index.ts")))};
 try {
   const store = new SqliteWorkflowCheckpointStore({ path: ":memory:" });
   await store.list({ limit: 1 });
@@ -77,7 +89,7 @@ try {
 `,
       "control",
     );
-    expect(result.status).toBe(0);
+    expect(result.status, childMessage("control", result)).toBe(0);
     expect(result.stdout).not.toContain("opened");
     expect(result.stdout).toContain("failed:");
   });
@@ -85,12 +97,15 @@ try {
   for (const [label, entry] of entries) {
     test(`importing the ${label} does not load node:sqlite`, () => {
       const result = runChild(
-        `const mod = await import(${JSON.stringify(join(root, entry))});
+        `const mod = await import(${JSON.stringify(moduleSpecifier(join(root, entry)))});
 console.log("exports:" + Object.keys(mod).length);
 `,
         `import-${label.replaceAll(" ", "-")}`,
       );
-      expect({ status: result.status, stderr: result.stderr }).toEqual({
+      expect(
+        { status: result.status, stderr: result.stderr },
+        childMessage(label, result),
+      ).toEqual({
         status: 0,
         stderr: "",
       });
@@ -100,10 +115,16 @@ console.log("exports:" + Object.keys(mod).length);
 
   test("importing all of them together does not load node:sqlite", () => {
     const imports = entries
-      .map(([, entry]) => `await import(${JSON.stringify(join(root, entry))});`)
+      .map(
+        ([, entry]) =>
+          `await import(${JSON.stringify(moduleSpecifier(join(root, entry)))});`,
+      )
       .join("\n");
     const result = runChild(`${imports}\nconsole.log("done");\n`, "all");
-    expect({ status: result.status, stderr: result.stderr }).toEqual({
+    expect(
+      { status: result.status, stderr: result.stderr },
+      childMessage("all", result),
+    ).toEqual({
       status: 0,
       stderr: "",
     });

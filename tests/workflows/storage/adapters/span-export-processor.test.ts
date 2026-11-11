@@ -1,6 +1,5 @@
 import { describe, expect, test } from "bun:test";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { fileURLToPath } from "node:url";
 import {
   BaseAgent,
   createEvent,
@@ -31,6 +30,7 @@ import {
   withWorkflowSpan,
 } from "../../../../src/workflows/telemetry.js";
 import { WorkflowAgent } from "../../../../src/workflows/workflow-agent.js";
+import { describeChild } from "../../../utils/fixtures/runtime.js";
 
 interface SpanInit {
   name?: string;
@@ -544,9 +544,9 @@ describe("WorkflowSpanExportProcessor", () => {
       import.meta.url,
     );
     const script = `
-const { WorkflowEventExportPipeline } = await import(${JSON.stringify(fileURLToPath(new URL("event-export-pipeline.ts", source)))});
-const { InMemoryWorkflowEventExporter } = await import(${JSON.stringify(fileURLToPath(new URL("in-memory-event-exporter.ts", source)))});
-const { WorkflowSpanExportProcessor } = await import(${JSON.stringify(fileURLToPath(new URL("span-export-processor.ts", source)))});
+const { WorkflowEventExportPipeline } = await import(${JSON.stringify(new URL("event-export-pipeline.ts", source).href)});
+const { InMemoryWorkflowEventExporter } = await import(${JSON.stringify(new URL("in-memory-event-exporter.ts", source).href)});
+const { WorkflowSpanExportProcessor } = await import(${JSON.stringify(new URL("span-export-processor.ts", source).href)});
 const pipeline = new WorkflowEventExportPipeline({ exporter: new InMemoryWorkflowEventExporter() });
 const processor = new WorkflowSpanExportProcessor({ pipeline });
 const span = (spanId, parent) => ({
@@ -571,11 +571,20 @@ console.log("returned");
       timeout: 10_000,
       killSignal: "SIGKILL",
     });
-    expect({
+    const captured = {
       timedOut: result.exitedDueToTimeout === true,
       stdout: result.stdout.toString(),
       stderr: result.stderr.toString(),
-    }).toEqual({ timedOut: false, stdout: "returned\n", stderr: "" });
+    };
+    expect(
+      captured,
+      describeChild("span ancestry cycle", {
+        exitCode: result.exitCode,
+        signal: result.signalCode,
+        stdout: captured.stdout,
+        stderr: captured.stderr,
+      }),
+    ).toEqual({ timedOut: false, stdout: "returned\n", stderr: "" });
   }, 20_000);
 
   test("keeps traces apart", async () => {

@@ -24,7 +24,13 @@ import {
   type SqliteMigration,
   type SqliteOpenFailure,
 } from "../../src/utils/sqlite-database.js";
-import { isBun, preloadFlag, quietFlags } from "./fixtures/runtime.js";
+import {
+  describeChild,
+  isBun,
+  moduleSpecifier,
+  preloadArgs,
+  quietFlags,
+} from "./fixtures/runtime.js";
 
 class TestFailure extends Error {
   constructor(
@@ -662,9 +668,9 @@ Module.createRequire = function (...args) {
     const script = join(dir, "child.mjs");
     writeFileSync(
       script,
-      `const helper = await import(${JSON.stringify(join(src, "utils/sqlite-database.ts"))});
-await import(${JSON.stringify(join(src, "agents/session-store/sqlite/index.ts"))});
-await import(${JSON.stringify(join(src, "agents/index.ts"))});
+      `const helper = await import(${JSON.stringify(moduleSpecifier(join(src, "utils/sqlite-database.ts")))});
+await import(${JSON.stringify(moduleSpecifier(join(src, "agents/session-store/sqlite/index.ts")))});
+await import(${JSON.stringify(moduleSpecifier(join(src, "agents/index.ts")))});
 console.log("imported");
 try {
   helper.openSqliteDatabase({ path: ":memory:", fail: (failure) => new Error(failure) });
@@ -675,14 +681,21 @@ try {
 `,
     );
     const result = Bun.spawnSync(
-      [process.execPath, ...quietFlags, preloadFlag, preload, script],
+      [process.execPath, ...quietFlags, ...preloadArgs(preload), script],
       { stdout: "pipe", stderr: "pipe" },
     );
-    expect({
+    const captured = {
       exitCode: result.exitCode,
       stdout: result.stdout.toString(),
       stderr: result.stderr.toString(),
-    }).toEqual({
+    };
+    expect(
+      captured,
+      describeChild("sqlite preload", {
+        ...captured,
+        signal: result.signalCode,
+      }),
+    ).toEqual({
       exitCode: 0,
       stdout: "imported\nopen failed: unavailable\n",
       stderr: "",

@@ -44,6 +44,10 @@ const MAX_CURSOR_LENGTH = 8192;
 const ENVELOPE_ALLOWANCE_BYTES = 4096;
 // On Windows a rename onto a file another process has open fails with one of
 // these codes until that process closes it, which takes milliseconds.
+// TEMPORARY: remove when FS-RENAME-RETRY-1 merges. The core store publishes a
+// checkpoint with a plain rename (file-system-checkpoint-store.ts), which
+// Windows refuses while another handle holds the file open; until the core
+// store retries that rename, this provider retries the whole save on win32.
 const WINDOWS_BLOCKED_RENAME_CODES = new Set(["EPERM", "EBUSY", "EACCES"]);
 const WINDOWS_RETRY_BUDGET_MS = 5000;
 const WINDOWS_RETRY_MAX_DELAY_MS = 100;

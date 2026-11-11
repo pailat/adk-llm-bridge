@@ -25,6 +25,10 @@ import {
   type WorkflowEventRecord,
   type WorkflowEventRecordInput,
 } from "../../../../src/workflows/storage/event-exporter.js";
+import {
+  describeChild,
+  moduleSpecifier,
+} from "../../../utils/fixtures/runtime.js";
 
 type Behavior = "ok" | "hang" | "store-then-fail" | Error;
 
@@ -1074,22 +1078,26 @@ describe("WorkflowEventExportPipeline: offerAdkEvent", () => {
 });
 
 describe("WorkflowEventExportPipeline: timers do not keep the process alive", () => {
-  const pipelineModule = fileURLToPath(
-    new URL(
-      "../../../../src/workflows/storage/event-export-pipeline.ts",
-      import.meta.url,
+  const pipelineModule = moduleSpecifier(
+    fileURLToPath(
+      new URL(
+        "../../../../src/workflows/storage/event-export-pipeline.ts",
+        import.meta.url,
+      ),
     ),
   );
-  const exporterModule = fileURLToPath(
-    new URL(
-      "../../../../src/workflows/storage/event-exporter.ts",
-      import.meta.url,
+  const exporterModule = moduleSpecifier(
+    fileURLToPath(
+      new URL(
+        "../../../../src/workflows/storage/event-exporter.ts",
+        import.meta.url,
+      ),
     ),
   );
 
   async function runScript(
     body: string,
-  ): Promise<{ code: number; ms: number }> {
+  ): Promise<{ code: number; ms: number; capture: string }> {
     const script = `
       const { WorkflowEventExportPipeline } = await import(${JSON.stringify(pipelineModule)});
       const { BaseWorkflowEventExporter } = await import(${JSON.stringify(exporterModule)});
@@ -1105,13 +1113,23 @@ describe("WorkflowEventExportPipeline: timers do not keep the process alive", ()
     `;
     const started = Date.now();
     const proc = Bun.spawn([process.execPath, "-e", script], {
-      stdout: "ignore",
+      stdout: "pipe",
       stderr: "pipe",
     });
     const timer = setTimeout(() => proc.kill(9), 15_000);
-    const code = await proc.exited;
+    const [code, stdout, stderr] = await Promise.all([
+      proc.exited,
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+    ]);
     clearTimeout(timer);
-    return { code, ms: Date.now() - started };
+    const capture = describeChild("pipeline timers", {
+      exitCode: code,
+      signal: proc.signalCode,
+      stdout,
+      stderr,
+    });
+    return { code, ms: Date.now() - started, capture };
   }
 
   test("a pending flush timer does not keep the process alive", async () => {
@@ -1119,7 +1137,7 @@ describe("WorkflowEventExportPipeline: timers do not keep the process alive", ()
       const p = new WorkflowEventExportPipeline({ exporter: new Hanging(), flushIntervalMs: 60000, appendTimeoutMs: 60000 });
       p.offer(record);
     `);
-    expect(result.code).toBe(0);
+    expect(result.code, result.capture).toBe(0);
     expect(result.ms).toBeLessThan(10_000);
   }, 30_000);
 
@@ -1132,7 +1150,7 @@ describe("WorkflowEventExportPipeline: timers do not keep the process alive", ()
       p.offer(record);
       await new Promise((r) => setTimeout(r, 100));
     `);
-    expect(result.code).toBe(0);
+    expect(result.code, result.capture).toBe(0);
     expect(result.ms).toBeLessThan(10_000);
   }, 30_000);
 
@@ -1143,7 +1161,7 @@ describe("WorkflowEventExportPipeline: timers do not keep the process alive", ()
       p.flush(1500);
       await new Promise((r) => setTimeout(r, 50));
     `);
-    expect(result.code).toBe(0);
+    expect(result.code, result.capture).toBe(0);
     expect(result.ms).toBeGreaterThanOrEqual(1500);
     expect(result.ms).toBeLessThan(10_000);
   }, 30_000);
