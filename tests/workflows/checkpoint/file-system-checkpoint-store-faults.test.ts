@@ -1,10 +1,52 @@
-import { describe, expect, test } from "bun:test";
+import { test as bunTest, describe, expect } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const FIXTURE = join(import.meta.dir, "fixtures", "checkpoint-store-fault.ts");
+/** The child's own limit; the test's is longer, so the child's output is kept. */
+const CHILD_TIMEOUT_MS = 30_000;
+const TEST_TIMEOUT_MS = 45_000;
+
+/** How the last fault child ended, printed when its test fails. */
+let lastChild:
+  | {
+      mode: string;
+      status: number | null;
+      signal: string | null;
+      error?: string;
+      stdout: string;
+      stderr: string;
+    }
+  | undefined;
+
+function describeChild(child: NonNullable<typeof lastChild>): string {
+  return [
+    `fault child "${child.mode}": exit code ${child.status}, signal ${child.signal}${child.error ? `, ${child.error}` : ""}`,
+    "--- stdout ---",
+    child.stdout.trimEnd(),
+    "--- stderr ---",
+    child.stderr.trimEnd(),
+  ].join("\n");
+}
+
+/** A test of the fault fixture that prints how its child ended if it fails. */
+function test(name: string, body: () => Promise<void>) {
+  bunTest(
+    name,
+    async () => {
+      lastChild = undefined;
+      try {
+        await body();
+      } catch (error) {
+        if (lastChild) console.error(describeChild(lastChild));
+        throw error;
+      }
+    },
+    TEST_TIMEOUT_MS,
+  );
+}
 
 async function runFault(
   mode:
@@ -33,9 +75,17 @@ async function runFault(
     const child = spawnSync(
       process.execPath,
       [FIXTURE, mode, root, ...(swapTarget ? [swapTarget] : [])],
-      { encoding: "utf8", timeout: 30_000 },
+      { encoding: "utf8", timeout: CHILD_TIMEOUT_MS },
     );
-    const line = child.stdout.trim().split("\n").at(-1) ?? "";
+    lastChild = {
+      mode,
+      status: child.status,
+      signal: child.signal,
+      error: child.error?.message,
+      stdout: child.stdout ?? "",
+      stderr: child.stderr ?? "",
+    };
+    const line = lastChild.stdout.trim().split("\n").at(-1) ?? "";
     return {
       result: JSON.parse(line) as {
         saved: boolean;
@@ -43,7 +93,7 @@ async function runFault(
         reason?: string;
         [key: string]: unknown;
       },
-      output: `${child.stdout}${child.stderr}`,
+      output: `${lastChild.stdout}${lastChild.stderr}`,
     };
   } finally {
     await rm(root, { recursive: true, force: true });

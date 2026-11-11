@@ -38,6 +38,11 @@
  * `file-sync-win32` runs as `win32` and fails the owner file's flush instead.
  * Prints one JSON line: `{ saved, loaded, reason }`, plus the trace fields in
  * `trace` mode.
+ *
+ * On a Windows host, or with `ADK_FAULT_TRACE=1`, every file-system step the
+ * store takes (and every lock the fixture publishes or retires) is written to
+ * stderr as `fault-trace +<ms> <who> <step> <path> -> ok | <code>`, so a child
+ * that stops or times out shows its last step.
  */
 
 import { mock } from "bun:test";
@@ -71,6 +76,46 @@ if (!root || !mode || !MODES.includes(mode)) {
 }
 
 const real = { ...(await import("node:fs/promises")) };
+// Read before a `-win32` mode makes the process look like Windows.
+const TRACE =
+  process.platform === "win32" || process.env.ADK_FAULT_TRACE === "1";
+const traceStart = performance.now();
+
+/** Writes one step of the file-system trace to stderr. */
+function traceStep(who: string, step: string, path: unknown, outcome: string) {
+  if (!TRACE) return;
+  const at = (performance.now() - traceStart).toFixed(1);
+  const shown = String(path)
+    .replaceAll("\\", "/")
+    .replace(String(root).replaceAll("\\", "/"), "<root>");
+  process.stderr.write(
+    `fault-trace +${at}ms ${who} ${step} ${shown} -> ${outcome}\n`,
+  );
+}
+
+/** Runs one traced step and records its outcome: `ok` or the error code. */
+async function traced<T>(
+  who: string,
+  step: string,
+  path: unknown,
+  run: () => Promise<T>,
+): Promise<T> {
+  try {
+    const value = await run();
+    traceStep(who, step, path, "ok");
+    return value;
+  } catch (error) {
+    const code = (error as { code?: unknown }).code;
+    traceStep(who, step, path, typeof code === "string" ? code : String(error));
+    throw error;
+  }
+}
+
+if (TRACE) {
+  process.on("exit", (code) =>
+    traceStep("process", "exit", "-", `code ${code}`),
+  );
+}
 const syncFault =
   mode === "dir-sync-win32" || mode === "dir-sync-posix"
     ? "directory"
@@ -117,14 +162,20 @@ async function publishLock(lockPath: string, token: string, pid: number) {
     join(candidate, "owner.json"),
     JSON.stringify({ token, pid, acquiredAt: Date.now() }),
   );
-  await real.rename(candidate, lockPath);
+  await traced("fixture", `publish(${token})`, lockPath, () =>
+    real.rename(candidate, lockPath),
+  );
 }
 
 /** Retires a lock the way the protocol does: one rename away, then removal. */
 async function retireLock(lockPath: string) {
   const retired = `${lockPath}.retired.fixture`;
-  await real.rename(lockPath, retired);
-  await real.rm(retired, { recursive: true });
+  await traced("fixture", "retire", lockPath, () =>
+    real.rename(lockPath, retired),
+  );
+  await traced("fixture", "remove", retired, () =>
+    real.rm(retired, { recursive: true }),
+  );
 }
 
 async function beforeOwnerRead(ownerPath: string) {
@@ -150,7 +201,7 @@ function deadPid(): number {
   return pid;
 }
 
-mock.module("node:fs/promises", () => ({
+const faultFs = {
   ...real,
   mkdir: async (path: string, ...rest: [unknown?]) => {
     trace("mkdir", path);
@@ -313,7 +364,52 @@ mock.module("node:fs/promises", () => ({
       },
     });
   },
-}));
+};
+
+/** Steps of an open handle the trace records, as `handle.<name>`. */
+const TRACED_HANDLE_STEPS = new Set(["stat", "readFile", "sync", "close"]);
+
+/** The fault file system with every store step traced. */
+function tracedFs(fs: typeof faultFs): typeof faultFs {
+  const wrap =
+    <A extends unknown[], R>(name: string, fn: (...args: A) => Promise<R>) =>
+    (...args: A) =>
+      traced("store", name, args[0], () => fn(...args));
+  return {
+    ...fs,
+    mkdir: wrap("mkdir", fs.mkdir),
+    writeFile: wrap("writeFile", fs.writeFile),
+    unlink: wrap("unlink", fs.unlink),
+    rmdir: wrap("rmdir", fs.rmdir),
+    rm: wrap("rm", fs.rm),
+    readFile: wrap("readFile", fs.readFile),
+    rename: (from: string, to: string) =>
+      traced("store", `rename(-> ${basename(to)})`, from, () =>
+        fs.rename(from, to),
+      ),
+    lstat: wrap("lstat", fs.lstat),
+    open: async (path: string, ...rest: [number?, number?]) => {
+      const handle = await traced("store", `open(flags=${rest[0]})`, path, () =>
+        fs.open(path, ...rest),
+      );
+      return new Proxy(handle, {
+        get(target, key) {
+          const value = Reflect.get(target, key);
+          if (typeof value !== "function") return value;
+          if (typeof key !== "string" || !TRACED_HANDLE_STEPS.has(key)) {
+            return value.bind(target);
+          }
+          return (...args: unknown[]) =>
+            traced("store", `handle.${key}`, path, () =>
+              value.apply(target, args),
+            );
+        },
+      });
+    },
+  };
+}
+
+mock.module("node:fs/promises", () => (TRACE ? tracedFs(faultFs) : faultFs));
 
 const { FileSystemWorkflowCheckpointStore } = await import(
   "../../../../src/workflows/checkpoint/file-system-checkpoint-store.js"
