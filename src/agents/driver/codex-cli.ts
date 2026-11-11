@@ -30,6 +30,7 @@ import {
   assertNoModelOverride,
   CODEX_CLI_MODEL_FLAGS,
   CODEX_MODEL_ENV,
+  envNameIn,
   MODEL_ALIAS_DENYLIST,
   modelEnvRefusal,
 } from "./model.js";
@@ -615,7 +616,11 @@ export class CodexCliDriver extends SubprocessJsonlDriver {
     const refuse = (error: ExternalAgentPolicyError) =>
       refusedRun(this.providerId, error);
 
-    const envRefusal = modelEnvRefusal("CodexCliDriver", env, CODEX_MODEL_ENV);
+    const envRefusal = modelEnvRefusal(
+      "CodexCliDriver",
+      env,
+      envNameIn(CODEX_MODEL_ENV),
+    );
     if (envRefusal) {
       yield* refuse(envRefusal);
       return;

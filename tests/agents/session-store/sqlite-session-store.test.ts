@@ -16,6 +16,7 @@ import {
   SqliteSessionStore,
   SqliteSessionStoreError,
 } from "../../../src/agents/session-store/sqlite/index.js";
+import { openRawDatabase } from "../../utils/fixtures/raw-sqlite.js";
 
 const dirs: string[] = [];
 const stores: SqliteSessionStore[] = [];
@@ -256,16 +257,20 @@ describe("SqliteSessionStore", () => {
     ]);
   });
 
-  test("creates the database file 0600 in a 0700 directory, uses WAL, and the WAL file is 0600", async () => {
-    const dir = join(tempDir(), "nested", "dir");
-    const path = join(dir, "sessions.db");
-    const store = open(path);
-    await store.append(key, [{ type: "user", uuid: "u1" }]);
-    expect(statSync(path).mode & 0o777).toBe(0o600);
-    expect(statSync(dir).mode & 0o777).toBe(0o700);
-    expect(existsSync(`${path}-wal`)).toBe(true);
-    expect(statSync(`${path}-wal`).mode & 0o777).toBe(0o600);
-  });
+  // Skipped on Windows: POSIX modes.
+  test.skipIf(process.platform === "win32")(
+    "creates the database file 0600 in a 0700 directory, uses WAL, and the WAL file is 0600",
+    async () => {
+      const dir = join(tempDir(), "nested", "dir");
+      const path = join(dir, "sessions.db");
+      const store = open(path);
+      await store.append(key, [{ type: "user", uuid: "u1" }]);
+      expect(statSync(path).mode & 0o777).toBe(0o600);
+      expect(statSync(dir).mode & 0o777).toBe(0o700);
+      expect(existsSync(`${path}-wal`)).toBe(true);
+      expect(statSync(`${path}-wal`).mode & 0o777).toBe(0o600);
+    },
+  );
 
   test("works in memory", async () => {
     const store = new SqliteSessionStore({ path: ":memory:" });
@@ -277,8 +282,7 @@ describe("SqliteSessionStore", () => {
   test("refuses a database written by a newer schema version", async () => {
     const path = join(tempDir(), "sessions.db");
     open(path).close();
-    const { Database } = await import("bun:sqlite");
-    const raw = new Database(path);
+    const raw = openRawDatabase(path);
     raw.exec("PRAGMA user_version = 99");
     raw.close();
     let caught: unknown;
@@ -297,7 +301,7 @@ describe("SqliteSessionStore", () => {
     open(path).close();
     const writer = resolve(import.meta.dir, "fixtures/concurrent-writer.ts");
     const procs = ["a", "b"].map((tag) =>
-      Bun.spawn(["bun", writer, path, tag, "60"], {
+      Bun.spawn([process.execPath, writer, path, tag, "60"], {
         stdout: "pipe",
         stderr: "pipe",
       }),
@@ -339,8 +343,7 @@ function openError(options: { path: string; busyTimeoutMs?: number }) {
 
 /** Adds a trigger, through a second connection, that fails on `type: "boom"`. */
 async function failOnBoom(path: string, action: "ABORT" | "ROLLBACK") {
-  const { Database } = await import("bun:sqlite");
-  const raw = new Database(path);
+  const raw = openRawDatabase(path);
   raw.exec(`CREATE TRIGGER boom BEFORE INSERT ON claude_session_entries
     WHEN json_extract(NEW.entry, '$.type') = 'boom'
     BEGIN SELECT RAISE(${action}, 'boom'); END`);
@@ -490,38 +493,42 @@ describe("SqliteSessionStore edge cases", () => {
   });
 });
 
-describe.skipIf(process.platform === "win32")(
-  "SqliteSessionStore refuses an unsafe database path",
-  () => {
-    test("a symlink planted at the database path is refused and its target is left alone", () => {
-      const dir = tempDir();
-      const target = join(dir, "victim.txt");
-      writeFileSync(target, "keep me");
-      const path = join(dir, "sessions.db");
-      symlinkSync(target, path);
+// The symlink, dangling-link and not-a-regular-file refusals run on Windows
+// too; the tests that read or set POSIX modes are skipped there, each with a
+// one-line reason.
+describe("SqliteSessionStore refuses an unsafe database path", () => {
+  test("a symlink planted at the database path is refused and its target is left alone", () => {
+    const dir = tempDir();
+    const target = join(dir, "victim.txt");
+    writeFileSync(target, "keep me");
+    const path = join(dir, "sessions.db");
+    symlinkSync(target, path);
 
-      const error = openError({ path });
+    const error = openError({ path });
 
-      expect(error).toBeInstanceOf(SqliteSessionStoreError);
-      expect((error as SqliteSessionStoreError).code).toBe(
-        "SESSION_STORE_UNSAFE_PATH",
-      );
-      expect(readFileSync(target, "utf8")).toBe("keep me");
-    });
+    expect(error).toBeInstanceOf(SqliteSessionStoreError);
+    expect((error as SqliteSessionStoreError).code).toBe(
+      "SESSION_STORE_UNSAFE_PATH",
+    );
+    expect(readFileSync(target, "utf8")).toBe("keep me");
+  });
 
-    test("a dangling symlink at the database path is refused and nothing is created", () => {
-      const dir = tempDir();
-      const target = join(dir, "created-through-link.db");
-      const path = join(dir, "sessions.db");
-      symlinkSync(target, path);
+  test("a dangling symlink at the database path is refused and nothing is created", () => {
+    const dir = tempDir();
+    const target = join(dir, "created-through-link.db");
+    const path = join(dir, "sessions.db");
+    symlinkSync(target, path);
 
-      expect((openError({ path }) as SqliteSessionStoreError).code).toBe(
-        "SESSION_STORE_UNSAFE_PATH",
-      );
-      expect(existsSync(target)).toBe(false);
-    });
+    expect((openError({ path }) as SqliteSessionStoreError).code).toBe(
+      "SESSION_STORE_UNSAFE_PATH",
+    );
+    expect(existsSync(target)).toBe(false);
+  });
 
-    test("a new file is 0600 whatever the umask", async () => {
+  // Skipped on Windows: POSIX modes and umask.
+  test.skipIf(process.platform === "win32")(
+    "a new file is 0600 whatever the umask",
+    async () => {
       const path = join(tempDir(), "sessions.db");
       const previous = process.umask(0o277);
       let store: SqliteSessionStore;
@@ -532,9 +539,13 @@ describe.skipIf(process.platform === "win32")(
       }
       await store.append(key, [{ type: "user", uuid: "u1" }]);
       expect(statSync(path).mode & 0o777).toBe(0o600);
-    });
+    },
+  );
 
-    test("a directory others can write is refused", () => {
+  // Skipped on Windows: POSIX directory modes.
+  test.skipIf(process.platform === "win32")(
+    "a directory others can write is refused",
+    () => {
       const dir = join(tempDir(), "shared");
       mkdirSync(dir);
       chmodSync(dir, 0o777);
@@ -547,9 +558,13 @@ describe.skipIf(process.platform === "win32")(
         ).code,
       ).toBe("SESSION_STORE_UNSAFE_PATH");
       expect(existsSync(join(dir, "sessions.db"))).toBe(false);
-    });
+    },
+  );
 
-    test("a directory its group can write is refused", () => {
+  // Skipped on Windows: POSIX directory modes.
+  test.skipIf(process.platform === "win32")(
+    "a directory its group can write is refused",
+    () => {
       for (const mode of [0o770, 0o775]) {
         const dir = join(tempDir(), `group-${mode.toString(8)}`);
         mkdirSync(dir);
@@ -564,9 +579,13 @@ describe.skipIf(process.platform === "win32")(
         ).toBe("SESSION_STORE_UNSAFE_PATH");
         expect(existsSync(join(dir, "sessions.db"))).toBe(false);
       }
-    });
+    },
+  );
 
-    test("a path that is not a regular file is refused", () => {
+  // Skipped on Windows: /dev/null is POSIX only; the helper refuses a directory on every platform (sqlite-database.test.ts).
+  test.skipIf(process.platform === "win32")(
+    "a path that is not a regular file is refused",
+    () => {
       const before = statSync("/dev/null");
 
       const error = openError({ path: "/dev/null" });
@@ -579,9 +598,13 @@ describe.skipIf(process.platform === "win32")(
       const after = statSync("/dev/null");
       expect(after.isCharacterDevice()).toBe(true);
       expect(after.mode).toBe(before.mode);
-    });
+    },
+  );
 
-    test("a sticky shared directory and an existing 0755 directory are accepted unchanged", async () => {
+  // Skipped on Windows: POSIX modes and the sticky bit.
+  test.skipIf(process.platform === "win32")(
+    "a sticky shared directory and an existing 0755 directory are accepted unchanged",
+    async () => {
       const sticky = join(tempDir(), "sticky");
       mkdirSync(sticky);
       chmodSync(sticky, 0o1777);
@@ -595,9 +618,13 @@ describe.skipIf(process.platform === "win32")(
       }
       expect(statSync(sticky).mode & 0o7777).toBe(0o1777);
       expect(statSync(plain).mode & 0o777).toBe(0o755);
-    });
+    },
+  );
 
-    test("a directory reached through a symlink is checked at its real path", async () => {
+  // Skipped on Windows: POSIX directory modes.
+  test.skipIf(process.platform === "win32")(
+    "a directory reached through a symlink is checked at its real path",
+    async () => {
       const real = join(tempDir(), "real");
       mkdirSync(real, { mode: 0o700 });
       const link = join(tempDir(), "link");
@@ -612,15 +639,19 @@ describe.skipIf(process.platform === "win32")(
         (openError({ path: join(link, "other.db") }) as SqliteSessionStoreError)
           .code,
       ).toBe("SESSION_STORE_UNSAFE_PATH");
-    });
+    },
+  );
 
-    test("an existing database keeps its mode", async () => {
+  // Skipped on Windows: POSIX modes.
+  test.skipIf(process.platform === "win32")(
+    "an existing database keeps its mode",
+    async () => {
       const path = join(tempDir(), "sessions.db");
       open(path).close();
       chmodSync(path, 0o640);
       const store = open(path);
       await store.append(key, [{ type: "user", uuid: "u1" }]);
       expect(statSync(path).mode & 0o777).toBe(0o640);
-    });
-  },
-);
+    },
+  );
+});

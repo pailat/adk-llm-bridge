@@ -1459,7 +1459,9 @@ describe("FileSystemWorkflowRepositoryMutationLock", () => {
       );
       expect(maxHolders).toBe(1);
     }
-  });
+    // 30 rounds of real lock work (about 1.5 s alone, several times that on a
+    // loaded host): the 5 s default is not a deadline on the property tested.
+  }, 60_000);
 
   test("reclaims a lock whose owner process is dead", async () => {
     const root = await lockRoot();

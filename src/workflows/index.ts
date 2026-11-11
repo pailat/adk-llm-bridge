@@ -372,6 +372,147 @@ export type {
 export { runWorkflowScript } from "./sandbox/workflow-script-runner.js";
 export type { ScriptWorkflowAgentConfig } from "./script-workflow-agent.js";
 export { ScriptWorkflowAgent } from "./script-workflow-agent.js";
+export type { AdkSessionServiceWorkflowCheckpointStoreOptions } from "./storage/adk-session-checkpoint-store.js";
+export {
+  AdkSessionServiceWorkflowCheckpointStore,
+  DEFAULT_WORKFLOW_CHECKPOINT_APP_NAME,
+} from "./storage/adk-session-checkpoint-store.js";
+export type {
+  AcquireWorkflowCheckpointLeaseInput,
+  BaseWorkflowCheckpointStoreOptions,
+  DeleteWorkflowCheckpointInput,
+  FencedSaveWorkflowCheckpointInput,
+  ListWorkflowCheckpointsInput,
+  ListWorkflowCheckpointsResult,
+  PruneWorkflowCheckpointsInput,
+  PruneWorkflowCheckpointsResult,
+  PutWorkflowCheckpointInput,
+  StoredWorkflowCheckpoint,
+  WorkflowCheckpointLease,
+  WorkflowCheckpointStoreCapabilities,
+  WorkflowCheckpointSummary,
+  WorkflowCheckpointWriteRequest,
+} from "./storage/checkpoint-store.js";
+export {
+  BaseWorkflowCheckpointStore,
+  DEFAULT_WORKFLOW_CHECKPOINT_LIST_LIMIT,
+  isWorkflowCheckpointProvider,
+  MAX_WORKFLOW_CHECKPOINT_LIST_LIMIT,
+  WORKFLOW_CHECKPOINT_STORE_CONTRACT_VERSION,
+} from "./storage/checkpoint-store.js";
+export type {
+  WorkflowStorageErrorCode,
+  WorkflowStorageErrorOptions,
+} from "./storage/errors.js";
+export {
+  isWorkflowStorageError,
+  WorkflowStorageError,
+} from "./storage/errors.js";
+export type {
+  WorkflowEventExportPipelineOptions,
+  WorkflowEventExportPipelineStats,
+  WorkflowEventExportWarning,
+  WorkflowEventExportWarningCode,
+  WorkflowEventPayloadOverflowHandler,
+  WorkflowEventRecordMappingContext,
+} from "./storage/event-export-pipeline.js";
+export {
+  clipWorkflowEventRecord,
+  createArtifactOverflowHandler,
+  DEFAULT_WORKFLOW_EVENT_BUFFER_BYTES,
+  DEFAULT_WORKFLOW_EVENT_BUFFER_RECORDS,
+  DEFAULT_WORKFLOW_EVENT_STRING_MAX_BYTES,
+  WorkflowEventExportPipeline,
+  workflowEventRecordsFromAdkEvent,
+} from "./storage/event-export-pipeline.js";
+export type { WorkflowEventExportPluginOptions } from "./storage/event-export-plugin.js";
+export {
+  WORKFLOW_EVENT_EXPORT_PLUGIN_NAME,
+  WorkflowEventExportPlugin,
+} from "./storage/event-export-plugin.js";
+export type {
+  AppendWorkflowEventRecordsInput,
+  AppendWorkflowEventRecordsResult,
+  BaseWorkflowEventExporterOptions,
+  ListWorkflowEventExecutionsInput,
+  ListWorkflowEventExecutionsResult,
+  PruneWorkflowEventRecordsInput,
+  PruneWorkflowEventRecordsResult,
+  ReadWorkflowEventRecordsInput,
+  ReadWorkflowEventRecordsResult,
+  WorkflowEventExecutionSummary,
+  WorkflowEventExporterCapabilities,
+  WorkflowEventPayloadReference,
+  WorkflowEventRecord,
+  WorkflowEventRecordClipping,
+  WorkflowEventRecordInput,
+  WorkflowEventRecordKind,
+} from "./storage/event-exporter.js";
+export {
+  BaseWorkflowEventExporter,
+  DEFAULT_WORKFLOW_EVENT_RECORD_MAX_BYTES,
+  DEFAULT_WORKFLOW_EVENT_RECORD_READ_LIMIT,
+  MAX_WORKFLOW_EVENT_APPEND_BATCH,
+  MAX_WORKFLOW_EVENT_IDENTIFIER_LENGTH,
+  MAX_WORKFLOW_EVENT_RECORD_READ_LIMIT,
+  WORKFLOW_EVENT_EXPORTER_CONTRACT_VERSION,
+} from "./storage/event-exporter.js";
+export type { FileSystemWorkflowCheckpointProviderOptions } from "./storage/file-system-checkpoint-provider.js";
+export { FileSystemWorkflowCheckpointProvider } from "./storage/file-system-checkpoint-provider.js";
+export type { InMemoryWorkflowCheckpointStoreOptions } from "./storage/in-memory-checkpoint-store.js";
+export { InMemoryWorkflowCheckpointStore } from "./storage/in-memory-checkpoint-store.js";
+export type { InMemoryWorkflowEventExporterOptions } from "./storage/in-memory-event-exporter.js";
+export { InMemoryWorkflowEventExporter } from "./storage/in-memory-event-exporter.js";
+export type { JsonlWorkflowEventExporterOptions } from "./storage/jsonl-event-exporter.js";
+export {
+  JsonlWorkflowEventExporter,
+  WORKFLOW_EVENT_JSONL_FORMAT,
+  WORKFLOW_EVENT_JSONL_FORMAT_VERSION,
+} from "./storage/jsonl-event-exporter.js";
+export type { LeasedWorkflowCheckpointStoreOptions } from "./storage/leased-checkpoint-store.js";
+export {
+  DEFAULT_WORKFLOW_CHECKPOINT_LEASE_TTL_MS,
+  LeasedWorkflowCheckpointStore,
+} from "./storage/leased-checkpoint-store.js";
+export type {
+  WorkflowStorageProviderFactory,
+  WorkflowStorageSchemeInfo,
+  WorkflowStorageUri,
+} from "./storage/registry.js";
+export {
+  getWorkflowCheckpointStoreFromUri,
+  getWorkflowEventExporterFromUri,
+  listWorkflowStorageSchemes,
+  redactWorkflowStorageUri,
+  registerWorkflowStorageProvider,
+  WORKFLOW_CHECKPOINT_URI_SCHEMES,
+  WORKFLOW_EVENT_URI_SCHEMES,
+} from "./storage/registry.js";
+export type {
+  WorkflowReadableSpanLike,
+  WorkflowSpanExportProcessorOptions,
+} from "./storage/span-export-processor.js";
+export {
+  WORKFLOW_EXECUTION_ID_SPAN_ATTRIBUTE,
+  WORKFLOW_SPAN_EXPORT_DEFAULT_SCOPE,
+  WorkflowSpanExportProcessor,
+  workflowEventRecordFromSpan,
+} from "./storage/span-export-processor.js";
+export type {
+  RetryWorkflowStorageOperationOptions,
+  WorkflowStorageCapability,
+  WorkflowStorageHealth,
+  WorkflowStorageJsonObject,
+  WorkflowStorageJsonValue,
+  WorkflowStorageMetricsObserver,
+  WorkflowStorageOperationMetric,
+  WorkflowStorageRetryPolicy,
+} from "./storage/support.js";
+export {
+  retryWorkflowStorageOperation,
+  WORKFLOW_STORAGE_DURATION_METRIC,
+  WORKFLOW_STORAGE_SIZE_METRIC,
+} from "./storage/support.js";
 export type {
   AdkWorkflowInvocationContextLease,
   AdkWorkflowInvocationContextProvider,

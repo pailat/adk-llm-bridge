@@ -237,6 +237,93 @@ describe("workflows public exports", () => {
       });
     }
   });
+
+  test("the workflows entry exposes the storage provider surface", () => {
+    const functions = [
+      "BaseWorkflowCheckpointStore",
+      "InMemoryWorkflowCheckpointStore",
+      "FileSystemWorkflowCheckpointProvider",
+      "AdkSessionServiceWorkflowCheckpointStore",
+      "LeasedWorkflowCheckpointStore",
+      "BaseWorkflowEventExporter",
+      "InMemoryWorkflowEventExporter",
+      "JsonlWorkflowEventExporter",
+      "WorkflowEventExportPipeline",
+      "WorkflowEventExportPlugin",
+      "WorkflowSpanExportProcessor",
+      "WorkflowStorageError",
+      "isWorkflowCheckpointProvider",
+      "workflowEventRecordsFromAdkEvent",
+      "clipWorkflowEventRecord",
+      "createArtifactOverflowHandler",
+      "workflowEventRecordFromSpan",
+      "registerWorkflowStorageProvider",
+      "getWorkflowCheckpointStoreFromUri",
+      "getWorkflowEventExporterFromUri",
+      "listWorkflowStorageSchemes",
+      "redactWorkflowStorageUri",
+      "isWorkflowStorageError",
+      "retryWorkflowStorageOperation",
+    ];
+    const values = [
+      "WORKFLOW_CHECKPOINT_STORE_CONTRACT_VERSION",
+      "DEFAULT_WORKFLOW_CHECKPOINT_LIST_LIMIT",
+      "MAX_WORKFLOW_CHECKPOINT_LIST_LIMIT",
+      "DEFAULT_WORKFLOW_CHECKPOINT_APP_NAME",
+      "DEFAULT_WORKFLOW_CHECKPOINT_LEASE_TTL_MS",
+      "WORKFLOW_EVENT_EXPORTER_CONTRACT_VERSION",
+      "DEFAULT_WORKFLOW_EVENT_RECORD_MAX_BYTES",
+      "DEFAULT_WORKFLOW_EVENT_RECORD_READ_LIMIT",
+      "MAX_WORKFLOW_EVENT_RECORD_READ_LIMIT",
+      "MAX_WORKFLOW_EVENT_APPEND_BATCH",
+      "MAX_WORKFLOW_EVENT_IDENTIFIER_LENGTH",
+      "WORKFLOW_EVENT_JSONL_FORMAT",
+      "WORKFLOW_EVENT_JSONL_FORMAT_VERSION",
+      "DEFAULT_WORKFLOW_EVENT_STRING_MAX_BYTES",
+      "DEFAULT_WORKFLOW_EVENT_BUFFER_RECORDS",
+      "DEFAULT_WORKFLOW_EVENT_BUFFER_BYTES",
+      "WORKFLOW_EVENT_EXPORT_PLUGIN_NAME",
+      "WORKFLOW_EXECUTION_ID_SPAN_ATTRIBUTE",
+      "WORKFLOW_SPAN_EXPORT_DEFAULT_SCOPE",
+      "WORKFLOW_CHECKPOINT_URI_SCHEMES",
+      "WORKFLOW_EVENT_URI_SCHEMES",
+      "WORKFLOW_STORAGE_DURATION_METRIC",
+      "WORKFLOW_STORAGE_SIZE_METRIC",
+    ];
+    const exported = workflows as Record<string, unknown>;
+    for (const name of functions) {
+      expect({ name, type: typeof exported[name] }).toEqual({
+        name,
+        type: "function",
+      });
+    }
+    for (const name of values) {
+      expect({ name, defined: exported[name] !== undefined }).toEqual({
+        name,
+        defined: true,
+      });
+    }
+  });
+
+  test("the SQLite classes and the conformance functions are not exported from the workflows entry", () => {
+    const exported = workflows as Record<string, unknown>;
+    for (const name of [
+      "SqliteWorkflowCheckpointStore",
+      "SqliteWorkflowEventExporter",
+      "SQLITE_WORKFLOW_CHECKPOINT_SCHEMA_VERSION",
+      "SQLITE_WORKFLOW_EVENT_SCHEMA_VERSION",
+      "workflowCheckpointStoreConformanceCases",
+      "workflowEventExporterConformanceCases",
+      "defineWorkflowStorageConformanceTests",
+      "WorkflowStorageConformanceFailure",
+    ]) {
+      expect({ name, exported: name in exported }).toEqual({
+        name,
+        exported: false,
+      });
+    }
+  });
+
   test("package exports publishes the experimental spec subpath", () => {
     expect(packageJson.exports["./workflows/spec"]).toEqual({
       types: "./dist/workflows/spec/index.d.ts",
@@ -282,6 +369,49 @@ describe("workflows public exports", () => {
         exported: false,
       });
     }
+  });
+
+  test("the storage barrels and the provider subpath barrels list their exports explicitly", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const { join } = await import("node:path");
+    const root = join(import.meta.dir, "../../src/workflows");
+    for (const barrel of [
+      "storage/index.ts",
+      "storage/conformance/index.ts",
+      "checkpoint/sqlite/index.ts",
+      "events/sqlite/index.ts",
+    ]) {
+      const source = await readFile(join(root, barrel), "utf8");
+      expect({
+        barrel,
+        star: /^export (type )?\* from/mu.test(source),
+        names: /^export (type )?\{/mu.test(source),
+      }).toEqual({ barrel, star: false, names: true });
+    }
+  });
+
+  test("the SQLite and conformance subpath entries export their public names", async () => {
+    const checkpoint = await import(
+      "../../src/workflows/checkpoint/sqlite/index.js"
+    );
+    const events = await import("../../src/workflows/events/sqlite/index.js");
+    const conformance = await import(
+      "../../src/workflows/storage/conformance/index.js"
+    );
+    expect(checkpoint.SqliteWorkflowCheckpointStore).toBeFunction();
+    expect(checkpoint.SQLITE_WORKFLOW_CHECKPOINT_SCHEMA_VERSION).toBeNumber();
+    expect(events.SqliteWorkflowEventExporter).toBeFunction();
+    expect(events.SQLITE_WORKFLOW_EVENT_SCHEMA_VERSION).toBeNumber();
+    expect(conformance.workflowCheckpointStoreConformanceCases).toBeFunction();
+    expect(conformance.workflowEventExporterConformanceCases).toBeFunction();
+    expect(conformance.defineWorkflowStorageConformanceTests).toBeFunction();
+    expect(conformance.WorkflowStorageConformanceFailure).toBeFunction();
+    expect(
+      new checkpoint.SqliteWorkflowCheckpointStore({ path: ":memory:" }),
+    ).toBeInstanceOf(workflows.BaseWorkflowCheckpointStore);
+    expect(
+      new events.SqliteWorkflowEventExporter({ path: ":memory:" }),
+    ).toBeInstanceOf(workflows.BaseWorkflowEventExporter);
   });
 
   test("the spec values do not leak into the other entries", () => {

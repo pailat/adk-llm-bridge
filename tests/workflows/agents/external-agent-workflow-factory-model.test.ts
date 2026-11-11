@@ -14,6 +14,7 @@ import { WorkflowAgentFactoryError } from "../../../src/workflows/agents/workflo
 
 interface Options {
   model?: string;
+  smallFastModel?: string;
   requireExplicitModel?: boolean;
 }
 
@@ -21,9 +22,11 @@ interface Options {
 class KeepingDriver extends PlaceholderExternalAgentDriver {
   readonly model?: string;
   readonly requireExplicitModel?: boolean;
+  readonly smallFastModel?: string;
   constructor(id: string, options?: Options) {
     super(id);
     this.model = options?.model;
+    this.smallFastModel = options?.smallFastModel;
     this.requireExplicitModel = options?.requireExplicitModel;
   }
 }
@@ -264,7 +267,7 @@ describe("factory requireExplicitModel", () => {
         factory.create({
           providerId: "claude",
           name: `a${index}`,
-          config: { model },
+          config: { model, smallFastModel: "claude-haiku-5-5" },
         }),
       );
       expect(code).toBeUndefined();
@@ -490,5 +493,126 @@ describe("factory model applied check", () => {
     expect(
       codeOf(() => factory.create({ providerId: "custom", name: "a1" })).code,
     ).toBeUndefined();
+  });
+});
+
+describe("factory config.smallFastModel", () => {
+  test("reaches createDriver as driverOptions, only when given", () => {
+    const spy: Spy = { calls: [] };
+    const factory = factoryFor([definition("claude", keeping("claude"), spy)]);
+    factory.create({
+      providerId: "claude",
+      name: "a1",
+      config: { model: "claude-opus-5-5", smallFastModel: "claude-haiku-5-5" },
+    });
+    factory.create({
+      providerId: "claude",
+      name: "a2",
+      config: { model: "claude-opus-5-5" },
+    });
+    expect(spy.calls).toEqual([
+      { model: "claude-opus-5-5", smallFastModel: "claude-haiku-5-5" },
+      { model: "claude-opus-5-5" },
+    ]);
+  });
+
+  test("the grammar is the model grammar", () => {
+    const spy: Spy = { calls: [] };
+    const factory = factoryFor([definition("claude", keeping("claude"), spy)]);
+    for (const value of ["", " a", "-x", "a\u0000b", "x".repeat(257), 5]) {
+      const { code } = codeOf(() =>
+        factory.create({
+          providerId: "claude",
+          name: "a1",
+          config: { smallFastModel: value as string },
+        }),
+      );
+      expect(code, String(value)).toBe("WORKFLOW_AGENT_INVALID_REQUEST");
+    }
+    expect(spy.calls).toEqual([]);
+  });
+
+  test("under requireExplicitModel the claude id needs a smallFastModel, before createDriver", () => {
+    const spy: Spy = { calls: [] };
+    const factory = factoryFor(
+      [definition("claude", keeping("claude"), spy)],
+      true,
+    );
+    const { code } = codeOf(() =>
+      factory.create({
+        providerId: "claude",
+        name: "a1",
+        config: { model: "claude-opus-5-5" },
+      }),
+    );
+    expect(code).toBe("WORKFLOW_AGENT_MODEL_REQUIRED");
+    expect(spy.calls).toEqual([]);
+  });
+
+  test("another provider id does not need one", () => {
+    const factory = factoryFor([definition("codex", keeping("codex"))], true);
+    const { code } = codeOf(() =>
+      factory.create({
+        providerId: "codex",
+        name: "a1",
+        config: { model: "gpt-5.5" },
+      }),
+    );
+    expect(code).toBeUndefined();
+  });
+
+  test("a claude driver that does not keep the pin is WORKFLOW_AGENT_MODEL_NOT_APPLIED", () => {
+    const dropping = definition(
+      "claude",
+      (options) =>
+        new KeepingDriver("claude", {
+          model: options?.model,
+          requireExplicitModel: options?.requireExplicitModel,
+        }),
+    );
+    const factory = factoryFor([dropping], true);
+    const { code } = codeOf(() =>
+      factory.create({
+        providerId: "claude",
+        name: "a1",
+        config: {
+          model: "claude-opus-5-5",
+          smallFastModel: "claude-haiku-5-5",
+        },
+      }),
+    );
+    expect(code).toBe("WORKFLOW_AGENT_MODEL_NOT_APPLIED");
+    expect(factory.list()).toEqual([]);
+  });
+
+  test("a kept pin is accepted", () => {
+    const factory = factoryFor([definition("claude", keeping("claude"))], true);
+    const { code } = codeOf(() =>
+      factory.create({
+        providerId: "claude",
+        name: "a1",
+        config: {
+          model: "claude-opus-5-5",
+          smallFastModel: "claude-haiku-5-5",
+        },
+      }),
+    );
+    expect(code).toBeUndefined();
+  });
+
+  test("the revision without the field is unchanged, and the field is part of it when given", () => {
+    const make = () => factoryFor([definition("codex", keeping("codex"))]);
+    const plain = make().create({
+      providerId: "codex",
+      name: "a1",
+      config: { description: "d" },
+    });
+    expect(plain.descriptor.revision).toBe(GOLDEN_NO_MODEL_REVISION);
+    const pinned = make().create({
+      providerId: "codex",
+      name: "a1",
+      config: { description: "d", smallFastModel: "h" },
+    });
+    expect(pinned.descriptor.revision).not.toBe(GOLDEN_NO_MODEL_REVISION);
   });
 });

@@ -288,6 +288,8 @@ const MATCHERS = {
   toBeUndefined: (actual) => [actual === undefined, "to be undefined"],
   toBeDefined: (actual) => [actual !== undefined, "to be defined"],
   toBeNull: (actual) => [actual === null, "to be null"],
+  toBeFunction: (actual) => [typeof actual === "function", "to be a function"],
+  toBeString: (actual) => [typeof actual === "string", "to be a string"],
   toBeTruthy: (actual) => [Boolean(actual), "to be truthy"],
   toBeFalsy: (actual) => [!actual, "to be falsy"],
   toBeNaN: (actual) => [Number.isNaN(actual), "to be NaN"],

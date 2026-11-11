@@ -134,6 +134,99 @@ carry `details.causeCode` (the system error code) and, when available,
 | `checkpoint_lock_ownership_lost` | Another writer took the lock, before the commit or before the release that follows it; the save fails. |
 | `checkpoint_lock_acquire_failed`, `checkpoint_lock_candidate_failed`, `checkpoint_lock_candidate_cleanup_failed`, `checkpoint_lock_read_failed`, `checkpoint_lock_recovery_failed`, `checkpoint_lock_release_failed`, `checkpoint_lock_cleanup_failed` | A file system call on the lock failed. A `checkpoint_lock_release_failed` after a committed write is only logged (see above). |
 
+Storage providers that extend `BaseWorkflowCheckpointStore` (see
+[Checkpoint providers](#checkpoint-providers)) report their own failures as
+`WorkflowStorageError`, with a `WORKFLOW_STORAGE_*` code. The codes and their
+meanings are listed in [Choosing storage providers](storage-providers.md#errors).
+A revision conflict on save is still `WorkflowCheckpointConflictError`.
+
+## Checkpoint providers
+
+A checkpoint store is a provider the host chooses. Each provider extends
+`BaseWorkflowCheckpointStore` and reports what it guarantees in its
+`capabilities`:
+
+- `compareAndSet`: `atomic` when the revision check and the write are one
+  storage transaction, so exactly one of several concurrent writers wins.
+  `advisory` when another writer can commit between the check and the write.
+- `leases`: whether leases with fencing tokens are granted and checked in the
+  same transaction as a save.
+- `durable`: whether a saved checkpoint survives the process.
+- `multiProcess`: whether writers in several processes can share the storage.
+- `listing` and `pruning`: whether `list` and `delete`/`prune` are implemented.
+- `maxCheckpointBytes`: the largest checkpoint, 4 MiB by default.
+
+| Provider | `compareAndSet` | `leases` | `durable` | `multiProcess` |
+| --- | --- | --- | --- | --- |
+| `InMemoryWorkflowCheckpointStore` | `atomic` | yes | no | no |
+| `FileSystemWorkflowCheckpointProvider` | `atomic` | no | yes | yes, one host; no on Windows ([#117](https://github.com/pailat/adk-llm-bridge/issues/117)) |
+| `SqliteWorkflowCheckpointStore` | `atomic` | yes | yes | yes, one host |
+| `AdkSessionServiceWorkflowCheckpointStore` over `DatabaseSessionService` | `atomic` | yes | yes | yes |
+| `AdkSessionServiceWorkflowCheckpointStore` over ADK's in-memory service | `advisory` | no | no | no |
+
+`FileSystemWorkflowCheckpointProvider` stores checkpoints through
+`FileSystemWorkflowCheckpointStore`, the file-system store described in
+[Checkpoint commit semantics](#checkpoint-commit-semantics).
+
+`LeasedWorkflowCheckpointStore` is a decorator. It wraps a provider whose
+`capabilities.leases` is `true` and grants an execution lease with a fencing
+token. A save that carries a stale token fails with `WORKFLOW_STORAGE_LEASE_LOST`
+and is not applied. The lease lasts `DEFAULT_WORKFLOW_CHECKPOINT_LEASE_TTL_MS`
+(30 seconds) by default and is renewed every third of that time while the
+execution is active. Wrapping a provider with `leases` set to `false` throws
+`WORKFLOW_STORAGE_UNSUPPORTED`.
+
+Choose a provider by injecting it through the `checkpointStore` option or by URI
+with `getWorkflowCheckpointStoreFromUri`. The full guide, with URIs, custom
+schemes, event export and the limits of each provider, is in
+[Choosing storage providers](storage-providers.md).
+
+**Migration.** When no `checkpointStore` is given, the workflow runtime keeps
+checkpoints in ADK session state through `ADKSessionCheckpointStore`. The
+file-system provider is used only when you select it by injection or by a
+`file://` URI. A host that does not select a provider gets the runtime default
+above.
+
+### Windows: SQLite stores and the JSONL exporter
+
+The SQLite checkpoint store, the SQLite event exporter, the SQLite session
+store and the JSONL exporter run on Windows with these differences. How the
+file-system store and the exporters sync a directory on Windows is written once,
+with the file-system store fix; this section does not repeat it.
+
+- **No owner-only protection.** NTFS has no POSIX mode. Nothing is set to
+  `0600` or `0700`, and a database or directory that others can read is left as
+  it is, not tightened and not refused. Access follows the ACL of the parent
+  directory, so keep the database and the JSONL directory in a directory only
+  the account can open.
+- **Symbolic links are still refused**, from `lstat` before the open, because
+  Windows has no `O_NOFOLLOW`. The refusal holds for a link or junction at the
+  database path of the SQLite checkpoint store and event exporter and, for
+  those two, at the `-wal` and `-shm` files and the directory. The Claude
+  session store refuses a link at its database path only; it follows a link
+  in its directory and companion files, as it always did. A link swapped in
+  between that check and the open is not caught.
+- **No FIFOs.** The checks for a FIFO at the path apply only to POSIX.
+- **Open files.** Windows cannot delete or rename a file another process has
+  open. The JSONL exporter keeps no file open between calls, so this only
+  matters when something else holds a file at the moment `prune` deletes it:
+  that call rejects with the file system error and can be repeated. Releasing
+  the writer lock ignores a failed delete, as on POSIX.
+
+### Known limits of the JSONL exporter lock
+
+- **Leftover takeover files are not swept.** A process killed in the middle of
+  a lock takeover can leave a `.writer.lock.takeover-*` claim or a `*.tmp`
+  staging file in the directory. They are harmless and are removed by hand: no
+  process deletes a file another process created, because that rule is what
+  keeps a crash from leaving two writers.
+- **A paused claimer can remove a new lock.** A process that wins a takeover
+  and is then paused for more than 60 seconds between its last check of the
+  stale lock and the delete can remove a lock a new writer created in the
+  meantime. Deleting a file only if it still holds a given token is not
+  possible with the file system calls Node offers, and the writer notices the
+  loss at its next heartbeat or write and stops.
+
 ## Checkpoint size
 
 One execution has one checkpoint, and it grows with every step that

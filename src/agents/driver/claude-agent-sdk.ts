@@ -51,9 +51,11 @@ import {
 } from "./claude-session-files.js";
 import {
   assertModelOption,
-  CLAUDE_MODEL_ENV,
+  assertSmallFastModelOption,
+  isClaudeModelEnv,
   MODEL_ALIAS_DENYLIST,
   modelEnvRefusal,
+  withModelPins,
 } from "./model.js";
 import {
   dependencyMissing,
@@ -279,12 +281,32 @@ export interface ClaudeAgentSdkDriverConfig {
   model?: string;
   /**
    * Refuse to build the driver without a `model`, or with an alias that lets
-   * Claude Code choose (`default`, `best`, `opusplan`, `opusplan[1m]`):
-   * `EXTERNAL_AGENT_MODEL_REQUIRED`.
+   * Claude Code choose (`default`, `best`, `opusplan`, `opusplan[1m]`), or
+   * without a full-id `smallFastModel`: `EXTERNAL_AGENT_MODEL_REQUIRED`.
    *
    * @defaultValue false
    */
   requireExplicitModel?: boolean;
+  /**
+   * Model id of Claude Code's small/fast model, which runs the helper calls
+   * (WebFetch page processing, tool summaries, titles). The driver sets
+   * `ANTHROPIC_SMALL_FAST_MODEL` in the child environment, after the model
+   * environment refusal: a host cannot forward that variable itself. Same
+   * grammar as `model`; anything else is refused with
+   * `EXTERNAL_AGENT_MODEL_INVALID` when the driver is built.
+   *
+   * @remarks
+   * Required with `requireExplicitModel` (`EXTERNAL_AGENT_MODEL_REQUIRED`),
+   * and then it must be a full model id, not an alias such as `haiku`.
+   * Pinned, the runtime's helper fallback chain is off. Not covered: the
+   * quota and key-check probes of a subscription login, and an organization
+   * `deniedModels` policy, which replaces a denied pin with the main model.
+   * The run reports every model it billed in `externalAgentModel.used`.
+   *
+   * @defaultValue the runtime's own small model (the built-in haiku, or the
+   * main model when the runtime has no haiku tier)
+   */
+  smallFastModel?: string;
   /**
    * Emit every unrecognized SDK message as an `output` event containing its
    * JSON. For debugging only.
@@ -608,6 +630,8 @@ export class ClaudeAgentSdkDriver {
   readonly #settingSources: ClaudeAgentSdkSettingSource[];
   readonly #maxTurns?: number;
   readonly #model?: string;
+  readonly #requireExplicitModel: boolean;
+  readonly #smallFastModel?: string;
   readonly #debugEvents: boolean;
   readonly #requiredMcpServers: readonly string[];
   readonly #resumeSessionId?: string;
@@ -657,7 +681,8 @@ export class ClaudeAgentSdkDriver {
    * @throws {@link ExternalAgentPolicyError} with code
    * `EXTERNAL_AGENT_MODEL_INVALID` when `model` is not a model id, and
    * `EXTERNAL_AGENT_MODEL_REQUIRED` when `requireExplicitModel` is set and
-   * `model` is absent or a router alias.
+   * `model` is absent or a router alias, or `smallFastModel` is absent or an
+   * alias; `EXTERNAL_AGENT_MODEL_INVALID` also covers `smallFastModel`.
    */
   constructor(config: ClaudeAgentSdkDriverConfig = {}) {
     validateDriverConfig(
@@ -670,6 +695,12 @@ export class ClaudeAgentSdkDriver {
       config.model,
       config.requireExplicitModel ?? false,
       MODEL_ALIAS_DENYLIST.claude,
+    );
+    this.#requireExplicitModel = config.requireExplicitModel ?? false;
+    this.#smallFastModel = assertSmallFastModelOption(
+      "ClaudeAgentSdkDriver",
+      config.smallFastModel,
+      config.requireExplicitModel ?? false,
     );
     this.#sdk = config.sdk;
     this.#importSdk = config.importSdk ?? importClaudeAgentSdk;
@@ -712,6 +743,16 @@ export class ClaudeAgentSdkDriver {
   /** The configured model id (`gen_ai.request.model`), if any. */
   get model(): string | undefined {
     return this.#model;
+  }
+
+  /** Whether the driver was built with `requireExplicitModel`. */
+  get requireExplicitModel(): boolean {
+    return this.#requireExplicitModel;
+  }
+
+  /** The configured small/fast model pin, if any. */
+  get smallFastModel(): string | undefined {
+    return this.#smallFastModel;
   }
 
   /** `true`: the SDK's `system/init` message and `result` name the model it ran. */
@@ -829,7 +870,7 @@ export class ClaudeAgentSdkDriver {
       const envRefusal = modelEnvRefusal(
         "ClaudeAgentSdkDriver",
         this.buildEnv(request),
-        CLAUDE_MODEL_ENV,
+        isClaudeModelEnv,
       );
       if (envRefusal) {
         throw envRefusal;
@@ -1024,7 +1065,7 @@ export class ClaudeAgentSdkDriver {
             toolUseCheck?.finish();
             completed = true;
             if (!event.model && initModel) {
-              event = { ...event, model: initModel };
+              event = { ...event, model: initModel, modelFromInit: true };
             }
             const pending = backgroundTasks.pending();
             if (event.exitCode === 0 && pending.length > 0) {
@@ -1123,7 +1164,8 @@ export class ClaudeAgentSdkDriver {
     const permission = mapPolicyToClaudeSdkPermission(request.permissions);
     const options: ClaudeAgentSdkOptions = {
       cwd: request.workingDirectory,
-      env: this.buildEnv(request),
+      // The pin joins the environment after the refusal checked it.
+      env: withModelPins(this.buildEnv(request), this.#smallFastModel),
       abortController: this.buildAbortController(request),
       permissionMode: permission.permissionMode,
       additionalDirectories: request.permissions?.allowedPaths
@@ -1384,11 +1426,12 @@ export class ClaudeAgentSdkDriver {
         readCredentialEnv(request, "CLAUDE_CODE_EXECUTABLE"),
         readCredentialEnv(request, "CLAUDE_CODE_PATH"),
       ],
-      claudeExecutableCandidates({
-        env: this.#env,
-        executableSearchPaths: this.#executableSearchPaths,
-        excluded: agentWritableRoots(request),
-      }),
+      () =>
+        claudeExecutableCandidates({
+          env: this.#env,
+          executableSearchPaths: this.#executableSearchPaths,
+          excluded: agentWritableRoots(request),
+        }),
     );
   }
 

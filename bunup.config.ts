@@ -7,6 +7,9 @@ export default defineConfig({
     "src/agents/session-store/sqlite/index.ts",
     "src/workflows/index.ts",
     "src/workflows/node/index.ts",
+    "src/workflows/storage/conformance/index.ts",
+    "src/workflows/events/sqlite/index.ts",
+    "src/workflows/checkpoint/sqlite/index.ts",
     "src/workflows/spec/index.ts",
   ],
   // Output paths are relative to `src/`, so `src/agents/index.ts` builds to

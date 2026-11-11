@@ -710,7 +710,19 @@ from the 0.6.0 tag.
     `gen_ai.usage.cache_read.input_tokens`;
   - `AgentInvocationUsage.cacheCreationTokens` and `WorkflowStepUsage.cacheCreationTokens`
     (optional, absent when no provider reported a write; old checkpoints still load).
-
+- Claude drivers: `smallFastModel` pins the runtime's small/fast model
+  (`ANTHROPIC_SMALL_FAST_MODEL`: WebFetch page processing, tool summaries,
+  titles, ...); the driver sets it after the model environment check, so a host
+  cannot forward the variable. It is required, as a full model id, with
+  `requireExplicitModel`. Runs report every model they billed
+  (`externalAgentModel.used`, from `usage.byModel`, or from `completed.model`
+  for a trusted driver with one billed model) and the ones nobody requested
+  (`unexpected`, with an `UNEXPECTED_MODEL` warning under
+  `requireExplicitModel`), on events, spans and workflow steps
+  (`result.models.used`, `unexpected`). The workflow factory takes
+  `config.smallFastModel`. `ExternalAgentDriver` gains the optional members
+  `smallFastModel` and `requireExplicitModel`, and `completed` gains
+  `modelFromInit`. See [The small/fast model](docs/external-agent-isolation.md#the-smallfast-model-claude).
 - Workflow replay records the model each step's agent requested (`model.requested`
   on the checkpoint step) and reports a change on a replayed or resumed step: a
   `step_model_changed` event and a `WORKFLOW_STEP_MODEL_CHANGED` warning.
@@ -1127,6 +1139,35 @@ from the 0.6.0 tag.
 - `ExternalAgentModelUsage`, the type of an `ExternalAgentUsage.byModel` entry.
 - `WORKFLOW_STEP_MISMATCH` details include the saved step's `savedStatus` and
   `savedAttempts`.
+- Workflow storage providers. Checkpoint and event providers are chosen by
+  injection (`checkpointStore`) or by URI (`getWorkflowCheckpointStoreFromUri`,
+  `getWorkflowEventExporterFromUri`), with custom schemes through
+  `registerWorkflowStorageProvider`. Events export through
+  `WorkflowEventExportPlugin` and `WorkflowSpanExportProcessor`. The SQLite
+  providers load from `adk-llm-bridge/workflows/checkpoint/sqlite` and
+  `adk-llm-bridge/workflows/events/sqlite`, and the conformance suite from
+  `adk-llm-bridge/workflows/storage/conformance`. The default checkpoint
+  store does not change: it was `ADKSessionCheckpointStore` before this
+  addition and still is; a provider is used only when you pass or select one.
+  Known limitation: concurrent multi-process saves to the file-system
+  checkpoint provider are not yet supported on Windows, and its
+  `capabilities.multiProcess` is `false` there
+  ([#117](https://github.com/pailat/adk-llm-bridge/issues/117)).
+  On Windows the SQLite stores and the JSONL exporter set no owner-only mode and
+  refuse symbolic links from `lstat`. The Claude SQLite session store now
+  opens through the same shared helper: it still takes the write lock
+  (`BEGIN IMMEDIATE`) on open, also for a schema that is already current, as
+  before; on Windows a symbolic link at the database path is now refused
+  before the open, and no mode is set or checked there. The JSONL exporter
+  flushes its directory with the same helper as the file-system stores: a
+  failed directory flush after it creates or removes a file now fails the call
+  instead of being ignored, except on Windows, which cannot flush a
+  directory. The SQLite session store now sets `PRAGMA synchronous = FULL`
+  explicitly, and a storage URI longer than 8192 characters
+  (`MAX_WORKFLOW_STORAGE_URI_LENGTH`) is rejected with
+  `WORKFLOW_STORAGE_INVALID_URI`. See
+  [Choosing storage providers](./docs/storage-providers.md) and
+  [Workflow durability](./docs/workflow-durability.md).
 
 ### Changed
 
@@ -1162,7 +1203,16 @@ from the 0.6.0 tag.
   Gemini CLI drivers used to be ignored silently (the runtime decided alone and
   denied what needed approval). It now throws `EXTERNAL_AGENT_APPROVALS_UNSUPPORTED`
   when the agent is built, also on `clone()`. Only `ClaudeAgent` asks the host.
-
+- The Claude drivers refuse every forwarded environment variable whose name
+  contains `MODEL`, plus `CLAUDE_CODE_CLIENT_DATA_URL` and `CLAUDE_CODE_3P_*`,
+  instead of a fixed list; `ANTHROPIC_SMALL_FAST_MODEL_AWS_REGION` is the one
+  exception (a region, not a model). A drift test reads the bundled Claude Code
+  binary and fails on a model variable the rule misses. The Codex drivers
+  refuse every `config` key containing `model`, except the tuning keys
+  (`model_reasoning_effort`, `model_reasoning_summary`, `model_verbosity`,
+  `model_context_window`, `model_auto_compact_token_limit`,
+  `model_auto_compact_token_limit_scope`). A workflow step is `unknown` when an
+  external run in it reported no `used`.
 - **The script sandbox stack limit is lower and capped.**
   `DEFAULT_WORKFLOW_EXECUTION_LIMITS.stackBytes` is 32 KiB (32768, was
   512 KiB), and a script workflow whose `stackBytes` is above 32 KiB is refused
@@ -1943,6 +1993,9 @@ from the 0.6.0 tag.
 
 ### Docs
 
+- `docs/external-agent-isolation.md`: the per-run `/tmp/adk-claude-*` temp
+  directory of the Claude drivers stays behind when the host is killed with
+  `SIGKILL` before the run ends; how a host cleans stale ones safely.
 - `docs/workflow-durability.md`: writing your own checkpoint store, with
   `workflowCheckpointRevision`, `assertWorkflowCheckpointSize`,
   `workflowCheckpointByteLength`, `workflowCheckpointSizeLimitError` and

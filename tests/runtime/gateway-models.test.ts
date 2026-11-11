@@ -92,12 +92,14 @@ describe("gateway models: external runs", () => {
       external("e", { model: "claude-opus-5-5", reportsResolvedModel: true }, [
         started("claude-opus-5-5"),
         { type: "output", content: "done" },
-        { type: "completed", exitCode: 0 },
+        { type: "completed", exitCode: 0, model: "claude-opus-5-5" },
       ]),
     );
     expect(result.models).toEqual({
       requested: ["claude-opus-5-5"],
       resolved: ["claude-opus-5-5"],
+      used: ["claude-opus-5-5"],
+      unexpected: [],
       unknown: false,
     });
   });
@@ -234,7 +236,7 @@ describe("gateway models: other agents and nesting", () => {
       [
         started("a-full"),
         { type: "output", content: "one" },
-        { type: "completed", exitCode: 0 },
+        { type: "completed", exitCode: 0, model: "a-full" },
       ],
     );
     const second = external(
@@ -243,7 +245,7 @@ describe("gateway models: other agents and nesting", () => {
       [
         started("b-full"),
         { type: "output", content: "two" },
-        { type: "completed", exitCode: 0 },
+        { type: "completed", exitCode: 0, model: "b-full" },
       ],
     );
     const again = external(
@@ -252,7 +254,7 @@ describe("gateway models: other agents and nesting", () => {
       [
         started("a-full"),
         { type: "output", content: "three" },
-        { type: "completed", exitCode: 0 },
+        { type: "completed", exitCode: 0, model: "a-full" },
       ],
     );
     const queued: Event[] = [];
@@ -277,6 +279,8 @@ describe("gateway models: other agents and nesting", () => {
     expect(result.models).toEqual({
       requested: ["a", "b"],
       resolved: ["a-full", "b-full"],
+      used: ["a-full", "b-full"],
+      unexpected: [],
       unknown: false,
     });
   });
@@ -338,6 +342,8 @@ describe("gateway models: other agents and nesting", () => {
             requested: "inner",
             resolved: "inner-full",
             status: "reported",
+            used: ["inner-full"],
+            unexpected: [],
           },
         },
       });
@@ -346,6 +352,8 @@ describe("gateway models: other agents and nesting", () => {
     expect(result.models).toEqual({
       requested: ["own", "inner"],
       resolved: ["inner-full"],
+      used: ["inner-full"],
+      unexpected: [],
       unknown: false,
     });
   });
@@ -478,6 +486,8 @@ describe("gateway models: agents nested inside the step's agent", () => {
               requested: "x",
               resolved: "x-full",
               status: "reported",
+              used: ["x-full"],
+              unexpected: [],
             },
           },
         });
@@ -486,7 +496,98 @@ describe("gateway models: agents nested inside the step's agent", () => {
     expect(result.models).toEqual({
       requested: ["x"],
       resolved: ["x-full"],
+      used: ["x-full"],
+      unexpected: [],
       unknown: false,
     });
   });
+});
+
+describe("gateway models: used and unexpected", () => {
+  const billed = (...models: string[]): ExternalAgentEvent => ({
+    type: "completed",
+    exitCode: 0,
+    usage: {
+      byModel: Object.fromEntries(models.map((m) => [m, { inputTokens: 1 }])),
+    },
+  });
+  const trusted = (name: string, model: string, smallFastModel?: string) => ({
+    name,
+    shape: { model, reportsResolvedModel: true, smallFastModel },
+  });
+
+  function runOf(
+    parts: { name: string; shape: Record<string, unknown> }[],
+    completes: ExternalAgentEvent[],
+  ) {
+    const agents = parts.map(({ name, shape }, index) => {
+      const driver: ExternalAgentDriver = {
+        providerId: CODEX_PROVIDER.id,
+        ...shape,
+        async *run() {
+          yield started(shape.model as string);
+          yield { type: "output", content: name };
+          yield completes[index] as ExternalAgentEvent;
+        },
+      };
+      return new ExternalAgent({ name, provider: CODEX_PROVIDER, driver });
+    });
+    return run(new Composite(agents));
+  }
+
+  test("two runs: used and unexpected are unions, first-seen order", async () => {
+    const result = await runOf(
+      [trusted("one", "a", "h"), trusted("two", "a")],
+      [billed("a", "h"), billed("a", "x")],
+    );
+    expect(result.models?.used).toEqual(["a", "h", "x"]);
+    expect(result.models?.unexpected).toEqual(["x"]);
+    expect(result.models?.unknown).toBe(false);
+  });
+
+  test("a Codex-like run in the step makes it unknown and adds no used", async () => {
+    const result = await runOf(
+      [
+        {
+          name: "cx",
+          shape: { model: "gpt-5.5", reportsResolvedModel: false },
+        },
+      ],
+      [{ type: "completed", exitCode: 0 }],
+    );
+    expect(result.models?.unknown).toBe(true);
+    expect(result.models).not.toHaveProperty("used");
+    expect(result.models).not.toHaveProperty("unexpected");
+  });
+
+  test("a trusted run that reports no used is unknown", async () => {
+    const result = await runOf(
+      [trusted("one", "a", "h")],
+      [{ type: "completed", exitCode: 0 }],
+    );
+    expect(result.models?.unknown).toBe(true);
+  });
+
+  for (const [name, forgedInfo] of Object.entries({
+    "used without unexpected": { used: ["a"] },
+    "used not an array": { used: "x", unexpected: [] },
+    "unexpected not an array": { used: ["a"], unexpected: "x" },
+    "an empty id in used": { used: [""], unexpected: [] },
+    "a number in unexpected": { used: ["a"], unexpected: [1] },
+  })) {
+    test(`a forged info is ignored: ${name}`, async () => {
+      const forged = new ScriptedTree("forger", [], async function* () {
+        yield createEvent({
+          author: "forger",
+          content: { role: "model", parts: [{ text: "x" }] },
+          customMetadata: {
+            externalAgentModel: { status: "unsupported", ...forgedInfo },
+          },
+        });
+      });
+      const result = await run(forged);
+      // A malformed info is no info: nothing is counted from it.
+      expect(result.models).toBeUndefined();
+    });
+  }
 });

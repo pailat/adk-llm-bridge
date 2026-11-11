@@ -124,7 +124,14 @@ class FakeClaude {
   };
 
   driver(config: Partial<ClaudeAgentSdkDriverConfig> = {}) {
-    return new ClaudeAgentSdkDriver({ ...config, sdk: this.sdk } as never);
+    // These tests are about usage, not about finding the `claude` binary. An
+    // explicit path skips the per-run search of the PATH and the install
+    // directories, which made 260 runs cost seconds under load.
+    return new ClaudeAgentSdkDriver({
+      pathToClaudeCodeExecutable: "/fake/claude",
+      ...config,
+      sdk: this.sdk,
+    } as never);
   }
 }
 

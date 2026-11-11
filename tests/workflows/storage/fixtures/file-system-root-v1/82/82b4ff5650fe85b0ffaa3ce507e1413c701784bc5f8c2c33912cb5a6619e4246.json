@@ -1,0 +1,19 @@
+{
+  "format": "adk-llm-bridge/workflow-checkpoint-file",
+  "formatVersion": 1,
+  "checkpointKey": "__adk_llm_bridge_workflow_v1:fixture-flow:exec-b",
+  "revision": "sha256:db834eebe06c4c7743381aa6b71b7ad7979e550d1113714f275c24f228122a6a",
+  "checkpoint": {
+    "schemaVersion": 1,
+    "workflowId": "fixture-flow",
+    "workflowVersion": "1",
+    "executionId": "exec-b",
+    "inputHash": "sha256:c100f95c1913f9c72fc1f4ef0847e1e723ffe0bde0b36e5f36c13f81fe8c26ed",
+    "status": "completed",
+    "steps": {},
+    "startedAt": 1700000001000,
+    "updatedAt": 1700000002000,
+    "output": "fixture output",
+    "completedAt": 1700000002000
+  }
+}

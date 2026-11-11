@@ -33,10 +33,12 @@ import { collectTail, type LineSource, readLines } from "./lines.js";
 import {
   assertModelOption,
   assertNoModelOverride,
+  assertSmallFastModelOption,
   CLAUDE_CLI_MODEL_FLAGS,
-  CLAUDE_MODEL_ENV,
+  isClaudeModelEnv,
   MODEL_ALIAS_DENYLIST,
   modelEnvRefusal,
+  withModelPins,
 } from "./model.js";
 import {
   batchCommandRefusal,
@@ -300,12 +302,32 @@ export interface ClaudeCliDriverConfig {
   model?: string;
   /**
    * Refuse to build the driver without a `model`, or with an alias that lets
-   * Claude Code choose (`default`, `best`, `opusplan`, `opusplan[1m]`):
-   * `EXTERNAL_AGENT_MODEL_REQUIRED`.
+   * Claude Code choose (`default`, `best`, `opusplan`, `opusplan[1m]`), or
+   * without a full-id `smallFastModel`: `EXTERNAL_AGENT_MODEL_REQUIRED`.
    *
    * @defaultValue false
    */
   requireExplicitModel?: boolean;
+  /**
+   * Model id of Claude Code's small/fast model, which runs the helper calls
+   * (WebFetch page processing, tool summaries, titles). The driver sets
+   * `ANTHROPIC_SMALL_FAST_MODEL` in the child environment, after the model
+   * environment refusal: a host cannot forward that variable itself. Same
+   * grammar as `model`; anything else is refused with
+   * `EXTERNAL_AGENT_MODEL_INVALID` when the driver is built.
+   *
+   * @remarks
+   * Required with `requireExplicitModel` (`EXTERNAL_AGENT_MODEL_REQUIRED`),
+   * and then it must be a full model id, not an alias such as `haiku`.
+   * Pinned, the runtime's helper fallback chain is off. Not covered: the
+   * quota and key-check probes of a subscription login, and an organization
+   * `deniedModels` policy, which replaces a denied pin with the main model.
+   * The run reports every model it billed in `externalAgentModel.used`.
+   *
+   * @defaultValue the runtime's own small model (the built-in haiku, or the
+   * main model when the runtime has no haiku tier)
+   */
+  smallFastModel?: string;
   /**
    * Maximum agent turns per run (`--max-turns`), a positive integer. A run
    * that reaches it ends with a `MAX_TURNS_EXCEEDED` error.
@@ -481,6 +503,8 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
   readonly #allowBackgroundTasks: boolean;
   readonly #allowUnenforcedPaths: boolean;
   readonly #model: string | undefined;
+  readonly #requireExplicitModel: boolean;
+  readonly #smallFastModel: string | undefined;
   readonly #maxTurns: number | undefined;
   readonly #systemPrompt: string | undefined;
 
@@ -504,7 +528,8 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
    * `EXTERNAL_AGENT_MODEL_OVERRIDE` when an `args` entry sets the model,
    * `EXTERNAL_AGENT_MODEL_INVALID` when `model` is not a model id, and
    * `EXTERNAL_AGENT_MODEL_REQUIRED` when `requireExplicitModel` is set and
-   * `model` is absent or a router alias.
+   * `model` is absent or a router alias, or `smallFastModel` is absent or an
+   * alias; `EXTERNAL_AGENT_MODEL_INVALID` also covers `smallFastModel`.
    */
   constructor(config: ClaudeCliDriverConfig = {}) {
     for (const option of [
@@ -538,6 +563,11 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
       config.requireExplicitModel ?? false,
       MODEL_ALIAS_DENYLIST.claude,
     );
+    const smallFastModel = assertSmallFastModelOption(
+      "ClaudeCliDriver",
+      config.smallFastModel,
+      config.requireExplicitModel ?? false,
+    );
     super({
       providerId: CLAUDE_PROVIDER.id,
       command:
@@ -559,6 +589,8 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
     this.#allowBackgroundTasks = config.allowBackgroundTasks ?? false;
     this.#allowUnenforcedPaths = config.allowUnenforcedPaths ?? false;
     this.#model = model;
+    this.#smallFastModel = smallFastModel;
+    this.#requireExplicitModel = config.requireExplicitModel ?? false;
     this.#maxTurns = config.maxTurns;
     this.#systemPrompt = config.systemPrompt;
   }
@@ -566,6 +598,16 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
   /** The configured model id (`gen_ai.request.model`), if any. */
   get model(): string | undefined {
     return this.#model;
+  }
+
+  /** Whether the driver was built with `requireExplicitModel`. */
+  get requireExplicitModel(): boolean {
+    return this.#requireExplicitModel;
+  }
+
+  /** The configured small/fast model pin, if any. */
+  get smallFastModel(): string | undefined {
+    return this.#smallFastModel;
   }
 
   /** `true`: the CLI's `system/init` line and `result` name the model it ran. */
@@ -618,7 +660,7 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
         yield event.type === "completed" &&
         event.model === undefined &&
         state.initModel !== undefined
-          ? { ...event, model: state.initModel }
+          ? { ...event, model: state.initModel, modelFromInit: true }
           : event;
       }
     } catch (error) {
@@ -645,7 +687,7 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
     const envRefusal = modelEnvRefusal(
       "ClaudeCliDriver",
       env,
-      CLAUDE_MODEL_ENV,
+      isClaudeModelEnv,
     );
     if (envRefusal) {
       yield policyErrorEvent(envRefusal);
@@ -698,7 +740,12 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
     try {
       child = this.#spawn(launch.command, [...launch.prefix, ...args], {
         cwd: launch.cwd ?? request.workingDirectory,
-        env: { ...env, ...runTemp?.env, ...launch.env },
+        // The pin joins the environment after the refusal checked it.
+        env: {
+          ...withModelPins(env, this.#smallFastModel),
+          ...runTemp?.env,
+          ...launch.env,
+        },
         input: promptFromRequest(request),
       });
     } catch (error) {

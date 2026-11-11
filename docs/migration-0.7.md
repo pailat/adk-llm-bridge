@@ -693,11 +693,22 @@ Breaking changes:
   Set the driver's `model` option instead. Fallback models and Codex
   profiles are no longer reachable through the bridge. For another endpoint,
   use the Codex SDK driver's `baseUrl` option.
-- **Custom provider definitions** whose `envAllowlist` forwards
-  `ANTHROPIC_MODEL`, `ANTHROPIC_DEFAULT_*_MODEL`, `ANTHROPIC_SMALL_FAST_MODEL`,
-  `CLAUDE_CODE_SUBAGENT_MODEL`, `GEMINI_MODEL`, `OPENAI_BASE_URL`,
-  `CODEX_OSS_BASE_URL` or `CODEX_OSS_PORT`: runs that would carry one are
-  refused. Remove the name and set `model`.
+- **Custom provider definitions** whose `envAllowlist` forwards a Claude
+  variable whose name contains `MODEL` (`ANTHROPIC_MODEL`,
+  `ANTHROPIC_DEFAULT_*_MODEL`, `ANTHROPIC_SMALL_FAST_MODEL`,
+  `CLAUDE_CODE_SUBAGENT_MODEL`, `CLAUDE_CODE_MODEL_CATALOG`, ...),
+  `CLAUDE_CODE_CLIENT_DATA_URL` or a `CLAUDE_CODE_3P_*` variable, or
+  `GEMINI_MODEL`, `OPENAI_BASE_URL`, `CODEX_OSS_BASE_URL` or `CODEX_OSS_PORT`:
+  runs that would carry one are refused. Remove the name and set `model` (and
+  `smallFastModel` for Claude). The Claude rule is a pattern, so a variable a
+  later Claude Code release adds is refused too. The region variable
+  `ANTHROPIC_SMALL_FAST_MODEL_AWS_REGION` is the one exception.
+- **Codex config keys containing `model`** (`review_model`,
+  `auto_review_model_override`, `agents.x.model`, ...) are refused in `args`
+  and the SDK `config`, not only the keys listed above. The tuning keys
+  `model_reasoning_effort`, `model_reasoning_summary`, `model_verbosity`,
+  `model_context_window`, `model_auto_compact_token_limit` and
+  `model_auto_compact_token_limit_scope` stay allowed.
 - **Gemini read-only runs** (`--approval-mode=plan`, which may route turns to
   another model) are refused when `model` is set or `requireExplicitModel` is
   true (`EXTERNAL_AGENT_MODEL_OVERRIDE`). Choices:
@@ -745,11 +756,20 @@ Event changes:
   external agent's last error event is now delivered after any state-only event
   that arrives right behind it (as the final text already was), so the model
   info can ride on it. Checkpoints from before this change load without
-  `models`.
+  `models`. `externalAgentModel` also has `smallFast`, `used`, `unexpected`
+  and `warnings`, and `result.models` has `used` and `unexpected` (absent in
+  older checkpoints, which still load). A step is now `unknown` when an
+  external run in it reported no `used`, so a Codex or Gemini step, or a Claude
+  run with no model usage, no longer reads as fully known.
 
 Recommended for hosts:
 
-- Set `requireExplicitModel: true` on drivers.
+- Set `requireExplicitModel: true` on drivers, and on a Claude driver also set
+  `smallFastModel` (for example `claude-haiku-5-5`): without it the
+  constructor throws `EXTERNAL_AGENT_MODEL_REQUIRED`, and an alias such as
+  `haiku` is refused the same way. Through the workflow factory, pass
+  `config.smallFastModel`. Runs report every model they billed in
+  `externalAgentModel.used` and the unrequested ones in `unexpected`.
 - Use **full model ids** (`claude-opus-5-5`, not `opus`), so a substituted
   model shows as a reported id that differs from the requested one.
 
@@ -838,6 +858,12 @@ checkpoints:
   `waiting`, and it resumes when the user answers.
 - Import `BaseAgent` from `@google/adk`; the workflows entry point does not
   re-export it.
+- The default checkpoint store is `ADKSessionCheckpointStore`, as it was
+  before the storage providers were added: with no `checkpointStore`, the
+  checkpoints stay in ADK session state. Adding the storage providers changed
+  no default. To use another provider, pass it as `checkpointStore` or select
+  it with `getWorkflowCheckpointStoreFromUri`; see
+  [Choosing storage providers](./storage-providers.md).
 - `WorkflowAgent` and `ScriptWorkflowAgent` now take ADK's `waitForOutput`,
   `beforeAgentCallback`, `afterAgentCallback` and `parentAgent`, and
   `clone()` works (it threw before). A `beforeAgentCallback` that returns

@@ -14,6 +14,7 @@ import { resolveCliLaunch, validateLaunchConfig } from "./launch.js";
 import { collectTail, type LineSource, readLines } from "./lines.js";
 import {
   assertModelOption,
+  envNameIn,
   GEMINI_MODEL_ENV,
   GEMINI_PLAN_MODE_REASON,
   MODEL_ALIAS_DENYLIST,
@@ -376,7 +377,7 @@ export class GeminiCliDriver extends SubprocessJsonlDriver {
     const envRefusal = modelEnvRefusal(
       "GeminiCliDriver",
       env,
-      GEMINI_MODEL_ENV,
+      envNameIn(GEMINI_MODEL_ENV),
     );
     const planMode = isGeminiPlanMode(request.permissions);
     const planModeRefused =

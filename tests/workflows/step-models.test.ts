@@ -67,7 +67,12 @@ function external(
       ...(resolved ? { model: resolved } : {}),
     },
     { type: "output", content: "done" },
-    { type: "completed", exitCode: 0 },
+    {
+      type: "completed",
+      exitCode: 0,
+      // One billed model: a trusted driver names it on `completed`.
+      ...(resolved ? { model: resolved } : {}),
+    },
   ];
   const driver: ExternalAgentDriver = {
     providerId: CODEX_PROVIDER.id,
@@ -205,6 +210,8 @@ describe("step_completed result.models", () => {
     expect(completed[0]?.result.models).toEqual({
       requested: ["claude-opus-5-5"],
       resolved: ["claude-opus-5-5"],
+      used: ["claude-opus-5-5"],
+      unexpected: [],
       unknown: false,
     });
   });
@@ -278,6 +285,8 @@ describe("step_completed result.models", () => {
     expect(p1?.result.models).toEqual({
       requested: ["m-a", "m-b"],
       resolved: ["m-a-full", "m-b-full"],
+      used: ["m-a-full", "m-b-full"],
+      unexpected: [],
       unknown: false,
     });
   });
