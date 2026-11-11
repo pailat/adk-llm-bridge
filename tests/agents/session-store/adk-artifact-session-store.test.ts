@@ -955,8 +955,12 @@ describe("SDK interop and types", () => {
     process.env.CLAUDE_CONFIG_DIR = join(root, "config");
     const cwd = join(root, "project");
     mkdirSync(cwd);
-    const projectKey = cwd.replace(/[^a-zA-Z0-9]/g, "-");
-    const projectDir = join(root, "config", "projects", projectKey);
+    const projectKey = realpathSync(cwd).replace(/[^a-zA-Z0-9]/g, "-");
+    // The SDK looks the transcript up under the natively resolved path, which
+    // on Windows expands 8.3 short names such as RUNNER~1; the store key
+    // keeps the form realpathSync returns.
+    const layoutKey = realpathSync.native(cwd).replace(/[^a-zA-Z0-9]/g, "-");
+    const projectDir = join(root, "config", "projects", layoutKey);
     mkdirSync(projectDir, { recursive: true });
     const sessionId = "11111111-2222-4333-8444-555555555555";
     const entries = [
