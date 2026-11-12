@@ -852,7 +852,6 @@ export class CodexSdkDriver {
   }
 }
 
-/** Names of the MCP servers set in the driver's own `config.mcp_servers`. */
 /**
  * What one Codex turn needs from the transport that feeds the shared loop.
  *
@@ -1032,6 +1031,7 @@ export async function* runCodexTurn(
   }
 }
 
+/** Names of the MCP servers set in the driver's own `config.mcp_servers`. */
 function configuredMcpServerNames(
   config: CodexSdkConfigObject | undefined,
 ): string[] {

@@ -23,6 +23,7 @@ import {
 import {
   codexBridgeEnvelope,
   normalizeCodexJsonlEvent,
+  normalizeCodexTransportEvent,
   warnNonJsonLine,
 } from "./codex-message-mapper.js";
 import { buildCodexEnv } from "./codex-run-env.js";
@@ -709,7 +710,7 @@ export class CodexCliDriver extends SubprocessJsonlDriver {
       // The process keeps no thread: every run is a new `codex exec`.
       stateKey: undefined,
       normalize: (event) => {
-        const normalized = normalizeCodexJsonlEvent(event);
+        const normalized = normalizeCodexTransportEvent(event);
         return normalized ? [normalized] : [];
       },
       describeError: (error) => cliErrorEvent(error),
@@ -772,7 +773,13 @@ export class CodexCliDriver extends SubprocessJsonlDriver {
   }
 
   /**
-   * The `codex` argv for a run.
+   * Previews the policy flags and plain-text prompt for a run.
+   *
+   * @remarks
+   * This synchronous preview omits the cold-start history transcript and
+   * `--image` entries. {@link run} prepares the complete turn, including
+   * history and private image files, before passing the actual argv to
+   * the configured `spawn`. Observe that callback to audit the real argv.
    *
    * @param request - The run.
    * @param configOverrides - Extra `-c` values (for example the MCP server

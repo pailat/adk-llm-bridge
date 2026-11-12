@@ -423,6 +423,12 @@ from the 0.6.0 tag.
 
 ### Security
 
+- `SubprocessJsonlDriver.parseLine` now drops child-emitted `started`,
+  `state_delta` and `completed` events by rejecting those lines. Subclasses
+  yield these driver-owned events from their own `run` instead. Codex's
+  internal transport envelopes use a private symbol and cannot be forged
+  through child JSON stdout.
+
 - **A Claude agent under `allowedPaths` can read its own large tool
   outputs.** Claude Code saves a tool output too large to return inline to
   the session's `tool-results` directory and tells the model to `Read` it;

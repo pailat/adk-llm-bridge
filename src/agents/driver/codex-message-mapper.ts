@@ -8,24 +8,32 @@ import {
 import { codexTurnUsage } from "./run-summary.js";
 import { asRecord, bridgeEvent, stringValue } from "./shared.js";
 
-/**
- * Type of the envelope a transport uses to hand the run loop an event it
- * built itself (a process exit, a line of stderr) instead of a Codex event.
- * {@link normalizeCodexJsonlEvent} returns the wrapped event as is.
- */
-export const CODEX_BRIDGE_ENVELOPE = "adk.bridge_event";
+// A child stdout line cannot contain this module-private symbol.
+const BRIDGE_EVENT = Symbol("Codex transport event");
 
 /**
- * Wraps a bridge event so it crosses the event stream of a transport
- * unchanged.
+ * Wraps a driver-owned event with a brand that JSON stdout cannot forge.
  *
- * @param event - The event the transport built.
- * @returns A stream event for {@link normalizeCodexJsonlEvent}.
+ * @param event - A process exit or stderr event built by the transport.
+ * @returns An internal stream event, never a JSONL wire format.
  */
 export function codexBridgeEnvelope(
   event: ExternalAgentEvent,
 ): Record<string, unknown> {
-  return { type: CODEX_BRIDGE_ENVELOPE, event };
+  return { [BRIDGE_EVENT]: event };
+}
+
+/**
+ * Reads trusted transport envelopes or normalizes untrusted Codex stdout.
+ *
+ * @param event - An event from the in-process transport.
+ * @returns The driver-owned event, or the validated child event.
+ */
+export function normalizeCodexTransportEvent(
+  event: Record<string, unknown>,
+): ExternalAgentEvent | undefined {
+  const envelope = event as { [BRIDGE_EVENT]?: ExternalAgentEvent };
+  return envelope[BRIDGE_EVENT] ?? normalizeCodexJsonlEvent(event);
 }
 
 /**
@@ -135,9 +143,6 @@ export function normalizeCodexJsonlEvent(
   value: unknown,
 ): ExternalAgentEvent | undefined {
   const record = asRecord(value);
-  if (record.type === CODEX_BRIDGE_ENVELOPE) {
-    return record.event as ExternalAgentEvent;
-  }
   // Codex's own `{"type":"error","message":...}` is also bridge-shaped, so
   // error lines are always normalized and classified below.
   if (record.type !== "error") {

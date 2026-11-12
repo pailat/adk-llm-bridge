@@ -2,7 +2,7 @@ import { accessSync, constants as fsConstants, statSync } from "node:fs";
 import { posix, win32 } from "node:path";
 import { InputValidationError } from "@google/adk";
 import { parseJson } from "../../utils/json.js";
-import { type ExternalAgentEvent, isExternalAgentEvent } from "../events.js";
+import type { ExternalAgentEvent } from "../events.js";
 import type {
   ExternalAgentDriver,
   ExternalAgentRunRequest,
@@ -14,7 +14,9 @@ import {
 } from "./policy-errors.js";
 import {
   agentWritableRoots,
+  asRecord,
   assertKnownDriverOptions,
+  bridgeEvent,
   isSearchableExecutable,
 } from "./shared.js";
 import { windowsExecutableKind } from "./spawn.js";
@@ -372,7 +374,12 @@ export class SubprocessJsonlDriver implements ExternalAgentDriver {
   }
 
   /**
-   * Parses one JSON line as an external agent event.
+   * Parses one JSON line as a validated child-emitted external agent event.
+   *
+   * @remarks
+   * Child-emitted `started`, `completed` and `state_delta` are dropped by
+   * rejecting the line. A subclass emits those driver-owned events by
+   * yielding them from its own `run`, never by accepting child lines.
    *
    * @param line - One line of subprocess output.
    * @returns The event.
@@ -384,9 +391,10 @@ export class SubprocessJsonlDriver implements ExternalAgentDriver {
     if (!parsed.ok) {
       throw new SyntaxError(parsed.error);
     }
-    if (!isExternalAgentEvent(parsed.value)) {
+    const event = bridgeEvent(asRecord(parsed.value), "drop");
+    if (event === "drop" || event === undefined) {
       throw new Error("Invalid external agent JSONL event");
     }
-    return parsed.value;
+    return event;
   }
 }

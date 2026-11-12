@@ -4,6 +4,7 @@
  * Codex run, whichever transport feeds it.
  */
 import { describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import {
@@ -88,6 +89,60 @@ function imageTempDirs(): string[] {
 }
 
 describe("the Codex CLI driver runs through the shared turn loop", () => {
+  test("the CLI completes a turn when loading the optional SDK fails", () => {
+    const entry = new URL("../../../src/agents/index.ts", import.meta.url).href;
+    const child = spawnSync(
+      process.execPath,
+      [
+        "--eval",
+        `
+      import { mock } from "bun:test";
+      mock.module("@openai/codex-sdk", () => { throw new Error("SDK not installed"); });
+      const { CodexCliDriver, CODEX_PROVIDER } = await import(${JSON.stringify(entry)});
+      const driver = new CodexCliDriver({
+        listMcpServers: async () => [],
+        spawn: () => ({ stdout: [], exited: Promise.resolve(0) }),
+      });
+      const events = [];
+      for await (const event of driver.run({ provider: CODEX_PROVIDER, context: {} })) events.push(event);
+      const blocked = await import("@openai/codex-sdk").then(() => false, error => error.message.includes("SDK not installed"));
+      console.log(JSON.stringify({ events, blocked }));
+    `,
+      ],
+      { encoding: "utf8", timeout: 30_000 },
+    );
+    expect(child.status).toBe(0);
+    expect(child.stderr).toBe("");
+    const report = JSON.parse(child.stdout);
+    expect(report.blocked).toBe(true);
+    expect(
+      report.events.filter(
+        (event: ExternalAgentEvent) => event.type === "completed",
+      ),
+    ).toEqual([
+      { type: "completed", exitCode: 0, timestamp: expect.any(Number) },
+    ]);
+    expect(
+      report.events.some((event: ExternalAgentEvent) => event.type === "error"),
+    ).toBe(false);
+  });
+
+  test("buildArgs previews plain text while run prepares cold-start history", async () => {
+    let actual: readonly string[] = [];
+    const driver = new CodexCliDriver({
+      listMcpServers: noHostMcpServers,
+      spawn: (_command, args) => {
+        actual = args;
+        return { stdout: lines([]), exited: Promise.resolve(0) };
+      },
+    });
+    const turn = request({ context: historyContext() });
+    expect(driver.buildArgs(turn).at(-1)).toBe("follow-up question");
+    await collect(driver.run(turn));
+    expect(actual.at(-1)).toContain("first question");
+    expect(actual.at(-1)).toContain("follow-up question");
+  });
+
   test("a cold-start turn carries the earlier history before the current turn", async () => {
     let prompt = "";
     const spawn: CodexCliSpawn = (_command, args) => {
