@@ -1242,9 +1242,10 @@ checkpoints:
   [A save that fails after its rename](./workflow-durability.md#a-save-that-fails-after-its-rename).
   A lock release no longer drops a live lock silently when its owner file is
   unreadable (`EACCES`, `EIO`): the check throws instead.
-- **Lock tombstones.** Released locks no longer leave `*.retired.*`
-  directories; only recovered locks of dead processes do. The offline
-  collectors are unchanged. Watch for the warning
+- **Lock tombstones.** A release of a checkpoint, workspace or repository
+  lock removes its own `*.retired.*` directory (best effort); only locks
+  recovered from dead processes, and a leftover after a crash, keep one. The
+  offline collectors are unchanged. Watch for the warning
   `WORKFLOW_CHECKPOINT_LOCK_RELEASE_FAILED`: the save succeeded, but the next
   save of that execution fails with `checkpoint_lock_timeout` while the lock
   is left behind. A lock lost to another owner still fails the save with

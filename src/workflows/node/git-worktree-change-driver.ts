@@ -232,9 +232,9 @@ export interface FileSystemWorkflowRepositoryMutationLockOptions {
  * @remarks
  * The lock is a directory under `lockRoot`, published atomically with its
  * owner file, so at most one process holds it. A lock whose owner file cannot
- * be read is never taken over: waiters time out instead. Released and
- * recovered locks are kept as `.retired.*` directories in `lockRoot`; remove
- * them only while no process uses the lock.
+ * be read is never taken over: waiters time out instead. A normal release
+ * removes its own tombstone (best effort); tombstones of recovered locks are
+ * kept, because a late recovery must not remove a newer holder's lock.
  */
 export class FileSystemWorkflowRepositoryMutationLock
   implements WorkflowRepositoryMutationLock

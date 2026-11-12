@@ -228,6 +228,11 @@ const workflow = new WorkflowAgent({
 });
 ```
 
+A string `instruction` is an ADK template: `{name}` is replaced from session
+state, and a missing key throws "Context variable not found: `name`". Put
+untrusted text (files, diffs, user input) in the step input, or pass an
+instruction function (`instruction: () => text`) so no templating happens.
+
 ## Recovery guarantees
 
 - Task claims, operation IDs, plan/grant fences, and terminal writes prevent a
@@ -267,11 +272,12 @@ Git ignores it: a changed file keeps its base mode, and a new file is
 
 Commits and integrations of one repository are serialized by a lock under
 `<git common dir>/adk-workflow-locks` (for example `.git/adk-workflow-locks`).
-Each release, and each recovery of a dead owner's lock, leaves one small
-`.repository-<hash>.lock.retired.<hash>` directory there, so the directory
-grows by one entry per commit or integration. The driver never deletes them,
-because a late recovery must not remove a newer holder's lock. Delete them only
-while no process uses the driver on that repository.
+Each recovery of a dead owner's lock leaves one small
+`.repository-<hash>.lock.retired.<hash>` directory there. A normal release
+removes the tombstone it made itself (best effort; a leftover after a crash
+stays). The driver never deletes the tombstones of recovered locks, because a
+late recovery must not remove a newer holder's lock. Delete them only while no
+process uses the driver on that repository.
 
 A lock is taken over only when its owner file is readable and names a dead
 process. A lock whose owner cannot be read is never taken over: waiters time

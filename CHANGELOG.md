@@ -1464,11 +1464,11 @@ from the 0.6.0 tag.
   non-negative numbers, delays at most 2^31-1 ms); the sandbox applies the
   same step shape check.
 - The repository lock never takes over a lock with an unreadable owner
-  (waiters time out with `GIT_MUTATION_AMBIGUOUS`). Released locks remain as
-  `.retired.*` directories under `<git common dir>/adk-workflow-locks`, as for
-  the workspace adapter; they are safe to delete only when no workflow process
-  runs (documented in docs/workflow-orchestration.md, with the Git driver's
-  environment).
+  (waiters time out with `GIT_MUTATION_AMBIGUOUS`). A release of a checkpoint,
+  workspace or repository lock removes its own `*.retired.*` directory (best
+  effort); only locks recovered from a dead owner, and a leftover after a
+  crash, keep one (documented in docs/workflow-orchestration.md, with the Git
+  driver's environment).
 - `PlaceholderExternalAgentDriver` reports `EXTERNAL_AGENT_NOT_CONFIGURED` and
   is not recoverable. An unknown sub-agent or transfer target sets
   `RunSubAgentResult.errorKind` to `agent-error`; an error event with an empty
@@ -1541,8 +1541,9 @@ from the 0.6.0 tag.
   longer outlives its process: once the CLI has exited, the read of `stdout`
   and `stderr` ends at EOF, or when a wait on the pipe stays unanswered for two
   consecutive idle windows of 500 ms, the same on Bun and Node. A grandchild
-  that keeps a pipe open (a background task, an MCP server) does not hold the
-  run. Output not yet read is never dropped, however slow the consumer: what
+  that keeps a pipe open (a background task, an MCP server) no longer blocks
+  the run past those idle windows, but it keeps running, and anything it writes
+  later is not read. Output already read is never dropped, however slow the consumer: what
   the CLI wrote before it exited is still read in full. The Codex SDK driver
   now ends the turn at once when the process fails to start (it used to wait for an exit that never
   came), keeps an `error` on the process's `stdout` or `stderr` in the turn

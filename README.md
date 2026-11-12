@@ -116,6 +116,11 @@ for await (const event of runner.runAsync({
 }
 ```
 
+A string `instruction` is an ADK template: `{name}` is replaced from session
+state, and a missing key throws "Context variable not found: `name`". Put
+untrusted text (files, diffs, user input) in the message, or pass an
+instruction function (`instruction: () => text`) so no templating happens.
+
 A factory such as `AIGateway(...)` returns a model instance, so no
 registration is needed. To use string model names instead, register the
 provider class with ADK's registry from your own `@google/adk` import:
