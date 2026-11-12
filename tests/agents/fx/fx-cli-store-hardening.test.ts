@@ -1,10 +1,12 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
   rmSync,
+  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -73,6 +75,53 @@ function memoryStore(initial?: Bundle) {
 }
 
 const text = (value: string) => Buffer.from(value).toString("base64");
+
+describe("session store cancellation", () => {
+  for (const operation of ["load", "save"] as const) {
+    test(`abort during ${operation} ends the run`, async () => {
+      const home = makeHome();
+      if (operation === "save") {
+        mkdirSync(sessionDir(home), { recursive: true });
+        writeFileSync(join(sessionDir(home), "log.jsonl"), "session\n");
+      }
+      const controller = new AbortController();
+      let entered!: () => void;
+      const waiting = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const never = () => {
+        entered();
+        return new Promise<never>(() => {});
+      };
+      const fake = recordingSpawn([withSession(SESSION_ID)]);
+      const store = {
+        load: operation === "load" ? never : async () => undefined,
+        save: operation === "save" ? never : async () => {},
+      };
+      const eventsPromise = collect(
+        new FxCliDriver(
+          baseConfig({
+            spawn: fake.spawn,
+            env: { PATH: "/usr/bin", HOME: home },
+            sessionStore: store,
+          }),
+        ).run({
+          ...request(operation === "load" ? { [STATE_KEY]: SESSION_ID } : {}),
+          abortSignal: controller.signal,
+        }),
+      );
+      await waiting;
+      controller.abort();
+      const events = await Promise.race([
+        eventsPromise,
+        new Promise<undefined>((resolve) => setTimeout(resolve, 200)),
+      ]);
+      expect(events).toBeDefined();
+      expect(events?.some((event) => event.type === "completed")).toBe(false);
+      if (operation === "load") expect(fake.calls).toHaveLength(0);
+    });
+  }
+});
 
 describe("sessionStore: one store per run", () => {
   test("the factory is called once on a turn that restores and saves", async () => {

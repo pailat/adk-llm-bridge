@@ -400,7 +400,8 @@ export interface FxCliDriverConfig {
    * context (its one store serves both the restore and the save of that run),
    * such as `fxArtifactSessionStore()`. A factory that throws, or a store that fails, is
    * reported as a recoverable `FX_SESSION_STORE_ERROR` event and the run
-   * goes on. Needs `persistSession`.
+   * goes on. An abort stops waiting for store I/O; the store's own operation
+   * may continue in the background. Needs `persistSession`.
    *
    * @experimental
    * @defaultValue unset: the transcript stays in `~/.fx` of the host
@@ -786,6 +787,7 @@ export class FxCliDriver extends SubprocessJsonlDriver {
     store: FxSessionStore | undefined,
     home: string | undefined,
     id: string,
+    signal: AbortSignal | undefined,
   ): Promise<ExternalAgentEvent | undefined> {
     if (store === undefined) {
       return undefined;
@@ -798,7 +800,8 @@ export class FxCliDriver extends SubprocessJsonlDriver {
       if (existsSync(directory)) {
         return undefined;
       }
-      const bundle = await store.load(id);
+      const bundle = await abortableStoreWait(store.load(id), signal);
+      if (bundle === STORE_ABORTED) return undefined;
       if (bundle !== undefined) {
         restoreFxSessionBundle(directory, bundle);
       }
@@ -813,6 +816,7 @@ export class FxCliDriver extends SubprocessJsonlDriver {
     store: FxSessionStore | undefined,
     home: string | undefined,
     id: string,
+    signal: AbortSignal | undefined,
   ): Promise<ExternalAgentEvent | undefined> {
     if (store === undefined) {
       return undefined;
@@ -825,7 +829,10 @@ export class FxCliDriver extends SubprocessJsonlDriver {
       if (!existsSync(directory)) {
         throw new Error(`the session directory ${directory} does not exist`);
       }
-      await store.save(id, readFxSessionBundle(directory));
+      await abortableStoreWait(
+        store.save(id, readFxSessionBundle(directory)),
+        signal,
+      );
       return undefined;
     } catch (error) {
       return sessionStoreWarning("save", id, error);
@@ -919,6 +926,7 @@ export class FxCliDriver extends SubprocessJsonlDriver {
     result: FxResult,
     home: string | undefined,
     store: FxSessionStore | undefined,
+    signal: AbortSignal | undefined,
   ): Promise<ExternalAgentEvent[]> {
     const id = stringValue(result.session_id);
     if (id === undefined || id.length === 0) {
@@ -945,7 +953,7 @@ export class FxCliDriver extends SubprocessJsonlDriver {
         timestamp: Date.now(),
       });
     }
-    const warning = await this.#saveSession(store, home, id);
+    const warning = await this.#saveSession(store, home, id, signal);
     if (warning) {
       events.push(warning);
     }
@@ -1094,10 +1102,20 @@ export class FxCliDriver extends SubprocessJsonlDriver {
       sessionWarnings.push(opened.warning);
     }
     if (resumeId !== undefined) {
-      const warning = await this.#restoreSession(store, env.HOME, resumeId);
+      const warning = await this.#restoreSession(
+        store,
+        env.HOME,
+        resumeId,
+        signal,
+      );
       if (warning) {
         sessionWarnings.push(warning);
       }
+    }
+
+    if (signal?.aborted) {
+      yield started;
+      return;
     }
 
     const resolved = resolveCliLaunch({
@@ -1254,13 +1272,44 @@ export class FxCliDriver extends SubprocessJsonlDriver {
         resumeId,
       )) {
         if (event.type === "completed" && this.#persistSession) {
-          yield* await this.#sessionEvents(request, result, env.HOME, store);
+          const sessionEvents = await this.#sessionEvents(
+            request,
+            result,
+            env.HOME,
+            store,
+            signal,
+          );
+          if (signal?.aborted) return;
+          yield* sessionEvents;
         }
         yield event;
       }
     } finally {
       supervisor.release();
     }
+  }
+}
+
+const STORE_ABORTED = Symbol("store aborted");
+
+async function abortableStoreWait<T>(
+  operation: Promise<T>,
+  signal: AbortSignal | undefined,
+): Promise<T | typeof STORE_ABORTED> {
+  if (!signal) return operation;
+  if (signal.aborted) {
+    void operation.catch(() => {});
+    return STORE_ABORTED;
+  }
+  let onAbort!: () => void;
+  const aborted = new Promise<typeof STORE_ABORTED>((resolve) => {
+    onAbort = () => resolve(STORE_ABORTED);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+  try {
+    return await Promise.race([operation, aborted]);
+  } finally {
+    signal.removeEventListener("abort", onAbort);
   }
 }
 
