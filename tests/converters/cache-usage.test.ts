@@ -71,7 +71,12 @@ describe("OpenAI-compatible cache write", () => {
     );
     expect(r.usageMetadata?.promptTokenCount).toBe(8466);
     expect(r.usageMetadata?.cachedContentTokenCount).toBe(6316);
-    expect(r.customMetadata).toEqual({ cacheCreationTokenCount: 2148 });
+    // `cost: 0` (BYOK call) is now reported beside the write.
+    expect(r.customMetadata).toEqual({
+      costUsd: 0,
+      costSource: "cost",
+      cacheCreationTokenCount: 2148,
+    });
   });
 
   it("prefers prompt_tokens_details.cache_write_tokens over the top-level field", () => {

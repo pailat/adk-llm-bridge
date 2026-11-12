@@ -721,6 +721,18 @@ from the 0.6.0 tag.
   `CLAUDE_SESSION_STORE_UNAVAILABLE` event (exported from
   `adk-llm-bridge/agents`). `ClaudeCliDriver` still refuses any `sessionStore`.
   See [Persisting Claude sessions](./docs/claude-session-store.md#adk-artifacts).
+- **Cost of gateway model calls.** The cost a provider reports on a call (AI
+  Gateway and OpenRouter `usage.cost`, streaming and not) is in
+  `customMetadata.costUsd`, and `customMetadata.costSource` names the field it
+  came from (`cost`, `cost+upstream` or `market_cost`). A BYOK gateway key
+  reports `cost: 0`: `costUsd` then adds `cost_details.upstream_inference_cost`
+  when that is positive, otherwise it is the gateway's `market_cost`, also
+  kept as `marketCostUsd`. A call that is not BYOK keeps `cost`.
+  `AgentInvocationUsage` and `WorkflowStepUsage` gain an optional `costUsd` (a
+  sum of the reported values, absent when none was reported, so an
+  `ExternalAgent` step has none), and the model-call span gets
+  `adk_llm_bridge.usage.cost_usd`. Before, a run's cost counted only the
+  external agents. See [Prompt caching](./docs/prompt-caching.md#reading-the-cache-usage).
 - **`agentKind` on workflow step events and spans.** `step_started` and
   `step_completed` carry `agentKind: "llm" | "external" | "host" | "workflow"`
   (`WorkflowAgentKind`), derived from the step's agent before it runs:
@@ -1259,6 +1271,17 @@ from the 0.6.0 tag.
   [Workflow durability](./docs/workflow-durability.md).
 
 ### Changed
+
+- **A workflow step whose model response stopped early now fails.** A step whose agent
+  ended on `MAX_TOKENS`, or on a content stop (`SAFETY`, `RECITATION`, `BLOCKLIST`,
+  `PROHIBITED_CONTENT`, `SPII`, `IMAGE_SAFETY`, `IMAGE_PROHIBITED_CONTENT`) with no
+  function call and no agent error, used to complete with the cut-off text; it now fails
+  with `WORKFLOW_STEP_INCOMPLETE` (details: `finishReason`, `author`, `outputTokens`,
+  `thoughtsTokens`, `maxOutputTokens`), and `retry`, `retryFailedSteps` and
+  `resumePolicy` apply as for any failed step. `WorkflowStep.allowIncompleteOutput: true`
+  accepts the partial output. `WorkflowStepResult.finishReason` (and the `step_completed`
+  event) now reports the finish reason. `AgentInvocationResult` gains `finishReason` and
+  `incomplete`; the gateway itself still does not fail the run.
 
 - **CLI drivers refuse `runtimeSession`.** `ClaudeCliDriver`, `CodexCliDriver` and
   `GeminiCliDriver` used to ignore `request.runtimeSession`. They now fail the run with

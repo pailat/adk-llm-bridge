@@ -2128,6 +2128,40 @@ describe("AgentInvocationGateway usage", () => {
     ).toBeUndefined();
   });
 
+  test("costUsd sums customMetadata.costUsd of non-partial events, 0 included", async () => {
+    const usage = {
+      promptTokenCount: 10,
+      candidatesTokenCount: 1,
+      totalTokenCount: 11,
+    };
+    const result = await usageOf([
+      modelEvent(usage, { partial: true, customMetadata: { costUsd: 99 } }),
+      modelEvent(usage, { customMetadata: { costUsd: 0.25 } }),
+      modelEvent(usage, { customMetadata: { costUsd: 0 } }),
+      modelEvent(usage, { customMetadata: { costUsd: 0.5 } }),
+    ]);
+    expect(result.costUsd).toBe(0.75);
+    const zero = await usageOf([
+      modelEvent(usage, { customMetadata: { costUsd: 0 } }),
+    ]);
+    expect(zero.costUsd).toBe(0);
+  });
+
+  test("costUsd stays absent when no event reported a valid cost", async () => {
+    const usage = {
+      promptTokenCount: 10,
+      candidatesTokenCount: 1,
+      totalTokenCount: 11,
+    };
+    for (const bad of ["7", -3, Number.NaN, Number.POSITIVE_INFINITY, null]) {
+      const result = await usageOf([
+        modelEvent(usage, { customMetadata: { costUsd: bad } }),
+      ]);
+      expect(result.costUsd).toBeUndefined();
+    }
+    expect((await usageOf([modelEvent(usage)])).costUsd).toBeUndefined();
+  });
+
   test("a reported write of 0 is kept, not dropped", async () => {
     const result = await usageOf([
       modelEvent(
@@ -2180,5 +2214,90 @@ describe("AgentInvocationGateway usage", () => {
       toolCalls: 0,
       llmCalls: 0,
     });
+  });
+});
+
+describe("AgentInvocationGateway finish reason", () => {
+  test("a final MAX_TOKENS event fills finishReason and incomplete without failing the run", async () => {
+    const worker = new LlmAgent({
+      name: "worker",
+      model: "unused",
+      generateContentConfig: { maxOutputTokens: 12000 },
+    });
+    const cut = createEvent({
+      invocationId: "inv-1",
+      author: "worker",
+      content: { role: "model", parts: [{ text: "cut off" }] },
+      finishReason: "MAX_TOKENS" as never,
+      usageMetadata: {
+        promptTokenCount: 10,
+        candidatesTokenCount: 4339,
+        thoughtsTokenCount: 7661,
+        totalTokenCount: 12010,
+      },
+    });
+    const stub = new (class extends CaptureAgent {
+      override subAgents = [worker];
+    })("worker", [cut]);
+    const gateway = new AgentInvocationGateway({ resolveAgent: () => stub });
+    const result = await gateway.run({
+      agentName: "worker",
+      input: { role: "user", parts: [{ text: "go" }] },
+      parentContext: parentContext(new CaptureAgent("root")),
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.output).toBe("cut off");
+    expect(result.finishReason).toBe("MAX_TOKENS");
+    expect(result.incomplete).toEqual({
+      finishReason: "MAX_TOKENS",
+      author: "worker",
+      outputTokens: 4339,
+      thoughtsTokens: 7661,
+      maxOutputTokens: 12000,
+    });
+  });
+
+  test("partial events never count as incomplete; only a non-partial one does", async () => {
+    const run = async (events: Event[]) => {
+      const worker = new CaptureAgent("worker", events);
+      const gateway = new AgentInvocationGateway({
+        resolveAgent: () => worker,
+      });
+      return gateway.run({
+        agentName: "worker",
+        input: { role: "user", parts: [{ text: "go" }] },
+        parentContext: parentContext(new CaptureAgent("root")),
+      });
+    };
+    const event = (text: string, extra: Partial<Event>) =>
+      createEvent({
+        invocationId: "inv-1",
+        author: "worker",
+        content: { role: "model", parts: [{ text }] },
+        ...extra,
+      });
+    const streamed = await run([
+      event("a", { partial: true, finishReason: "MAX_TOKENS" as never }),
+      event("ab", { finishReason: "STOP" as never }),
+    ]);
+    expect(streamed.incomplete).toBeUndefined();
+    expect(streamed.finishReason).toBe("STOP");
+
+    const user = await run([
+      event("a", { author: "user", finishReason: "MAX_TOKENS" as never }),
+    ]);
+    expect(user.incomplete).toBeUndefined();
+
+    const withError = await run([
+      event("a", { finishReason: "MAX_TOKENS" as never }),
+      createEvent({
+        invocationId: "inv-1",
+        author: "worker",
+        errorCode: "X",
+        errorMessage: "boom",
+      }),
+    ]);
+    expect(withError.error).toBe("boom");
+    expect(withError.incomplete?.finishReason).toBe("MAX_TOKENS");
   });
 });

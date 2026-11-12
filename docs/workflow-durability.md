@@ -601,6 +601,17 @@ A completed step's checkpoint result may carry `models` (`requested`,
 model information, has none and loads as before. A stored `models` that is not
 exactly that shape makes the checkpoint corrupt, like a malformed `usage`.
 
+## Incomplete model responses
+
+A step whose model response stopped early (`MAX_TOKENS` or a content stop, see
+[migration](./migration-0.7.md#steps-cut-off-by-the-output-limit)) fails with
+`WORKFLOW_STEP_INCOMPLETE` and is checkpointed as `failed` like any other failure.
+Within a run, the step's `retry` policy resamples it. A resume replays the
+recorded failure unless `retryFailedSteps` or `resumePolicy: "retry"` is set,
+which runs the step again. `allowIncompleteOutput` is not part of the step's
+identity, so adding it before a resume takes effect. A completed step stores
+`finishReason`.
+
 ## Re-entered steps
 
 When a step runs again, the `step_started` event and the step record in the
