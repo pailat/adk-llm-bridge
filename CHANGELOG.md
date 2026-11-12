@@ -1574,6 +1574,8 @@ from the 0.6.0 tag.
 
 ### Fixed
 
+- `FxCliDriver` remembers and resumes session ids that start with `-`, and describes rejected ids without exposing them.
+
 - **A checkpoint save that fails after its rename says so.** The
   `checkpoint_write_failed` raised when the directory flush fails after the
   rename carries `details.committed: true`: the new revision is visible to
