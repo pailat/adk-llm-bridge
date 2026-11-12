@@ -437,7 +437,8 @@ and the checkpoint is `failed`, not `cancelled`; the failing step is `failed`,
 and each sibling still in flight is `interrupted` with `WORKFLOW_ABORTED`
 (`details.reasonCode` is the failing step's code, `details.failedStepId` its
 id) and a `step_interrupted` event. A step still queued behind `concurrency`
-is not started and not recorded, so a resume runs it as a first attempt. A resume therefore needs `retryFailedSteps` or
+is not started and not recorded, so a resume runs it as a first attempt. A
+resume therefore needs `retryFailedSteps` or
 `resumePolicy: "retry"`: with it, the failed step and the interrupted
 siblings run again as their next attempt; without it, the resume fails with
 `WORKFLOW_INDETERMINATE_STEP` for the interrupted sibling, which may have had

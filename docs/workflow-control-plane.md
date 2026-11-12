@@ -203,7 +203,8 @@ keys, field types, required fields, enums, and integer bounds (`limit` and
 revisions are positive safe integers, sequences are non-negative). Free-form
 JSON fields (`input`, `metadata`, `content`, `context`, and the mailbox
 `payload`) must be plain JSON: finite numbers, plain objects (no symbol keys), arrays
-without holes, no cycles, at most 32 levels deep, 20,000 nodes, and 1 MiB per string. A failure throws
+without holes, no cycles, at most 32 levels deep, 20,000 nodes, and 1 MiB per
+string. A failure throws
 `WorkflowControlPlaneError` with code `WORKFLOW_CONTROL_INVALID_REQUEST`, and
 no controller runs. Identifier formats, store-specific limits (such as the
 maximum `limit`), and cross-field plan rules stay in the controllers and keep

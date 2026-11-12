@@ -113,7 +113,8 @@ spread wholesale into Chat Completions.
 
 - OpenAI reasoning IDs are recognized by family and version: `gpt-<N>` with
   N of 5 or more (`gpt-5`, `gpt-6.1-sol`, `gpt-7`, ...) and the o-series
-  (`o1`, `o3-mini`, `o4-mini`, ...), with or without a `vendor/` prefix or an `ft:` fine-tune id. For
+  (`o1`, `o3-mini`, `o4-mini`, ...), with or without a `vendor/` prefix or an
+  `ft:` fine-tune id. For
   them the bridge uses `max_completion_tokens` and removes `temperature`,
   `top_p`, stop sequences, presence/frequency penalties, `logprobs`, and
   `top_logprobs`, because those APIs reject the fields.

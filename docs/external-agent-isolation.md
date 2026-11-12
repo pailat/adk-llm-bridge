@@ -213,7 +213,8 @@ confirmation sees it. Its denials are final; no approval overrides them.
   the allowed paths. Brace alternatives are expanded (at most 64; more is
   checked as `/`), and a relative glob is resolved against the tool's own
   search root (`path`, `dir_path`), or against the working directory when
-  the tool has none (Gemini `read_many_files` `include`, for example). Symlinks are resolved, dangling links
+  the tool has none (Gemini `read_many_files` `include`, for example). Symlinks
+  are resolved, dangling links
   included, so a link to a file that does not exist yet is checked where the
   write would land; a symlink loop is denied. Under `read-only` a path outside
   the allowed paths is denied with the path reason.
@@ -447,7 +448,8 @@ runtime accepts it and no two tools collide:
    instead.
 
 The runtime then reports the tool as `mcp__adk_bridge__<exposed name>`, the
-name its permission prompts and `PreToolUse` hooks see. An instruction that names `get_weather` therefore
+name its permission prompts and `PreToolUse` hooks see. An instruction that
+names `get_weather` therefore
 does not match any tool the model sees: describe what the tool does, or use
 the exposed name. Read-only filters (`readOnlyTools`) match the tool's own
 name, before it is rewritten.

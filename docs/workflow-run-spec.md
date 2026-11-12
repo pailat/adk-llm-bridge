@@ -15,7 +15,8 @@ anything, and exports the JSON Schema of its shape.
 The module does no I/O, reads no environment variable and has no side effects
 at import: the ids and descriptions of its zod schemas live in a registry of
 the module, not in zod's global registry. It starts no agent, touches no file
-and calls no provider. Those belong to the host, see [What the host must do at run time](#what-the-host-must-do-at-run-time).
+and calls no provider. Those belong to the host, see
+[What the host must do at run time](#what-the-host-must-do-at-run-time).
 
 ## Status and requirements
 

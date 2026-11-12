@@ -28,8 +28,10 @@ can pick 3.x, which is outside the supported range.
 The package is ESM only. Use `import`, or `await import()` from CommonJS.
 Shared code and its type declarations now live in `dist/shared/` chunks
 (`.js` and `.d.ts`). Import only the documented
-subpaths (`adk-llm-bridge`, `/agents`, `/agents/session-store/sqlite`, `/agents/session-store/adk-artifacts`,
-`/workflows`, `/workflows/node`, `/package.json`), never a file under `dist/`: chunk names change between
+subpaths (`adk-llm-bridge`, `/agents`, `/agents/session-store/sqlite`,
+`/agents/session-store/adk-artifacts`,
+`/workflows`, `/workflows/node`, `/package.json`), never a file under `dist/`:
+chunk names change between
 builds. The package declares `"sideEffects": false`, so bundlers can drop the
 modules you do not import.
 
@@ -186,7 +188,8 @@ Related behavior changes:
   pays no write surcharge (a write costs 1.25x the input price, a read 0.1x or
   less). `promptCaching: true` or `{ ttl }` always caches, `false` never does. The
   native provider now also marks the last cache-eligible block of the last message,
-  so later turns read earlier turns from the cache. It does not change outputs. Code that already sets
+  so later turns read earlier turns from the cache. It does not change outputs.
+  Code that already sets
   `promptCaching` keeps working; set `false` if you want no write surcharge at
   all. OpenRouter stays opt-in
   (`promptCaching: true`), and OpenAI, xAI and custom endpoints are unchanged. See
@@ -196,7 +199,9 @@ Related behavior changes:
   in the optional `cacheCreationTokens` of `AgentInvocationUsage` and
   `WorkflowStepUsage`.
 - The cost a provider reports (`usage.cost` of AI Gateway and OpenRouter, plus
-  the upstream or market cost of a BYOK gateway call, with `customMetadata.costSource` naming the field) is in `customMetadata.costUsd`, and
+  the upstream or market cost of a BYOK gateway call, with
+  `customMetadata.costSource` naming the field) is in `customMetadata.costUsd`,
+  and
   summed in the optional `costUsd` of `AgentInvocationUsage` and
   `WorkflowStepUsage`. `costUsd` is absent when no call reported a cost. It
   covers model calls made through the bridge's providers only: an external
@@ -572,7 +577,8 @@ new in 0.7.0. If you already use them, these changes apply:
   id is affected. Clear it from session state to start a new thread.
 - **Codex SDK prompt delivery.** `CodexSdkDriver` runs codex through a
   copy of the `@openai/codex-sdk` 0.167.0 exec path that handles a failed
-  write of the prompt (see [Codex SDK prompt delivery](external-agent-isolation.md#codex-sdk-prompt-delivery)).
+  write of the prompt (see
+  [Codex SDK prompt delivery](external-agent-isolation.md#codex-sdk-prompt-delivery)).
   A prompt codex did not read is the new error code
   `CODEX_SDK_INPUT_NOT_DELIVERED` instead of an uncaught `EPIPE` that ended
   the process.
@@ -589,7 +595,8 @@ new in 0.7.0. If you already use them, these changes apply:
     `CodexCliDriver`. npm refuses another version beside the exact peer
     (`ERESOLVE`): add `"overrides": { "adk-llm-bridge": { "@openai/codex-sdk":
     "$@openai/codex-sdk" } }` to the host's `package.json`, or install with
-    `--legacy-peer-deps` (see [Running another SDK version uncontained](external-agent-isolation.md#running-another-sdk-version-uncontained)).
+    `--legacy-peer-deps` (see
+    [Running another SDK version uncontained](external-agent-isolation.md#running-another-sdk-version-uncontained)).
   - A bundled host must keep `@openai/codex-sdk` external, or the version
     cannot be read and every run is refused; a prebuilt `sdk` client must
     come from the same SDK install the bridge resolves.
@@ -924,7 +931,8 @@ required by default (`requireExplicitModel` is `true` for fx only). fx has no
 sandbox, so `read-only` is refused, and network (unless the policy sets
 `allowNetwork: true`), paths, `workspace-write` and the host `~/.fx`
 configuration each need an explicit opt-in (`allowUnenforcedNetwork`,
-`allowUnenforcedPaths`, `allowUnsandboxedShell`, `inheritHostConfig`). In `ask` mode the first write or shell command ends the
+`allowUnenforcedPaths`, `allowUnsandboxedShell`, `inheritHostConfig`). In `ask`
+mode the first write or shell command ends the
 run with `FX_CLI_PERMISSION_REQUIRED` unless your fx permission rules allow
 it. Like the other CLI drivers it refuses `runtimeSession`, ADK tools,
 approvers and `subAgents`. See
@@ -1242,9 +1250,10 @@ checkpoints:
   [A save that fails after its rename](./workflow-durability.md#a-save-that-fails-after-its-rename).
   A lock release no longer drops a live lock silently when its owner file is
   unreadable (`EACCES`, `EIO`): the check throws instead.
-- **Lock tombstones.** Released locks no longer leave `*.retired.*`
-  directories; only recovered locks of dead processes do. The offline
-  collectors are unchanged. Watch for the warning
+- **Lock tombstones.** A release of a checkpoint, workspace or repository
+  lock removes its own `*.retired.*` directory (best effort); only locks
+  recovered from dead processes, and a leftover after a crash, keep one. The
+  offline collectors are unchanged. Watch for the warning
   `WORKFLOW_CHECKPOINT_LOCK_RELEASE_FAILED`: the save succeeded, but the next
   save of that execution fails with `checkpoint_lock_timeout` while the lock
   is left behind. A lock lost to another owner still fails the save with
