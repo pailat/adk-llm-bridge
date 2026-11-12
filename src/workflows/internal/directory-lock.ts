@@ -186,7 +186,12 @@ export function releaseDirectoryLock(lockPath: string, token: string): boolean {
  *
  * @param lockPath - Lock directory.
  * @param token - Token to compare.
- * @returns True when the owner file is readable and carries `token`.
+ * @returns True when the owner file is readable and carries `token`; false
+ * when the lock or its owner file is missing or the owner file is not a valid
+ * owner.
+ * @throws The file-system error when the owner file exists but cannot be read
+ * (`EACCES`, `EIO`): that proves neither that the token owns the lock nor that
+ * it does not.
  * @internal
  */
 export function directoryLockTokenMatches(
@@ -199,9 +204,27 @@ export function directoryLockTokenMatches(
         readFileSync(join(lockPath, DIRECTORY_LOCK_OWNER_FILE), "utf8"),
       ).token === token
     );
-  } catch {
-    return false;
+  } catch (error) {
+    // A lock or owner file that is not there, or contents that are not a valid
+    // owner, mean the token does not own it. A file that is there but cannot
+    // be read (`EACCES`, `EIO`) proves nothing, so the caller hears of it.
+    if (
+      hasErrorCode(error, "ENOENT") ||
+      hasErrorCode(error, "ENOTDIR") ||
+      !isFileSystemError(error)
+    ) {
+      return false;
+    }
+    throw error;
   }
+}
+
+function isFileSystemError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    typeof (error as { code?: unknown }).code === "string"
+  );
 }
 
 /**

@@ -182,6 +182,11 @@ const CHECKPOINT_STORE_OPTION_KEYS: ReadonlySet<string> = new Set([
  * `checkpoint_write_failed` (`details.causeCode` `EPERM`, `EBUSY` or
  * `EACCES`). A reader that keeps the file open almost continuously can make
  * saves fail: read with open, read, close.
+ *
+ * A `checkpoint_write_failed` raised after the rename (the directory flush
+ * failed) carries `details.committed: true`: the new revision is already
+ * visible to `load()` but may not survive a crash. Reload and save again with
+ * the loaded revision. A failure before the rename has no `committed` field.
  */
 export class FileSystemWorkflowCheckpointStore
   implements WorkflowCheckpointStore
@@ -835,6 +840,9 @@ async function atomicWriteCheckpoint(
     `.${basename(checkpointPath)}.${process.pid}.${randomUUID()}.tmp`,
   );
   let temporaryExists = false;
+  // Set once the rename has put the new revision in place: a failure after
+  // that point reports it, because `load()` already sees the new revision.
+  let committed = false;
   try {
     const handle = await open(
       temporaryPath,
@@ -851,12 +859,15 @@ async function atomicWriteCheckpoint(
     await assertOwnership();
     await renameRetryingBlocked(temporaryPath, checkpointPath);
     temporaryExists = false;
+    committed = true;
     await fsyncDirectory(directory);
   } catch (error) {
     if (error instanceof WorkflowError) {
       throw error;
     }
-    throw ioError("checkpoint_write_failed", checkpointKey, error);
+    throw ioError("checkpoint_write_failed", checkpointKey, error, {
+      ...(committed ? { committed: true } : {}),
+    });
   } finally {
     if (temporaryExists) {
       await unlink(temporaryPath).catch(() => {});
@@ -1239,12 +1250,14 @@ function ioError(
   reason: WorkflowCheckpointFailureReason,
   checkpointKey: string,
   error: unknown,
+  extraDetails: Record<string, unknown> = {},
 ): WorkflowError {
   const wrapped = checkpointFileError(
     reason,
     checkpointKey,
     `Workflow checkpoint file operation failed: ${checkpointKey}`,
     {
+      ...extraDetails,
       causeCode: errorCode(error),
       ...(errorMessage(error) !== undefined
         ? { causeMessage: errorMessage(error) }

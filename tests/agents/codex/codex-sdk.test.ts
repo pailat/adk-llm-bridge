@@ -552,6 +552,7 @@ describe("CodexSdkDriver", () => {
         metadata: {
           itemType: "mcp_tool_call",
           builtin: true,
+          mcp: { server: "docs", tool: "search_docs" },
           status: "completed",
           title: "Codex: search_docs call",
         },
@@ -571,6 +572,7 @@ describe("CodexSdkDriver", () => {
         metadata: {
           itemType: "mcp_tool_call",
           builtin: true,
+          mcp: { server: "docs", tool: "search_docs" },
           status: "completed",
           title: "Codex: search_docs completed",
         },

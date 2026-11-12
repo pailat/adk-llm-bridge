@@ -13,6 +13,14 @@ from the 0.6.0 tag.
 
 ### Breaking
 
+- **Driver options are checked by name.** Every built-in driver
+  (`ClaudeAgentSdkDriver`, `ClaudeCliDriver`, `CodexSdkDriver`,
+  `CodexCliDriver`, `GeminiCliDriver`, `FxCliDriver`,
+  `SubprocessJsonlDriver`) throws `ExternalAgentPolicyError`
+  `EXTERNAL_AGENT_OPTION_UNKNOWN` for a config key it does not know, and for a
+  config that is not a plain object, instead of ignoring it. An option of
+  another driver says which driver supports it. `FxCliDriver` keeps its
+  `EXTERNAL_AGENT_OPTION_UNSUPPORTED` refusal for the session options.
 - **Model checks on the external agent drivers** (`EXTERNAL_AGENT_MODEL_*`,
   see [Model](./docs/external-agent-isolation.md#model)):
   - `ClaudeCliDriver` with a blank `model` throws `ExternalAgentPolicyError`
@@ -384,8 +392,8 @@ from the 0.6.0 tag.
   The new `WorkflowStepInterruptedEvent` type is exported from
   `adk-llm-bridge/workflows`.
 - **Boolean driver options must be booleans.** Every `?: boolean` option of
-  `ClaudeAgentSdkDriver`, `ClaudeCliDriver`, `CodexSdkDriver`, `CodexCliDriver`
-  and `GeminiCliDriver` (for example `allowUnsandboxedShell`,
+  `ClaudeAgentSdkDriver`, `ClaudeCliDriver`, `CodexSdkDriver`, `CodexCliDriver`,
+  `GeminiCliDriver` and `FxCliDriver` (for example `allowUnsandboxedShell`,
   `inheritHostConfig`, `allowLocalBinding`, `allowUnenforcedPaths`,
   `allowUnenforcedNetwork`, `allowPolicyOverrideArgs`,
   `allowUncontainedCodexSdk`, `strictBinaryResolution`, `requireExplicitModel`,
@@ -702,6 +710,29 @@ from the 0.6.0 tag.
 
 ### Added
 
+- **Claude sessions on ADK artifacts (experimental).** `adkArtifactSessionStore()`
+  from the new `adk-llm-bridge/agents/session-store/adk-artifacts` subpath keeps
+  Claude transcripts in the ADK artifact service of the run (in-memory, file or
+  GCS), scoped to the ADK session, with no extra database. `sessionStore` on
+  `ClaudeAgentSdkDriver` (and `driverOptions` of `ClaudeAgent`) now also takes a
+  `SessionStoreFactory` (type exported from `adk-llm-bridge/agents`), called once
+  per run with the invocation context. A run whose context has no artifact
+  service ends before the SDK starts with the new non-recoverable
+  `CLAUDE_SESSION_STORE_UNAVAILABLE` event (exported from
+  `adk-llm-bridge/agents`). `ClaudeCliDriver` still refuses any `sessionStore`.
+  See [Persisting Claude sessions](./docs/claude-session-store.md#adk-artifacts).
+- **Cost of gateway model calls.** The cost a provider reports on a call (AI
+  Gateway and OpenRouter `usage.cost`, streaming and not) is in
+  `customMetadata.costUsd`, and `customMetadata.costSource` names the field it
+  came from (`cost`, `cost+upstream` or `market_cost`). A BYOK gateway key
+  reports `cost: 0`: `costUsd` then adds `cost_details.upstream_inference_cost`
+  when that is positive, otherwise it is the gateway's `market_cost`, also
+  kept as `marketCostUsd`. A call that is not BYOK keeps `cost`.
+  `AgentInvocationUsage` and `WorkflowStepUsage` gain an optional `costUsd` (a
+  sum of the reported values, absent when none was reported, so an
+  `ExternalAgent` step has none), and the model-call span gets
+  `adk_llm_bridge.usage.cost_usd`. Before, a run's cost counted only the
+  external agents. See [Prompt caching](./docs/prompt-caching.md#reading-the-cache-usage).
 - **`agentKind` on workflow step events and spans.** `step_started` and
   `step_completed` carry `agentKind: "llm" | "external" | "host" | "workflow"`
   (`WorkflowAgentKind`), derived from the step's agent before it runs:
@@ -765,6 +796,40 @@ from the 0.6.0 tag.
   validates an operator file. Acceptances must come from a host-only source,
   never a file an agent can write; see
   [Accepting a known-equivalent change](docs/workflow-durability.md#accepting-a-known-equivalent-change).
+- **Host MCP servers for isolated Claude agents** (`@experimental`, see
+  [Host MCP servers and secrets](docs/external-agent-isolation.md#host-mcp-servers-and-secrets)).
+  `ClaudeAgentSdkDriverConfig.mcpServers` declares `http`, `sse` and `stdio`
+  servers, each with a per-server `tools` allowlist and secret references
+  for headers and env (`{ resolve }`, recommended, or `{ env }`; plain
+  values are `{ public }`). Secrets are delivered to Claude Code over its
+  control channel, never on its command line, environment, prompt, events
+  or spans, and echoed secrets are redacted before the model sees tool
+  output. With a declared secret, Claude Code keeps no session transcript
+  on disk (`persistSession: false`), where a raw echo would land: such an
+  agent resumes nothing, and `sessionStore`, `resumeSessionId` and
+  `runtimeSession.id` are refused. A large tool result stays inline too:
+  the driver picks the session id and reserves the session's folder path,
+  so Claude Code cannot save it under `tool-results/`
+  ([Large tool results](docs/external-agent-isolation.md#large-tool-results)).
+  Other runtimes keep transcripts in host
+  directories the bridge does not own (see
+  [Transcripts on disk](docs/external-agent-isolation.md#transcripts-on-disk)).
+  Without `allowNetwork: true`, only loopback IP-literal servers and
+  host stdio servers are accepted. `requiredMcpServers` can name them, and
+  `mcpConnectTimeoutMs` bounds the wait. `selectMcpServers` resolves a run
+  plan's MCP grant. New codes: `EXTERNAL_AGENT_MCP_SERVER_INVALID`,
+  `EXTERNAL_AGENT_MCP_SECRET_LITERAL`,
+  `EXTERNAL_AGENT_MCP_SERVER_NETWORK_REQUIRED`,
+  `EXTERNAL_AGENT_MCP_STDIO_UNSAFE`,
+  `EXTERNAL_AGENT_MCP_SECRET_UNENFORCEABLE`,
+  `EXTERNAL_AGENT_MCP_SECRET_UNRESOLVED`,
+  `EXTERNAL_AGENT_MCP_PROVIDER_UNKNOWN` and the recoverable event code
+  `EXTERNAL_AGENT_MCP_SERVER_UNAVAILABLE`.
+- `readOnly: true` on a declared server with a `tools` list lets those tools
+  run under `read-only`.
+- MCP tool calls carry `metadata.mcp` (`server`, `tool`) and the result
+  `durationMs` (Claude Agent SDK; the Codex SDK driver adds `metadata.mcp`);
+  tool spans carry `gcp.vertex.agent.external_agent.mcp_server`.
 - **Opt-in strict binary resolution for the SDK drivers.**
   `ClaudeAgentSdkDriver` and `CodexSdkDriver` take `strictBinaryResolution`
   (default `false`, behaviour unchanged). When it is on, no explicit path is
@@ -1116,7 +1181,7 @@ from the 0.6.0 tag.
   the manual constructor names its errors without overriding
   `getErrorPrefix()`.
 - `caseInsensitivePaths` on `InMemoryWorkspaceAdapter` and
-  `FileSystemWorkspaceAdapter` (off by default; full case fold, so `ß`/`ss`,
+  `FileSystemWorkspaceAdapter` (full case fold, so `ß`/`ss`,
   `ς`/`σ`, `ſ`/`s` and `µ`/`μ` match) and the `caseInsensitive` option of
   `findWorkspacePathOverlaps` (`WorkspacePathOverlapOptions`).
 - `authorizeWorkflowActor` takes an optional
@@ -1153,6 +1218,28 @@ from the 0.6.0 tag.
 - `ExternalAgentModelUsage`, the type of an `ExternalAgentUsage.byModel` entry.
 - `WORKFLOW_STEP_MISMATCH` details include the saved step's `savedStatus` and
   `savedAttempts`.
+- `FxAgent` and `FxCliDriver`: run the fx coding agent (`fx ask --json`,
+  fx 0.0.16) as an external agent. The prompt goes on stdin, the model is
+  pinned with `--model` and required by default (`requireExplicitModel`
+  defaults to `true` for fx only), and every run uses `--no-save`. fx has no
+  sandbox, so `read-only` is refused, and network, paths, `workspace-write`
+  and the host `~/.fx` configuration need explicit opt-ins
+  (`allowUnenforcedNetwork`, `allowUnenforcedPaths`, `allowUnsandboxedShell`,
+  `inheritHostConfig`). In `ask` mode the first write or shell command ends
+  the run with `FX_CLI_PERMISSION_REQUIRED`, unless the user's fx permission
+  rules in `~/.fx/settings.json` allow it; `workspace-write` (fx `auto` mode)
+  asks a reviewer model whose cost is not in `usage`. The driver's boolean
+  options must be `true` or `false`. `args` holds only flags: the policy flags
+  (`--permission-mode`, `--ask`, `--timeout`, `--profile`, ...)
+  need `allowPolicyOverrideArgs`; `--model`, `--provider`, `--config`, `--`,
+  a lone `-`, the session flags (`--resume*`, `--continue`, `-c`, `-r`) and
+  the unsupported `--image`, `--fast` and `--ultrafast` are never allowed.
+  `request.runtimeSession`, ADK tools, approvers and
+  `subAgents` are refused. A
+  run fails on a non-zero process exit, an `exit_code` that is not `0` or an
+  `error` field, and then reports no `output`. A stdout line over 8 MiB ends
+  the run with `FX_CLI_RESULT_TOO_LARGE`. See
+  [External agent isolation](./docs/external-agent-isolation.md#fx).
 - Workflow storage providers. Checkpoint and event providers are chosen by
   injection (`checkpointStore`) or by URI (`getWorkflowCheckpointStoreFromUri`,
   `getWorkflowEventExporterFromUri`), with custom schemes through
@@ -1185,22 +1272,41 @@ from the 0.6.0 tag.
 
 ### Changed
 
+- **A workflow step whose model response stopped early now fails.** A step whose agent
+  ended on `MAX_TOKENS`, or on a content stop (`SAFETY`, `RECITATION`, `BLOCKLIST`,
+  `PROHIBITED_CONTENT`, `SPII`, `IMAGE_SAFETY`, `IMAGE_PROHIBITED_CONTENT`) with no
+  function call and no agent error, used to complete with the cut-off text; it now fails
+  with `WORKFLOW_STEP_INCOMPLETE` (details: `finishReason`, `author`, `outputTokens`,
+  `thoughtsTokens`, `maxOutputTokens`), and `retry`, `retryFailedSteps` and
+  `resumePolicy` apply as for any failed step. `WorkflowStep.allowIncompleteOutput: true`
+  accepts the partial output. `WorkflowStepResult.finishReason` (and the `step_completed`
+  event) now reports the finish reason. `AgentInvocationResult` gains `finishReason` and
+  `incomplete`; the gateway itself still does not fail the run.
+
 - **CLI drivers refuse `runtimeSession`.** `ClaudeCliDriver`, `CodexCliDriver` and
   `GeminiCliDriver` used to ignore `request.runtimeSession`. They now fail the run with
   `EXTERNAL_AGENT_SESSIONS_UNSUPPORTED` (exported from `adk-llm-bridge/agents`) before any
-  process starts. `ClaudeAgentSdkDriver` now declares `capabilities().sessions = true`,
-  matching what it already did.
-- **Prompt caching is on by default for Anthropic models** (fixes zero cache reads on
+  process starts, and so does the new `FxCliDriver`. `ClaudeAgentSdkDriver` now declares
+  `capabilities().sessions = true`, matching what it already did.
+- **`FileSystemWorkspaceAdapter` folds path case by default on macOS and
+  Windows.** `caseInsensitivePaths` defaults to `true` when `process.platform`
+  is `darwin` or `win32` (read at construction) and `false` elsewhere, so `Src/a`
+  and `src/a` can no longer both be leased on APFS or NTFS. A value you pass
+  wins; `InMemoryWorkspaceAdapter` is unchanged. See
+  [Path case](./docs/workflow-durability.md#path-case).
+- **Prompt caching is automatic by default for Anthropic models** (fixes zero cache reads on
   AI Gateway, where every turn paid the full prompt again):
   - native `AnthropicLlm`: `promptCaching` was opt-in and marked only the system block and
-    the last tool; it is now on and also marks the last message block, so later turns read
+    the last tool; it is now automatic by default (see below) and also marks the last message block, so later turns read
     earlier turns from the cache;
   - AI Gateway `anthropic/*`: sends `providerOptions.gateway.caching = "auto"`;
   - OpenRouter stays opt-in (`promptCaching: true`), and OpenAI, xAI and custom endpoints
     are unchanged;
   - a cache write costs 1.25x the input price and a read 0.1x or less, so it pays off from
-    the second turn; one-shot calls that are never reused pay the 25% write surcharge on
-    the cached part: set `promptCaching: false` for them.
+    the second turn. With `promptCaching` unset, markers are sent only when the request
+    declares a tool of the caller (not the structured-output tool) or already holds an
+    earlier model turn: tool loops cache from their first call, and one-shot calls send no
+    marker and pay no write surcharge. `true` or `{ ttl }` always caches, `false` never.
 
 - **`ExternalAgent` no longer drops ADK tools silently** (see
   [Read-only agents and host tools](./docs/external-agent-isolation.md#read-only-agents-and-host-tools)):
@@ -1235,7 +1341,7 @@ from the 0.6.0 tag.
 - **Sub-agents, `permissions`, `delegation` and `tools` entries are checked
   when an `ExternalAgent` is built**, instead of being ignored silently (see
   [Sub-agents need a driver that exposes them](./docs/external-agent-isolation.md#sub-agents-need-a-driver-that-exposes-them)):
-  - `subAgents` on the Claude CLI, Codex CLI, Codex SDK or Gemini CLI driver
+  - `subAgents` on the Claude CLI, Codex CLI, Codex SDK, Gemini CLI or fx driver
     (any driver whose `capabilities()` lacks `subagents`) throws
     `EXTERNAL_AGENT_SUBAGENTS_UNSUPPORTED`, also on `clone()`. Those drivers
     never exposed the sub-agents, so they were never called. Use
@@ -1419,6 +1525,30 @@ from the 0.6.0 tag.
 
 ### Fixed
 
+- **A checkpoint save that fails after its rename says so.** The
+  `checkpoint_write_failed` raised when the directory flush fails after the
+  rename carries `details.committed: true`: the new revision is visible to
+  `load()` but may not survive a crash. See
+  [A save that fails after its rename](./docs/workflow-durability.md#a-save-that-fails-after-its-rename).
+- The workspace and checkpoint lock's ownership check (`directoryLockTokenMatches`)
+  no longer treats an unreadable owner file (`EACCES`, `EIO`) as "not our lock":
+  it throws, so a release no longer drops a live lock silently. A missing lock
+  or owner file still means the token does not own it.
+- `createClaudeRunTempDir` removes the directory it made when resolving its real
+  path fails; the SQLite session store closes the database file when the
+  permission change on a just-created file fails.
+- **Child processes of the external agent drivers end reliably.** A run no
+  longer outlives its process: once the CLI has exited, the read of `stdout`
+  and `stderr` ends at EOF, or when a wait on the pipe stays unanswered for two
+  consecutive idle windows of 500 ms, the same on Bun and Node. A grandchild
+  that keeps a pipe open (a background task, an MCP server) does not hold the
+  run. Output not yet read is never dropped, however slow the consumer: what
+  the CLI wrote before it exited is still read in full. The Codex SDK driver
+  now ends the turn at once when the process fails to start (it used to wait for an exit that never
+  came), keeps an `error` on the process's `stdout` or `stderr` in the turn
+  instead of ending the host, and sends SIGKILL after a 2 s grace to a Codex
+  process that ignores SIGTERM after a stop, an abort or a failed prompt write.
+
 - **A delegated sub-agent's model and tool reports reach the host.** Its
   `externalAgentModel` and `externalAgentTools` now ride on the sub-agent's own
   final event (author = the sub-agent). The native-shape delegation stripped all
@@ -1440,6 +1570,14 @@ from the 0.6.0 tag.
   any turn activity, and a run whose stream ends after only model-less
   results fails with `EXTERNAL_AGENT_NO_TURN` (recoverable) and exit code 1.
   A real result still ends the run at once.
+
+- **A Claude Agent SDK stream that ends with no result message no longer
+  reports a clean exit.** When the SDK stream ended without any `result`
+  message (Claude Code exited or the pipe closed mid-run), and no background
+  task was pending, `ClaudeAgentSdkDriver` completed with exit code 0 and no
+  error, so a workflow step could pass after a cut-off run. The run now emits
+  an `EXTERNAL_AGENT_NO_RESULT` error (recoverable) and completes with exit
+  code 1, and the workflow step fails with that code.
 
 - **A Codex SDK run can no longer end the host process with `EPIPE`.**
   `@openai/codex-sdk` writes the prompt to codex's stdin with no error

@@ -28,7 +28,7 @@ can pick 3.x, which is outside the supported range.
 The package is ESM only. Use `import`, or `await import()` from CommonJS.
 Shared code and its type declarations now live in `dist/shared/` chunks
 (`.js` and `.d.ts`). Import only the documented
-subpaths (`adk-llm-bridge`, `/agents`, `/agents/session-store/sqlite`,
+subpaths (`adk-llm-bridge`, `/agents`, `/agents/session-store/sqlite`, `/agents/session-store/adk-artifacts`,
 `/workflows`, `/workflows/node`, `/package.json`), never a file under `dist/`: chunk names change between
 builds. The package declares `"sideEffects": false`, so bundlers can drop the
 modules you do not import.
@@ -177,17 +177,20 @@ Related behavior changes:
   tokens, as ADK expects. Cached tokens are also reported in
   `cachedContentTokenCount`. If you added the cache counts yourself, stop
   doing so.
-- Anthropic prompt caching is now **on by default** (native `AnthropicLlm` and
-  `anthropic/*` on AI Gateway), where the native option used to be opt-in. It
-  does not change outputs, but a cache write costs 1.25x the input price and a
-  read 0.1x or less, so it pays off from the second turn. If you make
-  high-volume one-shot calls with prompts above the minimum cacheable size
-  (512 tokens on Haiku/Sonnet/Opus 5.5), set `promptCaching: false`.
+- Anthropic prompt caching is now **automatic by default** (native `AnthropicLlm` and
+  `anthropic/*` on AI Gateway), where the native option used to be opt-in: markers
+  are sent only when the request declares a tool or already holds an earlier model
+  turn, so one-shot calls pay no write surcharge. It does not change outputs. Set
+  `promptCaching: true` to keep it always on, or `false` to turn it off.
   OpenRouter is opt-in. See [Prompt caching](prompt-caching.md).
 - The tokens a call wrote to the prompt cache are in
   `customMetadata.cacheCreationTokenCount` (genai has no field for them), and
   in the optional `cacheCreationTokens` of `AgentInvocationUsage` and
   `WorkflowStepUsage`.
+- The cost a provider reports (`usage.cost` of AI Gateway and OpenRouter, plus
+  the upstream or market cost of a BYOK gateway call, with `customMetadata.costSource` naming the field) is in `customMetadata.costUsd`, and
+  summed in the optional `costUsd` of `AgentInvocationUsage` and
+  `WorkflowStepUsage`. See [Prompt caching](prompt-caching.md#reading-the-cache-usage).
 - Claude Agent SDK: a resumed session reports usage and cost per run instead
   of the session total, marked `usage.scope: "run"`. When the driver has no
   baseline for the session (first run after a restart or on another replica,
@@ -277,10 +280,11 @@ new in 0.7.0. If you already use them, these changes apply:
   silence them with ADK's `setLogLevel` or a custom logger. Code that
   switches on `SkippedTool.reason` must handle `in-model` and
   `request-processor`.
-- **CLI drivers no longer ignore `runtimeSession`.** Claude CLI, Codex CLI and
-  Gemini CLI end a run that sets `request.runtimeSession` with an
+- **CLI drivers no longer ignore `runtimeSession`.** Claude CLI, Codex CLI,
+  and Gemini CLI end a run that sets `request.runtimeSession` with an
   `EXTERNAL_AGENT_SESSIONS_UNSUPPORTED` error before starting the process. Drop
   `runtimeSession` for them, or use `ClaudeAgentSdkDriver` or `CodexSdkDriver`.
+  The new fx driver refuses it the same way.
 - **`ExternalAgentUsage.byModel` entries have no `scope`** (type
   `ExternalAgentModelUsage`); the usage's own `scope` covers them. The
   drivers never set one there.
@@ -644,6 +648,10 @@ new in 0.7.0. If you already use them, these changes apply:
   results, the run ends with `EXTERNAL_AGENT_NO_TURN` (recoverable) and exit
   code 1 instead of completing with empty output, so a workflow step fails
   instead of completing empty.
+- **A Claude Agent SDK stream with no result message fails.** When the
+  stream ends without any `result` message, the run ends with
+  `EXTERNAL_AGENT_NO_RESULT` (recoverable) and exit code 1 instead of a clean
+  exit 0, so a cut-off run no longer passes as a success.
 - **Private temp directory per Claude run.** Both Claude drivers create a
   fresh `0700` directory under `/tmp` for each run and set
   `CLAUDE_CODE_TMPDIR` to it and `TMPDIR` to the `claude-<uid>` directory
@@ -866,6 +874,67 @@ See
   `"agent-error"`, and an error event with an empty `code` is reported as
   `EXTERNAL_AGENT_ERROR`.
 
+### Claude sessions in ADK artifacts
+
+New in 0.7.0, nothing to migrate. `ClaudeAgentSdkDriver`'s `sessionStore` also
+takes a factory such as `adkArtifactSessionStore()` (subpath
+`adk-llm-bridge/agents/session-store/adk-artifacts`), which keeps transcripts in
+the run's ADK artifact service. Without an artifact service the run ends with
+`CLAUDE_SESSION_STORE_UNAVAILABLE` before the SDK starts. See
+[Persisting Claude sessions](./claude-session-store.md#adk-artifacts).
+
+### Driver options and host MCP servers
+
+- **Driver options are checked by name.** A misspelled or unsupported key,
+  or a config that is not a plain object, now throws
+  `EXTERNAL_AGENT_OPTION_UNKNOWN` instead of being ignored. If you build a
+  driver config by spreading a larger object or a class instance, pick the
+  driver's keys first.
+- **Host MCP servers** (new, `ClaudeAgentSdkDriver` only): declare them in
+  `mcpServers`; see
+  [Host MCP servers and secrets](./external-agent-isolation.md#host-mcp-servers-and-secrets).
+  Header and env values are secret references or `{ public: "..." }`; a
+  plain string is refused.
+- Pass MCP secrets as `{ resolve }`, and best as a per-run token minted by a
+  host proxy that keeps the long-lived credential (host duty 14). A resolver
+  is only as safe as its source: `{ resolve: () => process.env.X }` is
+  exposed like `{ env }`, and a file or keychain read is safe only if the
+  agent's shell cannot do the same read. `{ env: "NAME" }` is accepted in
+  isolated mode only when the agent cannot read process environments: no
+  shell tool (on macOS, a shell in the no-network sandbox is fine; with
+  `allowNetwork: true` or `allowUnsandboxedShell: true` it is not), and on
+  Linux, file-read tools confined by `allowedPaths` or `readPaths`. A
+  variable that Claude Code itself receives cannot be an `{ env }` source.
+  On Linux with a shell, declared secrets also need
+  `kernel.yama.ptrace_scope` 1 or higher; on Windows, no shell tool.
+  Put the secret in the `Authorization` header.
+- With a declared `{ resolve }` or `{ env }` secret, `ClaudeAgentSdkDriver`
+  keeps Claude Code's session transcript off disk (`persistSession: false`),
+  because a transcript stores raw tool results and a server that echoes its
+  credential would leave it there. Such an agent resumes nothing: each turn
+  folds the scrubbed ADK history into its prompt. `sessionStore`,
+  `resumeSessionId` and `runtimeSession.id` are refused with
+  `EXTERNAL_AGENT_MCP_SECRET_UNENFORCEABLE`. The driver also picks the
+  session id and reserves that session's folder path, so Claude Code keeps
+  a large tool result inline instead of saving it under `tool-results/`.
+  A working directory whose real path is longer than 200 characters, or a
+  config dir that is not an absolute path, is refused (see
+  [Large tool results](./external-agent-isolation.md#large-tool-results)).
+- Every other runtime keeps its transcript in the host's directory, which
+  the bridge does not own and cannot scrub. That covers the Claude drivers
+  without a declared secret, Codex and Gemini CLI. See
+  [Transcripts on disk](./external-agent-isolation.md#transcripts-on-disk)
+  for where each one writes.
+- A stdio server's `env` cannot set code-loading variables (`NODE_OPTIONS`,
+  `PYTHONPATH`, `LD_*`, `DYLD_*`, `GIT_*`, …), and its arguments cannot load
+  code or open a debugger (`-m`, `-r`, `--require`, `-e`, `--import`, `-M`,
+  `-I<path>`, `--inspect*`, any clustered single-dash argument). Put that
+  setup in a host wrapper script.
+- A stdio MCP server runs in the agent's working directory: give an
+  absolute `command` outside the agent's folders, absolute paths or
+  `--flag=value` arguments only, and use a wrapper script that changes
+  directory if it needs one.
+
 ### Coming in 0.8
 
 0.8 is planned to replace the `args` denylist of `ClaudeCliDriver` and
@@ -1003,9 +1072,12 @@ checkpoints:
   load; drain them before upgrading.
 - **Paths.** Pass `/`-separated paths to workspace leases: a `\` is rejected
   instead of converted, and a first segment of one letter and a colon
-  (`x:y`, `a:b.txt`) is rejected as a drive prefix; rename such files. Set
-  `caseInsensitivePaths: true` on the workspace adapter for a workspace on a
-  case-insensitive filesystem (default macOS APFS, Windows).
+  (`x:y`, `a:b.txt`) is rejected as a drive prefix; rename such files.
+  `FileSystemWorkspaceAdapter` folds case by default on macOS and Windows and
+  compares case-sensitively elsewhere; pass `caseInsensitivePaths: false` for a
+  case-sensitive volume on those platforms, or `true` for a case-insensitive
+  workspace elsewhere (and on `InMemoryWorkspaceAdapter`, which stays
+  case-sensitive by default).
 - **Workspace leases.** Drain or delete workspace `stateDirectory` lease files
   before upgrading. Expired legacy leases with rejected paths are dropped; a
   live one fails with `WORKFLOW_WORKSPACE_STATE_INCOMPATIBLE` until it is
@@ -1179,6 +1251,33 @@ checkpoints:
   runtime never calls into the overflowed module again, not even to free it.
   See [Script sandbox stack](./workflow-orchestration.md#script-sandbox-stack)
   and [Time bound](./workflow-orchestration.md#time-bound).
+
+### Steps cut off by the output limit
+
+A step whose model response stops early now fails instead of completing with
+the cut-off text:
+
+- **Which responses.** `finishReason` `MAX_TOKENS`, or a content stop
+  (`SAFETY`, `RECITATION`, `BLOCKLIST`, `PROHIBITED_CONTENT`, `SPII`,
+  `IMAGE_SAFETY`, `IMAGE_PROHIBITED_CONTENT`), on a model response that has no
+  function call and no error. A cut that left only reasoning, or no text, counts
+  too. Every response of the step is checked, so a cut first child of a
+  `SequentialAgent` fails the step. An agent error still reports
+  `WORKFLOW_EXECUTION_ERROR`. A nested bridge workflow decides for its own steps.
+- **The error.** `WorkflowError` `WORKFLOW_STEP_INCOMPLETE` with `stepId`,
+  `agentName`, `attempt`, `finishReason`, `author`, and, when known,
+  `outputTokens`, `thoughtsTokens` and `maxOutputTokens` (the configured cap).
+  Handle it next to `WORKFLOW_EXECUTION_ERROR`. The step `retry` policy applies;
+  on resume the failure replays unless `retryFailedSteps` or
+  `resumePolicy: "retry"` is set.
+- **The fix.** Reasoning tokens count against `maxOutputTokens`, so a cap sized
+  for the answer can be used up by reasoning: raise the cap or lower the
+  reasoning budget, then resume with `retryFailedSteps`.
+- **Opt out.** Set `allowIncompleteOutput: true` on a step that can use partial
+  text (script steps too; it must be a boolean). The step completes and
+  `result.finishReason` (also on `step_completed`) says `MAX_TOKENS`.
+- External agents (Claude, Codex, Gemini CLI) report no per-turn finish reason,
+  so they are not affected.
 
 ### Model and input changes on replayed steps
 

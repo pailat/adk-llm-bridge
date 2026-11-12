@@ -7,8 +7,9 @@
  * - `driver` (Bun): a full `CodexSdkDriver` run, with the stub as
  *   `codexPathOverride`. Reports the error codes and the exit code.
  * - `sdk` (Bun or Node): a `Codex` client from `@openai/codex-sdk` with
- *   `containCodexSdkClient` applied, loaded straight from its source file
- *   (it imports only `node:` modules, so Node's type stripping runs it).
+ *   `containCodexSdkClient` applied, loaded from its source file under Bun,
+ *   and from a bundle of it (`CODEX_EXEC_MODULE`) under Node, which cannot
+ *   resolve the source's `.js` import specifiers.
  *   Reports what the turn threw.
  * `abortMs` > 0 aborts the turn after that many milliseconds. With mode
  * `break` (`sdk` leg) the host stops reading the turn after its first event
@@ -70,8 +71,11 @@ if (leg === "driver") {
 } else {
   const { Codex } = await import("@openai/codex-sdk");
   const { containCodexSdkClient } = await import(
-    new URL("../../../../src/agents/driver/codex-sdk-exec.ts", import.meta.url)
-      .href
+    process.env.CODEX_EXEC_MODULE ??
+      new URL(
+        "../../../../src/agents/driver/codex-sdk-exec.ts",
+        import.meta.url,
+      ).href
   );
   const client = new Codex({
     codexPathOverride: stub,

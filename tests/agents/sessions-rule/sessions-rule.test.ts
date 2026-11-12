@@ -10,6 +10,8 @@ import {
   type ExternalAgentDriver,
   type ExternalAgentEvent,
   type ExternalAgentRunRequest,
+  FX_PROVIDER,
+  FxCliDriver,
   GEMINI_CLI_PROVIDER,
   GeminiCliDriver,
 } from "../../../src/agents/index.js";
@@ -98,6 +100,19 @@ function geminiCli(): Built {
     resumed: () => [],
   };
 }
+function fxCli(): Built {
+  const counter = { spawned: 0 };
+  return {
+    driver: new FxCliDriver({
+      spawn: emptyProcess(counter),
+      env: {},
+      model: "some/model-id",
+      inheritHostConfig: true,
+    }),
+    started: () => counter.spawned,
+    resumed: () => [],
+  };
+}
 function codexSdk(): Built {
   const calls = { started: 0, resumed: [] as string[] };
   const thread = (id: string | null) =>
@@ -157,6 +172,7 @@ const REFUSING: [string, () => Built, ExternalAgentRunRequest["provider"]][] = [
   ["ClaudeCliDriver", claudeCli, CLAUDE_PROVIDER],
   ["CodexCliDriver", codexCli, CODEX_PROVIDER],
   ["GeminiCliDriver", geminiCli, GEMINI_CLI_PROVIDER],
+  ["FxCliDriver", fxCli, FX_PROVIDER],
 ];
 
 const ALL: [string, () => Built, ExternalAgentRunRequest["provider"]][] = [
@@ -166,9 +182,12 @@ const ALL: [string, () => Built, ExternalAgentRunRequest["provider"]][] = [
 ];
 
 function permissionsFor(provider: ExternalAgentRunRequest["provider"]) {
-  return provider === GEMINI_CLI_PROVIDER
-    ? GEMINI_NETWORK_ON
-    : ({ mode: "read-only", allowNetwork: true } as const);
+  if (provider === GEMINI_CLI_PROVIDER) return GEMINI_NETWORK_ON;
+  // fx refuses read-only.
+  if (provider === FX_PROVIDER) {
+    return { mode: "ask", allowNetwork: true } as const;
+  }
+  return { mode: "read-only", allowNetwork: true } as const;
 }
 
 describe("sessions rule", () => {
@@ -256,6 +275,6 @@ describe("sessions rule", () => {
       ([, build]) => build().driver.capabilities?.().sessions,
     );
     expect(flags.filter((flag) => flag === true)).toHaveLength(2);
-    expect(flags.filter((flag) => flag !== true)).toHaveLength(3);
+    expect(flags.filter((flag) => flag !== true)).toHaveLength(4);
   });
 });

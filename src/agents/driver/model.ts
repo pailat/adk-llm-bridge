@@ -55,13 +55,13 @@ export interface ModelAliasDenylist {
  * Claude: `default` is the account or organization default, `best` picks a
  * model family by availability, and `opusplan` switches models between
  * planning and execution. Gemini: `auto` and `auto-*` hand each turn to the
- * CLI's router. Codex has none. Reviewed against
+ * CLI's router. Codex and fx have none. Reviewed against
  * {@link MODEL_ALIAS_DENYLIST_REVIEW}.
  *
  * @internal
  */
 export const MODEL_ALIAS_DENYLIST: Readonly<
-  Record<"claude" | "codex" | "gemini-cli", ModelAliasDenylist>
+  Record<"claude" | "codex" | "gemini-cli" | "fx", ModelAliasDenylist>
 > = Object.freeze({
   claude: Object.freeze({
     exact: Object.freeze(["default", "best", "opusplan", "opusplan[1m]"]),
@@ -75,6 +75,10 @@ export const MODEL_ALIAS_DENYLIST: Readonly<
     exact: Object.freeze(["auto"]),
     prefixes: Object.freeze(["auto-"]),
   }),
+  fx: Object.freeze({
+    exact: Object.freeze([]),
+    prefixes: Object.freeze([]),
+  }),
 });
 
 /**
@@ -86,6 +90,7 @@ export const MODEL_ALIAS_DENYLIST_REVIEW = Object.freeze({
   claude:
     "literals in the Claude Code 2.1.319 bundle (@anthropic-ai/claude-agent-sdk 0.3.319)",
   "gemini-cli": "Gemini CLI router aliases from the upstream documentation",
+  fx: "fx 0.0.16 model ids are provider/model and no router alias was found in the fx documentation or `fx models --json`",
 });
 
 /**
@@ -248,6 +253,19 @@ export const CODEX_CLI_MODEL_FLAGS: PinnedFlags = Object.freeze({
 });
 
 /**
+ * fx CLI flags that set or route the model. `args` may never pass them, even
+ * with `allowPolicyOverrideArgs`. `--provider` picks the provider that serves
+ * the model, so it changes which model answers. `--effort` is not a model flag
+ * and is pinned with the other flags of the driver, and `--provider-order`,
+ * `--provider-strict` and `--no-provider-strict` stay policy flags.
+ *
+ * @internal
+ */
+export const FX_CLI_MODEL_FLAGS: PinnedFlags = Object.freeze({
+  flags: Object.freeze(["--model", "--provider"]),
+});
+
+/**
  * What the model flag tables were last reviewed against. The version-bump
  * test compares these with the installed SDKs, like the policy flag lists.
  *
@@ -259,6 +277,8 @@ export const MODEL_FLAGS_REVIEW = Object.freeze({
   codexCliVersion: "0.167.0",
   codexSource:
     "`codex exec --help` and the config keys read by the @openai/codex binary",
+  fxCliVersion: "0.0.16",
+  fxSource: "`fx --help` and `fx ask --help`",
 });
 
 function overrideMessage(driver: string, what: string): string {
@@ -436,6 +456,17 @@ export const GEMINI_MODEL_ENV: readonly string[] = Object.freeze([
 ]);
 
 /**
+ * Environment variables that set the fx model (`FX_MODEL`) or route the
+ * request to another provider (`FX_PROVIDER`).
+ *
+ * @internal
+ */
+export const FX_MODEL_ENV: readonly string[] = Object.freeze([
+  "FX_MODEL",
+  "FX_PROVIDER",
+]);
+
+/**
  * Where the model env tables come from.
  *
  * @internal
@@ -444,6 +475,7 @@ export const MODEL_ENV_REVIEW = Object.freeze({
   claude: CLAUDE_MODEL_ENV_RULE.review,
   codex: "variable names in the @openai/codex 0.167.0 binary",
   gemini: "Gemini CLI configuration reference",
+  fx: "fx 0.0.16 environment documentation (model_origin: FX_MODEL) and a probe of the routing variable",
 });
 
 /**

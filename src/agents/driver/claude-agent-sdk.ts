@@ -1,18 +1,22 @@
+import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { InputValidationError } from "@google/adk";
 import { warn } from "../../utils/log.js";
 import type { ExternalAgentEvent } from "../events.js";
 import {
+  type ExternalAgentMcpServerGrant,
   type ExternalAgentRunRequest,
   resolveAbortSignal,
 } from "../external-agent-driver.js";
 import {
+  declaredMcpTool,
   guardRequestPaths,
+  readOnlyMcpToolAllowed,
   readPathsReadAllowed,
 } from "../permissions/confirmation.js";
 import { mapPermissionPolicyToFlags } from "../permissions/mapper.js";
-import { policySetsPaths } from "../permissions/paths.js";
+import { canonicalPath, policySetsPaths } from "../permissions/paths.js";
 import type { ExternalAgentPermissionPolicy } from "../permissions/schema.js";
 import { CLAUDE_PROVIDER } from "../provider/claude.js";
 import type { AgentRuntimeCapabilities } from "../runtime/capabilities.js";
@@ -21,6 +25,7 @@ import {
   safeCollectContents,
 } from "../runtime/content-collector.js";
 import { classifyRecoverable } from "../runtime/error-classification.js";
+import type { SessionStoreFactory } from "../session-store/adk-artifacts.js";
 import type { SessionStore } from "../session-store/types.js";
 import {
   BRIDGE_MCP_SERVER,
@@ -31,8 +36,16 @@ import {
   claudeInitTools,
   DEFAULT_CLAUDE_TOOLS,
   isExpectedClaudeTool,
+  isListedClaudeMcpTool,
   planClaudeIsolation,
 } from "./claude-isolation.js";
+import {
+  type CheckedMcpServer,
+  type ClaudeMcpServer,
+  checkClaudeMcpServers,
+  checkMcpServerNetwork,
+  checkStdioServerForRun,
+} from "./claude-mcp-servers.js";
 import {
   contentsToSdkMessages,
   type SDKUserMessage,
@@ -50,6 +63,18 @@ import {
   isSessionToolResultsRead,
 } from "./claude-session-files.js";
 import {
+  type ClaudeSpillPathState,
+  type ClaudeSpillReservation,
+  reserveClaudeSpillPath,
+} from "./claude-spill-guard.js";
+import {
+  checkMcpSecretsEnforceable,
+  hasMcpSecrets,
+  mcpSecretHost,
+  resolveMcpSecrets,
+  SecretScrubber,
+} from "./mcp-secrets.js";
+import {
   assertModelOption,
   assertSmallFastModelOption,
   isClaudeModelEnv,
@@ -57,10 +82,16 @@ import {
   modelEnvRefusal,
   withModelPins,
 } from "./model.js";
+import { CLAUDE_AGENT_SDK_OPTION_KEYS } from "./option-keys.js";
 import {
   dependencyMissing,
+  EXTERNAL_AGENT_DEPENDENCY_MISSING,
   EXTERNAL_AGENT_ISOLATION_VIOLATED,
+  EXTERNAL_AGENT_MCP_SECRET_UNENFORCEABLE,
+  EXTERNAL_AGENT_MCP_SERVER_INVALID,
+  EXTERNAL_AGENT_MCP_SERVER_UNAVAILABLE,
   EXTERNAL_AGENT_MISSING_BINARY,
+  EXTERNAL_AGENT_NO_RESULT,
   EXTERNAL_AGENT_NO_TURN,
   EXTERNAL_AGENT_PATHS_UNENFORCEABLE,
   EXTERNAL_AGENT_TOOL_NOT_OFFERED,
@@ -77,6 +108,7 @@ import {
 import {
   agentWritableRoots,
   asRecord,
+  assertKnownDriverOptions,
   contextText,
   copyIfPresent,
   credentialEnv,
@@ -85,6 +117,7 @@ import {
   findExecutable,
   readCredentialEnv,
   removeUndefined,
+  sandboxTempRoots,
   stringValue,
   validateDriverConfig,
 } from "./shared.js";
@@ -134,7 +167,9 @@ type ClaudeAgentSdkOptions = {
   sandbox?: Record<string, unknown>;
   resume?: string;
   forkSession?: boolean;
-  sessionStore?: SessionStore;
+  persistSession?: boolean;
+  sessionId?: string;
+  sessionStore?: SessionStore | SessionStoreFactory;
   sessionStoreFlush?: ClaudeSessionStoreFlush;
   loadTimeoutMs?: number;
   canUseTool?: ClaudeAgentSdkCanUseTool;
@@ -185,6 +220,16 @@ type ClaudeAgentSdkToolDefinition = unknown;
 type ClaudeAgentSdkQuery = AsyncIterable<ClaudeAgentSdkMessage> & {
   interrupt?(): Promise<void> | void;
   return?(value?: unknown): Promise<unknown> | unknown;
+  /** Replaces the session's dynamic MCP servers; declared servers go here. */
+  setMcpServers?(servers: Record<string, unknown>): Promise<{
+    added?: string[];
+    removed?: string[];
+    errors?: Record<string, string>;
+  }>;
+  /** Connection state of each MCP server. Its `config` is never read. */
+  mcpServerStatus?(): Promise<
+    Array<{ name?: unknown; status?: unknown; error?: unknown }>
+  >;
 };
 
 type ClaudeAgentSdkLike = {
@@ -322,16 +367,49 @@ export interface ClaudeAgentSdkDriverConfig {
    * from silently continuing without its authority or completion tools.
    *
    * @remarks
-   * Host MCP servers load only with `inheritHostConfig: true`: an isolated
-   * run (the default) passes `strictMcpConfig` with the bridge's own
-   * `adk_bridge` server alone, so any other required server could never
-   * connect.
+   * An isolated run (the default) passes `strictMcpConfig` with the bridge's
+   * own `adk_bridge` server and the servers in `mcpServers` alone, so it may
+   * require only those; other host MCP servers load only with
+   * `inheritHostConfig: true`. A required server from `mcpServers` that is
+   * not connected within `mcpConnectTimeoutMs` ends the run with the
+   * recoverable `EXTERNAL_AGENT_MCP_SERVER_UNAVAILABLE` error.
    *
    * @throws InputValidationError (from `@google/adk`) at construction when a
-   * server other than `adk_bridge` is required without `inheritHostConfig`.
+   * server other than `adk_bridge` or one in `mcpServers` is required without
+   * `inheritHostConfig`.
    * @defaultValue `[]`
    */
   requiredMcpServers?: string[];
+  /**
+   * MCP servers the host declares for this agent, by server name. The agent
+   * sees their tools as `mcp__<name>__<tool>`; header and env values are
+   * secret references (`{ resolve }` or `{ env }`) or explicit
+   * `{ public }` values, read when each run starts and never placed in the
+   * runtime's options, command line or environment. Works in both modes.
+   *
+   * @remarks
+   * Checked when the driver is built (names, shape, URL grammar, bare
+   * secrets) and when a run starts (network, stdio command and arguments,
+   * whether the run can keep the secrets from the agent), in that order and
+   * before any resolver runs. Every secret read joins the run's scrubber,
+   * which replaces it with `[redacted]` in events, logs, errors, session
+   * store batches and successful tool results the model sees. An error
+   * result from a server is not rewritten before the model sees it: a server
+   * must not echo credentials. See docs/external-agent-isolation.md, "Host
+   * MCP servers and secrets".
+   *
+   * @defaultValue none
+   * @experimental
+   */
+  mcpServers?: Readonly<Record<string, ClaudeMcpServer>>;
+  /**
+   * How long the first message waits for required servers from `mcpServers`
+   * to connect, in milliseconds (1000 to 120000).
+   *
+   * @defaultValue 10000
+   * @experimental
+   */
+  mcpConnectTimeoutMs?: number;
   /**
    * Opt-in plain-string system prompt. When set, it REPLACES the
    * `claude_code` preset (and `request.instruction` is appended to it) so a
@@ -438,6 +516,11 @@ export interface ClaudeAgentSdkDriverConfig {
    * `request.runtimeSession.id`, then the id saved in ADK session state (see
    * {@link claudeSdkSessionStateKey}), then the id this driver captured
    * earlier for the same ADK session.
+   *
+   * With an `mcpServers` secret (`{ resolve }` or `{ env }`) the run keeps
+   * no transcript on disk and resumes nothing: the constructor refuses this
+   * option with `EXTERNAL_AGENT_MCP_SECRET_UNENFORCEABLE`, and a run
+   * refuses `runtimeSession.id` the same way.
    */
   resumeSessionId?: string;
   /**
@@ -461,13 +544,16 @@ export interface ClaudeAgentSdkDriverConfig {
    * `adk-llm-bridge/agents/session-store/sqlite`) is a ready adapter.
    *
    * Transcripts can hold tool output and file contents, and the store
-   * receives them: protecting access to it is up to the host.
+   * receives them: protecting access to it is up to the host. With an
+   * `mcpServers` secret the constructor refuses a store
+   * (`EXTERNAL_AGENT_MCP_SECRET_UNENFORCEABLE`): the store needs the local
+   * transcript, which a server's echo of its secret would reach unredacted.
    *
    * @experimental Follows the Claude Agent SDK's `@alpha` `sessionStore`
    * contract, which can change in a minor SDK release.
    * @defaultValue `undefined` (no store: only the local transcript is written)
    */
-  sessionStore?: SessionStore;
+  sessionStore?: SessionStore | SessionStoreFactory;
   /**
    * How eagerly the SDK sends transcript entries to {@link sessionStore}
    * (the SDK `sessionStoreFlush` option): `"batched"` or `"eager"`.
@@ -553,6 +639,23 @@ export const DEFAULT_CLAUDE_SDK_TOOLS: readonly string[] = DEFAULT_CLAUDE_TOOLS;
 export const CLAUDE_SESSION_STORE_MIRROR_ERROR =
   "CLAUDE_SESSION_STORE_MIRROR_ERROR";
 
+/**
+ * Code of the non-recoverable `error` event a run reports, before the SDK
+ * starts, when a `sessionStore` factory (such as `adkArtifactSessionStore()`)
+ * cannot build its store, for example because the run has no ADK artifact
+ * service.
+ */
+export const CLAUDE_SESSION_STORE_UNAVAILABLE =
+  "CLAUDE_SESSION_STORE_UNAVAILABLE";
+
+/** A `sessionStore` factory failed; reported as CLAUDE_SESSION_STORE_UNAVAILABLE. */
+class SessionStoreUnavailableError extends Error {
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause });
+    this.name = "SessionStoreUnavailableError";
+  }
+}
+
 /** The bridge's delegation tool; it maps to transfer events, not tool events. */
 const BRIDGE_SUBAGENT_TOOL = `${BRIDGE_TOOL_PREFIX}run_adk_subagent`;
 
@@ -616,11 +719,17 @@ export const CLAUDE_STRICT_BINARY_CHECK: StrictBinaryCheck = {
  *   recoverability comes from `classifyRecoverable`.
  * - Session resume: the SDK session id is kept per agent instance and ADK
  *   session, and in session state, so a later turn sends only the newest user
- *   message and the SDK reloads history from its own transcript.
+ *   message and the SDK reloads history from its own transcript. With an
+ *   `mcpServers` secret there is no transcript on disk and no resume
+ *   (`persistSession: false`): each turn folds the scrubbed ADK history
+ *   into its prompt.
  * - A "model-less" result (success, `num_turns` 0, empty `result`) before
  *   any turn activity does not end the run: the turn that runs the input
  *   follows. A stream that ends after only such results fails with
  *   `EXTERNAL_AGENT_NO_TURN` instead of completing empty.
+ * - A stream that ends with no result message at all (the child exited or
+ *   the pipe closed mid-run) fails with `EXTERNAL_AGENT_NO_RESULT` and exit
+ *   code 1, not a clean exit 0.
  */
 export class ClaudeAgentSdkDriver {
   /** Provider id of this driver (`claude`). */
@@ -639,9 +748,12 @@ export class ClaudeAgentSdkDriver {
   readonly #smallFastModel?: string;
   readonly #debugEvents: boolean;
   readonly #requiredMcpServers: readonly string[];
+  readonly #mcpServers: readonly CheckedMcpServer[];
+  readonly #mcpConnectTimeoutMs: number;
   readonly #resumeSessionId?: string;
   readonly #forkSession?: boolean;
-  readonly #sessionStore?: SessionStore;
+  readonly #sessionStore?: SessionStore | SessionStoreFactory;
+  readonly #resolvedStores = new WeakMap<object, SessionStore>();
   readonly #sessionStoreFlush?: ClaudeSessionStoreFlush;
   readonly #sessionStoreLoadTimeoutMs?: number;
   readonly #systemPrompt?: string;
@@ -684,12 +796,21 @@ export class ClaudeAgentSdkDriver {
    * `"batched"` or `"eager"`, when `sessionStoreLoadTimeoutMs` is not a
    * positive integer, or when either is given without `sessionStore`.
    * @throws {@link ExternalAgentPolicyError} with code
-   * `EXTERNAL_AGENT_MODEL_INVALID` when `model` is not a model id, and
+   * `EXTERNAL_AGENT_OPTION_UNKNOWN` for a config that is not a plain object
+   * or has an unknown key, `EXTERNAL_AGENT_MODEL_INVALID` when `model` is not
+   * a model id (it also covers `smallFastModel`),
    * `EXTERNAL_AGENT_MODEL_REQUIRED` when `requireExplicitModel` is set and
    * `model` is absent or a router alias, or `smallFastModel` is absent or an
-   * alias; `EXTERNAL_AGENT_MODEL_INVALID` also covers `smallFastModel`.
+   * alias, and `EXTERNAL_AGENT_MCP_SERVER_INVALID` or
+   * `EXTERNAL_AGENT_MCP_SECRET_LITERAL` for a malformed `mcpServers` or
+   * `mcpConnectTimeoutMs`.
    */
   constructor(config: ClaudeAgentSdkDriverConfig = {}) {
+    assertKnownDriverOptions(
+      "ClaudeAgentSdkDriver",
+      config,
+      CLAUDE_AGENT_SDK_OPTION_KEYS,
+    );
     validateDriverConfig(
       "ClaudeAgentSdkDriver",
       config,
@@ -707,6 +828,10 @@ export class ClaudeAgentSdkDriver {
       config.smallFastModel,
       config.requireExplicitModel ?? false,
     );
+    this.#mcpServers = checkClaudeMcpServers(config.mcpServers);
+    this.#mcpConnectTimeoutMs = checkMcpConnectTimeout(
+      config.mcpConnectTimeoutMs,
+    );
     this.#sdk = config.sdk;
     this.#importSdk = config.importSdk ?? importClaudeAgentSdk;
     this.#env = config.env ?? process.env;
@@ -722,16 +847,31 @@ export class ClaudeAgentSdkDriver {
     this.#maxTurns = config.maxTurns;
     this.#debugEvents = config.debugEvents ?? false;
     this.#requiredMcpServers = [...new Set(config.requiredMcpServers ?? [])];
+    const declaredNames = new Set(this.#mcpServers.map((s) => s.name));
     const unloadable = this.#requiredMcpServers.filter(
-      (name) => name !== BRIDGE_MCP_SERVER,
+      (name) => name !== BRIDGE_MCP_SERVER && !declaredNames.has(name),
     );
     if (unloadable.length > 0 && !config.inheritHostConfig) {
       throw new InputValidationError(
-        `requiredMcpServers (${unloadable.join(", ")}) needs inheritHostConfig: true. An isolated Claude agent loads no host MCP servers, so a required one could never connect.`,
+        `requiredMcpServers (${unloadable.join(", ")}) needs inheritHostConfig: true, or a server of that name in mcpServers. An isolated Claude agent loads no host MCP servers, so a required one could never connect.`,
       );
     }
     this.#resumeSessionId = config.resumeSessionId;
     this.#forkSession = config.forkSession;
+    // Declared secrets keep the transcript off disk (the transcript spill): Claude Code
+    // writes a tool's raw result there, before the bridge's hook redacts it
+    // for the model. A session store needs that local write, and a resumed
+    // session continues a transcript on disk, so neither can be combined.
+    if (
+      hasMcpSecrets(this.#mcpServers) &&
+      (config.sessionStore !== undefined ||
+        config.resumeSessionId !== undefined)
+    ) {
+      throw new ExternalAgentPolicyError(
+        EXTERNAL_AGENT_MCP_SECRET_UNENFORCEABLE,
+        `ClaudeAgentSdkDriver: ${config.sessionStore !== undefined ? "sessionStore" : "resumeSessionId"} cannot be combined with an MCP server that has a { resolve } or { env } secret. Claude Code would write the session transcript to disk, and a server that echoes its secret would leave it there unredacted. Drop the option, or pass the secret another way.`,
+      );
+    }
     this.#sessionStore = config.sessionStore;
     validateSessionStoreTuning(config);
     this.#sessionStoreFlush = config.sessionStoreFlush;
@@ -786,6 +926,21 @@ export class ClaudeAgentSdkDriver {
     };
   }
 
+  /**
+   * The servers declared in `mcpServers`, as the permission guard sees them.
+   *
+   * @returns One grant per declared server: name, tool allowlist and
+   * read-only attestation.
+   * @experimental
+   */
+  declaredMcpServers(): readonly ExternalAgentMcpServerGrant[] {
+    return this.#mcpServers.map((server) => ({
+      name: server.name,
+      ...(server.tools !== undefined ? { tools: server.tools } : {}),
+      readOnly: server.readOnly,
+    }));
+  }
+
   #sdkSessionsFor(request: ExternalAgentRunRequest): Map<string, string> {
     const owner: object = request.agent ?? this;
     let sessions = this.#sdkSessionsByAgent.get(owner);
@@ -802,7 +957,9 @@ export class ClaudeAgentSdkDriver {
    * @remarks
    * Never throws for run failures: they are reported as an `error` event and a
    * `completed` event with exit code 1. `started` is always emitted first (it
-   * waits for `system/init` to carry the resolved model).
+   * waits for `system/init` to carry the resolved model). A stream that ends
+   * with no `result` message ends with an `EXTERNAL_AGENT_NO_RESULT` error
+   * (`EXTERNAL_AGENT_NO_TURN` after only model-less results) and exit code 1.
    *
    * @param request - The run request (instruction, context, permissions,
    * credential, working directory, abort signal and bridge tools).
@@ -810,6 +967,22 @@ export class ClaudeAgentSdkDriver {
    */
   async *run(
     request: ExternalAgentRunRequest,
+  ): AsyncIterable<ExternalAgentEvent> {
+    // Every event leaves through the run's scrubber, which holds the MCP
+    // secrets the run read; it is cleared when the run ends.
+    const scrubber = new SecretScrubber();
+    try {
+      for await (const event of this.#run(request, scrubber)) {
+        yield scrubber.scrubDeep(event).value;
+      }
+    } finally {
+      scrubber.clear();
+    }
+  }
+
+  async *#run(
+    request: ExternalAgentRunRequest,
+    scrubber: SecretScrubber,
   ): AsyncIterable<ExternalAgentEvent> {
     // Resume order: static config, then the caller's `runtimeSession.id`,
     // then the id persisted in ADK session state (survives restarts and
@@ -821,13 +994,17 @@ export class ClaudeAgentSdkDriver {
     const persisted = stateKey
       ? readStateString(request.context, stateKey)
       : undefined;
-    const resolvedResume =
-      this.#resumeSessionId ??
-      stringValue(request.runtimeSession?.id) ??
-      persisted ??
-      (adkSessionId
-        ? this.#sdkSessionsFor(request).get(adkSessionId)
-        : undefined);
+    // With declared secrets nothing is resumed or saved: the transcript stays
+    // off disk, and each turn folds the scrubbed ADK history into its prompt.
+    const offDisk = hasMcpSecrets(this.#mcpServers);
+    const resolvedResume = offDisk
+      ? undefined
+      : (this.#resumeSessionId ??
+        stringValue(request.runtimeSession?.id) ??
+        persisted ??
+        (adkSessionId
+          ? this.#sdkSessionsFor(request).get(adkSessionId)
+          : undefined));
 
     // `started` waits for the first SDK message so it can carry the
     // resolved model from `system/init`; its timestamp is still the run start.
@@ -875,7 +1052,36 @@ export class ClaudeAgentSdkDriver {
     // Background tasks still live when the result arrives fail the run.
     const backgroundTasks = new ClaudeBackgroundTaskTracker();
     let runTemp: ClaudeRunTempDir | undefined;
+    // With declared secrets: the session id the driver picks, and its
+    // reserved session path, so no large tool result is saved to disk.
+    const spillSessionId = offDisk ? randomUUID() : undefined;
+    let spill: ClaudeSpillReservation | undefined;
+    let spillMismatch = false;
+    // What the end-of-run check found at the reserved path, and what it
+    // scrubbed there.
+    let spillEnd:
+      | {
+          state: ClaudeSpillPathState;
+          scrubbed?: { files: number; rewritten: number };
+        }
+      | undefined;
+    // Set by the gated prompt when the declared servers cannot be delivered;
+    // reported instead of whatever the stream does next.
+    let transportError: Error | undefined;
+    // Start time of each MCP tool call, for `durationMs` on its result.
+    const mcpEvents: ToolEventMcpContext = {
+      servers: new Set(this.#mcpServers.map((server) => server.name)),
+      started: new Map(),
+    };
+    for (const name of this.#requiredMcpServers) {
+      if (name !== BRIDGE_MCP_SERVER) mcpEvents.servers.add(name);
+    }
     try {
+      // A session store factory that cannot build its store ends the run
+      // here, before the SDK is loaded: a store that fails inside append()
+      // would only be reported as mirror_error and the run would go on
+      // without its transcript.
+      this.resolveSessionStore(request);
       // A model variable in the child environment would change the model
       // the runtime runs: refuse before anything else.
       const envRefusal = modelEnvRefusal(
@@ -886,6 +1092,15 @@ export class ClaudeAgentSdkDriver {
       if (envRefusal) {
         throw envRefusal;
       }
+      if (offDisk && stringValue(request.runtimeSession?.id) !== undefined) {
+        throw new ExternalAgentPolicyError(
+          EXTERNAL_AGENT_MCP_SECRET_UNENFORCEABLE,
+          "ClaudeAgentSdkDriver: runtimeSession.id cannot be resumed with an MCP server that has a { resolve } or { env } secret. The run keeps no transcript on disk, so there is no session to continue. Leave runtimeSession unset.",
+        );
+      }
+      // Declared MCP servers: network, stdio, then whether the run can keep
+      // their secrets from the agent. Nothing is read yet.
+      const stdioForRun = this.checkMcpServersForRun(request);
       // Shell writes that the sandbox cannot keep inside allowedPaths: refuse
       // before anything starts.
       const webTools = this.isolationPlan(request).unenforceableWebTools;
@@ -908,10 +1123,19 @@ export class ClaudeAgentSdkDriver {
       if (strictRefusal) {
         throw strictRefusal;
       }
-      const prompt = this.buildPromptInput(request, resolvedResume);
+      let prompt: string | AsyncIterable<unknown> = this.buildPromptInput(
+        request,
+        resolvedResume,
+      );
       const built = await this.buildRunOptions(request, sdk, resolvedResume);
       let options = built.options;
       const isolation = this.isolationPlan(request);
+      const declared = this.declaredMcpServers();
+      const allowlists = Object.fromEntries(
+        this.#mcpServers.flatMap((server) =>
+          server.tools !== undefined ? [[server.name, server.tools]] : [],
+        ),
+      );
       // What an isolated run may report in system/init and use.
       const expectation: ClaudeIsolationExpectation | undefined =
         isolation.isolated
@@ -920,8 +1144,10 @@ export class ClaudeAgentSdkDriver {
               mcpServers: [
                 ...Object.keys(options.mcpServers ?? {}),
                 ...this.#requiredMcpServers,
+                ...declared.map((server) => server.name),
               ],
               bridgeTools: built.bridgeTools,
+              mcpToolAllowlists: allowlists,
             }
           : undefined;
       if (expectation) {
@@ -931,9 +1157,14 @@ export class ClaudeAgentSdkDriver {
         // and the message check below ends the run.
         options = {
           ...options,
-          hooks: withIsolationHook(options.hooks, expectation, (name) => {
-            blockedTools.push(name);
-          }),
+          hooks: withIsolationHook(
+            options.hooks,
+            expectation,
+            (name) => {
+              blockedTools.push(name);
+            },
+            { policy: request.permissions, declared },
+          ),
           ...(options.canUseTool
             ? {
                 canUseTool: denyOutsideIsolation(
@@ -979,18 +1210,107 @@ export class ClaudeAgentSdkDriver {
         // The hook denies it anyway.
         options = {
           ...options,
-          hooks: withForeignMcpDenyHook(options.hooks, built.bridgeTools),
+          hooks: withForeignMcpDenyHook(options.hooks, built.bridgeTools, {
+            policy: request.permissions,
+            declared,
+          }),
         };
       }
       abortController = options.abortController;
+      if (spillSessionId !== undefined) {
+        spill = this.reserveSpillPath(request, options, spillSessionId);
+        const reservation = spill;
+        options = {
+          ...options,
+          sessionId: spillSessionId,
+          // First on every call, so a removed or replaced reservation is
+          // caught before the call that could spill (see the report on
+          // parallel batches in docs/external-agent-isolation.md).
+          hooks: withPreToolUseGuard(options.hooks, {
+            deny: (_name, _toolInput, hookInput) => {
+              if (!reservation.matches(hookInput)) {
+                spillMismatch = true;
+                return SPILL_SESSION_MISMATCH;
+              }
+              if (!reservation.stillReserved()) {
+                return SPILL_RESERVATION_LOST;
+              }
+              return undefined;
+            },
+            unnamedReason: SPILL_SESSION_MISMATCH,
+          }),
+        };
+      }
+      // Declared servers: read their secrets (last, after every check), then
+      // deliver them over the control channel before the user message.
+      let deliver: ((query: ClaudeAgentSdkQuery) => Promise<void>) | undefined;
+      if (this.#mcpServers.length > 0) {
+        const servers = await this.resolveDeclaredMcpServers(
+          stdioForRun,
+          abortController?.signal ?? new AbortController().signal,
+          scrubber,
+          options.env ?? {},
+        );
+        const bridge = options.mcpServers?.[BRIDGE_MCP_SERVER];
+        // `setMcpServers` drops an in-process server missing from its
+        // payload, so the bridge's own server goes with it.
+        const payload =
+          bridge === undefined
+            ? servers
+            : { ...servers, [BRIDGE_MCP_SERVER]: bridge };
+        deliver = (current) =>
+          this.deliverMcpServers(current, payload, scrubber);
+        options = {
+          ...options,
+          hooks: withMcpOutputScrubHook(
+            options.hooks,
+            this.#mcpServers.map((server) => server.name),
+            scrubber,
+          ),
+        };
+      }
       runTemp = createClaudeRunTempDir();
       if (runTemp) {
         options = { ...options, env: { ...options.env, ...runTemp.env } };
       }
+      let queryReady: ((query: ClaudeAgentSdkQuery) => void) | undefined;
+      if (deliver) {
+        const gate = deliver;
+        const created = new Promise<ClaudeAgentSdkQuery>((resolveQuery) => {
+          queryReady = resolveQuery;
+        });
+        const controller = abortController;
+        prompt = gatedPrompt(prompt, async () => {
+          try {
+            await gate(await created);
+            return true;
+          } catch (error) {
+            transportError =
+              error instanceof Error ? error : new Error(String(error));
+            controller?.abort();
+            return false;
+          }
+        });
+      }
       query = sdk.query({ prompt, options });
+      if (deliver && typeof query.setMcpServers !== "function") {
+        throw new ExternalAgentPolicyError(
+          EXTERNAL_AGENT_DEPENDENCY_MISSING,
+          "The installed @anthropic-ai/claude-agent-sdk has no Query.setMcpServers, which mcpServers needs. Update the SDK.",
+        );
+      }
+      queryReady?.(query);
       const iterator = query[Symbol.asyncIterator]();
       stream: while (true) {
-        const next = await iterator.next();
+        let next: IteratorResult<ClaudeAgentSdkMessage>;
+        try {
+          next = await iterator.next();
+        } catch (error) {
+          throw transportError ?? error;
+        }
+        if (transportError) {
+          throw transportError;
+        }
         if (next.done) {
           // A call held for the runtime's answer that never came stops the
           // run, as a result message without it does.
@@ -1002,12 +1322,39 @@ export class ClaudeAgentSdkDriver {
               yield startedEvent(initModel);
             }
             yield noTurnEvent(modelLessSession ?? resolvedResume);
+          } else if (
+            backgroundTasks.pending().length === 0 &&
+            !resolveAbortSignal(request)?.aborted
+          ) {
+            // No result message at all: the run was cut off. (Tasks still
+            // running are reported below, under their own error; a caller's
+            // abort is not a cut-off.)
+            failed = true;
+            if (!startedEmitted) {
+              yield startedEvent(initModel);
+            }
+            yield noResultEvent(resolvedResume);
           }
           break;
         }
         const message = next.value;
+        if (spill) {
+          const reported = initSessionId(message);
+          if (
+            spillMismatch ||
+            (reported !== undefined && reported !== spillSessionId)
+          ) {
+            throw spillSessionError();
+          }
+          if (!spill.stillReserved()) {
+            throw spillLostError();
+          }
+        }
         initModel ??= claudeInitModel(message);
         sawTurn ||= isTurnMessage(message);
+        for (const name of claudeInitMcpServerNames(message)) {
+          if (name !== BRIDGE_MCP_SERVER) mcpEvents.servers.add(name);
+        }
         if (sessionReads) {
           // The session the runtime reports, never one the model names.
           sessionReads.sessionId =
@@ -1040,7 +1387,7 @@ export class ClaudeAgentSdkDriver {
         }
         // Capture the SDK session id (system/init or result) so the
         // next turn of this ADK session can resume it.
-        if (adkSessionId) {
+        if (adkSessionId && !offDisk) {
           const captured = extractSdkSessionId(message);
           if (captured) {
             this.#sdkSessionsFor(request).set(adkSessionId, captured);
@@ -1072,6 +1419,7 @@ export class ClaudeAgentSdkDriver {
           message,
           toolNames,
           resolvedResume !== undefined,
+          mcpEvents,
         );
         for (let event of events) {
           if (
@@ -1081,7 +1429,9 @@ export class ClaudeAgentSdkDriver {
           ) {
             warn(
               EXTERNAL_AGENT_TOOL_NOT_OFFERED,
-              `Claude Agent SDK: the model requested ${JSON.stringify(event.name)} (call ${event.callId}), a tool it was not offered; the runtime refused it and the run goes on.`,
+              scrubber.scrub(
+                `Claude Agent SDK: the model requested ${JSON.stringify(event.name)} (call ${event.callId}), a tool it was not offered; the runtime refused it and the run goes on.`,
+              ),
             );
             event = {
               ...event,
@@ -1114,13 +1464,31 @@ export class ClaudeAgentSdkDriver {
           }
         }
       }
-    } catch (error) {
+    } catch (caught) {
       failed = true;
+      // The gated prompt's failure is the cause of whatever the stream did.
+      const error = transportError ?? caught;
       if (!startedEmitted) {
         yield startedEvent();
       }
-      if (error instanceof ExternalAgentPolicyError) {
+      if (error instanceof SessionStoreUnavailableError) {
+        yield {
+          type: "error",
+          message: error.message,
+          code: CLAUDE_SESSION_STORE_UNAVAILABLE,
+          recoverable: false,
+          timestamp: Date.now(),
+        };
+      } else if (error instanceof ExternalAgentPolicyError) {
         yield policyErrorEvent(error);
+      } else if (error instanceof McpServerUnavailableError) {
+        yield {
+          type: "error",
+          message: error.message,
+          code: EXTERNAL_AGENT_MCP_SERVER_UNAVAILABLE,
+          recoverable: true,
+          timestamp: Date.now(),
+        };
       } else {
         const { message, missingExecutable } = this.describeError(
           error,
@@ -1154,10 +1522,33 @@ export class ClaudeAgentSdkDriver {
       }
       // After the subprocess is stopped, so nothing still writes there.
       runTemp?.dispose();
+      if (spill) {
+        // The end-of-run check, still after the teardown: a folder in the
+        // reserved file's place may hold a saved tool result. Scrub it and
+        // keep it for the host; release() leaves anything but our file.
+        const state = spill.inspect();
+        spillEnd = {
+          state,
+          ...(state === "folder"
+            ? { scrubbed: spill.scrubLeftover((text) => scrubber.scrub(text)) }
+            : {}),
+        };
+        spill.release();
+      }
     }
 
     if (!startedEmitted) {
       yield startedEvent();
+    }
+    if (spill && spillEnd && spillEnd.state !== "reserved") {
+      if (spillEnd.state === "folder" || !failed) {
+        failed = true;
+        yield policyErrorEvent(
+          spillEnd.state === "folder"
+            ? spillFolderError(spill.path, spillEnd.scrubbed)
+            : spillLostError(),
+        );
+      }
     }
     if (!completed && !failed && backgroundTasks.pending().length > 0) {
       // The stream ended without a result while tasks still ran.
@@ -1175,6 +1566,33 @@ export class ClaudeAgentSdkDriver {
         timestamp: Date.now(),
       };
     }
+  }
+
+  /**
+   * The store for one run: a configured store as is, or the product of a
+   * configured factory (built once per request).
+   *
+   * @throws `SessionStoreUnavailableError` when the factory throws.
+   */
+  private resolveSessionStore(
+    request: ExternalAgentRunRequest,
+  ): SessionStore | undefined {
+    const configured = this.#sessionStore;
+    if (typeof configured !== "function") {
+      return configured;
+    }
+    const cached = this.#resolvedStores.get(request);
+    if (cached) {
+      return cached;
+    }
+    let store: SessionStore;
+    try {
+      store = configured({ context: request.context });
+    } catch (error) {
+      throw new SessionStoreUnavailableError(error);
+    }
+    this.#resolvedStores.set(request, store);
+    return store;
   }
 
   /**
@@ -1210,7 +1628,9 @@ export class ClaudeAgentSdkDriver {
         permission.allowDangerouslySkipPermissions,
       resume,
       forkSession: this.#forkSession,
-      sessionStore: this.#sessionStore,
+      // A declared secret keeps the transcript off disk.
+      persistSession: hasMcpSecrets(this.#mcpServers) ? false : undefined,
+      sessionStore: this.resolveSessionStore(request),
       sessionStoreFlush: this.#sessionStoreFlush,
       loadTimeoutMs: this.#sessionStoreLoadTimeoutMs,
       canUseTool: this.buildCanUseTool(request),
@@ -1523,7 +1943,218 @@ export class ClaudeAgentSdkDriver {
 
     Object.assign(env, credentialEnv(request));
     applyBackgroundTaskSetting(env, this.#allowBackgroundTasks);
+    if (hasMcpSecrets(this.#mcpServers)) {
+      // An MCP result too large to inline stays inline (truncated) instead of
+      // going to a file under the session folder; see claude-spill-guard.ts.
+      env.ENABLE_MCP_LARGE_OUTPUT_FILES = "0";
+    }
     return env;
+  }
+
+  /**
+   * Run-time checks of the declared MCP servers, in order: network (an http
+   * or sse server off loopback needs `allowNetwork: true`), stdio command,
+   * arguments and env names, then whether the run can keep their secrets
+   * from the agent. Reads no secret.
+   *
+   * @returns The real command and arguments of each stdio server, by name.
+   */
+  private checkMcpServersForRun(
+    request: ExternalAgentRunRequest,
+  ): Map<string, { command: string; args: string[] }> {
+    const stdio = new Map<string, { command: string; args: string[] }>();
+    if (this.#mcpServers.length === 0) return stdio;
+    checkMcpServerNetwork(this.#mcpServers, request.permissions);
+    const roots = [
+      ...agentWritableRoots(request),
+      ...sandboxTempRoots(this.#env),
+      ...worldWritableTempRoots(),
+    ];
+    for (const server of this.#mcpServers) {
+      if (server.type !== "stdio") continue;
+      stdio.set(
+        server.name,
+        checkStdioServerForRun(
+          {
+            name: server.name,
+            command: server.command,
+            ...(server.args ? { args: server.args } : {}),
+            envNames: Object.keys(server.env ?? {}),
+          },
+          roots,
+        ),
+      );
+    }
+    const plan = this.isolationPlan(request);
+    checkMcpSecretsEnforceable(this.#mcpServers, {
+      platform: mcpSecretHost.platform(),
+      shellOffered: plan.shellOffered,
+      // Only the no-network sandbox profile was measured to hide process
+      // environments (macOS); a confined profile built on it keeps it.
+      shellSandboxed: plan.networkSandbox === "enforced",
+      fileReadOffered: plan.fileReadOffered,
+      policy: request.permissions,
+      workingDirectory: request.workingDirectory ?? process.cwd(),
+      readPtraceScope: mcpSecretHost.readPtraceScope,
+      childEnv: this.buildEnv(request),
+    });
+    return stdio;
+  }
+
+  /**
+   * Reads the declared servers' secrets and builds their runtime configs.
+   * Every config gets `alwaysLoad: true`: an isolated run offers no tool
+   * search, so a deferred MCP tool could not be reached.
+   */
+  /**
+   * Reserves the run's session path so Claude Code cannot save a large tool
+   * result, which may echo a secret, to disk (see `claude-spill-guard.ts`).
+   *
+   * @throws ExternalAgentPolicyError `EXTERNAL_AGENT_MCP_SECRET_UNENFORCEABLE`
+   * when the config dir is unknown or the path cannot be reserved.
+   */
+  private reserveSpillPath(
+    request: ExternalAgentRunRequest,
+    options: ClaudeAgentSdkOptions,
+    sessionId: string,
+  ): ClaudeSpillReservation {
+    const configDir = claudeConfigDir(options.env ?? {});
+    const refuse = (reason: string) =>
+      new ExternalAgentPolicyError(
+        EXTERNAL_AGENT_MCP_SECRET_UNENFORCEABLE,
+        `ClaudeAgentSdkDriver: ${reason}. Claude Code saves a large tool result to a file under the session folder, and a server that echoes its secret would leave it there; the run cannot hold an MCP server with a { resolve } or { env } secret without blocking that folder. Set CLAUDE_CONFIG_DIR or HOME to an absolute path and use a working directory with a shorter path.`,
+      );
+    if (configDir === undefined) {
+      throw refuse("the Claude config dir is not an absolute path");
+    }
+    try {
+      return reserveClaudeSpillPath({
+        configDir,
+        workingDirectory: request.workingDirectory ?? process.cwd(),
+        sessionId,
+      });
+    } catch (error) {
+      throw refuse(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  private async resolveDeclaredMcpServers(
+    stdio: Map<string, { command: string; args: string[] }>,
+    signal: AbortSignal,
+    scrubber: SecretScrubber,
+    childEnv: Readonly<Record<string, string | undefined>> = {},
+  ): Promise<Record<string, Record<string, unknown>>> {
+    const resolved = await resolveMcpSecrets(this.#mcpServers, {
+      env: this.#env,
+      childEnv,
+      signal,
+      scrubber,
+    });
+    const byName = new Map(resolved.map((server) => [server.name, server]));
+    const out: Record<string, Record<string, unknown>> = {};
+    for (const server of this.#mcpServers) {
+      const values = byName.get(server.name);
+      if (server.type === "stdio") {
+        const real = stdio.get(server.name);
+        out[server.name] = removeUndefined({
+          type: "stdio",
+          command: real?.command,
+          args: real?.args,
+          env: values?.env,
+          timeout: server.timeoutMs,
+          alwaysLoad: true,
+        });
+      } else {
+        out[server.name] = removeUndefined({
+          type: server.type,
+          url: server.url,
+          headers: values?.headers,
+          timeout: server.timeoutMs,
+          alwaysLoad: true,
+        });
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Delivers the declared servers through `setMcpServers`, then waits for
+   * the required ones to connect, polling `mcpServerStatus` every 250 ms up
+   * to `mcpConnectTimeoutMs`.
+   *
+   * @throws McpServerUnavailableError for a required server that reported an
+   * error or did not connect in time.
+   */
+  private async deliverMcpServers(
+    query: ClaudeAgentSdkQuery,
+    payload: Record<string, unknown>,
+    scrubber: SecretScrubber,
+  ): Promise<void> {
+    if (typeof query.setMcpServers !== "function") {
+      throw new ExternalAgentPolicyError(
+        EXTERNAL_AGENT_DEPENDENCY_MISSING,
+        "The installed @anthropic-ai/claude-agent-sdk has no Query.setMcpServers, which mcpServers needs. Update the SDK.",
+      );
+    }
+    const declared = new Set(this.#mcpServers.map((server) => server.name));
+    const required = this.#requiredMcpServers.filter((name) =>
+      declared.has(name),
+    );
+    const result = await query.setMcpServers(payload);
+    for (const [name, error] of Object.entries(result?.errors ?? {})) {
+      if (!declared.has(name)) continue;
+      const text = scrubber.scrub(String(error)).slice(0, 500);
+      if (required.includes(name)) {
+        throw new McpServerUnavailableError(
+          `Required MCP server ${name} could not be added: ${text}`,
+        );
+      }
+      warn(
+        EXTERNAL_AGENT_MCP_SERVER_UNAVAILABLE,
+        `Claude Agent SDK: MCP server ${name} could not be added: ${text}`,
+      );
+    }
+    if (required.length === 0) return;
+    const deadline = Date.now() + this.#mcpConnectTimeoutMs;
+    for (;;) {
+      const statuses = new Map<string, { status?: string; error?: string }>();
+      for (const item of (await query.mcpServerStatus?.()) ?? []) {
+        const name = stringValue(item.name);
+        if (name !== undefined) {
+          statuses.set(name, {
+            status: stringValue(item.status),
+            error: stringValue(item.error),
+          });
+        }
+      }
+      const pending: string[] = [];
+      for (const name of required) {
+        const entry = statuses.get(name);
+        if (entry?.status === "connected") continue;
+        if (
+          entry?.status === "failed" ||
+          entry?.status === "needs-auth" ||
+          entry?.status === "disabled"
+        ) {
+          const detail = entry.error
+            ? `: ${scrubber.scrub(entry.error).slice(0, 500)}`
+            : "";
+          throw new McpServerUnavailableError(
+            `Required MCP server ${name} is ${entry.status}${detail}`,
+          );
+        }
+        pending.push(name);
+      }
+      if (pending.length === 0) return;
+      if (Date.now() >= deadline) {
+        throw new McpServerUnavailableError(
+          `Required MCP server ${pending.join(", ")} did not connect within ${this.#mcpConnectTimeoutMs} ms (mcpConnectTimeoutMs).`,
+        );
+      }
+      await new Promise((resolveWait) =>
+        setTimeout(resolveWait, MCP_STATUS_POLL_MS),
+      );
+    }
   }
 
   private assertRequiredMcpServersConnected(
@@ -1625,12 +2256,15 @@ export class ClaudeAgentSdkDriver {
    * @param resumed - Whether the run resumed or forked an existing SDK
    * session; without a baseline its usage is then the session total, marked
    * `scope: "session"`.
+   * @param mcp - Known MCP server names and call start times, for the
+   * `metadata.mcp` and `durationMs` of MCP tool events.
    * @returns Zero or more events.
    */
   normalizeMessage(
     message: ClaudeAgentSdkMessage,
     toolNames: Map<string, string> = new Map(),
     resumed = false,
+    mcp?: ToolEventMcpContext,
   ): ExternalAgentEvent[] {
     const record = asRecord(message);
     const type = stringValue(record.type);
@@ -1651,7 +2285,7 @@ export class ClaudeAgentSdkDriver {
         ...(text
           ? [{ type: "output" as const, content: text, timestamp: Date.now() }]
           : []),
-        ...toolUseEvents(content, toolNames, record.parent_tool_use_id),
+        ...toolUseEvents(content, toolNames, record.parent_tool_use_id, mcp),
       ];
     }
 
@@ -1660,6 +2294,7 @@ export class ClaudeAgentSdkDriver {
         asRecord(record.message).content,
         toolNames,
         record.parent_tool_use_id,
+        mcp,
       );
     }
 
@@ -2056,6 +2691,41 @@ export class ClaudeAgentSdkDriver {
   }
 }
 
+/** Why the spill guard denies a call from a session it did not reserve. */
+const SPILL_SESSION_MISMATCH =
+  "The tool call comes from a session other than the one the bridge reserved; a large result could be saved to disk.";
+
+/** Why the spill guard denies a call once the reserved file is gone. */
+const SPILL_RESERVATION_LOST =
+  "The session path the bridge reserved was removed or replaced; a large result could be saved to disk.";
+
+/** The run ends when the reserved file is removed or replaced. */
+function spillLostError(): ExternalAgentPolicyError {
+  return new ExternalAgentPolicyError(
+    EXTERNAL_AGENT_MCP_SECRET_UNENFORCEABLE,
+    "ClaudeAgentSdkDriver: the session path the bridge reserved was removed or replaced during the run, so a large tool result, which may echo an MCP secret, could be saved to disk. The run was stopped. Do not let the agent write Claude Code's config dir.",
+  );
+}
+
+/** Reported at the end of a run when a folder took the reserved file's place. */
+function spillFolderError(
+  path: string,
+  scrubbed: { files: number; rewritten: number } = { files: 0, rewritten: 0 },
+): ExternalAgentPolicyError {
+  return new ExternalAgentPolicyError(
+    EXTERNAL_AGENT_MCP_SECRET_UNENFORCEABLE,
+    `ClaudeAgentSdkDriver: a folder took the place of the session path the bridge reserved (${path}), so Claude Code may have saved tool results there. Declared secrets were redacted in ${scrubbed.rewritten} of ${scrubbed.files} files under it; the folder is kept. Inspect and delete it, and do not let the agent write Claude Code's config dir.`,
+  );
+}
+
+/** The run ends when the runtime does not use the reserved session. */
+function spillSessionError(): ExternalAgentPolicyError {
+  return new ExternalAgentPolicyError(
+    EXTERNAL_AGENT_MCP_SECRET_UNENFORCEABLE,
+    "ClaudeAgentSdkDriver: the runtime did not use the session the bridge reserved, so a large tool result, which may echo an MCP secret, could be saved to disk. The run was stopped. Use a Claude Code version that honors sessionId.",
+  );
+}
+
 /** What {@link withPreToolUseGuard} decides for each tool call. */
 interface PreToolUseGuard {
   /**
@@ -2072,6 +2742,163 @@ interface PreToolUseGuard {
   unnamedReason: string;
   /** Called for each denied call, with `""` for one that names no tool. */
   onDenied?: (toolName: string) => void;
+}
+
+/** How often the first message polls `mcpServerStatus` for required servers. */
+const MCP_STATUS_POLL_MS = 250;
+
+/** Default and bounds of `mcpConnectTimeoutMs`. */
+const MCP_CONNECT_TIMEOUT_MS = { default: 10_000, min: 1000, max: 120_000 };
+
+function checkMcpConnectTimeout(value: unknown): number {
+  if (value === undefined) return MCP_CONNECT_TIMEOUT_MS.default;
+  if (
+    typeof value !== "number" ||
+    !Number.isSafeInteger(value) ||
+    value < MCP_CONNECT_TIMEOUT_MS.min ||
+    value > MCP_CONNECT_TIMEOUT_MS.max
+  ) {
+    throw new ExternalAgentPolicyError(
+      EXTERNAL_AGENT_MCP_SERVER_INVALID,
+      `ClaudeAgentSdkDriver: mcpConnectTimeoutMs must be an integer from ${MCP_CONNECT_TIMEOUT_MS.min} to ${MCP_CONNECT_TIMEOUT_MS.max}.`,
+    );
+  }
+  return value;
+}
+
+/**
+ * A required declared MCP server did not connect: reported as the
+ * recoverable `EXTERNAL_AGENT_MCP_SERVER_UNAVAILABLE` error.
+ */
+class McpServerUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "McpServerUnavailableError";
+  }
+}
+
+/**
+ * The prompt as a single-message iterable whose first read waits for
+ * `ready`: the declared MCP servers are delivered before the user message.
+ * When `ready` gives `false` the iterable ends without the message.
+ */
+/**
+ * World-writable temp directories that exist on this host (`/var/tmp`,
+ * `/dev/shm`), canonical. A stdio server's command or path arguments there
+ * could be replaced by any local user, the agent included.
+ */
+function worldWritableTempRoots(): string[] {
+  return ["/var/tmp", "/dev/shm"]
+    .map((path) => canonicalPath(path, "/"))
+    .filter((path): path is string => path !== undefined);
+}
+
+function gatedPrompt(
+  prompt: string | AsyncIterable<unknown>,
+  ready: () => Promise<boolean>,
+): AsyncIterable<unknown> {
+  return (async function* () {
+    if (!(await ready())) return;
+    if (typeof prompt === "string") {
+      const message: SDKUserMessage = {
+        type: "user",
+        parent_tool_use_id: null,
+        message: { role: "user", content: [{ type: "text", text: prompt }] },
+      };
+      yield message;
+      return;
+    }
+    yield* prompt;
+  })();
+}
+
+/** What replaces an MCP tool result whose shape the scrubber does not know. */
+const MCP_OUTPUT_WITHHELD = "[output withheld: unrecognized shape]";
+
+/**
+ * A declared server's tool result with the run's secrets scrubbed. Known
+ * shapes: a string, an array of content blocks (objects with a string
+ * `type`), or an object with a `content` array.
+ *
+ * @returns The output to give the model, and whether it differs.
+ */
+function scrubMcpToolOutput(
+  output: unknown,
+  scrubber: SecretScrubber,
+): { value: unknown; changed: boolean } {
+  const isBlocks = (value: unknown): boolean =>
+    Array.isArray(value) &&
+    value.every(
+      (item) =>
+        typeof item === "object" &&
+        item !== null &&
+        typeof (item as Record<string, unknown>).type === "string",
+    );
+  const known =
+    typeof output === "string" ||
+    isBlocks(output) ||
+    (typeof output === "object" &&
+      output !== null &&
+      !Array.isArray(output) &&
+      isBlocks((output as Record<string, unknown>).content));
+  if (!known) {
+    return { value: MCP_OUTPUT_WITHHELD, changed: true };
+  }
+  return scrubber.scrubDeep(output);
+}
+
+/**
+ * Adds a `PostToolUse` hook that scrubs the run's secrets from the
+ * successful results of declared servers' tools before the model sees them.
+ * It returns a rewrite only when the output changed, so it never replaces
+ * another hook's rewrite with the same text. An error result does not reach
+ * `PostToolUse` and is not rewritten.
+ */
+function withMcpOutputScrubHook(
+  hooks: ClaudeAgentSdkOptions["hooks"],
+  servers: readonly string[],
+  scrubber: SecretScrubber,
+): NonNullable<ClaudeAgentSdkOptions["hooks"]> {
+  const prefixes = servers.map((server) => `mcp__${server}__`);
+  const matcher: ClaudeAgentSdkHookMatcher = {
+    hooks: [
+      async (input) => {
+        const toolName = stringValue(input.tool_name);
+        if (
+          toolName === undefined ||
+          !prefixes.some((prefix) => toolName.startsWith(prefix))
+        ) {
+          return {};
+        }
+        const { value, changed } = scrubMcpToolOutput(
+          input.tool_response,
+          scrubber,
+        );
+        if (!changed) return {};
+        return {
+          hookSpecificOutput: {
+            hookEventName: "PostToolUse",
+            updatedMCPToolOutput: value,
+            updatedToolOutput: value,
+          },
+        };
+      },
+    ],
+  };
+  return {
+    ...(hooks ?? {}),
+    PostToolUse: [...(hooks?.PostToolUse ?? []), matcher],
+  };
+}
+
+/** The MCP server names a `system/init` message lists; empty otherwise. */
+function claudeInitMcpServerNames(message: unknown): string[] {
+  const record = asRecord(message);
+  if (record.type !== "system" || record.subtype !== "init") return [];
+  if (!Array.isArray(record.mcp_servers)) return [];
+  return record.mcp_servers
+    .map((server) => stringValue(asRecord(server).name))
+    .filter((name): name is string => name !== undefined);
 }
 
 /**
@@ -2138,16 +2965,54 @@ function withIsolationHook(
   hooks: ClaudeAgentSdkOptions["hooks"],
   expectation: ClaudeIsolationExpectation,
   onBlocked: (toolName: string) => void,
+  mcp: DeclaredMcpCallContext,
 ): NonNullable<ClaudeAgentSdkOptions["hooks"]> {
   return withPreToolUseGuard(hooks, {
     unnamedReason:
       "A tool call with no tool name is outside this agent's isolated tool set.",
     deny: (toolName) =>
       isExpectedClaudeTool(toolName, expectation)
-        ? undefined
+        ? declaredMcpCallDenial(toolName, expectation, mcp)
         : `${toolName} is outside this agent's isolated tool set.`,
-    onDenied: onBlocked,
+    // A declared server's tool it does not list exists by design: the call
+    // is denied, the run goes on.
+    onDenied: (toolName) => {
+      if (!isExpectedClaudeTool(toolName, expectation)) onBlocked(toolName);
+    },
   });
+}
+
+/** The policy and declared servers a call to a declared MCP tool is checked against. */
+interface DeclaredMcpCallContext {
+  readonly policy: ExternalAgentPermissionPolicy | undefined;
+  readonly declared: readonly ExternalAgentMcpServerGrant[];
+}
+
+/**
+ * Why a call to a tool of a declared MCP server is denied, or `undefined`:
+ * a tool its server does not list, and under `read-only` any tool but a
+ * listed one of a `readOnly` server.
+ */
+function declaredMcpCallDenial(
+  toolName: string,
+  expectation: ClaudeIsolationExpectation | undefined,
+  mcp: DeclaredMcpCallContext,
+): string | undefined {
+  const declared = declaredMcpTool(toolName, mcp.declared);
+  if (declared === undefined) return undefined;
+  if (
+    !declared.listed ||
+    (expectation !== undefined && !isListedClaudeMcpTool(toolName, expectation))
+  ) {
+    return `${toolName} is not in the tool list of MCP server ${declared.server.name} for this agent.`;
+  }
+  if (
+    mcp.policy?.mode === "read-only" &&
+    !readOnlyMcpToolAllowed(mcp.policy, toolName, mcp.declared)
+  ) {
+    return `${toolName} may write: under a read-only policy only listed tools of a readOnly MCP server run.`;
+  }
+  return undefined;
 }
 
 /**
@@ -2160,15 +3025,21 @@ function withIsolationHook(
 function withForeignMcpDenyHook(
   hooks: ClaudeAgentSdkOptions["hooks"],
   bridgeTools: readonly string[] | undefined,
+  mcp: DeclaredMcpCallContext,
 ): NonNullable<ClaudeAgentSdkOptions["hooks"]> {
   const allowed = new Set(bridgeTools ?? []);
   return withPreToolUseGuard(hooks, {
     unnamedReason:
       "A tool call with no tool name cannot be checked, so it may be an MCP tool outside the bridge, which this agent cannot use.",
-    deny: (toolName) =>
-      !toolName.startsWith("mcp__") || allowed.has(toolName)
-        ? undefined
-        : `${toolName} is an MCP tool outside the bridge; this agent cannot use it (read-only, or the network is off).`,
+    deny: (toolName) => {
+      if (!toolName.startsWith("mcp__") || allowed.has(toolName)) {
+        return undefined;
+      }
+      if (declaredMcpTool(toolName, mcp.declared) !== undefined) {
+        return declaredMcpCallDenial(toolName, undefined, mcp);
+      }
+      return `${toolName} is an MCP tool outside the bridge and the declared servers; this agent cannot use it (read-only, or the network is off).`;
+    },
   });
 }
 
@@ -2310,6 +3181,12 @@ function denyOutsideIsolation(
 ): ClaudeAgentSdkCanUseTool {
   return (toolName, input, extra) => {
     if (isExpectedClaudeTool(toolName, expectation)) {
+      if (!isListedClaudeMcpTool(toolName, expectation)) {
+        return Promise.resolve({
+          behavior: "deny",
+          message: `${toolName} is not in its MCP server's tool list for this agent.`,
+        });
+      }
       return canUseTool(toolName, input, extra);
     }
     onDenied(toolName);
@@ -2626,6 +3503,7 @@ export function toolUseEvents(
   content: unknown,
   toolNames: Map<string, string>,
   parentToolUseId: unknown,
+  mcp?: ToolEventMcpContext,
 ): ExternalAgentEvent[] {
   if (!Array.isArray(content)) return [];
   const events: ExternalAgentEvent[] = [];
@@ -2637,12 +3515,16 @@ export function toolUseEvents(
     if (!name) continue;
     if (callId) toolNames.set(callId, name);
     if (name === BRIDGE_SUBAGENT_TOOL) continue;
+    const metadata = toolEventMetadata(name, parentToolUseId, mcp);
+    if (callId && metadata.mcp !== undefined) {
+      mcp?.started.set(callId, Date.now());
+    }
     events.push({
       type: "tool_call",
       name,
       input: block.input,
       ...(callId ? { callId } : {}),
-      metadata: toolEventMetadata(name, parentToolUseId),
+      metadata,
       timestamp: Date.now(),
     });
   }
@@ -2662,6 +3544,7 @@ export function toolResultEvents(
   content: unknown,
   toolNames: Map<string, string>,
   parentToolUseId: unknown,
+  mcp?: ToolEventMcpContext,
 ): ExternalAgentEvent[] {
   if (!Array.isArray(content)) return [];
   const events: ExternalAgentEvent[] = [];
@@ -2676,13 +3559,21 @@ export function toolResultEvents(
       block.is_error === true
         ? (extractText(block.content) ?? "Tool call failed")
         : undefined;
+    const metadata = toolEventMetadata(name, parentToolUseId, mcp);
+    const started = callId ? mcp?.started.get(callId) : undefined;
+    if (started !== undefined && callId) {
+      mcp?.started.delete(callId);
+      if (metadata.mcp !== undefined) {
+        metadata.durationMs = Math.max(0, Date.now() - started);
+      }
+    }
     events.push({
       type: "tool_result",
       name,
       result: block.content,
       callId,
       ...(error ? { error } : {}),
-      metadata: toolEventMetadata(name, parentToolUseId),
+      metadata,
       timestamp: Date.now(),
     });
   }
@@ -2692,12 +3583,17 @@ export function toolResultEvents(
 function toolEventMetadata(
   name: string,
   parentToolUseId: unknown,
+  mcp?: ToolEventMcpContext,
 ): Record<string, unknown> {
   const parent = stringValue(parentToolUseId);
+  const server = name.startsWith(BRIDGE_TOOL_PREFIX)
+    ? undefined
+    : mcpToolServer(name, mcp?.servers);
   return {
     ...(name.startsWith(BRIDGE_TOOL_PREFIX)
       ? { builtin: false, adkTool: true }
       : { builtin: true }),
+    ...(server !== undefined ? { mcp: server } : {}),
     ...(parent ? { parentToolUseId: parent } : {}),
   };
 }
@@ -2738,6 +3634,56 @@ function noTurnEvent(sessionId: string | undefined): ExternalAgentEvent {
     recoverable: true,
     timestamp: Date.now(),
   };
+}
+
+/**
+ * The error of a run whose stream ended with no result message.
+ *
+ * @param sessionId - The SDK session the run was in, if known.
+ */
+function noResultEvent(sessionId: string | undefined): ExternalAgentEvent {
+  return {
+    type: "error",
+    message: `Claude Agent SDK: the stream ended without a result message${sessionId ? ` in session ${sessionId}` : ""}, so the run has no outcome. Claude Code may have exited early. A new run of the same input can work.`,
+    code: EXTERNAL_AGENT_NO_RESULT,
+    recoverable: true,
+    timestamp: Date.now(),
+  };
+}
+
+/**
+ * Known MCP server names of a run, and the start time of each MCP call by
+ * call id, for the `metadata.mcp` and `durationMs` of its tool events.
+ */
+export interface ToolEventMcpContext {
+  /** Server names: declared, required and those `system/init` listed. */
+  readonly servers: Set<string>;
+  /** Start time of each open MCP call, by call id. */
+  readonly started: Map<string, number>;
+}
+
+/**
+ * The server and tool of `mcp__<server>__<tool>`, matching the longest known
+ * server name; `undefined` for any other name or an unknown server.
+ */
+function mcpToolServer(
+  name: string,
+  servers: ReadonlySet<string> | undefined,
+): { server: string; tool: string } | undefined {
+  let best: string | undefined;
+  for (const server of servers ?? []) {
+    const prefix = `mcp__${server}__`;
+    if (
+      name.startsWith(prefix) &&
+      name.length > prefix.length &&
+      (best === undefined || server.length > best.length)
+    ) {
+      best = server;
+    }
+  }
+  return best === undefined
+    ? undefined
+    : { server: best, tool: name.slice(`mcp__${best}__`.length) };
 }
 
 function isSuccessResultWithText(message: ClaudeAgentSdkMessage): boolean {

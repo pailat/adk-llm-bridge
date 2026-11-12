@@ -187,13 +187,14 @@ function prepareDatabaseFile(path: string, label: string): void {
     if (link?.isSymbolicLink()) throw unsafe("the path is a symlink");
   }
   let fd: number;
+  let created = false;
   try {
     fd = openSync(
       path,
       constants.O_RDWR | constants.O_CREAT | constants.O_EXCL | noFollow,
       0o600,
     );
-    fchmodSync(fd, 0o600);
+    created = true;
   } catch (error) {
     if (errorCode(error) !== "EEXIST") throw wrapOpenError(error, unsafe);
     try {
@@ -203,6 +204,8 @@ function prepareDatabaseFile(path: string, label: string): void {
     }
   }
   try {
+    // Inside the guard that closes `fd`: a failure here must not leak it.
+    if (created) fchmodSync(fd, 0o600);
     const file = fstatSync(fd);
     if (!file.isFile()) {
       throw unsafe("it is not a regular file");

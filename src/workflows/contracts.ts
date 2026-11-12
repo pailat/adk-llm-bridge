@@ -68,6 +68,14 @@ export interface WorkflowStep {
    * `WORKFLOW_INDETERMINATE_STEP`.
    */
   resumePolicy?: WorkflowResumePolicy;
+  /**
+   * Accept a model response that stopped early (`MAX_TOKENS` or a content
+   * filter) as the step's output. Defaults to `false`: such a step fails with
+   * `WORKFLOW_STEP_INCOMPLETE`. A completed step reports the reason in
+   * {@link WorkflowStepResult.finishReason}. Does not change the step's
+   * identity, so a resume picks it up.
+   */
+  allowIncompleteOutput?: boolean;
   /** Free-form JSON-safe data attached to the step for observers. */
   metadata?: Record<string, unknown>;
 }
@@ -80,7 +88,8 @@ export interface WorkflowStep {
  * events, including events of nested workflow agents. Only the successful
  * attempt is counted: failed attempts that were retried, and failed steps,
  * report no usage. Values are summed as each runtime reports them, so any
- * double counting there carries into the totals. Cost is not computed.
+ * double counting there carries into the totals. `costUsd` sums the cost the
+ * providers reported; it is not computed from a price table.
  */
 export interface WorkflowStepUsage {
   /** Summed prompt tokens. */
@@ -96,6 +105,14 @@ export interface WorkflowStepUsage {
    * reported a cache write (and in results saved before it existed).
    */
   cacheCreationTokens?: number;
+  /**
+   * Summed cost in US dollars the providers reported for the step's model
+   * calls (AI Gateway and OpenRouter `usage.cost`; for a BYOK gateway
+   * call, the upstream or market cost the gateway reports, see
+   * `COST_METADATA_KEY`). Absent when no call reported one, and in results
+   * saved before it existed. An `ExternalAgent` step reports none here.
+   */
+  costUsd?: number;
   /** Function calls requested on non-partial events. */
   toolCalls: number;
   /**
@@ -177,6 +194,12 @@ export interface WorkflowStepResult {
    * strings, or the checkpoint is rejected as corrupt.
    */
   models?: WorkflowStepModels;
+  /**
+   * Finish reason of the response that produced `output`, such as `STOP`, or
+   * `MAX_TOKENS` for a step that opted into `allowIncompleteOutput`. Absent
+   * when the provider reported none, and in checkpoints saved before it existed.
+   */
+  finishReason?: string;
   /** Attempts used, including the successful one. */
   attempts: number;
   /** Epoch milliseconds when the step started. */
@@ -463,6 +486,7 @@ export type WorkflowErrorCode =
   | "WORKFLOW_SANDBOX_UNAVAILABLE"
   | "WORKFLOW_SCRIPT_INVALID"
   | "WORKFLOW_SOURCE_MISMATCH"
+  | "WORKFLOW_STEP_INCOMPLETE"
   | "WORKFLOW_STEP_INTERRUPTED"
   | "WORKFLOW_STEP_MISMATCH"
   | "WORKFLOW_UNKNOWN_AGENT"

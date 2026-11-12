@@ -31,6 +31,7 @@ export type {
 } from "./driver/claude-agent-sdk.js";
 export {
   CLAUDE_SESSION_STORE_MIRROR_ERROR,
+  CLAUDE_SESSION_STORE_UNAVAILABLE,
   ClaudeAgentSdkDriver,
   claudeSdkSessionStateKey,
   DEFAULT_CLAUDE_SDK_TOOLS,
@@ -43,6 +44,17 @@ export type {
 } from "./driver/claude-cli.js";
 export { ClaudeCliDriver } from "./driver/claude-cli.js";
 export { DEFAULT_CLAUDE_TOOLS } from "./driver/claude-isolation.js";
+export type {
+  ClaudeMcpHttpServer,
+  ClaudeMcpServer,
+  ClaudeMcpServerCommon,
+  ClaudeMcpStdioServer,
+  McpPublicValue,
+  McpSecretRef,
+  McpSecretResolver,
+  McpValue,
+} from "./driver/claude-mcp-servers.js";
+export { selectMcpServers } from "./driver/claude-mcp-servers.js";
 // Named by public signatures: `ClaudeAgentSdkDriver.buildPromptInput()`
 // returns `SDKUserMessage`s.
 export type {
@@ -64,6 +76,13 @@ export type { CodexMcpLister } from "./driver/codex-mcp.js";
 export type { CodexSdkDriverConfig } from "./driver/codex-sdk.js";
 export { CodexSdkDriver } from "./driver/codex-sdk.js";
 export type {
+  FxCliDriverConfig,
+  FxCliSpawn,
+  FxCliSpawnOptions,
+  FxCliSubprocess,
+} from "./driver/fx-cli.js";
+export { FxCliDriver } from "./driver/fx-cli.js";
+export type {
   GeminiCliDriverConfig,
   GeminiCliSpawn,
   GeminiCliSpawnOptions,
@@ -79,12 +98,22 @@ export {
   EXTERNAL_AGENT_DEPENDENCY_MISSING,
   EXTERNAL_AGENT_INTERPRETER_UNSAFE,
   EXTERNAL_AGENT_ISOLATION_VIOLATED,
+  EXTERNAL_AGENT_MCP_PROVIDER_UNKNOWN,
+  EXTERNAL_AGENT_MCP_SECRET_LITERAL,
+  EXTERNAL_AGENT_MCP_SECRET_UNENFORCEABLE,
+  EXTERNAL_AGENT_MCP_SECRET_UNRESOLVED,
+  EXTERNAL_AGENT_MCP_SERVER_INVALID,
+  EXTERNAL_AGENT_MCP_SERVER_NETWORK_REQUIRED,
+  EXTERNAL_AGENT_MCP_SERVER_UNAVAILABLE,
+  EXTERNAL_AGENT_MCP_STDIO_UNSAFE,
   EXTERNAL_AGENT_MISSING_BINARY,
   EXTERNAL_AGENT_MODEL_INVALID,
   EXTERNAL_AGENT_MODEL_OVERRIDE,
   EXTERNAL_AGENT_MODEL_REQUIRED,
   EXTERNAL_AGENT_NETWORK_UNENFORCEABLE,
+  EXTERNAL_AGENT_NO_RESULT,
   EXTERNAL_AGENT_NO_TURN,
+  EXTERNAL_AGENT_OPTION_UNKNOWN,
   EXTERNAL_AGENT_OPTION_UNSUPPORTED,
   EXTERNAL_AGENT_PATHS_UNENFORCEABLE,
   EXTERNAL_AGENT_READ_ONLY_TOOL_UNKNOWN,
@@ -121,12 +150,15 @@ export type { ExternalAgentConfig } from "./external-agent.js";
 export { ExternalAgent } from "./external-agent.js";
 export type {
   ExternalAgentDriver,
+  ExternalAgentMcpServerGrant,
   ExternalAgentRunRequest,
 } from "./external-agent-driver.js";
 export {
   PlaceholderExternalAgentDriver,
   resolveAbortSignal,
 } from "./external-agent-driver.js";
+export type { FxAgentConfig } from "./fx-agent.js";
+export { FX_AGENT_DEFINITION, FxAgent } from "./fx-agent.js";
 export type { GeminiCliAgentConfig } from "./gemini-cli-agent.js";
 export {
   GEMINI_CLI_AGENT_DEFINITION,
@@ -146,6 +178,7 @@ export type {
 } from "./permissions/schema.js";
 export { CLAUDE_PROVIDER } from "./provider/claude.js";
 export { CODEX_ENV_ALLOWLIST, CODEX_PROVIDER } from "./provider/codex.js";
+export { FX_ENV_ALLOWLIST, FX_PROVIDER } from "./provider/fx.js";
 export {
   GEMINI_CLI_ENV_ALLOWLIST,
   GEMINI_CLI_PROVIDER,
@@ -170,6 +203,7 @@ export {
   normalizeRecoverableErrorCode,
 } from "./runtime/error-classification.js";
 export type { AgentRuntimeSession } from "./runtime/runtime-session.js";
+export type { SessionStoreFactory } from "./session-store/adk-artifacts.js";
 export type {
   SessionKey,
   SessionStore,

@@ -1,6 +1,13 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import {
   mkdir,
   mkdtemp,
@@ -192,6 +199,56 @@ describe("directory lock", () => {
       expect(code).toMatch(/^(EEXIST|ENOTEMPTY)$/u);
     }
     expect(directoryLockTokenMatches(path, next.token)).toBe(true);
+  });
+
+  // An owner file that cannot be read is not proof the lock is gone or not
+  // ours: the live holder must hear about it instead of dropping the lock.
+  test.skipIf(process.getuid?.() === 0 || process.platform === "win32")(
+    "a release whose owner file is unreadable throws and keeps the lock",
+    async () => {
+      const path = await lockPath();
+      const owner = tryAcquireDirectoryLock(path);
+      if (!owner) throw new Error("lock not acquired");
+      const ownerFile = join(path, DIRECTORY_LOCK_OWNER_FILE);
+      chmodSync(ownerFile, 0o000);
+      try {
+        expect(() => directoryLockTokenMatches(path, owner.token)).toThrow(
+          expect.objectContaining({ code: "EACCES" }),
+        );
+        expect(() => releaseDirectoryLock(path, owner.token)).toThrow(
+          expect.objectContaining({ code: "EACCES" }),
+        );
+        expect(existsSync(path)).toBe(true);
+      } finally {
+        chmodSync(ownerFile, 0o600);
+      }
+      expect(releaseDirectoryLock(path, owner.token)).toBe(true);
+    },
+  );
+
+  test("a missing owner file or lock directory means the token does not own the lock", async () => {
+    const path = await lockPath();
+    const owner = tryAcquireDirectoryLock(path);
+    if (!owner) throw new Error("lock not acquired");
+    expect(directoryLockTokenMatches(path, owner.token)).toBe(true);
+
+    rmSync(join(path, DIRECTORY_LOCK_OWNER_FILE));
+    expect(directoryLockTokenMatches(path, owner.token)).toBe(false);
+    expect(releaseDirectoryLock(path, owner.token)).toBe(false);
+
+    const parent = await lockPath();
+    writeFileSync(parent, "not a directory");
+    expect(directoryLockTokenMatches(join(parent, "inner"), "token")).toBe(
+      false,
+    );
+  });
+
+  test("an owner file that is not a valid owner is not a match", async () => {
+    const path = await lockPath();
+    await plant(path, { token: "", pid: DEAD_PID });
+    expect(directoryLockTokenMatches(path, "")).toBe(false);
+    writeFileSync(join(path, DIRECTORY_LOCK_OWNER_FILE), "{not json");
+    expect(directoryLockTokenMatches(path, "any")).toBe(false);
   });
 
   test("never retires a live or unreadable owner", async () => {

@@ -10,7 +10,7 @@ import { FinishReason, type Part } from "@google/genai";
 import type OpenAI from "openai";
 import { PROVIDER_ERROR_NO_CHOICE } from "../core/provider-llm-error.js";
 import type { StreamAccumulator, StreamChunkResult } from "../types.js";
-import { withCacheCreation } from "./cache-usage.js";
+import { reportedCost, withCacheCreation, withCost } from "./cache-usage.js";
 import { contentFilteredError, modelVersionOf } from "./finish.js";
 import {
   type MalformedToolCall,
@@ -124,11 +124,14 @@ export function convertResponse(response: OpenAI.ChatCompletion): LlmResponse {
     ? buildUsageMetadata(response.usage)
     : undefined;
   // Namespaced key so downstream code can read per-token logprobs.
-  const customMetadata = withCacheCreation(
-    choice.logprobs?.content?.length
-      ? { logprobs: choice.logprobs }
-      : undefined,
-    cacheWriteTokens(response.usage),
+  const customMetadata = withCost(
+    withCacheCreation(
+      choice.logprobs?.content?.length
+        ? { logprobs: choice.logprobs }
+        : undefined,
+      cacheWriteTokens(response.usage),
+    ),
+    reportedCost(response.usage),
   );
 
   const modelVersion = modelVersionOf(response.model);
@@ -382,6 +385,10 @@ export function convertStreamChunk(
   if (chunk.usage) {
     acc.usage = buildUsageMetadata(chunk.usage);
     acc.cacheCreationTokens = cacheWriteTokens(chunk.usage);
+    const cost = reportedCost(chunk.usage);
+    acc.costUsd = cost.costUsd;
+    acc.costSource = cost.costSource;
+    acc.marketCostUsd = cost.marketCostUsd;
   }
   if (chunk.model) acc.model = chunk.model;
 
@@ -483,9 +490,13 @@ export function convertStreamChunk(
 
     const finishReason = mapOpenAIFinishReason(choice.finish_reason);
     const usageMetadata = acc.usage;
-    const customMetadata = withCacheCreation(
-      undefined,
-      acc.cacheCreationTokens,
+    const customMetadata = withCost(
+      withCacheCreation(undefined, acc.cacheCreationTokens),
+      {
+        costUsd: acc.costUsd,
+        costSource: acc.costSource,
+        marketCostUsd: acc.marketCostUsd,
+      },
     );
     const modelVersion = modelVersionOf(acc.model);
 
@@ -495,6 +506,9 @@ export function convertStreamChunk(
     acc.toolCalls.clear();
     acc.usage = undefined;
     acc.cacheCreationTokens = undefined;
+    acc.costUsd = undefined;
+    acc.costSource = undefined;
+    acc.marketCostUsd = undefined;
 
     if (malformed.length) {
       return {

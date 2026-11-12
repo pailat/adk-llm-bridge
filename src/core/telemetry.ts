@@ -20,7 +20,10 @@
 
 import type { LlmResponse } from "@google/adk";
 import { type Span, SpanStatusCode, trace } from "@opentelemetry/api";
-import { CACHE_CREATION_METADATA_KEY } from "../converters/cache-usage.js";
+import {
+  CACHE_CREATION_METADATA_KEY,
+  COST_METADATA_KEY,
+} from "../converters/cache-usage.js";
 import { httpStatusOf } from "./provider-llm-error.js";
 
 /**
@@ -88,6 +91,8 @@ export interface LlmSpanInfo {
   cacheReadTokens?: number;
   /** Prompt tokens written to the cache (`gen_ai.usage.cache_creation.input_tokens`). */
   cacheCreationTokens?: number;
+  /** Cost the provider reported for the call (`adk_llm_bridge.usage.cost_usd`). */
+  costUsd?: number;
 }
 
 /**
@@ -112,7 +117,9 @@ export function serverAddress(baseURL: string | undefined): {
  * Records the cache usage of a finished call on the active model-call span:
  * the cache-read tokens from `usageMetadata.cachedContentTokenCount` and the
  * cache-write tokens from `customMetadata.cacheCreationTokenCount`. Attributes
- * the provider did not report are skipped.
+ * the provider did not report are skipped. The cost the provider reported
+ * (`customMetadata.costUsd`) goes on the same span as
+ * `adk_llm_bridge.usage.cost_usd`.
  *
  * @param provider - Bridge provider id
  * @param response - The converted response of the call
@@ -123,9 +130,17 @@ export function annotateCacheUsage(
 ): void {
   const read = response.usageMetadata?.cachedContentTokenCount;
   const written = response.customMetadata?.[CACHE_CREATION_METADATA_KEY];
-  if (read === undefined && typeof written !== "number") return;
+  const cost = response.customMetadata?.[COST_METADATA_KEY];
+  if (
+    read === undefined &&
+    typeof written !== "number" &&
+    typeof cost !== "number"
+  ) {
+    return;
+  }
   annotateLlmSpan({
     provider,
+    ...(typeof cost === "number" ? { costUsd: cost } : {}),
     ...(read !== undefined ? { cacheReadTokens: read } : {}),
     ...(typeof written === "number" ? { cacheCreationTokens: written } : {}),
   });
@@ -159,6 +174,9 @@ export function annotateLlmSpan(
   if (info.cacheCreationTokens !== undefined) {
     attributes["gen_ai.usage.cache_creation.input_tokens"] =
       info.cacheCreationTokens;
+  }
+  if (info.costUsd !== undefined) {
+    attributes["adk_llm_bridge.usage.cost_usd"] = info.costUsd;
   }
   if (address) attributes["server.address"] = address;
   if (port !== undefined && Number.isFinite(port)) {
