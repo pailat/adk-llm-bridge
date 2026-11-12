@@ -16,6 +16,7 @@ import { FX_PROVIDER } from "../provider/fx.js";
 import type { AgentRuntimeCapabilities } from "../runtime/capabilities.js";
 import { classifyRecoverable } from "../runtime/error-classification.js";
 import {
+  describeFxSessionId,
   type FxSessionStore,
   type FxSessionStoreFactory,
   fxSessionDirectory,
@@ -388,7 +389,8 @@ export interface FxCliDriverConfig {
   /**
    * fx session id to resume on every run, before `request.runtimeSession.id`
    * and the id saved in ADK session state. A plain token (1 to 128 letters,
-   * digits, `_` or `-`, not starting with `-`). Needs `persistSession`.
+   * digits, `_` or `-`, except the bare tokens `-` and `--`). Needs
+   * `persistSession`.
    *
    * @defaultValue unset
    */
@@ -661,7 +663,7 @@ export class FxCliDriver extends SubprocessJsonlDriver {
     if (config.resumeSessionId !== undefined) {
       if (!isFxSessionId(config.resumeSessionId)) {
         throw unsupported(
-          "FxCliDriver: resumeSessionId must be an fx session id: 1 to 128 letters, digits, _ or -, not starting with -.",
+          `FxCliDriver: resumeSessionId must be an fx session id: 1 to 128 letters, digits, _ or -, except bare - and -- (${describeFxSessionId(config.resumeSessionId)}).`,
         );
       }
     }
@@ -861,7 +863,7 @@ export class FxCliDriver extends SubprocessJsonlDriver {
     const resumeId = this.#resumeId(request);
     if (resumeId !== undefined && !isFxSessionId(resumeId)) {
       throw unsupported(
-        "FxCliDriver: the fx session id to resume is not a plain token (1 to 128 letters, digits, _ or -, not starting with -), so it is not passed to fx. Check resumeSessionId, runtimeSession.id and the id saved in session state.",
+        `FxCliDriver: the fx session id to resume is not a plain token (1 to 128 letters, digits, _ or -, except bare - and --; ${describeFxSessionId(resumeId)}), so it is not passed to fx. Check resumeSessionId, runtimeSession.id and the id saved in session state.`,
       );
     }
     const addDirs = this.#allowUnenforcedPaths
@@ -937,7 +939,7 @@ export class FxCliDriver extends SubprocessJsonlDriver {
         {
           type: "error",
           message: cut(
-            `fx reported a session id that is not a plain token, so the session was not remembered${store === undefined ? "" : " and was not copied to the session store"}: the next turn starts a new fx session. The run goes on.`,
+            `fx reported a session id that is not a plain token (${describeFxSessionId(id)}), so the session was not remembered${store === undefined ? "" : " and was not copied to the session store"}: the next turn starts a new fx session. The run goes on.`,
           ),
           code: "FX_SESSION_STORE_ERROR",
           recoverable: true,
@@ -979,7 +981,7 @@ export class FxCliDriver extends SubprocessJsonlDriver {
       const resumeId = this.#resumeId(request);
       if (resumeId !== undefined && !isFxSessionId(resumeId)) {
         return unsupported(
-          "FxCliDriver: the fx session id to resume is not a plain token (1 to 128 letters, digits, _ or -, not starting with -), so it is not passed to fx. Check resumeSessionId, runtimeSession.id and the id saved in session state.",
+          `FxCliDriver: the fx session id to resume is not a plain token (1 to 128 letters, digits, _ or -, except bare - and --; ${describeFxSessionId(resumeId)}), so it is not passed to fx. Check resumeSessionId, runtimeSession.id and the id saved in session state.`,
         );
       }
     }

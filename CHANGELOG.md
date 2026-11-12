@@ -1574,6 +1574,8 @@ from the 0.6.0 tag.
 
 ### Fixed
 
+- `FxCliDriver` remembers and resumes session ids that start with `-`, and describes rejected ids without exposing them.
+
 - `ClaudeCliDriver` remembers earlier turns: each turn's prompt now starts with a transcript of the earlier ADK turns (thought parts left out, the current turn last), the same one the Codex drivers send on a fresh thread. Before, a second turn saw only the instruction and its own message.
 - **A checkpoint save that fails after its rename says so.** The
   `checkpoint_write_failed` raised when the directory flush fails after the

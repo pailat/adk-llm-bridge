@@ -111,6 +111,38 @@ describe("second turn", () => {
     expect(args).not.toContain("--no-save");
   });
 
+  for (const id of ["-x", "--yolo"]) {
+    test(`stores and safely resumes ${id}`, async () => {
+      const fake = recordingSpawn([withSession(id), withSession(id)]);
+      const driver = new FxCliDriver(baseConfig({ spawn: fake.spawn }));
+      const first = await collect(driver.run(request()));
+      expect(stateDeltas(first)).toEqual([{ [STATE_KEY]: id }]);
+      await collect(driver.run(request(stateDeltas(first)[0])));
+      expect(fake.calls[1]?.args).toEqual([
+        "ask",
+        "--json",
+        "--no-color",
+        "--resume-id",
+        id,
+        "--model",
+        "anthropic/claude-haiku-5.5",
+      ]);
+    });
+  }
+
+  test("describes a rejected resume id without exposing it", async () => {
+    const id = "bad secret";
+    const events = await collect(
+      new FxCliDriver(baseConfig({ spawn: forbiddenSpawn().spawn })).run(
+        request({ [STATE_KEY]: id }),
+      ),
+    );
+    const message = errorsOf(events)[0]?.message ?? "";
+    expect(message).toContain("length 10");
+    expect(message).toContain("first character: letter");
+    expect(message).not.toContain(id);
+  });
+
   test("does not write the id again when it is already stored", async () => {
     const fake = recordingSpawn([withSession()]);
     const events = await collect(
@@ -157,8 +189,29 @@ describe("second turn", () => {
     );
   });
 
+  for (const id of ["-", "--"]) {
+    test(`refuses bare hyphen id ${id} before spawning`, async () => {
+      const fake = forbiddenSpawn();
+      const events = await collect(
+        new FxCliDriver(baseConfig({ spawn: fake.spawn })).run(
+          request({ [STATE_KEY]: id }),
+        ),
+      );
+      expect(errorsOf(events)[0]?.code).toBe(
+        "EXTERNAL_AGENT_OPTION_UNSUPPORTED",
+      );
+      expect(errorsOf(events)[0]?.message).toContain(
+        `length ${id.length}, first character: -`,
+      );
+      expect(fake.state.called).toBe(0);
+      expect(
+        () => new FxCliDriver(baseConfig({ resumeSessionId: id })),
+      ).toThrow();
+    });
+  }
+
   test("a stored id that is not a plain token is refused before any spawn", async () => {
-    for (const bad of ["--yolo", "a b", "../x", "x".repeat(200)]) {
+    for (const bad of ["a b", "a=b", "../x", "x".repeat(129)]) {
       const fake = forbiddenSpawn();
       const events = await collect(
         new FxCliDriver(baseConfig({ spawn: fake.spawn })).run(
@@ -242,7 +295,7 @@ describe("driver-owned flags", () => {
 describe("session options", () => {
   test("resumeSessionId must be a plain token", () => {
     expect(
-      () => new FxCliDriver(baseConfig({ resumeSessionId: "--yolo" })),
+      () => new FxCliDriver(baseConfig({ resumeSessionId: "bad id" })),
     ).toThrow();
     expect(
       () => new FxCliDriver(baseConfig({ resumeSessionId: "" })),

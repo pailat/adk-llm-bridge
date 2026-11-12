@@ -294,14 +294,48 @@ describe("an unusable session id from fx", () => {
     });
     expect(error?.message).not.toMatch(/store/i);
     expect(error?.message).toContain("plain token");
+    expect(error?.message).toContain("length 6");
+    expect(error?.message).toContain("first character: letter");
+    expect(error?.message).not.toContain("bad id");
     expect(events.some((event) => event.type === "state_delta")).toBe(false);
     expect(events.at(-1)).toMatchObject({ type: "completed", exitCode: 0 });
   });
 
+  for (const [id, kind] of [
+    ["1=secret", "digit"],
+    ["-=secret", "-"],
+    ["_=secret", "_"],
+    ["=secret", "other"],
+  ]) {
+    test(`describes the first character as ${kind}`, async () => {
+      const fake = recordingSpawn([withSession(id)]);
+      const events = await collect(
+        new FxCliDriver(baseConfig({ spawn: fake.spawn })).run(request()),
+      );
+      const message = errorsOf(events)[0]?.message ?? "";
+      expect(message).toContain(`length ${id.length}`);
+      expect(message).toContain(`first character: ${kind}`);
+      expect(message).not.toContain(id);
+    });
+  }
+
+  for (const id of ["-", "--"]) {
+    test(`does not remember a bare hyphen id ${id}`, async () => {
+      const fake = recordingSpawn([withSession(id)]);
+      const events = await collect(
+        new FxCliDriver(baseConfig({ spawn: fake.spawn })).run(request()),
+      );
+      expect(errorsOf(events)[0]?.message).toContain(
+        `length ${id.length}, first character: -`,
+      );
+      expect(events.some((event) => event.type === "state_delta")).toBe(false);
+    });
+  }
+
   test("is not saved to a configured store", async () => {
     const home = makeHome();
     const memory = memoryStore();
-    const fake = recordingSpawn([withSession("--bad")]);
+    const fake = recordingSpawn([withSession("bad=id")]);
     const events = await collect(
       new FxCliDriver(
         baseConfig({
