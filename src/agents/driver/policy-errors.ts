@@ -509,7 +509,7 @@ const BATCH_REMEDY = {
     "Set `command` to the codex.exe inside the @openai/codex package, for example node_modules\\@openai\\codex-win32-x64\\vendor\\x86_64-pc-windows-msvc\\bin\\codex.exe (win32-arm64 uses codex-win32-arm64 and aarch64-pc-windows-msvc).",
   gemini:
     "Gemini CLI has no native .exe: set `interpreter` to node (a native node.exe) and `entry` to the package's JavaScript entry, the file named by `bin.gemini` in @google/gemini-cli's package.json.",
-  fx: "Set `command` to a native fx.exe, not a batch shim.",
+  fx: "fx has no documented native Windows build and a batch shim cannot be launched safely, so run fx where it is supported.",
 } as const;
 
 /**

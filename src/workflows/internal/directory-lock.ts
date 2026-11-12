@@ -205,12 +205,14 @@ export function directoryLockTokenMatches(
       ).token === token
     );
   } catch (error) {
-    // A lock or owner file that is not there, or contents that are not a valid
-    // owner, mean the token does not own it. A file that is there but cannot
-    // be read (`EACCES`, `EIO`) proves nothing, so the caller hears of it.
+    // A lock or owner file that is not there, an owner path that is a
+    // directory, or contents that are not a valid owner, mean the token does
+    // not own it. A file that is there but cannot be read (`EACCES`, `EIO`)
+    // proves nothing, so the caller hears of it.
     if (
       hasErrorCode(error, "ENOENT") ||
       hasErrorCode(error, "ENOTDIR") ||
+      hasErrorCode(error, "EISDIR") ||
       !isFileSystemError(error)
     ) {
       return false;

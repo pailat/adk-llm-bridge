@@ -980,7 +980,7 @@ Other refusals:
   error and runs an unknown one at the model default, so only the syntax is
   checked.
 - **Extra `args`.** Only flags go in `args`. An entry that is not a flag and
-  does not follow a flag that takes a value (`--system <text>`) is refused with
+  does not follow a flag that takes a value (`--add-dir <path>`) is refused with
   `EXTERNAL_AGENT_OPTION_UNSUPPORTED`: fx would read it as the prompt and
   ignore stdin. The refusal names `args` and the entry's index, never more than
   its first 40 characters. The flags the driver sets from the policy or its
@@ -988,19 +988,20 @@ Other refusals:
   `allowPolicyOverrideArgs: true`: `--auto`, `--full-access`, `--yolo`,
   `--prompt-permissions`, `--permission-mode`, `--ask`, `--timeout`,
   `--profile`, `--provider-order`, `--provider-strict`,
-  `--no-provider-strict`, `--system`, `--add-dir`, `--no-additional-dirs`,
+  `--no-provider-strict`, `--add-dir`, `--no-additional-dirs`,
   `--context-limit` and `--quiet`. Never allowed, even with
   `allowPolicyOverrideArgs`: `--model` and `--provider` (both as
   `EXTERNAL_AGENT_MODEL_OVERRIDE`: they change which model answers), and, as
   `EXTERNAL_AGENT_OPTION_UNSUPPORTED`, `--image`, `--fast`, `--ultrafast` (not
   supported: no image input, and the faster tiers cost more than `usage` shows),
-  `--effort`, `--json`, `--no-save`,
+  `--effort`, `--system` (it replaces fx's base prompt; the instruction goes
+  inside the stdin prompt), `--json`, `--no-save`,
   `--no-color`, `--config` (a key such as `provider` or `model` would change
   which model answers), `--` and a lone `-` (fx would read what follows, or
   the `-`, as the prompt and ignore stdin) and the session flags `--resume`,
   `--resume-id`, `--resume-last`, any `--resume-<id>`, `--continue`, `-c` and
   `-r`. A lone `-` is accepted only as the value of a flag that takes one
-  (`--system -`). Every flag is refused in the `--flag value` and the
+  (`--add-dir -`). Every flag is refused in the `--flag value` and the
   `--flag=value` form, and a cluster such as `-vc` is split first. The refusal
   names the entry; use the matching driver option or policy field instead.
 - **Boolean options.** `requireExplicitModel`, `allowPolicyOverrideArgs`,
@@ -1802,7 +1803,8 @@ because the tool was not offered. The other codes in the table (`CLAUDE_*`,
 | `FX_CLI_EXIT` | - | From the message | fx exited non-zero and printed no JSON result. The message holds the stderr tail. |
 | `FX_CLI_NO_RESULT` | - | No | fx exited 0 and printed no JSON result object. |
 | `FX_CLI_RESULT_TOO_LARGE` | - | No | An fx stdout line was longer than the 8 MiB bound (`FX_CLI_MAX_LINE_CHARS`). It was not parsed and the run is reported as failed with exit code 1; no `output` event. |
-| `FX_CLI_NON_JSON_LINE` | - | Yes | A warning: a stdout line was not JSON and was skipped. |
+| `FX_CLI_NON_JSON_LINE` | - | Yes | A warning: a stdout line was not JSON, or not a JSON object, and was skipped. |
+| `FX_CLI_JSON_WITHOUT_EXIT_CODE` | - | Yes | A warning: fx printed a JSON object without `exit_code` and it was ignored. |
 | `CLAUDE_PERMISSION_DENIED` | - | No | The Claude Agent SDK denied a tool call (the message names the tool and the reason). |
 | `CLAUDE_AGENT_SDK_ERROR` | - | From the message | The Claude Agent SDK threw; used when the message matches no known failure. |
 | `CLAUDE_AGENT_SDK_RESULT_ERROR` | - | From the message | A Claude Agent SDK `result` reported an error with no known subtype. A known subtype such as `error_max_turns` gives its code instead (`MAX_TURNS_EXCEEDED`). |

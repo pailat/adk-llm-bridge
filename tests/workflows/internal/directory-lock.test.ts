@@ -243,6 +243,16 @@ describe("directory lock", () => {
     );
   });
 
+  test("an owner path that is a directory means the token does not own the lock", async () => {
+    const path = await lockPath();
+    const owner = tryAcquireDirectoryLock(path);
+    if (!owner) throw new Error("lock not acquired");
+    const ownerFile = join(path, DIRECTORY_LOCK_OWNER_FILE);
+    rmSync(ownerFile);
+    mkdirSync(ownerFile);
+    expect(directoryLockTokenMatches(path, owner.token)).toBe(false);
+  });
+
   test("an owner file that is not a valid owner is not a match", async () => {
     const path = await lockPath();
     await plant(path, { token: "", pid: DEAD_PID });
