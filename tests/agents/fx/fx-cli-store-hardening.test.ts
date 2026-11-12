@@ -186,6 +186,9 @@ describe("a restore that fails halfway", () => {
       recoverable: true,
     });
     expect(errorsOf(events)[0]?.message).not.toContain("stays only in ~/.fx");
+    expect(errorsOf(events)[0]?.message).toContain(
+      "The session could not be restored to ~/.fx on this host, so fx may not find it.",
+    );
     expect(existsSync(sessionDir(home))).toBe(false);
     // No temporary sibling is left behind either.
     const leftovers = existsSync(sessionsRoot(home))
