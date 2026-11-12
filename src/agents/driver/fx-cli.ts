@@ -83,7 +83,6 @@ export const FX_CLI_PINNED_FLAGS: PinnedFlags = Object.freeze({
     "--json",
     "--no-save",
     "--no-color",
-    "--system",
     "--add-dir",
     "--no-additional-dirs",
     "--context-limit",
@@ -95,7 +94,7 @@ export const FX_CLI_PINNED_FLAGS: PinnedFlags = Object.freeze({
 });
 
 /**
- * The fx flags that take a value in the space form (`--system <text>`). The
+ * The fx flags that take a value in the space form (`--add-dir <path>`). The
  * entry after one of them in `args` is its value, not prompt text.
  */
 const FX_CLI_VALUE_FLAGS: readonly string[] = Object.freeze([
@@ -129,7 +128,8 @@ export const FX_CLI_MAX_LINE_CHARS = 8 * 1024 * 1024;
  * `--`. `args` may never pass them, even with `allowPolicyOverrideArgs`: a run
  * without `--json` or `--no-save` could not be read, a resumed session is not
  * stateless, `--effort` has the driver's `effort` option, a `--config` key such
- * as `provider` or `model` would change which model answers, and fx reads
+ * as `provider` or `model` would change which model answers, `--system`
+ * replaces fx's base prompt (the instruction goes inside the stdin prompt), and fx reads
  * what follows `--` as the prompt. Any `--resume-<id>` entry is refused too
  * (see `assertNoFixedArg`).
  *
@@ -141,6 +141,7 @@ export const FX_CLI_FIXED_FLAGS: PinnedFlags = Object.freeze({
     "--no-save",
     "--no-color",
     "--effort",
+    "--system",
     "--config",
     "--",
     "--resume",
@@ -400,7 +401,7 @@ function assertNoFixedArg(args: readonly string[] | undefined): void {
   }
   if (entry !== undefined) {
     throw unsupported(
-      `FxCliDriver: the args entry "${cut(entry, 40)}" sets a flag the driver owns: the output format, statelessness (--no-save), the effort or a session to resume. The run could not be read or would not be stateless. Remove it; allowPolicyOverrideArgs does not lift this.`,
+      `FxCliDriver: the args entry "${cut(entry, 40)}" sets a flag the driver owns: the output format, statelessness (--no-save), the effort, the system prompt or a session to resume. The run could not be read or would not be stateless. Remove it; allowPolicyOverrideArgs does not lift this.`,
     );
   }
 }
@@ -796,7 +797,9 @@ export class FxCliDriver extends SubprocessJsonlDriver {
    * result, non-zero exit), `FX_CLI_NO_RESULT` (no result, exit 0) or
    * `FX_CLI_RESULT_TOO_LARGE` (a stdout line over
    * {@link FX_CLI_MAX_LINE_CHARS}) before `completed`. A line that is not
-   * JSON is skipped with a recoverable `FX_CLI_NON_JSON_LINE` error event. If the abort signal fires, the stream ends without `completed`
+   * a JSON object is skipped with a recoverable `FX_CLI_NON_JSON_LINE` error
+   * event, and a JSON object without `exit_code` with a recoverable
+   * `FX_CLI_JSON_WITHOUT_EXIT_CODE` one. If the abort signal fires, the stream ends without `completed`
    * after the process is killed. Spawn errors other than a missing binary
    * are thrown.
    *
@@ -901,12 +904,12 @@ export class FxCliDriver extends SubprocessJsonlDriver {
         }
         // fx prints its result as one JSON object on one line.
         const parsed = parseJson(trimmed);
-        if (
-          parsed.ok &&
-          isJsonObject(parsed.value) &&
-          "exit_code" in parsed.value
-        ) {
-          result = parsed.value;
+        if (parsed.ok && isJsonObject(parsed.value)) {
+          if ("exit_code" in parsed.value) {
+            result = parsed.value;
+          } else {
+            yield jsonWithoutExitCodeEvent(trimmed);
+          }
         } else {
           yield nonJsonLineEvent(trimmed);
         }
@@ -985,6 +988,16 @@ function nonJsonLineEvent(line: string): ExternalAgentEvent {
     type: "error",
     message: `Ignoring a non-JSON line from fx ask --json: ${line.slice(0, 200)}`,
     code: "FX_CLI_NON_JSON_LINE",
+    recoverable: true,
+    timestamp: Date.now(),
+  };
+}
+
+function jsonWithoutExitCodeEvent(line: string): ExternalAgentEvent {
+  return {
+    type: "error",
+    message: `fx printed a JSON object without exit_code and it was ignored: ${line.slice(0, 200)}`,
+    code: "FX_CLI_JSON_WITHOUT_EXIT_CODE",
     recoverable: true,
     timestamp: Date.now(),
   };

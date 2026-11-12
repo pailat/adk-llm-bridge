@@ -6,6 +6,7 @@
  */
 
 import type { LlmResponse } from "@google/adk";
+import type { CostSource } from "./converters/cache-usage.js";
 
 // =============================================================================
 // Base Provider Types
@@ -918,7 +919,7 @@ export interface StreamAccumulator {
   /**
    * The usage field `costUsd` came from. Emitted as `customMetadata.costSource`.
    */
-  costSource?: "cost" | "cost+upstream" | "market_cost";
+  costSource?: CostSource;
 
   /**
    * Market cost the AI Gateway reported (`usage.market_cost`). Emitted as
