@@ -1530,10 +1530,16 @@ from the 0.6.0 tag.
   rename carries `details.committed: true`: the new revision is visible to
   `load()` but may not survive a crash. See
   [A save that fails after its rename](./docs/workflow-durability.md#a-save-that-fails-after-its-rename).
-- The workspace and checkpoint lock's ownership check (`directoryLockTokenMatches`)
-  no longer treats an unreadable owner file (`EACCES`, `EIO`) as "not our lock":
-  it throws, so a release no longer drops a live lock silently. A missing lock
-  or owner file still means the token does not own it.
+- The workspace and checkpoint lock's ownership check no longer treats an
+  unreadable owner file (`EACCES`, `EIO`) as "not our lock": it throws, so a
+  release no longer drops a live lock silently. A missing lock or owner file,
+  or an owner file that is a directory, still means the token does not own it.
+- The Claude Agent SDK driver's "stream ended without a result message" error
+  now names the session of a fresh run too, not only a resumed one.
+- The fx driver reports a JSON result object without an `exit_code` as JSON
+  missing `exit_code` instead of "non-JSON". Its Windows hint no longer
+  promises a native `fx.exe` that is not documented, and the driver never sends
+  the `--system` flag, so the docs and the code agree.
 - `createClaudeRunTempDir` removes the directory it made when resolving its real
   path fails; the SQLite session store closes the database file when the
   permission change on a just-created file fails.

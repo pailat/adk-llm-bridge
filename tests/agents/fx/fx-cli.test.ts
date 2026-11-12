@@ -110,7 +110,7 @@ describe("FxCliDriver buildArgs", () => {
   test("user args come last, after the policy flags", () => {
     const driver = new FxCliDriver(
       baseConfig({
-        args: ["--debug", "--system", "x"],
+        args: ["--debug", "--context-limit", "1000"],
         allowPolicyOverrideArgs: true,
         allowUnsandboxedShell: true,
       }),
@@ -118,7 +118,13 @@ describe("FxCliDriver buildArgs", () => {
     const args = driver.buildArgs(
       request({ permissions: { mode: "workspace-write", allowNetwork: true } }),
     );
-    expect(args).toEqual([...BASE_ARGV, "--auto", "--debug", "--system", "x"]);
+    expect(args).toEqual([
+      ...BASE_ARGV,
+      "--auto",
+      "--debug",
+      "--context-limit",
+      "1000",
+    ]);
   });
 });
 

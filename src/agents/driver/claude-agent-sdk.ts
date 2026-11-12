@@ -1032,6 +1032,8 @@ export class ClaudeAgentSdkDriver {
     let sawTurn = false;
     let modelLessResults = 0;
     let modelLessSession: string | undefined;
+    // The session the runtime reported on this run's own init message.
+    let initReportedSession: string | undefined;
     // Capture the Query so we can tear down the spawned `claude`
     // subprocess on early consumer break or thrown error. We drive the iterator
     // manually (rather than `for await`) so the `finally` reliably runs even
@@ -1333,7 +1335,9 @@ export class ClaudeAgentSdkDriver {
             if (!startedEmitted) {
               yield startedEvent(initModel);
             }
-            yield noResultEvent(resolvedResume);
+            yield noResultEvent(
+              sessionReads?.sessionId ?? initReportedSession ?? resolvedResume,
+            );
           }
           break;
         }
@@ -1351,6 +1355,7 @@ export class ClaudeAgentSdkDriver {
           }
         }
         initModel ??= claudeInitModel(message);
+        initReportedSession = initSessionId(message) ?? initReportedSession;
         sawTurn ||= isTurnMessage(message);
         for (const name of claudeInitMcpServerNames(message)) {
           if (name !== BRIDGE_MCP_SERVER) mcpEvents.servers.add(name);

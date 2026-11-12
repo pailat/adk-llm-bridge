@@ -85,7 +85,6 @@ describe("pinned flags that take a value (space and =value forms)", () => {
       "--provider-order",
       "--resume",
       "--resume-id",
-      "--system",
       "--add-dir",
       "--context-limit",
       ...cases.map(([flag]) => flag),
@@ -280,32 +279,31 @@ describe("no prompt text in args", () => {
 
   test("a value after a value flag is kept; a bare word after it is refused", () => {
     const optIn = { allowPolicyOverrideArgs: true };
-    // `--system` takes a value in the space form.
-    expect(construct(["--system", "x"], optIn)).toBeUndefined();
-    // `--system` alone is accepted at construction (fx reports it).
-    expect(construct(["--system"], optIn)).toBeUndefined();
+    // `--add-dir` takes a value in the space form.
+    expect(construct(["--add-dir", "/x"], optIn)).toBeUndefined();
+    // `--add-dir` alone is accepted at construction (fx reports it).
+    expect(construct(["--add-dir"], optIn)).toBeUndefined();
     const driver = new FxCliDriver(
-      baseConfig({ args: ["--system", "x"], ...optIn }),
+      baseConfig({ args: ["--add-dir", "/x"], ...optIn }),
     );
-    expect(driver.buildArgs(request()).slice(-2)).toEqual(["--system", "x"]);
+    expect(driver.buildArgs(request()).slice(-2)).toEqual(["--add-dir", "/x"]);
     // A third entry with no flag in front of it is prompt text.
-    const refusal = construct(["--system", "x", "hello"], optIn);
+    const refusal = construct(["--add-dir", "/x", "hello"], optIn);
     expectRefused(refusal, EXTERNAL_AGENT_OPTION_UNSUPPORTED, "args");
     expect(refusal?.message).toMatch(/\b2\b/);
   });
 
   test("the =value form does not consume the next entry", () => {
     const optIn = { allowPolicyOverrideArgs: true };
-    expect(construct(["--system=x"], optIn)).toBeUndefined();
+    expect(construct(["--add-dir=/x"], optIn)).toBeUndefined();
     expectRefused(
-      construct(["--system=x", "hello"], optIn),
+      construct(["--add-dir=/x", "hello"], optIn),
       EXTERNAL_AGENT_OPTION_UNSUPPORTED,
       "args",
     );
   });
 
   const valueFlags = [
-    "--system",
     "--permission-mode",
     "--timeout",
     "--add-dir",
@@ -405,13 +403,13 @@ describe("a lone - is the prompt marker of fx", () => {
 
   test("a - that is the value of a value flag in the space form is accepted", () => {
     expect(
-      construct(["--system", "-"], { allowPolicyOverrideArgs: true }),
+      construct(["--add-dir", "-"], { allowPolicyOverrideArgs: true }),
     ).toBeUndefined();
   });
 
   test("a - after that value is refused again", () => {
     expectRefused(
-      construct(["--system", "-", "-"], { allowPolicyOverrideArgs: true }),
+      construct(["--add-dir", "-", "-"], { allowPolicyOverrideArgs: true }),
       EXTERNAL_AGENT_OPTION_UNSUPPORTED,
       "args",
     );

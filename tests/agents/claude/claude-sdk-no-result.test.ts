@@ -230,6 +230,39 @@ describe("Claude Agent SDK: a stream that ends with no result message fails type
     expect(completedOf(events).map((e) => e.exitCode)).toEqual([1]);
   });
 
+  test("a fresh run's no-result error names the session its init reported", async () => {
+    const fake = new FakeSdk();
+    fake.scripts.push({
+      messages: [init("sdk-fresh-7"), assistant("sdk-fresh-7", "partial")],
+    });
+    const events = await run(fake.driver(), "do it");
+    expect(fake.resumes).toEqual([undefined]);
+    const errors = errorsOf(events);
+    expect(errors).toHaveLength(1);
+    expect(errors[0].code).toBe(EXTERNAL_AGENT_NO_RESULT);
+    expect(errors[0].message).toContain("sdk-fresh-7");
+  });
+
+  test("a resumed run's no-result error still names its session", async () => {
+    const fake = new FakeSdk();
+    fake.scripts.push({
+      messages: [
+        init("sdk-1"),
+        assistant("sdk-1", "one"),
+        result("sdk-1", "one", 0.25),
+      ],
+    });
+    fake.scripts.push({ messages: [] });
+    const driver = fake.driver();
+    await run(driver, "first");
+    const events = await run(driver, "second");
+    expect(fake.resumes[1]).toBe("sdk-1");
+    const errors = errorsOf(events);
+    expect(errors).toHaveLength(1);
+    expect(errors[0].code).toBe(EXTERNAL_AGENT_NO_RESULT);
+    expect(errors[0].message).toContain("sdk-1");
+  });
+
   test("a stream that ends after only model-less results keeps its own code", async () => {
     const fake = new FakeSdk();
     fake.scripts.push({ messages: [init("sdk-1"), modelLess("sdk-1", 0.25)] });
