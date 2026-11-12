@@ -20,7 +20,8 @@ from the 0.6.0 tag.
   `EXTERNAL_AGENT_OPTION_UNKNOWN` for a config key it does not know, and for a
   config that is not a plain object, instead of ignoring it. An option of
   another driver says which driver supports it. `FxCliDriver` keeps its
-  `EXTERNAL_AGENT_OPTION_UNSUPPORTED` refusal for the session options.
+  `EXTERNAL_AGENT_OPTION_UNSUPPORTED` refusal for `sessionStoreFlush` and
+  `sessionStoreLoadTimeoutMs`.
 - **Model checks on the external agent drivers** (`EXTERNAL_AGENT_MODEL_*`,
   see [Model](./docs/external-agent-isolation.md#model)):
   - `ClaudeCliDriver` with a blank `model` throws `ExternalAgentPolicyError`
@@ -1226,7 +1227,7 @@ from the 0.6.0 tag.
 - `FxAgent` and `FxCliDriver`: run the fx coding agent (`fx ask --json`,
   fx 0.0.16) as an external agent. The prompt goes on stdin, the model is
   pinned with `--model` and required by default (`requireExplicitModel`
-  defaults to `true` for fx only), and every run uses `--no-save`. fx has no
+  defaults to `true` for fx only). fx has no
   sandbox, so `read-only` is refused, and network, paths, `workspace-write`
   and the host `~/.fx` configuration need explicit opt-ins
   (`allowUnenforcedNetwork`, `allowUnenforcedPaths`, `allowUnsandboxedShell`,
@@ -1239,12 +1240,29 @@ from the 0.6.0 tag.
   need `allowPolicyOverrideArgs`; `--model`, `--provider`, `--config`, `--`,
   a lone `-`, the session flags (`--resume*`, `--continue`, `-c`, `-r`) and
   the unsupported `--image`, `--fast` and `--ultrafast` are never allowed.
-  `request.runtimeSession`, ADK tools, approvers and
-  `subAgents` are refused. A
+  ADK tools, approvers and `subAgents` are refused. A
   run fails on a non-zero process exit, an `exit_code` that is not `0` or an
   `error` field, and then reports no `output`. A stdout line over 8 MiB ends
   the run with `FX_CLI_RESULT_TOO_LARGE`. See
   [External agent isolation](./docs/external-agent-isolation.md#fx).
+- `FxCliDriver` multi-turn sessions, the way the Claude and Codex SDK drivers
+  keep theirs. By default (`persistSession: true`) the first turn runs without
+  `--no-save`, the fx session id of the JSON result goes to ADK session state
+  under `fx_session:<agent name>` (`fxSessionStateKey()`), and the next turn of
+  the same ADK session runs `--resume-id <id>`. The id to resume is
+  `resumeSessionId`, then `request.runtimeSession.id`, then session state, and
+  must be a plain token. `persistSession: false` keeps the earlier stateless
+  runs (`--no-save`, `sessions` not declared, `runtimeSession` refused). A
+  missing session ends with the new `FX_CLI_SESSION_NOT_FOUND`, never a silent
+  new session. `sessionStore` (a store or a factory) copies the whole fx
+  session directory (`~/.fx/sessions/v2/<id>`: log, blobs and lock file) after
+  a turn and restores it when a resume finds it missing; `fxArtifactSessionStore()`
+  keeps it in the ADK artifact service, and a failing store gives the
+  recoverable `FX_SESSION_STORE_ERROR`. `resumeSessionId` and `sessionStore`
+  are accepted now; `sessionStoreFlush` and `sessionStoreLoadTimeoutMs` stay
+  refused. `args` still cannot set `--resume*` or `--no-save`. The fx page
+  records the decisions on the ten open design questions. See
+  [External agent isolation](./docs/external-agent-isolation.md#fx-multi-turn-sessions).
 - Workflow storage providers. Checkpoint and event providers are chosen by
   injection (`checkpointStore`) or by URI (`getWorkflowCheckpointStoreFromUri`,
   `getWorkflowEventExporterFromUri`), with custom schemes through

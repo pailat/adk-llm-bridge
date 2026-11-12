@@ -177,7 +177,9 @@ export const EXTERNAL_AGENT_APPROVALS_UNSUPPORTED =
  * The run asked for a runtime session (`request.runtimeSession`) from a driver
  * whose `capabilities().sessions` is not `true`, so the id would be ignored.
  * The run is refused before any process starts. Use a driver that resumes
- * (`ClaudeAgent`, `CodexAgent`), or drop `runtimeSession`.
+ * (`ClaudeAgent`, `CodexAgent`), or drop `runtimeSession`. `FxCliDriver`
+ * refuses it only with `persistSession: false`; the fix there is to drop that
+ * option.
  */
 export const EXTERNAL_AGENT_SESSIONS_UNSUPPORTED =
   "EXTERNAL_AGENT_SESSIONS_UNSUPPORTED";
@@ -382,19 +384,23 @@ export function policyErrorEvent(
  *
  * @param driverName - Driver class name for the message.
  * @param request - The run request.
+ * @param remedy - What to do about it, when the default advice (use
+ * `ClaudeAgent` or `CodexAgent`, or remove `runtimeSession`) does not fit the
+ * driver, for example a driver that resumes once a setting is changed.
  * @returns An `EXTERNAL_AGENT_SESSIONS_UNSUPPORTED` error to report, or
  * `undefined` when the request has no `runtimeSession`.
  */
 export function sessionRefusal(
   driverName: string,
   request: { readonly runtimeSession?: unknown },
+  remedy = "Use ClaudeAgent or CodexAgent, or remove runtimeSession.",
 ): ExternalAgentPolicyError | undefined {
   if (request.runtimeSession === undefined) {
     return undefined;
   }
   return new ExternalAgentPolicyError(
     EXTERNAL_AGENT_SESSIONS_UNSUPPORTED,
-    `${driverName} cannot resume a runtime session (capabilities().sessions is not true), so request.runtimeSession would be ignored. Use ClaudeAgent or CodexAgent, or remove runtimeSession.`,
+    `${driverName} cannot resume a runtime session (capabilities().sessions is not true), so request.runtimeSession would be ignored. ${remedy}`,
   );
 }
 

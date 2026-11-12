@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { parseJson } from "../../utils/json.js";
 import type {
@@ -14,6 +15,14 @@ import type { ExternalAgentPermissionPolicy } from "../permissions/schema.js";
 import { FX_PROVIDER } from "../provider/fx.js";
 import type { AgentRuntimeCapabilities } from "../runtime/capabilities.js";
 import { classifyRecoverable } from "../runtime/error-classification.js";
+import {
+  type FxSessionStore,
+  type FxSessionStoreFactory,
+  fxSessionDirectory,
+  isFxSessionId,
+  readFxSessionBundle,
+  restoreFxSessionBundle,
+} from "./fx-session.js";
 import { resolveCliLaunch, validateLaunchConfig } from "./launch.js";
 import { collectTail, type LineSource, readLines } from "./lines.js";
 import {
@@ -123,11 +132,12 @@ const FX_CLI_VALUE_FLAGS: readonly string[] = Object.freeze([
 export const FX_CLI_MAX_LINE_CHARS = 8 * 1024 * 1024;
 
 /**
- * Flags the driver owns: the ones it needs for its own parsing and
- * statelessness, the ones that resume or continue a session, `--config` and
+ * Flags the driver owns: the ones it needs for its own parsing and for the
+ * session mode, the ones that resume or continue a session, `--config` and
  * `--`. `args` may never pass them, even with `allowPolicyOverrideArgs`: a run
- * without `--json` or `--no-save` could not be read, a resumed session is not
- * stateless, `--effort` has the driver's `effort` option, a `--config` key such
+ * without `--json` could not be read, `--no-save` and `--resume*` would take
+ * the session mode (and the session the run resumes) out of the driver's
+ * hands, `--effort` has the driver's `effort` option, a `--config` key such
  * as `provider` or `model` would change which model answers, `--system`
  * replaces fx's base prompt (the instruction goes inside the stdin prompt), and fx reads
  * what follows `--` as the prompt. Any `--resume-<id>` entry is refused too
@@ -174,6 +184,7 @@ const FX_CLI_BOOLEAN_OPTIONS = [
   "allowUnenforcedPaths",
   "allowUnsandboxedShell",
   "inheritHostConfig",
+  "persistSession",
 ] as const;
 
 /**
@@ -358,6 +369,58 @@ export interface FxCliDriverConfig {
    * @defaultValue false
    */
   inheritHostConfig?: boolean;
+  /**
+   * Keep fx sessions between turns. `true` runs without `--no-save`, stores the
+   * fx session id in ADK session state under {@link fxSessionStateKey} and
+   * resumes it with `--resume-id` on the next turn of the same ADK session.
+   * `false` keeps the stateless behaviour of 0.7.0 releases before this
+   * option: every run uses `--no-save` and nothing is stored or resumed.
+   *
+   * @remarks
+   * The fx transcript lives in `~/.fx/sessions/v2/<id>` of the host that ran
+   * the turn. Give `sessionStore` (for example `fxArtifactSessionStore()`) to
+   * make the session survive a change of host. Resuming a session fx no longer
+   * has is an error (`FX_CLI_SESSION_NOT_FOUND`), never a silent new session.
+   *
+   * @defaultValue true, as the Claude and Codex drivers
+   */
+  persistSession?: boolean;
+  /**
+   * fx session id to resume on every run, before `request.runtimeSession.id`
+   * and the id saved in ADK session state. A plain token (1 to 128 letters,
+   * digits, `_` or `-`, not starting with `-`). Needs `persistSession`.
+   *
+   * @defaultValue unset
+   */
+  resumeSessionId?: string;
+  /**
+   * Durable copy of the fx session directory (log, blobs and lock file), saved
+   * after a turn and restored when a resume finds the directory missing on
+   * this host. A store or a factory called once per run with the invocation
+   * context (its one store serves both the restore and the save of that run),
+   * such as `fxArtifactSessionStore()`. A factory that throws, or a store that fails, is
+   * reported as a recoverable `FX_SESSION_STORE_ERROR` event and the run
+   * goes on. An abort stops waiting for store I/O; the store's own operation
+   * may continue in the background. Needs `persistSession`.
+   *
+   * @experimental
+   * @defaultValue unset: the transcript stays in `~/.fx` of the host
+   */
+  sessionStore?: FxSessionStore | FxSessionStoreFactory;
+}
+
+/**
+ * Session-state key under which the fx session id of an agent is kept.
+ *
+ * @param agentName - Name of the agent.
+ * @returns The state key for that agent.
+ *
+ * Trust model: it lives in ordinary session state, which tools can write, so a
+ * tool can point the next resume at another fx session of the same `~/.fx`.
+ * The id is checked as a plain token before it reaches the command line.
+ */
+export function fxSessionStateKey(agentName: string): string {
+  return `fx_session:${agentName}`;
 }
 
 function fxCliMissing(): ExternalAgentPolicyError {
@@ -401,7 +464,7 @@ function assertNoFixedArg(args: readonly string[] | undefined): void {
   }
   if (entry !== undefined) {
     throw unsupported(
-      `FxCliDriver: the args entry "${cut(entry, 40)}" sets a flag the driver owns: the output format, statelessness (--no-save), the effort, the system prompt or a session to resume. The run could not be read or would not be stateless. Remove it; allowPolicyOverrideArgs does not lift this.`,
+      `FxCliDriver: the args entry "${cut(entry, 40)}" sets a flag the driver owns: the output format, the session mode (--no-save), the effort, the system prompt or a session to resume. The run could not be read or would leave the session the driver manages. Remove it; allowPolicyOverrideArgs does not lift this.`,
     );
   }
 }
@@ -504,9 +567,15 @@ type FxResult = Record<string, unknown>;
 const MESSAGE_CHARS = 4096;
 
 /**
- * Runs an external agent through the `fx` CLI (`fx ask --json --no-save`).
+ * Runs an external agent through the `fx` CLI (`fx ask --json`).
  *
  * @remarks
+ * Sessions: by default (`persistSession`) the first turn runs without
+ * `--no-save`, the fx session id of the result goes to ADK session state
+ * (`fx_session:<agent name>`, a `state_delta` event) and the next turn of the
+ * same ADK session resumes it with `--resume-id`. `persistSession: false`
+ * keeps every run stateless (`--no-save`).
+ *
  * Security and lifecycle invariants:
  * - fx has no sandbox, no read-only mode, no path confinement and no network
  *   block, so the driver fails closed with typed refusals (events, not
@@ -537,6 +606,9 @@ export class FxCliDriver extends SubprocessJsonlDriver {
   readonly #model: string | undefined;
   readonly #requireExplicitModel: boolean;
   readonly #effort: string | undefined;
+  readonly #persistSession: boolean;
+  readonly #resumeSessionId: string | undefined;
+  readonly #sessionStore: FxSessionStore | FxSessionStoreFactory | undefined;
 
   /**
    * Creates a driver that runs the `fx` CLI.
@@ -550,9 +622,10 @@ export class FxCliDriver extends SubprocessJsonlDriver {
    * (see the config's `?: boolean` fields) is set to a non-boolean value such
    * as the string `"false"`.
    * @throws {@link ExternalAgentPolicyError} with code
-   * `EXTERNAL_AGENT_OPTION_UNSUPPORTED` when a session option
-   * (`resumeSessionId`, `sessionStore`, `sessionStoreFlush`,
-   * `sessionStoreLoadTimeoutMs`) is given (every run is stateless), `effort` is not a plain
+   * `EXTERNAL_AGENT_OPTION_UNSUPPORTED` when `sessionStoreFlush` or
+   * `sessionStoreLoadTimeoutMs` is given (they tune the Claude transcript
+   * store), `resumeSessionId` is not a plain token, `resumeSessionId` or
+   * `sessionStore` is given with `persistSession: false`, `effort` is not a plain
    * token, an `args` entry overrides a pinned flag or names a flag the driver
    * owns (`--json`, `--no-save`, `--config`, `--`, `--resume*`, `--continue`,
    * `-c`, `-r`), names a flag the driver does not support (`--image`, `--fast`,
@@ -568,18 +641,16 @@ export class FxCliDriver extends SubprocessJsonlDriver {
    * `true`) is set and `model` is absent.
    */
   constructor(config: FxCliDriverConfig = {}) {
-    // The released session-option refusal comes first, so these four keys
-    // keep their stateless message instead of reading as unknown keys.
+    // The Claude transcript store tuning keeps its refusal, so these two keys
+    // read as unsupported instead of unknown.
     if (typeof config === "object" && config !== null) {
       for (const option of [
-        "resumeSessionId",
-        "sessionStore",
         "sessionStoreFlush",
         "sessionStoreLoadTimeoutMs",
       ] as const) {
         if ((config as Record<string, unknown>)[option] !== undefined) {
           throw unsupported(
-            `FxCliDriver does not support ${option}: every run uses --no-save and is stateless. Remove ${option}.`,
+            `FxCliDriver does not support ${option}: it tunes the Claude transcript store, and fx sessions are saved as one directory per turn. Remove ${option}.`,
           );
         }
       }
@@ -587,6 +658,22 @@ export class FxCliDriver extends SubprocessJsonlDriver {
     assertKnownDriverOptions("FxCliDriver", config, FX_CLI_OPTION_KEYS);
     validateDriverConfig("FxCliDriver", config, FX_CLI_BOOLEAN_OPTIONS);
     validateLaunchConfig("FxCliDriver", config);
+    if (config.resumeSessionId !== undefined) {
+      if (!isFxSessionId(config.resumeSessionId)) {
+        throw unsupported(
+          "FxCliDriver: resumeSessionId must be an fx session id: 1 to 128 letters, digits, _ or -, not starting with -.",
+        );
+      }
+    }
+    if (
+      config.persistSession === false &&
+      (config.resumeSessionId !== undefined ||
+        config.sessionStore !== undefined)
+    ) {
+      throw unsupported(
+        `FxCliDriver: ${config.resumeSessionId !== undefined ? "resumeSessionId" : "sessionStore"} needs persistSession: true (the default). A stateless run uses --no-save, so there is no session to resume or store.`,
+      );
+    }
     assertNoModelOverride("FxCliDriver", config.args, FX_CLI_MODEL_FLAGS);
     assertNoFixedArg(config.args);
     assertNoUnsupportedArg(config.args);
@@ -626,6 +713,9 @@ export class FxCliDriver extends SubprocessJsonlDriver {
     this.#model = model;
     this.#requireExplicitModel = config.requireExplicitModel ?? true;
     this.#effort = config.effort;
+    this.#persistSession = config.persistSession ?? true;
+    this.#resumeSessionId = config.resumeSessionId;
+    this.#sessionStore = config.sessionStore;
   }
 
   /** The configured model id (`gen_ai.request.model`), if any. */
@@ -643,9 +733,110 @@ export class FxCliDriver extends SubprocessJsonlDriver {
     return true;
   }
 
-  /** Features this driver supports: the permission policy mapped onto fx's mode. fx prints one result at the end, so there is no streaming. */
+  /**
+   * Features this driver supports: the permission policy mapped onto fx's mode
+   * and, unless `persistSession` is `false`, sessions (`--resume-id`). fx
+   * prints one result at the end, so there is no streaming.
+   */
   capabilities(): AgentRuntimeCapabilities {
-    return { streaming: false, permissions: true };
+    return this.#persistSession
+      ? { streaming: false, permissions: true, sessions: true }
+      : { streaming: false, permissions: true };
+  }
+
+  /**
+   * The fx session a run resumes: the driver's `resumeSessionId`, then
+   * `request.runtimeSession.id`, then the id saved in ADK session state.
+   */
+  #resumeId(request: ExternalAgentRunRequest): string | undefined {
+    if (!this.#persistSession) {
+      return undefined;
+    }
+    return (
+      this.#resumeSessionId ??
+      stringValue(request.runtimeSession?.id) ??
+      savedSessionId(request)
+    );
+  }
+
+  /**
+   * The store of this run: the configured one, or the one its factory builds
+   * (called once, so the restore and the save share it). A factory that throws
+   * gives a warning and no store.
+   */
+  #openStore(request: ExternalAgentRunRequest): {
+    store?: FxSessionStore;
+    warning?: ExternalAgentEvent;
+  } {
+    const configured = this.#sessionStore;
+    if (configured === undefined || typeof configured !== "function") {
+      return configured === undefined ? {} : { store: configured };
+    }
+    try {
+      return { store: configured({ context: request.context }) };
+    } catch (error) {
+      return { warning: sessionStoreWarning("open", undefined, error) };
+    }
+  }
+
+  /**
+   * Restores the session directory from the store when a resume finds it
+   * missing on this host. Returns the warning to report, if any.
+   */
+  async #restoreSession(
+    store: FxSessionStore | undefined,
+    home: string | undefined,
+    id: string,
+    signal: AbortSignal | undefined,
+  ): Promise<ExternalAgentEvent | undefined> {
+    if (store === undefined) {
+      return undefined;
+    }
+    try {
+      if (home === undefined) {
+        throw new Error("the run has no HOME to find the fx sessions in");
+      }
+      const directory = fxSessionDirectory(home, id);
+      if (existsSync(directory)) {
+        return undefined;
+      }
+      const bundle = await abortableStoreWait(store.load(id), signal);
+      if (bundle === STORE_ABORTED) return undefined;
+      if (bundle !== undefined) {
+        restoreFxSessionBundle(directory, bundle);
+      }
+      return undefined;
+    } catch (error) {
+      return sessionStoreWarning("restore", id, error);
+    }
+  }
+
+  /** Copies the session directory to the store. Returns the warning to report, if any. */
+  async #saveSession(
+    store: FxSessionStore | undefined,
+    home: string | undefined,
+    id: string,
+    signal: AbortSignal | undefined,
+  ): Promise<ExternalAgentEvent | undefined> {
+    if (store === undefined) {
+      return undefined;
+    }
+    try {
+      if (home === undefined) {
+        throw new Error("the run has no HOME to find the fx sessions in");
+      }
+      const directory = fxSessionDirectory(home, id);
+      if (!existsSync(directory)) {
+        throw new Error(`the session directory ${directory} does not exist`);
+      }
+      await abortableStoreWait(
+        store.save(id, readFxSessionBundle(directory)),
+        signal,
+      );
+      return undefined;
+    } catch (error) {
+      return sessionStoreWarning("save", id, error);
+    }
   }
 
   /**
@@ -654,16 +845,25 @@ export class FxCliDriver extends SubprocessJsonlDriver {
    * @remarks
    * Order: global `--add-dir` pairs (fx 0.0.16 accepts them only before the
    * subcommand, and only with `allowUnenforcedPaths`), then
-   * `ask --json --no-save --no-color`, `--model`, `--effort`, the permission
-   * flags and the configured `args`. The prompt is never an argument.
+   * `ask --json` with `--no-save` when sessions do not persist, then
+   * `--no-color`, `--resume-id <id>` when a session is resumed, `--model`,
+   * `--effort`, the permission flags and the configured `args`. The prompt is
+   * never an argument.
    *
    * @param request - The run.
    * @returns The arguments.
    * @throws {@link ExternalAgentPolicyError} with code
-   * `EXTERNAL_AGENT_OPTION_UNSUPPORTED` for the `read-only` mode.
+   * `EXTERNAL_AGENT_OPTION_UNSUPPORTED` for the `read-only` mode, or for a
+   * session id to resume that is not a plain token.
    */
   buildArgs(request: ExternalAgentRunRequest): string[] {
     const mapping = mapFxPermission(request.permissions);
+    const resumeId = this.#resumeId(request);
+    if (resumeId !== undefined && !isFxSessionId(resumeId)) {
+      throw unsupported(
+        "FxCliDriver: the fx session id to resume is not a plain token (1 to 128 letters, digits, _ or -, not starting with -), so it is not passed to fx. Check resumeSessionId, runtimeSession.id and the id saved in session state.",
+      );
+    }
     const addDirs = this.#allowUnenforcedPaths
       ? (request.permissions?.allowedPaths ?? []).flatMap((path) => [
           "--add-dir",
@@ -674,8 +874,9 @@ export class FxCliDriver extends SubprocessJsonlDriver {
       ...addDirs,
       "ask",
       "--json",
-      "--no-save",
+      ...(this.#persistSession ? [] : ["--no-save"]),
       "--no-color",
+      ...(resumeId === undefined ? [] : ["--resume-id", resumeId]),
       ...(this.#model === undefined ? [] : ["--model", this.#model]),
       ...(this.#effort === undefined ? [] : ["--effort", this.#effort]),
       ...mapping.args,
@@ -716,15 +917,71 @@ export class FxCliDriver extends SubprocessJsonlDriver {
     return buildChildEnv(this.#env, ["PATH", "HOME"], request);
   }
 
+  /**
+   * After a turn: the `state_delta` that saves the fx session id, and the
+   * store copy of the session directory.
+   */
+  async #sessionEvents(
+    request: ExternalAgentRunRequest,
+    result: FxResult,
+    home: string | undefined,
+    store: FxSessionStore | undefined,
+    signal: AbortSignal | undefined,
+  ): Promise<ExternalAgentEvent[]> {
+    const id = stringValue(result.session_id);
+    if (id === undefined || id.length === 0) {
+      return [];
+    }
+    if (!isFxSessionId(id)) {
+      return [
+        {
+          type: "error",
+          message: cut(
+            `fx reported a session id that is not a plain token, so the session was not remembered${store === undefined ? "" : " and was not copied to the session store"}: the next turn starts a new fx session. The run goes on.`,
+          ),
+          code: "FX_SESSION_STORE_ERROR",
+          recoverable: true,
+          timestamp: Date.now(),
+        },
+      ];
+    }
+    const events: ExternalAgentEvent[] = [];
+    if (request.agent && id !== savedSessionId(request)) {
+      events.push({
+        type: "state_delta",
+        stateDelta: { [fxSessionStateKey(request.agent.name)]: id },
+        timestamp: Date.now(),
+      });
+    }
+    const warning = await this.#saveSession(store, home, id, signal);
+    if (warning) {
+      events.push(warning);
+    }
+    return events;
+  }
+
   /** The first reason a run cannot start, in the order the checks run. */
   #refusal(
     request: ExternalAgentRunRequest,
     baseEnv: Record<string, string>,
   ): ExternalAgentPolicyError | undefined {
     const permissions = request.permissions;
-    const sessionRefused = sessionRefusal("FxCliDriver", request);
-    if (sessionRefused) {
-      return sessionRefused;
+    if (!this.#persistSession) {
+      const sessionRefused = sessionRefusal(
+        "FxCliDriver",
+        request,
+        "Drop persistSession: false so fx keeps and resumes its sessions, or remove runtimeSession.",
+      );
+      if (sessionRefused) {
+        return sessionRefused;
+      }
+    } else {
+      const resumeId = this.#resumeId(request);
+      if (resumeId !== undefined && !isFxSessionId(resumeId)) {
+        return unsupported(
+          "FxCliDriver: the fx session id to resume is not a plain token (1 to 128 letters, digits, _ or -, not starting with -), so it is not passed to fx. Check resumeSessionId, runtimeSession.id and the id saved in session state.",
+        );
+      }
     }
     const envRefusal = modelEnvRefusal(
       "FxCliDriver",
@@ -783,9 +1040,10 @@ export class FxCliDriver extends SubprocessJsonlDriver {
    *
    * @remarks
    * The stream starts with `started`. A refused run yields one `error` event
-   * with the policy code and `completed` with `exitCode: 1`. A
-   * `request.runtimeSession` is refused with
-   * `EXTERNAL_AGENT_SESSIONS_UNSUPPORTED` before any process starts. A
+   * with the policy code and `completed` with `exitCode: 1`. With
+   * `persistSession: false`, a `request.runtimeSession` is refused with
+   * `EXTERNAL_AGENT_SESSIONS_UNSUPPORTED` before any process starts; with the
+   * default `persistSession: true` the driver resumes it. A
    * successful run yields `output`, one `tool_call` and `tool_result` pair per tool call fx
    * reports (replayed after the run: fx gives no arguments, ids or times),
    * and `completed` with the model, turns and usage. A run failed when the
@@ -794,12 +1052,18 @@ export class FxCliDriver extends SubprocessJsonlDriver {
    * `output` (fx's text goes into the error message) and one `error` event
    * with `FX_CLI_PERMISSION_REQUIRED` (the run needed an approval that a
    * noninteractive `ask` run cannot give), `FX_CLI_ERROR`, `FX_CLI_EXIT` (no
-   * result, non-zero exit), `FX_CLI_NO_RESULT` (no result, exit 0) or
+   * result, non-zero exit), `FX_CLI_NO_RESULT` (no result, exit 0),
+   * `FX_CLI_SESSION_NOT_FOUND` (the session to resume is gone; not
+   * recoverable, and no new session is started) or
    * `FX_CLI_RESULT_TOO_LARGE` (a stdout line over
    * {@link FX_CLI_MAX_LINE_CHARS}) before `completed`. A line that is not
    * a JSON object is skipped with a recoverable `FX_CLI_NON_JSON_LINE` error
    * event, and a JSON object without `exit_code` with a recoverable
-   * `FX_CLI_JSON_WITHOUT_EXIT_CODE` one. If the abort signal fires, the stream ends without `completed`
+   * `FX_CLI_JSON_WITHOUT_EXIT_CODE` one. With `persistSession: true`, a run
+   * that reports a session id yields a `state_delta` (key
+   * `fx_session:<agent name>`) before `completed`, and a recoverable
+   * `FX_SESSION_STORE_ERROR` warning when the session store (or the id) could
+   * not be used. If the abort signal fires, the stream ends without `completed`
    * after the process is killed. Spawn errors other than a missing binary
    * are thrown.
    *
@@ -829,6 +1093,30 @@ export class FxCliDriver extends SubprocessJsonlDriver {
     }
     const args = this.buildArgs(request);
     const env = this.buildEnv(request);
+    const resumeId = this.#resumeId(request);
+    const sessionWarnings: ExternalAgentEvent[] = [];
+    // One store for the whole run: the restore and the save share it.
+    const opened = this.#persistSession ? this.#openStore(request) : {};
+    const store = opened.store;
+    if (opened.warning) {
+      sessionWarnings.push(opened.warning);
+    }
+    if (resumeId !== undefined) {
+      const warning = await this.#restoreSession(
+        store,
+        env.HOME,
+        resumeId,
+        signal,
+      );
+      if (warning) {
+        sessionWarnings.push(warning);
+      }
+    }
+
+    if (signal?.aborted) {
+      yield started;
+      return;
+    }
 
     const resolved = resolveCliLaunch({
       command: this.command,
@@ -876,6 +1164,7 @@ export class FxCliDriver extends SubprocessJsonlDriver {
       // `started` follows the spawn, so a consumer that aborts right after it
       // still finds a process to stop.
       yield started;
+      yield* sessionWarnings;
       // Drain stderr while stdout is read so the process cannot block; its
       // lines explain a failed run.
       const stderrLines: string[] = [];
@@ -976,11 +1265,89 @@ export class FxCliDriver extends SubprocessJsonlDriver {
         return;
       }
 
-      yield* resultEvents(result, processExit, stderrLines);
+      for (const event of resultEvents(
+        result,
+        processExit,
+        stderrLines,
+        resumeId,
+      )) {
+        if (event.type === "completed" && this.#persistSession) {
+          const sessionEvents = await this.#sessionEvents(
+            request,
+            result,
+            env.HOME,
+            store,
+            signal,
+          );
+          if (signal?.aborted) return;
+          yield* sessionEvents;
+        }
+        yield event;
+      }
     } finally {
       supervisor.release();
     }
   }
+}
+
+const STORE_ABORTED = Symbol("store aborted");
+
+async function abortableStoreWait<T>(
+  operation: Promise<T>,
+  signal: AbortSignal | undefined,
+): Promise<T | typeof STORE_ABORTED> {
+  if (!signal) return operation;
+  if (signal.aborted) {
+    void operation.catch(() => {});
+    return STORE_ABORTED;
+  }
+  let onAbort!: () => void;
+  const aborted = new Promise<typeof STORE_ABORTED>((resolve) => {
+    onAbort = () => resolve(STORE_ABORTED);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+  try {
+    return await Promise.race([operation, aborted]);
+  } finally {
+    signal.removeEventListener("abort", onAbort);
+  }
+}
+
+/** The fx session id saved in ADK session state for the run's agent. */
+function savedSessionId(request: ExternalAgentRunRequest): string | undefined {
+  if (!request.agent) {
+    return undefined;
+  }
+  const state = (
+    request.context as { session?: { state?: Record<string, unknown> } }
+  )?.session?.state;
+  const saved = state?.[fxSessionStateKey(request.agent.name)];
+  return typeof saved === "string" && saved.length > 0 ? saved : undefined;
+}
+
+function sessionStoreWarning(
+  action: "save" | "restore" | "open",
+  id: string | undefined,
+  error: unknown,
+): ExternalAgentEvent {
+  const reason = error instanceof Error ? error.message : String(error);
+  const what =
+    action === "open"
+      ? "could not be opened for this run"
+      : `could not ${action} session ${cut(id ?? "", 40)}`;
+  const consequence =
+    action === "restore"
+      ? "The session could not be restored to ~/.fx on this host, so fx may not find it."
+      : "The session is not copied to the store and stays only in ~/.fx of this host.";
+  return {
+    type: "error",
+    message: cut(
+      `The fx session store ${what}: ${reason}. The run goes on; ${consequence}`,
+    ),
+    code: "FX_SESSION_STORE_ERROR",
+    recoverable: true,
+    timestamp: Date.now(),
+  };
 }
 
 function nonJsonLineEvent(line: string): ExternalAgentEvent {
@@ -1098,6 +1465,7 @@ function* resultEvents(
   result: FxResult,
   processExit: number,
   stderr: readonly string[],
+  resumeId?: string,
 ): Generator<ExternalAgentEvent> {
   const resultExit = numberValue(result.exit_code);
   const errorName = stringValue(result.error);
@@ -1143,7 +1511,7 @@ function* resultEvents(
 
   // A failed run has no answer: its text rides in the error event instead.
   if (failed) {
-    yield failureEvent(result, errorName, output, stderr, {
+    yield failureEvent(result, errorName, output, stderr, resumeId, {
       exitCodeOnly:
         processExit === 0 &&
         resultExit === undefined &&
@@ -1175,9 +1543,19 @@ function failureEvent(
   errorName: string | undefined,
   output: string,
   stderr: readonly string[],
+  resumeId: string | undefined,
   flags: { exitCodeOnly: boolean },
 ): ExternalAgentEvent {
   const timestamp = Date.now();
+  if (errorName === "SessionNotFound") {
+    return {
+      type: "error",
+      message: `fx has no session ${resumeId === undefined ? "to resume" : `"${cut(resumeId, 40)}"`} (SessionNotFound). It is not on this host (the transcript lives in ~/.fx/sessions of the machine that ran the earlier turn) or fx removed it, and no new session was started. Restore the directory, give a sessionStore, or start a new ADK session.`,
+      code: "FX_CLI_SESSION_NOT_FOUND",
+      recoverable: false,
+      timestamp,
+    };
+  }
   if (errorName === "NonInteractivePermissionRequired") {
     const blocked = stderr
       .map((line) => line.trim())

@@ -404,7 +404,9 @@ the policy sets `allowNetwork: true`, Codex turns
 host MCP servers off. fx has no read-only mode: in `ask` mode it stops at the
 first write or shell command unless the user's fx permission rules in
 `~/.fx/settings.json` allow it, and `workspace-write` (fx `auto` mode) asks a
-reviewer model whose cost is not in `usage`.
+reviewer model whose cost is not in `usage`. `FxAgent` is multi-turn: the fx session id is kept in ADK
+session state and resumed with `--resume-id` (`persistSession: false` for stateless runs;
+`sessionStore: fxArtifactSessionStore()` to carry the session to another host).
 See [External agent isolation](docs/external-agent-isolation.md).
 
 ### Permissions

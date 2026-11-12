@@ -78,8 +78,10 @@ export interface ExternalAgentRunRequest {
    * - Claude Agent SDK: the driver's `resumeSessionId` option, then
    *   `runtimeSession.id`, then the id saved in ADK session state, then the
    *   id the driver captured earlier for the same ADK session.
+   * - fx CLI: the driver's `resumeSessionId`, then `runtimeSession.id`, then
+   *   the id saved in ADK session state (`persistSession: false` refuses it).
    *
-   * The CLI drivers refuse it.
+   * The other CLI drivers refuse it.
    */
   runtimeSession?: AgentRuntimeSession;
   /**

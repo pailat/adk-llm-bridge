@@ -925,7 +925,8 @@ the run's ADK artifact service. Without an artifact service the run ends with
 
 ### fx agent
 
-New in 0.7.0, nothing to migrate. `FxAgent` and `FxCliDriver` run the fx
+New in 0.7.0, nothing to migrate from 0.5.3 or 0.6.0. `FxAgent` and
+`FxCliDriver` run the fx
 coding agent (`fx ask --json`, fx 0.0.16) as an external agent. A model is
 required by default (`requireExplicitModel` is `true` for fx only). fx has no
 sandbox, so `read-only` is refused, and network (unless the policy sets
@@ -934,9 +935,21 @@ configuration each need an explicit opt-in (`allowUnenforcedNetwork`,
 `allowUnenforcedPaths`, `allowUnsandboxedShell`, `inheritHostConfig`). In `ask`
 mode the first write or shell command ends the
 run with `FX_CLI_PERMISSION_REQUIRED` unless your fx permission rules allow
-it. Like the other CLI drivers it refuses `runtimeSession`, ADK tools,
-approvers and `subAgents`. See
-[External agent isolation](./external-agent-isolation.md#fx).
+it. Sessions persist by default: the first turn saves the fx session id in
+ADK session state (`fx_session:<agent name>`) and the next turn of the same ADK
+session runs `fx ask --resume-id <id>`, so the agent remembers earlier turns.
+Set `persistSession: false` for the stateless runs (`--no-save`) of the earlier
+0.7.0 builds of this driver; that mode also refuses `runtimeSession`. The fx
+transcript lives in `~/.fx/sessions/v2/<id>` of the host: give
+`sessionStore: fxArtifactSessionStore()` to keep a copy of the whole directory
+in the ADK artifact service so a session survives a change of host. A session
+fx no longer has fails with `FX_CLI_SESSION_NOT_FOUND`; the driver never
+starts a new one silently. The options `resumeSessionId` and `sessionStore` are
+now accepted (they were refused as stateless), `sessionStoreFlush` and
+`sessionStoreLoadTimeoutMs` stay refused. ADK tools, approvers and `subAgents`
+are refused, as for the other CLI drivers. See
+[External agent isolation](./external-agent-isolation.md#fx), which also
+records the design decisions behind the driver.
 
 ### Driver options and host MCP servers
 

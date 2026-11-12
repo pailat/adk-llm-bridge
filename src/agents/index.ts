@@ -81,7 +81,12 @@ export type {
   FxCliSpawnOptions,
   FxCliSubprocess,
 } from "./driver/fx-cli.js";
-export { FxCliDriver } from "./driver/fx-cli.js";
+export { FxCliDriver, fxSessionStateKey } from "./driver/fx-cli.js";
+export type {
+  FxSessionBundle,
+  FxSessionStore,
+  FxSessionStoreFactory,
+} from "./driver/fx-session.js";
 export type {
   GeminiCliDriverConfig,
   GeminiCliSpawn,
@@ -204,6 +209,8 @@ export {
 } from "./runtime/error-classification.js";
 export type { AgentRuntimeSession } from "./runtime/runtime-session.js";
 export type { SessionStoreFactory } from "./session-store/adk-artifacts.js";
+export type { FxArtifactSessionStoreOptions } from "./session-store/fx-artifacts.js";
+export { fxArtifactSessionStore } from "./session-store/fx-artifacts.js";
 export type {
   SessionKey,
   SessionStore,

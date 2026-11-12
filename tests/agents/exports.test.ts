@@ -183,6 +183,8 @@ describe("agents public exports", () => {
     expect(agents.deriveSubAgentPermissionPolicy).toBeFunction();
     expect(agents.ToolGateway).toBeFunction();
     expect(agents.claudeSdkSessionStateKey("a")).toBe("claude_sdk_session:a");
+    expect(agents.fxSessionStateKey("a")).toBe("fx_session:a");
+    expect(agents.fxArtifactSessionStore).toBeFunction();
   });
 
   test("./agents does not expose driver internals", () => {

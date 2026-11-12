@@ -33,7 +33,11 @@ import {
 const request = (overrides: Parameters<typeof makeRequest>[1] = {}) =>
   makeRequest(FX_PROVIDER, overrides);
 
-const BASE_ARGV = [
+/** The argv of a first turn: sessions persist by default, so no `--no-save`. */
+const BASE_ARGV = ["ask", "--json", "--no-color", "--model", FX_MODEL_ID];
+
+/** The argv with `persistSession: false`: the stateless run of earlier releases. */
+const STATELESS_ARGV = [
   "ask",
   "--json",
   "--no-save",
@@ -68,6 +72,11 @@ describe("FxCliDriver buildArgs", () => {
   test("builds the exact ask argv, with no prompt in it", () => {
     const driver = new FxCliDriver(baseConfig());
     expect(driver.buildArgs(request())).toEqual(BASE_ARGV);
+  });
+
+  test("persistSession: false builds the stateless argv, with --no-save", () => {
+    const driver = new FxCliDriver(baseConfig({ persistSession: false }));
+    expect(driver.buildArgs(request())).toEqual(STATELESS_ARGV);
   });
 
   test("adds --effort after --model when set", () => {
@@ -595,20 +604,16 @@ describe("pinned args are refused", () => {
 });
 
 describe("capabilities and sessions", () => {
-  test("streaming off, permissions on, and nothing else claimed", () => {
+  test("streaming off, permissions and sessions on, and nothing else claimed", () => {
     expect(new FxCliDriver(baseConfig()).capabilities?.()).toEqual({
       streaming: false,
       permissions: true,
+      sessions: true,
     });
   });
 
-  test("untyped session options are refused", async () => {
-    for (const option of [
-      "resumeSessionId",
-      "sessionStore",
-      "sessionStoreFlush",
-      "sessionStoreLoadTimeoutMs",
-    ]) {
+  test("the Claude transcript store tuning options stay refused", async () => {
+    for (const option of ["sessionStoreFlush", "sessionStoreLoadTimeoutMs"]) {
       const error = await refusalCode(
         () =>
           new FxCliDriver({
@@ -619,7 +624,6 @@ describe("capabilities and sessions", () => {
       );
       expect(error.code).toBe(EXTERNAL_AGENT_OPTION_UNSUPPORTED);
       expect(error.message).toContain(option);
-      expect(error.message).toContain("stateless");
     }
   });
 

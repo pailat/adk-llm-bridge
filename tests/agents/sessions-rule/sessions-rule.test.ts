@@ -100,7 +100,8 @@ function geminiCli(): Built {
     resumed: () => [],
   };
 }
-function fxCli(): Built {
+/** fx that does not persist sessions: every run is `--no-save`, so nothing resumes. */
+function fxCliStateless(): Built {
   const counter = { spawned: 0 };
   return {
     driver: new FxCliDriver({
@@ -108,9 +109,30 @@ function fxCli(): Built {
       env: {},
       model: "some/model-id",
       inheritHostConfig: true,
+      persistSession: false,
     }),
     started: () => counter.spawned,
     resumed: () => [],
+  };
+}
+/** fx with its default: sessions persist, a run resumes with `--resume-id`. */
+function fxCli(): Built {
+  const calls = { started: 0, resumed: [] as string[] };
+  const process = emptyProcess({ spawned: 0 });
+  return {
+    driver: new FxCliDriver({
+      spawn: (_command, args) => {
+        calls.started++;
+        const at = args.indexOf("--resume-id");
+        if (at !== -1) calls.resumed.push(args[at + 1] as string);
+        return process();
+      },
+      env: {},
+      model: "some/model-id",
+      inheritHostConfig: true,
+    }),
+    started: () => calls.started,
+    resumed: () => calls.resumed,
   };
 }
 function codexSdk(): Built {
@@ -172,11 +194,12 @@ const REFUSING: [string, () => Built, ExternalAgentRunRequest["provider"]][] = [
   ["ClaudeCliDriver", claudeCli, CLAUDE_PROVIDER],
   ["CodexCliDriver", codexCli, CODEX_PROVIDER],
   ["GeminiCliDriver", geminiCli, GEMINI_CLI_PROVIDER],
-  ["FxCliDriver", fxCli, FX_PROVIDER],
+  ["FxCliDriver (persistSession: false)", fxCliStateless, FX_PROVIDER],
 ];
 
 const ALL: [string, () => Built, ExternalAgentRunRequest["provider"]][] = [
-  ...REFUSING,
+  ...REFUSING.filter(([name]) => !name.startsWith("FxCliDriver")),
+  ["FxCliDriver", fxCli, FX_PROVIDER],
   ["CodexSdkDriver", codexSdk, CODEX_PROVIDER],
   ["ClaudeAgentSdkDriver", claudeSdk, CLAUDE_PROVIDER],
 ];
@@ -274,7 +297,7 @@ describe("sessions rule", () => {
     const flags = ALL.map(
       ([, build]) => build().driver.capabilities?.().sessions,
     );
-    expect(flags.filter((flag) => flag === true)).toHaveLength(2);
-    expect(flags.filter((flag) => flag !== true)).toHaveLength(4);
+    expect(flags.filter((flag) => flag === true)).toHaveLength(3);
+    expect(flags.filter((flag) => flag !== true)).toHaveLength(3);
   });
 });

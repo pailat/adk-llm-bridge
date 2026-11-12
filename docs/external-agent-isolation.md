@@ -933,8 +933,10 @@ it may.
 
 ## fx
 
-`FxAgent` runs `fx ask --json --no-save --no-color --model <id>` (reviewed
-against fx 0.0.16) with the prompt on stdin, never in argv. `--system` is never
+`FxAgent` runs `fx ask --json --no-color --model <id>` (reviewed against fx
+0.0.16; `--no-save` with `persistSession: false`, see
+[Multi-turn sessions](#fx-multi-turn-sessions)) with the prompt on stdin,
+never in argv. `--system` is never
 sent: it replaces fx's base prompt, so the instruction goes inside the stdin
 prompt. The child environment is `PATH`, `HOME`, the credential keys
 `AI_GATEWAY_API_KEY` and `VERCEL_OIDC_TOKEN`, and the variables the driver
@@ -995,8 +997,8 @@ Other refusals:
   `EXTERNAL_AGENT_OPTION_UNSUPPORTED`, `--image`, `--fast`, `--ultrafast` (not
   supported: no image input, and the faster tiers cost more than `usage` shows),
   `--effort`, `--system` (it replaces fx's base prompt; the instruction goes
-  inside the stdin prompt), `--json`, `--no-save`,
-  `--no-color`, `--config` (a key such as `provider` or `model` would change
+  inside the stdin prompt), `--json`, `--no-save` (the driver sets it with
+  `persistSession: false`), `--no-color`, `--config` (a key such as `provider` or `model` would change
   which model answers), `--` and a lone `-` (fx would read what follows, or
   the `-`, as the prompt and ignore stdin) and the session flags `--resume`,
   `--resume-id`, `--resume-last`, any `--resume-<id>`, `--continue`, `-c` and
@@ -1005,17 +1007,128 @@ Other refusals:
   `--flag=value` form, and a cluster such as `-vc` is split first. The refusal
   names the entry; use the matching driver option or policy field instead.
 - **Boolean options.** `requireExplicitModel`, `allowPolicyOverrideArgs`,
-  `allowUnenforcedNetwork`, `allowUnenforcedPaths`, `allowUnsandboxedShell` and
-  `inheritHostConfig` must be `true` or `false`. Anything else (the string
+  `allowUnenforcedNetwork`, `allowUnenforcedPaths`, `allowUnsandboxedShell`,
+  `inheritHostConfig` and `persistSession` must be `true` or `false`. Anything else (the string
   `"false"`, `0`, `null`) throws `InputValidationError` when the driver is
   built, so an untyped host cannot turn an opt-in on by accident.
-- **Sessions.** Every run is stateless. `resumeSessionId` and `sessionStore*`
-  are refused with `EXTERNAL_AGENT_OPTION_UNSUPPORTED`, and a
+- **Sessions.** Sessions persist by default: see
+  [Multi-turn sessions](#fx-multi-turn-sessions). `sessionStoreFlush` and
+  `sessionStoreLoadTimeoutMs` (the Claude transcript store tuning) are refused
+  with `EXTERNAL_AGENT_OPTION_UNSUPPORTED`. With `persistSession: false` a
   `request.runtimeSession` is refused with
   `EXTERNAL_AGENT_SESSIONS_UNSUPPORTED` before fx starts. ADK tools,
   `confirmation` approvers and `subAgents` are refused by `ExternalAgent`
   (`EXTERNAL_AGENT_TOOLS_UNSUPPORTED`, `EXTERNAL_AGENT_APPROVALS_UNSUPPORTED`,
   `EXTERNAL_AGENT_SUBAGENTS_UNSUPPORTED`).
+
+### fx multi-turn sessions
+
+By default (`persistSession: true`, the same default as the Claude and Codex
+SDK drivers) fx keeps its transcript between turns of one ADK session:
+
+1. The first turn runs without `--no-save`. fx prints the id of the session it
+   created as `session_id` in its JSON result, and the driver saves it in ADK
+   session state under `fx_session:<agent name>` (`fxSessionStateKey()`) with a
+   `state_delta` event, once, before `completed`.
+2. The next turn of the same ADK session runs with `--resume-id <id>` (and no
+   `--no-save`). fx 0.0.16 confirmed live: `fx ask --resume-id <id>` works
+   without a terminal (stdin not a TTY, JSON output), and the second turn
+   remembered the first.
+3. The id to resume is, in order: the driver's `resumeSessionId`,
+   `request.runtimeSession.id`, then the id in session state. It must be a
+   plain token (1 to 128 letters, digits, `_` or `-`, not starting with `-`);
+   anything else is refused with `EXTERNAL_AGENT_OPTION_UNSUPPORTED` before fx
+   starts, because a tool can write session state.
+4. The driver owns `--resume*` and `--no-save`: `args` cannot set them, with or
+   without `allowPolicyOverrideArgs`.
+5. A resumed turn sends the instruction and the newest user turn on stdin, not
+   the ADK history: fx already has the earlier turns. The instruction is
+   repeated each turn, because `--system` would replace fx's base prompt.
+
+`persistSession: false` keeps the stateless behaviour: every run uses
+`--no-save`, nothing is stored or resumed, the driver does not declare
+`sessions`, and a `runtimeSession` is refused.
+
+A lost session is an error, never a silent new one. A missing id exits 1 with
+the JSON `error` `SessionNotFound` (checked live on 0.0.16, stderr empty); the
+driver reports it as `FX_CLI_SESSION_NOT_FOUND` (not recoverable) and does not
+start another session, as the Claude drivers do not either. The id stays in
+session state, so later turns fail the same way until the host restores the
+session or starts a new ADK session.
+
+**Where the transcript lives, and moving it.** fx keeps a session in the
+directory `~/.fx/sessions/v2/<id>` (`log.jsonl`, `blobs/` and a `lock` file) of
+the host that ran the turn. Checked live on 0.0.16: copying the whole
+directory away, restoring the copy and running `--resume-id` returned what the
+first turn stored. So a session can move with its whole directory, blobs
+included; a copy of `log.jsonl` alone is not enough. Give `sessionStore` to
+make this automatic, for example `fxArtifactSessionStore()` (exported from
+`adk-llm-bridge/agents`), which keeps the directory as one artifact per fx
+session in the run's ADK artifact service (`fx-session.v1.<id>.json`, size
+bound `maxBytes`, 64 MiB by default):
+
+- After a turn that reports a session id, the driver reads
+  `<HOME>/.fx/sessions/v2/<id>` and calls `save(id, bundle)`.
+- Before a resumed turn, when that directory does not exist on this host, the
+  driver calls `load(id)` and writes the bundle back. A directory that exists
+  is never overwritten. Every path in a bundle is checked and one that leaves
+  the session directory rejects the whole bundle before anything is written.
+- A store failure is a recoverable `FX_SESSION_STORE_ERROR` event and the run
+  goes on; without the store the session stays in `~/.fx` of the host.
+- The bundle holds the transcript and tool output of the session in clear
+  text. Treat the artifact service as you treat `~/.fx`.
+
+Without a `sessionStore`, the transcript stays in `~/.fx` of the host: a new
+host, a wiped home directory or a container without a persistent `~/.fx` gives
+`FX_CLI_SESSION_NOT_FOUND`. `FX_HOME` is not used: it does not isolate fx on
+0.0.16, so the driver looks in `<HOME>/.fx`.
+
+### fx design decisions
+
+The ten open questions of the fx design, with what the driver does and why.
+
+1. **Default model requirement.** Kept: `requireExplicitModel` defaults to
+   `true` for fx only. Without `--model` fx runs the model saved in the user's
+   settings, so a run would pay for a model nobody chose.
+2. **Host configuration.** Kept: a run needs `inheritHostConfig: true`. fx
+   always reads `~/.fx` rules, skills, MCP servers and the project's
+   `AGENTS.md`, and the driver cannot turn that off; the opt-in makes the
+   exposure a choice, as it is for the other CLI drivers.
+3. **Environment allowlist.** Kept: `PATH`, `HOME`, `AI_GATEWAY_API_KEY` and
+   `VERCEL_OIDC_TOKEN`, plus the variables the driver sets. More variables
+   join only when the fx docs or a live check name them, so no ambient secret
+   leaks by guesswork. `HOME` also decides where sessions are found.
+4. **Instruction delivery.** Kept: the instruction goes inside the stdin
+   prompt and `--system` is never sent, because it replaces fx's base prompt.
+   On a resumed turn it is sent again with the new user turn.
+5. **`read-only`.** Kept: refused with `EXTERNAL_AGENT_OPTION_UNSUPPORTED`. fx
+   has no read-only mode, and `ask` would still run commands fx does not count
+   as sensitive, so mapping one to the other would promise too much.
+6. **`ask` without a TTY.** Checked live on fx 0.0.16: a write in non-TTY
+   `ask` mode is denied and the run ends with exit 1 and the JSON error
+   `NonInteractivePermissionRequired`; neither file the prompt asked for was
+   created. Kept: `ask` is allowed and reported as `FX_CLI_PERMISSION_REQUIRED`.
+   fx does not continue after the denial, so a run can stop before the answer.
+7. **Run deadline.** Kept: no timeout option. fx retries provider failures
+   forever, so the host passes an `abortSignal` with a deadline; the driver
+   sends SIGTERM, then SIGKILL after `killGraceMs`. One cancellation contract
+   serves every driver.
+8. **Version drift.** Kept as documented, no run-time version probe. The
+   installed version was 0.0.16 when checked. The driver sets
+   `FX_AUTO_UPGRADE=0`, pins its flags to `FX_CLI_PINNED_FLAGS_REVIEW`, and a
+   changed output shape shows as `FX_CLI_NO_RESULT` or
+   `FX_CLI_JSON_WITHOUT_EXIT_CODE` instead of a silent wrong answer. A probe
+   would add a process per driver and could not tell a compatible 0.0.x from a
+   broken one. Sessions add one more fx-internal contract, the `sessions/v2`
+   layout; a bundle is restored only into that path.
+9. **`workspace-write` as `auto`.** Kept: refused unless
+   `allowUnsandboxedShell: true`, with no separate flag. fx `auto` is wider
+   than a workspace and adds a reviewer model whose cost is not in `usage`.
+10. **ACP or libfx.** Not built; after 0.7.0. ACP would add streaming,
+    permission requests and per-session MCP isolation, and libfx would host
+    ADK tools in process. Neither changes the CLI driver's contract, so the
+    choice waits for real demand for streaming or host tools. Multi-turn
+    sessions use the CLI as it is.
 
 What a run reports:
 
@@ -1409,7 +1522,9 @@ driver a frozen copy; non-string `env` values are dropped.
 the session to resume: the Codex SDK driver prefers it over the thread id
 saved in session state; the Claude Agent SDK driver uses its
 `resumeSessionId` option first, then `runtimeSession.id`, then session state,
-then its own memory. With a declared MCP secret it resumes nothing (see
+then its own memory; the fx CLI driver uses its `resumeSessionId` first, then
+`runtimeSession.id`, then the id saved in ADK session state
+(`persistSession: false` refuses it). With a declared MCP secret the Claude Agent SDK driver resumes nothing (see
 [Transcripts on disk](#transcripts-on-disk)). `ExternalAgent` never sets it.
 
 ## Cancel and host signals
@@ -1800,6 +1915,8 @@ because the tool was not offered. The other codes in the table (`CLAUDE_*`,
 | `CLAUDE_CLI_EXIT`, `CODEX_CLI_EXIT`, `GEMINI_CLI_EXIT` | - | From the message | The CLI exited with a nonzero code (Codex: and reported no error of its own). The message holds the stderr tail; auth, billing and quota failures are not recoverable. |
 | `FX_CLI_PERMISSION_REQUIRED` | - | No | An fx `ask` run needed an approval a noninteractive run cannot give (fx reported `NonInteractivePermissionRequired`). The message names the modes that allow it and carries fx's `blocked action` lines and fx's own output. The blocked action did not run; actions before it may have run. |
 | `FX_CLI_ERROR` | - | From the message | The fallback code of an fx failure the shared classifier does not know, and the code (not recoverable) of a result whose `exit_code` is not a number. fx failures carry the classifier code when they have one: `AUTH_ERROR` (`auth_failure`), `QUOTA_EXHAUSTED` (`recovery.need` `quota`) and `INVALID_REQUEST` (`recovery.need` `content_filter`, `rejected` or `too_long`, and `model_not_found`), none recoverable, and whatever `classifyRecoverable` gives the message of an `error` name or a reason only in `output` (for example `RATE_LIMIT`, `TRANSPORT_ERROR`). |
+| `FX_CLI_SESSION_NOT_FOUND` | - | No | An fx run resumed a session fx does not have (the JSON `error` is `SessionNotFound`). No new session was started. See [fx multi-turn sessions](#fx-multi-turn-sessions). |
+| `FX_SESSION_STORE_ERROR` | - | Yes | A warning: the fx `sessionStore` could not be opened, or could not save or restore a session directory (or a stored bundle was refused); also when fx reports a session id that is not a plain token, even with no `sessionStore` (the session is not remembered). The run goes on. |
 | `FX_CLI_EXIT` | - | From the message | fx exited non-zero and printed no JSON result. The message holds the stderr tail. |
 | `FX_CLI_NO_RESULT` | - | No | fx exited 0 and printed no JSON result object. |
 | `FX_CLI_RESULT_TOO_LARGE` | - | No | An fx stdout line was longer than the 8 MiB bound (`FX_CLI_MAX_LINE_CHARS`). It was not parsed and the run is reported as failed with exit code 1; no `output` event. |
