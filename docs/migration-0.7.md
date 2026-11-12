@@ -576,10 +576,12 @@ new in 0.7.0. If you already use them, these changes apply:
   Codex's own thread ids never start with `-`, so only a forged or corrupted
   id is affected. Clear it from session state to start a new thread.
 - **Custom JSONL driver subclasses.** `SubprocessJsonlDriver.parseLine` now
-  rejects child-emitted `started`, `completed` and `state_delta` events,
-  throwing `Error` as it does for other invalid child lines. Its public
-  signature is unchanged. Yield lifecycle and state events from the subclass's
-  own `run` method, rather than passing them through from child stdout.
+  ignores child-emitted `started`, `completed`, `state_delta` and
+  transport-envelope lines. It returns an empty `output` event carrying none
+  of the child payload, preserving its public return type while allowing a
+  subclass's read loop to continue without throwing on those lines. Yield
+  lifecycle and state events from the subclass's own `run` method, rather
+  than passing them through from child stdout.
 - **Codex CLI driver and the shared run loop.** `CodexCliDriver` (the
   fallback for hosts without `@openai/codex-sdk`) keeps working without the SDK
   and keeps its options (`command`, `interpreter`, `entry`, `args`, `spawn`,

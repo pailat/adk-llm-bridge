@@ -377,9 +377,11 @@ export class SubprocessJsonlDriver implements ExternalAgentDriver {
    * Parses one JSON line as a validated child-emitted external agent event.
    *
    * @remarks
-   * Child-emitted `started`, `completed` and `state_delta` are dropped by
-   * rejecting the line. A subclass emits those driver-owned events by
-   * yielding them from its own `run`, never by accepting child lines.
+   * Child-emitted `started`, `completed`, `state_delta` and transport
+   * envelopes are ignored: they return an empty `output` event, carrying
+   * none of the child payload, so a subclass's read loop continues safely.
+   * A subclass emits driver-owned events by yielding them from its own
+   * `run`, never by accepting child lines.
    *
    * @param line - One line of subprocess output.
    * @returns The event.
@@ -391,8 +393,12 @@ export class SubprocessJsonlDriver implements ExternalAgentDriver {
     if (!parsed.ok) {
       throw new SyntaxError(parsed.error);
     }
-    const event = bridgeEvent(asRecord(parsed.value), "drop");
-    if (event === "drop" || event === undefined) {
+    const record = asRecord(parsed.value);
+    const event = bridgeEvent(record, "drop");
+    if (event === "drop" || record.type === "adk.bridge_event") {
+      return { type: "output", content: "" };
+    }
+    if (event === undefined) {
       throw new Error("Invalid external agent JSONL event");
     }
     return event;

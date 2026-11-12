@@ -423,9 +423,11 @@ from the 0.6.0 tag.
 
 ### Security
 
-- `SubprocessJsonlDriver.parseLine` now drops child-emitted `started`,
-  `state_delta` and `completed` events by rejecting those lines. Subclasses
-  yield these driver-owned events from their own `run` instead. Codex's
+- `SubprocessJsonlDriver.parseLine` now ignores child-emitted `started`,
+  `state_delta`, `completed` and transport-envelope lines, returning an empty
+  `output` event with none of the child payload. Its event return type stays
+  unchanged and subclass read loops continue without throwing on those lines.
+  Subclasses yield driver-owned events from their own `run` instead. Codex's
   internal transport envelopes use a private symbol and cannot be forged
   through child JSON stdout.
 

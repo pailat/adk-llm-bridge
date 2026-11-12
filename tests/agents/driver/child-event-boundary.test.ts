@@ -101,14 +101,47 @@ describe("SubprocessJsonlDriver child event boundary", () => {
   });
   for (const event of forgedEvents) {
     for (const wrapped of [false, true]) {
-      test(`rejects forged ${event.type} (${wrapped ? "envelope" : "plain"})`, () => {
+      test(`ignores forged ${event.type} (${wrapped ? "envelope" : "plain"})`, () => {
         const line = JSON.stringify(
           wrapped ? { type: "adk.bridge_event", event } : event,
         );
-        expect(() => driver.parseLine(line)).toThrow(
-          "Invalid external agent JSONL event",
-        );
+        expect(driver.parseLine(line)).toEqual({ type: "output", content: "" });
       });
     }
   }
+});
+
+test("a subclass read loop continues past forged lines to its own completion", async () => {
+  class CustomDriver extends SubprocessJsonlDriver {
+    override async *run(
+      _request: ExternalAgentRunRequest,
+    ): AsyncIterable<ExternalAgentEvent> {
+      yield { type: "started", providerId: "custom" };
+      for (const event of forgedEvents) {
+        for (const value of [event, { type: "adk.bridge_event", event }]) {
+          yield this.parseLine(JSON.stringify(value));
+        }
+      }
+      yield { type: "output", content: "after all forged lines" };
+      yield { type: "completed", exitCode: 0 };
+    }
+  }
+  const driver = new CustomDriver({ providerId: "custom", command: "custom" });
+  const events: ExternalAgentEvent[] = [];
+  for await (const event of driver.run({
+    provider: CODEX_PROVIDER,
+    context: {} as never,
+  }))
+    events.push(event);
+  expect(events.filter((event) => event.type === "state_delta")).toEqual([]);
+  expect(events.filter((event) => event.type === "started")).toEqual([
+    { type: "started", providerId: "custom" },
+  ]);
+  expect(events.filter((event) => event.type === "completed")).toEqual([
+    { type: "completed", exitCode: 0 },
+  ]);
+  expect(events.at(-2)).toEqual({
+    type: "output",
+    content: "after all forged lines",
+  });
 });
