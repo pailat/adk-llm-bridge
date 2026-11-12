@@ -123,7 +123,8 @@ from the 0.6.0 tag.
     `mcpServers` support.
   - `ClaudeAgent` with its default Claude Agent SDK driver no longer inherits
     the host's Claude Code setup. The agent gets the built-in tools in
-    `DEFAULT_CLAUDE_TOOLS` (alias `DEFAULT_CLAUDE_SDK_TOOLS`; Read, Glob, Grep, Edit, Write, NotebookEdit,
+    `DEFAULT_CLAUDE_TOOLS` (alias `DEFAULT_CLAUDE_SDK_TOOLS`; Read, Glob, Grep,
+    Edit, Write, NotebookEdit,
     Bash, WebFetch, WebSearch, TodoWrite) plus the bridge's own tools. Host
     tools (Task, Skill, cron, worktrees, Workflow, ToolSearch, messaging), MCP
     servers from other config and claude.ai connectors are off, and bundled
@@ -740,7 +741,8 @@ from the 0.6.0 tag.
   bridge's workflow agents and ADK's `Workflow`, `SequentialAgent`,
   `ParallelAgent` and `LoopAgent` are `workflow`, and any other `BaseAgent` is
   `host`. The same value is the span attribute
-  `gcp.vertex.agent.agent_kind`, always on the step's parent `execute_node` span and on `invoke_agent` only for
+  `gcp.vertex.agent.agent_kind`, always on the step's parent `execute_node` span
+  and on `invoke_agent` only for
   `ExternalAgent` runs: ADK 2.4 creates the `invoke_agent` span of `llm`,
   `workflow` and `host` agents privately in `BaseAgent.runAsync`, and the bridge
   has no hook inside it. Additive: events recorded before this have no
@@ -767,7 +769,8 @@ from the 0.6.0 tag.
   (`result.models.used`, `unexpected`). The workflow factory takes
   `config.smallFastModel`. `ExternalAgentDriver` gains the optional members
   `smallFastModel` and `requireExplicitModel`, and `completed` gains
-  `modelFromInit`. See [The small/fast model](docs/external-agent-isolation.md#the-smallfast-model-claude).
+  `modelFromInit`. See
+  [The small/fast model](docs/external-agent-isolation.md#the-smallfast-model-claude).
 - Workflow replay records the model each step's agent requested (`model.requested`
   on the checkpoint step) and reports a change on a replayed or resumed step: a
   `step_model_changed` event and a `WORKFLOW_STEP_MODEL_CHANGED` warning.
@@ -897,7 +900,8 @@ from the 0.6.0 tag.
   `runSpecJsonSchema`, with documented `RUN_SPEC_*` issue codes (stability
   policy in the doc), the zod schemas, limits and constants listed under
   "Exports" in the doc. The plan carries the effective `deniedPathPatterns`,
-  which the host enforces on writes (`run-spec.denied-paths`). Rule sets also name the workflows a spec may run
+  which the host enforces on writes (`run-spec.denied-paths`). Rule sets also name
+  the workflows a spec may run
   (`allowedWorkflows`) and the refs it may merge into (`allowedTargetRefs`);
   both are required and an empty list allows nothing. A lane agent may name
   MCP providers by id only (`agent.mcp`, at most 16, unique ignoring case,
@@ -970,7 +974,8 @@ from the 0.6.0 tag.
   `ADK_LLM_BRIDGE_AGENT_CWD`, so no shim or interpreter reads configuration
   the agent wrote. The entry and the interpreter are started by the canonical
   paths that were checked, so a symlink through an agent-writable directory
-  cannot be re-pointed in between. The interpreter goes through the same lookup as `command` (native `.exe`/`.com` only on
+  cannot be re-pointed in between. The interpreter goes through the same lookup as
+  `command` (native `.exe`/`.com` only on
   Windows, never `cmd.exe`, no `PATH` entry inside the run's writable roots).
   An entry, or an interpreter path, inside the run's working directory or
   `allowedPaths` (symlinks resolved), or a non-Node interpreter, refuses the
@@ -1297,7 +1302,8 @@ from the 0.6.0 tag.
 - **Prompt caching is automatic by default for Anthropic models** (fixes zero cache reads on
   AI Gateway, where every turn paid the full prompt again):
   - native `AnthropicLlm`: `promptCaching` was opt-in and marked only the system block and
-    the last tool; it is now automatic by default (see below) and also marks the last message block, so later turns read
+    the last tool; it is now automatic by default (see below) and also marks the
+    last message block, so later turns read
     earlier turns from the cache;
   - AI Gateway `anthropic/*`: sends `providerOptions.gateway.caching = "auto"`;
   - OpenRouter stays opt-in (`promptCaching: true`), and OpenAI, xAI and custom endpoints
@@ -1698,7 +1704,11 @@ from the 0.6.0 tag.
   docs/workflow-durability.md ("Host sleep and wall-clock steps").
 - **A nested workflow's outcome decides its parent step.** A run that completed
   or is waiting is no longer reported as failed because of a retried inner attempt.
-- **The CLI drivers never run a Windows `.cmd` or `.bat` file.** The command is resolved over `.com` and `.exe` on `PATH`; a batch shim ends the run with `EXTERNAL_AGENT_BATCH_COMMAND_REFUSED` (use the native `.exe`, or `interpreter` + `entry` for Gemini CLI; see docs/external-agent-isolation.md), and a Windows CI job checks it with fake `.cmd` files on Bun and Node.
+- **The CLI drivers never run a Windows `.cmd` or `.bat` file.** The command is
+  resolved over `.com` and `.exe` on `PATH`; a batch shim ends the run with
+  `EXTERNAL_AGENT_BATCH_COMMAND_REFUSED` (use the native `.exe`, or
+  `interpreter` + `entry` for Gemini CLI; see docs/external-agent-isolation.md),
+  and a Windows CI job checks it with fake `.cmd` files on Bun and Node.
 - **Aborting a workflow run records an explicit `interrupted` state.** The
   execution is `cancelled` and each in-flight step is checkpointed as
   `interrupted` with a `step_interrupted` event, instead of `failed`, including

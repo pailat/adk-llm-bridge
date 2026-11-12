@@ -153,7 +153,8 @@ included. Agents nested inside the step's own agent (the children of an ADK
 the authors of the step's events: their requested ids are listed, an inherited
 model makes the step `unknown`, and so does an external child with no model
 info or an author the step's agent tree does not contain. An agent that runs but
-yields no event at all stays invisible. A replayed step returns the stored value. `models` is a record of
+yields no event at all stays invisible. A replayed step returns the stored
+value. `models` is a record of
 what the runtimes said, not a guarantee: an alias remap or a mid-run fallback
 can still change what ran (see the external-agent isolation guide).
 

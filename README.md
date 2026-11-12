@@ -302,7 +302,8 @@ reasoning tokens, as OpenAI's `completion_tokens` does, and
 `thoughtsTokenCount` is that reasoning part: do not add the two.
 
 Tokens written to the prompt cache are in
-`customMetadata.cacheCreationTokenCount`. Anthropic models cache by default when the request can be reused (tools or
+`customMetadata.cacheCreationTokenCount`. Anthropic models cache by default when
+the request can be reused (tools or
 earlier turns; see [Prompt caching](./docs/prompt-caching.md)); set
 `promptCaching: true` to always cache or `false` to turn it off.
 
@@ -398,7 +399,8 @@ const hostSetup = new ClaudeAgent({
 ```
 
 The Codex drivers (SDK and CLI), the Gemini CLI driver and the fx driver use
-the host's configuration (fx needs `inheritHostConfig: true` to say so); unless the policy sets `allowNetwork: true`, Codex turns
+the host's configuration (fx needs `inheritHostConfig: true` to say so); unless
+the policy sets `allowNetwork: true`, Codex turns
 host MCP servers off. fx has no read-only mode: in `ask` mode it stops at the
 first write or shell command unless the user's fx permission rules in
 `~/.fx/settings.json` allow it, and `workspace-write` (fx `auto` mode) asks a
@@ -438,7 +440,8 @@ to its runtime's sandbox and flags.
 - **Credentials.** The four agents use `EnvCredentialProvider`: only the
   runtime's allow-listed variables reach it (for Codex, `CODEX_API_KEY`,
   `CODEX_ACCESS_TOKEN`, `CODEX_HOME` and a few others, not
-  `OPENAI_API_KEY`; for fx, `AI_GATEWAY_API_KEY` and `VERCEL_OIDC_TOKEN`). Without them, the runtime uses its own login.
+  `OPENAI_API_KEY`; for fx, `AI_GATEWAY_API_KEY` and `VERCEL_OIDC_TOKEN`).
+  Without them, the runtime uses its own login.
 
 ### Network policy
 
