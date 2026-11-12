@@ -189,6 +189,27 @@ describe("second turn", () => {
     );
   });
 
+  for (const id of ["-", "--"]) {
+    test(`refuses bare hyphen id ${id} before spawning`, async () => {
+      const fake = forbiddenSpawn();
+      const events = await collect(
+        new FxCliDriver(baseConfig({ spawn: fake.spawn })).run(
+          request({ [STATE_KEY]: id }),
+        ),
+      );
+      expect(errorsOf(events)[0]?.code).toBe(
+        "EXTERNAL_AGENT_OPTION_UNSUPPORTED",
+      );
+      expect(errorsOf(events)[0]?.message).toContain(
+        `length ${id.length}, first character: -`,
+      );
+      expect(fake.state.called).toBe(0);
+      expect(
+        () => new FxCliDriver(baseConfig({ resumeSessionId: id })),
+      ).toThrow();
+    });
+  }
+
   test("a stored id that is not a plain token is refused before any spawn", async () => {
     for (const bad of ["a b", "a=b", "../x", "x".repeat(129)]) {
       const fake = forbiddenSpawn();

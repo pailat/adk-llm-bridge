@@ -319,6 +319,19 @@ describe("an unusable session id from fx", () => {
     });
   }
 
+  for (const id of ["-", "--"]) {
+    test(`does not remember a bare hyphen id ${id}`, async () => {
+      const fake = recordingSpawn([withSession(id)]);
+      const events = await collect(
+        new FxCliDriver(baseConfig({ spawn: fake.spawn })).run(request()),
+      );
+      expect(errorsOf(events)[0]?.message).toContain(
+        `length ${id.length}, first character: -`,
+      );
+      expect(events.some((event) => event.type === "state_delta")).toBe(false);
+    });
+  }
+
   test("is not saved to a configured store", async () => {
     const home = makeHome();
     const memory = memoryStore();
