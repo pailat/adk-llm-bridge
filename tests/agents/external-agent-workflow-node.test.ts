@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { InMemoryRunner, Workflow } from "@google/adk";
+import { type Event, InMemoryRunner, Workflow } from "@google/adk";
+import { SubprocessJsonlDriver } from "../../src/agents/driver/subprocess-jsonl.js";
 import {
   ExternalAgent,
   type ExternalAgentDriver,
@@ -43,21 +44,79 @@ async function runNode(agent: ExternalAgent) {
     userId: "user",
   });
   const errors: string[] = [];
+  const events: Event[] = [];
   try {
     for await (const event of runner.runAsync({
       userId: "user",
       sessionId: session.id,
       newMessage: { role: "user", parts: [{ text: "go" }] },
     })) {
+      events.push(event);
       if (event.errorCode) errors.push(event.errorMessage ?? event.errorCode);
     }
   } catch (error) {
     errors.push(error instanceof Error ? error.message : String(error));
   }
-  return { received, errors };
+  return { received, errors, events };
 }
 
 describe("ExternalAgent as an ADK Workflow node", () => {
+  test("a legitimate empty final output still completes the ADK turn", async () => {
+    const agent = new ExternalAgent({
+      name: "empty_final",
+      provider: CODEX_PROVIDER,
+      driver: scripted(async function* () {
+        yield { type: "output", content: "streamed chunk", partial: true };
+        yield { type: "output", content: "", turnComplete: true };
+        yield { type: "completed", exitCode: 0 };
+      }),
+    });
+    const { received, errors, events } = await runNode(agent);
+    expect(errors).toEqual([]);
+    const final = events.filter(
+      (event) => event.author === "empty_final" && event.turnComplete === true,
+    );
+    expect(final).toHaveLength(1);
+    expect(final[0]?.content?.parts).toEqual([{ text: "" }]);
+    expect(received).toEqual([""]);
+  });
+
+  for (const wrapped of [false, true]) {
+    test(`ignored child completion produces no ADK event (${wrapped ? "envelope" : "plain"})`, async () => {
+      class GuardedDriver extends SubprocessJsonlDriver {
+        override async *run(
+          _request: ExternalAgentRunRequest,
+        ): AsyncIterable<ExternalAgentEvent> {
+          const completed = { type: "completed", exitCode: 99 };
+          yield this.parseLine(
+            JSON.stringify(
+              wrapped
+                ? { type: "adk.bridge_event", event: completed }
+                : completed,
+            ),
+          );
+          yield { type: "output", content: "real output" };
+          yield { type: "completed", exitCode: 0 };
+        }
+      }
+      const agent = new ExternalAgent({
+        name: "guarded",
+        provider: CODEX_PROVIDER,
+        driver: new GuardedDriver({
+          providerId: CODEX_PROVIDER.id,
+          command: "unused",
+        }),
+      });
+      const { received, errors, events } = await runNode(agent);
+      expect(errors).toEqual([]);
+      const agentEvents = events.filter((event) => event.author === "guarded");
+      expect(agentEvents).toHaveLength(1);
+      expect(agentEvents[0]?.content?.parts).toEqual([{ text: "real output" }]);
+      expect(agentEvents[0]?.turnComplete).toBe(true);
+      expect(received).toEqual(["real output"]);
+    });
+  }
+
   test("timeout aborts the driver through request.abortSignal", async () => {
     let signal: AbortSignal | undefined;
     let driverCleanedUp = false;

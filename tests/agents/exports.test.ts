@@ -5,6 +5,11 @@ import * as agents from "../../src/agents/index.js";
 import * as root from "../../src/index.js";
 
 describe("agents public exports", () => {
+  test("the ignored-child sentinel checker stays private to internal modules", () => {
+    expect("isIgnoredChildLine" in agents).toBe(false);
+    expect("isIgnoredChildLine" in root).toBe(false);
+  });
+
   test("root export behavior remains LLM-focused", () => {
     expect(root.AIGateway).toBeFunction();
     expect(root.OpenRouter).toBeFunction();

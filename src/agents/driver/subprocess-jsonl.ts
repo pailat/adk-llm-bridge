@@ -14,10 +14,31 @@ import {
 } from "./policy-errors.js";
 import {
   agentWritableRoots,
+  asRecord,
   assertKnownDriverOptions,
+  bridgeEvent,
   isSearchableExecutable,
 } from "./shared.js";
 import { windowsExecutableKind } from "./spawn.js";
+
+const IGNORED_CHILD_LINE: ExternalAgentEvent = Object.freeze({
+  type: "output",
+  content: "",
+});
+
+/**
+ * Whether an event is the internal placeholder for an ignored child line.
+ *
+ * Identity distinguishes it from a legitimate empty final output. The
+ * placeholder cannot be constructed by parsing child JSON.
+ *
+ * @param event - A driver event.
+ * @returns Whether the event must be skipped before any processing.
+ * @internal
+ */
+export function isIgnoredChildLine(event: ExternalAgentEvent): boolean {
+  return event === IGNORED_CHILD_LINE;
+}
 
 /** Options for {@link SubprocessJsonlDriver}. */
 export interface SubprocessJsonlDriverConfig {
@@ -372,17 +393,32 @@ export class SubprocessJsonlDriver implements ExternalAgentDriver {
   }
 
   /**
-   * Parses one JSON line as an external agent event.
+   * Parses one JSON line with a recognized external agent event tag.
+   *
+   * @remarks
+   * Child-emitted `started`, `completed`, `state_delta` and transport
+   * envelopes are ignored: they return an empty `output` event, carrying
+   * none of the child payload, so a subclass's read loop continues safely.
+   * `ExternalAgent` recognizes the internal placeholder by identity and
+   * skips it before delegation, tracing or ADK processing. It produces no
+   * message, turn completion or node output; real empty outputs still pass.
+   * Other recognized event records retain their fields unchanged.
+   * A subclass emits driver-owned events by yielding them from its own
+   * `run`, never by accepting child lines.
    *
    * @param line - One line of subprocess output.
    * @returns The event.
    * @throws SyntaxError when the line is not JSON.
-   * @throws Error when the JSON is not a valid external agent event.
+   * @throws Error when the JSON has no recognized external agent event tag.
    */
   parseLine(line: string): ExternalAgentEvent {
     const parsed = parseJson(line);
     if (!parsed.ok) {
       throw new SyntaxError(parsed.error);
+    }
+    const record = asRecord(parsed.value);
+    if (bridgeEvent(record) === "drop" || record.type === "adk.bridge_event") {
+      return IGNORED_CHILD_LINE;
     }
     if (!isExternalAgentEvent(parsed.value)) {
       throw new Error("Invalid external agent JSONL event");

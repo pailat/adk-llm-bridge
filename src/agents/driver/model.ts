@@ -194,7 +194,7 @@ export const CODEX_MODEL_CONFIG_KEYS: readonly string[] = Object.freeze([
 /**
  * Codex config keys that contain `model` but only tune the model, never
  * choose or route it. Reviewed against the `ConfigToml` keys of the
- * `@openai/codex` 0.167.0 binary; a key not found there is dropped from this
+ * `@openai/codex` 0.167.2 binary; a key not found there is dropped from this
  * list, which fails closed.
  *
  * @internal
@@ -274,7 +274,7 @@ export const FX_CLI_MODEL_FLAGS: PinnedFlags = Object.freeze({
 export const MODEL_FLAGS_REVIEW = Object.freeze({
   claudeCliVersion: "2.1.319",
   claudeSource: "flag strings in the Claude Code bundle of the Agent SDK",
-  codexCliVersion: "0.167.0",
+  codexCliVersion: "0.167.2",
   codexSource:
     "`codex exec --help` and the config keys read by the @openai/codex binary",
   fxCliVersion: "0.0.16",
@@ -473,7 +473,7 @@ export const FX_MODEL_ENV: readonly string[] = Object.freeze([
  */
 export const MODEL_ENV_REVIEW = Object.freeze({
   claude: CLAUDE_MODEL_ENV_RULE.review,
-  codex: "variable names in the @openai/codex 0.167.0 binary",
+  codex: "variable names in the @openai/codex 0.167.2 binary",
   gemini: "Gemini CLI configuration reference",
   fx: "fx 0.0.16 environment documentation (model_origin: FX_MODEL) and a probe of the routing variable",
 });

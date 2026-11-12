@@ -1,5 +1,9 @@
 # Codex-only dynamic workflow
 
+This example pins `@openai/codex-sdk` to `0.167.2`, the version supported by
+the bridge’s contained exec transport. `CodexAgent` uses the shared SDK run
+loop and saves its thread id in ADK session state for subsequent turns.
+
 ## What it shows
 
 This smoke example runs a first-class `ScriptWorkflowAgent` whose three direct

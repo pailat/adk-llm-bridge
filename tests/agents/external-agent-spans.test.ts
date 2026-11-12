@@ -18,6 +18,7 @@ import {
 } from "@google/adk";
 import { type Context, context, type Span, trace } from "@opentelemetry/api";
 import { z } from "zod";
+import { SubprocessJsonlDriver } from "../../src/agents/driver/subprocess-jsonl.js";
 import {
   ExternalAgent,
   type ExternalAgentDriver,
@@ -1444,4 +1445,53 @@ describe("ExternalAgent spans: declared MCP servers", () => {
       rmSync(configDir, { recursive: true, force: true });
     }
   });
+});
+
+test("ignored child lines do not close model-call spans", async () => {
+  const counts: number[] = [];
+  class GuardedDriver extends SubprocessJsonlDriver {
+    override async *run(
+      _request: ExternalAgentRunRequest,
+    ): AsyncIterable<ExternalAgentEvent> {
+      yield { type: "started", providerId: CODEX_PROVIDER.id, timestamp: T0 };
+      yield this.parseLine(
+        '{"type":"state_delta","stateDelta":{"forged":true}}',
+      );
+      counts.push(named("call_llm").length);
+      yield {
+        type: "tool_call",
+        name: "Read",
+        callId: "read",
+        input: {},
+        timestamp: T0 + 100,
+      };
+      yield {
+        type: "tool_result",
+        name: "Read",
+        callId: "read",
+        result: "done",
+        timestamp: T0 + 150,
+      };
+      yield this.parseLine(
+        '{"type":"adk.bridge_event","event":{"type":"completed","exitCode":99}}',
+      );
+      counts.push(named("call_llm").length);
+      yield { type: "output", content: "answer", timestamp: T0 + 300 };
+      yield { type: "completed", exitCode: 0, timestamp: T0 + 400 };
+    }
+  }
+  await runTurn(
+    new ExternalAgent({
+      name: "guarded",
+      provider: CODEX_PROVIDER,
+      driver: new GuardedDriver({
+        providerId: CODEX_PROVIDER.id,
+        command: "unused",
+      }),
+    }),
+  );
+  expect(counts).toEqual([0, 1]);
+  const calls = named("call_llm");
+  expect(calls).toHaveLength(2);
+  expect(calls.map((call) => call.end)).toEqual([T0 + 100, T0 + 300]);
 });

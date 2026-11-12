@@ -1,7 +1,3 @@
-import { existsSync, statSync } from "node:fs";
-import { createRequire } from "node:module";
-import { delimiter, dirname, join } from "node:path";
-import type { Content } from "@google/genai";
 import { warn } from "../../utils/log.js";
 import type { ExternalAgentEvent } from "../events.js";
 import {
@@ -12,18 +8,24 @@ import { networkAllowed } from "../permissions/network.js";
 import type { ExternalAgentPermissionPolicy } from "../permissions/schema.js";
 import { CODEX_PROVIDER } from "../provider/codex.js";
 import type { AgentRuntimeCapabilities } from "../runtime/capabilities.js";
-import { safeCollectContents } from "../runtime/content-collector.js";
 import { classifyRecoverable } from "../runtime/error-classification.js";
-import {
-  type CodexInputPart,
-  summarizeHistoryForColdStart,
-  userContentToCodexInput,
-} from "./codex-input-mapper.js";
+import type { CodexInputPart } from "./codex-input-mapper.js";
 import {
   type CodexMcpLister,
   codexApprovalsReviewerOverrides,
   codexMcpDisableOverrides,
 } from "./codex-mcp.js";
+import {
+  codexFailureMessage,
+  codexThreadStartedId,
+  normalizeCodexSdkEvent,
+} from "./codex-message-mapper.js";
+import {
+  buildCodexEnv,
+  type CodexBinaryResolution,
+  resolveCodexBinary,
+  withBinaryPathDirs,
+} from "./codex-run-env.js";
 import {
   CODEX_SDK_INPUT_NOT_DELIVERED,
   CODEX_SDK_UNCONTAINED,
@@ -34,6 +36,11 @@ import {
   SUPPORTED_CODEX_SDK_VERSIONS,
   threadUsesExec,
 } from "./codex-sdk-exec.js";
+import {
+  CodexThreadTracker,
+  codexStateKey,
+  prepareCodexTurn,
+} from "./codex-session.js";
 import {
   assertModelOption,
   assertNoCodexConfigModelOverride,
@@ -52,19 +59,10 @@ import {
   unenforceablePathsRefusal,
   unsandboxedShellRefusal,
 } from "./policy-errors.js";
-import { codexTurnUsage } from "./run-summary.js";
 import {
   agentWritableRoots,
-  asRecord,
   assertKnownDriverOptions,
-  candidateBaseDirectories,
-  contextText,
-  copyIfPresent,
-  credentialEnv,
   describeMissingExecutable,
-  executableCandidates,
-  findExecutable,
-  isSearchableExecutable,
   readCredentialEnv,
   removeUndefined,
   stringValue,
@@ -74,23 +72,6 @@ import {
   type StrictBinaryCheck,
   strictBinaryRefusal,
 } from "./strict-binary.js";
-
-/**
- * Ambient environment variables forwarded from `this.#env` into the Codex SDK's
- * replacement env (the SDK does not inherit `process.env`). Covers proxy/cert
- * egress configuration plus a custom shell `CODEX_HOME`.
- */
-const CODEX_AMBIENT_PASSTHROUGH = [
-  "HTTPS_PROXY",
-  "https_proxy",
-  "HTTP_PROXY",
-  "http_proxy",
-  "NO_PROXY",
-  "no_proxy",
-  "SSL_CERT_FILE",
-  "SSL_CERT_DIR",
-  "CODEX_HOME",
-] as const;
 
 type CodexSdkApprovalMode = "never" | "on-request" | "on-failure" | "untrusted";
 type CodexSdkSandboxMode =
@@ -122,7 +103,7 @@ type CodexSdkOptions = {
   env?: Record<string, string>;
 };
 
-type CodexSdkThreadOptions = {
+export type CodexSdkThreadOptions = {
   model?: string;
   sandboxMode?: CodexSdkSandboxMode;
   workingDirectory?: string;
@@ -135,16 +116,16 @@ type CodexSdkThreadOptions = {
   additionalDirectories?: string[];
 };
 
-type CodexSdkTurnOptions = {
+export type CodexSdkTurnOptions = {
   signal?: AbortSignal;
   outputSchema?: Record<string, unknown>;
 };
 
-type CodexSdkThreadEvent = Record<string, unknown>;
+export type CodexSdkThreadEvent = Record<string, unknown>;
 
-type CodexSdkInput = string | CodexInputPart[];
+export type CodexSdkInput = string | CodexInputPart[];
 
-type CodexSdkThreadLike = {
+export type CodexSdkThreadLike = {
   readonly id?: string | null;
   runStreamed(
     input: CodexSdkInput,
@@ -152,7 +133,7 @@ type CodexSdkThreadLike = {
   ): Promise<{ events: AsyncGenerator<CodexSdkThreadEvent> }>;
 };
 
-type CodexSdkClientLike = {
+export type CodexSdkClientLike = {
   startThread(options?: CodexSdkThreadOptions): CodexSdkThreadLike;
   resumeThread(id: string, options?: CodexSdkThreadOptions): CodexSdkThreadLike;
 };
@@ -165,20 +146,7 @@ type CodexSdkModuleLike = {
   Codex: CodexSdkConstructor;
 };
 
-/** Which Codex binary a run uses, and where the driver looked. */
-export interface CodexBinaryResolution {
-  /** The binary, or `undefined` when none was found. */
-  path?: string;
-  /** Every location tried, in order. */
-  checked: string[];
-  /**
-   * Directories the binary needs on `PATH` (the `codex-path` or `path`
-   * directory of an npm-installed Codex package). The SDK adds them only
-   * when it finds the binary itself, so the driver adds them to the env of
-   * the client and of the MCP listing.
-   */
-  pathDirs?: string[];
-}
+export type { CodexBinaryResolution } from "./codex-run-env.js";
 
 /** Every `?: boolean` option of the driver config, checked when the driver is built. */
 const CODEX_SDK_BOOLEAN_OPTIONS = [
@@ -313,14 +281,14 @@ export interface CodexSdkDriverConfig {
   allowUnenforcedPaths?: boolean;
   /**
    * Opt-in: run an installed `@openai/codex-sdk` version the driver cannot
-   * contain (any version other than 0.167.0, or one it cannot read) through
+   * contain (any version other than 0.167.2, or one it cannot read) through
    * the SDK's own exec, **without the containment**. Without it such a run is
    * refused with `EXTERNAL_AGENT_DEPENDENCY_MISSING`.
    *
    * With it, a codex that exits, is aborted or closes stdin before it reads
    * the prompt can end the host process with an uncaught `EPIPE` from the
    * SDK. The driver logs one `CODEX_SDK_UNCONTAINED` warning per driver
-   * instance. On 0.167.0 the option changes nothing: the contained exec is
+   * instance. On 0.167.2 the option changes nothing: the contained exec is
    * still used, and a client whose exec it cannot contain is still refused.
    *
    * @defaultValue false
@@ -401,10 +369,10 @@ const CODEX_SDK_INSTALL = "npm install @openai/codex-sdk";
  * The SDK writes the prompt to codex's stdin without handling a write error,
  * so a codex gone before it read the prompt would end the host with an
  * uncaught `EPIPE`. The driver replaces the client's exec with a contained
- * copy of the SDK 0.167.0 exec path: such a run ends with
+ * copy of the SDK 0.167.2 exec path: such a run ends with
  * `CODEX_SDK_INPUT_NOT_DELIVERED` (or `CODEX_SDK_ERROR` for a non-zero exit of
  * codex's own). The copy is used only on the installed SDK versions it was
- * copied from (0.167.0, read at run time); another version, or a client
+ * copied from (0.167.2, read at run time); another version, or a client
  * whose exec it cannot contain, is refused with
  * `EXTERNAL_AGENT_DEPENDENCY_MISSING` before codex starts, unless
  * `allowUncontainedCodexSdk` runs another version uncontained. The copy is
@@ -629,171 +597,46 @@ export class CodexSdkDriver {
       configOverrides = mcp.overrides;
     }
 
-    let completed = false;
-    let failed = false;
-    let terminalEvent: ExternalAgentEvent | undefined;
-    let cleanup: () => Promise<void> = async () => {};
-    try {
-      const sdk =
-        this.#sdk ??
-        new (Codex as CodexSdkConstructor)(
-          this.buildClientOptions(request, configOverrides),
-        );
-      // The SDK writes the prompt to codex's stdin with no error listener,
-      // so a codex that is gone before it read the prompt would end the host
-      // with an uncaught EPIPE. Its exec is replaced by a contained copy.
-      const containment = containCodexSdkClient(sdk);
-      if (containment === "unknown-shape") {
-        throw codexSdkUncontainable(installedCodexSdkVersion());
-      }
-      if (containment === "unsupported-version") {
-        const installed = installedCodexSdkVersion();
-        if (!this.#allowUncontainedCodexSdk) {
-          throw codexSdkUnsupportedVersion(installed);
+    yield* runCodexTurn({
+      request,
+      open: () => {
+        const sdk =
+          this.#sdk ??
+          new (Codex as CodexSdkConstructor)(
+            this.buildClientOptions(request, configOverrides),
+          );
+        // The SDK writes the prompt to codex's stdin with no error listener,
+        // so a codex that is gone before it read the prompt would end the host
+        // with an uncaught EPIPE. Its exec is replaced by a contained copy.
+        const containment = containCodexSdkClient(sdk);
+        if (containment === "unknown-shape") {
+          throw codexSdkUncontainable(installedCodexSdkVersion());
         }
-        this.#warnUncontained(installed);
-      }
-      const threadOptions = this.buildThreadOptions(request);
-      const agentName = request.agent?.name ?? request.context?.agent?.name;
-      const stateKey = agentName ? this.#threadStateKey(agentName) : undefined;
-      // An explicit runtime session id wins over the id saved in state.
-      const savedThreadId =
-        stringValue(request.runtimeSession?.id) ??
-        readSavedThreadId(request, stateKey);
-      const contents = safeCollectContents(request.context);
-      const lastContent = contents[contents.length - 1];
-
-      let thread: CodexSdkThreadLike;
-      let input: CodexSdkInput;
-
-      if (savedThreadId) {
-        assertThreadIdIsNotAFlag(savedThreadId);
-        thread = sdk.resumeThread(savedThreadId, threadOptions);
-        const mapping = mapLastContentOrFallback(lastContent, request);
-        cleanup = mapping.cleanup;
-        input = applyInstruction(request.instruction, mapping.input);
-      } else if (contents.length > 1 && lastContent) {
-        thread = sdk.startThread(threadOptions);
-        const mapping = userContentToCodexInput(lastContent);
-        cleanup = mapping.cleanup;
-        const transcript = summarizeHistoryForColdStart(contents);
-        input = applyInstruction(
-          request.instruction,
-          prependColdStartTranscript(mapping.input, transcript),
-        );
-      } else {
-        thread = sdk.startThread(threadOptions);
-        const mapping = mapLastContentOrFallback(lastContent, request);
-        cleanup = mapping.cleanup;
-        input = applyInstruction(request.instruction, mapping.input);
-      }
-
-      if (
-        containment === "contained" &&
-        !threadUsesExec(thread, (sdk as { exec?: unknown }).exec)
-      ) {
-        throw codexSdkUncontainable(installedCodexSdkVersion());
-      }
-
-      const { events } = await thread.runStreamed(input, {
-        signal: resolveAbortSignal(request),
-        outputSchema: this.#outputSchema,
-      });
-
-      // Track the thread id as soon as it is known so resumability survives a
-      // mid-turn throw. The `thread.started` event carries it before the first
-      // turn completes; we emit the `state_delta` immediately and
-      // remember it so the post-loop read does not re-emit.
-      let emittedThreadId: string | undefined;
-      const emitThreadId = (threadId: string | undefined) => {
-        if (!stateKey || !threadId) return undefined;
-        if (threadId === savedThreadId || threadId === emittedThreadId) {
-          return undefined;
+        if (containment === "unsupported-version") {
+          const installed = installedCodexSdkVersion();
+          if (!this.#allowUncontainedCodexSdk) {
+            throw codexSdkUnsupportedVersion(installed);
+          }
+          this.#warnUncontained(installed);
         }
-        emittedThreadId = threadId;
-        const delta: ExternalAgentEvent = {
-          type: "state_delta",
-          stateDelta: { [stateKey]: threadId },
-          timestamp: Date.now(),
+        return {
+          client: sdk,
+          threadOptions: this.buildThreadOptions(request),
+          verifyThread: (thread) => {
+            if (
+              containment === "contained" &&
+              !threadUsesExec(thread, (sdk as { exec?: unknown }).exec)
+            ) {
+              throw codexSdkUncontainable(installedCodexSdkVersion());
+            }
+          },
         };
-        return delta;
-      };
-
-      // One failure surfaces as a stream `error` followed by `turn.failed`.
-      // Hold the stream error back until the next event: when it is the
-      // `turn.failed` for the same failure, only that one error is emitted.
-      let pendingStreamError: ExternalAgentEvent | undefined;
-      stream: for await (const event of events) {
-        const eventType = stringValue(event.type);
-        if (eventType === "error") {
-          if (pendingStreamError) {
-            yield pendingStreamError;
-          }
-          pendingStreamError = this.normalizeEvent(event)[0];
-          continue;
-        }
-        let normalizedEvent = event;
-        if (pendingStreamError) {
-          const held = pendingStreamError;
-          pendingStreamError = undefined;
-          if (eventType !== "turn.failed") {
-            yield held;
-          } else if (
-            held.type === "error" &&
-            !stringValue(asRecord(event.error).message)
-          ) {
-            // Keep the stream error's message when `turn.failed` has none.
-            normalizedEvent = { ...event, error: { message: held.message } };
-          }
-        }
-        if (eventType === "thread.started") {
-          const delta = emitThreadId(threadStartedId(event));
-          if (delta) {
-            yield delta;
-          }
-          continue;
-        }
-        for (const normalized of this.normalizeEvent(normalizedEvent)) {
-          if (normalized.type === "completed") {
-            terminalEvent = normalized;
-            break stream;
-          }
-          yield normalized;
-        }
-      }
-      if (pendingStreamError) {
-        yield pendingStreamError;
-      }
-
-      // Fallback: if `thread.started` was never observed (older event stream),
-      // persist the id from the post-loop accessor.
-      const postLoopDelta = emitThreadId(thread.id ?? undefined);
-      if (postLoopDelta) {
-        yield postLoopDelta;
-      }
-
-      if (terminalEvent) {
-        completed = true;
-        yield terminalEvent;
-      }
-    } catch (error) {
-      failed = true;
-      yield this.errorEvent(error, request);
-    } finally {
-      try {
-        await cleanup();
-      } catch {
-        // best-effort cleanup; never let tmp deletion mask the real error.
-      }
-    }
-
-    if (!completed) {
-      yield {
-        type: "completed",
-        exitCode: failed ? 1 : 0,
-        timestamp: Date.now(),
-      };
-    }
+      },
+      stateKey: codexStateKey(request, this.#threadStateKey),
+      outputSchema: this.#outputSchema,
+      normalize: (event) => normalizeCodexSdkEvent(event),
+      describeError: (error) => this.errorEvent(error, request),
+    });
   }
 
   /**
@@ -833,15 +676,7 @@ export class CodexSdkDriver {
     request: ExternalAgentRunRequest,
     binary: CodexBinaryResolution,
   ): Record<string, string> {
-    const env = this.buildEnv(request);
-    const dirs = binary.pathDirs ?? [];
-    if (dirs.length > 0) {
-      const rest = (env.PATH ?? "")
-        .split(delimiter)
-        .filter((entry) => entry.length > 0 && !dirs.includes(entry));
-      env.PATH = [...dirs, ...rest].join(delimiter);
-    }
-    return env;
+    return withBinaryPathDirs(this.buildEnv(request), binary.pathDirs);
   }
 
   /**
@@ -899,31 +734,7 @@ export class CodexSdkDriver {
    * @returns The binary path (when found) and every location tried.
    */
   resolveCodexBinary(request: ExternalAgentRunRequest): CodexBinaryResolution {
-    const excluded = agentWritableRoots(request);
-    const found = findExecutable(
-      [
-        this.#codexPathOverride,
-        this.#env.CODEX_EXECUTABLE,
-        this.#env.CODEX_CLI_PATH,
-        readCredentialEnv(request, "CODEX_EXECUTABLE"),
-        readCredentialEnv(request, "CODEX_CLI_PATH"),
-      ],
-      codexBinaryCandidates({ env: this.#env, excluded }),
-    );
-    if (found.path) {
-      return found;
-    }
-    const { checked } = found;
-
-    // The npm-installed binary, found the way @openai/codex-sdk finds it.
-    for (const base of candidateBaseDirectories()) {
-      const found = findNpmCodexBinary(base, checked, excluded);
-      if (found) {
-        return { ...found, checked };
-      }
-    }
-
-    return { checked };
+    return resolveCodexBinary(request, this.#env, this.#codexPathOverride);
   }
 
   /**
@@ -941,25 +752,7 @@ export class CodexSdkDriver {
    * @returns The environment to pass to the client.
    */
   buildEnv(request: ExternalAgentRunRequest): Record<string, string> {
-    const env: Record<string, string> = {};
-    copyIfPresent(this.#env, env, "PATH");
-    copyIfPresent(this.#env, env, "HOME");
-    copyIfPresent(this.#env, env, "USER");
-    copyIfPresent(this.#env, env, "SHELL");
-    copyIfPresent(this.#env, env, "XDG_CONFIG_HOME");
-
-    // The SDK builds a *replacement* env (it does not inherit `process.env`
-    // when `env` is supplied), so ambient proxy/cert vars must be forwarded
-    // explicitly or egress through a corporate proxy / custom CA breaks. A
-    // custom shell `CODEX_HOME` is also carried through here so it is not lost
-    // when it is not delivered via a structured credential. When a
-    // credential supplies one of these keys it overrides the ambient value
-    // through `credentialEnv` below.
-    for (const key of CODEX_AMBIENT_PASSTHROUGH) {
-      copyIfPresent(this.#env, env, key);
-    }
-
-    return Object.assign(env, credentialEnv(request));
+    return buildCodexEnv(this.#env, request, { ambientPassthrough: true });
   }
 
   /**
@@ -976,67 +769,7 @@ export class CodexSdkDriver {
    * @returns The normalized events; empty when the event carries nothing.
    */
   normalizeEvent(event: CodexSdkThreadEvent): ExternalAgentEvent[] {
-    const type = stringValue(event.type);
-    const timestamp = Date.now();
-
-    if (type === "turn.completed") {
-      // Codex reports token usage per turn; it does not report the model.
-      const usage = codexTurnUsage(event.usage);
-      return [
-        {
-          type: "completed",
-          exitCode: 0,
-          ...(usage ? { usage } : {}),
-          timestamp,
-        },
-      ];
-    }
-
-    if (type === "turn.failed") {
-      const error = asRecord(event.error);
-      const message = stringValue(error.message) ?? "Codex turn failed";
-      const { recoverable, code } = classifyRecoverable({
-        message,
-        fallbackCode: "CODEX_TURN_FAILED",
-      });
-      return [
-        {
-          type: "error",
-          message,
-          code,
-          recoverable,
-          timestamp,
-        },
-        { type: "completed", exitCode: 1, timestamp },
-      ];
-    }
-
-    if (type === "error") {
-      const message = stringValue(event.message) ?? "Codex SDK error";
-      const { recoverable, code } = classifyRecoverable({
-        message,
-        fallbackCode: "CODEX_SDK_STREAM_ERROR",
-      });
-      return [
-        {
-          type: "error",
-          message,
-          code,
-          recoverable,
-          timestamp,
-        },
-      ];
-    }
-
-    if (type === "item.started" || type === "item.updated") {
-      return normalizeProgressItem(asRecord(event.item), timestamp);
-    }
-
-    if (type !== "item.completed") {
-      return [];
-    }
-
-    return normalizeCompletedItem(asRecord(event.item), timestamp);
+    return normalizeCodexSdkEvent(event);
   }
 
   private async loadConstructor(): Promise<CodexSdkConstructor> {
@@ -1119,6 +852,185 @@ export class CodexSdkDriver {
   }
 }
 
+/**
+ * What one Codex turn needs from the transport that feeds the shared loop.
+ *
+ * @internal
+ */
+export interface CodexTurnOptions {
+  /** The run. */
+  request: ExternalAgentRunRequest;
+  /**
+   * Builds the client for this run. Runs inside the loop's error handling, so
+   * a refusal it throws becomes an `error` event. `verifyThread` runs on the
+   * thread before the turn starts.
+   */
+  open: () => {
+    client: CodexSdkClientLike;
+    threadOptions: CodexSdkThreadOptions;
+    verifyThread?: (thread: CodexSdkThreadLike) => void;
+  };
+  /** The session state key for the thread id; `undefined` keeps no state. */
+  stateKey: string | undefined;
+  /** JSON schema for the final answer, passed to the turn. */
+  outputSchema?: Record<string, unknown>;
+  /** Maps one stream event to bridge events (see the message mapper). */
+  normalize: (event: CodexSdkThreadEvent) => ExternalAgentEvent[];
+  /** Turns a thrown error into the one `error` event of the run. */
+  describeError: (error: unknown) => ExternalAgentEvent;
+  /**
+   * End the stream without a `completed` event when the abort signal fires,
+   * instead of reporting the abort as an error.
+   */
+  endOnAbort?: boolean;
+  /**
+   * Lets a transport have an error it threw reach the caller instead of
+   * becoming an `error` event: returns the error to throw, or `undefined`.
+   */
+  rethrow?: (error: unknown) => { error: unknown } | undefined;
+}
+
+/**
+ * The one agent run loop of the Codex drivers: starts or resumes the thread,
+ * streams its events through `normalize`, saves the thread id as soon as it
+ * is known, reports one error per failure, ends with exactly one `completed`
+ * event, and always removes the turn's temporary files.
+ *
+ * @remarks
+ * `CodexSdkDriver` feeds it the SDK's thread events; `CodexCliDriver` feeds it
+ * a client whose threads run `codex exec --json`. Anything that is not about
+ * how the events arrive lives here, so the two transports cannot drift apart.
+ *
+ * @param options - The run and the transport hooks.
+ * @returns Bridge events in order, without the leading `started`.
+ * @internal
+ */
+export async function* runCodexTurn(
+  options: CodexTurnOptions,
+): AsyncGenerator<ExternalAgentEvent> {
+  const { request, normalize } = options;
+  const signal = resolveAbortSignal(request);
+  const endedByAbort = () => options.endOnAbort === true && signal?.aborted;
+  let completed = false;
+  let failed = false;
+  let terminalEvent: ExternalAgentEvent | undefined;
+  let cleanup: () => Promise<void> = async () => {};
+  try {
+    const { client, threadOptions, verifyThread } = options.open();
+    const turn = prepareCodexTurn({
+      client,
+      request,
+      stateKey: options.stateKey,
+      threadOptions,
+    });
+    cleanup = turn.cleanup;
+    verifyThread?.(turn.thread);
+
+    const { events } = await turn.thread.runStreamed(turn.input, {
+      signal,
+      outputSchema: options.outputSchema,
+    });
+
+    // The `thread.started` event carries the id before the first turn
+    // completes, so the `state_delta` goes out at once and a turn that fails
+    // midway is still resumable.
+    const tracker = new CodexThreadTracker(
+      options.stateKey,
+      turn.savedThreadId,
+    );
+
+    // One failure surfaces as a stream `error` followed by `turn.failed`.
+    // Hold the stream error back until the next event: when that is the
+    // `turn.failed` for the same failure (or one without a message), only
+    // one error is emitted.
+    let heldError: ExternalAgentEvent | undefined;
+    stream: for await (const event of events) {
+      if (endedByAbort()) {
+        return;
+      }
+      const eventType = stringValue(event.type);
+      if (eventType === "error") {
+        if (heldError) {
+          yield heldError;
+        }
+        heldError = normalize(event)[0];
+        continue;
+      }
+      let current = event;
+      if (heldError) {
+        const previous = heldError;
+        heldError = undefined;
+        if (eventType !== "turn.failed" || previous.type !== "error") {
+          yield previous;
+        } else {
+          const message = codexFailureMessage(event);
+          if (message === undefined) {
+            // Keep the stream error's message when `turn.failed` has none.
+            current = { ...event, error: { message: previous.message } };
+          } else if (message !== previous.message) {
+            yield previous;
+          }
+        }
+      }
+      if (eventType === "thread.started") {
+        const delta = tracker.observe(codexThreadStartedId(event));
+        if (delta) {
+          yield delta;
+        }
+      }
+      for (const normalized of normalize(current)) {
+        if (normalized.type === "completed") {
+          terminalEvent = normalized;
+          break stream;
+        }
+        yield normalized;
+      }
+    }
+    if (heldError) {
+      yield heldError;
+    }
+    if (endedByAbort()) {
+      return;
+    }
+
+    // Fallback: if `thread.started` was never observed, persist the id from
+    // the thread accessor.
+    const lateDelta = tracker.observe(turn.thread.id);
+    if (lateDelta) {
+      yield lateDelta;
+    }
+
+    if (terminalEvent) {
+      completed = true;
+      yield terminalEvent;
+    }
+  } catch (error) {
+    if (endedByAbort()) {
+      return;
+    }
+    const fault = options.rethrow?.(error);
+    if (fault) {
+      throw fault.error;
+    }
+    failed = true;
+    yield options.describeError(error);
+  } finally {
+    try {
+      await cleanup();
+    } catch {
+      // best-effort cleanup; never let tmp deletion mask the real error.
+    }
+  }
+
+  if (!completed) {
+    yield {
+      type: "completed",
+      exitCode: failed ? 1 : 0,
+      timestamp: Date.now(),
+    };
+  }
+}
+
 /** Names of the MCP servers set in the driver's own `config.mcp_servers`. */
 function configuredMcpServerNames(
   config: CodexSdkConfigObject | undefined,
@@ -1127,20 +1039,6 @@ function configuredMcpServerNames(
   return servers && typeof servers === "object" && !Array.isArray(servers)
     ? Object.keys(servers)
     : [];
-}
-
-/**
- * `metadata.mcp` for a Codex `mcp_tool_call` item: its server and tool, when
- * both are strings.
- */
-function codexMcpMetadata(item: Record<string, unknown>): {
-  mcp?: { server: string; tool: string };
-} {
-  const server = stringValue(item.server);
-  const tool = stringValue(item.tool);
-  return server !== undefined && tool !== undefined
-    ? { mcp: { server, tool } }
-    : {};
 }
 
 /**
@@ -1238,481 +1136,4 @@ function codexSdkUnsupportedVersion(installed: string | undefined): Error {
 
 async function importCodexSdk(): Promise<CodexSdkModuleLike> {
   return import("@openai/codex-sdk") as Promise<CodexSdkModuleLike>;
-}
-
-function normalizeProgressItem(
-  item: Record<string, unknown>,
-  timestamp: number,
-): ExternalAgentEvent[] {
-  const itemType = stringValue(item.type);
-  // Same value as the builtin tool_call `callId`, so the first progress event
-  // can set the start time of the tool span.
-  const itemId = stringValue(item.id);
-  const idMetadata = itemId ? { itemId } : {};
-
-  if (itemType === "command_execution") {
-    const command = stringValue(item.command);
-    const status = stringValue(item.status);
-    return command
-      ? [
-          {
-            type: "output",
-            content: `Codex command ${status ?? "running"}: ${command}`,
-            partial: true,
-            turnComplete: false,
-            metadata: {
-              itemType,
-              ...idMetadata,
-              status,
-              command,
-              exitCode: item.exit_code,
-              title: `Codex: command_execution ${status ?? "running"}`,
-            },
-            timestamp,
-          },
-        ]
-      : [];
-  }
-
-  if (itemType === "mcp_tool_call") {
-    const toolName = stringValue(item.tool) ?? "mcp_tool_call";
-    const status = stringValue(item.status) ?? "running";
-    return [
-      {
-        type: "output",
-        content: `Codex MCP tool ${status}: ${toolName}`,
-        partial: true,
-        turnComplete: false,
-        metadata: {
-          itemType,
-          ...idMetadata,
-          toolName,
-          status: item.status,
-          title: `Codex: ${toolName} ${status}`,
-        },
-        timestamp,
-      },
-    ];
-  }
-
-  if (itemType === "web_search") {
-    const query = stringValue(item.query);
-    return query
-      ? [
-          {
-            type: "output",
-            content: `Codex web search: ${query}`,
-            partial: true,
-            turnComplete: false,
-            metadata: {
-              itemType,
-              ...idMetadata,
-              query,
-              title: "Codex: web_search",
-            },
-            timestamp,
-          },
-        ]
-      : [];
-  }
-
-  return [];
-}
-
-function normalizeCompletedItem(
-  item: Record<string, unknown>,
-  timestamp: number,
-): ExternalAgentEvent[] {
-  const itemType = stringValue(item.type);
-
-  if (itemType === "agent_message") {
-    const text = stringValue(item.text);
-    return text
-      ? [{ type: "output", content: text, stream: "stdout", timestamp }]
-      : [];
-  }
-
-  if (itemType === "error") {
-    const message = stringValue(item.message) ?? "Codex item error";
-    const { recoverable, code } = classifyRecoverable({
-      message,
-      fallbackCode: "CODEX_ITEM_ERROR",
-    });
-    return [
-      {
-        type: "error",
-        message,
-        code,
-        recoverable,
-        timestamp,
-      },
-    ];
-  }
-
-  if (itemType === "mcp_tool_call") {
-    const toolName = stringValue(item.tool) ?? "mcp_tool_call";
-    const status = stringValue(item.status) ?? "completed";
-    return [
-      {
-        type: "tool_call",
-        name: toolName,
-        input: {
-          server: item.server,
-          arguments: item.arguments,
-          status: item.status,
-        },
-        callId: stringValue(item.id),
-        metadata: {
-          itemType,
-          builtin: true,
-          status: item.status,
-          title: `Codex: ${toolName} call`,
-          ...codexMcpMetadata(item),
-        },
-        timestamp,
-      },
-      {
-        type: "tool_result",
-        name: toolName,
-        result: {
-          server: item.server,
-          status: item.status,
-          result: item.result,
-          error: item.error,
-        },
-        callId: stringValue(item.id),
-        error: stringValue(item.error),
-        metadata: {
-          itemType,
-          builtin: true,
-          status: item.status,
-          title: `Codex: ${toolName} ${status}`,
-          ...codexMcpMetadata(item),
-        },
-        timestamp,
-      },
-    ];
-  }
-
-  if (itemType === "command_execution") {
-    const command = stringValue(item.command);
-    const status = stringValue(item.status) ?? "completed";
-    return [
-      {
-        type: "tool_call",
-        name: "command_execution",
-        input: {
-          command: item.command,
-          status: item.status,
-          exitCode: item.exit_code,
-        },
-        callId: stringValue(item.id),
-        metadata: {
-          itemType,
-          builtin: true,
-          status: item.status,
-          command,
-          title: "Codex: command_execution call",
-        },
-        timestamp,
-      },
-      {
-        type: "tool_result",
-        name: "command_execution",
-        result: {
-          command: item.command,
-          status: item.status,
-          exitCode: item.exit_code,
-          ...(typeof item.aggregated_output === "string"
-            ? { output: item.aggregated_output }
-            : {}),
-        },
-        callId: stringValue(item.id),
-        metadata: {
-          itemType,
-          builtin: true,
-          status: item.status,
-          command,
-          exitCode: item.exit_code,
-          title: `Codex: command_execution ${status}`,
-        },
-        timestamp,
-      },
-    ];
-  }
-
-  if (itemType === "file_change") {
-    // A patch the agent applied with its own tools.
-    const status = stringValue(item.status) ?? "completed";
-    const callId = stringValue(item.id);
-    const metadata = { itemType, builtin: true, status: item.status };
-    return [
-      {
-        type: "tool_call",
-        name: "file_change",
-        input: { changes: item.changes },
-        callId,
-        metadata: { ...metadata, title: "Codex: file_change call" },
-        timestamp,
-      },
-      {
-        type: "tool_result",
-        name: "file_change",
-        result: { changes: item.changes, status: item.status },
-        callId,
-        ...(status === "failed" ? { error: "Codex patch failed" } : {}),
-        metadata: { ...metadata, title: `Codex: file_change ${status}` },
-        timestamp,
-      },
-    ];
-  }
-
-  if (itemType === "web_search") {
-    const callId = stringValue(item.id);
-    const metadata = { itemType, builtin: true };
-    return [
-      {
-        type: "tool_call",
-        name: "web_search",
-        input: { query: item.query },
-        callId,
-        metadata: { ...metadata, title: "Codex: web_search call" },
-        timestamp,
-      },
-      {
-        type: "tool_result",
-        name: "web_search",
-        result: { query: item.query },
-        callId,
-        metadata: { ...metadata, title: "Codex: web_search completed" },
-        timestamp,
-      },
-    ];
-  }
-
-  return [];
-}
-
-/**
- * Extract the thread id from a `thread.started` event. The SDK shape is
- * `ThreadStartedEvent { type: "thread.started", thread_id }`.
- */
-function threadStartedId(event: CodexSdkThreadEvent): string | undefined {
-  return stringValue(event.thread_id) ?? stringValue(asRecord(event.thread).id);
-}
-
-function mapLastContentOrFallback(
-  lastContent: Content | undefined,
-  request: ExternalAgentRunRequest,
-): { input: CodexSdkInput; cleanup: () => Promise<void> } {
-  if (lastContent) {
-    return userContentToCodexInput(lastContent);
-  }
-  // No content collected — fall back to the legacy text extractor so synthetic
-  // contexts (e.g. unit tests with just `userContent: {...}`) keep working.
-  const text = contextText(request.context) ?? "";
-  return { input: text, cleanup: async () => {} };
-}
-
-function applyInstruction(
-  instruction: string | undefined,
-  input: CodexSdkInput,
-): CodexSdkInput {
-  if (!instruction || instruction.length === 0) {
-    return input;
-  }
-  if (typeof input === "string") {
-    return input.length > 0 ? `${instruction}\n\n${input}` : instruction;
-  }
-  return [{ type: "text", text: instruction }, ...input];
-}
-
-function prependColdStartTranscript(
-  input: CodexSdkInput,
-  transcript: string,
-): CodexSdkInput {
-  if (!transcript || transcript.length === 0) {
-    return input;
-  }
-  if (typeof input === "string") {
-    return input.length > 0 ? `${transcript}\n\n${input}` : transcript;
-  }
-  // Array input. If the first part is text, fold the transcript into it;
-  // otherwise (e.g. starts with an image), insert a synthetic text part.
-  const first = input[0];
-  if (first && first.type === "text") {
-    return [
-      { type: "text", text: `${transcript}\n\n${first.text}` },
-      ...input.slice(1),
-    ];
-  }
-  return [{ type: "text", text: transcript }, ...input];
-}
-
-/**
- * Refuses a thread id that starts with `-`.
- *
- * The SDK passes the id as its own argv entry after `resume`, and
- * `codex exec resume` reads an entry that starts with `-` as an option, so
- * an id such as `--dangerously-bypass-approvals-and-sandbox` would change
- * the run's policy instead of naming a thread. The id can come from session
- * state, which other agents and tools may write.
- *
- * @param threadId - The id the run would resume.
- * @throws ExternalAgentPolicyError with `EXTERNAL_AGENT_OPTION_UNSUPPORTED`.
- */
-function assertThreadIdIsNotAFlag(threadId: string): void {
-  if (threadId.startsWith("-")) {
-    throw new ExternalAgentPolicyError(
-      EXTERNAL_AGENT_OPTION_UNSUPPORTED,
-      "CodexSdkDriver: the thread id to resume starts with '-', which codex exec resume would read as an option rather than a thread id. Codex thread ids never start with '-'; check runtimeSession.id and the thread id saved in session state.",
-    );
-  }
-}
-
-function readSavedThreadId(
-  request: ExternalAgentRunRequest,
-  stateKey: string | undefined,
-): string | undefined {
-  if (!stateKey) return undefined;
-  const session = (
-    request.context as { session?: { state?: unknown } } | undefined
-  )?.session;
-  const state = session?.state;
-  if (!state || typeof state !== "object") {
-    return undefined;
-  }
-  const value = (state as Record<string, unknown>)[stateKey];
-  return typeof value === "string" && value.length > 0 ? value : undefined;
-}
-
-function codexBinaryCandidates({
-  env,
-  excluded,
-}: {
-  env: Record<string, string | undefined>;
-  excluded: readonly string[];
-}): string[] {
-  const executable = process.platform === "win32" ? "codex.exe" : "codex";
-  return executableCandidates({
-    executable,
-    env,
-    excluded,
-    packagePaths: (base) =>
-      platformCodexPackages().map(([platformPackage, targetTriple]) =>
-        join(
-          base,
-          "node_modules",
-          "@openai",
-          platformPackage,
-          "vendor",
-          targetTriple,
-          "codex",
-          executable,
-        ),
-      ),
-  });
-}
-
-/**
- * The binary of the `@openai/codex` npm package, resolved like
- * `@openai/codex-sdk` 0.167.0 does: `@openai/codex/package.json` from the
- * SDK's own location (or from `base`), then the platform package from
- * there, then `vendor/<triple>/bin/codex` (with `codex-package.json` next to
- * it, and `codex-path` for `PATH`) or the older `vendor/<triple>/codex/codex`
- * (with `path`).
- */
-function findNpmCodexBinary(
-  base: string,
-  checked: string[],
-  excluded: readonly string[],
-): { path: string; pathDirs: string[] } | undefined {
-  const [platform] = platformCodexPackages();
-  if (!platform) {
-    return undefined;
-  }
-  const [platformPackage, targetTriple] = platform;
-  const sdkEntry = join(
-    base,
-    "node_modules",
-    "@openai",
-    "codex-sdk",
-    "dist",
-    "index.js",
-  );
-  // createRequire only needs a file name to resolve from; it may not exist.
-  const starts = existsSync(sdkEntry)
-    ? [sdkEntry, join(base, "index.js")]
-    : [join(base, "index.js")];
-  const executable = process.platform === "win32" ? "codex.exe" : "codex";
-  for (const start of starts) {
-    let vendorRoot: string;
-    try {
-      const codexPackage = createRequire(start).resolve(
-        "@openai/codex/package.json",
-      );
-      const platformJson = createRequire(codexPackage).resolve(
-        `@openai/${platformPackage}/package.json`,
-      );
-      vendorRoot = join(dirname(platformJson), "vendor");
-    } catch {
-      continue;
-    }
-    const root = join(vendorRoot, targetTriple);
-    // The package resolution can follow a symlink into the workspace.
-    if (!isSearchableExecutable(root, excluded)) {
-      continue;
-    }
-    const current = join(root, "bin", executable);
-    checked.push(current);
-    if (isFile(current) && isFile(join(root, "codex-package.json"))) {
-      return {
-        path: current,
-        pathDirs: existingDirs(join(root, "codex-path")),
-      };
-    }
-    const legacy = join(root, "codex", executable);
-    checked.push(legacy);
-    if (isFile(legacy)) {
-      return { path: legacy, pathDirs: existingDirs(join(root, "path")) };
-    }
-  }
-  return undefined;
-}
-
-function isFile(path: string): boolean {
-  try {
-    return statSync(path).isFile();
-  } catch {
-    return false;
-  }
-}
-
-function existingDirs(...paths: string[]): string[] {
-  return paths.filter((path) => {
-    try {
-      return statSync(path).isDirectory();
-    } catch {
-      return false;
-    }
-  });
-}
-
-function platformCodexPackages(): Array<[string, string]> {
-  switch (`${process.platform}:${process.arch}`) {
-    case "darwin:arm64":
-      return [["codex-darwin-arm64", "aarch64-apple-darwin"]];
-    case "darwin:x64":
-      return [["codex-darwin-x64", "x86_64-apple-darwin"]];
-    case "linux:arm64":
-      return [["codex-linux-arm64", "aarch64-unknown-linux-musl"]];
-    case "linux:x64":
-      return [["codex-linux-x64", "x86_64-unknown-linux-musl"]];
-    case "win32:arm64":
-      return [["codex-win32-arm64", "aarch64-pc-windows-msvc"]];
-    case "win32:x64":
-      return [["codex-win32-x64", "x86_64-pc-windows-msvc"]];
-    default:
-      return [];
-  }
 }

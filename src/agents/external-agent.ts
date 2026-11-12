@@ -32,6 +32,7 @@ import {
   ExternalAgentPolicyError,
   policyErrorEvent,
 } from "./driver/policy-errors.js";
+import { isIgnoredChildLine } from "./driver/subprocess-jsonl.js";
 import {
   errorTitle,
   isPlainRecord,
@@ -1075,6 +1076,7 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
           subAgents,
           toolGateway,
         })) {
+          if (isIgnoredChildLine(event)) continue;
           // A driver-level completion event is authoritative. Some provider SDKs emit their
           // terminal result after the subprocess exits but keep the transport iterator open while
           // it waits for EOF. Waiting for that EOF strands ADK's Runner even though the turn is

@@ -601,9 +601,9 @@ starts. `ClaudeAgentSdkDriver` is not affected: its SDK passes the session
 id as `--resume=<id>`.
 
 The list is a denylist: a flag a later CLI adds is not on it. It was
-reviewed against Claude Code 2.1.322 and codex-cli 0.167.0 (the `--help` of
+reviewed against Claude Code 2.1.322 and codex-cli 0.167.2 (the `--help` of
 each), with `@anthropic-ai/claude-agent-sdk` 0.3.319 (bundling Claude Code
-2.1.319) and `@openai/codex-sdk` 0.167.0 (bundling `@openai/codex` 0.167.0)
+2.1.319) and `@openai/codex-sdk` 0.167.2 (bundling `@openai/codex` 0.167.2)
 installed. A test fails when the installed SDKs, the CLIs they bundle or the
 peer ranges in `package.json` change, so the list is reviewed again on each
 bump. Two limits remain:
@@ -792,7 +792,7 @@ they are endpoint and credential choices the host makes on purpose, not model
 ids.
 
 The tables were reviewed against Claude Code 2.1.319 (the CLI the Agent SDK
-bundles) and codex-cli 0.167.0; the version-bump test covers them with the
+bundles) and codex-cli 0.167.2; the version-bump test covers them with the
 policy flag lists.
 
 ### Model variables in the environment
@@ -1657,7 +1657,7 @@ What to run instead depends on the CLI:
 | CLI | Supported route on Windows |
 |---|---|
 | Claude | The native `claude.exe` from Claude's native installer. Put it on `PATH` or set `command` to its path. |
-| Codex | The native `codex.exe` inside the `@openai/codex` package: `<npm root -g>\@openai\codex\node_modules\@openai\codex-win32-x64\vendor\x86_64-pc-windows-msvc\bin\codex.exe` (`codex-win32-arm64` and `aarch64-pc-windows-msvc` on ARM). That is the layout of `@openai/codex` 0.167.0, read from the `@openai/codex-sdk` 0.167.0 lookup this package pins; older versions keep it at `vendor\<triple>\codex\codex.exe`. It was not checked on a Windows machine. To find it for another version, search `npm root -g` for `codex.exe`. Set `command` to its path. |
+| Codex | The native `codex.exe` inside the `@openai/codex` package: `<npm root -g>\@openai\codex\node_modules\@openai\codex-win32-x64\vendor\x86_64-pc-windows-msvc\bin\codex.exe` (`codex-win32-arm64` and `aarch64-pc-windows-msvc` on ARM). That is the layout of `@openai/codex` 0.167.2, read from the `@openai/codex-sdk` 0.167.2 lookup this package pins; older versions keep it at `vendor\<triple>\codex\codex.exe`. It was not checked on a Windows machine. To find it for another version, search `npm root -g` for `codex.exe`. Set `command` to its path. |
 | Gemini | Gemini CLI ships only as an npm package, so there is no `.exe`. Set `interpreter` to Node and `entry` to the package's JavaScript entry, the file named by `bin.gemini` in `@google/gemini-cli`'s `package.json`. The driver runs `<interpreter> <entry> <flags>`; see [Interpreter and entry](#interpreter-and-entry). |
 
 ### Interpreter and entry
@@ -1960,23 +1960,24 @@ the same binary and abort signal. The result:
 - A prompt codex did not read in any other way is `CODEX_SDK_INPUT_NOT_DELIVERED`.
   A codex that closed stdin and kept running is stopped.
 
-The copy follows `@openai/codex-sdk` 0.167.0, and the driver uses it only on
-that version. The optional peer is exactly `0.167.0`, and on each run the
+The copy follows `@openai/codex-sdk` 0.167.2 (it was adapted from the 0.167.0
+exec path), and the driver uses it only on that version. The optional peer is
+exactly `0.167.2`, and on each run the
 driver also reads the installed SDK's version (from the `package.json` beside
 the resolved `@openai/codex-sdk` entry, once per process), because a package
 manager can still install another one. The run is refused with
 `EXTERNAL_AGENT_DEPENDENCY_MISSING`, before codex starts, when:
 
 - the installed version is another one, such as 0.167.1. Its exec may build a
-  different command line, so the driver does not run the 0.167.0 copy for it.
+  different command line, so the driver does not run the 0.167.2 copy for it.
   The message names the supported version, the installed one and the ways
-  forward: install `@openai/codex-sdk@0.167.0`, set
+  forward: install `@openai/codex-sdk@0.167.2`, set
   `allowUncontainedCodexSdk: true`, or use `CodexCliDriver`;
 - the version cannot be read. The driver finds the SDK with
   `import.meta.resolve`, so a bundler that rewrites or drops that call (or
   inlines the SDK without its `package.json`) makes every Codex SDK run fail
   closed with this message. Keep `@openai/codex-sdk` external to the bundle;
-- the version is 0.167.0 but the client's exec does not have the 0.167.0
+- the version is 0.167.2 but the client's exec does not have the 0.167.2
   fields.
 
 The version checked is the one the bridge resolves, not the copy a prebuilt
@@ -1987,7 +1988,9 @@ by the shape of its exec, not by its version.
 
 A client with no SDK exec (for example a test double) is used as is.
 `CodexCliDriver` writes the prompt through its own spawn helper, which already
-handles the error.
+handles the error. It does not use `@openai/codex-sdk` at all: it is a transport
+that feeds `codex exec --json` lines to the same run loop `CodexSdkDriver`
+uses, so it keeps working when the SDK is not installed.
 
 #### Running another SDK version uncontained
 
@@ -1997,10 +2000,10 @@ read) instead of being refused. Such a run goes through the SDK's own exec
 **without the containment**: a codex that exits, is aborted or closes stdin
 before it has read the prompt can again end the host process with an uncaught
 `EPIPE`. The driver logs one `CODEX_SDK_UNCONTAINED` warning per driver
-instance. On 0.167.0 the option changes nothing: the contained copy is still
-used, and a client whose exec does not match 0.167.0 is still refused.
+instance. On 0.167.2 the option changes nothing: the contained copy is still
+used, and a client whose exec does not match 0.167.2 is still refused.
 
-The optional peer is exactly `0.167.0`, so npm (7 and later) fails with
+The optional peer is exactly `0.167.2`, so npm (7 and later) fails with
 `ERESOLVE` when another version is installed beside the bridge. With npm,
 override the bridge's peer with the version the host installs:
 

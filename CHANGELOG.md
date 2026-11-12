@@ -77,8 +77,8 @@ from the 0.6.0 tag.
   - `zod` is an optional peer at `^4` (ADK 2.4 requires zod 4); zod 3 is no
     longer supported.
   - `@anthropic-ai/claude-agent-sdk` `>=0.3.319 <0.4` and `@openai/codex-sdk`
-    exactly `0.167.0` (optional, for `adk-llm-bridge/agents`). The Codex SDK
-    range narrows from `>=0.167.0 <0.168` to `0.167.0`, because the contained
+    exactly `0.167.2` (optional, for `adk-llm-bridge/agents`). The Codex SDK
+    range narrows from `>=0.167.0 <0.168` to `0.167.2`, because the contained
     exec copy (see Fixed) is verified against that exact version.
   - `quickjs-emscripten-core` and `@jitl/quickjs-wasmfile-release-sync`
     `>=0.32.0 <0.33.0` (optional, new, for `ScriptWorkflowAgent`).
@@ -423,6 +423,19 @@ from the 0.6.0 tag.
 
 ### Security
 
+- `SubprocessJsonlDriver.parseLine` now ignores child-emitted `started`,
+  `state_delta`, `completed` and transport-envelope lines, returning an empty
+  `output` event with none of the child payload. Its event return type stays
+  unchanged and subclass read loops continue without throwing on those lines.
+  `ExternalAgent` recognizes the internal placeholder by identity and skips
+  it before delegation, tracing or ADK processing, so it creates no message,
+  turn completion or Workflow node output. Legitimate empty outputs still
+  pass through. Other
+  recognized event records keep their fields unchanged, including
+  `turnComplete`. Subclasses yield driver-owned events from their own `run` instead. Codex's
+  internal transport envelopes use a private symbol and cannot be forged
+  through child JSON stdout.
+
 - **A Claude agent under `allowedPaths` can read its own large tool
   outputs.** Claude Code saves a tool output too large to return inline to
   the session's `tool-results` directory and tells the model to `Read` it;
@@ -496,7 +509,7 @@ from the 0.6.0 tag.
   `ExternalAgentPolicyError` with code `EXTERNAL_AGENT_OPTION_UNSUPPORTED`,
   unless the driver is built with `allowPolicyOverrideArgs: true`. A non-string
   `args` entry throws `InputValidationError`. Checked against the real CLIs
-  (Claude Code 2.1.322, codex-cli 0.167.0), the list also refuses flags that
+  (Claude Code 2.1.322, codex-cli 0.167.2), the list also refuses flags that
   widen the run another way: Claude `--agents`/`--agent` (subagents with their
   own tools and permission mode), `--plugin-url`, `--permission-prompts`,
   `--worktree`/`-w`, `--remote-control`, `--cloud`, `--teleport`,
@@ -1295,6 +1308,24 @@ from the 0.6.0 tag.
 
 ### Changed
 
+- **One Codex run loop.** `CodexCliDriver` is now a compatibility transport in
+  front of the same run loop `CodexSdkDriver` uses: both start the thread from
+  the same input, report one error per failure (a stream error followed by a
+  `turn.failed` with another message now reports both, in order, on the SDK
+  driver too), end with exactly one `completed` event, and remove temporary
+  files when the run ends, fails or is abandoned. Public exports, options and
+  methods are unchanged. `CodexCliDriver` still needs no `@openai/codex-sdk`
+  and keeps its custom `spawn`, `interpreter`/`entry` and `args` checks. What
+  changes for CLI users: a turn with earlier session history now starts with
+  a transcript of it (the same cold-start summary the SDK driver sends), and an
+  image in the turn reaches codex as `--image=<file>` (the file is private and
+  removed after the run). The CLI driver still refuses `runtimeSession` and
+  keeps no thread state.
+- **Codex SDK 0.167.2.** The exact peer and development pin of
+  `@openai/codex-sdk` moves from `0.167.0` to `0.167.2`, together with the
+  contained exec version check, the reviewed `codex exec --help` flag lists
+  and the example manifests. Other versions are still refused (or run
+  uncontained with `allowUncontainedCodexSdk: true`).
 - **A workflow step whose model response stopped early now fails.** A step whose agent
   ended on `MAX_TOKENS`, or on a content stop (`SAFETY`, `RECITATION`, `BLOCKLIST`,
   `PROHIBITED_CONTENT`, `SPII`, `IMAGE_SAFETY`, `IMAGE_PROHIBITED_CONTENT`) with no
@@ -1622,14 +1653,14 @@ from the 0.6.0 tag.
   uncaught exception that ended the host. With a prompt larger than the pipe
   buffer (256 KiB on Linux, 1 MiB on macOS) this happened at any exit time.
   `CodexSdkDriver` now replaces the client's exec with a copy of the SDK
-  0.167.0 exec path that handles the error, with the same arguments,
+  exec path (adapted from 0.167.0) that handles the error, with the same arguments,
   environment, binary and abort signal. An abort and a non-zero exit of
   codex's own are reported as before (`CODEX_SDK_ERROR` with stderr). A prompt
   codex did not read in any other way is the new `CODEX_SDK_INPUT_NOT_DELIVERED`
   (not recoverable), and a codex that closed stdin and kept running is
-  stopped. The copy is used only on `@openai/codex-sdk` 0.167.0, read from the
+  stopped. The copy is used only on `@openai/codex-sdk` 0.167.2, read from the
   installed package at run time. Another version, an unreadable version, or a
-  client whose exec differs from 0.167.0 is refused with
+  client whose exec differs from 0.167.2 is refused with
   `EXTERNAL_AGENT_DEPENDENCY_MISSING` before codex starts; the message names
   the supported and the installed version and the ways forward. The new
   opt-in `CodexSdkDriver` option `allowUncontainedCodexSdk: true` runs another
@@ -2232,6 +2263,9 @@ from the 0.6.0 tag.
 
 ### Docs
 
+- `docs/migration-0.7.md` and `docs/external-agent-isolation.md`: the Codex CLI
+  driver runs through the shared run loop and still needs no SDK; the Codex SDK
+  pin is `0.167.2`.
 - `docs/external-agent-isolation.md`: the per-run `/tmp/adk-claude-*` temp
   directory of the Claude drivers stays behind when the host is killed with
   `SIGKILL` before the run ends; how a host cleans stale ones safely.
