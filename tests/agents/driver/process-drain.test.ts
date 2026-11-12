@@ -196,6 +196,48 @@ describe.skipIf(process.platform === "win32")(
   },
 );
 
+/**
+ * A manual clock standing in for `setTimeout`/`clearTimeout`: timers fire only
+ * when `advance` moves time past them.
+ */
+function installManualClock() {
+  const realSet = globalThis.setTimeout;
+  const realClear = globalThis.clearTimeout;
+  let now = 0;
+  let nextId = 1;
+  const timers = new Map<number, { at: number; fn: () => void }>();
+  globalThis.setTimeout = ((fn: () => void, ms = 0) => {
+    const id = nextId++;
+    timers.set(id, { at: now + ms, fn });
+    return { id, unref() {} };
+  }) as unknown as typeof setTimeout;
+  globalThis.clearTimeout = ((handle?: { id: number }) => {
+    if (handle) timers.delete(handle.id);
+  }) as unknown as typeof clearTimeout;
+  return {
+    advance(ms: number) {
+      const target = now + ms;
+      for (;;) {
+        let due: [number, { at: number; fn: () => void }] | undefined;
+        for (const entry of timers) {
+          if (entry[1].at <= target && (!due || entry[1].at < due[1].at)) {
+            due = entry;
+          }
+        }
+        if (!due) break;
+        timers.delete(due[0]);
+        now = due[1].at;
+        due[1].fn();
+      }
+      now = target;
+    },
+    restore() {
+      globalThis.setTimeout = realSet;
+      globalThis.clearTimeout = realClear;
+    },
+  };
+}
+
 describe("drainAfterExit idle rule", () => {
   test("a wait that has only just started is not cut; one that stays unanswered for a full window is", async () => {
     let reading = false;
@@ -206,20 +248,29 @@ describe("drainAfterExit idle rule", () => {
       },
       () => reading,
     );
-    drain.start();
+    // A manual clock replaces the timer functions while the drain is armed, so
+    // the ticks fire exactly when the test advances it, never by wall time.
+    const clock = installManualClock();
     try {
+      drain.start();
       // Not reading at the first tick; the consumer asks for more just before
       // the second one.
-      await sleep(POST_EXIT_IDLE_MS * 2 - 40);
+      clock.advance(POST_EXIT_IDLE_MS - 1);
+      clock.advance(1);
+      expect(stops).toBe(0);
+      clock.advance(POST_EXIT_IDLE_MS - 1);
       reading = true;
-      await sleep(40 + 60);
-      // The second tick saw a wait that began a moment ago.
+      // The second tick (one ms away) sees a wait that began a moment ago.
+      clock.advance(1);
       expect(stops).toBe(0);
       // The same wait, unanswered for a whole window, ends the read.
-      await sleep(POST_EXIT_IDLE_MS);
+      clock.advance(POST_EXIT_IDLE_MS - 1);
+      expect(stops).toBe(0);
+      clock.advance(1);
       expect(stops).toBe(1);
     } finally {
       drain.cancel();
+      clock.restore();
     }
   });
 

@@ -296,6 +296,10 @@ describe("a one-shot workflow step on an Anthropic gateway model", () => {
     expect(seen).toHaveLength(1);
     expect("providerOptions" in seen[0]).toBe(false);
     const done = events.map(workflowEventOf).find(isStepCompleted);
-    expect(done?.result.usage?.cacheCreationTokens ?? 0).toBe(0);
+    // The stub reports no cache write, so the field is absent on purpose
+    // (not zero): usage is present and counted, with no cacheCreationTokens.
+    expect(done?.result.usage).toBeDefined();
+    expect(done?.result.usage?.promptTokens).toBe(100);
+    expect(done?.result.usage).not.toHaveProperty("cacheCreationTokens");
   });
 });

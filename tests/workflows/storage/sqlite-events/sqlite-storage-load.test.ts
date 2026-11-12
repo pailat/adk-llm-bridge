@@ -4,7 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SqliteWorkflowCheckpointStore } from "../../../../src/workflows/checkpoint/sqlite/index.js";
 import { SqliteWorkflowEventExporter } from "../../../../src/workflows/events/sqlite/index.js";
-import { openRawDatabase } from "../../../utils/fixtures/raw-sqlite.js";
+import {
+  nodeSqliteAvailable,
+  openRawDatabase,
+} from "../../../utils/fixtures/raw-sqlite.js";
 import { buildCheckpoint } from "../sqlite-checkpoint/fixtures/checkpoint-worker.js";
 import { buildRecord } from "./fixtures/event-worker.js";
 
@@ -111,155 +114,161 @@ function report(line: string): void {
   console.log(`[sqlite load ${FULL ? "full" : "default"}] ${line}`);
 }
 
-describe(`SQLite storage load (${CHECKPOINTS} checkpoints, ${RECORDS} event records)`, () => {
-  test("stays inside its time and memory budgets on one shared database file", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "sqlite-load-"));
-    directories.push(dir);
-    const path = join(dir, "load.db");
-    const factor = slowdown(dir);
-    report(
-      `machine slowdown against the reference workload: x${factor.toFixed(2)}`,
-    );
-    const checkpoints = new SqliteWorkflowCheckpointStore({
-      path,
-      busyTimeoutMs: 30_000,
-    });
-    const events = new SqliteWorkflowEventExporter({
-      path,
-      busyTimeoutMs: 30_000,
-    });
-    // Start from a collected heap: when the whole suite runs in one process,
-    // garbage left by earlier test files would otherwise count as growth.
-    collectGarbage();
-    const rssStart = process.memoryUsage().rss;
-    let rssPeak = rssStart;
-    // Collect before each sample so the number is memory still held, not
-    // garbage the collector has not freed yet (which varies with whatever
-    // else ran in the process).
-    const sampleRss = (): void => {
+// Needs the built-in `node:sqlite` for the reference database.
+describe.skipIf(!nodeSqliteAvailable)(
+  `SQLite storage load (${CHECKPOINTS} checkpoints, ${RECORDS} event records)`,
+  () => {
+    test("stays inside its time and memory budgets on one shared database file", async () => {
+      const dir = mkdtempSync(join(tmpdir(), "sqlite-load-"));
+      directories.push(dir);
+      const path = join(dir, "load.db");
+      const factor = slowdown(dir);
+      report(
+        `machine slowdown against the reference workload: x${factor.toFixed(2)}`,
+      );
+      const checkpoints = new SqliteWorkflowCheckpointStore({
+        path,
+        busyTimeoutMs: 30_000,
+      });
+      const events = new SqliteWorkflowEventExporter({
+        path,
+        busyTimeoutMs: 30_000,
+      });
+      // Start from a collected heap: when the whole suite runs in one process,
+      // garbage left by earlier test files would otherwise count as growth.
       collectGarbage();
-      rssPeak = Math.max(rssPeak, process.memoryUsage().rss);
-    };
-    try {
-      // 1. Checkpoint saves of about 4 KiB each.
-      const prepared = await buildCheckpoint(
-        "load-flow",
-        "exec-0",
-        1,
-        CHECKPOINT_BYTES,
-      );
-      let started = performance.now();
-      for (let i = 0; i < CHECKPOINTS; i++) {
-        await checkpoints.put({
-          checkpoint: { ...prepared, executionId: `exec-${i}` },
-        });
-        if (i % 200 === 0) sampleRss();
-      }
-      const saveSeconds = seconds(started);
-      report(
-        `saved ${CHECKPOINTS} checkpoints in ${saveSeconds.toFixed(2)} s (budget ${(BUDGET.saveSeconds * factor).toFixed(2)} s)`,
-      );
-
-      // 2. Listing every checkpoint in pages.
-      started = performance.now();
-      let listed = 0;
-      let cursor: string | undefined;
-      do {
-        const page = await checkpoints.list({ cursor, limit: LIST_PAGE });
-        listed += page.items.length;
-        cursor = page.nextCursor;
-        sampleRss();
-      } while (cursor !== undefined);
-      const listSeconds = seconds(started);
-      report(
-        `listed ${listed} checkpoints in pages of ${LIST_PAGE} in ${listSeconds.toFixed(2)} s (budget ${(BUDGET.listSeconds * factor).toFixed(2)} s)`,
-      );
-      expect(listed).toBe(CHECKPOINTS);
-
-      // 3. Appending event records in batches, spread over executions.
-      started = performance.now();
-      let appended = 0;
-      let batchNumber = 0;
-      while (appended < RECORDS) {
-        const size = Math.min(APPEND_BATCH, RECORDS - appended);
-        const executionId = `load-exec-${Math.floor(appended / EXECUTION_RECORDS)}`;
-        const base = appended % EXECUTION_RECORDS;
-        await events.append({
-          executionId,
-          records: Array.from({ length: size }, (_, i) =>
-            buildRecord(executionId, `r-${base + i}`, {
-              timestamp: 1_000 + appended + i,
-              kind: "step",
-              type: "step_completed",
-              payload: { index: base + i, note: "load" },
-            }),
-          ),
-        });
-        appended += size;
-        if (++batchNumber % 20 === 0) sampleRss();
-      }
-      const appendSeconds = seconds(started);
-      report(
-        `appended ${appended} records in batches of ${APPEND_BATCH} in ${appendSeconds.toFixed(2)} s (budget ${(BUDGET.appendSeconds * factor).toFixed(2)} s)`,
-      );
-      expect(appended).toBe(RECORDS);
-
-      // 4. Reading everything back in pages, checking order and counts.
-      started = performance.now();
-      let read = 0;
-      const executions = Math.ceil(RECORDS / EXECUTION_RECORDS);
-      for (let e = 0; e < executions; e++) {
-        const executionId = `load-exec-${e}`;
-        const expected = Math.min(
-          EXECUTION_RECORDS,
-          RECORDS - e * EXECUTION_RECORDS,
+      const rssStart = process.memoryUsage().rss;
+      let rssPeak = rssStart;
+      // Collect before each sample so the number is memory still held, not
+      // garbage the collector has not freed yet (which varies with whatever
+      // else ran in the process).
+      const sampleRss = (): void => {
+        collectGarbage();
+        rssPeak = Math.max(rssPeak, process.memoryUsage().rss);
+      };
+      try {
+        // 1. Checkpoint saves of about 4 KiB each.
+        const prepared = await buildCheckpoint(
+          "load-flow",
+          "exec-0",
+          1,
+          CHECKPOINT_BYTES,
         );
-        let after = 0;
-        let seen = 0;
-        for (;;) {
-          const page = await events.read({
-            executionId,
-            afterSequence: after,
-            limit: READ_PAGE,
+        let started = performance.now();
+        for (let i = 0; i < CHECKPOINTS; i++) {
+          await checkpoints.put({
+            checkpoint: { ...prepared, executionId: `exec-${i}` },
           });
-          for (const record of page.records) {
-            seen++;
-            if (record.sequence !== seen) {
-              throw new Error(
-                `${executionId}: sequence ${record.sequence} where ${seen} was expected`,
-              );
-            }
-          }
-          after = page.nextAfterSequence;
-          if (!page.hasMore) break;
+          if (i % 200 === 0) sampleRss();
         }
-        expect(seen).toBe(expected);
-        read += seen;
+        const saveSeconds = seconds(started);
+        report(
+          `saved ${CHECKPOINTS} checkpoints in ${saveSeconds.toFixed(2)} s (budget ${(BUDGET.saveSeconds * factor).toFixed(2)} s)`,
+        );
+
+        // 2. Listing every checkpoint in pages.
+        started = performance.now();
+        let listed = 0;
+        let cursor: string | undefined;
+        do {
+          const page = await checkpoints.list({ cursor, limit: LIST_PAGE });
+          listed += page.items.length;
+          cursor = page.nextCursor;
+          sampleRss();
+        } while (cursor !== undefined);
+        const listSeconds = seconds(started);
+        report(
+          `listed ${listed} checkpoints in pages of ${LIST_PAGE} in ${listSeconds.toFixed(2)} s (budget ${(BUDGET.listSeconds * factor).toFixed(2)} s)`,
+        );
+        expect(listed).toBe(CHECKPOINTS);
+
+        // 3. Appending event records in batches, spread over executions.
+        started = performance.now();
+        let appended = 0;
+        let batchNumber = 0;
+        while (appended < RECORDS) {
+          const size = Math.min(APPEND_BATCH, RECORDS - appended);
+          const executionId = `load-exec-${Math.floor(appended / EXECUTION_RECORDS)}`;
+          const base = appended % EXECUTION_RECORDS;
+          await events.append({
+            executionId,
+            records: Array.from({ length: size }, (_, i) =>
+              buildRecord(executionId, `r-${base + i}`, {
+                timestamp: 1_000 + appended + i,
+                kind: "step",
+                type: "step_completed",
+                payload: { index: base + i, note: "load" },
+              }),
+            ),
+          });
+          appended += size;
+          if (++batchNumber % 20 === 0) sampleRss();
+        }
+        const appendSeconds = seconds(started);
+        report(
+          `appended ${appended} records in batches of ${APPEND_BATCH} in ${appendSeconds.toFixed(2)} s (budget ${(BUDGET.appendSeconds * factor).toFixed(2)} s)`,
+        );
+        expect(appended).toBe(RECORDS);
+
+        // 4. Reading everything back in pages, checking order and counts.
+        started = performance.now();
+        let read = 0;
+        const executions = Math.ceil(RECORDS / EXECUTION_RECORDS);
+        for (let e = 0; e < executions; e++) {
+          const executionId = `load-exec-${e}`;
+          const expected = Math.min(
+            EXECUTION_RECORDS,
+            RECORDS - e * EXECUTION_RECORDS,
+          );
+          let after = 0;
+          let seen = 0;
+          for (;;) {
+            const page = await events.read({
+              executionId,
+              afterSequence: after,
+              limit: READ_PAGE,
+            });
+            for (const record of page.records) {
+              seen++;
+              if (record.sequence !== seen) {
+                throw new Error(
+                  `${executionId}: sequence ${record.sequence} where ${seen} was expected`,
+                );
+              }
+            }
+            after = page.nextAfterSequence;
+            if (!page.hasMore) break;
+          }
+          expect(seen).toBe(expected);
+          read += seen;
+          sampleRss();
+        }
+        const readSeconds = seconds(started);
+        report(
+          `read ${read} records in pages of ${READ_PAGE} in ${readSeconds.toFixed(2)} s (budget ${(BUDGET.readSeconds * factor).toFixed(2)} s)`,
+        );
+        expect(read).toBe(RECORDS);
+
+        const listedExecutions = await events.listExecutions({ limit: 5 });
+        expect(listedExecutions.items.length).toBeGreaterThan(0);
+
         sampleRss();
+        const rssGrowthMiB = (rssPeak - rssStart) / MiB;
+        report(
+          `resident memory grew ${rssGrowthMiB.toFixed(1)} MiB (budget ${BUDGET.rssGrowthMiB} MiB)`,
+        );
+
+        expect(saveSeconds).toBeLessThanOrEqual(BUDGET.saveSeconds * factor);
+        expect(listSeconds).toBeLessThanOrEqual(BUDGET.listSeconds * factor);
+        expect(appendSeconds).toBeLessThanOrEqual(
+          BUDGET.appendSeconds * factor,
+        );
+        expect(readSeconds).toBeLessThanOrEqual(BUDGET.readSeconds * factor);
+        expect(rssGrowthMiB).toBeLessThanOrEqual(BUDGET.rssGrowthMiB);
+      } finally {
+        await checkpoints.close().catch(() => undefined);
+        await events.close().catch(() => undefined);
       }
-      const readSeconds = seconds(started);
-      report(
-        `read ${read} records in pages of ${READ_PAGE} in ${readSeconds.toFixed(2)} s (budget ${(BUDGET.readSeconds * factor).toFixed(2)} s)`,
-      );
-      expect(read).toBe(RECORDS);
-
-      const listedExecutions = await events.listExecutions({ limit: 5 });
-      expect(listedExecutions.items.length).toBeGreaterThan(0);
-
-      sampleRss();
-      const rssGrowthMiB = (rssPeak - rssStart) / MiB;
-      report(
-        `resident memory grew ${rssGrowthMiB.toFixed(1)} MiB (budget ${BUDGET.rssGrowthMiB} MiB)`,
-      );
-
-      expect(saveSeconds).toBeLessThanOrEqual(BUDGET.saveSeconds * factor);
-      expect(listSeconds).toBeLessThanOrEqual(BUDGET.listSeconds * factor);
-      expect(appendSeconds).toBeLessThanOrEqual(BUDGET.appendSeconds * factor);
-      expect(readSeconds).toBeLessThanOrEqual(BUDGET.readSeconds * factor);
-      expect(rssGrowthMiB).toBeLessThanOrEqual(BUDGET.rssGrowthMiB);
-    } finally {
-      await checkpoints.close().catch(() => undefined);
-      await events.close().catch(() => undefined);
-    }
-  }, 1_800_000);
-});
+    }, 1_800_000);
+  },
+);
