@@ -180,12 +180,13 @@ Related behavior changes:
 - Anthropic prompt caching is now **automatic by default** (native `AnthropicLlm` and
   `anthropic/*` on AI Gateway, which now sends `caching: "auto"`), where the native
   option used to be opt-in. With `promptCaching` unset, cache markers are sent only
-  when the request declares a tool or already holds an earlier model turn:
+  when the request declares a tool of its own (not the synthetic structured-output
+  tool) or already holds an earlier model turn:
   tool loops cache from their first call, and a one-shot call sends no marker and
   pays no write surcharge (a write costs 1.25x the input price, a read 0.1x or
   less). `promptCaching: true` or `{ ttl }` always caches, `false` never does. The
-  native provider now also marks the last message block, so later turns read earlier
-  turns from the cache. It does not change outputs. Code that already sets
+  native provider now also marks the last cache-eligible block of the last message,
+  so later turns read earlier turns from the cache. It does not change outputs. Code that already sets
   `promptCaching` keeps working; set `false` if you want no write surcharge at
   all. OpenRouter stays opt-in
   (`promptCaching: true`), and OpenAI, xAI and custom endpoints are unchanged. See
@@ -697,12 +698,13 @@ new in 0.7.0. If you already use them, these changes apply:
   so a grandchild that keeps a pipe open (a background task, an MCP
   server) no longer holds the run. Output the CLI wrote before it exited is
   still read in full. `CodexSdkDriver` ends the turn at once when the process
-  fails to start, and sends SIGKILL after `killGraceMs` (default 2000 ms) to a
-  Codex process that ignores SIGTERM. No action needed; do not rely on a run waiting for such
-  grandchildren.
+  fails to start, and sends SIGKILL 2000 ms after SIGTERM to a Codex
+  process that ignores it (`CodexSdkDriver` has no `killGraceMs` option). No
+  action needed; do not rely on a run waiting for such grandchildren.
 - **Cancel.** CLI processes get `killGraceMs` (default 2000 ms) to exit after
-  SIGTERM before SIGKILL. On macOS and Linux the whole process group of the
-  CLI is killed, and host signals are forwarded to it.
+  SIGTERM before SIGKILL. Everywhere but Windows the CLI runs in its own
+  process group, which is killed as a whole, and the host's SIGINT, SIGTERM
+  and SIGHUP are forwarded to it.
 - **Windows batch shims.** `ClaudeCliDriver`, `CodexCliDriver` and
   `GeminiCliDriver` resolve their command over `.com` and `.exe` only and never
   run a `.cmd` or `.bat` file (it would go through `cmd.exe` and re-parse the
@@ -919,10 +921,10 @@ the run's ADK artifact service. Without an artifact service the run ends with
 New in 0.7.0, nothing to migrate. `FxAgent` and `FxCliDriver` run the fx
 coding agent (`fx ask --json`, fx 0.0.16) as an external agent. A model is
 required by default (`requireExplicitModel` is `true` for fx only). fx has no
-sandbox, so `read-only` is refused, and network, paths, `workspace-write` and
-the host `~/.fx` configuration each need an explicit opt-in
-(`allowUnenforcedNetwork`, `allowUnenforcedPaths`, `allowUnsandboxedShell`,
-`inheritHostConfig`). In `ask` mode the first write or shell command ends the
+sandbox, so `read-only` is refused, and network (unless the policy sets
+`allowNetwork: true`), paths, `workspace-write` and the host `~/.fx`
+configuration each need an explicit opt-in (`allowUnenforcedNetwork`,
+`allowUnenforcedPaths`, `allowUnsandboxedShell`, `inheritHostConfig`). In `ask` mode the first write or shell command ends the
 run with `FX_CLI_PERMISSION_REQUIRED` unless your fx permission rules allow
 it. Like the other CLI drivers it refuses `runtimeSession`, ADK tools,
 approvers and `subAgents`. See
