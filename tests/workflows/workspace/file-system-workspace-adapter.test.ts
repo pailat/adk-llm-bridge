@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   collectFileSystemWorkspaceTombstonesOffline,
+  defaultCaseInsensitivePaths,
   FileSystemWorkspaceAdapter,
   type FileSystemWorkspaceAdapterOptions,
 } from "../../../src/workflows/workspace/file-system-workspace-adapter.js";
@@ -480,22 +481,6 @@ function delay(milliseconds: number): Promise<void> {
 }
 
 describe("FileSystemWorkspaceAdapter path case", () => {
-  const realPlatform = Object.getOwnPropertyDescriptor(process, "platform");
-  afterEach(() => {
-    if (realPlatform) Object.defineProperty(process, "platform", realPlatform);
-  });
-
-  /** Runs `body` with `process.platform` reading as `platform`. */
-  async function asPlatform(platform: string, body: () => Promise<void>) {
-    Object.defineProperty(process, "platform", { value: platform });
-    try {
-      await body();
-    } finally {
-      if (realPlatform)
-        Object.defineProperty(process, "platform", realPlatform);
-    }
-  }
-
   async function holdsOverlap(
     options: Partial<FileSystemWorkspaceAdapterOptions> = {},
   ): Promise<boolean> {
@@ -506,24 +491,28 @@ describe("FileSystemWorkspaceAdapter path case", () => {
     );
   }
 
-  test("compares paths case-sensitively by default on Linux", async () => {
-    await asPlatform("linux", async () => {
-      expect(await holdsOverlap()).toBe(false);
-    });
+  test("the default compares paths case-sensitively on Linux", () => {
+    expect(defaultCaseInsensitivePaths("linux")).toBe(false);
   });
 
-  for (const platform of ["darwin", "win32"]) {
-    test(`folds case by default on ${platform}`, async () => {
-      await asPlatform(platform, async () => {
-        expect(await holdsOverlap()).toBe(true);
-      });
+  for (const platform of ["darwin", "win32"] as const) {
+    test(`the default folds case on ${platform}`, () => {
+      expect(defaultCaseInsensitivePaths(platform)).toBe(true);
     });
   }
 
-  test("an explicit false wins over the macOS default", async () => {
-    await asPlatform("darwin", async () => {
-      expect(await holdsOverlap({ caseInsensitivePaths: false })).toBe(false);
-    });
+  test("the default reads the host platform", () => {
+    expect(defaultCaseInsensitivePaths()).toBe(
+      defaultCaseInsensitivePaths(process.platform),
+    );
+  });
+
+  test("an adapter without the option uses the host default", async () => {
+    expect(await holdsOverlap()).toBe(defaultCaseInsensitivePaths());
+  });
+
+  test("an explicit false wins over a case-folding host", async () => {
+    expect(await holdsOverlap({ caseInsensitivePaths: false })).toBe(false);
   });
 
   for (const value of ["false", 1, 0, null]) {
@@ -541,10 +530,8 @@ describe("FileSystemWorkspaceAdapter path case", () => {
     });
   }
 
-  test("an explicit true wins over the Linux default", async () => {
-    await asPlatform("linux", async () => {
-      expect(await holdsOverlap({ caseInsensitivePaths: true })).toBe(true);
-    });
+  test("an explicit true wins over a case-sensitive host", async () => {
+    expect(await holdsOverlap({ caseInsensitivePaths: true })).toBe(true);
   });
 
   test("caseInsensitivePaths makes differently cased paths conflict", async () => {

@@ -553,6 +553,18 @@ export class FileSystemWorkspaceAdapter implements WorkspaceAdapter {
   }
 }
 
+/**
+ * Whether paths fold case when `caseInsensitivePaths` is not set: true on
+ * macOS and Windows, false elsewhere.
+ *
+ * @internal
+ */
+export function defaultCaseInsensitivePaths(
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  return platform === "darwin" || platform === "win32";
+}
+
 function normalizeOptions(
   options: FileSystemWorkspaceAdapterOptions,
 ): NormalizedOptions {
@@ -581,8 +593,7 @@ function normalizeOptions(
     createLeaseId: options.createLeaseId ?? randomUUID,
     now: options.now ?? Date.now,
     caseInsensitivePaths:
-      options.caseInsensitivePaths ??
-      (process.platform === "darwin" || process.platform === "win32"),
+      options.caseInsensitivePaths ?? defaultCaseInsensitivePaths(),
   };
   for (const [name, value] of Object.entries(normalized)) {
     if (
