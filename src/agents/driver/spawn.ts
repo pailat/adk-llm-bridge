@@ -12,7 +12,7 @@
  *
  * A run does not outlive its process: once the CLI has exited, `stdout` and
  * `stderr` are read until EOF, or until a wait on the pipe stays unanswered
- * for two consecutive idle windows of {@link POST_EXIT_IDLE_MS}. Output already
+ * for two consecutive idle windows of {@link POST_EXIT_IDLE_MS}. Output not yet
  * read is never dropped, however slow the consumer. After the CLI exits, a
  * grandchild that still holds a pipe no longer blocks the run past the two
  * idle windows, but this rule does not kill it and anything it writes later is

@@ -1550,12 +1550,13 @@ from the 0.6.0 tag.
   consecutive idle windows of 500 ms, the same on Bun and Node. A grandchild
   that keeps a pipe open (a background task, an MCP server) no longer blocks
   the run past those idle windows, but it keeps running, and anything it writes
-  later is not read. Output already read is never dropped, however slow the consumer: what
-  the CLI wrote before it exited is still read in full. The Codex SDK driver
-  now ends the turn at once when the process fails to start (it used to wait for an exit that never
-  came), keeps an `error` on the process's `stdout` or `stderr` in the turn
-  instead of ending the host, and sends SIGKILL after a 2 s grace to a Codex
-  process that ignores SIGTERM after a stop, an abort or a failed prompt write.
+  later is not read. Output not yet read is never dropped, however slow the
+  consumer: what the CLI wrote before it exited is still read in full. The
+  Codex SDK driver now ends the turn at once when the process fails to start
+  (it used to wait for an exit that never came), keeps an `error` on the
+  process's `stdout` or `stderr` in the turn instead of ending the host, and
+  sends SIGKILL after a 2 s grace to a Codex process that ignores SIGTERM
+  after a stop, an abort or a failed prompt write.
 
 - **A delegated sub-agent's model and tool reports reach the host.** Its
   `externalAgentModel` and `externalAgentTools` now ride on the sub-agent's own

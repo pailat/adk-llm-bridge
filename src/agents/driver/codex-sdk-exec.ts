@@ -200,7 +200,7 @@ export class ContainedCodexExec {
    * @param args - What `Thread` passes for the turn.
    * @returns The JSONL lines Codex prints. The stream ends when the child's
    * stdout reaches EOF, or, once the child has exited, when a wait on stdout
-   * stays unanswered for two idle windows of 500 ms. Output already read is
+   * stays unanswered for two idle windows of 500 ms. Output not yet read is
    * never dropped. A grandchild that still holds the pipe no longer blocks
    * the turn after those windows, but this rule does not kill it and any
    * output it writes later is not read. A child that was stopped (cleanup,
