@@ -118,8 +118,10 @@ Related behavior changes:
   `[adk-llm-bridge]` prefix and a stable code (for example
   `BUILTIN_TOOLS_DROPPED`). Use ADK's `setLogger` / `setLogLevel` to capture or
   silence them.
-- Invalid configuration (for example an empty API key or model id) throws
-  ADK's `InputValidationError`. Credentials are redacted from the message.
+- Invalid configuration (for example a missing API key or an empty model id)
+  throws ADK's `InputValidationError`. Credentials are redacted from the
+  message. A blank `apiKey` counts as missing (see below), so it throws only
+  when no global key or environment variable supplies one.
 - **Integer options are checked.** `timeout`, `maxRetries` and Anthropic
   `maxTokens` throw `InputValidationError` for a non-integer (for example
   `1500.5`, or `Number(process.env.X)` when X is unset, which is `NaN`), and
@@ -176,11 +178,19 @@ Related behavior changes:
   `cachedContentTokenCount`. If you added the cache counts yourself, stop
   doing so.
 - Anthropic prompt caching is now **automatic by default** (native `AnthropicLlm` and
-  `anthropic/*` on AI Gateway), where the native option used to be opt-in: markers
-  are sent only when the request declares a tool or already holds an earlier model
-  turn, so one-shot calls pay no write surcharge. It does not change outputs. Set
-  `promptCaching: true` to keep it always on, or `false` to turn it off.
-  OpenRouter is opt-in. See [Prompt caching](prompt-caching.md).
+  `anthropic/*` on AI Gateway, which now sends `caching: "auto"`), where the native
+  option used to be opt-in. With `promptCaching` unset, cache markers are sent only
+  when the request declares a tool of its own (not the synthetic structured-output
+  tool) or already holds an earlier model turn:
+  tool loops cache from their first call, and a one-shot call sends no marker and
+  pays no write surcharge (a write costs 1.25x the input price, a read 0.1x or
+  less). `promptCaching: true` or `{ ttl }` always caches, `false` never does. The
+  native provider now also marks the last cache-eligible block of the last message,
+  so later turns read earlier turns from the cache. It does not change outputs. Code that already sets
+  `promptCaching` keeps working; set `false` if you want no write surcharge at
+  all. OpenRouter stays opt-in
+  (`promptCaching: true`), and OpenAI, xAI and custom endpoints are unchanged. See
+  [Prompt caching](prompt-caching.md#automatic-by-default).
 - The tokens a call wrote to the prompt cache are in
   `customMetadata.cacheCreationTokenCount` (genai has no field for them), and
   in the optional `cacheCreationTokens` of `AgentInvocationUsage` and
@@ -188,7 +198,16 @@ Related behavior changes:
 - The cost a provider reports (`usage.cost` of AI Gateway and OpenRouter, plus
   the upstream or market cost of a BYOK gateway call, with `customMetadata.costSource` naming the field) is in `customMetadata.costUsd`, and
   summed in the optional `costUsd` of `AgentInvocationUsage` and
-  `WorkflowStepUsage`. See [Prompt caching](prompt-caching.md#reading-the-cache-usage).
+  `WorkflowStepUsage`. `costUsd` is absent when no call reported a cost. It
+  covers model calls made through the bridge's providers only: an external
+  agent reports its cost as `totalCostUsd` in its `ExternalAgentUsage` and on
+  its span, so an `ExternalAgent` step has no `costUsd`. A BYOK gateway key
+  reports `cost: 0`; `costUsd` then adds `cost_details.upstream_inference_cost`
+  when that is positive, otherwise it is the gateway's `market_cost`. The
+  gateway's `market_cost` is also kept as `marketCostUsd` whenever it is
+  reported. Before, only external agents had a cost; if you added gateway
+  cost yourself, stop. See
+  [Prompt caching](prompt-caching.md#reading-the-cache-usage).
 - Claude Agent SDK: a resumed session reports usage and cost per run instead
   of the session total, marked `usage.scope: "run"`. When the driver has no
   baseline for the session (first run after a restart or on another replica,
@@ -208,6 +227,11 @@ Related behavior changes:
 - For providers that require a key, a blank `apiKey` counts as unset, so a
   global key or the environment variable applies instead of an
   `API key is required` error.
+- **`normalizeSchema` keeps instance data and rejects arrays.** If you call it
+  yourself, `default`, `example`, `examples`, `enum` and `const` are copied
+  verbatim (it no longer rewrites a `type` string inside them), and an array
+  argument returns `undefined`. Handle `undefined` for any input that is not a
+  plain object.
 
 ## 5. Telemetry
 
@@ -585,6 +609,10 @@ new in 0.7.0. If you already use them, these changes apply:
   `AUTH_ERROR`; `overloaded` is `SERVER_ERROR`. Retry handlers that matched
   `CLAUDE_AGENT_SDK_ERROR` for these should match the new codes. The message
   is `<subtype>: <SDK text>`.
+- **Claude Agent SDK peer range.** The optional peer
+  `@anthropic-ai/claude-agent-sdk` is declared as `>=0.3.319 <0.4` (it was
+  `^0.3.183` in the 0.6.0 tag). If you use `ClaudeAgent` or
+  `ClaudeAgentSdkDriver`, install a version in that range.
 - **Missing SDKs and binaries.** A missing `@anthropic-ai/claude-agent-sdk`,
   `@openai/codex-sdk`, or `claude`/`codex`/`gemini` binary is now an error
   event (`EXTERNAL_AGENT_DEPENDENCY_MISSING` or `MISSING_BINARY`) with the
@@ -657,10 +685,26 @@ new in 0.7.0. If you already use them, these changes apply:
   without it. `sessionStoreFlush` and `sessionStoreLoadTimeoutMs` tune it, and
   the SDK's `importSessionToStore` copies existing local sessions into it.
   `ClaudeCliDriver` throws `EXTERNAL_AGENT_OPTION_UNSUPPORTED` when given any
-  of the three options.
+  of the three options. `SqliteSessionStore` refuses an unsafe database path
+  with `SESSION_STORE_UNSAFE_PATH`: a symlink at the path (a symlink or junction on
+  Windows too), and, on POSIX, a file owned by another user, or a directory
+  owned by another user (root is accepted) or writable by others without the
+  sticky bit. A new file is created `0600`; an existing
+  file or directory is not re-moded. Point it at a directory only your user
+  controls.
+- **Child processes end with the run.** The drivers stop reading a CLI's
+  `stdout` and `stderr` at EOF, or, once the CLI has exited, when a read stays
+  unanswered for two idle 500 ms windows (500 to 1000 ms after the last chunk),
+  so a grandchild that keeps a pipe open (a background task, an MCP
+  server) no longer holds the run. Output the CLI wrote before it exited is
+  still read in full. `CodexSdkDriver` ends the turn at once when the process
+  fails to start, and sends SIGKILL 2000 ms after SIGTERM to a Codex
+  process that ignores it (`CodexSdkDriver` has no `killGraceMs` option). No
+  action needed; do not rely on a run waiting for such grandchildren.
 - **Cancel.** CLI processes get `killGraceMs` (default 2000 ms) to exit after
-  SIGTERM before SIGKILL. On macOS and Linux the whole process group of the
-  CLI is killed, and host signals are forwarded to it.
+  SIGTERM before SIGKILL. Everywhere but Windows the CLI runs in its own
+  process group, which is killed as a whole, and the host's SIGINT, SIGTERM
+  and SIGHUP are forwarded to it.
 - **Windows batch shims.** `ClaudeCliDriver`, `CodexCliDriver` and
   `GeminiCliDriver` resolve their command over `.com` and `.exe` only and never
   run a `.cmd` or `.bat` file (it would go through `cmd.exe` and re-parse the
@@ -847,6 +891,22 @@ example `process.env.X === "true"`) before you pass it.
 See
 [Sub-agents need a driver that exposes them](./external-agent-isolation.md#sub-agents-need-a-driver-that-exposes-them).
 
+### Custom drivers and the placeholder driver
+
+- `CodexCliDriver.parseLine` now throws for a `codex exec --json` line that
+  carries no bridge event (lifecycle and unknown events), like the other CLI
+  drivers, instead of returning it as `output`. If you subclass the driver or
+  call `parseLine` yourself, switch to the new
+  `CodexCliDriver.parseEvent(line)`, which returns `undefined` for such lines,
+  or catch the throw.
+- `PlaceholderExternalAgentDriver` (what `ExternalAgent` runs when you pass no
+  `driver`) reports `EXTERNAL_AGENT_NOT_CONFIGURED` with `recoverable: false`,
+  so a retry does not help: pass a `driver` or use `CodexAgent`,
+  `ClaudeAgent` or `GeminiCliAgent`.
+- An unknown sub-agent or transfer target sets `RunSubAgentResult.errorKind` to
+  `"agent-error"`, and an error event with an empty `code` is reported as
+  `EXTERNAL_AGENT_ERROR`.
+
 ### Claude sessions in ADK artifacts
 
 New in 0.7.0, nothing to migrate. `ClaudeAgentSdkDriver`'s `sessionStore` also
@@ -855,6 +915,20 @@ takes a factory such as `adkArtifactSessionStore()` (subpath
 the run's ADK artifact service. Without an artifact service the run ends with
 `CLAUDE_SESSION_STORE_UNAVAILABLE` before the SDK starts. See
 [Persisting Claude sessions](./claude-session-store.md#adk-artifacts).
+
+### fx agent
+
+New in 0.7.0, nothing to migrate. `FxAgent` and `FxCliDriver` run the fx
+coding agent (`fx ask --json`, fx 0.0.16) as an external agent. A model is
+required by default (`requireExplicitModel` is `true` for fx only). fx has no
+sandbox, so `read-only` is refused, and network (unless the policy sets
+`allowNetwork: true`), paths, `workspace-write` and the host `~/.fx`
+configuration each need an explicit opt-in (`allowUnenforcedNetwork`,
+`allowUnenforcedPaths`, `allowUnsandboxedShell`, `inheritHostConfig`). In `ask` mode the first write or shell command ends the
+run with `FX_CLI_PERMISSION_REQUIRED` unless your fx permission rules allow
+it. Like the other CLI drivers it refuses `runtimeSession`, ADK tools,
+approvers and `subAgents`. See
+[External agent isolation](./external-agent-isolation.md#fx).
 
 ### Driver options and host MCP servers
 
@@ -940,6 +1014,9 @@ If you call `AgentInvocationGateway` (or `ToolGateway`) directly:
   error event, and the gateway used to classify it as `"agent-error"`. Match on
   `errorKind`, not on the error text. Any other error event is still
   `"agent-error"`.
+- `AgentInvocationErrorKind` also has `"invalid-resume"`: a `resume` whose
+  input does not answer a pending interrupt now fails with it. An exhaustive
+  `switch` over the kind must handle it (and `"llm-calls-limit"`).
 
 ## 8. Workflows (`adk-llm-bridge/workflows`)
 
@@ -1047,7 +1124,8 @@ checkpoints:
   compares case-sensitively elsewhere; pass `caseInsensitivePaths: false` for a
   case-sensitive volume on those platforms, or `true` for a case-insensitive
   workspace elsewhere (and on `InMemoryWorkspaceAdapter`, which stays
-  case-sensitive by default).
+  case-sensitive by default). On those platforms `Src/a` and `src/a` can no
+  longer both be leased. See [Path case](./workflow-durability.md#path-case).
 - **Workspace leases.** Drain or delete workspace `stateDirectory` lease files
   before upgrading. Expired legacy leases with rejected paths are dropped; a
   live one fails with `WORKFLOW_WORKSPACE_STATE_INCOMPATIBLE` until it is
@@ -1157,6 +1235,13 @@ checkpoints:
 - **Event back-pressure.** Workflow agents wait for the consumer to take each
   event before going on. Keep reading the event stream while a run is in
   progress; a consumer that pauses reading pauses the run.
+- **A save that fails after its rename.** A `checkpoint_write_failed` raised
+  when the directory flush fails after the rename carries
+  `details.committed: true`: the new revision is visible to `load()` but may
+  not survive a crash. Check it before you retry or roll back; see
+  [A save that fails after its rename](./workflow-durability.md#a-save-that-fails-after-its-rename).
+  A lock release no longer drops a live lock silently when its owner file is
+  unreadable (`EACCES`, `EIO`): the check throws instead.
 - **Lock tombstones.** Released locks no longer leave `*.retired.*`
   directories; only recovered locks of dead processes do. The offline
   collectors are unchanged. Watch for the warning
