@@ -1522,7 +1522,9 @@ driver a frozen copy; non-string `env` values are dropped.
 the session to resume: the Codex SDK driver prefers it over the thread id
 saved in session state; the Claude Agent SDK driver uses its
 `resumeSessionId` option first, then `runtimeSession.id`, then session state,
-then its own memory. With a declared MCP secret it resumes nothing (see
+then its own memory; the fx CLI driver uses its `resumeSessionId` first, then
+`runtimeSession.id`, then the id saved in ADK session state
+(`persistSession: false` refuses it). With a declared MCP secret it resumes nothing (see
 [Transcripts on disk](#transcripts-on-disk)). `ExternalAgent` never sets it.
 
 ## Cancel and host signals
@@ -1914,7 +1916,7 @@ because the tool was not offered. The other codes in the table (`CLAUDE_*`,
 | `FX_CLI_PERMISSION_REQUIRED` | - | No | An fx `ask` run needed an approval a noninteractive run cannot give (fx reported `NonInteractivePermissionRequired`). The message names the modes that allow it and carries fx's `blocked action` lines and fx's own output. The blocked action did not run; actions before it may have run. |
 | `FX_CLI_ERROR` | - | From the message | The fallback code of an fx failure the shared classifier does not know, and the code (not recoverable) of a result whose `exit_code` is not a number. fx failures carry the classifier code when they have one: `AUTH_ERROR` (`auth_failure`), `QUOTA_EXHAUSTED` (`recovery.need` `quota`) and `INVALID_REQUEST` (`recovery.need` `content_filter`, `rejected` or `too_long`, and `model_not_found`), none recoverable, and whatever `classifyRecoverable` gives the message of an `error` name or a reason only in `output` (for example `RATE_LIMIT`, `TRANSPORT_ERROR`). |
 | `FX_CLI_SESSION_NOT_FOUND` | - | No | An fx run resumed a session fx does not have (the JSON `error` is `SessionNotFound`). No new session was started. See [fx multi-turn sessions](#fx-multi-turn-sessions). |
-| `FX_SESSION_STORE_ERROR` | - | Yes | A warning: the fx `sessionStore` could not save or restore a session directory (or a stored bundle was refused); the run goes on. |
+| `FX_SESSION_STORE_ERROR` | - | Yes | A warning: the fx `sessionStore` could not be opened, or could not save or restore a session directory (or a stored bundle was refused); also when fx reports a session id that is not a plain token, even with no `sessionStore` (the session is not remembered). The run goes on. |
 | `FX_CLI_EXIT` | - | From the message | fx exited non-zero and printed no JSON result. The message holds the stderr tail. |
 | `FX_CLI_NO_RESULT` | - | No | fx exited 0 and printed no JSON result object. |
 | `FX_CLI_RESULT_TOO_LARGE` | - | No | An fx stdout line was longer than the 8 MiB bound (`FX_CLI_MAX_LINE_CHARS`). It was not parsed and the run is reported as failed with exit code 1; no `output` event. |

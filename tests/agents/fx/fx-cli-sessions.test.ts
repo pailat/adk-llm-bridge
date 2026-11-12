@@ -33,6 +33,9 @@ describe("runtimeSession with persistSession: false", () => {
     const [error] = errorsOf(events);
     expect(error).toMatchObject({ code: CODE, recoverable: false });
     expect(error?.message).toContain("FxCliDriver");
+    // The remedy for fx is to keep sessions on, not to switch runtime.
+    expect(error?.message).toContain("persistSession");
+    expect(error?.message).not.toContain("ClaudeAgent");
     expect(events.at(-1)).toMatchObject({ type: "completed", exitCode: 1 });
     expect(fake.state.called).toBe(0);
   });

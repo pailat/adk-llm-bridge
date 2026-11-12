@@ -1,8 +1,11 @@
+import { randomBytes } from "node:crypto";
 import {
   lstatSync,
   mkdirSync,
   readdirSync,
   readFileSync,
+  renameSync,
+  rmSync,
   writeFileSync,
 } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
@@ -138,6 +141,12 @@ function insideRoot(root: string, path: string): string {
  * Writes a bundle under `root`. Every path is checked first; one that leaves
  * `root` rejects the whole bundle before anything is written.
  *
+ * @remarks
+ * The files go into a sibling temporary directory that is renamed onto `root`
+ * once complete, so a failed write never leaves a partial `root` behind that
+ * a later run would take for a finished session. The temporary directory is
+ * removed on any error.
+ *
  * @internal
  */
 export function restoreFxSessionBundle(
@@ -145,6 +154,7 @@ export function restoreFxSessionBundle(
   bundle: FxSessionBundle,
 ): void {
   const absoluteRoot = resolve(root);
+  // Validate against the final root, then rebase onto the temporary one.
   const directories = bundle.directories.map((path) =>
     insideRoot(absoluteRoot, path),
   );
@@ -152,13 +162,24 @@ export function restoreFxSessionBundle(
     target: insideRoot(absoluteRoot, file.path),
     bytes: Buffer.from(file.base64, "base64"),
   }));
-  mkdirSync(absoluteRoot, { recursive: true });
-  for (const directory of directories) {
-    mkdirSync(directory, { recursive: true });
-  }
-  for (const file of files) {
-    mkdirSync(dirname(file.target), { recursive: true });
-    writeFileSync(file.target, file.bytes);
+  const temporary = `${absoluteRoot}.restore-${randomBytes(6).toString("hex")}`;
+  const rebase = (target: string): string =>
+    join(temporary, relative(absoluteRoot, target));
+  mkdirSync(dirname(absoluteRoot), { recursive: true });
+  try {
+    mkdirSync(temporary);
+    for (const directory of directories) {
+      mkdirSync(rebase(directory), { recursive: true });
+    }
+    for (const file of files) {
+      const target = rebase(file.target);
+      mkdirSync(dirname(target), { recursive: true });
+      writeFileSync(target, file.bytes);
+    }
+    renameSync(temporary, absoluteRoot);
+  } catch (error) {
+    rmSync(temporary, { recursive: true, force: true });
+    throw error;
   }
 }
 

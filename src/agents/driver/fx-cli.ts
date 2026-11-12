@@ -397,7 +397,8 @@ export interface FxCliDriverConfig {
    * Durable copy of the fx session directory (log, blobs and lock file), saved
    * after a turn and restored when a resume finds the directory missing on
    * this host. A store or a factory called once per run with the invocation
-   * context, such as `fxArtifactSessionStore()`. A store that fails is
+   * context (its one store serves both the restore and the save of that run),
+   * such as `fxArtifactSessionStore()`. A factory that throws, or a store that fails, is
    * reported as a recoverable `FX_SESSION_STORE_ERROR` event and the run
    * goes on. Needs `persistSession`.
    *
@@ -757,12 +758,24 @@ export class FxCliDriver extends SubprocessJsonlDriver {
     );
   }
 
-  /** The configured store, or the one its factory builds for this run. */
-  #storeFor(request: ExternalAgentRunRequest): FxSessionStore | undefined {
+  /**
+   * The store of this run: the configured one, or the one its factory builds
+   * (called once, so the restore and the save share it). A factory that throws
+   * gives a warning and no store.
+   */
+  #openStore(request: ExternalAgentRunRequest): {
+    store?: FxSessionStore;
+    warning?: ExternalAgentEvent;
+  } {
     const configured = this.#sessionStore;
-    return typeof configured === "function"
-      ? configured({ context: request.context })
-      : configured;
+    if (configured === undefined || typeof configured !== "function") {
+      return configured === undefined ? {} : { store: configured };
+    }
+    try {
+      return { store: configured({ context: request.context }) };
+    } catch (error) {
+      return { warning: sessionStoreWarning("open", undefined, error) };
+    }
   }
 
   /**
@@ -770,11 +783,11 @@ export class FxCliDriver extends SubprocessJsonlDriver {
    * missing on this host. Returns the warning to report, if any.
    */
   async #restoreSession(
-    request: ExternalAgentRunRequest,
+    store: FxSessionStore | undefined,
     home: string | undefined,
     id: string,
   ): Promise<ExternalAgentEvent | undefined> {
-    if (this.#sessionStore === undefined) {
+    if (store === undefined) {
       return undefined;
     }
     try {
@@ -785,7 +798,7 @@ export class FxCliDriver extends SubprocessJsonlDriver {
       if (existsSync(directory)) {
         return undefined;
       }
-      const bundle = await this.#storeFor(request)?.load(id);
+      const bundle = await store.load(id);
       if (bundle !== undefined) {
         restoreFxSessionBundle(directory, bundle);
       }
@@ -797,11 +810,11 @@ export class FxCliDriver extends SubprocessJsonlDriver {
 
   /** Copies the session directory to the store. Returns the warning to report, if any. */
   async #saveSession(
-    request: ExternalAgentRunRequest,
+    store: FxSessionStore | undefined,
     home: string | undefined,
     id: string,
   ): Promise<ExternalAgentEvent | undefined> {
-    if (this.#sessionStore === undefined) {
+    if (store === undefined) {
       return undefined;
     }
     try {
@@ -812,7 +825,7 @@ export class FxCliDriver extends SubprocessJsonlDriver {
       if (!existsSync(directory)) {
         throw new Error(`the session directory ${directory} does not exist`);
       }
-      await this.#storeFor(request)?.save(id, readFxSessionBundle(directory));
+      await store.save(id, readFxSessionBundle(directory));
       return undefined;
     } catch (error) {
       return sessionStoreWarning("save", id, error);
@@ -905,6 +918,7 @@ export class FxCliDriver extends SubprocessJsonlDriver {
     request: ExternalAgentRunRequest,
     result: FxResult,
     home: string | undefined,
+    store: FxSessionStore | undefined,
   ): Promise<ExternalAgentEvent[]> {
     const id = stringValue(result.session_id);
     if (id === undefined || id.length === 0) {
@@ -912,13 +926,15 @@ export class FxCliDriver extends SubprocessJsonlDriver {
     }
     if (!isFxSessionId(id)) {
       return [
-        sessionStoreWarning(
-          "save",
-          "(unusable id)",
-          new Error(
-            "fx reported a session id that is not a plain token, so it was not stored",
+        {
+          type: "error",
+          message: cut(
+            `fx reported a session id that is not a plain token, so the session was not remembered${store === undefined ? "" : " and was not copied to the session store"}: the next turn starts a new fx session. The run goes on.`,
           ),
-        ),
+          code: "FX_SESSION_STORE_ERROR",
+          recoverable: true,
+          timestamp: Date.now(),
+        },
       ];
     }
     const events: ExternalAgentEvent[] = [];
@@ -929,7 +945,7 @@ export class FxCliDriver extends SubprocessJsonlDriver {
         timestamp: Date.now(),
       });
     }
-    const warning = await this.#saveSession(request, home, id);
+    const warning = await this.#saveSession(store, home, id);
     if (warning) {
       events.push(warning);
     }
@@ -943,7 +959,11 @@ export class FxCliDriver extends SubprocessJsonlDriver {
   ): ExternalAgentPolicyError | undefined {
     const permissions = request.permissions;
     if (!this.#persistSession) {
-      const sessionRefused = sessionRefusal("FxCliDriver", request);
+      const sessionRefused = sessionRefusal(
+        "FxCliDriver",
+        request,
+        "Drop persistSession: false so fx keeps and resumes its sessions, or remove runtimeSession.",
+      );
       if (sessionRefused) {
         return sessionRefused;
       }
@@ -1012,9 +1032,10 @@ export class FxCliDriver extends SubprocessJsonlDriver {
    *
    * @remarks
    * The stream starts with `started`. A refused run yields one `error` event
-   * with the policy code and `completed` with `exitCode: 1`. A
-   * `request.runtimeSession` is refused with
-   * `EXTERNAL_AGENT_SESSIONS_UNSUPPORTED` before any process starts. A
+   * with the policy code and `completed` with `exitCode: 1`. With
+   * `persistSession: false`, a `request.runtimeSession` is refused with
+   * `EXTERNAL_AGENT_SESSIONS_UNSUPPORTED` before any process starts; with the
+   * default `persistSession: true` the driver resumes it. A
    * successful run yields `output`, one `tool_call` and `tool_result` pair per tool call fx
    * reports (replayed after the run: fx gives no arguments, ids or times),
    * and `completed` with the model, turns and usage. A run failed when the
@@ -1023,12 +1044,18 @@ export class FxCliDriver extends SubprocessJsonlDriver {
    * `output` (fx's text goes into the error message) and one `error` event
    * with `FX_CLI_PERMISSION_REQUIRED` (the run needed an approval that a
    * noninteractive `ask` run cannot give), `FX_CLI_ERROR`, `FX_CLI_EXIT` (no
-   * result, non-zero exit), `FX_CLI_NO_RESULT` (no result, exit 0) or
+   * result, non-zero exit), `FX_CLI_NO_RESULT` (no result, exit 0),
+   * `FX_CLI_SESSION_NOT_FOUND` (the session to resume is gone; not
+   * recoverable, and no new session is started) or
    * `FX_CLI_RESULT_TOO_LARGE` (a stdout line over
    * {@link FX_CLI_MAX_LINE_CHARS}) before `completed`. A line that is not
    * a JSON object is skipped with a recoverable `FX_CLI_NON_JSON_LINE` error
    * event, and a JSON object without `exit_code` with a recoverable
-   * `FX_CLI_JSON_WITHOUT_EXIT_CODE` one. If the abort signal fires, the stream ends without `completed`
+   * `FX_CLI_JSON_WITHOUT_EXIT_CODE` one. With `persistSession: true`, a run
+   * that reports a session id yields a `state_delta` (key
+   * `fx_session:<agent name>`) before `completed`, and a recoverable
+   * `FX_SESSION_STORE_ERROR` warning when the session store (or the id) could
+   * not be used. If the abort signal fires, the stream ends without `completed`
    * after the process is killed. Spawn errors other than a missing binary
    * are thrown.
    *
@@ -1060,8 +1087,14 @@ export class FxCliDriver extends SubprocessJsonlDriver {
     const env = this.buildEnv(request);
     const resumeId = this.#resumeId(request);
     const sessionWarnings: ExternalAgentEvent[] = [];
+    // One store for the whole run: the restore and the save share it.
+    const opened = this.#persistSession ? this.#openStore(request) : {};
+    const store = opened.store;
+    if (opened.warning) {
+      sessionWarnings.push(opened.warning);
+    }
     if (resumeId !== undefined) {
-      const warning = await this.#restoreSession(request, env.HOME, resumeId);
+      const warning = await this.#restoreSession(store, env.HOME, resumeId);
       if (warning) {
         sessionWarnings.push(warning);
       }
@@ -1221,7 +1254,7 @@ export class FxCliDriver extends SubprocessJsonlDriver {
         resumeId,
       )) {
         if (event.type === "completed" && this.#persistSession) {
-          yield* await this.#sessionEvents(request, result, env.HOME);
+          yield* await this.#sessionEvents(request, result, env.HOME, store);
         }
         yield event;
       }
@@ -1244,15 +1277,19 @@ function savedSessionId(request: ExternalAgentRunRequest): string | undefined {
 }
 
 function sessionStoreWarning(
-  action: "save" | "restore",
-  id: string,
+  action: "save" | "restore" | "open",
+  id: string | undefined,
   error: unknown,
 ): ExternalAgentEvent {
   const reason = error instanceof Error ? error.message : String(error);
+  const what =
+    action === "open"
+      ? "could not be opened for this run"
+      : `could not ${action} session ${cut(id ?? "", 40)}`;
   return {
     type: "error",
     message: cut(
-      `The fx session store could not ${action} session ${cut(id, 40)}: ${reason}. The run goes on; the session stays only in ~/.fx of this host.`,
+      `The fx session store ${what}: ${reason}. The run goes on; the session is not copied to the store and stays only in ~/.fx of this host.`,
     ),
     code: "FX_SESSION_STORE_ERROR",
     recoverable: true,
