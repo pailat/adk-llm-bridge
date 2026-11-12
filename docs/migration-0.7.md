@@ -175,12 +175,11 @@ Related behavior changes:
   tokens, as ADK expects. Cached tokens are also reported in
   `cachedContentTokenCount`. If you added the cache counts yourself, stop
   doing so.
-- Anthropic prompt caching is now **on by default** (native `AnthropicLlm` and
-  `anthropic/*` on AI Gateway), where the native option used to be opt-in. It
-  does not change outputs, but a cache write costs 1.25x the input price and a
-  read 0.1x or less, so it pays off from the second turn. If you make
-  high-volume one-shot calls with prompts above the minimum cacheable size
-  (512 tokens on Haiku/Sonnet/Opus 5.5), set `promptCaching: false`.
+- Anthropic prompt caching is now **automatic by default** (native `AnthropicLlm` and
+  `anthropic/*` on AI Gateway), where the native option used to be opt-in: markers
+  are sent only when the request declares a tool or already holds an earlier model
+  turn, so one-shot calls pay no write surcharge. It does not change outputs. Set
+  `promptCaching: true` to keep it always on, or `false` to turn it off.
   OpenRouter is opt-in. See [Prompt caching](prompt-caching.md).
 - The tokens a call wrote to the prompt cache are in
   `customMetadata.cacheCreationTokenCount` (genai has no field for them), and

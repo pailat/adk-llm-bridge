@@ -247,6 +247,7 @@ describe("AnthropicLlm", () => {
           tools?: unknown;
           toolChoice?: ToolChoice;
           messages?: unknown[];
+          structuredOutput?: boolean;
         },
       ): BuildResult {
         return (
@@ -257,6 +258,8 @@ describe("AnthropicLlm", () => {
               tools: unknown,
               params?: TestableParams,
               toolChoice?: ToolChoice,
+              model?: string,
+              structuredOutput?: boolean,
             ) => BuildResult;
           }
         ).buildRequestParams(
@@ -265,6 +268,8 @@ describe("AnthropicLlm", () => {
           opts?.tools,
           params,
           opts?.toolChoice,
+          undefined,
+          opts?.structuredOutput,
         );
       }
     }
@@ -442,6 +447,111 @@ describe("AnthropicLlm", () => {
 
     describe("prompt caching wiring", () => {
       const tool = { name: "get_weather", description: "", input_schema: {} };
+
+      describe("automatic default (promptCaching unset)", () => {
+        const make = (extra: Record<string, unknown> = {}) =>
+          new TestableAnthropicLlm({
+            model: "claude-sonnet-4-5-20250929",
+            apiKey: "sk-ant-test",
+            ...extra,
+          });
+        const user = { role: "user", content: "hi" };
+        const model = { role: "assistant", content: "ok" };
+        const jsonTool = {
+          name: "json_output",
+          description: "",
+          input_schema: {},
+        };
+
+        it("sends no cache_control for a one-shot request and matches the false body", () => {
+          const opts = { system: "sys", messages: [user] };
+          const auto = make().callBuild({}, opts);
+          const off = make({ promptCaching: false }).callBuild({}, opts);
+          expect(JSON.stringify(auto)).not.toContain("cache_control");
+          expect(auto.system).toBe("sys");
+          expect(auto).toEqual(off);
+        });
+
+        it("caches from the first call when a caller tool is declared", () => {
+          const result = make().callBuild(
+            {},
+            { system: "sys", tools: [tool], messages: [user] },
+          );
+          expect(JSON.stringify(result).match(/cache_control/g)).toHaveLength(
+            3,
+          );
+        });
+
+        it("caches when the contents already hold an earlier model turn", () => {
+          const result = make().callBuild(
+            {},
+            { system: "sys", messages: [user, model, user] },
+          );
+          expect(JSON.stringify(result).match(/cache_control/g)).toHaveLength(
+            2,
+          );
+        });
+
+        it("does not count the synthetic structured-output tool as a caller tool", () => {
+          const result = make().callBuild(
+            {},
+            {
+              system: "sys",
+              tools: [jsonTool],
+              messages: [user],
+              structuredOutput: true,
+            },
+          );
+          expect(JSON.stringify(result)).not.toContain("cache_control");
+        });
+
+        it("still counts a caller tool next to the structured-output tool", () => {
+          const result = make().callBuild(
+            {},
+            {
+              system: "sys",
+              tools: [tool, jsonTool],
+              messages: [user],
+              structuredOutput: true,
+            },
+          );
+          expect(JSON.stringify(result)).toContain("cache_control");
+        });
+
+        it("forces markers on a one-shot request with true", () => {
+          const result = make({ promptCaching: true }).callBuild(
+            {},
+            { system: "sys", messages: [user] },
+          );
+          expect(JSON.stringify(result.system)).toContain("cache_control");
+          expect(JSON.stringify(result.messages)).toContain("cache_control");
+        });
+
+        it("forces markers on a one-shot request with a ttl object", () => {
+          const result = make({ promptCaching: { ttl: "1h" } }).callBuild(
+            {},
+            { system: "sys", messages: [user] },
+          );
+          expect(JSON.stringify(result).match(/"ttl":"1h"/g)).toHaveLength(2);
+        });
+
+        it("never sends markers with false, even with tools and history", () => {
+          const result = make({ promptCaching: false }).callBuild(
+            {},
+            { system: "sys", tools: [tool], messages: [user, model, user] },
+          );
+          expect(JSON.stringify(result)).not.toContain("cache_control");
+        });
+
+        it("keeps a global false over the automatic default for a tool loop", () => {
+          setProviderConfig("anthropic", { promptCaching: false });
+          const result = make().callBuild(
+            {},
+            { system: "sys", tools: [tool], messages: [user] },
+          );
+          expect(JSON.stringify(result)).not.toContain("cache_control");
+        });
+      });
 
       it("applies cache_control only when promptCaching is enabled", () => {
         const enabled = new TestableAnthropicLlm({

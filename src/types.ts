@@ -107,14 +107,16 @@ export interface BaseProviderConfig {
  */
 export interface AIGatewayProviderConfig extends BaseProviderConfig {
   /**
-   * Prompt caching for Anthropic models (`anthropic/*`), on by default.
+   * Prompt caching for Anthropic models (`anthropic/*`), automatic by default.
    *
-   * Sends `providerOptions.gateway.caching = "auto"`, and the gateway places
+   * Unset, it is sent only when the request declares a tool or already holds
+   * an earlier model turn; a one-shot request sends nothing. `true` always
+   * sends it. Sends `providerOptions.gateway.caching = "auto"`, and the gateway places
    * the Anthropic cache breakpoints itself. Other models are left untouched
    * unless this is `true`. `false` disables it. The chat endpoint has a
    * 5-minute lifetime only: `ttl: "1h"` warns and uses 5 minutes.
    *
-   * @defaultValue true for `anthropic/*` models, off for others
+   * @defaultValue automatic for `anthropic/*` models, off for others
    * @see {@link PromptCachingConfig}
    */
   promptCaching?: PromptCachingConfig;
@@ -123,8 +125,8 @@ export interface AIGatewayProviderConfig extends BaseProviderConfig {
 /**
  * Prompt caching setting for Anthropic models.
  *
- * - `true`: on, 5-minute lifetime.
- * - `{ ttl }`: on with that lifetime. `"1h"` writes cost 2x the base input
+ * - `true`: always on, 5-minute lifetime.
+ * - `{ ttl }`: always on with that lifetime. `"1h"` writes cost 2x the base input
  *   price instead of 1.25x; the AI Gateway chat endpoint only supports `"5m"`
  *   and warns (`PROMPT_CACHE_TTL_IGNORED`) when `"1h"` is requested.
  * - `false`: off, no marker of any kind.
@@ -719,7 +721,7 @@ export interface AnthropicProviderConfig extends BaseProviderConfig {
   maxTokens?: number;
 
   /**
-   * Anthropic prompt caching, on by default.
+   * Anthropic prompt caching, automatic by default.
    *
    * Attaches `cache_control` to the system prompt block, the last tool
    * definition and the last block of the last message (3 of the 4 allowed
@@ -730,17 +732,20 @@ export interface AnthropicProviderConfig extends BaseProviderConfig {
    *
    * A cache write costs 1.25x the base input price (2x with `ttl: "1h"`) and a
    * read 0.1x or less, so caching pays off from the first reuse. A one-shot
-   * call that is never reused pays the write surcharge for nothing: set
-   * `false` for those.
+   * call that is never reused pays the write surcharge for nothing, so unset
+   * sends markers only when the request can be reused: it declares a tool of
+   * the caller (not the structured-output tool) or already holds an earlier
+   * model turn.
    *
-   * - `true` / unset: on, 5-minute lifetime.
-   * - `{ ttl: "1h" }`: on, 1-hour lifetime on every breakpoint.
+   * - unset: automatic, 5-minute lifetime.
+   * - `true`: always on, 5-minute lifetime.
+   * - `{ ttl: "1h" }`: always on, 1-hour lifetime on every breakpoint.
    * - `false`: no `cache_control` anywhere.
    *
    * This is a bridge-level setting, NOT derived from ADK's
    * `config.cachedContent` (which is a non-portable Gemini resource name).
    *
-   * @defaultValue true
+   * @defaultValue automatic
    * @see {@link PromptCachingConfig}
    * @see {@link https://platform.claude.com/docs/en/build-with-claude/prompt-caching|Anthropic Prompt Caching}
    */

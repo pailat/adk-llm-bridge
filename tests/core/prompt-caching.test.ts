@@ -5,7 +5,13 @@
  */
 
 import { beforeEach, describe, expect, it, spyOn } from "bun:test";
-import { type LlmRequest, RoutedLlm } from "@google/adk";
+import {
+  FunctionTool,
+  InMemoryRunner,
+  LlmAgent,
+  type LlmRequest,
+  RoutedLlm,
+} from "@google/adk";
 import { type Span, trace } from "@opentelemetry/api";
 import { resetAllConfigs, setProviderConfig } from "../../src/config.js";
 import { OpenAICompatibleLlm } from "../../src/core/openai-compatible-llm.js";
@@ -69,6 +75,38 @@ function request(model?: string): LlmRequest {
   } as LlmRequest;
 }
 
+function toolRequest(model?: string): LlmRequest {
+  return {
+    ...request(model),
+    config: {
+      tools: [
+        {
+          functionDeclarations: [
+            { name: "read_file", description: "read", parameters: undefined },
+          ],
+        },
+      ],
+    },
+  } as unknown as LlmRequest;
+}
+
+function historyRequest(withText = true): LlmRequest {
+  return {
+    contents: [
+      { role: "user", parts: [{ text: "Hi" }] },
+      {
+        role: "model",
+        parts: withText
+          ? [{ text: "Hello" }]
+          : [{ functionCall: { name: "read_file", args: {}, id: "c1" } }],
+      },
+      { role: "user", parts: [{ text: "More" }] },
+    ],
+    liveConnectConfig: {},
+    toolsDict: {},
+  } as unknown as LlmRequest;
+}
+
 async function run(llm: OpenAICompatibleLlm, stream: boolean, req = request()) {
   for await (const _ of llm.generateContentAsync(req, stream)) {
     // drain
@@ -102,11 +140,57 @@ describe("AI Gateway prompt caching", () => {
   for (const stream of [false, true]) {
     const mode = stream ? "streaming" : "non-streaming";
 
-    it(`defaults ON for anthropic/* (${mode})`, async () => {
+    it(`sends no providerOptions for a one-shot anthropic/* request with promptCaching unset (${mode})`, async () => {
       const llm = gateway("anthropic/claude-haiku-5.5");
       const seen = bodies(llm);
       await run(llm, stream);
+      expect("providerOptions" in seen[0]).toBe(false);
+    });
+
+    it(`caches anthropic/* by default when a tool is declared (${mode})`, async () => {
+      const llm = gateway("anthropic/claude-haiku-5.5");
+      const seen = bodies(llm);
+      await run(llm, stream, toolRequest());
       expect(seen[0].providerOptions).toEqual({ gateway: { caching: "auto" } });
+    });
+
+    it(`caches anthropic/* by default when an earlier model turn exists (${mode})`, async () => {
+      const llm = gateway("anthropic/claude-haiku-5.5");
+      const seen = bodies(llm);
+      await run(llm, stream, historyRequest());
+      expect(seen[0].providerOptions).toEqual({ gateway: { caching: "auto" } });
+    });
+
+    it(`caches by default when the earlier model turn only carries tool calls (${mode})`, async () => {
+      const llm = gateway("anthropic/claude-haiku-5.5");
+      const seen = bodies(llm);
+      await run(llm, stream, historyRequest(false));
+      expect(seen[0].providerOptions).toEqual({ gateway: { caching: "auto" } });
+    });
+
+    it(`promptCaching: true forces it on for a one-shot request (${mode})`, async () => {
+      const llm = gateway("anthropic/claude-haiku-5.5", {
+        promptCaching: true,
+      });
+      const seen = bodies(llm);
+      await run(llm, stream);
+      expect(seen[0].providerOptions).toEqual({ gateway: { caching: "auto" } });
+    });
+
+    it(`promptCaching: false sends nothing even with tools (${mode})`, async () => {
+      const llm = gateway("anthropic/claude-haiku-5.5", {
+        promptCaching: false,
+      });
+      const seen = bodies(llm);
+      await run(llm, stream, toolRequest());
+      expect("providerOptions" in seen[0]).toBe(false);
+    });
+
+    it(`keeps the model gate with tools for a non-anthropic model (${mode})`, async () => {
+      const llm = gateway("openai/gpt-5");
+      const seen = bodies(llm);
+      await run(llm, stream, toolRequest());
+      expect("providerOptions" in seen[0]).toBe(false);
     });
 
     it(`sends no providerOptions for a non-anthropic model by default (${mode})`, async () => {
@@ -133,10 +217,28 @@ describe("AI Gateway prompt caching", () => {
     });
   }
 
-  it("never hand-places cache_control in the body", async () => {
+  it("decides per call on one instance", async () => {
     const llm = gateway("anthropic/claude-haiku-5.5");
     const seen = bodies(llm);
     await run(llm, false);
+    await run(llm, false, toolRequest());
+    expect("providerOptions" in seen[0]).toBe(false);
+    expect(seen[1].providerOptions).toEqual({ gateway: { caching: "auto" } });
+  });
+
+  it("applies the automatic rule to a per-request model override", async () => {
+    const llm = gateway("openai/gpt-5");
+    const seen = bodies(llm);
+    await run(llm, false, request("anthropic/claude-sonnet-5.5"));
+    await run(llm, false, toolRequest("anthropic/claude-sonnet-5.5"));
+    expect("providerOptions" in seen[0]).toBe(false);
+    expect(seen[1].providerOptions).toEqual({ gateway: { caching: "auto" } });
+  });
+
+  it("never hand-places cache_control in the body", async () => {
+    const llm = gateway("anthropic/claude-haiku-5.5");
+    const seen = bodies(llm);
+    await run(llm, false, toolRequest());
     expect(JSON.stringify(seen[0])).not.toContain("cache_control");
   });
 
@@ -178,8 +280,8 @@ describe("AI Gateway prompt caching", () => {
   it("judges the model of each call: llmRequest.model override", async () => {
     const llm = gateway("openai/gpt-5");
     const seen = bodies(llm);
-    await run(llm, false, request("anthropic/claude-sonnet-5.5"));
-    await run(llm, false, request("openai/gpt-5"));
+    await run(llm, false, toolRequest("anthropic/claude-sonnet-5.5"));
+    await run(llm, false, toolRequest("openai/gpt-5"));
     expect(seen[0].providerOptions).toEqual({ gateway: { caching: "auto" } });
     expect("providerOptions" in seen[1]).toBe(false);
   });
@@ -195,7 +297,7 @@ describe("AI Gateway prompt caching", () => {
       router: () => (call++ === 0 ? "claude" : "gpt"),
     });
     for (let i = 0; i < 2; i++) {
-      for await (const _ of routed.generateContentAsync(request(), false)) {
+      for await (const _ of routed.generateContentAsync(toolRequest(), false)) {
         // drain
       }
     }
@@ -204,13 +306,74 @@ describe("AI Gateway prompt caching", () => {
     });
     expect("providerOptions" in gptSeen[0]).toBe(false);
   });
+
+  it("caches every call of a 3-turn tool loop, the first included", async () => {
+    const llm = gateway("anthropic/claude-haiku-5.5");
+    const seen: Body[] = [];
+    const toolCall = (id: string) => ({
+      ...COMPLETION,
+      choices: [
+        {
+          index: 0,
+          message: {
+            role: "assistant",
+            content: null,
+            refusal: null,
+            tool_calls: [
+              {
+                id,
+                type: "function",
+                function: { name: "read_file", arguments: "{}" },
+              },
+            ],
+          },
+          finish_reason: "tool_calls",
+          logprobs: null,
+        },
+      ],
+    });
+    const replies = [toolCall("c1"), toolCall("c2"), COMPLETION];
+    // biome-ignore lint/suspicious/noExplicitAny: test access to private client
+    (llm as any).client.chat.completions.create = async (params: Body) => {
+      seen.push(params);
+      return replies[seen.length - 1];
+    };
+    const agent = new LlmAgent({
+      name: "loop",
+      model: llm,
+      instruction: "Read the files.",
+      tools: [
+        new FunctionTool({
+          name: "read_file",
+          description: "Reads a file.",
+          execute: () => ({ text: "contents" }),
+        }),
+      ],
+    });
+    const runner = new InMemoryRunner({ agent, appName: "app" });
+    const session = await runner.sessionService.createSession({
+      appName: "app",
+      userId: "u",
+    });
+    for await (const _ of runner.runAsync({
+      userId: "u",
+      sessionId: session.id,
+      newMessage: { role: "user", parts: [{ text: "go" }] },
+    })) {
+      // drain
+    }
+    expect(seen).toHaveLength(3);
+    for (const body of seen) {
+      expect(body.providerOptions).toEqual({ gateway: { caching: "auto" } });
+    }
+  });
 });
 
 describe("OpenRouter prompt caching (opt-in)", () => {
-  it("is OFF by default, even for anthropic/*", async () => {
+  it("is OFF by default, even for anthropic/* with tools", async () => {
     const llm = openrouter("anthropic/claude-sonnet-5.5");
     const seen = bodies(llm);
-    await run(llm, false);
+    await run(llm, false, toolRequest());
     expect("cache_control" in seen[0]).toBe(false);
   });
 
@@ -224,6 +387,15 @@ describe("OpenRouter prompt caching (opt-in)", () => {
       expect(seen[0].cache_control).toEqual({ type: "ephemeral" });
     });
   }
+
+  it("true sends cache_control even for a one-shot request", async () => {
+    const llm = openrouter("anthropic/claude-sonnet-5.5", {
+      promptCaching: true,
+    });
+    const seen = bodies(llm);
+    await run(llm, false);
+    expect(seen[0].cache_control).toEqual({ type: "ephemeral" });
+  });
 
   it("{ttl:'1h'} adds ttl", async () => {
     const llm = openrouter("anthropic/claude-sonnet-5.5", {

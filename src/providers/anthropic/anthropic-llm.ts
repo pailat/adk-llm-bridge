@@ -62,6 +62,7 @@ import type { AnthropicGenerationParams } from "./converters/request.js";
 import {
   applyAnthropicPromptCaching,
   convertAnthropicRequest,
+  JSON_OUTPUT_TOOL_NAME,
 } from "./converters/request.js";
 import {
   convertAnthropicResponse,
@@ -116,11 +117,8 @@ export class AnthropicLlm extends BaseProviderLlm {
    */
   private readonly maxTokens: number;
 
-  /**
-   * Whether opt-in prompt caching is enabled for this instance.
-   */
-  /** Resolved setting; `false` is the opt-out, anything else is on. */
-  private readonly promptCaching: PromptCachingConfig;
+  /** Resolved setting: `false` off, `true` or `{ ttl }` always on, `undefined` automatic (only when the request can be reused). */
+  private readonly promptCaching: PromptCachingConfig | undefined;
 
   /**
    * Creates a new Anthropic LLM instance.
@@ -154,8 +152,8 @@ export class AnthropicLlm extends BaseProviderLlm {
       min: 1,
     });
 
-    this.promptCaching =
-      config.promptCaching ?? globalConfig.promptCaching ?? true;
+    // Unset stays undefined: prompt caching is then automatic, per request.
+    this.promptCaching = config.promptCaching ?? globalConfig.promptCaching;
 
     this.client = new AnthropicSDK({
       apiKey: resolved.apiKey,
@@ -271,6 +269,7 @@ export class AnthropicLlm extends BaseProviderLlm {
     params?: AnthropicGenerationParams,
     toolChoice?: AnthropicSDK.ToolChoice,
     model: string = this.model,
+    structuredOutput = false,
   ): AnthropicSDK.MessageCreateParamsNonStreaming {
     const { max_tokens, ...sampling } = params ?? {};
 
@@ -285,13 +284,24 @@ export class AnthropicLlm extends BaseProviderLlm {
       }
     }
 
-    // Prompt caching (on by default): attach ephemeral cache breakpoints to
-    // the system block, the last tool and the last message block. `false`
-    // passes everything through unchanged.
+    // Prompt caching: attach ephemeral cache breakpoints to the system block,
+    // the last tool and the last message block. `true` or `{ ttl }` always
+    // does, `false` never does, and unset (automatic) does only when the
+    // request can be reused: the caller declared a tool, or the contents
+    // already hold an earlier model turn. The synthetic structured-output tool
+    // is not a caller tool.
     let systemField: AnthropicSDK.MessageCreateParams["system"] = system;
     let toolsField = tools;
     let messagesField = messages;
-    if (this.promptCaching !== false) {
+    const callerTools = structuredOutput
+      ? tools?.filter((t) => t.name !== JSON_OUTPUT_TOOL_NAME)
+      : tools;
+    const reusable =
+      (callerTools?.length ?? 0) > 0 ||
+      messages.some((m) => m.role === "assistant");
+    if (
+      this.promptCaching === undefined ? reusable : this.promptCaching !== false
+    ) {
       const ttl =
         typeof this.promptCaching === "object"
           ? this.promptCaching.ttl
@@ -362,6 +372,7 @@ export class AnthropicLlm extends BaseProviderLlm {
           params,
           toolChoice,
           model,
+          structuredOutput,
         ),
         abortSignal ? { signal: abortSignal } : undefined,
       )
@@ -414,6 +425,7 @@ export class AnthropicLlm extends BaseProviderLlm {
         params,
         toolChoice,
         model,
+        structuredOutput,
       ),
       abortSignal ? { signal: abortSignal } : undefined,
     );
