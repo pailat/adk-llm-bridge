@@ -1220,6 +1220,33 @@ checkpoints:
   See [Script sandbox stack](./workflow-orchestration.md#script-sandbox-stack)
   and [Time bound](./workflow-orchestration.md#time-bound).
 
+### Steps cut off by the output limit
+
+A step whose model response stops early now fails instead of completing with
+the cut-off text:
+
+- **Which responses.** `finishReason` `MAX_TOKENS`, or a content stop
+  (`SAFETY`, `RECITATION`, `BLOCKLIST`, `PROHIBITED_CONTENT`, `SPII`,
+  `IMAGE_SAFETY`, `IMAGE_PROHIBITED_CONTENT`), on a model response that has no
+  function call and no error. A cut that left only reasoning, or no text, counts
+  too. Every response of the step is checked, so a cut first child of a
+  `SequentialAgent` fails the step. An agent error still reports
+  `WORKFLOW_EXECUTION_ERROR`. A nested bridge workflow decides for its own steps.
+- **The error.** `WorkflowError` `WORKFLOW_STEP_INCOMPLETE` with `stepId`,
+  `agentName`, `attempt`, `finishReason`, `author`, and, when known,
+  `outputTokens`, `thoughtsTokens` and `maxOutputTokens` (the configured cap).
+  Handle it next to `WORKFLOW_EXECUTION_ERROR`. The step `retry` policy applies;
+  on resume the failure replays unless `retryFailedSteps` or
+  `resumePolicy: "retry"` is set.
+- **The fix.** Reasoning tokens count against `maxOutputTokens`, so a cap sized
+  for the answer can be used up by reasoning: raise the cap or lower the
+  reasoning budget, then resume with `retryFailedSteps`.
+- **Opt out.** Set `allowIncompleteOutput: true` on a step that can use partial
+  text (script steps too; it must be a boolean). The step completes and
+  `result.finishReason` (also on `step_completed`) says `MAX_TOKENS`.
+- External agents (Claude, Codex, Gemini CLI) report no per-turn finish reason,
+  so they are not affected.
+
 ### Model and input changes on replayed steps
 
 - Nothing breaks. Older checkpoints load: their steps have no model record and

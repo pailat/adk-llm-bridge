@@ -1272,6 +1272,17 @@ from the 0.6.0 tag.
 
 ### Changed
 
+- **A workflow step whose model response stopped early now fails.** A step whose agent
+  ended on `MAX_TOKENS`, or on a content stop (`SAFETY`, `RECITATION`, `BLOCKLIST`,
+  `PROHIBITED_CONTENT`, `SPII`, `IMAGE_SAFETY`, `IMAGE_PROHIBITED_CONTENT`) with no
+  function call and no agent error, used to complete with the cut-off text; it now fails
+  with `WORKFLOW_STEP_INCOMPLETE` (details: `finishReason`, `author`, `outputTokens`,
+  `thoughtsTokens`, `maxOutputTokens`), and `retry`, `retryFailedSteps` and
+  `resumePolicy` apply as for any failed step. `WorkflowStep.allowIncompleteOutput: true`
+  accepts the partial output. `WorkflowStepResult.finishReason` (and the `step_completed`
+  event) now reports the finish reason. `AgentInvocationResult` gains `finishReason` and
+  `incomplete`; the gateway itself still does not fail the run.
+
 - **CLI drivers refuse `runtimeSession`.** `ClaudeCliDriver`, `CodexCliDriver` and
   `GeminiCliDriver` used to ignore `request.runtimeSession`. They now fail the run with
   `EXTERNAL_AGENT_SESSIONS_UNSUPPORTED` (exported from `adk-llm-bridge/agents`) before any

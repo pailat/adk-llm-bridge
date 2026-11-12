@@ -28,6 +28,7 @@ import {
   COST_METADATA_KEY,
 } from "../converters/cache-usage.js";
 import { isTempStateKey, withoutTempStateKeys } from "../utils/state.js";
+import { isWorkflowAgent } from "../workflows/internal/workflow-agent-brand.js";
 
 /**
  * Aggregate model usage of one delegated agent run.
@@ -162,6 +163,40 @@ export interface AgentInvocationResume {
   events: readonly Event[];
 }
 
+/** The first model response of a run that stopped before the model was done. */
+export interface AgentInvocationIncomplete {
+  /** Finish reason of the response, such as `MAX_TOKENS` or `SAFETY`. */
+  finishReason: string;
+  /** Name of the agent that produced the response. */
+  author: string;
+  /** `usageMetadata.candidatesTokenCount` of that response. */
+  outputTokens?: number;
+  /** `usageMetadata.thoughtsTokenCount`; reasoning counts against the cap. */
+  thoughtsTokens?: number;
+  /**
+   * `generateContentConfig.maxOutputTokens` of the author when exactly one
+   * `LlmAgent` has that name and sets one. This is the configured cap, not
+   * necessarily the cap that was sent (callbacks and provider defaults can
+   * change it).
+   */
+  maxOutputTokens?: number;
+}
+
+/**
+ * Finish reasons of a response that stopped before the model was done:
+ * the output cap and the content filters.
+ */
+const INCOMPLETE_FINISH_REASONS: ReadonlySet<string> = new Set([
+  "MAX_TOKENS",
+  "SAFETY",
+  "RECITATION",
+  "BLOCKLIST",
+  "PROHIBITED_CONTENT",
+  "SPII",
+  "IMAGE_SAFETY",
+  "IMAGE_PROHIBITED_CONTENT",
+]);
+
 /** Result of one delegated agent run; failures are reported in `error`, not thrown. */
 export interface AgentInvocationResult {
   /** Name of the agent that ran. */
@@ -194,6 +229,18 @@ export interface AgentInvocationResult {
    * absent when empty.
    */
   stateDelta?: Record<string, unknown>;
+  /**
+   * `finishReason` of the event that produced `output`: the last final
+   * non-partial event with text, else the last final event that has one.
+   * Absent when the provider reported none.
+   */
+  finishReason?: string;
+  /**
+   * The first incomplete model response of the run; see
+   * {@link AgentInvocationIncomplete}. Data only: the gateway still does not
+   * fail the run, so delegation tools behave as before.
+   */
+  incomplete?: AgentInvocationIncomplete;
   /** Failure message; absent on success. */
   error?: string;
   /** Classification of `error`. */
@@ -613,6 +660,10 @@ interface RunTally {
   stateDelta: Record<string, unknown>;
   /** Visible text of the last final event that had text. */
   finalText: string | undefined;
+  /** Finish reason of the event behind `finalText`. */
+  finishReason: string | undefined;
+  /** First incomplete model response. */
+  incomplete: AgentInvocationIncomplete | undefined;
   /** Non-partial events with visible text. */
   textEvents: number;
   /** Function calls on non-partial events. */
@@ -657,6 +708,8 @@ function emptyTally(): RunTally {
     fallbackOutput: [],
     stateDelta: {},
     finalText: undefined,
+    finishReason: undefined,
+    incomplete: undefined,
     textEvents: 0,
     toolCalls: 0,
     usage: emptyUsage(),
@@ -709,6 +762,7 @@ function countEvent(
     tally.text.push(visible);
     if (isFinal(persisted)) {
       tally.finalText = visible;
+      tally.finishReason = persisted.finishReason;
     }
   } else {
     const fallback = extractFallbackOutput(persisted);
@@ -716,7 +770,18 @@ function countEvent(
       tally.fallbackOutput.push(fallback);
     }
   }
+  if (!tally.incomplete) {
+    tally.incomplete = incompleteResponse(persisted, agent);
+  }
   if (!persisted.partial) {
+    if (
+      !visible &&
+      tally.finalText === undefined &&
+      persisted.finishReason &&
+      isFinal(persisted)
+    ) {
+      tally.finishReason = persisted.finishReason;
+    }
     // A streamed function call is repeated on the final event.
     tally.toolCalls += getFunctionCalls(persisted).length;
     addUsage(tally.usage, persisted);
@@ -729,6 +794,77 @@ function countEvent(
       ? "llm-calls-limit"
       : "agent-error";
   }
+}
+
+/**
+ * The incomplete model response an event is, if any.
+ *
+ * @remarks
+ * Only a non-partial event of a model (not the user), without an error and
+ * without function calls, whose finish reason is in
+ * {@link INCOMPLETE_FINISH_REASONS}. Content is not required: a cut that
+ * left only reasoning, or nothing, is incomplete too. An event authored at
+ * or under a nested bridge workflow agent is skipped: that workflow decides
+ * for its own steps. A name shared by agents inside and outside such a
+ * workflow is not skipped.
+ */
+function incompleteResponse(
+  event: Event,
+  root: BaseAgent,
+): AgentInvocationIncomplete | undefined {
+  const { finishReason, author } = event;
+  if (
+    event.partial ||
+    !author ||
+    author === "user" ||
+    event.errorMessage ||
+    typeof finishReason !== "string" ||
+    !INCOMPLETE_FINISH_REASONS.has(finishReason) ||
+    getFunctionCalls(event).length > 0 ||
+    isUnderNestedWorkflow(root, author)
+  ) {
+    return undefined;
+  }
+  const owners = llmAgentsByName(root).get(author);
+  const cap =
+    owners?.length === 1
+      ? owners[0]?.generateContentConfig?.maxOutputTokens
+      : undefined;
+  const usage = event.usageMetadata;
+  return {
+    finishReason,
+    author,
+    ...(typeof usage?.candidatesTokenCount === "number"
+      ? { outputTokens: usage.candidatesTokenCount }
+      : {}),
+    ...(typeof usage?.thoughtsTokenCount === "number"
+      ? { thoughtsTokens: usage.thoughtsTokenCount }
+      : {}),
+    ...(typeof cap === "number" ? { maxOutputTokens: cap } : {}),
+  };
+}
+
+/**
+ * Whether every agent named `author` in the tree of `root` is a bridge
+ * workflow agent or sits below one (the root itself counts). An author that
+ * is not in the tree is not under one.
+ */
+function isUnderNestedWorkflow(root: BaseAgent, author: string): boolean {
+  let found = false;
+  let allNested = true;
+  const seen = new Set<BaseAgent>();
+  const visit = (node: BaseAgent, nested: boolean): void => {
+    if (seen.has(node)) return;
+    seen.add(node);
+    const inside = nested || isWorkflowAgent(node);
+    if (node.name === author) {
+      found = true;
+      if (!inside) allNested = false;
+    }
+    for (const child of node.subAgents) visit(child, inside);
+  };
+  visit(root, false);
+  return found && allNested;
 }
 
 /**
@@ -1030,6 +1166,8 @@ function aggregateResult(
     usage: { ...tally.usage, toolCalls: tally.toolCalls },
     ...modelsKey(runModels(agent, tally)),
     ...(Object.keys(stateDelta).length > 0 ? { stateDelta } : {}),
+    ...(tally.finishReason ? { finishReason: tally.finishReason } : {}),
+    ...(tally.incomplete ? { incomplete: tally.incomplete } : {}),
     ...(error ? { error } : {}),
     ...(error && errorKind ? { errorKind } : {}),
     ...(interrupt ? { interrupt } : {}),
