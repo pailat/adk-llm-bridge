@@ -580,8 +580,10 @@ new in 0.7.0. If you already use them, these changes apply:
   transport-envelope lines. It returns an empty `output` event carrying none
   of the child payload, preserving its public return type while allowing a
   subclass's read loop to continue without throwing on those lines.
-  `ExternalAgent` drops these empty metadata-free outputs before ADK, so no
-  message, turn completion or Workflow node output is produced. Other
+  `ExternalAgent` recognizes the internal placeholder by identity and skips
+  it before delegation, tracing or ADK processing, so no message, turn
+  completion or Workflow node output is produced. Legitimate empty outputs
+  still pass through. Other
   recognized event records keep their original fields unchanged, including
   `turnComplete`. Yield lifecycle and state events from the subclass's own `run` method, rather
   than passing them through from child stdout.

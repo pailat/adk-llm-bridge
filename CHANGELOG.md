@@ -427,8 +427,10 @@ from the 0.6.0 tag.
   `state_delta`, `completed` and transport-envelope lines, returning an empty
   `output` event with none of the child payload. Its event return type stays
   unchanged and subclass read loops continue without throwing on those lines.
-  `ExternalAgent` drops these empty metadata-free output events before ADK,
-  so they create no message, turn completion or Workflow node output. Other
+  `ExternalAgent` recognizes the internal placeholder by identity and skips
+  it before delegation, tracing or ADK processing, so it creates no message,
+  turn completion or Workflow node output. Legitimate empty outputs still
+  pass through. Other
   recognized event records keep their fields unchanged, including
   `turnComplete`. Subclasses yield driver-owned events from their own `run` instead. Codex's
   internal transport envelopes use a private symbol and cannot be forged

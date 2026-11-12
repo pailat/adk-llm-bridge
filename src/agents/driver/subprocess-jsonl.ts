@@ -21,6 +21,25 @@ import {
 } from "./shared.js";
 import { windowsExecutableKind } from "./spawn.js";
 
+const IGNORED_CHILD_LINE: ExternalAgentEvent = Object.freeze({
+  type: "output",
+  content: "",
+});
+
+/**
+ * Whether an event is the internal placeholder for an ignored child line.
+ *
+ * Identity distinguishes it from a legitimate empty final output. The
+ * placeholder cannot be constructed by parsing child JSON.
+ *
+ * @param event - A driver event.
+ * @returns Whether the event must be skipped before any processing.
+ * @internal
+ */
+export function isIgnoredChildLine(event: ExternalAgentEvent): boolean {
+  return event === IGNORED_CHILD_LINE;
+}
+
 /** Options for {@link SubprocessJsonlDriver}. */
 export interface SubprocessJsonlDriverConfig {
   /** Provider id reported in `started` events. */
@@ -380,8 +399,9 @@ export class SubprocessJsonlDriver implements ExternalAgentDriver {
    * Child-emitted `started`, `completed`, `state_delta` and transport
    * envelopes are ignored: they return an empty `output` event, carrying
    * none of the child payload, so a subclass's read loop continues safely.
-   * `ExternalAgent` suppresses these empty metadata-free output events
-   * before ADK: they produce no message, turn completion or node output.
+   * `ExternalAgent` recognizes the internal placeholder by identity and
+   * skips it before delegation, tracing or ADK processing. It produces no
+   * message, turn completion or node output; real empty outputs still pass.
    * Other recognized event records retain their fields unchanged.
    * A subclass emits driver-owned events by yielding them from its own
    * `run`, never by accepting child lines.
@@ -398,7 +418,7 @@ export class SubprocessJsonlDriver implements ExternalAgentDriver {
     }
     const record = asRecord(parsed.value);
     if (bridgeEvent(record) === "drop" || record.type === "adk.bridge_event") {
-      return { type: "output", content: "" };
+      return IGNORED_CHILD_LINE;
     }
     if (!isExternalAgentEvent(parsed.value)) {
       throw new Error("Invalid external agent JSONL event");

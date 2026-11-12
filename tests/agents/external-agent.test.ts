@@ -13,6 +13,7 @@ import {
 } from "@google/adk";
 import { trace } from "@opentelemetry/api";
 import { z } from "zod";
+import { SubprocessJsonlDriver } from "../../src/agents/driver/subprocess-jsonl.js";
 import {
   ExternalAgent,
   type ExternalAgentDriver,
@@ -1018,6 +1019,37 @@ describe("ExternalAgent telemetry", () => {
 });
 
 describe("ExternalAgent delegation final answer", () => {
+  test("an ignored line does not consume the delegation final-answer slot", async () => {
+    class Coordinator extends SubprocessJsonlDriver {
+      override async *run(
+        request: ExternalAgentRunRequest,
+      ): AsyncIterable<ExternalAgentEvent> {
+        await request.toolGateway?.runSubAgent({
+          agentName: "state_agent",
+          task: "summarize",
+        });
+        yield this.parseLine('{"type":"completed","exitCode":99}');
+        yield { type: "output", content: "coordinator repeats child output" };
+        yield { type: "output", content: "independent commentary" };
+      }
+    }
+    const agent = new ExternalAgent({
+      name: "root_external",
+      provider: CODEX_PROVIDER,
+      driver: new Coordinator({
+        providerId: CODEX_PROVIDER.id,
+        command: "unused",
+      }),
+      subAgents: [new StateAgent()],
+    });
+    const events = await collect(agent, { branch: undefined });
+    const texts = events
+      .filter((event) => event.author === "root_external")
+      .flatMap((event) => event.content?.parts?.map((part) => part.text) ?? []);
+    expect(texts).not.toContain("coordinator repeats child output");
+    expect(texts).toContain("independent commentary");
+  });
+
   class FailingAgent extends BaseAgent {
     constructor() {
       super({ name: "failing_agent" });

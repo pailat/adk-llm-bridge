@@ -61,6 +61,26 @@ async function runNode(agent: ExternalAgent) {
 }
 
 describe("ExternalAgent as an ADK Workflow node", () => {
+  test("a legitimate empty final output still completes the ADK turn", async () => {
+    const agent = new ExternalAgent({
+      name: "empty_final",
+      provider: CODEX_PROVIDER,
+      driver: scripted(async function* () {
+        yield { type: "output", content: "streamed chunk", partial: true };
+        yield { type: "output", content: "", turnComplete: true };
+        yield { type: "completed", exitCode: 0 };
+      }),
+    });
+    const { received, errors, events } = await runNode(agent);
+    expect(errors).toEqual([]);
+    const final = events.filter(
+      (event) => event.author === "empty_final" && event.turnComplete === true,
+    );
+    expect(final).toHaveLength(1);
+    expect(final[0]?.content?.parts).toEqual([{ text: "" }]);
+    expect(received).toEqual([""]);
+  });
+
   for (const wrapped of [false, true]) {
     test(`ignored child completion produces no ADK event (${wrapped ? "envelope" : "plain"})`, async () => {
       class GuardedDriver extends SubprocessJsonlDriver {
