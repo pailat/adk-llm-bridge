@@ -11,9 +11,16 @@
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 
 const HOST = resolve(import.meta.dir, "fixtures/codex-sdk-epipe-host.ts");
 const MIB = 1024 * 1024;
@@ -62,10 +69,27 @@ interface HostReport {
 }
 
 let dir = "";
+let bundledExec = "";
+let bundleDir = "";
 const stubPath = (name: Stub) => join(dir, name);
 
-beforeAll(() => {
+beforeAll(async () => {
   dir = mkdtempSync(join(tmpdir(), "codex-sdk-epipe-"));
+  // Inside the repo, so the bundle resolves `@openai/codex-sdk` as the
+  // source file does.
+  const cache = resolve(import.meta.dir, "../../../node_modules/.cache");
+  mkdirSync(cache, { recursive: true });
+  bundleDir = mkdtempSync(join(cache, "codex-exec-bundle-"));
+  const built = await Bun.build({
+    entrypoints: [
+      resolve(import.meta.dir, "../../../src/agents/driver/codex-sdk-exec.ts"),
+    ],
+    target: "node",
+    outdir: bundleDir,
+    naming: "codex-sdk-exec.mjs",
+  });
+  if (!built.success) throw new Error("bundling codex-sdk-exec failed");
+  bundledExec = pathToFileURL(join(bundleDir, "codex-sdk-exec.mjs")).href;
   for (const [name, script] of Object.entries(STUBS)) {
     writeFileSync(join(dir, name), script);
     chmodSync(join(dir, name), 0o755);
@@ -73,6 +97,7 @@ beforeAll(() => {
 });
 
 afterAll(() => {
+  rmSync(bundleDir, { recursive: true, force: true });
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -88,7 +113,11 @@ function runHost(
   const host = spawnSync(
     command,
     [HOST, leg, stubPath(stub), String(promptBytes), String(abortMs), mode],
-    { encoding: "utf8", timeout: 20_000 },
+    {
+      encoding: "utf8",
+      timeout: 20_000,
+      env: { ...process.env, CODEX_EXEC_MODULE: bundledExec },
+    },
   );
   const line = host.stdout.trim().split("\n").at(-1) ?? "";
   if (host.status !== 0 || !line.startsWith("{")) {
