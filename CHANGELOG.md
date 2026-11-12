@@ -900,8 +900,8 @@ from the 0.6.0 tag.
   `runSpecJsonSchema`, with documented `RUN_SPEC_*` issue codes (stability
   policy in the doc), the zod schemas, limits and constants listed under
   "Exports" in the doc. The plan carries the effective `deniedPathPatterns`,
-  which the host enforces on writes (`run-spec.denied-paths`). Rule sets also name
-  the workflows a spec may run
+  which the host enforces on writes (`run-spec.denied-paths`). Rule sets also
+  name the workflows a spec may run
   (`allowedWorkflows`) and the refs it may merge into (`allowedTargetRefs`);
   both are required and an empty list allows nothing. A lane agent may name
   MCP providers by id only (`agent.mcp`, at most 16, unique ignoring case,
@@ -974,8 +974,8 @@ from the 0.6.0 tag.
   `ADK_LLM_BRIDGE_AGENT_CWD`, so no shim or interpreter reads configuration
   the agent wrote. The entry and the interpreter are started by the canonical
   paths that were checked, so a symlink through an agent-writable directory
-  cannot be re-pointed in between. The interpreter goes through the same lookup as
-  `command` (native `.exe`/`.com` only on
+  cannot be re-pointed in between. The interpreter goes through the same lookup
+  as `command` (native `.exe`/`.com` only on
   Windows, never `cmd.exe`, no `PATH` entry inside the run's writable roots).
   An entry, or an interpreter path, inside the run's working directory or
   `allowedPaths` (symlinks resolved), or a non-Node interpreter, refuses the
