@@ -579,8 +579,11 @@ new in 0.7.0. If you already use them, these changes apply:
   ignores child-emitted `started`, `completed`, `state_delta` and
   transport-envelope lines. It returns an empty `output` event carrying none
   of the child payload, preserving its public return type while allowing a
-  subclass's read loop to continue without throwing on those lines. Yield
-  lifecycle and state events from the subclass's own `run` method, rather
+  subclass's read loop to continue without throwing on those lines.
+  `ExternalAgent` drops these empty metadata-free outputs before ADK, so no
+  message, turn completion or Workflow node output is produced. Other
+  recognized event records keep their original fields unchanged, including
+  `turnComplete`. Yield lifecycle and state events from the subclass's own `run` method, rather
   than passing them through from child stdout.
 - **Codex CLI driver and the shared run loop.** `CodexCliDriver` (the
   fallback for hosts without `@openai/codex-sdk`) keeps working without the SDK

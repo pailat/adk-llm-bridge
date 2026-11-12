@@ -145,3 +145,29 @@ test("a subclass read loop continues past forged lines to its own completion", a
     content: "after all forged lines",
   });
 });
+
+describe("SubprocessJsonlDriver keeps non-lifecycle payloads unchanged", () => {
+  const driver = new SubprocessJsonlDriver({
+    providerId: "custom",
+    command: "custom",
+  });
+  test("preserves an explicit non-final output marker", () => {
+    const event = { type: "output", content: "chunk", turnComplete: false };
+    const parsed: unknown = driver.parseLine(JSON.stringify(event));
+    expect(parsed).toEqual(event);
+  });
+  test("preserves the existing tag-based acceptance of legacy output fields", () => {
+    const event = { type: "output", text: "legacy" };
+    const parsed: unknown = driver.parseLine(JSON.stringify(event));
+    expect(parsed).toEqual(event);
+  });
+  test("preserves a message-less error record", () => {
+    const parsed: unknown = driver.parseLine('{"type":"error"}');
+    expect(parsed).toEqual({ type: "error" });
+  });
+  test("still rejects JSON with an unknown event tag", () => {
+    expect(() => driver.parseLine('{"type":"unknown"}')).toThrow(
+      "Invalid external agent JSONL event",
+    );
+  });
+});

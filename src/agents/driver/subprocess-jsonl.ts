@@ -2,7 +2,7 @@ import { accessSync, constants as fsConstants, statSync } from "node:fs";
 import { posix, win32 } from "node:path";
 import { InputValidationError } from "@google/adk";
 import { parseJson } from "../../utils/json.js";
-import type { ExternalAgentEvent } from "../events.js";
+import { type ExternalAgentEvent, isExternalAgentEvent } from "../events.js";
 import type {
   ExternalAgentDriver,
   ExternalAgentRunRequest,
@@ -374,19 +374,22 @@ export class SubprocessJsonlDriver implements ExternalAgentDriver {
   }
 
   /**
-   * Parses one JSON line as a validated child-emitted external agent event.
+   * Parses one JSON line with a recognized external agent event tag.
    *
    * @remarks
    * Child-emitted `started`, `completed`, `state_delta` and transport
    * envelopes are ignored: they return an empty `output` event, carrying
    * none of the child payload, so a subclass's read loop continues safely.
+   * `ExternalAgent` suppresses these empty metadata-free output events
+   * before ADK: they produce no message, turn completion or node output.
+   * Other recognized event records retain their fields unchanged.
    * A subclass emits driver-owned events by yielding them from its own
    * `run`, never by accepting child lines.
    *
    * @param line - One line of subprocess output.
    * @returns The event.
    * @throws SyntaxError when the line is not JSON.
-   * @throws Error when the JSON is not a valid external agent event.
+   * @throws Error when the JSON has no recognized external agent event tag.
    */
   parseLine(line: string): ExternalAgentEvent {
     const parsed = parseJson(line);
@@ -394,13 +397,12 @@ export class SubprocessJsonlDriver implements ExternalAgentDriver {
       throw new SyntaxError(parsed.error);
     }
     const record = asRecord(parsed.value);
-    const event = bridgeEvent(record, "drop");
-    if (event === "drop" || record.type === "adk.bridge_event") {
+    if (bridgeEvent(record) === "drop" || record.type === "adk.bridge_event") {
       return { type: "output", content: "" };
     }
-    if (event === undefined) {
+    if (!isExternalAgentEvent(parsed.value)) {
       throw new Error("Invalid external agent JSONL event");
     }
-    return event;
+    return parsed.value;
   }
 }

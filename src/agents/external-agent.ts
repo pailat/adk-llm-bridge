@@ -1362,8 +1362,8 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
    *
    * @param event - The driver event.
    * @param context - The ADK invocation context.
-   * @returns The ADK event, or `undefined` for `started` and `completed`,
-   * which only drive tracing.
+   * @returns The ADK event, or `undefined` for `started` and `completed`
+   * (tracing only) and empty output without metadata (ignored child lines).
    */
   protected toAdkEvent(
     event: ExternalAgentEvent,
@@ -1371,6 +1371,9 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
   ): Event | undefined {
     switch (event.type) {
       case "output": {
+        if (event.content === "" && event.metadata === undefined) {
+          return undefined;
+        }
         return createEvent({
           invocationId: context.invocationId,
           author: this.name,
