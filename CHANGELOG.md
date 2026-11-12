@@ -1536,10 +1536,13 @@ from the 0.6.0 tag.
   or an owner file that is a directory, still means the token does not own it.
 - The Claude Agent SDK driver's "stream ended without a result message" error
   now names the session of a fresh run too, not only a resumed one.
-- The fx driver reports a JSON result object without an `exit_code` as JSON
-  missing `exit_code` instead of "non-JSON". Its Windows hint no longer
-  promises a native `fx.exe` that is not documented, and the driver never sends
-  the `--system` flag, so the docs and the code agree.
+- The fx driver reports a JSON object without an `exit_code` with the new
+  recoverable code `FX_CLI_JSON_WITHOUT_EXIT_CODE` instead of
+  `FX_CLI_NON_JSON_LINE` ("non-JSON"). Its Windows hint no longer promises a
+  native `fx.exe` that is not documented. `--system` in `args` is now refused
+  with `EXTERNAL_AGENT_OPTION_UNSUPPORTED` even with `allowPolicyOverrideArgs`
+  (it replaced fx's base prompt; put the instruction in the prompt), so fx never
+  receives it and the docs and the code agree.
 - `createClaudeRunTempDir` removes the directory it made when resolving its real
   path fails; the SQLite session store closes the database file when the
   permission change on a just-created file fails.
