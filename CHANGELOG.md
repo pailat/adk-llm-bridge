@@ -1181,7 +1181,7 @@ from the 0.6.0 tag.
   the manual constructor names its errors without overriding
   `getErrorPrefix()`.
 - `caseInsensitivePaths` on `InMemoryWorkspaceAdapter` and
-  `FileSystemWorkspaceAdapter` (off by default; full case fold, so `ß`/`ss`,
+  `FileSystemWorkspaceAdapter` (full case fold, so `ß`/`ss`,
   `ς`/`σ`, `ſ`/`s` and `µ`/`μ` match) and the `caseInsensitive` option of
   `findWorkspacePathOverlaps` (`WorkspacePathOverlapOptions`).
 - `authorizeWorkflowActor` takes an optional
@@ -1288,6 +1288,12 @@ from the 0.6.0 tag.
   `EXTERNAL_AGENT_SESSIONS_UNSUPPORTED` (exported from `adk-llm-bridge/agents`) before any
   process starts, and so does the new `FxCliDriver`. `ClaudeAgentSdkDriver` now declares
   `capabilities().sessions = true`, matching what it already did.
+- **`FileSystemWorkspaceAdapter` folds path case by default on macOS and
+  Windows.** `caseInsensitivePaths` defaults to `true` when `process.platform`
+  is `darwin` or `win32` (read at construction) and `false` elsewhere, so `Src/a`
+  and `src/a` can no longer both be leased on APFS or NTFS. A value you pass
+  wins; `InMemoryWorkspaceAdapter` is unchanged. See
+  [Path case](./docs/workflow-durability.md#path-case).
 - **Prompt caching is on by default for Anthropic models** (fixes zero cache reads on
   AI Gateway, where every turn paid the full prompt again):
   - native `AnthropicLlm`: `promptCaching` was opt-in and marked only the system block and
@@ -1517,6 +1523,18 @@ from the 0.6.0 tag.
 
 ### Fixed
 
+- **A checkpoint save that fails after its rename says so.** The
+  `checkpoint_write_failed` raised when the directory flush fails after the
+  rename carries `details.committed: true`: the new revision is visible to
+  `load()` but may not survive a crash. See
+  [A save that fails after its rename](./docs/workflow-durability.md#a-save-that-fails-after-its-rename).
+- The workspace and checkpoint lock's ownership check (`directoryLockTokenMatches`)
+  no longer treats an unreadable owner file (`EACCES`, `EIO`) as "not our lock":
+  it throws, so a release no longer drops a live lock silently. A missing lock
+  or owner file still means the token does not own it.
+- `createClaudeRunTempDir` removes the directory it made when resolving its real
+  path fails; the SQLite session store closes the database file when the
+  permission change on a just-created file fails.
 - **Child processes of the external agent drivers end reliably.** A run no
   longer outlives its process: once the CLI has exited, the read of `stdout`
   and `stderr` ends at EOF, or when a wait on the pipe stays unanswered for two

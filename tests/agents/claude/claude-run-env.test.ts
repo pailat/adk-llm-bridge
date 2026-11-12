@@ -1,4 +1,5 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
+import * as fs from "node:fs";
 import { existsSync, realpathSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,6 +16,8 @@ import {
 import type { ExternalAgentEvent } from "../../../src/agents/events.js";
 import { EXTERNAL_AGENT_BACKGROUND_TASK_PENDING } from "../../../src/agents/index.js";
 import { CLAUDE_PROVIDER } from "../../../src/agents/provider/schema.js";
+import { captureWarnings } from "../../helpers/fake-logger.js";
+import { isBun } from "../../utils/fixtures/runtime.js";
 
 const REQUEST = {
   provider: CLAUDE_PROVIDER,
@@ -331,6 +334,37 @@ describe("each Claude run gets a private temp directory", () => {
     expect(root).toBeDefined();
     expect(existsSync(root as string)).toBe(false);
   });
+
+  // Skipped under Node: `spyOn` on a `node:fs` namespace is Bun-only.
+  test.skipIf(!isBun)(
+    "a failed path resolution after the directory was made removes the directory and warns",
+    () => {
+      const warnings = captureWarnings();
+      const realMkdtemp = fs.mkdtempSync;
+      let made: string | undefined;
+      const mkdtemp = spyOn(fs, "mkdtempSync").mockImplementation(((
+        prefix: string,
+      ) => {
+        made = realMkdtemp(prefix);
+        return made;
+      }) as typeof fs.mkdtempSync);
+      const realpath = spyOn(fs, "realpathSync").mockImplementation((() => {
+        throw Object.assign(new Error("EIO: i/o error, realpath"), {
+          code: "EIO",
+        });
+      }) as unknown as typeof fs.realpathSync);
+      try {
+        expect(createClaudeRunTempDir()).toBeUndefined();
+      } finally {
+        realpath.mockRestore();
+        mkdtemp.mockRestore();
+        warnings.mockRestore();
+      }
+      expect(made).toBeDefined();
+      expect(existsSync(made as string)).toBe(false);
+      expect(warnings.codes).toEqual(["CLAUDE_RUN_TEMP_DIR_UNAVAILABLE"]);
+    },
+  );
 
   test("two directories are never the same", () => {
     const first = createClaudeRunTempDir();
