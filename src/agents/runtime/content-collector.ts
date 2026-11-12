@@ -137,6 +137,27 @@ export function flattenContentsToPrompt(
   return blocks.join("\n\n").trimEnd();
 }
 
+/**
+ * Renders the earlier turns as a text transcript for a fresh external run.
+ *
+ * @remarks
+ * For runtimes that start without a saved session (a new Codex thread, a
+ * new `claude -p` process), so the run still sees the earlier turns. Every
+ * content except the last (the current user turn) is rendered with
+ * {@link flattenContentsToPrompt}: thought parts are omitted.
+ *
+ * @param contents - The whole conversation, oldest first.
+ * @returns The transcript, or an empty string when there is no prior history.
+ */
+export function summarizeHistoryForColdStart(
+  contents: ReadonlyArray<Content>,
+): string {
+  if (contents.length <= 1) {
+    return "";
+  }
+  return flattenContentsToPrompt(contents.slice(0, -1));
+}
+
 // --- internals ----------------------------------------------------------------
 
 type AdkEventLike = {

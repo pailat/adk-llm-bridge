@@ -2,7 +2,10 @@ import { promises as fs, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Content, Part } from "@google/genai";
-import { flattenContentsToPrompt } from "../runtime/content-collector.js";
+
+// The cold-start transcript lives with the content collector so every
+// driver without native resume renders history the same way.
+export { summarizeHistoryForColdStart } from "../runtime/content-collector.js";
 
 /** One part of a multi-part Codex input: text, or an image file on disk. */
 export type CodexInputPart =
@@ -196,26 +199,6 @@ export function userContentToCodexInput(
   }
 
   return { input: result, cleanup };
-}
-
-/**
- * Renders the history as a text transcript for a fresh Codex thread.
- *
- * @remarks
- * Use it when no saved thread id exists, so the new thread still sees the
- * earlier turns. Every content except the last (the current user turn) is
- * rendered.
- *
- * @param contents - The whole conversation, oldest first.
- * @returns The transcript, or an empty string when there is no prior history.
- */
-export function summarizeHistoryForColdStart(
-  contents: ReadonlyArray<Content>,
-): string {
-  if (contents.length <= 1) {
-    return "";
-  }
-  return flattenContentsToPrompt(contents.slice(0, -1));
 }
 
 // --- helpers ---------------------------------------------------------------

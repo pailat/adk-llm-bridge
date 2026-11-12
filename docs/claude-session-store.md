@@ -51,7 +51,10 @@ Things to know:
 - **Claude Agent SDK only.** `ClaudeCliDriver` cannot mirror transcripts: it
   throws `ExternalAgentPolicyError` with code
   `EXTERNAL_AGENT_OPTION_UNSUPPORTED` when built with a `sessionStore`,
-  `sessionStoreFlush` or `sessionStoreLoadTimeoutMs`.
+  `sessionStoreFlush` or `sessionStoreLoadTimeoutMs`. It needs no store for
+  memory: every turn is a new `claude -p` process whose prompt starts with a
+  transcript of the earlier ADK turns (thought parts left out), the same
+  transcript the Codex drivers send on a fresh thread.
 
 ### Tuning
 

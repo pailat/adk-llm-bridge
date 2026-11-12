@@ -66,7 +66,7 @@ import {
   exitErrorEvent,
   isJsonObject,
   isRecoverableMessage,
-  promptFromRequest,
+  promptWithHistoryFromRequest,
   stringValue,
   validateDriverConfig,
 } from "./shared.js";
@@ -462,6 +462,11 @@ function claudeCliMissing(): ExternalAgentPolicyError {
  * maps the stream to {@link ExternalAgentEvent}s.
  *
  * @remarks
+ * Memory comes from the ADK history, not a native session: every turn is a
+ * new `claude -p` process, so the prompt is the instruction, a transcript of
+ * the earlier turns of the ADK session (thought parts left out) and the
+ * current user turn, last. A `request.runtimeSession` is refused.
+ *
  * Security and lifecycle rules:
  * - The prompt goes on stdin, never in argv, so it cannot be read as a flag
  *   or a subcommand name.
@@ -758,7 +763,7 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
           ...runTemp?.env,
           ...launch.env,
         },
-        input: promptFromRequest(request),
+        input: promptWithHistoryFromRequest(request),
       });
     } catch (error) {
       runTemp?.dispose();
