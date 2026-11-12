@@ -42,7 +42,10 @@ const NON_APPROVING: Array<[string, () => ExternalAgentDriver]> = [
   ["ClaudeCliDriver", () => new ClaudeCliDriver()],
   ["CodexCliDriver", () => new CodexCliDriver()],
   ["CodexSdkDriver", () => new CodexSdkDriver()],
-  ["FxCliDriver", () => new FxCliDriver({ model: "anthropic/claude-haiku-4-5" })],
+  [
+    "FxCliDriver",
+    () => new FxCliDriver({ model: "anthropic/claude-haiku-4-5" }),
+  ],
 ];
 
 describe("approvals capability", () => {
@@ -170,7 +173,11 @@ describe("approvals capability", () => {
       ["claude-cli", new ClaudeCliDriver(), "claude-cli.ts"],
       ["codex-cli", new CodexCliDriver(), "codex-cli.ts"],
       ["codex-sdk", new CodexSdkDriver(), "codex-sdk.ts"],
-      ["fx-cli", new FxCliDriver({ model: "anthropic/claude-haiku-4-5" }), "fx-cli.ts"],
+      [
+        "fx-cli",
+        new FxCliDriver({ model: "anthropic/claude-haiku-4-5" }),
+        "fx-cli.ts",
+      ],
     ];
     for (const [name, driver, file] of drivers) {
       const source = readFileSync(

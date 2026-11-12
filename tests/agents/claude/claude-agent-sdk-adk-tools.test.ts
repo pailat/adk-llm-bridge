@@ -568,7 +568,10 @@ describe("runtime capabilities are honest", () => {
     expect(codex.tools).toBeUndefined();
     expect(codex.mcpServers).toBeUndefined();
     expect(codex.approvals).toBeUndefined();
-    expect(new FxCliDriver({ model: "anthropic/claude-haiku-4-5" }).capabilities().tools).toBeUndefined();
+    expect(
+      new FxCliDriver({ model: "anthropic/claude-haiku-4-5" }).capabilities()
+        .tools,
+    ).toBeUndefined();
   });
 
   test("definitions carry no capabilities: the driver is the only source", () => {

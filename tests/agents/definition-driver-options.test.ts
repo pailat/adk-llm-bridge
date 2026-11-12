@@ -25,7 +25,11 @@ describe("definitions build their driver from driverOptions", () => {
     expect(CODEX_AGENT_DEFINITION.createDriver?.()).toBeInstanceOf(
       CodexSdkDriver,
     );
-    expect(FX_AGENT_DEFINITION.createDriver?.({ model: "anthropic/claude-haiku-4-5" })).toBeInstanceOf(FxCliDriver);
+    expect(
+      FX_AGENT_DEFINITION.createDriver?.({
+        model: "anthropic/claude-haiku-4-5",
+      }),
+    ).toBeInstanceOf(FxCliDriver);
   });
 
   test("registry.create() applies driverOptions", () => {

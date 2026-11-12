@@ -38,7 +38,9 @@ function entryPoints(): { subpath: string; source: string }[] {
         typeof target === "string"
           ? target
           : (target as { import: string }).import;
-      const source = dist.replace(/^\.\/dist\//, "src/").replace(/\.js$/, ".ts");
+      const source = dist
+        .replace(/^\.\/dist\//, "src/")
+        .replace(/\.js$/, ".ts");
       return { subpath, source };
     });
 }

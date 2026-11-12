@@ -1,9 +1,5 @@
 /** Stable id of an external runtime provider. Known ids autocomplete; any other string is accepted. */
-export type ExternalAgentProviderId =
-  | "codex"
-  | "claude"
-  | "fx"
-  | (string & {});
+export type ExternalAgentProviderId = "codex" | "claude" | "fx" | (string & {});
 
 /** Static description of an external runtime provider. */
 export interface ExternalAgentProviderDefinition {

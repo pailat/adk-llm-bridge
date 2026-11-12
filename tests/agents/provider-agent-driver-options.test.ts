@@ -77,7 +77,12 @@ describe("provider agents pass driverOptions to their default driver", () => {
       ClaudeAgentSdkDriver,
     );
     expect(new CodexAgent({ name: "b" }).driver).toBeInstanceOf(CodexSdkDriver);
-    expect(new FxAgent({ name: "c", driverOptions: { model: "anthropic/claude-haiku-4-5" } }).driver).toBeInstanceOf(FxCliDriver);
+    expect(
+      new FxAgent({
+        name: "c",
+        driverOptions: { model: "anthropic/claude-haiku-4-5" },
+      }).driver,
+    ).toBeInstanceOf(FxCliDriver);
   });
 
   test("the placeholder driver reports EXTERNAL_AGENT_NOT_CONFIGURED, not recoverable", async () => {
