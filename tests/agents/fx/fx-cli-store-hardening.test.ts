@@ -185,6 +185,7 @@ describe("a restore that fails halfway", () => {
       code: "FX_SESSION_STORE_ERROR",
       recoverable: true,
     });
+    expect(errorsOf(events)[0]?.message).not.toContain("stays only in ~/.fx");
     expect(existsSync(sessionDir(home))).toBe(false);
     // No temporary sibling is left behind either.
     const leftovers = existsSync(sessionsRoot(home))

@@ -1524,7 +1524,7 @@ saved in session state; the Claude Agent SDK driver uses its
 `resumeSessionId` option first, then `runtimeSession.id`, then session state,
 then its own memory; the fx CLI driver uses its `resumeSessionId` first, then
 `runtimeSession.id`, then the id saved in ADK session state
-(`persistSession: false` refuses it). With a declared MCP secret it resumes nothing (see
+(`persistSession: false` refuses it). With a declared MCP secret the Claude Agent SDK driver resumes nothing (see
 [Transcripts on disk](#transcripts-on-disk)). `ExternalAgent` never sets it.
 
 ## Cancel and host signals

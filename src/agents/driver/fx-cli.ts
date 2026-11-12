@@ -1286,10 +1286,14 @@ function sessionStoreWarning(
     action === "open"
       ? "could not be opened for this run"
       : `could not ${action} session ${cut(id ?? "", 40)}`;
+  const consequence =
+    action === "restore"
+      ? "The session could not be restored to ~/.fx on this host, so fx may not find it."
+      : "The session is not copied to the store and stays only in ~/.fx of this host.";
   return {
     type: "error",
     message: cut(
-      `The fx session store ${what}: ${reason}. The run goes on; the session is not copied to the store and stays only in ~/.fx of this host.`,
+      `The fx session store ${what}: ${reason}. The run goes on; ${consequence}`,
     ),
     code: "FX_SESSION_STORE_ERROR",
     recoverable: true,
