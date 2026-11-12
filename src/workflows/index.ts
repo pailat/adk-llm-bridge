@@ -4,6 +4,7 @@ export type {
   AgentInvocationEventSink,
   AgentInvocationExecutionSummary,
   AgentInvocationGatewayConfig,
+  AgentInvocationIncomplete,
   AgentInvocationInterrupt,
   AgentInvocationInterruptKind,
   AgentInvocationRequest,

@@ -237,7 +237,8 @@ so consumers need not re-derive totals from child events:
 | `promptTokens`, `completionTokens`, `totalTokens` | Summed from `usageMetadata` of non-partial events; `totalTokens` falls back to prompt + completion |
 | `cachedTokens` | Summed `cachedContentTokenCount`; part of `promptTokens`, not added on top |
 | `toolCalls` | Function calls requested on non-partial events |
-| `llmCalls` | Events that reported usage: one per model response for an `LlmAgent`, one per run for an `ExternalAgent` that ends with a final response |
+| `llmCalls` | Events that reported usage: one per model response for an `LlmAgent`, one per run for an `ExternalAgent` that ends with a final response. A Claude Code step that made 100 native model calls reports `llmCalls: 1`; the run's turn count is the `gcp.vertex.agent.external_agent.num_turns` span attribute |
+| `costUsd` | Optional. Summed cost the providers reported for the step's model calls (AI Gateway and OpenRouter `usage.cost`; for a BYOK gateway call the upstream cost or `market_cost`, see Prompt caching). Absent when no call reported one, so a step of an `ExternalAgent` has none: its cost is `totalCostUsd` on the driver usage and the `usage.cost_usd` span attribute |
 
 - Only the successful attempt is counted. Failed attempts that were retried are
   not, and a failed or interrupted step (`step_failed`, `step_interrupted`)
@@ -255,7 +256,11 @@ so consumers need not re-derive totals from child events:
   totals. Checkpoints written before 0.7 have no `usage`. A stored `usage` that
   lacks a field, or holds a negative or non-finite number, makes the checkpoint
   load as corrupt.
-- Cost is not computed: the gateway has no price source.
+- Cost is not computed: `costUsd` adds up what the providers reported, and
+  there is no price table. A step that mixes a gateway `LlmAgent` and an
+  `ExternalAgent` needs both sources to get a run total.
+- `promptTokens` counts input, cache reads and cache writes (Anthropic
+  semantics), so it is above a count that leaves the writes out.
 
 ## Future work
 

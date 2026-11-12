@@ -330,6 +330,37 @@ describe("streamed cache usage", () => {
   });
 });
 
+describe("streamed cost", () => {
+  it("puts the trailing usage chunk's cost on the final response", async () => {
+    const llm = openrouter("anthropic/claude-sonnet-5.5");
+    // biome-ignore lint/suspicious/noExplicitAny: test access to private client
+    (llm as any).client.chat.completions.create = async () =>
+      (async function* () {
+        yield* oneChunkStream();
+        yield {
+          id: "c1",
+          object: "chat.completion.chunk",
+          created: 0,
+          model: "served",
+          choices: [],
+          usage: {
+            prompt_tokens: 50,
+            completion_tokens: 2,
+            total_tokens: 52,
+            cost: 0.0042,
+          },
+        };
+      })();
+    const out = [];
+    for await (const r of llm.generateContentAsync(request(), true))
+      out.push(r);
+    expect(out[out.length - 1].customMetadata).toEqual({
+      costUsd: 0.0042,
+      costSource: "cost",
+    });
+  });
+});
+
 describe("cache usage on the model-call span", () => {
   it("records cache read and write tokens on the active span", async () => {
     const attributes: Record<string, unknown> = {};
@@ -356,5 +387,37 @@ describe("cache usage on the model-call span", () => {
     }
     expect(attributes["gen_ai.usage.cache_read.input_tokens"]).toBe(20);
     expect(attributes["gen_ai.usage.cache_creation.input_tokens"]).toBe(15);
+  });
+
+  it("records the reported cost, 0 included, and only then", async () => {
+    for (const [cost, expected] of [
+      [0.0042, 0.0042],
+      [0, 0],
+      [undefined, undefined],
+    ] as const) {
+      const attributes: Record<string, unknown> = {};
+      const span = {
+        setAttributes: (a: Record<string, unknown>) =>
+          Object.assign(attributes, a),
+      } as unknown as Span;
+      const spy = spyOn(trace, "getActiveSpan").mockReturnValue(span);
+      try {
+        const llm = openrouter("anthropic/claude-sonnet-5.5");
+        // biome-ignore lint/suspicious/noExplicitAny: test access to private client
+        (llm as any).client.chat.completions.create = async () => ({
+          ...COMPLETION,
+          usage: {
+            prompt_tokens: 50,
+            completion_tokens: 2,
+            total_tokens: 52,
+            ...(cost === undefined ? {} : { cost }),
+          },
+        });
+        await run(llm, false);
+      } finally {
+        spy.mockRestore();
+      }
+      expect(attributes["adk_llm_bridge.usage.cost_usd"]).toBe(expected);
+    }
   });
 });
