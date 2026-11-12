@@ -18,6 +18,10 @@ import type {
 } from "../events.js";
 import type { ExternalAgentRunRequest } from "../external-agent-driver.js";
 import { canonicalPath, expandHome, isUnderAny } from "../permissions/paths.js";
+import {
+  safeCollectContents,
+  summarizeHistoryForColdStart,
+} from "../runtime/content-collector.js";
 import { classifyRecoverable } from "../runtime/error-classification.js";
 import { CLAUDE_AGENT_SDK_ONLY_KEYS } from "./option-keys.js";
 import {
@@ -227,6 +231,38 @@ export function contextText(context: unknown): string | undefined {
  */
 export function promptFromRequest(request: ExternalAgentRunRequest): string {
   return [request.instruction, contextText(request.context)]
+    .filter(
+      (part): part is string => typeof part === "string" && part.length > 0,
+    )
+    .join("\n\n");
+}
+
+/**
+ * Builds a one-shot prompt that carries the earlier turns of the session.
+ *
+ * @remarks
+ * For CLIs that start a new process every turn and cannot resume a native
+ * session: the instruction, then the cold-start transcript of the earlier
+ * ADK turns ({@link summarizeHistoryForColdStart}, the one the Codex drivers
+ * use on a fresh thread), then the current user turn, last. Thought parts
+ * are left out. Without earlier turns it equals {@link promptFromRequest}.
+ *
+ * @param request - The run.
+ * @returns The prompt; empty when the run has none of the three.
+ */
+export function promptWithHistoryFromRequest(
+  request: ExternalAgentRunRequest,
+): string {
+  const contents = safeCollectContents(request.context);
+  const current = contents[contents.length - 1];
+  if (contents.length <= 1 || !current) {
+    return promptFromRequest(request);
+  }
+  return [
+    request.instruction,
+    summarizeHistoryForColdStart(contents),
+    textOf(current) ?? contextText(request.context),
+  ]
     .filter(
       (part): part is string => typeof part === "string" && part.length > 0,
     )
