@@ -12,6 +12,7 @@ import {
 import type { Content, Part } from "@google/genai";
 import type {
   AgentInvocationGateway,
+  AgentInvocationIncomplete,
   AgentInvocationResult,
 } from "../../runtime/agent-invocation-gateway.js";
 import {
@@ -785,7 +786,10 @@ export class WorkflowRuntime {
               { stepId: step.id, interrupt },
             ]);
           }
-          if (!result.error) {
+          const incomplete = result.error
+            ? undefined
+            : stepIncomplete(step, result);
+          if (!result.error && !incomplete) {
             const completed = stepResult(step, result, attempt, startedAt);
             await this.#hooks?.afterAttempt?.(attemptContext, completed);
             throwIfAttemptAborted(
@@ -805,16 +809,27 @@ export class WorkflowRuntime {
             return completed;
           }
 
-          lastError = new WorkflowError(
-            "WORKFLOW_EXECUTION_ERROR",
-            `Workflow step ${step.id} failed: ${result.error}`,
-            {
-              agentName: step.agentName,
-              stepId: step.id,
-              attempt,
-              ...agentFailureCause(result),
-            },
-          );
+          lastError = incomplete
+            ? new WorkflowError(
+                "WORKFLOW_STEP_INCOMPLETE",
+                `Workflow step ${step.id} got an incomplete model response (${incomplete.finishReason}) from ${incomplete.author}`,
+                {
+                  agentName: step.agentName,
+                  stepId: step.id,
+                  attempt,
+                  ...incomplete,
+                },
+              )
+            : new WorkflowError(
+                "WORKFLOW_EXECUTION_ERROR",
+                `Workflow step ${step.id} failed: ${result.error}`,
+                {
+                  agentName: step.agentName,
+                  stepId: step.id,
+                  attempt,
+                  ...agentFailureCause(result),
+                },
+              );
           const failure = failureFromError(step, lastError, attempt, startedAt);
           await this.#hooks?.attemptFailed?.(attemptContext, failure);
           await this.checkpointCoordinator().failStep(failure);
@@ -1791,6 +1806,16 @@ function validateStep(step: WorkflowStep): void {
     );
   }
   if (
+    step.allowIncompleteOutput !== undefined &&
+    typeof step.allowIncompleteOutput !== "boolean"
+  ) {
+    throw new WorkflowError(
+      "WORKFLOW_DEFINITION_INVALID",
+      `Workflow step ${step.id} allowIncompleteOutput must be a boolean`,
+      { stepId: step.id },
+    );
+  }
+  if (
     step.writePaths !== undefined &&
     (!Array.isArray(step.writePaths) || step.writePaths.length === 0)
   ) {
@@ -1899,6 +1924,21 @@ function stepInputContent(step: WorkflowStep): Content {
     : step.input;
 }
 
+/**
+ * The incomplete model response that must fail the step, if any.
+ *
+ * @remarks
+ * An agent error comes first (the caller only asks when there is none). The
+ * opt-out is honored here; a nested bridge workflow agent, which decides for
+ * its own steps, is skipped by the gateway when it records the response.
+ */
+function stepIncomplete(
+  step: WorkflowStep,
+  result: AgentInvocationResult,
+): AgentInvocationIncomplete | undefined {
+  return step.allowIncompleteOutput === true ? undefined : result.incomplete;
+}
+
 function stepResult(
   step: WorkflowStep,
   invocation: AgentInvocationResult,
@@ -1931,6 +1971,9 @@ function stepResult(
             unknown: invocation.models.unknown,
           },
         }
+      : {}),
+    ...(invocation.finishReason
+      ? { finishReason: invocation.finishReason }
       : {}),
     attempts,
     startedAt,

@@ -507,6 +507,7 @@ describe("workflow checkpoints", () => {
       WORKFLOW_SANDBOX_UNAVAILABLE: true,
       WORKFLOW_SCRIPT_INVALID: true,
       WORKFLOW_SOURCE_MISMATCH: true,
+      WORKFLOW_STEP_INCOMPLETE: true,
       WORKFLOW_STEP_INTERRUPTED: true,
       WORKFLOW_STEP_MISMATCH: true,
       WORKFLOW_UNKNOWN_AGENT: true,
@@ -609,6 +610,26 @@ describe("stored step usage", () => {
         isWorkflowCheckpointV1(
           await withUsage({ ...usage, cacheCreationTokens: bad }),
         ),
+      ).toBe(false);
+    }
+  });
+
+  test("costUsd is optional: old usage loads, 0 and a real cost load, a bad one is corrupt", async () => {
+    for (const ok of [0, 0.0042, 15.63]) {
+      expect(
+        isWorkflowCheckpointV1(await withUsage({ ...usage, costUsd: ok })),
+      ).toBe(true);
+    }
+    for (const bad of [
+      "1",
+      -0.01,
+      null,
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      {},
+    ]) {
+      expect(
+        isWorkflowCheckpointV1(await withUsage({ ...usage, costUsd: bad })),
       ).toBe(false);
     }
   });

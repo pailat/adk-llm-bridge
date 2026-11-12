@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   collectFileSystemWorkspaceTombstonesOffline,
+  defaultCaseInsensitivePaths,
   FileSystemWorkspaceAdapter,
   type FileSystemWorkspaceAdapterOptions,
 } from "../../../src/workflows/workspace/file-system-workspace-adapter.js";
@@ -480,12 +481,57 @@ function delay(milliseconds: number): Promise<void> {
 }
 
 describe("FileSystemWorkspaceAdapter path case", () => {
-  test("compares paths case-sensitively by default", async () => {
+  async function holdsOverlap(
+    options: Partial<FileSystemWorkspaceAdapterOptions> = {},
+  ): Promise<boolean> {
     const root = await stateDirectory();
-    const first = adapter(root);
-    await first.acquire(request("agent-a", ["Src/a"]));
+    await adapter(root, options).acquire(request("agent-a", ["Src/a"]));
+    return (
+      adapter(root, options).conflicts(request("agent-b", ["src/a"])).length > 0
+    );
+  }
 
-    expect(adapter(root).conflicts(request("agent-b", ["src/a"]))).toEqual([]);
+  test("the default compares paths case-sensitively on Linux", () => {
+    expect(defaultCaseInsensitivePaths("linux")).toBe(false);
+  });
+
+  for (const platform of ["darwin", "win32"] as const) {
+    test(`the default folds case on ${platform}`, () => {
+      expect(defaultCaseInsensitivePaths(platform)).toBe(true);
+    });
+  }
+
+  test("the default reads the host platform", () => {
+    expect(defaultCaseInsensitivePaths()).toBe(
+      defaultCaseInsensitivePaths(process.platform),
+    );
+  });
+
+  test("an adapter without the option uses the host default", async () => {
+    expect(await holdsOverlap()).toBe(defaultCaseInsensitivePaths());
+  });
+
+  test("an explicit false wins over a case-folding host", async () => {
+    expect(await holdsOverlap({ caseInsensitivePaths: false })).toBe(false);
+  });
+
+  for (const value of ["false", 1, 0, null]) {
+    test(`caseInsensitivePaths rejects the non-boolean ${JSON.stringify(value)}`, async () => {
+      const root = await stateDirectory();
+      expect(() =>
+        adapter(root, {
+          caseInsensitivePaths: value as unknown as boolean,
+        }),
+      ).toThrow(
+        new TypeError(
+          "Workspace adapter caseInsensitivePaths must be a boolean",
+        ),
+      );
+    });
+  }
+
+  test("an explicit true wins over a case-sensitive host", async () => {
+    expect(await holdsOverlap({ caseInsensitivePaths: true })).toBe(true);
   });
 
   test("caseInsensitivePaths makes differently cased paths conflict", async () => {

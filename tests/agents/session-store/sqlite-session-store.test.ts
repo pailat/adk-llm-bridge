@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import * as fs from "node:fs";
 import {
   chmodSync,
   existsSync,
@@ -17,6 +18,7 @@ import {
   SqliteSessionStoreError,
 } from "../../../src/agents/session-store/sqlite/index.js";
 import { openRawDatabase } from "../../utils/fixtures/raw-sqlite.js";
+import { isBun } from "../../utils/fixtures/runtime.js";
 
 const dirs: string[] = [];
 const stores: SqliteSessionStore[] = [];
@@ -652,6 +654,45 @@ describe("SqliteSessionStore refuses an unsafe database path", () => {
       const store = open(path);
       await store.append(key, [{ type: "user", uuid: "u1" }]);
       expect(statSync(path).mode & 0o777).toBe(0o640);
+    },
+  );
+
+  // Skipped under Node: `spyOn` on a `node:fs` namespace is Bun-only.
+  test.skipIf(!isBun)(
+    "a failed permission change on a just-created database closes the file and throws",
+    () => {
+      const path = join(tempDir(), "sessions.db");
+      const opened: number[] = [];
+      const closed: number[] = [];
+      const realOpen = fs.openSync;
+      const realClose = fs.closeSync;
+      const open = spyOn(fs, "openSync").mockImplementation(((
+        ...args: Parameters<typeof realOpen>
+      ) => {
+        const fd = realOpen(...args);
+        if (args[0] === path) opened.push(fd);
+        return fd;
+      }) as typeof fs.openSync);
+      const close = spyOn(fs, "closeSync").mockImplementation(((fd: number) => {
+        closed.push(fd);
+        return realClose(fd);
+      }) as typeof fs.closeSync);
+      const chmod = spyOn(fs, "fchmodSync").mockImplementation((() => {
+        throw Object.assign(new Error("EIO: i/o error, fchmod"), {
+          code: "EIO",
+        });
+      }) as typeof fs.fchmodSync);
+      try {
+        expect(() => new SqliteSessionStore({ path })).toThrow(
+          expect.objectContaining({ code: "EIO" }),
+        );
+      } finally {
+        chmod.mockRestore();
+        close.mockRestore();
+        open.mockRestore();
+      }
+      expect(opened).toHaveLength(1);
+      expect(closed).toContain(opened[0] as number);
     },
   );
 });

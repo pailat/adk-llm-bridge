@@ -104,9 +104,13 @@ export interface FileSystemWorkspaceAdapterOptions {
    * report an overlap the filesystem would not, never miss one. Lease paths
    * keep the caller's spelling. Every adapter that shares a
    * `stateDirectory` must use the same setting, because each one checks
-   * conflicts with its own.
+   * conflicts with its own. Pass `caseInsensitivePaths` explicitly when
+   * adapters on different platforms share a state directory, because the
+   * default differs between platforms.
    *
-   * @defaultValue false
+   * @defaultValue `true` on macOS and Windows (`process.platform` `darwin` or
+   * `win32`, read when the adapter is constructed), `false` elsewhere. A value
+   * you pass wins.
    */
   caseInsensitivePaths?: boolean;
 }
@@ -549,6 +553,18 @@ export class FileSystemWorkspaceAdapter implements WorkspaceAdapter {
   }
 }
 
+/**
+ * Whether paths fold case when `caseInsensitivePaths` is not set: true on
+ * macOS and Windows, false elsewhere.
+ *
+ * @internal
+ */
+export function defaultCaseInsensitivePaths(
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  return platform === "darwin" || platform === "win32";
+}
+
 function normalizeOptions(
   options: FileSystemWorkspaceAdapterOptions,
 ): NormalizedOptions {
@@ -557,6 +573,14 @@ function normalizeOptions(
   }
   if (!isAbsolute(options.stateDirectory)) {
     throw new TypeError("Workspace stateDirectory must be absolute");
+  }
+  if (
+    options.caseInsensitivePaths !== undefined &&
+    typeof options.caseInsensitivePaths !== "boolean"
+  ) {
+    throw new TypeError(
+      "Workspace adapter caseInsensitivePaths must be a boolean",
+    );
   }
   const normalized = {
     stateDirectory: resolve(options.stateDirectory),
@@ -568,7 +592,8 @@ function normalizeOptions(
       options.lockAcquireTimeoutMs ?? DEFAULT_LOCK_ACQUIRE_TIMEOUT_MS,
     createLeaseId: options.createLeaseId ?? randomUUID,
     now: options.now ?? Date.now,
-    caseInsensitivePaths: options.caseInsensitivePaths === true,
+    caseInsensitivePaths:
+      options.caseInsensitivePaths ?? defaultCaseInsensitivePaths(),
   };
   for (const [name, value] of Object.entries(normalized)) {
     if (

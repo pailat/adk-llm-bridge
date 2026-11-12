@@ -21,11 +21,19 @@ import { WorkflowAgent } from "../../src/workflows/workflow-agent.js";
 /** Yields one model event per `[prompt, completion]` pair, with usage. */
 class UsageAgent extends BaseAgent {
   calls = 0;
-  readonly #usages: Array<[number, number] | [number, number, number]>;
+  readonly #usages: Array<
+    | [number, number]
+    | [number, number, number]
+    | [number, number, number, number]
+  >;
 
   constructor(
     name: string,
-    usages: Array<[number, number] | [number, number, number]>,
+    usages: Array<
+      | [number, number]
+      | [number, number, number]
+      | [number, number, number, number]
+    >,
   ) {
     super({ name });
     this.#usages = usages;
@@ -33,7 +41,7 @@ class UsageAgent extends BaseAgent {
 
   protected async *runAsyncImpl(context: InvocationContext) {
     this.calls++;
-    for (const [prompt, completion, written] of this.#usages) {
+    for (const [prompt, completion, written, cost] of this.#usages) {
       yield createEvent({
         invocationId: context.invocationId,
         author: this.name,
@@ -44,9 +52,16 @@ class UsageAgent extends BaseAgent {
           candidatesTokenCount: completion,
           totalTokenCount: prompt + completion,
         },
-        ...(written === undefined
+        ...(written === undefined && cost === undefined
           ? {}
-          : { customMetadata: { cacheCreationTokenCount: written } }),
+          : {
+              customMetadata: {
+                ...(written === undefined
+                  ? {}
+                  : { cacheCreationTokenCount: written }),
+                ...(cost === undefined ? {} : { costUsd: cost }),
+              },
+            }),
       });
     }
   }
@@ -151,6 +166,17 @@ describe("workflow step results carry the agent run's usage", () => {
     });
   });
 
+  test("a step reports the summed costUsd of its model responses", async () => {
+    const worker = new UsageAgent("worker", [
+      [10, 5, 0, 0.25],
+      [20, 8, 0, 0.5],
+    ]);
+    const workflow = singleStepWorkflow(worker);
+    const events = await collect(workflow, invocation(workflow));
+    const done = events.map(workflowEventOf).find(isStepCompleted);
+    expect(done?.result.usage?.costUsd).toBe(0.75);
+  });
+
   test("a nested workflow step reports its child workflow's summed usage", async () => {
     const worker = new UsageAgent("worker", [
       [10, 5],
@@ -208,6 +234,25 @@ describe("workflow step results carry the agent run's usage", () => {
     const replayed = second.map(workflowEventOf).find(isStepReplayed);
     expect(replayed?.result.usage).toEqual(TWO_RESPONSES);
     expect(replayed?.result.usage).toEqual(completed?.result.usage);
+  });
+
+  test("a replayed step keeps its costUsd, so a resumed run does not lose cost", async () => {
+    const worker = new UsageAgent("worker", [
+      [10, 5, 0, 0.25],
+      [20, 8, 0, 0.5],
+    ]);
+    const workflow = singleStepWorkflow(worker);
+    const first = await collect(workflow, invocation(workflow));
+    const completed = first.map(workflowEventOf).find(isStepCompleted);
+    expect(completed?.result.usage?.costUsd).toBe(0.75);
+    const saved = first.filter(
+      (event) => workflowEventOf(event)?.type === "checkpoint_saved",
+    );
+    const crashState = saved.at(-2)?.actions?.stateDelta ?? {};
+    const second = await collect(workflow, invocation(workflow, crashState));
+    expect(worker.calls).toBe(1);
+    const replayed = second.map(workflowEventOf).find(isStepReplayed);
+    expect(replayed?.result.usage?.costUsd).toBe(0.75);
   });
 });
 

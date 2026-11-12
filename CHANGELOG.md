@@ -721,6 +721,18 @@ from the 0.6.0 tag.
   `CLAUDE_SESSION_STORE_UNAVAILABLE` event (exported from
   `adk-llm-bridge/agents`). `ClaudeCliDriver` still refuses any `sessionStore`.
   See [Persisting Claude sessions](./docs/claude-session-store.md#adk-artifacts).
+- **Cost of gateway model calls.** The cost a provider reports on a call (AI
+  Gateway and OpenRouter `usage.cost`, streaming and not) is in
+  `customMetadata.costUsd`, and `customMetadata.costSource` names the field it
+  came from (`cost`, `cost+upstream` or `market_cost`). A BYOK gateway key
+  reports `cost: 0`: `costUsd` then adds `cost_details.upstream_inference_cost`
+  when that is positive, otherwise it is the gateway's `market_cost`, also
+  kept as `marketCostUsd`. A call that is not BYOK keeps `cost`.
+  `AgentInvocationUsage` and `WorkflowStepUsage` gain an optional `costUsd` (a
+  sum of the reported values, absent when none was reported, so an
+  `ExternalAgent` step has none), and the model-call span gets
+  `adk_llm_bridge.usage.cost_usd`. Before, a run's cost counted only the
+  external agents. See [Prompt caching](./docs/prompt-caching.md#reading-the-cache-usage).
 - **`agentKind` on workflow step events and spans.** `step_started` and
   `step_completed` carry `agentKind: "llm" | "external" | "host" | "workflow"`
   (`WorkflowAgentKind`), derived from the step's agent before it runs:
@@ -1169,7 +1181,7 @@ from the 0.6.0 tag.
   the manual constructor names its errors without overriding
   `getErrorPrefix()`.
 - `caseInsensitivePaths` on `InMemoryWorkspaceAdapter` and
-  `FileSystemWorkspaceAdapter` (off by default; full case fold, so `ß`/`ss`,
+  `FileSystemWorkspaceAdapter` (full case fold, so `ß`/`ss`,
   `ς`/`σ`, `ſ`/`s` and `µ`/`μ` match) and the `caseInsensitive` option of
   `findWorkspacePathOverlaps` (`WorkspacePathOverlapOptions`).
 - `authorizeWorkflowActor` takes an optional
@@ -1260,11 +1272,28 @@ from the 0.6.0 tag.
 
 ### Changed
 
+- **A workflow step whose model response stopped early now fails.** A step whose agent
+  ended on `MAX_TOKENS`, or on a content stop (`SAFETY`, `RECITATION`, `BLOCKLIST`,
+  `PROHIBITED_CONTENT`, `SPII`, `IMAGE_SAFETY`, `IMAGE_PROHIBITED_CONTENT`) with no
+  function call and no agent error, used to complete with the cut-off text; it now fails
+  with `WORKFLOW_STEP_INCOMPLETE` (details: `finishReason`, `author`, `outputTokens`,
+  `thoughtsTokens`, `maxOutputTokens`), and `retry`, `retryFailedSteps` and
+  `resumePolicy` apply as for any failed step. `WorkflowStep.allowIncompleteOutput: true`
+  accepts the partial output. `WorkflowStepResult.finishReason` (and the `step_completed`
+  event) now reports the finish reason. `AgentInvocationResult` gains `finishReason` and
+  `incomplete`; the gateway itself still does not fail the run.
+
 - **CLI drivers refuse `runtimeSession`.** `ClaudeCliDriver`, `CodexCliDriver` and
   `GeminiCliDriver` used to ignore `request.runtimeSession`. They now fail the run with
   `EXTERNAL_AGENT_SESSIONS_UNSUPPORTED` (exported from `adk-llm-bridge/agents`) before any
   process starts, and so does the new `FxCliDriver`. `ClaudeAgentSdkDriver` now declares
   `capabilities().sessions = true`, matching what it already did.
+- **`FileSystemWorkspaceAdapter` folds path case by default on macOS and
+  Windows.** `caseInsensitivePaths` defaults to `true` when `process.platform`
+  is `darwin` or `win32` (read at construction) and `false` elsewhere, so `Src/a`
+  and `src/a` can no longer both be leased on APFS or NTFS. A value you pass
+  wins; `InMemoryWorkspaceAdapter` is unchanged. See
+  [Path case](./docs/workflow-durability.md#path-case).
 - **Prompt caching is automatic by default for Anthropic models** (fixes zero cache reads on
   AI Gateway, where every turn paid the full prompt again):
   - native `AnthropicLlm`: `promptCaching` was opt-in and marked only the system block and
@@ -1495,6 +1524,30 @@ from the 0.6.0 tag.
   in it.
 
 ### Fixed
+
+- **A checkpoint save that fails after its rename says so.** The
+  `checkpoint_write_failed` raised when the directory flush fails after the
+  rename carries `details.committed: true`: the new revision is visible to
+  `load()` but may not survive a crash. See
+  [A save that fails after its rename](./docs/workflow-durability.md#a-save-that-fails-after-its-rename).
+- The workspace and checkpoint lock's ownership check (`directoryLockTokenMatches`)
+  no longer treats an unreadable owner file (`EACCES`, `EIO`) as "not our lock":
+  it throws, so a release no longer drops a live lock silently. A missing lock
+  or owner file still means the token does not own it.
+- `createClaudeRunTempDir` removes the directory it made when resolving its real
+  path fails; the SQLite session store closes the database file when the
+  permission change on a just-created file fails.
+- **Child processes of the external agent drivers end reliably.** A run no
+  longer outlives its process: once the CLI has exited, the read of `stdout`
+  and `stderr` ends at EOF, or when a wait on the pipe stays unanswered for two
+  consecutive idle windows of 500 ms, the same on Bun and Node. A grandchild
+  that keeps a pipe open (a background task, an MCP server) does not hold the
+  run. Output not yet read is never dropped, however slow the consumer: what
+  the CLI wrote before it exited is still read in full. The Codex SDK driver
+  now ends the turn at once when the process fails to start (it used to wait for an exit that never
+  came), keeps an `error` on the process's `stdout` or `stderr` in the turn
+  instead of ending the host, and sends SIGKILL after a 2 s grace to a Codex
+  process that ignores SIGTERM after a stop, an abort or a failed prompt write.
 
 - **A delegated sub-agent's model and tool reports reach the host.** Its
   `externalAgentModel` and `externalAgentTools` now ride on the sub-agent's own

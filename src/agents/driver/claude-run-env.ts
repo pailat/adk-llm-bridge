@@ -78,9 +78,12 @@ const RUN_TEMP_PARENT = "/tmp";
  */
 export function createClaudeRunTempDir(): ClaudeRunTempDir | undefined {
   if (process.platform === "win32") return undefined;
-  let root: string | undefined;
+  // Kept apart from the resolved path: if resolving it fails, the directory
+  // `mkdtemp` made must still be removed.
+  let made: string | undefined;
   try {
-    root = realpathSync(mkdtempSync(join(RUN_TEMP_PARENT, "adk-claude-")));
+    made = mkdtempSync(join(RUN_TEMP_PARENT, "adk-claude-"));
+    const root = realpathSync(made);
     const uid = process.getuid?.() ?? 0;
     const tmp = join(root, `claude-${uid}`);
     mkdirSync(tmp, { mode: 0o700 });
@@ -90,7 +93,7 @@ export function createClaudeRunTempDir(): ClaudeRunTempDir | undefined {
       dispose: () => removeQuietly(created),
     };
   } catch (error) {
-    if (root) removeQuietly(root);
+    if (made) removeQuietly(made);
     warn(
       "CLAUDE_RUN_TEMP_DIR_UNAVAILABLE",
       `Could not create a private temp directory for the Claude run (${error instanceof Error ? error.message : String(error)}); Claude Code uses its default temp directory.`,
