@@ -234,7 +234,8 @@ export interface FileSystemWorkflowRepositoryMutationLockOptions {
  * owner file, so at most one process holds it. A lock whose owner file cannot
  * be read is never taken over: waiters time out instead. A normal release
  * removes its own tombstone (best effort); tombstones of recovered locks are
- * kept, because a late recovery must not remove a newer holder's lock.
+ * kept, because a late recovery must not remove a newer holder's lock. Remove
+ * them only while no process uses the lock.
  */
 export class FileSystemWorkflowRepositoryMutationLock
   implements WorkflowRepositoryMutationLock

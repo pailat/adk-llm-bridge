@@ -7,6 +7,13 @@
 
 import { describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
+import {
+  BaseLlm,
+  InMemoryRunner,
+  LlmAgent,
+  type LlmRequest,
+  type LlmResponse,
+} from "@google/adk";
 
 function read(path: string): string {
   return readFileSync(new URL(`../../${path}`, import.meta.url), "utf8");
@@ -26,19 +33,45 @@ describe("string instruction is an ADK state template", () => {
     });
   }
 
-  it("the installed ADK throws for a missing key and takes functions", () => {
-    const base = "../../node_modules/@google/adk/dist/esm/agents";
-    const instructions = readFileSync(
-      new URL(`${base}/instructions.js`, import.meta.url),
-      "utf8",
+  it("the installed ADK throws for a missing key and takes functions", async () => {
+    const seen: string[] = [];
+
+    class FakeLlm extends BaseLlm {
+      constructor() {
+        super({ model: "fake-model" });
+      }
+      async *generateContentAsync(
+        request: LlmRequest,
+      ): AsyncGenerator<LlmResponse, void> {
+        seen.push(String(request.config?.systemInstruction ?? ""));
+        yield { content: { role: "model", parts: [{ text: "ok" }] } };
+      }
+      async connect(): Promise<never> {
+        throw new Error("not supported");
+      }
+    }
+
+    async function run(instruction: string | (() => string)): Promise<void> {
+      const agent = new LlmAgent({
+        name: "probe",
+        model: new FakeLlm(),
+        instruction,
+      });
+      const runner = new InMemoryRunner({ agent, appName: "probe-app" });
+      const events = runner.runEphemeral({
+        userId: "user",
+        newMessage: { role: "user", parts: [{ text: "hi" }] },
+      });
+      for await (const _event of events) {
+        // drain
+      }
+    }
+
+    await expect(run("x {missing}")).rejects.toThrow(
+      /Context variable not found/,
     );
-    const agent = readFileSync(
-      new URL(`${base}/llm_agent.js`, import.meta.url),
-      "utf8",
-    );
-    expect(instructions).toContain("Context variable not found");
-    expect(agent).toContain("requireStateInjection: true");
-    expect(agent).toContain("await this.instruction(context2)");
+    await run(() => "x {missing}");
+    expect(seen.some((text) => text.includes("x {missing}"))).toBe(true);
   });
 });
 

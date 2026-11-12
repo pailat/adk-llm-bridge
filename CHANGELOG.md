@@ -1467,8 +1467,9 @@ from the 0.6.0 tag.
   (waiters time out with `GIT_MUTATION_AMBIGUOUS`). A release of a checkpoint,
   workspace or repository lock removes its own `*.retired.*` directory (best
   effort); only locks recovered from a dead owner, and a leftover after a
-  crash, keep one (documented in docs/workflow-orchestration.md, with the Git
-  driver's environment).
+  crash, keep one, which is safe to delete only when no workflow process runs
+  (documented in docs/workflow-orchestration.md, with the Git driver's
+  environment).
 - `PlaceholderExternalAgentDriver` reports `EXTERNAL_AGENT_NOT_CONFIGURED` and
   is not recoverable. An unknown sub-agent or transfer target sets
   `RunSubAgentResult.errorKind` to `agent-error`; an error event with an empty
