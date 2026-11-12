@@ -87,13 +87,6 @@ export type {
   FxSessionStore,
   FxSessionStoreFactory,
 } from "./driver/fx-session.js";
-export type {
-  GeminiCliDriverConfig,
-  GeminiCliSpawn,
-  GeminiCliSpawnOptions,
-  GeminiCliSubprocess,
-} from "./driver/gemini-cli.js";
-export { GeminiCliDriver } from "./driver/gemini-cli.js";
 export type { ExternalAgentPolicyErrorCode } from "./driver/policy-errors.js";
 export {
   EXTERNAL_AGENT_APPROVALS_UNSUPPORTED,
@@ -164,11 +157,6 @@ export {
 } from "./external-agent-driver.js";
 export type { FxAgentConfig } from "./fx-agent.js";
 export { FX_AGENT_DEFINITION, FxAgent } from "./fx-agent.js";
-export type { GeminiCliAgentConfig } from "./gemini-cli-agent.js";
-export {
-  GEMINI_CLI_AGENT_DEFINITION,
-  GeminiCliAgent,
-} from "./gemini-cli-agent.js";
 export type {
   ExternalAgentConfirmationOptions,
   PermissionApprover,
@@ -184,10 +172,6 @@ export type {
 export { CLAUDE_PROVIDER } from "./provider/claude.js";
 export { CODEX_ENV_ALLOWLIST, CODEX_PROVIDER } from "./provider/codex.js";
 export { FX_ENV_ALLOWLIST, FX_PROVIDER } from "./provider/fx.js";
-export {
-  GEMINI_CLI_ENV_ALLOWLIST,
-  GEMINI_CLI_PROVIDER,
-} from "./provider/gemini-cli.js";
 export {
   createDefaultExternalAgentProviderRegistry,
   ExternalAgentProviderRegistry,

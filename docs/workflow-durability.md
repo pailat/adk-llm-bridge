@@ -375,7 +375,7 @@ await running.catch(() => undefined);
 process.exit(0); // safe now
 ```
 
-While a Claude, Codex or Gemini CLI agent runs, the bridge forwards the host's
+While a Claude or Codex CLI agent runs, the bridge forwards the host's
 SIGINT, SIGTERM and SIGHUP to the CLI's process group. A host listener for the
 signal, registered with `process.on` or `process.once`, keeps control: abort
 from it and drain as above. Without one, the host ends by the signal as usual.
@@ -913,7 +913,7 @@ What a sleep longer than the relevant limit does:
 | Checkpoint lock and repository mutation lock | none | Not time-based: a lock is held while its owner process is alive, so sleep does not release it. |
 | Lock wait timeouts, delegated-run grace, sandbox `cpuTimeMs` | monotonic | Unaffected by the wall-clock jump. |
 | Execution `timeoutMs`, node `timeout`, retry backoff delays | runtime timers | Fire on wake at the earliest, possibly later. An execution or node timeout that fires aborts the run as described in [Stopping a run](#stopping-a-run). |
-| External agent runs (Claude, Codex, Gemini CLIs) | none of the bridge's | The bridge sets no run timeout of its own; the CLI process is suspended with the host. On wake it continues, or fails if its provider connection dropped, and the step fails or retries by its policy. |
+| External agent runs (Claude, Codex, fx CLIs) | none of the bridge's | The bridge sets no run timeout of its own; the CLI process is suspended with the host. On wake it continues, or fails if its provider connection dropped, and the step fails or retries by its policy. |
 
 Between wake and the first heartbeat, local code can still run with a
 workspace lease that durable state already dropped. That is the same window as

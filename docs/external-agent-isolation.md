@@ -1,7 +1,7 @@
 # External agent isolation and network policy
 
 This page states what `adk-llm-bridge/agents` guarantees when it runs Claude
-Code, Codex or Gemini CLI as an ADK agent: which host configuration the agent
+Code, Codex or fx as an ADK agent: which host configuration the agent
 sees, and how each driver keeps the network off. Network is off unless the
 policy sets `allowNetwork: true`.
 
@@ -11,7 +11,7 @@ policy sets `allowNetwork: true`.
 |---|---|---|
 | `ClaudeAgentSdkDriver` (default for `ClaudeAgent`) | Isolated: the built-in tools in `DEFAULT_CLAUDE_TOOLS` plus the bridge's tools; no host MCP servers, settings files, skills, claude.ai connectors or auto-memory. | `inheritHostConfig: true`, or `tools: [...]` to choose the built-in tools. |
 | `ClaudeCliDriver` | Isolated the same way, through CLI flags. | Same options. |
-| Codex and Gemini CLI drivers | Use the host's Codex or Gemini configuration. Without `allowNetwork: true` see the table below. | - |
+| Codex drivers | Use the host's Codex configuration. Without `allowNetwork: true` see the table below. | - |
 
 Both Claude drivers check the tools and MCP servers the runtime reports at
 start, and every tool the model is about to use. A tool outside the configured
@@ -127,7 +127,6 @@ guarantee below applies to every run without `allowNetwork: true`:
 | Claude CLI | Same sandbox, through `--settings`. | Same as the SDK driver. | No MCP server; `permissions.deny` for `mcp__*`. | Same as the SDK driver. |
 | Codex SDK | Codex sandbox with no network in `read-only`, `ask` and `workspace-write`. | Web search disabled, so a host `config.toml` cannot turn it on. | Host MCP servers are listed with `codex mcp list --json` and each one is turned off for the run. | `full-access`, a failed listing, a server name that cannot be written as an override, or a prebuilt `sdk` client: refused with `EXTERNAL_AGENT_NETWORK_UNENFORCEABLE`. Opt in with `allowUnenforcedNetwork: true`. |
 | Codex CLI | `sandbox_workspace_write.network_access=false` is pinned. | `web_search="disabled"` is pinned. | Same listing; each server gets `mcp_servers.<name>.enabled=false`. | Same as the Codex SDK driver. |
-| Gemini CLI | Not enforceable. | Not enforceable: `google_web_search` and `web_fetch` run without the guard. | Not enforceable: servers from `~/.gemini/settings.json` run without the guard. | Every run without `allowNetwork: true` is refused with `EXTERNAL_AGENT_NETWORK_UNENFORCEABLE`, in every mode, so a Gemini CLI agent needs `allowNetwork: true` (or a driver built with `allowUnenforcedNetwork: true`). |
 
 ### Local ports in the no-network sandbox
 
@@ -181,7 +180,6 @@ approver.
 | Claude Agent SDK | `WebFetch` and `WebSearch`, when offered, run without a confirmation: the guard lets them through and the agent allows them without asking an approver. Driven without a permission callback, the driver adds them to `allowedTools`. |
 | Claude CLI | Same: `--settings` adds `permissions.allow` for the offered web tools next to the `mcp__*` deny, since `dontAsk` denies anything that would prompt. |
 | Codex SDK and CLI | Web search follows the driver's `webSearchMode` / `webSearchEnabled` (SDK) or Codex's own setting (CLI); it is only pinned to `disabled` without the network. Shell commands stay in the read-only sandbox. |
-| Gemini CLI | Runs in plan mode with `--sandbox`; `google_web_search` and `web_fetch` run without the guard, as in every mode. |
 
 Every other read-only rule stays: write, edit and shell tools are denied, MCP
 tools other than the bridge's own are denied, and the web exception matches
@@ -208,12 +206,12 @@ confirmation sees it. Its denials are final; no approval overrides them.
   named `adk_bridge__x` gets no exemption), and shell calls that the driver
   did not run in a no-network sandbox.
 - Path guard (with `allowedPaths`, `readPaths` or inherited path bounds): path arguments
-  of file tools (Claude Code, Codex and Gemini CLI argument names, nested
+  of file tools (Claude Code, Codex and other known argument names, nested
   file changes, `apply_patch` file headers), and the base of globs that leave
   the allowed paths. Brace alternatives are expanded (at most 64; more is
   checked as `/`), and a relative glob is resolved against the tool's own
   search root (`path`, `dir_path`), or against the working directory when
-  the tool has none (Gemini `read_many_files` `include`, for example). Symlinks
+  the tool has none (a `read_many_files` `include`, for example). Symlinks
   are resolved, dangling links
   included, so a link to a file that does not exist yet is checked where the
   write would land; a symlink loop is denied. Under `read-only` a path outside
@@ -261,7 +259,7 @@ confirmation sees it. Its denials are final; no approval overrides them.
   transcripts elsewhere gets no exception.
 
   The Claude
-  CLI, Codex SDK, Codex CLI and Gemini CLI drivers run file tools without
+  CLI, Codex SDK, Codex CLI and fx drivers run file tools without
   asking the bridge, so they refuse a run with `allowedPaths` or `pathBounds`
   with `EXTERNAL_AGENT_PATHS_UNENFORCEABLE`. Build the driver with
   `allowUnenforcedPaths: true` to run anyway; the runtime's own sandbox then
@@ -330,7 +328,7 @@ after delegation) is therefore still denied.
 the runtime's permission prompts to the host (`capabilities().approvals` is
 `true`, which means the driver calls `request.requestPermission`). Only the
 Claude Agent SDK driver (`ClaudeAgent`) does. The Claude CLI, Codex SDK, Codex
-CLI and Gemini CLI drivers enforce the policy through the runtime's own flags
+CLI and fx drivers enforce the policy through the runtime's own flags
 and never ask the host: a tool that needs approval is denied, and an approver
 or ADK confirmation there would be ignored.
 
@@ -346,7 +344,7 @@ checks.
 `subAgents` only work when the driver hands the delegation tool to the runtime
 (`capabilities().subagents` is `true`, which means the driver reads
 `request.toolGateway`). Only the Claude Agent SDK driver (`ClaudeAgent`) does.
-On the Claude CLI, Codex SDK, Codex CLI, Gemini CLI and fx drivers the
+On the Claude CLI, Codex SDK, Codex CLI and fx drivers the
 sub-agents could never be called, so an agent built with `subAgents` there throws
 `ExternalAgentPolicyError` `EXTERNAL_AGENT_SUBAGENTS_UNSUPPORTED`, naming the
 driver. `clone()` re-checks. A custom driver without `capabilities()` is not
@@ -378,7 +376,7 @@ new ClaudeAgent({
 ```
 
 - **Read tools are an explicit list.** Claude Code `Read`, `Glob`, `Grep`,
-  `LS`, `NotebookRead` and Gemini CLI `read_file`, `read_many_files`,
+  `LS`, `NotebookRead` and the known `read_file`, `read_many_files`,
   `list_directory`, `glob`, `grep`, `grep_search`, `search_file_content`,
   matched by exact name. Only these may target a path under `readPaths`.
   Every other tool counts as a write and must stay inside `allowedPaths`.
@@ -399,7 +397,7 @@ new ClaudeAgent({
 - **Shell commands are not parsed.** As with `allowedPaths`, the sandbox
   limits where shell commands write (only `allowedPaths`), not what they
   read.
-- **Other drivers.** The Claude CLI, Codex and Gemini CLI drivers cannot check
+- **Other drivers.** The Claude CLI, Codex and fx drivers cannot check
   tool paths. They refuse a run whose policy sets `readPaths` with
   `EXTERNAL_AGENT_PATHS_UNENFORCEABLE`, unless they are built with
   `allowUnenforcedPaths: true`. The runtime's own sandbox then decides what
@@ -477,9 +475,9 @@ dropped silently.
 
 | Code (`ExternalAgentPolicyError`, thrown when the agent is built) | When |
 |---|---|
-| `EXTERNAL_AGENT_TOOLS_UNSUPPORTED` | `tools` on a driver whose `capabilities().tools` is not `true` (Codex, Gemini CLI, Claude CLI, fx). Only the Claude Agent SDK driver (`ClaudeAgent`) hosts ADK tools. A custom driver without `capabilities()` is not checked. |
-| `EXTERNAL_AGENT_APPROVALS_UNSUPPORTED` | `confirmation.approver` or `confirmation.adk: true` on a driver whose `capabilities().approvals` is not `true` (Codex, Gemini CLI, Claude CLI, fx): the runtime decides alone and the setting would be ignored. Only the Claude Agent SDK driver (`ClaudeAgent`) asks the host. A custom driver without `capabilities()` is not checked. See [Approvers and ADK confirmation](#approvers-and-adk-confirmation-need-a-driver-that-asks). |
-| `EXTERNAL_AGENT_SUBAGENTS_UNSUPPORTED` | `subAgents` on a driver whose `capabilities().subagents` is not `true` (Codex, Gemini CLI, Claude CLI, fx): the delegation tool never reaches the runtime, so the sub-agents would never be called. Only the Claude Agent SDK driver (`ClaudeAgent`) exposes them. A custom driver without `capabilities()` is not checked. See [Sub-agents need a driver that exposes them](#sub-agents-need-a-driver-that-exposes-them). |
+| `EXTERNAL_AGENT_TOOLS_UNSUPPORTED` | `tools` on a driver whose `capabilities().tools` is not `true` (Codex, Claude CLI, fx). Only the Claude Agent SDK driver (`ClaudeAgent`) hosts ADK tools. A custom driver without `capabilities()` is not checked. |
+| `EXTERNAL_AGENT_APPROVALS_UNSUPPORTED` | `confirmation.approver` or `confirmation.adk: true` on a driver whose `capabilities().approvals` is not `true` (Codex, Claude CLI, fx): the runtime decides alone and the setting would be ignored. Only the Claude Agent SDK driver (`ClaudeAgent`) asks the host. A custom driver without `capabilities()` is not checked. See [Approvers and ADK confirmation](#approvers-and-adk-confirmation-need-a-driver-that-asks). |
+| `EXTERNAL_AGENT_SUBAGENTS_UNSUPPORTED` | `subAgents` on a driver whose `capabilities().subagents` is not `true` (Codex, Claude CLI, fx): the delegation tool never reaches the runtime, so the sub-agents would never be called. Only the Claude Agent SDK driver (`ClaudeAgent`) exposes them. A custom driver without `capabilities()` is not checked. See [Sub-agents need a driver that exposes them](#sub-agents-need-a-driver-that-exposes-them). |
 | `EXTERNAL_AGENT_READ_ONLY_TOOL_UNKNOWN` | A `readOnlyTools` entry that is empty, listed twice, names no direct tool (when `tools` has no toolset), or names two or more direct tools. |
 | `EXTERNAL_AGENT_TOOL_NOT_READ_ONLY` | The agent's **own** mode is `read-only` and a direct tool is not in `readOnlyTools`. Add it if it has no side effects, or remove it. |
 
@@ -661,7 +659,7 @@ the runtime uses: Claude settings sources under `inheritHostConfig` or
 `settingSources`; `--settings`, `--setting-sources`, `--agent`, `--agents`,
 `--plugin-dir` and `--plugin-url` passed in Claude CLI `args` under
 `allowPolicyOverrideArgs`; the Codex config home and a trusted workspace's
-`.codex/config.toml`; and Gemini settings. Where the runtime reports the model
+`.codex/config.toml`. Where the runtime reports the model
 it started with, the run's events show it. A `fallbackModel` switch or an
 alias remap may not show there (see "Residuals" below).
 
@@ -686,7 +684,6 @@ aliases are compared without regard to case:
 | Driver | Refused aliases |
 |---|---|
 | `ClaudeAgentSdkDriver`, `ClaudeCliDriver` | `default`, `best`, `opusplan`, `opusplan[1m]` |
-| `GeminiCliDriver` | `auto`, and any id that starts with `auto-` |
 | `CodexSdkDriver`, `CodexCliDriver` | none |
 
 Plain aliases (`opus`, `sonnet`, `haiku`, `fable`, `opus[1m]`) stay allowed
@@ -700,8 +697,7 @@ a requested id that differs from the reported one.
 `reportsResolvedModel` on a driver says whether the runtime reports the model
 it ran. It is `true` for the two Claude drivers (the `system/init` model on
 `started`, and the `result` model on `completed`) and `false` for Codex,
-which reports no model, and Gemini CLI, whose `init` model is kept on
-`completed.model` for diagnostics only. `ClaudeCliDriver` emits `started`
+which reports no model. `ClaudeCliDriver` emits `started`
 with the first output line, so it can carry the init model; its timestamp is
 still the start of the run, and it is still the first event on every path.
 
@@ -720,7 +716,7 @@ events never carry it):
 | Field | Meaning |
 |---|---|
 | `smallFast` | the driver's `smallFastModel` pin, when set |
-| `used` | every model the run billed, sorted. It is the keys of `usage.byModel`; a run with one billed model has no `byModel`, so a driver with `reportsResolvedModel: true` contributes the model of its `completed` event instead (a routed plan-mode run does not). With neither, `used` is absent: the run's models are unknown (Codex, Gemini). A model the Claude drivers filled from `system/init` because the result had no `modelUsage` (`completed.modelFromInit`) is a guess, not billing: it counts for `resolved` only, and `used` stays absent |
+| `used` | every model the run billed, sorted. It is the keys of `usage.byModel`; a run with one billed model has no `byModel`, so a driver with `reportsResolvedModel: true` contributes the model of its `completed` event instead (a routed plan-mode run does not). With neither, `used` is absent: the run's models are unknown (Codex). A model the Claude drivers filled from `system/init` because the result had no `modelUsage` (`completed.modelFromInit`) is a guess, not billing: it counts for `resolved` only, and `used` stays absent |
 | `unexpected` | the entries of `used` that are none of `requested`, `resolved` or `smallFast`, sorted. Present exactly when `used` is. It is never an error: the run already ran and was billed |
 | `warnings` | `["UNEXPECTED_MODEL"]`, only when the driver has `requireExplicitModel` and `unexpected` is not empty |
 
@@ -806,7 +802,6 @@ value), and `completed` with `exitCode: 1`.
 |---|---|
 | Claude (SDK and CLI) | any variable whose name contains `MODEL` (any case), `CLAUDE_CODE_CLIENT_DATA_URL`, and every `CLAUDE_CODE_3P_*` variable |
 | Codex (SDK and CLI) | `OPENAI_BASE_URL`, `CODEX_OSS_BASE_URL`, `CODEX_OSS_PORT` |
-| Gemini CLI | `GEMINI_MODEL` |
 
 The Claude rule is a pattern, not a list, because each Claude Code release adds
 variables (`CLAUDE_CODE_MODEL_CATALOG`, `ANTHROPIC_CUSTOM_MODEL_OPTION*`,
@@ -874,17 +869,6 @@ model the drivers filled from `system/init` because the result had no
 billed. A driver or run with none of these has no `used`, and its workflow
 step is `unknown`.
 
-### Gemini CLI read-only runs
-
-The read-only policy maps to Gemini's plan mode (`--approval-mode=plan`),
-which may route turns to another model than `--model`. A read-only run with a
-`model`, or on a driver with `requireExplicitModel`, is refused before spawn
-with `EXTERNAL_AGENT_MODEL_OVERRIDE`. A read-only run without a model still
-runs (the CLI picks the model anyway) and its `started` event carries
-`modelRouting: "plan-mode"`. To pin a model, use `ask` or `workspace-write`:
-both let the agent write files (`ask` after approval), so choose them only if
-it may.
-
 ### Residuals
 
 - **Codex host config.** `CODEX_HOME` and `HOME` are forwarded, so the host
@@ -895,12 +879,6 @@ it may.
   a trusted workspace, and ignores some keys there. Which provider and
   endpoint keys it accepts from that file was not checked. The file is in the
   workspace, so the agent can write it for a later run.
-- **Gemini host settings.** Without `model`, `~/.gemini/settings.json`
-  decides. A quota fallback to another model is not reported.
-- **Gemini CLI model reporting.** Neither the model on Gemini's `init` line,
-  nor plan-mode routing, nor the router aliases (`auto`, `auto-*`) were
-  checked against a live Gemini CLI. So the driver trusts no reported model
-  (`reportsResolvedModel: false`) and refuses a read-only run with a model.
 - **Claude agents and plugins you pass** (`--agent`, `--agents`,
   `--plugin-dir`, `--plugin-url` under `allowPolicyOverrideArgs`): a
   main-thread agent whose `model` is not `inherit` switches the session's
@@ -922,9 +900,6 @@ it may.
   compact fallback and the hosted image tool models) cannot be pinned beyond
   the refused override keys, and Codex usage has no per-model breakdown, so
   they are not reported (`used` is absent, the step is `unknown`).
-- **Gemini helper models** (the router classifier, loop detection, compression
-  and similar flash calls) are not reported: Gemini CLI gives no per-model
-  usage, and the CLI is not bundled, so this is not verified here.
 - **Helper models and subagents** run other models: Claude's WebFetch helper
   and `Agent`/`Task` subagents (they show only in the usage per model), and
   Codex's `review_model` and subagent model (`agents.default_subagent_model`,
@@ -1370,7 +1345,6 @@ home: every driver passes the host's `CLAUDE_CONFIG_DIR`, `CODEX_HOME` or
 | `ClaudeAgentSdkDriver` without a declared secret, isolated or `inheritHostConfig: true` | `<config dir>/projects/<project>/<session id>.jsonl`, large outputs in `<session id>/tool-results/`; `<config dir>` is the child's `CLAUDE_CONFIG_DIR`, else `~/.claude` | Yes, in the host's directory |
 | `ClaudeCliDriver` | The same Claude Code paths | Yes, in the host's directory |
 | `CodexSdkDriver`, `CodexCliDriver` | `$CODEX_HOME/sessions/<year>/<month>/<day>/rollout-<time>-<thread id>.jsonl` (some Codex versions compress it); `CODEX_HOME` defaults to `~/.codex` | Yes, in the host's directory |
-| `GeminiCliDriver` | Gemini CLI's chat recording under `~/.gemini/tmp/<project hash>/` | Yes, in the host's directory |
 
 With a declared secret, `ClaudeAgentSdkDriver` therefore resumes nothing.
 Each turn folds the ADK history (already scrubbed) into its prompt, saves no
@@ -1502,7 +1476,7 @@ credentials, and remove the sessions you do not need.
 
 ## Credentials
 
-`ClaudeAgent`, `CodexAgent` and `GeminiCliAgent` read credentials with
+`ClaudeAgent`, `CodexAgent` and `FxAgent` read credentials with
 `EnvCredentialProvider`: only the variables in the provider's `envAllowlist`
 (for Codex: `CODEX_API_KEY`, `CODEX_ACCESS_TOKEN`, `CODEX_HOME`, and so on)
 reach the runtime. `OPENAI_API_KEY` is not in the Codex allowlist on purpose:
@@ -1540,7 +1514,7 @@ signaled.
 
 A missing `@anthropic-ai/claude-agent-sdk` or `@openai/codex-sdk` is an error
 event with `EXTERNAL_AGENT_DEPENDENCY_MISSING`. A missing `claude`, `codex` or
-`gemini` binary is an error event with `MISSING_BINARY`
+`fx` binary is an error event with `MISSING_BINARY`
 (`EXTERNAL_AGENT_MISSING_BINARY`). Both name the install command; neither
 throws out of the agent.
 
@@ -1637,14 +1611,14 @@ path instead. A custom `spawn` gets `command` as given.
 ## Windows: batch files and npm installs
 
 On Windows the CLI drivers (`ClaudeCliDriver`, `CodexCliDriver`,
-`GeminiCliDriver`) look their command up themselves instead of leaving it to
+`FxCliDriver`) look their command up themselves instead of leaving it to
 the runtime: over the absolute entries of `PATH`, in the default `PATHEXT`
 order (`.com`, `.exe`), never in the working directory, and the spawned path is
 always absolute. A batch file is never run. Only a `.com` or `.exe` file is an answer: the three
 files `npm install -g` writes (an extensionless shell shim, `.cmd` and `.ps1`)
 are skipped when a native file comes later on `PATH`, so an npm shim does not
 hide a real `.exe`. When the command itself is a batch file, or only a batch file is found
-(the shim `npm install -g` creates, such as `gemini.cmd`), the run ends with
+(the shim `npm install -g` creates, such as `claude.cmd`), the run ends with
 `EXTERNAL_AGENT_BATCH_COMMAND_REFUSED`: running it goes through `cmd.exe`,
 which parses the prompt and the other arguments again, so a prompt with `&` or
 `|` could run as a command. Nothing found is `MISSING_BINARY`, as elsewhere.
@@ -1658,24 +1632,23 @@ What to run instead depends on the CLI:
 |---|---|
 | Claude | The native `claude.exe` from Claude's native installer. Put it on `PATH` or set `command` to its path. |
 | Codex | The native `codex.exe` inside the `@openai/codex` package: `<npm root -g>\@openai\codex\node_modules\@openai\codex-win32-x64\vendor\x86_64-pc-windows-msvc\bin\codex.exe` (`codex-win32-arm64` and `aarch64-pc-windows-msvc` on ARM). That is the layout of `@openai/codex` 0.167.2, read from the `@openai/codex-sdk` 0.167.2 lookup this package pins; older versions keep it at `vendor\<triple>\codex\codex.exe`. It was not checked on a Windows machine. To find it for another version, search `npm root -g` for `codex.exe`. Set `command` to its path. |
-| Gemini | Gemini CLI ships only as an npm package, so there is no `.exe`. Set `interpreter` to Node and `entry` to the package's JavaScript entry, the file named by `bin.gemini` in `@google/gemini-cli`'s `package.json`. The driver runs `<interpreter> <entry> <flags>`; see [Interpreter and entry](#interpreter-and-entry). |
 
 ### Interpreter and entry
 
-`ClaudeCliDriver`, `CodexCliDriver` and `GeminiCliDriver` take `interpreter`
+`ClaudeCliDriver`, `CodexCliDriver` and `FxCliDriver` take `interpreter`
 and `entry` (both or neither, and not with `command`). The driver then runs
 `<interpreter> <entry> <its flags> <args>` instead of `<command> <its flags>
 <args>`, on every platform. It is meant for a CLI that ships as a JavaScript
-package, Gemini CLI on Windows above all:
+package, on Windows above all (where its npm `.cmd` shim is refused):
 
 ```ts
-import { GeminiCliDriver } from "adk-llm-bridge/agents";
+import { ClaudeCliDriver } from "adk-llm-bridge/agents";
 
-const driver = new GeminiCliDriver({
+const driver = new ClaudeCliDriver({
   // Node only. A bare name is looked up on PATH like `command`; an absolute path is used as given.
   interpreter: String.raw`C:\Program Files\nodejs\node.exe`,
-  // The file named by `bin.gemini` in @google/gemini-cli's package.json.
-  entry: String.raw`C:\Users\me\AppData\Roaming\npm\node_modules\@google\gemini-cli\bundle\gemini.js`,
+  // The JavaScript file named by `bin` in the CLI package's package.json.
+  entry: String.raw`C:\Tools\cli-package\cli.js`,
 });
 ```
 
@@ -1790,17 +1763,19 @@ container:
 
 ```ts
 import { spawn as nodeSpawn } from "node:child_process";
-import { GeminiCliDriver, type GeminiCliSpawn } from "adk-llm-bridge/agents";
+import { ClaudeCliDriver, type ClaudeCliSpawn } from "adk-llm-bridge/agents";
 
-// The file named by `bin.gemini` in @google/gemini-cli's package.json.
-const entry = String.raw`C:\Users\me\AppData\Roaming\npm\node_modules\@google\gemini-cli\bundle\gemini.js`;
+// The JavaScript file named by `bin` in the CLI package's package.json.
+const entry = String.raw`C:\Tools\cli-package\cli.js`;
 
-const spawn: GeminiCliSpawn = (_command, args, options) => {
+const spawn: ClaudeCliSpawn = (_command, args, options) => {
   const child = nodeSpawn(process.execPath, [entry, ...args], {
     cwd: options.cwd,
     env: options.env,
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: ["pipe", "pipe", "pipe"],
   });
+  // The driver passes the prompt as `options.input`: write it to stdin.
+  child.stdin.end(options.input ?? "");
   return {
     stdout: child.stdout,
     stderr: child.stderr,
@@ -1812,11 +1787,10 @@ const spawn: GeminiCliSpawn = (_command, args, options) => {
   };
 };
 
-const driver = new GeminiCliDriver({ spawn });
+const driver = new ClaudeCliDriver({ spawn });
 ```
 
-`tests/agents/driver/windows-command.test.ts` runs this rerouting against a
-fake process. Prefer `interpreter` and `entry`: they keep the bridge's
+Prefer `interpreter` and `entry`: they keep the bridge's
 lookup and the writable-root check. The policy (`allowNetwork`, paths) applies as for any other
 run; the custom `spawn` only replaces how the process starts.
 
@@ -1877,7 +1851,7 @@ exported from `adk-llm-bridge/agents`. They come from two places, and
 `EXTERNAL_AGENT_TOOL_NOT_OFFERED` is not an error code: it is the value of
 `metadata.isolation` on the `tool_result` of a call the runtime refused
 because the tool was not offered. The other codes in the table (`CLAUDE_*`,
-`CODEX_*`, `GEMINI_*`) are reported by one driver and have no constant.
+`CODEX_*`) are reported by one driver and have no constant.
 
 | Code | Constant | Recoverable | When |
 | --- | --- | --- | --- |
@@ -1889,7 +1863,7 @@ because the tool was not offered. The other codes in the table (`CLAUDE_*`,
 | `EXTERNAL_AGENT_TOOL_RESULT_TOO_LARGE` | `EXTERNAL_AGENT_TOOL_RESULT_TOO_LARGE` | No | The user's answer to a paused long-running call is over 64 KiB (UTF-8 bytes of JSON), or the answers of one turn total over 256 KiB. The runtime does not start; the answers are not marked used, so a smaller one for the same call id can follow. |
 | `EXTERNAL_AGENT_ISOLATION_VIOLATED` | `EXTERNAL_AGENT_ISOLATION_VIOLATED` | No | The runtime reported tools or MCP servers outside the isolated set. |
 | `EXTERNAL_AGENT_NETWORK_UNENFORCEABLE` | `EXTERNAL_AGENT_NETWORK_UNENFORCEABLE` | No | The network cannot be kept off (the policy does not set `allowNetwork: true`), or a Claude agent's `tools` name a web tool while the network is off; see the tables above. The message names the remedy: `allowNetwork: true`, or `allowUnenforcedNetwork: true` on the driver; for web tools named in a Claude agent's `tools`, `allowNetwork: true` or removing them (`allowUnenforcedNetwork` does not lift that refusal). |
-| `EXTERNAL_AGENT_PATHS_UNENFORCEABLE` | `EXTERNAL_AGENT_PATHS_UNENFORCEABLE` | No | The policy sets `allowedPaths` (or a parent agent passed `pathBounds`) and the driver cannot check tool paths: Claude CLI, Codex and Gemini CLI (remedy: `ClaudeAgentSdkDriver`, no `allowedPaths`, or `allowUnenforcedPaths: true` on the driver). On the Claude Agent SDK: a shell tool is on offer and the working directory is outside `allowedPaths` or the shell is unsandboxed (remedy: a working directory inside `allowedPaths`, or `tools` without `Bash`). |
+| `EXTERNAL_AGENT_PATHS_UNENFORCEABLE` | `EXTERNAL_AGENT_PATHS_UNENFORCEABLE` | No | The policy sets `allowedPaths` (or a parent agent passed `pathBounds`) and the driver cannot check tool paths: Claude CLI, Codex and fx (remedy: `ClaudeAgentSdkDriver`, no `allowedPaths`, or `allowUnenforcedPaths: true` on the driver). On the Claude Agent SDK: a shell tool is on offer and the working directory is outside `allowedPaths` or the shell is unsandboxed (remedy: a working directory inside `allowedPaths`, or `tools` without `Bash`). |
 | `EXTERNAL_AGENT_DEPENDENCY_MISSING` | `EXTERNAL_AGENT_DEPENDENCY_MISSING` | No | An optional SDK package is not installed. |
 | `EXTERNAL_AGENT_BACKGROUND_TASK_PENDING` | `EXTERNAL_AGENT_BACKGROUND_TASK_PENDING` | No | A Claude run (SDK or CLI driver) reached its result while Claude Code still reported a background task (from `system/background_tasks_changed`; ambient tasks do not count). The task's work is not done; the run ends with exit code 1. Background tasks are off by default (`CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`); `allowBackgroundTasks: true` turns them on. |
 | `EXTERNAL_AGENT_NO_TURN` | `EXTERNAL_AGENT_NO_TURN` | Yes | A Claude Agent SDK run whose stream ended after only "model-less" results (success, `num_turns` 0, empty `result`): Claude Code never ran the input. The run ends with exit code 1 instead of an empty success; a new run of the same input can work. A model-less result followed by a real turn is not an error: the driver reads past it. |
@@ -1897,8 +1871,8 @@ because the tool was not offered. The other codes in the table (`CLAUDE_*`,
 | `EXTERNAL_AGENT_CREDENTIAL_UNSUPPORTED` | `EXTERNAL_AGENT_CREDENTIAL_UNSUPPORTED` | No | The credential provider returned a `kind` other than `env` or `none`. |
 | `EXTERNAL_AGENT_OPTION_UNSUPPORTED` | `EXTERNAL_AGENT_OPTION_UNSUPPORTED` | No | Thrown (not an event) when a driver is built with an option its runtime cannot honor: `sessionStore` on `ClaudeCliDriver`. |
 | `EXTERNAL_AGENT_MODEL_INVALID` | `EXTERNAL_AGENT_MODEL_INVALID` | No | Thrown when a driver is built with a `model` that is not a model id (not a string, empty, over 256 characters, with whitespace or a control character, or starting with `-`). See [Model](#model). |
-| `EXTERNAL_AGENT_MODEL_REQUIRED` | `EXTERNAL_AGENT_MODEL_REQUIRED` | No | Thrown when a driver with `requireExplicitModel: true` has no `model`, or a router or default alias (`default`, `best`, `opusplan`, Gemini `auto`; fx has none), or a Claude driver has no `smallFastModel` or one that is an alias instead of a full id. |
-| `EXTERNAL_AGENT_MODEL_OVERRIDE` | `EXTERNAL_AGENT_MODEL_OVERRIDE` | No | Something other than `model` would set or route the model: thrown for model-setting `args` or Codex SDK `config` keys (even with `allowPolicyOverrideArgs`); an error event for a model variable in the run's environment, or a Gemini CLI read-only run with a model (plan mode may route turns to another model). |
+| `EXTERNAL_AGENT_MODEL_REQUIRED` | `EXTERNAL_AGENT_MODEL_REQUIRED` | No | Thrown when a driver with `requireExplicitModel: true` has no `model`, or a router or default alias (`default`, `best`, `opusplan`; Codex and fx have none), or a Claude driver has no `smallFastModel` or one that is an alias instead of a full id. |
+| `EXTERNAL_AGENT_MODEL_OVERRIDE` | `EXTERNAL_AGENT_MODEL_OVERRIDE` | No | Something other than `model` would set or route the model: thrown for model-setting `args` or Codex SDK `config` keys (even with `allowPolicyOverrideArgs`); an error event for a model variable in the run's environment. |
 | `EXTERNAL_AGENT_OPTION_UNKNOWN` | `EXTERNAL_AGENT_OPTION_UNKNOWN` | No | Thrown when a built-in driver's config is not a plain object or has a key the driver does not know (a typo, or an option of another driver: the message says which driver supports it). |
 | `EXTERNAL_AGENT_MCP_SERVER_INVALID` | `EXTERNAL_AGENT_MCP_SERVER_INVALID` | No | Thrown for a malformed `mcpServers` entry (name, type, key, URL, `tools`, `readOnly` without `tools`, `timeoutMs`, header or env name) or `mcpConnectTimeoutMs`. |
 | `EXTERNAL_AGENT_MCP_SECRET_LITERAL` | `EXTERNAL_AGENT_MCP_SECRET_LITERAL` | No | Thrown for a header or env value given as a bare string, or as `{ public }` under a sensitive name. |
@@ -1909,10 +1883,10 @@ because the tool was not offered. The other codes in the table (`CLAUDE_*`,
 | `EXTERNAL_AGENT_MCP_PROVIDER_UNKNOWN` | `EXTERNAL_AGENT_MCP_PROVIDER_UNKNOWN` | No | Thrown by `selectMcpServers` for a granted provider id with no server. |
 | `EXTERNAL_AGENT_MCP_SERVER_UNAVAILABLE` | `EXTERNAL_AGENT_MCP_SERVER_UNAVAILABLE` | Yes | A required declared server failed or did not connect within `mcpConnectTimeoutMs`; the first message was not sent. For a server that is not required, a warning with this code. |
 | `CLAUDE_SESSION_STORE_MIRROR_ERROR` | `CLAUDE_SESSION_STORE_MIRROR_ERROR` | Yes | The Claude Agent SDK dropped a transcript batch its `sessionStore` rejected or timed out on (3 attempts in total); the run goes on. See [Persisting Claude sessions](claude-session-store.md). |
-| `MISSING_BINARY` | `EXTERNAL_AGENT_MISSING_BINARY` | No | The `claude`, `codex`, `gemini` or `fx` binary was not found, or, with `interpreter` and `entry`, the interpreter or the entry file. |
+| `MISSING_BINARY` | `EXTERNAL_AGENT_MISSING_BINARY` | No | The `claude`, `codex` or `fx` binary was not found, or, with `interpreter` and `entry`, the interpreter or the entry file. |
 | `EXTERNAL_AGENT_BATCH_COMMAND_REFUSED` | `EXTERNAL_AGENT_BATCH_COMMAND_REFUSED` | No | On Windows, the CLI command (or `interpreter`) is or resolves to a `.cmd` or `.bat` file (for example an npm shim). Remedy per CLI: [Windows: batch files and npm installs](#windows-batch-files-and-npm-installs). |
 | `EXTERNAL_AGENT_INTERPRETER_UNSAFE` | `EXTERNAL_AGENT_INTERPRETER_UNSAFE` | No | The driver's `entry`, or its `interpreter` given as a path, (or the entry's directory, where the interpreter starts) is at or under the run's working directory, an `allowedPaths` root or a temp directory a runtime sandbox keeps writable (symlinks resolved), or the interpreter is not the native Node binary (its real path is not named `node`/`node.exe`, or the file is not a native executable, such as an asdf or nodenv script shim). Install the CLI outside every directory the agent can write; see [Interpreter and entry](#interpreter-and-entry). |
-| `CLAUDE_CLI_EXIT`, `CODEX_CLI_EXIT`, `GEMINI_CLI_EXIT` | - | From the message | The CLI exited with a nonzero code (Codex: and reported no error of its own). The message holds the stderr tail; auth, billing and quota failures are not recoverable. |
+| `CLAUDE_CLI_EXIT`, `CODEX_CLI_EXIT` | - | From the message | The CLI exited with a nonzero code (Codex: and reported no error of its own). The message holds the stderr tail; auth, billing and quota failures are not recoverable. |
 | `FX_CLI_PERMISSION_REQUIRED` | - | No | An fx `ask` run needed an approval a noninteractive run cannot give (fx reported `NonInteractivePermissionRequired`). The message names the modes that allow it and carries fx's `blocked action` lines and fx's own output. The blocked action did not run; actions before it may have run. |
 | `FX_CLI_ERROR` | - | From the message | The fallback code of an fx failure the shared classifier does not know, and the code (not recoverable) of a result whose `exit_code` is not a number. fx failures carry the classifier code when they have one: `AUTH_ERROR` (`auth_failure`), `QUOTA_EXHAUSTED` (`recovery.need` `quota`) and `INVALID_REQUEST` (`recovery.need` `content_filter`, `rejected` or `too_long`, and `model_not_found`), none recoverable, and whatever `classifyRecoverable` gives the message of an `error` name or a reason only in `output` (for example `RATE_LIMIT`, `TRANSPORT_ERROR`). |
 | `FX_CLI_SESSION_NOT_FOUND` | - | No | An fx run resumed a session fx does not have (the JSON `error` is `SessionNotFound`). No new session was started. See [fx multi-turn sessions](#fx-multi-turn-sessions). |

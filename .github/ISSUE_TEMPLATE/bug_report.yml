@@ -81,7 +81,6 @@ body:
         - Custom OpenAI-compatible endpoint
         - Claude agent
         - Codex agent
-        - Gemini CLI agent
         - Workflows
         - Other
     validations:

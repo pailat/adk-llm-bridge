@@ -15,7 +15,6 @@ import {
 import { CodexCliDriver } from "../../../src/agents/driver/codex-cli.js";
 import { CodexSdkDriver } from "../../../src/agents/driver/codex-sdk.js";
 import { FxCliDriver } from "../../../src/agents/driver/fx-cli.js";
-import { GeminiCliDriver } from "../../../src/agents/driver/gemini-cli.js";
 import {
   assertSmallFastModelOption,
   CLAUDE_MODEL_ENV_RULE,
@@ -377,7 +376,7 @@ describe("stripBracketSuffix equals the old end-anchored regex", () => {
 });
 
 describe("a driver without the option refuses it with a typed error", () => {
-  // smallFastModel is Claude-only. Codex and Gemini must not drop it silently:
+  // smallFastModel is Claude-only. Codex and fx must not drop it silently:
   // a host that passes it believes a small/fast model is pinned.
   const builders: readonly [string, () => unknown][] = [
     [
@@ -394,14 +393,6 @@ describe("a driver without the option refuses it with a typed error", () => {
       () =>
         new CodexCliDriver({
           model: "gpt-x",
-          smallFastModel: "claude-haiku-5-5",
-        } as never),
-    ],
-    [
-      "GeminiCliDriver",
-      () =>
-        new GeminiCliDriver({
-          model: "gemini-x",
           smallFastModel: "claude-haiku-5-5",
         } as never),
     ],

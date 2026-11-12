@@ -18,10 +18,6 @@ import {
   CodexSdkDriver,
   mapPolicyToCodexSdkThreadOptions,
 } from "../../src/agents/driver/codex-sdk.js";
-import {
-  GeminiCliDriver,
-  type GeminiCliSpawn,
-} from "../../src/agents/driver/gemini-cli.js";
 import { EXTERNAL_AGENT_NETWORK_UNENFORCEABLE } from "../../src/agents/driver/policy-errors.js";
 import type { ExternalAgentEvent } from "../../src/agents/events.js";
 import {
@@ -35,7 +31,6 @@ import {
   type PermissionRequest,
 } from "../../src/agents/permissions/confirmation.js";
 import type { ExternalAgentPermissionPolicy } from "../../src/agents/permissions/schema.js";
-import { GEMINI_CLI_PROVIDER } from "../../src/agents/provider/gemini-cli.js";
 import {
   CLAUDE_PROVIDER,
   CODEX_PROVIDER,
@@ -540,7 +535,7 @@ function runRequest(
   };
 }
 
-describe("Codex and Gemini CLI: read-only with allowNetwork", () => {
+describe("Codex: read-only with allowNetwork", () => {
   test("Codex SDK keeps the read-only sandbox and passes the web search mode through", () => {
     expect(mapPolicyToCodexSdkThreadOptions(READ_ONLY_NETWORK)).toMatchObject({
       sandboxMode: "read-only",
@@ -579,19 +574,6 @@ describe("Codex and Gemini CLI: read-only with allowNetwork", () => {
     );
     expect(runs).toHaveLength(1);
     expect(runs[0]).not.toContain('web_search="disabled"');
-  });
-
-  test("Gemini CLI runs read-only with the network in plan mode, sandboxed", async () => {
-    const { spawn, runs } = recordingSpawn();
-    const events = await collect(
-      new GeminiCliDriver({ spawn: spawn as GeminiCliSpawn }).run(
-        runRequest(READ_ONLY_NETWORK, GEMINI_CLI_PROVIDER),
-      ),
-    );
-    expect(events.find((event) => event.type === "error")).toBeUndefined();
-    expect(runs).toHaveLength(1);
-    expect(runs[0]).toContain("--approval-mode=plan");
-    expect(runs[0]).toContain("--sandbox");
   });
 });
 

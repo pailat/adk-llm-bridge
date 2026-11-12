@@ -9,7 +9,6 @@ import { CLAUDE_AGENT_DEFINITION } from "./claude-agent.js";
 import { CODEX_AGENT_DEFINITION } from "./codex-agent.js";
 import type { ExternalAgent } from "./external-agent.js";
 import { FX_AGENT_DEFINITION } from "./fx-agent.js";
-import { GEMINI_CLI_AGENT_DEFINITION } from "./gemini-cli-agent.js";
 
 /** A lookup table of agent definitions keyed by provider id, able to create agents from them. */
 export class ExternalAgentDefinitionRegistry {
@@ -75,14 +74,13 @@ export class ExternalAgentDefinitionRegistry {
 /**
  * Creates a registry of the built-in agent definitions.
  *
- * @returns A new registry holding the built-in Codex, Claude, Gemini CLI and fx
+ * @returns A new registry holding the built-in Codex, Claude and fx
  *   definitions.
  */
 export function createDefaultExternalAgentDefinitionRegistry(): ExternalAgentDefinitionRegistry {
   return new ExternalAgentDefinitionRegistry([
     CODEX_AGENT_DEFINITION,
     CLAUDE_AGENT_DEFINITION,
-    GEMINI_CLI_AGENT_DEFINITION,
     FX_AGENT_DEFINITION,
   ]);
 }

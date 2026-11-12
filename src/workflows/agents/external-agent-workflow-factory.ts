@@ -82,8 +82,7 @@ export interface ExternalAgentWorkflowFactoryOptions {
    * @remarks
    * A request without `config.model` fails with
    * `WORKFLOW_AGENT_MODEL_REQUIRED`, and so does a router or default alias of
-   * a built-in provider id (`claude`: `default`, `best`, `opusplan`;
-   * `gemini-cli`: `auto`, `auto-*`), which the factory checks itself. The
+   * a built-in provider id (`claude`: `default`, `best`, `opusplan`), which the factory checks itself. The
    * option is also forwarded to the driver. For a custom provider id the
    * factory cannot know the aliases: it relies on the driver refusing them,
    * and on the driver reporting a `model`.

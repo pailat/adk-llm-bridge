@@ -21,16 +21,11 @@ import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { ClaudeCliDriver } from "../../../src/agents/driver/claude-cli.js";
 import { CodexCliDriver } from "../../../src/agents/driver/codex-cli.js";
-import { GeminiCliDriver } from "../../../src/agents/driver/gemini-cli.js";
 import { resolveCliCommand } from "../../../src/agents/driver/subprocess-jsonl.js";
 import type { ExternalAgentEvent } from "../../../src/agents/events.js";
 import type { ExternalAgentRunRequest } from "../../../src/agents/external-agent-driver.js";
-import {
-  CLAUDE_PROVIDER,
-  CODEX_PROVIDER,
-  GEMINI_CLI_PROVIDER,
-} from "../../../src/agents/index.js";
-import { GEMINI_NETWORK_ON, noHostMcpServers } from "../helpers.js";
+import { CLAUDE_PROVIDER, CODEX_PROVIDER } from "../../../src/agents/index.js";
+import { noHostMcpServers } from "../helpers.js";
 
 type Tree = {
   root: string;
@@ -66,7 +61,7 @@ beforeEach(() => {
     markers: join(root, "markers"),
   };
   mkdirSync(tree.markers, { recursive: true });
-  for (const name of ["claude", "codex", "gemini"]) {
+  for (const name of ["claude", "codex"]) {
     fakeCli(tree.planted, name, join(tree.markers, `planted-${name}`));
   }
 });
@@ -90,7 +85,7 @@ async function collect(
   return events;
 }
 
-type Runtime = "claude" | "codex" | "gemini";
+type Runtime = "claude" | "codex";
 
 function runDriver(
   runtime: Runtime,
@@ -107,20 +102,10 @@ function runDriver(
       }),
     );
   }
-  if (runtime === "codex") {
-    return collect(
-      new CodexCliDriver({ env, listMcpServers: noHostMcpServers }).run({
-        provider: CODEX_PROVIDER,
-        context: { input: "hi" } as never,
-        ...request,
-      }),
-    );
-  }
   return collect(
-    new GeminiCliDriver({ env }).run({
-      provider: GEMINI_CLI_PROVIDER,
+    new CodexCliDriver({ env, listMcpServers: noHostMcpServers }).run({
+      provider: CODEX_PROVIDER,
       context: { input: "hi" } as never,
-      permissions: GEMINI_NETWORK_ON,
       ...request,
     }),
   );
@@ -129,44 +114,41 @@ function runDriver(
 const codeOf = (events: ExternalAgentEvent[]) =>
   events.find((event) => event.type === "error")?.code;
 
-describe.each(["claude", "codex", "gemini"] as const)(
-  "%s CLI lookup",
-  (runtime) => {
-    test("default workingDirectory: the planted binary does not run", async () => {
-      process.chdir(tree.workspace);
-      const events = await runDriver(
-        runtime,
-        [tree.planted, "/usr/bin", "/bin"].join(delimiter),
-        {},
-      );
-      expect(ran(`planted-${runtime}`)).toBe(false);
-      expect(codeOf(events)).toBe("MISSING_BINARY");
-    });
+describe.each(["claude", "codex"] as const)("%s CLI lookup", (runtime) => {
+  test("default workingDirectory: the planted binary does not run", async () => {
+    process.chdir(tree.workspace);
+    const events = await runDriver(
+      runtime,
+      [tree.planted, "/usr/bin", "/bin"].join(delimiter),
+      {},
+    );
+    expect(ran(`planted-${runtime}`)).toBe(false);
+    expect(codeOf(events)).toBe("MISSING_BINARY");
+  });
 
-    test("workingDirectory === process.cwd(): the planted binary does not run", async () => {
-      process.chdir(tree.workspace);
-      const events = await runDriver(
-        runtime,
-        [tree.planted, "/usr/bin", "/bin"].join(delimiter),
-        { workingDirectory: process.cwd() },
-      );
-      expect(ran(`planted-${runtime}`)).toBe(false);
-      expect(codeOf(events)).toBe("MISSING_BINARY");
-    });
+  test("workingDirectory === process.cwd(): the planted binary does not run", async () => {
+    process.chdir(tree.workspace);
+    const events = await runDriver(
+      runtime,
+      [tree.planted, "/usr/bin", "/bin"].join(delimiter),
+      { workingDirectory: process.cwd() },
+    );
+    expect(ran(`planted-${runtime}`)).toBe(false);
+    expect(codeOf(events)).toBe("MISSING_BINARY");
+  });
 
-    test("a later PATH entry outside the workspace is used", async () => {
-      addSafe(runtime);
-      const events = await runDriver(
-        runtime,
-        [tree.planted, tree.safe].join(delimiter),
-        { workingDirectory: tree.workspace },
-      );
-      expect(ran(`planted-${runtime}`)).toBe(false);
-      expect(ran(`safe-${runtime}`)).toBe(true);
-      expect(codeOf(events)).toBeUndefined();
-    });
-  },
-);
+  test("a later PATH entry outside the workspace is used", async () => {
+    addSafe(runtime);
+    const events = await runDriver(
+      runtime,
+      [tree.planted, tree.safe].join(delimiter),
+      { workingDirectory: tree.workspace },
+    );
+    expect(ran(`planted-${runtime}`)).toBe(false);
+    expect(ran(`safe-${runtime}`)).toBe(true);
+    expect(codeOf(events)).toBeUndefined();
+  });
+});
 
 describe("resolveCliCommand", () => {
   const request = () => ({ workingDirectory: tree.workspace });

@@ -12,10 +12,8 @@ import {
   type ExternalAgentRunRequest,
   FX_PROVIDER,
   FxCliDriver,
-  GEMINI_CLI_PROVIDER,
-  GeminiCliDriver,
 } from "../../../src/agents/index.js";
-import { GEMINI_NETWORK_ON, noHostMcpServers } from "../helpers.js";
+import { noHostMcpServers } from "../helpers.js";
 
 const CODE = "EXTERNAL_AGENT_SESSIONS_UNSUPPORTED";
 
@@ -88,14 +86,6 @@ function codexCli(): Built {
       spawn: emptyProcess(counter),
       env: {},
     }),
-    started: () => counter.spawned,
-    resumed: () => [],
-  };
-}
-function geminiCli(): Built {
-  const counter = { spawned: 0 };
-  return {
-    driver: new GeminiCliDriver({ spawn: emptyProcess(counter), env: {} }),
     started: () => counter.spawned,
     resumed: () => [],
   };
@@ -193,7 +183,6 @@ function claudeSdk(): Built {
 const REFUSING: [string, () => Built, ExternalAgentRunRequest["provider"]][] = [
   ["ClaudeCliDriver", claudeCli, CLAUDE_PROVIDER],
   ["CodexCliDriver", codexCli, CODEX_PROVIDER],
-  ["GeminiCliDriver", geminiCli, GEMINI_CLI_PROVIDER],
   ["FxCliDriver (persistSession: false)", fxCliStateless, FX_PROVIDER],
 ];
 
@@ -205,7 +194,6 @@ const ALL: [string, () => Built, ExternalAgentRunRequest["provider"]][] = [
 ];
 
 function permissionsFor(provider: ExternalAgentRunRequest["provider"]) {
-  if (provider === GEMINI_CLI_PROVIDER) return GEMINI_NETWORK_ON;
   // fx refuses read-only.
   if (provider === FX_PROVIDER) {
     return { mode: "ask", allowNetwork: true } as const;
@@ -298,6 +286,6 @@ describe("sessions rule", () => {
       ([, build]) => build().driver.capabilities?.().sessions,
     );
     expect(flags.filter((flag) => flag === true)).toHaveLength(3);
-    expect(flags.filter((flag) => flag !== true)).toHaveLength(3);
+    expect(flags.filter((flag) => flag !== true)).toHaveLength(2);
   });
 });

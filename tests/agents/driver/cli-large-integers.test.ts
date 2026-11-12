@@ -7,7 +7,6 @@
 import { describe, expect, test } from "bun:test";
 import { ClaudeCliDriver } from "../../../src/agents/driver/claude-cli.js";
 import { CodexCliDriver } from "../../../src/agents/driver/codex-cli.js";
-import { GeminiCliDriver } from "../../../src/agents/driver/gemini-cli.js";
 import { SubprocessJsonlDriver } from "../../../src/agents/driver/subprocess-jsonl.js";
 import type { ExternalAgentEvent } from "../../../src/agents/events.js";
 import { CLAUDE_PROVIDER } from "../../../src/agents/index.js";
@@ -69,14 +68,6 @@ describe("CLI drivers keep large integers exact", () => {
       `{"type":"item.completed","item":{"id":"c1","type":"mcp_tool_call","tool":"get","arguments":{},"result":{"ticketId":${BIG}}}}`,
     );
     expect(JSON.stringify(completed)).toContain(`"${BIG}"`);
-  });
-
-  test("Gemini keeps a tool_use parameter ID", () => {
-    expect(
-      new GeminiCliDriver().parseGeminiLine(
-        `{"type":"tool_use","tool_name":"read_file","tool_id":"a1","parameters":{"ticketId":${BIG}}}`,
-      ),
-    ).toMatchObject({ type: "tool_call", input: { ticketId: BIG } });
   });
 
   test("SubprocessJsonlDriver parseLine keeps a tool input ID", () => {

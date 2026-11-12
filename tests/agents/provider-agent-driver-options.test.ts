@@ -8,9 +8,9 @@ import {
   CodexAgent,
   CodexCliDriver,
   CodexSdkDriver,
-  GeminiCliAgent,
-  GeminiCliDriver,
-  type GeminiCliSpawn,
+  FxAgent,
+  FxCliDriver,
+  type FxCliSpawn,
   PlaceholderExternalAgentDriver,
 } from "../../src/agents/index.js";
 
@@ -53,18 +53,23 @@ describe("provider agents pass driverOptions to their default driver", () => {
     expect(agent.driver.model).toBe("gpt-5-codex");
   });
 
-  test("GeminiCliAgent builds the CLI driver with the given options", () => {
+  test("FxAgent builds the CLI driver with the given options", () => {
     const spawned: string[] = [];
-    const spawn: GeminiCliSpawn = (command) => {
+    const spawn: FxCliSpawn = (command) => {
       spawned.push(command);
       throw new Error("not spawned in tests");
     };
-    const agent = new GeminiCliAgent({
-      name: "gemini",
-      driverOptions: { command: "my-gemini", spawn, killGraceMs: 250 },
+    const agent = new FxAgent({
+      name: "fx",
+      driverOptions: {
+        command: "my-fx",
+        model: "anthropic/claude-haiku-4-5",
+        spawn,
+        killGraceMs: 250,
+      },
     });
 
-    expect(agent.driver).toBeInstanceOf(GeminiCliDriver);
+    expect(agent.driver).toBeInstanceOf(FxCliDriver);
   });
 
   test("without driverOptions the default driver is used", () => {
@@ -72,9 +77,12 @@ describe("provider agents pass driverOptions to their default driver", () => {
       ClaudeAgentSdkDriver,
     );
     expect(new CodexAgent({ name: "b" }).driver).toBeInstanceOf(CodexSdkDriver);
-    expect(new GeminiCliAgent({ name: "c" }).driver).toBeInstanceOf(
-      GeminiCliDriver,
-    );
+    expect(
+      new FxAgent({
+        name: "c",
+        driverOptions: { model: "anthropic/claude-haiku-4-5" },
+      }).driver,
+    ).toBeInstanceOf(FxCliDriver);
   });
 
   test("the placeholder driver reports EXTERNAL_AGENT_NOT_CONFIGURED, not recoverable", async () => {
@@ -115,9 +123,9 @@ describe("provider agents pass driverOptions to their default driver", () => {
     ).toThrow(InputValidationError);
     expect(
       () =>
-        new GeminiCliAgent({
+        new FxAgent({
           name: "c",
-          driver: new PlaceholderExternalAgentDriver("gemini-cli"),
+          driver: new PlaceholderExternalAgentDriver("fx"),
           driverOptions: {},
         }),
     ).toThrow(InputValidationError);
@@ -148,7 +156,7 @@ describe("provider agents pass driverOptions to their default driver", () => {
 
 describe("driver option validation", () => {
   test("CLI drivers reject an empty command and an invalid kill grace", () => {
-    for (const Driver of [ClaudeCliDriver, CodexCliDriver, GeminiCliDriver]) {
+    for (const Driver of [ClaudeCliDriver, CodexCliDriver]) {
       expect(() => new Driver({ command: "" })).toThrow(InputValidationError);
       expect(() => new Driver({ command: "  " })).toThrow(InputValidationError);
       expect(() => new Driver({ killGraceMs: Number.NaN })).toThrow(

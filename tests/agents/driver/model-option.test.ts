@@ -12,10 +12,6 @@ import { ClaudeCliDriver } from "../../../src/agents/driver/claude-cli.js";
 import { CodexCliDriver } from "../../../src/agents/driver/codex-cli.js";
 import { CodexSdkDriver } from "../../../src/agents/driver/codex-sdk.js";
 import {
-  GeminiCliDriver,
-  type GeminiCliSpawn,
-} from "../../../src/agents/driver/gemini-cli.js";
-import {
   EXTERNAL_AGENT_MODEL_INVALID,
   EXTERNAL_AGENT_MODEL_REQUIRED,
   ExternalAgentPolicyError,
@@ -25,22 +21,15 @@ import {
   CODEX_PROVIDER,
   type ExternalAgentDriver,
   type ExternalAgentRunRequest,
-  GEMINI_CLI_PROVIDER,
 } from "../../../src/agents/index.js";
 
-type DriverKind =
-  | "claude-sdk"
-  | "claude-cli"
-  | "codex-sdk"
-  | "codex-cli"
-  | "gemini";
+type DriverKind = "claude-sdk" | "claude-cli" | "codex-sdk" | "codex-cli";
 
 const KINDS: readonly DriverKind[] = [
   "claude-sdk",
   "claude-cli",
   "codex-sdk",
   "codex-cli",
-  "gemini",
 ];
 
 interface ModelOptions {
@@ -69,8 +58,6 @@ function build(kind: DriverKind, options: ModelOptions): ExternalAgentDriver {
       return new CodexSdkDriver(config);
     case "codex-cli":
       return new CodexCliDriver(config);
-    case "gemini":
-      return new GeminiCliDriver(config);
   }
 }
 
@@ -83,23 +70,6 @@ function request(
     instruction: "say hi",
     permissions: { mode: "ask", allowNetwork: true },
   };
-}
-
-async function geminiArgv(driver: GeminiCliDriver): Promise<readonly string[]> {
-  let argv: readonly string[] = [];
-  const spawn: GeminiCliSpawn = (_command, args) => {
-    argv = args;
-    return { stdout: [], exited: Promise.resolve(0) };
-  };
-  const withSpawn = new GeminiCliDriver({
-    spawn,
-    model: driver.model,
-    env: { PATH: "/usr/bin:/bin" },
-  });
-  for await (const _ of withSpawn.run(request(GEMINI_CLI_PROVIDER))) {
-    // drain
-  }
-  return argv;
 }
 
 /** What the driver sends for its model: a CLI flag or an SDK option. */
@@ -141,13 +111,6 @@ async function sentModel(
       const argv = (driver as CodexCliDriver).buildArgs(
         request(CODEX_PROVIDER),
       );
-      return {
-        flags: argv.filter((arg) => arg.startsWith("--model")),
-        hasOption: false,
-      };
-    }
-    case "gemini": {
-      const argv = await geminiArgv(driver as GeminiCliDriver);
       return {
         flags: argv.filter((arg) => arg.startsWith("--model")),
         hasOption: false,
@@ -242,7 +205,6 @@ describe("router and default aliases under requireExplicitModel", () => {
     "opusplan[1m]",
     "OpusPlan",
   ];
-  const GEMINI_ALIASES = ["auto", "AUTO", "auto-x", "Auto-Gemini-3"];
 
   for (const kind of ["claude-sdk", "claude-cli"] as const) {
     for (const alias of CLAUDE_ALIASES) {
@@ -262,22 +224,6 @@ describe("router and default aliases under requireExplicitModel", () => {
       });
     }
   }
-
-  for (const alias of GEMINI_ALIASES) {
-    test(`gemini refuses ${alias}`, () => {
-      const error = refusal(() =>
-        build("gemini", { model: alias, requireExplicitModel: true }),
-      );
-      expect(error.code).toBe(EXTERNAL_AGENT_MODEL_REQUIRED);
-    });
-  }
-
-  test("gemini accepts an id that only contains auto", () => {
-    expect(
-      build("gemini", { model: "gemini-auto-2", requireExplicitModel: true })
-        .model,
-    ).toBe("gemini-auto-2");
-  });
 
   test("the Codex drivers have no router alias", () => {
     for (const kind of ["codex-sdk", "codex-cli"] as const) {
@@ -299,9 +245,6 @@ describe("router and default aliases under requireExplicitModel", () => {
       expect(build("claude-cli", { model: alias }).model).toBe(alias);
       expect(build("claude-sdk", { model: alias }).model).toBe(alias);
     }
-    for (const alias of GEMINI_ALIASES) {
-      expect(build("gemini", { model: alias }).model).toBe(alias);
-    }
   });
 });
 
@@ -311,6 +254,5 @@ describe("reportsResolvedModel", () => {
     expect(build("claude-cli", {}).reportsResolvedModel).toBe(true);
     expect(build("codex-sdk", {}).reportsResolvedModel).toBe(false);
     expect(build("codex-cli", {}).reportsResolvedModel).toBe(false);
-    expect(build("gemini", {}).reportsResolvedModel).toBe(false);
   });
 });

@@ -16,7 +16,7 @@ import { CODEX_PROVIDER } from "./provider/codex.js";
  * credentials.
  *
  * @remarks
- * Like the Claude and Gemini CLI agents, it reads credentials with an
+ * Like the Claude and fx agents, it reads credentials with an
  * {@link EnvCredentialProvider}, which copies only the provider's
  * `envAllowlist` (for example `CODEX_API_KEY`) from `process.env`.
  */

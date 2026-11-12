@@ -10,8 +10,8 @@ import {
   createExternalAgent,
   createExternalAgentConfig,
   type ExternalAgentDefinition,
-  GEMINI_CLI_AGENT_DEFINITION,
-  GeminiCliDriver,
+  FX_AGENT_DEFINITION,
+  FxCliDriver,
   PlaceholderExternalAgentDriver,
 } from "../../src/agents/index.js";
 
@@ -25,9 +25,11 @@ describe("definitions build their driver from driverOptions", () => {
     expect(CODEX_AGENT_DEFINITION.createDriver?.()).toBeInstanceOf(
       CodexSdkDriver,
     );
-    expect(GEMINI_CLI_AGENT_DEFINITION.createDriver?.()).toBeInstanceOf(
-      GeminiCliDriver,
-    );
+    expect(
+      FX_AGENT_DEFINITION.createDriver?.({
+        model: "anthropic/claude-haiku-4-5",
+      }),
+    ).toBeInstanceOf(FxCliDriver);
   });
 
   test("registry.create() applies driverOptions", () => {

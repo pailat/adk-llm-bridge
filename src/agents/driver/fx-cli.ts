@@ -255,7 +255,7 @@ export interface FxCliDriverConfig {
   command?: string;
   /**
    * Runs fx as `<interpreter> <entry> <flags>` instead of `command`. See
-   * `GeminiCliDriverConfig.interpreter` for the security invariants, which
+   * `ClaudeCliDriverConfig.interpreter` for the security invariants, which
    * apply unchanged.
    *
    * @defaultValue unset: the driver runs `command`

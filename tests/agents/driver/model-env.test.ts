@@ -11,10 +11,8 @@ import { ClaudeAgentSdkDriver } from "../../../src/agents/driver/claude-agent-sd
 import { ClaudeCliDriver } from "../../../src/agents/driver/claude-cli.js";
 import { CodexCliDriver } from "../../../src/agents/driver/codex-cli.js";
 import { CodexSdkDriver } from "../../../src/agents/driver/codex-sdk.js";
-import { GeminiCliDriver } from "../../../src/agents/driver/gemini-cli.js";
 import {
   CODEX_MODEL_ENV,
-  GEMINI_MODEL_ENV,
   isClaudeModelEnv,
 } from "../../../src/agents/driver/model.js";
 
@@ -37,7 +35,6 @@ import {
   type ExternalAgentDriver,
   type ExternalAgentEvent,
   type ExternalAgentRunRequest,
-  GEMINI_CLI_PROVIDER,
 } from "../../../src/agents/index.js";
 import type { ExternalAgentProviderDefinition } from "../../../src/agents/provider/schema.js";
 
@@ -122,21 +119,6 @@ function codexCli(): Harness {
   };
 }
 
-function gemini(): Harness {
-  let called = false;
-  return {
-    provider: GEMINI_CLI_PROVIDER,
-    started: () => called,
-    driver: new GeminiCliDriver({
-      env: { PATH: "/usr/bin:/bin" },
-      spawn: () => {
-        called = true;
-        throw new Error("spawn must not run");
-      },
-    }),
-  };
-}
-
 const CASES: readonly {
   name: string;
   build: () => Harness;
@@ -146,7 +128,6 @@ const CASES: readonly {
   { name: "ClaudeCliDriver", build: claudeCli, names: CLAUDE_MODEL_ENV },
   { name: "CodexSdkDriver", build: codexSdk, names: CODEX_MODEL_ENV },
   { name: "CodexCliDriver", build: codexCli, names: CODEX_MODEL_ENV },
-  { name: "GeminiCliDriver", build: gemini, names: GEMINI_MODEL_ENV },
 ];
 
 async function collect(
@@ -219,18 +200,12 @@ describe("a model variable in the run's environment is refused", () => {
 });
 
 describe("the built-in providers forward no model variable", () => {
-  for (const provider of [
-    CLAUDE_PROVIDER,
-    CODEX_PROVIDER,
-    GEMINI_CLI_PROVIDER,
-  ]) {
+  for (const provider of [CLAUDE_PROVIDER, CODEX_PROVIDER]) {
     test(provider.id, () => {
       const forwarded = (provider.envAllowlist ?? []).filter(
         (name) =>
           isClaudeModelEnv(name) ||
-          [...CODEX_MODEL_ENV, ...GEMINI_MODEL_ENV].includes(
-            name.toUpperCase(),
-          ),
+          CODEX_MODEL_ENV.includes(name.toUpperCase()),
       );
       expect(forwarded).toEqual([]);
     });
@@ -244,10 +219,9 @@ describe("the model env tables", () => {
     }
   });
 
-  test("the Codex and Gemini tables list the reviewed variables", () => {
+  test("the Codex table lists the reviewed variables", () => {
     expect([...CODEX_MODEL_ENV].sort()).toEqual(
       ["CODEX_OSS_BASE_URL", "CODEX_OSS_PORT", "OPENAI_BASE_URL"].sort(),
     );
-    expect([...GEMINI_MODEL_ENV]).toEqual(["GEMINI_MODEL"]);
   });
 });

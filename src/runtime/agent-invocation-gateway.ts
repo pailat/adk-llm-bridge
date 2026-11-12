@@ -282,7 +282,7 @@ export interface AgentInvocationModels {
   unexpected?: string[];
   /**
    * Whether any run was not fully explicit and reported. An external run that
-   * reported no `used` (Codex, Gemini, or a Claude run with no model usage)
+   * reported no `used` (Codex, or a Claude run with no model usage)
    * also makes it `true`: its helper models are not known.
    */
   unknown: boolean;

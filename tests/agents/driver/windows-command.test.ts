@@ -20,11 +20,9 @@ import {
 import { resolveCliCommand } from "../../../src/agents/driver/subprocess-jsonl.js";
 import type { ExternalAgentRunRequest } from "../../../src/agents/index.js";
 import {
+  CLAUDE_PROVIDER,
   ClaudeCliDriver,
   CodexCliDriver,
-  GEMINI_CLI_PROVIDER,
-  GeminiCliDriver,
-  type GeminiCliSpawn,
 } from "../../../src/agents/index.js";
 
 /** A Windows file system with only these files. */
@@ -47,15 +45,15 @@ function code(run: () => unknown): unknown {
 
 describe("resolveWindowsCommand", () => {
   test("a bare name resolves to the first .exe on PATH", () => {
-    const fs = host(["C:\\tools\\gemini.exe"]);
+    const fs = host(["C:\\tools\\codex.exe"]);
 
-    expect(resolveWindowsCommand("gemini", fs)).toBe("C:\\tools\\gemini.exe");
+    expect(resolveWindowsCommand("codex", fs)).toBe("C:\\tools\\codex.exe");
   });
 
   test("an npm shim ahead of the .exe is skipped: the native file wins", () => {
-    const fs = host(["C:\\shims\\gemini.cmd", "C:\\tools\\gemini.exe"]);
+    const fs = host(["C:\\shims\\codex.cmd", "C:\\tools\\codex.exe"]);
 
-    expect(resolveWindowsCommand("gemini", fs)).toBe("C:\\tools\\gemini.exe");
+    expect(resolveWindowsCommand("codex", fs)).toBe("C:\\tools\\codex.exe");
   });
 
   test("only a .cmd or .bat on PATH is a refusal, not a missing binary", () => {
@@ -68,12 +66,12 @@ describe("resolveWindowsCommand", () => {
 
   test("an explicit batch path is refused without looking at the disk", () => {
     for (const command of [
-      "C:\\npm\\gemini.cmd",
-      "gemini.CMD",
+      "C:\\npm\\codex.cmd",
+      "codex.CMD",
       "tool.bat",
-      "C:\\npm\\gemini.cmd.",
-      "C:\\npm\\gemini.cmd ",
-      "./gemini.cmd",
+      "C:\\npm\\codex.cmd.",
+      "C:\\npm\\codex.cmd ",
+      "./codex.cmd",
     ]) {
       expect(code(() => resolveWindowsCommand(command, host([])))).toBe(
         "EXTERNAL_AGENT_BATCH_COMMAND_REFUSED",
@@ -99,19 +97,17 @@ describe("resolveWindowsCommand", () => {
   });
 
   test("nothing found is ENOENT, so the driver reports a missing binary", () => {
-    expect(code(() => resolveWindowsCommand("gemini", host([])))).toBe(
-      "ENOENT",
-    );
-    expect(code(() => resolveWindowsCommand("C:\\x\\gemini", host([])))).toBe(
+    expect(code(() => resolveWindowsCommand("codex", host([])))).toBe("ENOENT");
+    expect(code(() => resolveWindowsCommand("C:\\x\\codex", host([])))).toBe(
       "ENOENT",
     );
   });
 
   test("the working directory is not searched", () => {
-    // `gemini.exe` next to the host process does not count, only PATH.
+    // `codex.exe` next to the host process does not count, only PATH.
     expect(
       code(() =>
-        resolveWindowsCommand("gemini", host(["gemini.exe", ".\\gemini.exe"])),
+        resolveWindowsCommand("codex", host(["codex.exe", ".\\codex.exe"])),
       ),
     ).toBe("ENOENT");
   });
@@ -119,11 +115,11 @@ describe("resolveWindowsCommand", () => {
   test("the PATH variable is found in any letter case, and quoted entries work", () => {
     const fs = {
       env: { PATH: '"C:\\Program Files\\g";C:\\x' },
-      exists: (path: string) => path === "C:\\Program Files\\g\\gemini.exe",
+      exists: (path: string) => path === "C:\\Program Files\\g\\codex.exe",
     };
 
-    expect(resolveWindowsCommand("gemini", fs)).toBe(
-      "C:\\Program Files\\g\\gemini.exe",
+    expect(resolveWindowsCommand("codex", fs)).toBe(
+      "C:\\Program Files\\g\\codex.exe",
     );
   });
 });
@@ -135,12 +131,12 @@ describe("resolveWindowsCommand returns absolute paths only", () => {
   };
 
   test("relative PATH entries are skipped", () => {
-    expect(resolveWindowsCommand("gemini", everything)).toBe(
-      "C:\\tools\\gemini.com",
+    expect(resolveWindowsCommand("codex", everything)).toBe(
+      "C:\\tools\\codex.com",
     );
     expect(
       code(() =>
-        resolveWindowsCommand("gemini", {
+        resolveWindowsCommand("codex", {
           env: { Path: ".;bin;node_modules\\.bin" },
           exists: () => true,
         }),
@@ -470,11 +466,11 @@ describe("spawnSubprocess on Windows", () => {
   }
 
   test("spawns the resolved .exe, on the Node path and on the Bun path", () => {
-    const fs = host(["C:\\tools\\gemini.exe"]);
+    const fs = host(["C:\\tools\\codex.exe"]);
     const node = spy();
     expect(() =>
       spawnSubprocess(
-        "gemini",
+        "codex",
         ["-p", "a & b"],
         { env: fs.env },
         {
@@ -485,12 +481,12 @@ describe("spawnSubprocess on Windows", () => {
         },
       ),
     ).toThrow("stop here");
-    expect(node.calls).toEqual([["C:\\tools\\gemini.exe", ["-p", "a & b"]]]);
+    expect(node.calls).toEqual([["C:\\tools\\codex.exe", ["-p", "a & b"]]]);
 
     const bunCalls: string[][] = [];
     expect(() =>
       spawnSubprocess(
-        "gemini",
+        "codex",
         ["-p", "a & b"],
         { env: fs.env },
         {
@@ -505,11 +501,11 @@ describe("spawnSubprocess on Windows", () => {
         },
       ),
     ).toThrow("stop here");
-    expect(bunCalls).toEqual([["C:\\tools\\gemini.exe", "-p", "a & b"]]);
+    expect(bunCalls).toEqual([["C:\\tools\\codex.exe", "-p", "a & b"]]);
   });
 
   test("a .cmd shim never reaches either spawn", () => {
-    const fs = host(["C:\\shims\\gemini.cmd"]);
+    const fs = host(["C:\\shims\\codex.cmd"]);
     const node = spy();
     let bunCalled = false;
 
@@ -525,7 +521,7 @@ describe("spawnSubprocess on Windows", () => {
       expect(
         code(() =>
           spawnSubprocess(
-            "gemini",
+            "codex",
             ["-p", "x"],
             { env: fs.env },
             {
@@ -547,7 +543,7 @@ describe("spawnSubprocess on Windows", () => {
 
     expect(() =>
       spawnSubprocess(
-        "gemini",
+        "codex",
         [],
         {},
         {
@@ -560,16 +556,12 @@ describe("spawnSubprocess on Windows", () => {
         },
       ),
     ).toThrow("stop here");
-    expect(node.calls).toEqual([["gemini", []]]);
+    expect(node.calls).toEqual([["codex", []]]);
   });
 });
 
 describe("the CLI drivers on Windows with only a .cmd shim on PATH", () => {
-  const fs = host([
-    "C:\\shims\\gemini.cmd",
-    "C:\\shims\\claude.cmd",
-    "C:\\shims\\codex.cmd",
-  ]);
+  const fs = host(["C:\\shims\\claude.cmd", "C:\\shims\\codex.cmd"]);
   const nodeSpawn: NodeSpawnLike = () => {
     throw new Error("a shim must never be spawned");
   };
@@ -587,16 +579,15 @@ describe("the CLI drivers on Windows with only a .cmd shim on PATH", () => {
 
   function request(allowNetwork: boolean): ExternalAgentRunRequest {
     return {
-      provider: GEMINI_CLI_PROVIDER,
+      provider: CLAUDE_PROVIDER,
       context: {} as ExternalAgentRunRequest["context"],
       instruction: "say hello",
       permissions: { mode: "ask", allowNetwork },
     };
   }
 
-  // Gemini refuses a run with the network off before it spawns anything, so
-  // only the other two have a network-off run that reaches the spawn. Codex
-  // lists its MCP servers first in that case, through the same spawn.
+  // Both drivers have a network-off run that reaches the spawn. Codex lists
+  // its MCP servers first in that case, through the same spawn.
   const cases: Array<
     [
       string,
@@ -605,12 +596,6 @@ describe("the CLI drivers on Windows with only a .cmd shim on PATH", () => {
       RegExp,
     ]
   > = [
-    [
-      "gemini",
-      () => new GeminiCliDriver({ spawn: spawn as never }),
-      true,
-      /`interpreter`.*`entry`/,
-    ],
     [
       "claude",
       () => new ClaudeCliDriver({ spawn: spawn as never }),
@@ -671,36 +656,6 @@ describe("the CLI drivers on Windows with only a .cmd shim on PATH", () => {
   });
 });
 
-describe("the documented Gemini route: a custom spawn that runs node", () => {
-  test("the driver's command and arguments are rerouted through process.execPath", async () => {
-    const entry =
-      "C:\\npm\\node_modules\\@google\\gemini-cli\\bundle\\gemini.js";
-    const started: Array<[string, readonly string[]]> = [];
-    // The example from docs/external-agent-isolation.md, with the real
-    // process start replaced by a fake.
-    const spawn: GeminiCliSpawn = (_command, args) => {
-      started.push([process.execPath, [entry, ...args]]);
-      return { exited: Promise.resolve(0), stdout: null, stderr: null };
-    };
-    const driver = new GeminiCliDriver({ spawn });
-
-    const events = [];
-    for await (const event of driver.run({
-      provider: GEMINI_CLI_PROVIDER,
-      context: {} as ExternalAgentRunRequest["context"],
-      instruction: "say hello",
-      permissions: { mode: "ask", allowNetwork: true },
-    })) {
-      events.push(event);
-    }
-
-    expect(started).toHaveLength(1);
-    expect(started[0]?.[0]).toBe(process.execPath);
-    expect(started[0]?.[1][0]).toBe(entry);
-    expect(events.some((event) => event.type === "error")).toBe(false);
-  });
-});
-
 // Runs on the Windows CI job only: a real `.cmd` that records its own run.
 describe.skipIf(process.platform !== "win32")(
   "a real fake .cmd on PATH (Windows)",
@@ -717,7 +672,6 @@ describe.skipIf(process.platform !== "win32")(
     }
 
     for (const [name, make] of [
-      ["gemini", () => new GeminiCliDriver({})],
       ["claude", () => new ClaudeCliDriver({})],
       ["codex", () => new CodexCliDriver({})],
     ] as const) {
@@ -731,7 +685,7 @@ describe.skipIf(process.platform !== "win32")(
         try {
           const events = [];
           for await (const event of make().run({
-            provider: GEMINI_CLI_PROVIDER,
+            provider: CLAUDE_PROVIDER,
             context: {} as ExternalAgentRunRequest["context"],
             instruction: "x & echo injected> injected.txt",
             workingDirectory: work,

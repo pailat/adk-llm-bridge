@@ -206,7 +206,7 @@ export class PlaceholderExternalAgentDriver implements ExternalAgentDriver {
       type: "error",
       code: EXTERNAL_AGENT_NOT_CONFIGURED,
       message:
-        "No external agent driver is configured. Pass a `driver` to the ExternalAgent, or use a provider agent (CodexAgent, ClaudeAgent, GeminiCliAgent), which builds its own.",
+        "No external agent driver is configured. Pass a `driver` to the ExternalAgent, or use a provider agent (CodexAgent, ClaudeAgent, FxAgent), which builds its own.",
       recoverable: false,
     };
   }

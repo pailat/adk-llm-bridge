@@ -49,7 +49,7 @@ export interface ExternalAgentPermissionPolicy {
    *
    * @remarks
    * `ClaudeAgentSdkDriver` checks every tool call against them. The Claude
-   * CLI, Codex and Gemini CLI drivers run file tools without asking the
+   * CLI, Codex and fx drivers run file tools without asking the
    * bridge, so they refuse a run with `allowedPaths` (or inherited
    * `pathBounds`) with `EXTERNAL_AGENT_PATHS_UNENFORCEABLE` unless built with
    * `allowUnenforcedPaths: true`.
@@ -64,7 +64,7 @@ export interface ExternalAgentPermissionPolicy {
    *
    * @remarks
    * A call to a known read tool (Claude Code `Read`, `Glob`, `Grep`, `LS`,
-   * `NotebookRead`; Gemini CLI `read_file`, `read_many_files`,
+   * `NotebookRead`; the known `read_file`, `read_many_files`,
    * `list_directory`, `glob`, `grep_search`, `search_file_content`; names
    * matched exactly) may target a path under `allowedPaths` or under these
    * roots. Every other tool, an unknown one included, counts as a write and

@@ -9,7 +9,7 @@ import {
   ClaudeAgent,
   CodexAgent,
   ExternalAgent,
-  GeminiCliAgent,
+  FxAgent,
 } from "../../src/agents/index.js";
 import { CLAUDE_PROVIDER } from "../../src/agents/provider/schema.js";
 
@@ -30,14 +30,15 @@ function codeOf(fn: () => unknown): { code?: string; message: string } {
 }
 
 describe("tools on a driver that cannot host them", () => {
-  test("CodexAgent, GeminiCliAgent, a Claude CLI agent and a Codex SDK agent refuse tools", () => {
+  test("CodexAgent, FxAgent, a Claude CLI agent and a Codex SDK agent refuse tools", () => {
     const cases: Array<[string, () => unknown]> = [
       ["CodexSdkDriver", () => new CodexAgent({ name: "c", tools: [weather] })],
       [
-        "GeminiCliDriver",
+        "FxCliDriver",
         () =>
-          new GeminiCliAgent({
+          new FxAgent({
             name: "g",
+            driverOptions: { model: "anthropic/claude-haiku-4-5" },
             tools: [weather],
             permissions: { mode: "ask", allowNetwork: true },
           }),

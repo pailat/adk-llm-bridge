@@ -7,14 +7,14 @@ import { ClaudeAgentSdkDriver } from "../../src/agents/driver/claude-agent-sdk.j
 import { ClaudeCliDriver } from "../../src/agents/driver/claude-cli.js";
 import { CodexCliDriver } from "../../src/agents/driver/codex-cli.js";
 import { CodexSdkDriver } from "../../src/agents/driver/codex-sdk.js";
-import { GeminiCliDriver } from "../../src/agents/driver/gemini-cli.js";
+import { FxCliDriver } from "../../src/agents/driver/fx-cli.js";
 import {
   ClaudeAgent,
   CodexAgent,
   ExternalAgent,
   type ExternalAgentConfirmationOptions,
   type ExternalAgentDriver,
-  GeminiCliAgent,
+  FxAgent,
 } from "../../src/agents/index.js";
 import { CLAUDE_PROVIDER } from "../../src/agents/provider/schema.js";
 
@@ -42,7 +42,10 @@ const NON_APPROVING: Array<[string, () => ExternalAgentDriver]> = [
   ["ClaudeCliDriver", () => new ClaudeCliDriver()],
   ["CodexCliDriver", () => new CodexCliDriver()],
   ["CodexSdkDriver", () => new CodexSdkDriver()],
-  ["GeminiCliDriver", () => new GeminiCliDriver()],
+  [
+    "FxCliDriver",
+    () => new FxCliDriver({ model: "anthropic/claude-haiku-4-5" }),
+  ],
 ];
 
 describe("approvals capability", () => {
@@ -73,8 +76,9 @@ describe("approvals capability", () => {
     expect(
       codeOf(
         () =>
-          new GeminiCliAgent({
+          new FxAgent({
             name: "g",
+            driverOptions: { model: "anthropic/claude-haiku-4-5" },
             confirmation: { adk: true },
             permissions: { mode: "ask", allowNetwork: true },
           }),
@@ -169,7 +173,11 @@ describe("approvals capability", () => {
       ["claude-cli", new ClaudeCliDriver(), "claude-cli.ts"],
       ["codex-cli", new CodexCliDriver(), "codex-cli.ts"],
       ["codex-sdk", new CodexSdkDriver(), "codex-sdk.ts"],
-      ["gemini-cli", new GeminiCliDriver(), "gemini-cli.ts"],
+      [
+        "fx-cli",
+        new FxCliDriver({ model: "anthropic/claude-haiku-4-5" }),
+        "fx-cli.ts",
+      ],
     ];
     for (const [name, driver, file] of drivers) {
       const source = readFileSync(

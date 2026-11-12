@@ -25,7 +25,7 @@ export interface ExternalAgentStartedEvent {
   model?: string;
   /**
    * Set when the runtime may route this run's turns to a model other than
-   * the requested one (Gemini CLI plan mode, the read-only mapping). The
+   * the requested one (for example a planning mode with its own router). The
    * run's model status is then `unsupported`.
    */
   modelRouting?: "plan-mode";
@@ -74,8 +74,7 @@ export interface ExternalAgentModelInfo {
    * `usage.byModel`; a run with one billed model has no `byModel`, so a
    * driver that sets `reportsResolvedModel: true` contributes the model of
    * its `completed` event instead, unless that model came from the start of
-   * the run (`modelFromInit`). Absent when neither exists (Codex, Gemini,
-   * a run whose runtime reported no model usage), never an empty guess.
+   * the run (`modelFromInit`). Absent when neither exists (Codex, a run whose runtime reported no model usage), never an empty guess.
    */
   used?: string[];
   /**

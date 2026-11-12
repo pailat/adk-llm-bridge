@@ -6,14 +6,14 @@ import { ClaudeAgentSdkDriver } from "../../src/agents/driver/claude-agent-sdk.j
 import { ClaudeCliDriver } from "../../src/agents/driver/claude-cli.js";
 import { CodexCliDriver } from "../../src/agents/driver/codex-cli.js";
 import { CodexSdkDriver } from "../../src/agents/driver/codex-sdk.js";
-import { GeminiCliDriver } from "../../src/agents/driver/gemini-cli.js";
+import { FxCliDriver } from "../../src/agents/driver/fx-cli.js";
 import * as agentsApi from "../../src/agents/index.js";
 import {
   ClaudeAgent,
   CodexAgent,
   ExternalAgent,
   type ExternalAgentDriver,
-  GeminiCliAgent,
+  FxAgent,
 } from "../../src/agents/index.js";
 import { CLAUDE_PROVIDER } from "../../src/agents/provider/schema.js";
 
@@ -49,7 +49,10 @@ const NO_SUBAGENTS: Array<[string, () => ExternalAgentDriver]> = [
   ["ClaudeCliDriver", () => new ClaudeCliDriver()],
   ["CodexCliDriver", () => new CodexCliDriver()],
   ["CodexSdkDriver", () => new CodexSdkDriver()],
-  ["GeminiCliDriver", () => new GeminiCliDriver()],
+  [
+    "FxCliDriver",
+    () => new FxCliDriver({ model: "anthropic/claude-haiku-4-5" }),
+  ],
 ];
 
 describe("subagents capability", () => {
@@ -67,8 +70,14 @@ describe("subagents capability", () => {
       codeOf(() => new CodexAgent({ name: "c", subAgents: [child()] })).code,
     ).toBe("EXTERNAL_AGENT_SUBAGENTS_UNSUPPORTED");
     expect(
-      codeOf(() => new GeminiCliAgent({ name: "g", subAgents: [child()] }))
-        .code,
+      codeOf(
+        () =>
+          new FxAgent({
+            name: "g",
+            driverOptions: { model: "anthropic/claude-haiku-4-5" },
+            subAgents: [child()],
+          }),
+      ).code,
     ).toBe("EXTERNAL_AGENT_SUBAGENTS_UNSUPPORTED");
   });
 
@@ -148,7 +157,11 @@ describe("subagents capability", () => {
       ["claude-cli", new ClaudeCliDriver(), "claude-cli.ts"],
       ["codex-cli", new CodexCliDriver(), "codex-cli.ts"],
       ["codex-sdk", new CodexSdkDriver(), "codex-sdk.ts"],
-      ["gemini-cli", new GeminiCliDriver(), "gemini-cli.ts"],
+      [
+        "fx-cli",
+        new FxCliDriver({ model: "anthropic/claude-haiku-4-5" }),
+        "fx-cli.ts",
+      ],
     ];
     for (const [name, driver, file] of drivers) {
       const source = readFileSync(

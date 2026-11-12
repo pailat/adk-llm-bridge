@@ -122,7 +122,7 @@ export interface SpawnRuntime {
 }
 
 // Windows command lookup. A runtime or a PATHEXT-aware resolver can turn
-// `gemini` into `gemini.cmd` (the shim npm installs) and run it through
+// `claude` into `claude.cmd` (the shim npm installs) and run it through
 // `cmd.exe`, which parses the arguments again, so a prompt with `&` or `|`
 // would run as a command. The drivers find the executable themselves, over
 // `.exe` and `.com` only, and refuse a batch file.
@@ -289,7 +289,7 @@ function withinDirectory(
  * for a bare name). A relative `command` that names a directory is resolved
  * against the host process's working directory.
  *
- * @param command - A bare name (`gemini`, `claude.exe`), or a path with or
+ * @param command - A bare name (`claude`, `codex.exe`), or a path with or
  * without extension.
  * @param host - Environment and file-existence probe.
  * @returns The absolute path to spawn.

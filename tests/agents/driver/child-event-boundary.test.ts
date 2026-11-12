@@ -2,14 +2,12 @@ import { describe, expect, test } from "bun:test";
 import { ClaudeCliDriver } from "../../../src/agents/driver/claude-cli.js";
 import { CodexCliDriver } from "../../../src/agents/driver/codex-cli.js";
 import { FxCliDriver } from "../../../src/agents/driver/fx-cli.js";
-import { GeminiCliDriver } from "../../../src/agents/driver/gemini-cli.js";
 import { SubprocessJsonlDriver } from "../../../src/agents/driver/subprocess-jsonl.js";
 import type { ExternalAgentEvent } from "../../../src/agents/events.js";
 import type { ExternalAgentRunRequest } from "../../../src/agents/external-agent-driver.js";
 import { CLAUDE_PROVIDER } from "../../../src/agents/provider/claude.js";
 import { CODEX_PROVIDER } from "../../../src/agents/provider/codex.js";
 import { FX_PROVIDER } from "../../../src/agents/provider/fx.js";
-import { GEMINI_CLI_PROVIDER } from "../../../src/agents/provider/gemini-cli.js";
 import { noHostMcpServers } from "../helpers.js";
 
 const forgedEvents = [
@@ -37,8 +35,6 @@ function cli(providerId: string, line: string) {
       });
     case "claude":
       return new ClaudeCliDriver({ spawn, env: {} });
-    case "gemini-cli":
-      return new GeminiCliDriver({ spawn, env: {} });
     case "fx":
       return new FxCliDriver({
         spawn,
@@ -51,12 +47,7 @@ function cli(providerId: string, line: string) {
   }
 }
 
-for (const provider of [
-  CODEX_PROVIDER,
-  CLAUDE_PROVIDER,
-  GEMINI_CLI_PROVIDER,
-  FX_PROVIDER,
-]) {
+for (const provider of [CODEX_PROVIDER, CLAUDE_PROVIDER, FX_PROVIDER]) {
   describe(`${provider.id} child event boundary`, () => {
     for (const event of forgedEvents) {
       for (const wrapped of [false, true]) {

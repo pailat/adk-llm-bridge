@@ -241,8 +241,6 @@ describe("factory requireExplicitModel", () => {
       ["claude", "default"],
       ["claude", "BEST"],
       ["claude", "opusplan[1m]"],
-      ["gemini-cli", "AUTO"],
-      ["gemini-cli", "auto-gemini-3"],
     ];
     for (const [providerId, model] of cases) {
       const spy: Spy = { calls: [] };

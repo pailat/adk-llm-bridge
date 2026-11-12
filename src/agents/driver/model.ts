@@ -54,14 +54,13 @@ export interface ModelAliasDenylist {
  *
  * Claude: `default` is the account or organization default, `best` picks a
  * model family by availability, and `opusplan` switches models between
- * planning and execution. Gemini: `auto` and `auto-*` hand each turn to the
- * CLI's router. Codex and fx have none. Reviewed against
+ * planning and execution. Codex and fx have none. Reviewed against
  * {@link MODEL_ALIAS_DENYLIST_REVIEW}.
  *
  * @internal
  */
 export const MODEL_ALIAS_DENYLIST: Readonly<
-  Record<"claude" | "codex" | "gemini-cli" | "fx", ModelAliasDenylist>
+  Record<"claude" | "codex" | "fx", ModelAliasDenylist>
 > = Object.freeze({
   claude: Object.freeze({
     exact: Object.freeze(["default", "best", "opusplan", "opusplan[1m]"]),
@@ -70,10 +69,6 @@ export const MODEL_ALIAS_DENYLIST: Readonly<
   codex: Object.freeze({
     exact: Object.freeze([]),
     prefixes: Object.freeze([]),
-  }),
-  "gemini-cli": Object.freeze({
-    exact: Object.freeze(["auto"]),
-    prefixes: Object.freeze(["auto-"]),
   }),
   fx: Object.freeze({
     exact: Object.freeze([]),
@@ -89,7 +84,6 @@ export const MODEL_ALIAS_DENYLIST: Readonly<
 export const MODEL_ALIAS_DENYLIST_REVIEW = Object.freeze({
   claude:
     "literals in the Claude Code 2.1.319 bundle (@anthropic-ai/claude-agent-sdk 0.3.319)",
-  "gemini-cli": "Gemini CLI router aliases from the upstream documentation",
   fx: "fx 0.0.16 model ids are provider/model and no router alias was found in the fx documentation or `fx models --json`",
 });
 
@@ -447,15 +441,6 @@ export const CODEX_MODEL_ENV: readonly string[] = Object.freeze([
 ]);
 
 /**
- * Environment variables that set the Gemini CLI model.
- *
- * @internal
- */
-export const GEMINI_MODEL_ENV: readonly string[] = Object.freeze([
-  "GEMINI_MODEL",
-]);
-
-/**
  * Environment variables that set the fx model (`FX_MODEL`) or route the
  * request to another provider (`FX_PROVIDER`).
  *
@@ -474,7 +459,6 @@ export const FX_MODEL_ENV: readonly string[] = Object.freeze([
 export const MODEL_ENV_REVIEW = Object.freeze({
   claude: CLAUDE_MODEL_ENV_RULE.review,
   codex: "variable names in the @openai/codex 0.167.2 binary",
-  gemini: "Gemini CLI configuration reference",
   fx: "fx 0.0.16 environment documentation (model_origin: FX_MODEL) and a probe of the routing variable",
 });
 
@@ -629,11 +613,3 @@ export function withModelPins<T extends Record<string, string | undefined>>(
     ? env
     : { ...env, [CLAUDE_SMALL_FAST_MODEL_ENV]: smallFastModel };
 }
-
-/**
- * The reason of the Gemini CLI read-only refusal.
- *
- * @internal
- */
-export const GEMINI_PLAN_MODE_REASON =
-  "Gemini CLI plan mode (read-only) may route turns to another model than `model`";

@@ -90,9 +90,9 @@ driver and are not affected.
 
 With `requireExplicitModel: true` on the factory, a request without
 `config.model` fails with `WORKFLOW_AGENT_MODEL_REQUIRED` before the driver is
-created. For the built-in ids `claude` and `gemini-cli` the factory also
-refuses router and default aliases itself (`default`, `best`, `opusplan`;
-`auto`, `auto-*`), whatever the definition forwards. For a custom provider id
+created. For the built-in id `claude` the factory also
+refuses router and default aliases itself (`default`, `best`, `opusplan`),
+whatever the definition forwards. For a custom provider id
 it cannot know the aliases: it relies on the driver refusing them and on the
 driver reporting a `model`. Pair it with full model ids and with the run spec's
 `allowedModels` and `allowedModelsByRole`.
@@ -145,7 +145,7 @@ reports a model:
 - `unknown`: `true` when some run in the step was not fully explicit and
   reported: an external run with no requested model, with a status other than
   `reported`, or with no model information; or an `LlmAgent` whose model is
-  inherited or cannot be read. A Codex or Gemini step is always `unknown`.
+  inherited or cannot be read. A Codex step is always `unknown`.
 
 Each id appears once, in the order first seen, nested workflow agents
 included. Agents nested inside the step's own agent (the children of an ADK

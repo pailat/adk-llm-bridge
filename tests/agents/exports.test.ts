@@ -19,7 +19,6 @@ describe("agents public exports", () => {
     expect(root.Custom).toBeFunction();
     expect("CodexAgent" in root).toBe(false);
     expect("ClaudeAgent" in root).toBe(false);
-    expect("GeminiCliAgent" in root).toBe(false);
     expect("FxAgent" in root).toBe(false);
     expect("ExternalAgent" in root).toBe(false);
     expect("EnvCredentialProvider" in root).toBe(false);
@@ -161,13 +160,9 @@ describe("agents public exports", () => {
     expect(agents.createDefaultExternalAgentDefinitionRegistry).toBeFunction();
     expect(agents.CodexAgent).toBeFunction();
     expect(agents.ClaudeAgent).toBeFunction();
-    expect(agents.GeminiCliAgent).toBeFunction();
     expect(agents.CODEX_AGENT_DEFINITION.provider).toBe(agents.CODEX_PROVIDER);
     expect(agents.CLAUDE_AGENT_DEFINITION.provider).toBe(
       agents.CLAUDE_PROVIDER,
-    );
-    expect(agents.GEMINI_CLI_AGENT_DEFINITION.provider).toBe(
-      agents.GEMINI_CLI_PROVIDER,
     );
     expect(agents.FxAgent).toBeFunction();
     expect(agents.FxCliDriver).toBeFunction();
@@ -206,8 +201,6 @@ describe("agents public exports", () => {
       "mapPolicyToCodexArgs",
       "mapPolicyToCodexSdkThreadOptions",
       "mapClaudePermissionArgs",
-      "mapGeminiPermissionArgs",
-      "buildGeminiArgs",
       "mapFxPermission",
       "FX_CLI_PINNED_FLAGS",
       "FX_MODEL_ENV",
@@ -246,19 +239,22 @@ describe("agents public exports", () => {
   test("provider-backed agents preserve expected public shape", () => {
     const codex = new agents.CodexAgent({ name: "codex" });
     const claude = new agents.ClaudeAgent({ name: "claude" });
-    const gemini = new agents.GeminiCliAgent({ name: "gemini" });
+    const fx = new agents.FxAgent({
+      name: "fx",
+      driverOptions: { model: "anthropic/claude-haiku-4-5" },
+    });
 
     expect(codex).toBeInstanceOf(agents.ExternalAgent);
     expect(codex).toBeInstanceOf(BaseAgent);
     expect(codex.provider).toEqual(agents.CODEX_PROVIDER);
     expect(claude.provider).toEqual(agents.CLAUDE_PROVIDER);
-    expect(gemini.provider).toEqual(agents.GEMINI_CLI_PROVIDER);
+    expect(fx.provider).toEqual(agents.FX_PROVIDER);
 
     const root = new agents.ClaudeAgent({
       name: "root",
-      subAgents: [codex, gemini],
+      subAgents: [codex, fx],
     });
-    expect(root.subAgents).toEqual([codex, gemini]);
+    expect(root.subAgents).toEqual([codex, fx]);
   });
 
   test("package exports preserves root and adds agents subpath", () => {

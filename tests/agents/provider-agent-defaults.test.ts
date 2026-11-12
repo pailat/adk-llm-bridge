@@ -7,8 +7,6 @@ import {
   CodexAgent,
   createDefaultExternalAgentDefinitionRegistry,
   EnvCredentialProvider,
-  GEMINI_CLI_AGENT_DEFINITION,
-  GeminiCliAgent,
 } from "../../src/agents/index.js";
 
 describe("provider agents default to environment credentials", () => {
@@ -16,7 +14,6 @@ describe("provider agents default to environment credentials", () => {
     for (const definition of [
       CLAUDE_AGENT_DEFINITION,
       CODEX_AGENT_DEFINITION,
-      GEMINI_CLI_AGENT_DEFINITION,
     ]) {
       expect(definition.createCredentialProvider?.()).toBeInstanceOf(
         EnvCredentialProvider,
@@ -24,14 +21,11 @@ describe("provider agents default to environment credentials", () => {
     }
   });
 
-  test("CodexAgent, ClaudeAgent and GeminiCliAgent use EnvCredentialProvider", () => {
+  test("CodexAgent and ClaudeAgent use EnvCredentialProvider", () => {
     expect(new CodexAgent({ name: "a" }).credentialProvider).toBeInstanceOf(
       EnvCredentialProvider,
     );
     expect(new ClaudeAgent({ name: "b" }).credentialProvider).toBeInstanceOf(
-      EnvCredentialProvider,
-    );
-    expect(new GeminiCliAgent({ name: "c" }).credentialProvider).toBeInstanceOf(
       EnvCredentialProvider,
     );
   });
@@ -70,8 +64,8 @@ describe("provider agents default to environment credentials", () => {
 });
 
 describe("each built-in driver reports its own capabilities", () => {
-  test("CLI drivers claim permission mapping; the Gemini CLI also streams", async () => {
-    const { ClaudeCliDriver, CodexCliDriver, GeminiCliDriver } = await import(
+  test("CLI drivers claim permission mapping", async () => {
+    const { ClaudeCliDriver, CodexCliDriver } = await import(
       "../../src/agents/index.js"
     );
     expect(new ClaudeCliDriver().capabilities()).toEqual({
@@ -80,10 +74,6 @@ describe("each built-in driver reports its own capabilities", () => {
     });
     expect(new CodexCliDriver().capabilities()).toEqual({
       streaming: false,
-      permissions: true,
-    });
-    expect(new GeminiCliDriver().capabilities()).toEqual({
-      streaming: true,
       permissions: true,
     });
   });

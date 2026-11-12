@@ -27,14 +27,13 @@ import {
   spawnSubprocess,
 } from "../../../src/agents/driver/spawn.js";
 import {
+  CLAUDE_PROVIDER,
   ClaudeCliDriver,
   CodexCliDriver,
   EXTERNAL_AGENT_INTERPRETER_UNSAFE,
   type ExternalAgentEvent,
   ExternalAgentPolicyError,
   type ExternalAgentRunRequest,
-  GEMINI_CLI_PROVIDER,
-  GeminiCliDriver,
 } from "../../../src/agents/index.js";
 
 // The real Node binary (through a version-manager shim, if any): only Node
@@ -90,7 +89,6 @@ type Make = (config: Record<string, unknown>) => {
 };
 
 const DRIVERS: Array<[string, Make]> = [
-  ["gemini", (config) => new GeminiCliDriver(config as never)],
   ["claude", (config) => new ClaudeCliDriver(config as never)],
   ["codex", (config) => new CodexCliDriver(config as never)],
 ];
@@ -100,7 +98,7 @@ function request(
   extra: Partial<ExternalAgentRunRequest> = {},
 ): ExternalAgentRunRequest {
   return {
-    provider: GEMINI_CLI_PROVIDER,
+    provider: CLAUDE_PROVIDER,
     context: {} as ExternalAgentRunRequest["context"],
     instruction: "x & echo injected> injected.txt",
     workingDirectory,
@@ -156,7 +154,7 @@ describe("interpreter + entry: constructor validation", () => {
         { interpreter: "  ", entry },
         { interpreter: "node", entry: "relative/cli.js" },
         { interpreter: "node", entry: "./cli.js" },
-        { interpreter: "node", entry, command: "gemini" },
+        { interpreter: "node", entry, command: "claude" },
         { interpreter: 42, entry },
         { interpreter: "node", entry: ["x"] },
       ]) {
@@ -358,7 +356,7 @@ describe("interpreter + entry with the built-in spawn", () => {
         argv: string[];
         input: string;
       };
-      // The prompt arrives intact: as an argument (Gemini, Codex) or on
+      // The prompt arrives intact: as an argument (Codex) or on
       // stdin (Claude).
       const all = [...seen.argv, seen.input].join("\n");
       expect(all).toContain("x & echo injected> injected.txt");
@@ -488,22 +486,6 @@ describe("on Windows the interpreter follows the command rule", () => {
       );
     });
   }
-
-  test("the Gemini batch remedy names interpreter and entry", async () => {
-    const work = dir("work");
-    const events = await collect(
-      new GeminiCliDriver({ spawn: spawn as never }).run(request(work)),
-    );
-    files.add("c:\\shims\\gemini.cmd");
-    const again = await collect(
-      new GeminiCliDriver({ spawn: spawn as never }).run(request(work)),
-    );
-
-    expect(errorOf(events)?.code).toBe("MISSING_BINARY");
-    const message = errorOf(again)?.message ?? "";
-    expect(message).toContain("interpreter");
-    expect(message).toContain("entry");
-  });
 });
 
 describe("resolveCliLaunch", () => {
@@ -512,7 +494,7 @@ describe("resolveCliLaunch", () => {
   const windowsFiles = new Set([
     "C:\\shims\\node.cmd",
     "C:\\tools\\node.exe",
-    "C:\\shims\\gemini.cmd",
+    "C:\\shims\\claude.cmd",
   ]);
   const host = {
     platform: "win32" as const,
@@ -564,12 +546,12 @@ describe("resolveCliLaunch", () => {
       host,
     };
 
-    // Only gemini.cmd: handed on, so the spawn refuses it with the remedy.
+    // Only claude.cmd: handed on, so the spawn refuses it with the remedy.
     expect(
-      resolveCliLaunch({ ...base, command: "gemini", builtInSpawn: true }),
+      resolveCliLaunch({ ...base, command: "claude", builtInSpawn: true }),
     ).toEqual({
       launch: {
-        command: expect.stringMatching(/^C:\\shims\\gemini\.cmd$/i),
+        command: expect.stringMatching(/^C:\\shims\\claude\.cmd$/i),
         prefix: [],
       },
     });

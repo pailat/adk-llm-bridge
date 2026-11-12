@@ -1085,7 +1085,7 @@ describe("ExternalAgent spans: ClaudeCliDriver", () => {
   });
 });
 
-describe("ExternalAgent spans: the model option of the Codex and Gemini CLI drivers", () => {
+describe("ExternalAgent spans: the model option of the Codex CLI driver", () => {
   test("Codex CLI writes its model to gen_ai.request.model", async () => {
     const { CodexCliDriver } = await import(
       "../../src/agents/driver/codex-cli.js"
@@ -1114,40 +1114,6 @@ describe("ExternalAgent spans: the model option of the Codex and Gemini CLI driv
     expect(named("call_llm").length).toBeGreaterThan(0);
     for (const span of named("call_llm")) {
       expect(span.attributes["gen_ai.request.model"]).toBe("gpt-6.1-sol");
-    }
-  });
-
-  test("Gemini CLI writes its model to gen_ai.request.model", async () => {
-    const { GeminiCliDriver } = await import(
-      "../../src/agents/driver/gemini-cli.js"
-    );
-    const { GEMINI_CLI_PROVIDER } = await import(
-      "../../src/agents/provider/gemini-cli.js"
-    );
-    const lines = [
-      { type: "init", session_id: "s", model: "gemini-3-pro" },
-      { type: "message", role: "assistant", content: "done" },
-      { type: "result", status: "success" },
-    ];
-    const agent = new ExternalAgent({
-      name: "gemini_cli",
-      provider: GEMINI_CLI_PROVIDER,
-      permissions: { mode: "ask", allowNetwork: true },
-      driver: new GeminiCliDriver({
-        model: "gemini-3-pro",
-        env: {},
-        spawn: () => ({
-          stdout: lines.map((line) => `${JSON.stringify(line)}\n`),
-          exited: Promise.resolve(0),
-        }),
-      }),
-    });
-
-    await runTurn(agent);
-
-    expect(named("call_llm").length).toBeGreaterThan(0);
-    for (const span of named("call_llm")) {
-      expect(span.attributes["gen_ai.request.model"]).toBe("gemini-3-pro");
     }
   });
 });

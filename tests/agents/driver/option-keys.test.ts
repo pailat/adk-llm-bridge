@@ -26,17 +26,12 @@ import {
   type FxCliDriverConfig,
 } from "../../../src/agents/driver/fx-cli.js";
 import {
-  GeminiCliDriver,
-  type GeminiCliDriverConfig,
-} from "../../../src/agents/driver/gemini-cli.js";
-import {
   CLAUDE_AGENT_SDK_ONLY_KEYS,
   CLAUDE_AGENT_SDK_OPTION_KEYS,
   CLAUDE_CLI_OPTION_KEYS,
   CODEX_CLI_OPTION_KEYS,
   CODEX_SDK_OPTION_KEYS,
   FX_CLI_OPTION_KEYS,
-  GEMINI_CLI_OPTION_KEYS,
   SUBPROCESS_JSONL_OPTION_KEYS,
 } from "../../../src/agents/driver/option-keys.js";
 import {
@@ -53,7 +48,7 @@ import {
   CODEX_AGENT_DEFINITION,
   createDefaultExternalAgentDefinitionRegistry,
   createExternalAgent,
-  GEMINI_CLI_AGENT_DEFINITION,
+  FX_AGENT_DEFINITION,
 } from "../../../src/agents/index.js";
 
 type Equal<A, B> =
@@ -70,13 +65,12 @@ const exhaustive: [
   Equal<keyof ClaudeCliDriverConfig, (typeof CLAUDE_CLI_OPTION_KEYS)[number]>,
   Equal<keyof CodexSdkDriverConfig, (typeof CODEX_SDK_OPTION_KEYS)[number]>,
   Equal<keyof CodexCliDriverConfig, (typeof CODEX_CLI_OPTION_KEYS)[number]>,
-  Equal<keyof GeminiCliDriverConfig, (typeof GEMINI_CLI_OPTION_KEYS)[number]>,
   Equal<keyof FxCliDriverConfig, (typeof FX_CLI_OPTION_KEYS)[number]>,
   Equal<
     keyof SubprocessJsonlDriverConfig,
     (typeof SUBPROCESS_JSONL_OPTION_KEYS)[number]
   >,
-] = [true, true, true, true, true, true, true];
+] = [true, true, true, true, true, true];
 
 type Build = (config: unknown) => unknown;
 
@@ -109,12 +103,6 @@ const DRIVERS: readonly {
     build: (c) => new CodexCliDriver(c as CodexCliDriverConfig),
     base: {},
     keys: CODEX_CLI_OPTION_KEYS,
-  },
-  {
-    name: "GeminiCliDriver",
-    build: (c) => new GeminiCliDriver(c as GeminiCliDriverConfig),
-    base: {},
-    keys: GEMINI_CLI_OPTION_KEYS,
   },
   {
     name: "FxCliDriver",
@@ -284,7 +272,6 @@ describe("unknown driver options (step 0)", () => {
     expect(() => new ClaudeCliDriver()).not.toThrow();
     expect(() => new CodexSdkDriver()).not.toThrow();
     expect(() => new CodexCliDriver()).not.toThrow();
-    expect(() => new GeminiCliDriver()).not.toThrow();
   });
 
   test("a subclass checks its own keys, not the base driver's", () => {
@@ -313,8 +300,8 @@ describe("unknown options through the agent factories", () => {
       }),
     );
     refusal(() =>
-      createExternalAgent(GEMINI_CLI_AGENT_DEFINITION, {
-        name: "gemini",
+      createExternalAgent(FX_AGENT_DEFINITION, {
+        name: "fx",
         driverOptions: { mcpServers: {} } as never,
       }),
     );
@@ -347,7 +334,6 @@ describe("every exported driver refuses an unknown option", () => {
       "CodexCliDriver",
       "CodexSdkDriver",
       "FxCliDriver",
-      "GeminiCliDriver",
     ]) {
       expect(names).toContain(name);
     }
