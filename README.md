@@ -525,7 +525,9 @@ const agent = new ClaudeAgent({
 ```
 
 A resume finds a session only from the same working directory.
-`ClaudeCliDriver` refuses the option with `EXTERNAL_AGENT_OPTION_UNSUPPORTED`.
+`ClaudeCliDriver` refuses the option with `EXTERNAL_AGENT_OPTION_UNSUPPORTED`;
+it keeps no native session and carries memory through the ADK history instead:
+each turn's prompt starts with a transcript of the earlier turns.
 It follows the SDK's `@alpha` session store contract. See
 [Persisting Claude sessions](docs/claude-session-store.md).
 

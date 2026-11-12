@@ -306,7 +306,9 @@ new in 0.7.0. If you already use them, these changes apply:
   CLI end a run that sets `request.runtimeSession` with an
   `EXTERNAL_AGENT_SESSIONS_UNSUPPORTED` error before starting the process. Drop
   `runtimeSession` for them, or use `ClaudeAgentSdkDriver` or `CodexSdkDriver`.
-  The new fx driver refuses it the same way.
+  The new fx driver refuses it the same way. Both CLI drivers still remember
+  the conversation: each turn's prompt starts with a transcript of the earlier
+  ADK turns.
 - **`ExternalAgentUsage.byModel` entries have no `scope`** (type
   `ExternalAgentModelUsage`); the usage's own `scope` covers them. The
   drivers never set one there.
