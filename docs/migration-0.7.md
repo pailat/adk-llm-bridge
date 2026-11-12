@@ -575,18 +575,26 @@ new in 0.7.0. If you already use them, these changes apply:
   `EXTERNAL_AGENT_OPTION_UNSUPPORTED`: codex would read it as an option.
   Codex's own thread ids never start with `-`, so only a forged or corrupted
   id is affected. Clear it from session state to start a new thread.
+- **Codex CLI driver and the shared run loop.** `CodexCliDriver` (the
+  fallback for hosts without `@openai/codex-sdk`) keeps working without the SDK
+  and keeps its options (`command`, `interpreter`, `entry`, `args`, `spawn`,
+  `killGraceMs`, ...). It now runs through the same loop as `CodexSdkDriver`,
+  so a turn with earlier history starts with a transcript of it, an image in the
+  turn is passed as `--image=<file>`, and a failure is reported once. Nothing
+  is required of CLI users beyond reading this note; installing the SDK stays
+  optional and only `CodexAgent` with the default SDK driver needs it.
 - **Codex SDK prompt delivery.** `CodexSdkDriver` runs codex through a
-  copy of the `@openai/codex-sdk` 0.167.0 exec path that handles a failed
+  copy of the `@openai/codex-sdk` 0.167.2 exec path that handles a failed
   write of the prompt (see
   [Codex SDK prompt delivery](external-agent-isolation.md#codex-sdk-prompt-delivery)).
   A prompt codex did not read is the new error code
   `CODEX_SDK_INPUT_NOT_DELIVERED` instead of an uncaught `EPIPE` that ended
   the process.
   - **The optional peer range narrows** from `>=0.167.0 <0.168` to exactly
-    `0.167.0`, because the contained copy is verified against that exact
-    version. Install exactly `@openai/codex-sdk@0.167.0`.
+    `0.167.2`, because the contained copy is verified against that exact
+    version. Install exactly `@openai/codex-sdk@0.167.2`.
   - Another installed version, one the driver cannot read, or a prebuilt
-    `sdk` client whose exec differs from 0.167.0 is refused with
+    `sdk` client whose exec differs from 0.167.2 is refused with
     `EXTERNAL_AGENT_DEPENDENCY_MISSING`, naming the supported and the
     installed version. To run another version anyway, set
     `allowUncontainedCodexSdk: true`: the run then uses the SDK's own exec

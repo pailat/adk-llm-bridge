@@ -13,17 +13,30 @@ import { networkAllowed } from "../permissions/network.js";
 import type { ExternalAgentPermissionPolicy } from "../permissions/schema.js";
 import { CODEX_PROVIDER } from "../provider/codex.js";
 import type { AgentRuntimeCapabilities } from "../runtime/capabilities.js";
-import {
-  classifyRecoverable,
-  isKnownSubtype,
-} from "../runtime/error-classification.js";
+import { classifyRecoverable } from "../runtime/error-classification.js";
 import {
   type CodexMcpLister,
   codexApprovalsReviewerOverrides,
   codexMcpDisableOverrides,
   listCodexMcpServers,
 } from "./codex-mcp.js";
-import { resolveCliLaunch, validateLaunchConfig } from "./launch.js";
+import {
+  codexBridgeEnvelope,
+  normalizeCodexJsonlEvent,
+  warnNonJsonLine,
+} from "./codex-message-mapper.js";
+import { buildCodexEnv } from "./codex-run-env.js";
+import {
+  type CodexSdkClientLike,
+  type CodexSdkInput,
+  type CodexSdkThreadLike,
+  runCodexTurn,
+} from "./codex-sdk.js";
+import {
+  type CliLaunch,
+  resolveCliLaunch,
+  validateLaunchConfig,
+} from "./launch.js";
 import { collectTail, type LineSource, readLines } from "./lines.js";
 import {
   assertModelOption,
@@ -46,15 +59,10 @@ import {
   unenforceablePathsRefusal,
   unsandboxedShellRefusal,
 } from "./policy-errors.js";
-import { codexTurnUsage } from "./run-summary.js";
 import {
-  asRecord,
   assertKnownDriverOptions,
-  bridgeEvent,
-  buildChildEnv,
   exitErrorEvent,
   promptFromRequest,
-  stringValue,
   validateDriverConfig,
 } from "./shared.js";
 import {
@@ -133,11 +141,11 @@ const CODEX_CLI_PINNED_FLAGS: PinnedFlags = {
  * @internal
  */
 export const CODEX_CLI_PINNED_FLAGS_REVIEW = Object.freeze({
-  reviewedCliVersion: "0.167.0",
+  reviewedCliVersion: "0.167.2",
   sdkPackage: "@openai/codex-sdk",
-  sdkPeerRange: "0.167.0",
-  reviewedSdkVersion: "0.167.0",
-  reviewedBundledCliVersion: "0.167.0",
+  sdkPeerRange: "0.167.2",
+  reviewedSdkVersion: "0.167.2",
+  reviewedBundledCliVersion: "0.167.2",
 });
 
 /**
@@ -505,6 +513,9 @@ function codexCliMissing(): ExternalAgentPolicyError {
  *   unless `allowPolicyOverrideArgs` is set.
  * - Aborting the run sends SIGTERM, then SIGKILL after `killGraceMs`; the
  *   process is also killed if the consumer stops reading.
+ * - This driver is a transport: the run loop (input, history, errors, the
+ *   single `completed` event, temporary files) is the one `CodexSdkDriver`
+ *   uses, and `@openai/codex-sdk` is not needed.
  */
 export class CodexCliDriver extends SubprocessJsonlDriver {
   readonly #spawn: CodexCliSpawn;
@@ -684,135 +695,80 @@ export class CodexCliDriver extends SubprocessJsonlDriver {
     if (signal?.aborted) {
       return;
     }
-    const args = this.buildArgs(request, mcp.overrides);
-    let child: CodexCliSubprocess;
-    try {
-      child = this.#spawn(launch.command, [...launch.prefix, ...args], {
-        cwd: launch.cwd ?? request.workingDirectory,
-        env: launch.env ? { ...env, ...launch.env } : env,
-      });
-    } catch (error) {
-      if (error instanceof BatchCommandRefusedError) {
-        yield* refuse(batchCommandRefusal(error, "codex"));
-        return;
-      }
-      // Bun.spawn throws when the binary does not exist.
-      if (!isCommandNotFound(error)) {
-        throw error;
-      }
-      yield* refuse(codexCliMissing());
-      return;
-    }
-    const supervisor = superviseSubprocess(child, signal, {
-      killGraceMs: this.#killGraceMs,
+    yield {
+      type: "started",
+      providerId: this.providerId,
+      timestamp: Date.now(),
+    };
+    // The one run loop lives in `runCodexTurn`: this driver only supplies a
+    // client whose threads run `codex exec --json`.
+    const client = this.#client(request, launch, env, mcp.overrides);
+    yield* runCodexTurn({
+      request,
+      open: () => ({ client, threadOptions: {} }),
+      // The process keeps no thread: every run is a new `codex exec`.
+      stateKey: undefined,
+      normalize: (event) => {
+        const normalized = normalizeCodexJsonlEvent(event);
+        return normalized ? [normalized] : [];
+      },
+      describeError: (error) => cliErrorEvent(error),
+      endOnAbort: true,
+      rethrow: (error) =>
+        error instanceof CodexTransportFault
+          ? { error: error.cause }
+          : undefined,
     });
+  }
 
-    try {
-      yield {
-        type: "started",
-        providerId: this.providerId,
-        timestamp: Date.now(),
-      };
-
-      // Drain stderr while stdout is read so a chatty stderr cannot fill its
-      // pipe and stall the process; its lines are reported after stdout.
-      const stderrLines: string[] = [];
-      let errored = false;
-      let usage: ExternalAgentUsage | undefined;
-      const stderrPromise = child.stderr
-        ? collectTail(child.stderr, stderrLines)
-        : Promise.resolve();
-
-      if (child.stdout) {
-        // `codex exec --json` reports one failure twice: an `error` event and
-        // then a `turn.failed` carrying the same message. Surface it once.
-        let lastErrorMessage: string | undefined;
-        for await (const line of readLines(child.stdout)) {
-          if (signal?.aborted) {
-            return;
+  /**
+   * The client the shared run loop drives: its thread starts one process and
+   * streams the JSONL lines it prints.
+   */
+  #client(
+    request: ExternalAgentRunRequest,
+    launch: CliLaunch,
+    env: Record<string, string>,
+    configOverrides: readonly string[],
+  ): CodexSdkClientLike {
+    const runEnv = launch.env ? { ...env, ...launch.env } : env;
+    const thread: CodexSdkThreadLike = {
+      id: null,
+      runStreamed: async (input, options) => {
+        const { prompt, images } = cliTurnInput(input);
+        const args = this.#argv(request, configOverrides, prompt, images);
+        let child: CodexCliSubprocess;
+        try {
+          child = this.#spawn(launch.command, [...launch.prefix, ...args], {
+            cwd: launch.cwd ?? request.workingDirectory,
+            env: runEnv,
+          });
+        } catch (error) {
+          if (error instanceof BatchCommandRefusedError) {
+            throw batchCommandRefusal(error, "codex");
           }
-          if (line.trim().length === 0) {
-            continue;
+          // Bun.spawn throws when the binary does not exist.
+          if (!isCommandNotFound(error)) {
+            throw new CodexTransportFault(error);
           }
-          const parsed = this.#parse(line);
-          if (!parsed) {
-            continue;
-          }
-          const { event, sourceType } = parsed;
-          if (event.type === "completed") {
-            // `turn.completed` is not the end of the run: the exit code is
-            // checked first. Keep its usage for the final `completed`.
-            if (event.usage) {
-              usage = event.usage;
-            }
-            continue;
-          }
-          if (event.type === "error") {
-            if (
-              sourceType === "turn.failed" &&
-              event.message === lastErrorMessage
-            ) {
-              continue;
-            }
-            lastErrorMessage = event.message;
-            errored = true;
-          }
-          yield event;
+          throw codexCliMissing();
         }
-      }
-      await stderrPromise;
-      if (signal?.aborted) {
-        return;
-      }
-
-      let exitCode: number;
-      try {
-        exitCode = await child.exited;
-      } catch (error) {
-        // Node reports a missing binary through `exited`.
-        supervisor.markExited();
-        if (!isCommandNotFound(error)) {
-          throw error;
-        }
-        yield policyErrorEvent(codexCliMissing());
-        yield { type: "completed", exitCode: 1, timestamp: Date.now() };
-        return;
-      }
-      supervisor.markExited();
-      if (signal?.aborted) {
-        return;
-      }
-      // Codex prints warnings and progress on stderr even when the turn
-      // succeeds, so stderr only describes a failure when the exit says so.
-      for (const line of stderrLines) {
-        if (isIgnorableCodexStderr(line)) {
-          continue;
-        }
-        if (exitCode === 0) {
-          warn(CODEX_CLI_STDERR, `Codex CLI stderr: ${truncate(line, 500)}`);
-          continue;
-        }
-        errored = true;
-        yield { type: "error", message: line, recoverable: false };
-      }
-      if (exitCode !== 0 && !errored) {
-        // A failed run must not look like a quiet success.
-        yield exitErrorEvent({
-          runtime: "Codex CLI",
-          exitCode,
-          stderr: [],
-          code: "CODEX_CLI_EXIT",
+        const supervisor = superviseSubprocess(child, options?.signal, {
+          killGraceMs: this.#killGraceMs,
         });
-      }
-      yield {
-        type: "completed",
-        exitCode,
-        ...(usage ? { usage } : {}),
-        timestamp: Date.now(),
-      };
-    } finally {
-      supervisor.release();
-    }
+        return {
+          events: readCodexCliEvents(child, supervisor, options?.signal),
+        };
+      },
+    };
+    return {
+      startThread: () => thread,
+      resumeThread: () => {
+        throw new CodexTransportFault(
+          new Error("CodexCliDriver keeps no thread to resume"),
+        );
+      },
+    };
   }
 
   /**
@@ -828,13 +784,22 @@ export class CodexCliDriver extends SubprocessJsonlDriver {
     request: ExternalAgentRunRequest,
     configOverrides: readonly string[] = [],
   ): readonly string[] {
-    const prompt = promptFromRequest(request);
+    return this.#argv(request, configOverrides, promptFromRequest(request), []);
+  }
+
+  #argv(
+    request: ExternalAgentRunRequest,
+    configOverrides: readonly string[],
+    prompt: string,
+    images: readonly string[],
+  ): readonly string[] {
     return [
       ...mapPolicyToCodexArgs(request.permissions),
       ...configOverrides.flatMap((override) => ["-c", override]),
       // Joined, so the id can never be read as a flag.
       ...(this.#model === undefined ? [] : [`--model=${this.#model}`]),
       ...(this.#skipGitRepoCheck ? ["--skip-git-repo-check"] : []),
+      ...images.map((path) => `--image=${path}`),
       ...this.args,
       "--",
       prompt,
@@ -855,11 +820,7 @@ export class CodexCliDriver extends SubprocessJsonlDriver {
    * @returns The environment to spawn with.
    */
   buildEnv(request: ExternalAgentRunRequest): Record<string, string> {
-    return buildChildEnv(
-      this.#env,
-      ["PATH", "HOME", "USER", "SHELL", "XDG_CONFIG_HOME"],
-      request,
-    );
+    return buildCodexEnv(this.#env, request, { ambientPassthrough: false });
   }
 
   /**
@@ -871,7 +832,12 @@ export class CodexCliDriver extends SubprocessJsonlDriver {
    * that are not JSON, which carry nothing the bridge reports.
    */
   parseEvent(line: string): ExternalAgentEvent | undefined {
-    return this.#parse(line)?.event;
+    const result = parseJson(line);
+    if (!result.ok) {
+      warnNonJsonLine(line);
+      return undefined;
+    }
+    return normalizeCodexJsonlEvent(result.value);
   }
 
   /**
@@ -889,37 +855,6 @@ export class CodexCliDriver extends SubprocessJsonlDriver {
       throw new Error("Codex JSONL line carries no external agent event");
     }
     return event;
-  }
-
-  #parse(line: string): ParsedCodexLine | undefined {
-    const result = parseJson(line);
-    if (!result.ok) {
-      // A stray non-JSON line (a CLI banner, a debug print) must not end
-      // the run. Log it and keep reading.
-      warn(
-        "CODEX_CLI_NON_JSON_LINE",
-        `Ignoring a non-JSON line from codex exec --json: ${truncate(line.trim(), 200)}`,
-      );
-      return undefined;
-    }
-    // Codex's own `{"type":"error","message":...}` is also bridge-shaped, so
-    // error lines are always normalized and classified below.
-    const record = asRecord(result.value);
-    if (record.type !== "error") {
-      // A bridge-shaped line without its fields has no Codex meaning either.
-      const bridged = bridgeEvent(record, "drop");
-      if (bridged === "drop") {
-        return undefined;
-      }
-      if (bridged !== undefined) {
-        return { event: bridged, sourceType: bridged.type };
-      }
-    }
-    const event = normalizeCodexEvent(result.value);
-    if (!event) {
-      return undefined;
-    }
-    return { event, sourceType: codexEventType(record) };
   }
 }
 
@@ -1018,218 +953,173 @@ function codexModeArgs(
   }
 }
 
-interface ParsedCodexLine {
-  event: ExternalAgentEvent;
-  /** The raw Codex event type, used to drop a duplicated `turn.failed`. */
-  sourceType: string;
+/** Marks an error of the process itself, which the caller of `run` receives as thrown. */
+class CodexTransportFault extends Error {
+  constructor(override readonly cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause));
+    this.name = "CodexTransportFault";
+  }
 }
 
-/** Codex event types whose payload is assistant text. */
-const TEXT_EVENT_TYPES = new Set([
-  "response.output_text.delta",
-  "agent_message",
-  "agent_message_delta",
-]);
-
-function codexEventType(record: Record<string, unknown>): string {
-  return stringValue(record.type) ?? stringValue(record.event) ?? "unknown";
-}
-
-function codexError(
-  message: string,
-  source: Record<string, unknown>,
-  timestamp: number | undefined,
-): ExternalAgentEvent {
-  const explicitCode = stringValue(source.code);
-  // Same classifier as the Codex SDK driver: a usage cap becomes a
-  // non-recoverable QUOTA_EXHAUSTED, a rate limit stays recoverable.
-  // An explicit code on the line wins, unless it is a classifier subtype key
-  // (for example `quota_exhausted`): then the classified code is used, so it
-  // matches what the SDK driver reports for the same condition.
-  const classified = classifyRecoverable({
-    subtype: explicitCode,
+/** The one `error` event for a failure that is not a refusal. */
+function cliErrorEvent(error: unknown): ExternalAgentEvent {
+  if (error instanceof ExternalAgentPolicyError) {
+    return policyErrorEvent(error);
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  const { code, recoverable } = classifyRecoverable({
     message,
     fallbackCode: EXTERNAL_AGENT_ERROR,
     defaultRecoverable: false,
   });
-  return {
-    type: "error",
-    message,
-    code:
-      explicitCode && !isKnownSubtype(explicitCode)
-        ? explicitCode
-        : classified.code,
-    recoverable:
-      typeof source.recoverable === "boolean"
-        ? source.recoverable
-        : classified.recoverable,
-    timestamp,
-  };
+  return { type: "error", message, code, recoverable, timestamp: Date.now() };
 }
 
 /**
- * Maps one Codex JSONL event to a bridge event. Only known text-bearing
- * events produce `output`; lifecycle and unknown events return `undefined`
- * so raw JSONL never reaches the assistant text.
+ * The command-line form of a turn's input: the text parts joined the way the
+ * SDK joins them, and the image files as `--image` values.
  */
-function normalizeCodexEvent(value: unknown): ExternalAgentEvent | undefined {
-  const record = asRecord(value);
-  const type = codexEventType(record);
-  const timestamp = numberValue(record.timestamp);
-
-  // `codex exec --json` ends a failed turn with `turn.failed`
-  // ({ error: { message } }), which does not contain the word "error".
-  if (type.includes("error") || type.includes("failed")) {
-    const message =
-      stringValue(record.message) ??
-      stringValue(record.error) ??
-      stringValue(asRecord(record.error).message) ??
-      // An empty `turn.failed` (no message) gets a readable message
-      // instead of the raw JSON line.
-      `Codex reported ${type} without an error message`;
-    return codexError(message, record, timestamp);
+function cliTurnInput(input: CodexSdkInput): {
+  prompt: string;
+  images: string[];
+} {
+  if (typeof input === "string") {
+    return { prompt: input, images: [] };
   }
-
-  const item = asRecord(record.item);
-  const itemType = stringValue(item.type);
-  if (itemType === "agent_message") {
-    // Like the SDK driver, only the completed message is assistant text;
-    // `item.started` / `item.updated` would duplicate it.
-    const text = type === "item.completed" ? extractText(item) : undefined;
-    return text
-      ? { type: "output", content: text, stream: "stdout", timestamp }
-      : undefined;
-  }
-
-  if (itemType === "error") {
-    const message =
-      stringValue(item.message) ?? extractErrorMessage(item.error);
-    return message ? codexError(message, item, timestamp) : undefined;
-  }
-
-  const toolName = extractToolName(record);
-  if (toolName) {
-    if (type === "item.completed") {
-      return {
-        type: "tool_result",
-        name: toolName,
-        result: item.result ?? item.aggregated_output ?? item,
-        callId: stringValue(item.id),
-        error: extractErrorMessage(item.error),
-        metadata: { ...(itemType ? { itemType } : {}), builtin: true },
-        timestamp,
-      };
+  const text: string[] = [];
+  const images: string[] = [];
+  for (const part of input) {
+    if (part.type === "text") {
+      text.push(part.text);
+    } else {
+      images.push(part.path);
     }
-    // One tool_call per callId: `item.started` opens it; `item.updated` is
-    // progress of the same call and must not emit a second call.
-    if (type === "item.updated") {
-      return undefined;
+  }
+  return { prompt: text.join("\n\n"), images };
+}
+
+/**
+ * Streams one `codex exec --json` process as thread events: every JSONL line
+ * as parsed, then, once the process exited, its stderr and exit status as
+ * bridge events ending with the one `completed` event.
+ *
+ * @remarks
+ * `turn.completed` is not the end of the run: the exit code is checked
+ * first, so its usage is kept for the final `completed`. After a non-zero
+ * exit each stderr line becomes a non-recoverable `error`; after exit 0 they
+ * are only logged. A non-zero exit that reported no error yields a
+ * `CODEX_CLI_EXIT` error. The process is killed when the consumer stops
+ * reading.
+ */
+async function* readCodexCliEvents(
+  child: CodexCliSubprocess,
+  supervisor: { markExited(): void; release(): void },
+  signal: AbortSignal | undefined,
+): AsyncGenerator<Record<string, unknown>> {
+  const bridge = (event: ExternalAgentEvent) => codexBridgeEnvelope(event);
+  try {
+    // Drain stderr while stdout is read so a chatty stderr cannot fill its
+    // pipe and stall the process; its lines are reported after stdout.
+    const stderrLines: string[] = [];
+    let errored = false;
+    let usage: ExternalAgentUsage | undefined;
+    const stderrPromise = child.stderr
+      ? collectTail(child.stderr, stderrLines)
+      : Promise.resolve();
+
+    if (child.stdout) {
+      for await (const line of readLines(child.stdout)) {
+        if (signal?.aborted) {
+          return;
+        }
+        if (line.trim().length === 0) {
+          continue;
+        }
+        const parsed = parseJson(line);
+        if (!parsed.ok) {
+          warnNonJsonLine(line);
+          continue;
+        }
+        const event = normalizeCodexJsonlEvent(parsed.value);
+        if (!event) {
+          continue;
+        }
+        if (event.type === "completed") {
+          // Keep its usage for the final `completed`.
+          if (event.usage) {
+            usage = event.usage;
+          }
+          continue;
+        }
+        if (event.type === "error") {
+          errored = true;
+        }
+        yield parsed.value as Record<string, unknown>;
+      }
     }
-    return {
-      type: "tool_call",
-      name: toolName,
-      input:
-        itemType === "command_execution" && item.command !== undefined
-          ? { command: item.command }
-          : (record.input ?? record.arguments ?? item.input ?? item.arguments),
-      callId: stringValue(item.id),
-      metadata: { ...(itemType ? { itemType } : {}), builtin: true },
-      timestamp,
-    };
-  }
+    await stderrPromise;
+    if (signal?.aborted) {
+      return;
+    }
 
-  if (type === "thread.started" || type === "response.created") {
-    return {
-      type: "started",
-      providerId: CODEX_PROVIDER.id,
-      runId:
-        stringValue(record.thread_id) ??
-        stringValue(record.run_id) ??
-        stringValue(record.id),
-      timestamp,
-    };
-  }
-
-  if (type === "turn.completed" || type === "response.completed") {
-    // `turn.completed` carries the turn's token usage.
-    const usage = codexTurnUsage(record.usage);
-    return {
+    let exitCode: number;
+    try {
+      exitCode = await child.exited;
+    } catch (error) {
+      // Node reports a missing binary through `exited`.
+      supervisor.markExited();
+      if (!isCommandNotFound(error)) {
+        throw new CodexTransportFault(error);
+      }
+      yield bridge(policyErrorEvent(codexCliMissing()));
+      yield bridge({ type: "completed", exitCode: 1, timestamp: Date.now() });
+      return;
+    }
+    supervisor.markExited();
+    if (signal?.aborted) {
+      return;
+    }
+    // Codex prints warnings and progress on stderr even when the turn
+    // succeeds, so stderr only describes a failure when the exit says so.
+    for (const line of stderrLines) {
+      if (isIgnorableCodexStderr(line)) {
+        continue;
+      }
+      if (exitCode === 0) {
+        warn(CODEX_CLI_STDERR, `Codex CLI stderr: ${truncate(line, 500)}`);
+        continue;
+      }
+      errored = true;
+      yield bridge({ type: "error", message: line, recoverable: false });
+    }
+    if (exitCode !== 0 && !errored) {
+      // A failed run must not look like a quiet success.
+      yield bridge(
+        exitErrorEvent({
+          runtime: "Codex CLI",
+          exitCode,
+          stderr: [],
+          code: "CODEX_CLI_EXIT",
+        }),
+      );
+    }
+    yield bridge({
       type: "completed",
-      exitCode: numberValue(record.exit_code),
+      exitCode,
       ...(usage ? { usage } : {}),
-      timestamp,
-    };
-  }
-
-  if (TEXT_EVENT_TYPES.has(type)) {
-    const text = extractText(record);
-    return text
-      ? { type: "output", content: text, stream: "stdout", timestamp }
-      : undefined;
-  }
-
-  return undefined;
-}
-
-function extractToolName(record: Record<string, unknown>): string | undefined {
-  const directName = stringValue(record.name) ?? stringValue(record.tool_name);
-  const type = stringValue(record.type) ?? "";
-  if (directName && (type.includes("tool") || type.includes("call"))) {
-    return directName;
-  }
-
-  const item = asRecord(record.item);
-  const itemType = stringValue(item.type) ?? "";
-  if (itemType.includes("tool") || itemType.includes("call")) {
-    return (
-      stringValue(item.name) ??
-      stringValue(item.tool_name) ??
-      stringValue(item.tool)
-    );
-  }
-  if (itemType === "command_execution") {
-    return "command_execution";
-  }
-
-  return undefined;
-}
-
-function extractErrorMessage(value: unknown): string | undefined {
-  return stringValue(value) ?? stringValue(asRecord(value).message);
-}
-
-function extractText(value: unknown): string | undefined {
-  if (typeof value === "string") {
-    return value;
-  }
-
-  const record = asRecord(value);
-  const direct =
-    stringValue(record.content) ??
-    stringValue(record.text) ??
-    stringValue(record.delta) ??
-    stringValue(record.message);
-  if (direct) {
-    return direct;
-  }
-
-  if (record.item !== undefined) {
-    const itemText = extractText(record.item);
-    if (itemText) {
-      return itemText;
+      timestamp: Date.now(),
+    });
+  } catch (error) {
+    if (
+      error instanceof ExternalAgentPolicyError ||
+      error instanceof CodexTransportFault
+    ) {
+      throw error;
     }
+    throw new CodexTransportFault(error);
+  } finally {
+    supervisor.release();
   }
-
-  if (Array.isArray(record.content)) {
-    const parts = record.content
-      .map((part) => extractText(part))
-      .filter((part): part is string => typeof part === "string");
-    if (parts.length > 0) {
-      return parts.join("");
-    }
-  }
-
-  return undefined;
 }
 
 function isIgnorableCodexStderr(line: string): boolean {
@@ -1238,8 +1128,4 @@ function isIgnorableCodexStderr(line: string): boolean {
 
 function truncate(value: string, max: number): string {
   return value.length > max ? `${value.slice(0, max)}...` : value;
-}
-
-function numberValue(value: unknown): number | undefined {
-  return typeof value === "number" ? value : undefined;
 }

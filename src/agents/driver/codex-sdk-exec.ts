@@ -15,7 +15,7 @@
  */
 
 /**
- * A contained copy of the `@openai/codex-sdk` 0.167.0 exec path.
+ * A contained copy of the `@openai/codex-sdk` exec path (adapted from 0.167.0).
  *
  * The SDK writes the prompt to the child's stdin with no `error` listener on
  * that stream. When the child is gone before it has read the whole prompt
@@ -46,7 +46,7 @@ import { DEFAULT_KILL_GRACE_MS, drainAfterExit } from "./spawn.js";
  * The `@openai/codex-sdk` version whose exec path this module copies. A test
  * fails when the installed SDK differs, so a bump re-reviews the copy.
  */
-export const CONTAINED_CODEX_SDK_VERSION = "0.167.0";
+export const CONTAINED_CODEX_SDK_VERSION = "0.167.2";
 
 /**
  * The `@openai/codex-sdk` versions the contained exec was copied from and
@@ -88,7 +88,7 @@ type CodexConfigValue =
   | CodexConfigValue[]
   | { [key: string]: CodexConfigValue };
 
-/** The arguments `Thread` passes to `exec.run` in SDK 0.167.0. */
+/** The arguments `Thread` passes to `exec.run` in the SDK. */
 export interface CodexExecArgs {
   input: string;
   baseUrl?: string;
@@ -157,7 +157,7 @@ export class CodexSdkExitError extends Error {
  * Built from the SDK's own exec instance, so the binary (`executablePath`,
  * the driver's resolved `codexPathOverride`), the env (`envOverride`, the
  * driver's scrubbed env) and the `--config` overrides are the ones the SDK
- * would use. The argv is built exactly as SDK 0.167.0 builds it.
+ * would use. The argv is built exactly as the SDK builds it.
  */
 export class ContainedCodexExec {
   readonly executablePath: string;
@@ -440,7 +440,7 @@ function readInstalledVersion(): string | undefined {
  * `"unsupported-version"` when the SDK version is not in
  * {@link SUPPORTED_CODEX_SDK_VERSIONS} or cannot be read; `"unknown-shape"`
  * when the version is supported but the exec's fields differ from SDK
- * 0.167.0. On the last two the client is left as is, and its exec is not
+ * 0.167.2. On the last two the client is left as is, and its exec is not
  * contained.
  */
 export function containCodexSdkClient(
@@ -471,7 +471,7 @@ export function containCodexSdkClient(
 }
 
 /**
- * Whether a thread runs its turns through `exec` (SDK 0.167.0 keeps it in
+ * Whether a thread runs its turns through `exec` (the SDK keeps it in
  * the thread's `_exec`).
  *
  * @param thread - A thread from `startThread` or `resumeThread`.
@@ -526,7 +526,7 @@ function exitDetail(
   return signal ? `signal ${signal}` : `code ${code ?? 1}`;
 }
 
-/** The argv SDK 0.167.0 builds for one turn (`CodexExec.run`). */
+/** The argv the SDK builds for one turn (`CodexExec.run`). */
 export function codexExecArgv(
   exec: CodexExecFields,
   args: CodexExecArgs,
@@ -607,7 +607,7 @@ export function codexExecArgv(
   return commandArgs;
 }
 
-/** The env SDK 0.167.0 gives the child (`CodexExec.run`). */
+/** The env the SDK gives the child (`CodexExec.run`). */
 export function codexExecEnv(
   exec: CodexExecFields,
   args: Pick<CodexExecArgs, "apiKey">,

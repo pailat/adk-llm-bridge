@@ -1,5 +1,5 @@
 /**
- * The contained Codex exec copies `@openai/codex-sdk` 0.167.0 internals. These
+ * The contained Codex exec copies `@openai/codex-sdk` 0.167.2 internals. These
  * tests pin that version, check that the copy sends the argv and env the SDK
  * sends, and check how `CodexSdkDriver` installs it and fails closed when it
  * cannot.
@@ -217,7 +217,7 @@ describe("containCodexSdkClient", () => {
     expect(containCodexSdkClient(null)).toBe("not-sdk");
   });
 
-  test("reports an exec that lacks any one field of SDK 0.167.0", () => {
+  test("reports an exec that lacks any one field of SDK 0.167.2", () => {
     const fields = {
       executablePath: "/opt/codex",
       pathDirs: [],
@@ -235,7 +235,7 @@ describe("containCodexSdkClient", () => {
     }
   });
 
-  test("reports an exec whose fields differ from SDK 0.167.0", () => {
+  test("reports an exec whose fields differ from SDK 0.167.2", () => {
     const client = { exec: { run() {}, executablePath: "/opt/codex" } };
     expect(containCodexSdkClient(client)).toBe("unknown-shape");
     expect(client.exec).not.toBeInstanceOf(ContainedCodexExec);
@@ -398,7 +398,7 @@ describe("the installed SDK version at run time", () => {
   });
 
   test("an SDK client on another version is not contained", () => {
-    for (const sdkVersion of ["0.167.1", "0.168.0", undefined]) {
+    for (const sdkVersion of ["0.167.0", "0.167.1", "0.168.0", undefined]) {
       const client = new Codex({ codexPathOverride: "/opt/codex" });
       expect([
         sdkVersion,
@@ -420,10 +420,10 @@ describe("the installed SDK version at run time", () => {
         const report = runVersionHost([installed]);
         expect(report.turns).toBe(0);
         expect(report.codes).toEqual([EXTERNAL_AGENT_DEPENDENCY_MISSING]);
-        expect(report.message).toContain("@openai/codex-sdk 0.167.0");
+        expect(report.message).toContain("@openai/codex-sdk 0.167.2");
         expect(report.message).toContain(shown);
         expect(report.message).toContain(
-          "npm install @openai/codex-sdk@0.167.0",
+          "npm install @openai/codex-sdk@0.167.2",
         );
         expect(report.message).toContain("allowUncontainedCodexSdk: true");
         expect(report.message).toContain("new CodexCliDriver(...)");
@@ -458,9 +458,9 @@ describe("the installed SDK version at run time", () => {
   });
 
   test(
-    "allowUncontainedCodexSdk on 0.167.0 still runs the contained exec, with no warning",
+    "allowUncontainedCodexSdk on 0.167.2 still runs the contained exec, with no warning",
     () => {
-      const report = runVersionHost(["0.167.0", "allow", normalStub, "2"]);
+      const report = runVersionHost(["0.167.2", "allow", normalStub, "2"]);
       expect(report.codes).toEqual([]);
       expect(report.exitCodes).toEqual([0, 0]);
       expect(report.execRuns).toBe(0);
@@ -470,7 +470,7 @@ describe("the installed SDK version at run time", () => {
     HOST_TIMEOUT_MS,
   );
 
-  test("allowUncontainedCodexSdk on 0.167.0 still refuses an exec it cannot contain", async () => {
+  test("allowUncontainedCodexSdk on 0.167.2 still refuses an exec it cannot contain", async () => {
     let started = 0;
     const events = await drain(
       new CodexSdkDriver({

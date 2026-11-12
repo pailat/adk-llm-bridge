@@ -14,7 +14,7 @@
   "dependencies": {
     "@google/adk": "^2.4.0",
     "@jitl/quickjs-wasmfile-release-sync": "^0.32.0",
-    "@openai/codex-sdk": "0.167.0",
+    "@openai/codex-sdk": "0.167.2",
     "adk-llm-bridge": "file:../..",
     "quickjs-emscripten-core": "^0.32.0"
   },
