@@ -69,12 +69,17 @@ const PLAIN_SESSION_ID = /^[A-Za-z0-9_-]{1,128}$/;
 
 /**
  * Whether `value` can be used as an fx session id: 1 to 128 letters, digits,
- * `_` or `-`, including a leading `-`.
+ * `_` or `-`, including a leading `-`, except the bare tokens `-` and `--`.
  *
  * @internal
  */
 export function isFxSessionId(value: unknown): value is string {
-  return typeof value === "string" && PLAIN_SESSION_ID.test(value);
+  return (
+    typeof value === "string" &&
+    PLAIN_SESSION_ID.test(value) &&
+    value !== "-" &&
+    value !== "--"
+  );
 }
 
 /** Describe a rejected id without revealing its contents. @internal */

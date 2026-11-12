@@ -1011,7 +1011,8 @@ SDK drivers) fx keeps its transcript between turns of one ADK session:
    remembered the first.
 3. The id to resume is, in order: the driver's `resumeSessionId`,
    `request.runtimeSession.id`, then the id in session state. It must be a
-   plain token (1 to 128 letters, digits, `_` or `-`, including a leading `-`);
+   plain token (1 to 128 letters, digits, `_` or `-`, including a leading `-`,
+   except the bare tokens `-` and `--`);
    anything else is refused with `EXTERNAL_AGENT_OPTION_UNSUPPORTED` before fx
    starts, because a tool can write session state. The id is passed as the
    argument immediately after `--resume-id`, even when it starts with `-`.
