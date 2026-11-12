@@ -61,8 +61,20 @@ describe("FxAgent", () => {
     );
   });
 
-  test("capabilities are streaming off, permissions on", () => {
+  test("capabilities are streaming off, permissions on, sessions on", () => {
     const agent = new FxAgent({ name: "fx", driverOptions });
+    expect(agent.driver.capabilities?.()).toEqual({
+      streaming: false,
+      permissions: true,
+      sessions: true,
+    });
+  });
+
+  test("persistSession: false gives the stateless capabilities", () => {
+    const agent = new FxAgent({
+      name: "fx",
+      driverOptions: { ...driverOptions, persistSession: false },
+    });
     expect(agent.driver.capabilities?.()).toEqual({
       streaming: false,
       permissions: true,

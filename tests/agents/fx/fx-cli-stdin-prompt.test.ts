@@ -40,6 +40,7 @@ describe.skipIf(process.platform === "win32")("fx prompt on stdin", () => {
           baseConfig({
             command: fake.command,
             env: { PATH: "/usr/bin:/bin" },
+            persistSession: false,
           }),
         ),
         prompt,

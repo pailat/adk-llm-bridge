@@ -135,7 +135,10 @@ export const FX_CLI_OPTION_KEYS = Object.freeze([
   "interpreter",
   "killGraceMs",
   "model",
+  "persistSession",
   "requireExplicitModel",
+  "resumeSessionId",
+  "sessionStore",
   "spawn",
 ] as const);
 
