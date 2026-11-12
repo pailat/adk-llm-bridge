@@ -70,11 +70,14 @@ function fakeSdk(scripts: Message[][], resumes: Array<string | undefined>) {
   };
 }
 
-function workflowWith(agent: ExternalAgent): WorkflowAgent {
+// Every case builds its own workflow and invocation ids from this counter.
+let caseCounter = 0;
+
+function workflowWith(agent: ExternalAgent, id: string): WorkflowAgent {
   return new WorkflowAgent({
     name: "wf",
     definition: defineWorkflow({
-      id: "resume-model-less",
+      id,
       version: "1",
       handler: async (ctx) => {
         await ctx.run({ id: "s1", agentName: agent.name, input: "first task" });
@@ -89,10 +92,10 @@ function workflowWith(agent: ExternalAgent): WorkflowAgent {
   });
 }
 
-function invocation(agent: BaseAgent): InvocationContext {
+function invocation(agent: BaseAgent, invocationId: string): InvocationContext {
   return new InvocationContext({
     pluginManager: new PluginManager(),
-    invocationId: "inv-resume",
+    invocationId,
     branch: "root",
     agent,
     userContent: { role: "user", parts: [{ text: "go" }] },
@@ -118,11 +121,15 @@ async function completedSteps(scripts: Message[][]) {
     provider: CLAUDE_PROVIDER,
     driver,
   });
-  const wf = workflowWith(agent);
+  caseCounter += 1;
+  const wf = workflowWith(agent, `resume-model-less-${caseCounter}`);
   const events: Event[] = [];
   let thrown: unknown;
   try {
-    for await (const event of wf.runAsync(invocation(wf))) events.push(event);
+    for await (const event of wf.runAsync(
+      invocation(wf, `inv-resume-${caseCounter}`),
+    ))
+      events.push(event);
   } catch (error) {
     thrown = error;
   }

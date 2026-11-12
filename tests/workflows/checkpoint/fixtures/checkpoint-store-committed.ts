@@ -5,9 +5,11 @@
  * Usage: `bun checkpoint-store-committed.ts <mode> <root>`.
  * `rename-fails` fails the rename itself with `EIO`. `flush-after-rename` fails the first directory flush that follows the
  * rename of the checkpoint file with `EIO`; `write-before-rename` fails the
- * temporary file's write with `EIO` (the rename never happens). Both first
- * save a base checkpoint without a fault. `provider-flush-after-rename` is
- * `flush-after-rename` through `FileSystemWorkflowCheckpointProvider.put`.
+ * temporary file's write with `EIO` (the rename never happens). Every mode
+ * first saves a base checkpoint through the store without a fault, before the
+ * fault is armed; no mode skips it. `provider-flush-after-rename` is
+ * `flush-after-rename` with the faulted save made through
+ * `FileSystemWorkflowCheckpointProvider.put` instead of the store.
  * Prints one JSON line with the failure details and what a later load and save
  * see.
  */

@@ -18,7 +18,10 @@ import {
   SqliteSessionStoreError,
 } from "../../../src/agents/session-store/sqlite/index.js";
 import { overrideNodeSqliteLoaderForTests } from "../../../src/utils/sqlite-database.js";
-import { openRawDatabase } from "../../utils/fixtures/raw-sqlite.js";
+import {
+  nodeSqliteAvailable,
+  openRawDatabase,
+} from "../../utils/fixtures/raw-sqlite.js";
 
 // A second version 1 database, written by the first release of the session
 // store (schema version 1, WAL checkpointed) and embedded as base64 so tests
@@ -62,203 +65,212 @@ afterEach(() => {
 
 const key = { projectKey: "proj", sessionId: "s1" };
 
-describe("SqliteSessionStore with a version 1 database file", () => {
-  test("refuses a newer schema at once while another connection holds the write lock", async () => {
-    const path = writeFixture(tempDir());
-    const holder = openRawDatabase(path);
-    try {
-      holder.exec("PRAGMA user_version = 2");
-      holder.exec("BEGIN IMMEDIATE");
-      const started = Date.now();
-      let caught: unknown;
+// Needs the built-in `node:sqlite`: the store and the raw fixture both load it.
+describe.skipIf(!nodeSqliteAvailable)(
+  "SqliteSessionStore with a version 1 database file",
+  () => {
+    test("refuses a newer schema at once while another connection holds the write lock", async () => {
+      const path = writeFixture(tempDir());
+      const holder = openRawDatabase(path);
       try {
-        new SqliteSessionStore({ path, busyTimeoutMs: 3000 });
-      } catch (error) {
-        caught = error;
+        holder.exec("PRAGMA user_version = 2");
+        holder.exec("BEGIN IMMEDIATE");
+        const started = Date.now();
+        let caught: unknown;
+        try {
+          new SqliteSessionStore({ path, busyTimeoutMs: 3000 });
+        } catch (error) {
+          caught = error;
+        }
+        expect((caught as SqliteSessionStoreError).code).toBe(
+          "SESSION_STORE_SCHEMA_UNSUPPORTED",
+        );
+        expect(Date.now() - started).toBeLessThan(1500);
+      } finally {
+        holder.exec("ROLLBACK");
+        holder.close();
       }
-      expect((caught as SqliteSessionStoreError).code).toBe(
+    });
+
+    test("loads the committed version 1 database file", async () => {
+      const path = join(tempDir(), "committed.db");
+      copyFileSync(
+        resolve(import.meta.dir, "fixtures/session-store-v1.db"),
+        path,
+      );
+      const store = open(path);
+      expect(await store.load(key)).toEqual([
+        { type: "user", uuid: "u1", message: { content: "hi" } },
+        { type: "assistant", uuid: "u2" },
+        { type: "summary" },
+      ]);
+      expect(await store.listSubkeys(key)).toEqual(["sub/a"]);
+    });
+
+    test("loads the entries a version 1 file holds, in order", async () => {
+      const store = open(writeFixture(tempDir()));
+      expect(await store.load(key)).toEqual([
+        { type: "user", uuid: "u1", message: "hello" },
+        { type: "assistant", uuid: "u2", message: "hi" },
+      ]);
+      expect(await store.load({ ...key, subpath: "sub/a" })).toEqual([
+        { type: "user", message: "no uuid" },
+      ]);
+    });
+
+    test("appends to a version 1 file and replaces an entry by uuid", async () => {
+      const path = writeFixture(tempDir());
+      const store = open(path);
+      await store.append(key, [
+        { type: "user", uuid: "u1", message: "edited" },
+        { type: "user", uuid: "u3", message: "new" },
+      ]);
+      store.close();
+      const reopened = open(path);
+      expect(await reopened.load(key)).toEqual([
+        { type: "user", uuid: "u1", message: "edited" },
+        { type: "assistant", uuid: "u2", message: "hi" },
+        { type: "user", uuid: "u3", message: "new" },
+      ]);
+    });
+
+    // Skipped on Windows: POSIX modes.
+    test.skipIf(process.platform === "win32")(
+      "keeps the file mode of an existing version 1 file",
+      () => {
+        const path = writeFixture(tempDir());
+        chmodSync(path, 0o640);
+        open(path);
+        expect(statSync(path).mode & 0o777).toBe(0o640);
+      },
+    );
+
+    test("refuses a symbolic link to a version 1 file and leaves the target alone", () => {
+      // The store opens its path without following a symlink;
+      // a version 1 file behind a link is refused, not migrated.
+      const dir = tempDir();
+      const target = writeFixture(dir);
+      const before = readFileSync(target);
+      const link = join(dir, "link.db");
+      symlinkSync(target, link);
+      let error: unknown;
+      try {
+        open(link);
+      } catch (caught) {
+        error = caught;
+      }
+      expect(error).toBeInstanceOf(SqliteSessionStoreError);
+      expect((error as SqliteSessionStoreError).code).toBe(
+        "SESSION_STORE_UNSAFE_PATH",
+      );
+      expect(readFileSync(target).equals(before)).toBe(true);
+    });
+
+    test("reports a stored schema version newer than 1 and leaves the file alone", () => {
+      const dir = tempDir();
+      const path = writeFixture(dir);
+      // Bump user_version (offset 60 of the header) to a future version.
+      const bytes = Buffer.from(VERSION_1_DATABASE, "base64");
+      bytes.writeUInt32BE(2, 60);
+      writeFileSync(path, bytes);
+      let error: unknown;
+      try {
+        open(path);
+      } catch (caught) {
+        error = caught;
+      }
+      expect(error).toBeInstanceOf(SqliteSessionStoreError);
+      expect((error as SqliteSessionStoreError).code).toBe(
         "SESSION_STORE_SCHEMA_UNSUPPORTED",
       );
-      expect(Date.now() - started).toBeLessThan(1500);
-    } finally {
-      holder.exec("ROLLBACK");
-      holder.close();
+      expect(readdirSync(dir)).toEqual(["v1.db"]);
+      expect(Buffer.compare(bytes, readFileSync(path))).toBe(0);
+    });
+
+    test("keeps the message of the schema refusal that earlier versions raised", () => {
+      const dir = tempDir();
+      const path = writeFixture(dir);
+      const bytes = Buffer.from(VERSION_1_DATABASE, "base64");
+      bytes.writeUInt32BE(2, 60);
+      writeFileSync(path, bytes);
+      expect(() => open(path)).toThrow(
+        "The session store database has schema version 2; this version of adk-llm-bridge reads version 1. Upgrade adk-llm-bridge.",
+      );
+    });
+  },
+);
+
+// Needs the built-in `node:sqlite`: the store and the raw fixture both load it.
+describe.skipIf(!nodeSqliteAvailable)(
+  "SqliteSessionStore with an unusual user_version",
+  () => {
+    async function userVersion(path: string): Promise<number> {
+      const db = openRawDatabase(path);
+      try {
+        return (
+          db.query("PRAGMA user_version").get() as { user_version: number }
+        ).user_version;
+      } finally {
+        db.close();
+      }
     }
-  });
 
-  test("loads the committed version 1 database file", async () => {
-    const path = join(tempDir(), "committed.db");
-    copyFileSync(
-      resolve(import.meta.dir, "fixtures/session-store-v1.db"),
-      path,
-    );
-    const store = open(path);
-    expect(await store.load(key)).toEqual([
-      { type: "user", uuid: "u1", message: { content: "hi" } },
-      { type: "assistant", uuid: "u2" },
-      { type: "summary" },
-    ]);
-    expect(await store.listSubkeys(key)).toEqual(["sub/a"]);
-  });
-
-  test("loads the entries a version 1 file holds, in order", async () => {
-    const store = open(writeFixture(tempDir()));
-    expect(await store.load(key)).toEqual([
-      { type: "user", uuid: "u1", message: "hello" },
-      { type: "assistant", uuid: "u2", message: "hi" },
-    ]);
-    expect(await store.load({ ...key, subpath: "sub/a" })).toEqual([
-      { type: "user", message: "no uuid" },
-    ]);
-  });
-
-  test("appends to a version 1 file and replaces an entry by uuid", async () => {
-    const path = writeFixture(tempDir());
-    const store = open(path);
-    await store.append(key, [
-      { type: "user", uuid: "u1", message: "edited" },
-      { type: "user", uuid: "u3", message: "new" },
-    ]);
-    store.close();
-    const reopened = open(path);
-    expect(await reopened.load(key)).toEqual([
-      { type: "user", uuid: "u1", message: "edited" },
-      { type: "assistant", uuid: "u2", message: "hi" },
-      { type: "user", uuid: "u3", message: "new" },
-    ]);
-  });
-
-  // Skipped on Windows: POSIX modes.
-  test.skipIf(process.platform === "win32")(
-    "keeps the file mode of an existing version 1 file",
-    () => {
+    test("accepts a negative user_version, keeps the entries and rewrites it to 1", async () => {
       const path = writeFixture(tempDir());
-      chmodSync(path, 0o640);
-      open(path);
-      expect(statSync(path).mode & 0o777).toBe(0o640);
-    },
-  );
+      const raw = openRawDatabase(path);
+      raw.exec("PRAGMA user_version = -5");
+      raw.close();
+      expect(await userVersion(path)).toBe(-5);
+      const store = open(path);
+      expect(await store.load(key)).toEqual([
+        { type: "user", uuid: "u1", message: "hello" },
+        { type: "assistant", uuid: "u2", message: "hi" },
+      ]);
+      store.close();
+      expect(await userVersion(path)).toBe(1);
+    });
 
-  test("refuses a symbolic link to a version 1 file and leaves the target alone", () => {
-    // Since the S13 hardening the store opens its path without following a
-    // symlink; a version 1 file behind a link is refused, not migrated.
-    const dir = tempDir();
-    const target = writeFixture(dir);
-    const before = readFileSync(target);
-    const link = join(dir, "link.db");
-    symlinkSync(target, link);
-    let error: unknown;
-    try {
-      open(link);
-    } catch (caught) {
-      error = caught;
-    }
-    expect(error).toBeInstanceOf(SqliteSessionStoreError);
-    expect((error as SqliteSessionStoreError).code).toBe(
-      "SESSION_STORE_UNSAFE_PATH",
-    );
-    expect(readFileSync(target).equals(before)).toBe(true);
-  });
+    test("repairs a file stamped version 1 whose table and indexes are missing", async () => {
+      const path = join(tempDir(), "stamped.db");
+      const raw = openRawDatabase(path);
+      raw.exec("PRAGMA user_version = 1");
+      raw.close();
+      const store = open(path);
+      await store.append(key, [{ type: "user", uuid: "u1", message: "a" }]);
+      await store.append(key, [{ type: "user", uuid: "u1", message: "b" }]);
+      expect(await store.load(key)).toEqual([
+        { type: "user", uuid: "u1", message: "b" },
+      ]);
+      store.close();
+      expect(await userVersion(path)).toBe(1);
+    });
 
-  test("reports a stored schema version newer than 1 and leaves the file alone", () => {
-    const dir = tempDir();
-    const path = writeFixture(dir);
-    // Bump user_version (offset 60 of the header) to a future version.
-    const bytes = Buffer.from(VERSION_1_DATABASE, "base64");
-    bytes.writeUInt32BE(2, 60);
-    writeFileSync(path, bytes);
-    let error: unknown;
-    try {
-      open(path);
-    } catch (caught) {
-      error = caught;
-    }
-    expect(error).toBeInstanceOf(SqliteSessionStoreError);
-    expect((error as SqliteSessionStoreError).code).toBe(
-      "SESSION_STORE_SCHEMA_UNSUPPORTED",
-    );
-    expect(readdirSync(dir)).toEqual(["v1.db"]);
-    expect(Buffer.compare(bytes, readFileSync(path))).toBe(0);
-  });
-
-  test("keeps the message of the schema refusal that earlier versions raised", () => {
-    const dir = tempDir();
-    const path = writeFixture(dir);
-    const bytes = Buffer.from(VERSION_1_DATABASE, "base64");
-    bytes.writeUInt32BE(2, 60);
-    writeFileSync(path, bytes);
-    expect(() => open(path)).toThrow(
-      "The session store database has schema version 2; this version of adk-llm-bridge reads version 1. Upgrade adk-llm-bridge.",
-    );
-  });
-});
-
-describe("SqliteSessionStore with an unusual user_version", () => {
-  async function userVersion(path: string): Promise<number> {
-    const db = openRawDatabase(path);
-    try {
-      return (db.query("PRAGMA user_version").get() as { user_version: number })
-        .user_version;
-    } finally {
-      db.close();
-    }
-  }
-
-  test("accepts a negative user_version, keeps the entries and rewrites it to 1", async () => {
-    const path = writeFixture(tempDir());
-    const raw = openRawDatabase(path);
-    raw.exec("PRAGMA user_version = -5");
-    raw.close();
-    expect(await userVersion(path)).toBe(-5);
-    const store = open(path);
-    expect(await store.load(key)).toEqual([
-      { type: "user", uuid: "u1", message: "hello" },
-      { type: "assistant", uuid: "u2", message: "hi" },
-    ]);
-    store.close();
-    expect(await userVersion(path)).toBe(1);
-  });
-
-  test("repairs a file stamped version 1 whose table and indexes are missing", async () => {
-    const path = join(tempDir(), "stamped.db");
-    const raw = openRawDatabase(path);
-    raw.exec("PRAGMA user_version = 1");
-    raw.close();
-    const store = open(path);
-    await store.append(key, [{ type: "user", uuid: "u1", message: "a" }]);
-    await store.append(key, [{ type: "user", uuid: "u1", message: "b" }]);
-    expect(await store.load(key)).toEqual([
-      { type: "user", uuid: "u1", message: "b" },
-    ]);
-    store.close();
-    expect(await userVersion(path)).toBe(1);
-  });
-
-  test("recreates an index a file stamped version 1 lost", async () => {
-    const path = writeFixture(tempDir());
-    const raw = openRawDatabase(path);
-    const indexes = (
-      raw
+    test("recreates an index a file stamped version 1 lost", async () => {
+      const path = writeFixture(tempDir());
+      const raw = openRawDatabase(path);
+      const indexes = (
+        raw
+          .query(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE '%_uuid'",
+          )
+          .all() as { name: string }[]
+      ).map((row) => row.name);
+      expect(indexes.length).toBe(1);
+      raw.exec(`DROP INDEX ${indexes[0]}`);
+      raw.close();
+      const store = open(path);
+      store.close();
+      const check = openRawDatabase(path);
+      const after = check
         .query(
           "SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE '%_uuid'",
         )
-        .all() as { name: string }[]
-    ).map((row) => row.name);
-    expect(indexes.length).toBe(1);
-    raw.exec(`DROP INDEX ${indexes[0]}`);
-    raw.close();
-    const store = open(path);
-    store.close();
-    const check = openRawDatabase(path);
-    const after = check
-      .query(
-        "SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE '%_uuid'",
-      )
-      .all();
-    check.close();
-    expect(after.length).toBe(1);
-  });
-});
+        .all();
+      check.close();
+      expect(after.length).toBe(1);
+    });
+  },
+);
 
 describe("SqliteSessionStore without node:sqlite", () => {
   test("reports SESSION_STORE_SQLITE_UNAVAILABLE and creates no directory or file", () => {

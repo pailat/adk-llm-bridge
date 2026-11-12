@@ -33,7 +33,10 @@ import {
   getWorkflowCheckpointStoreFromUri,
   getWorkflowEventExporterFromUri,
 } from "../../../src/workflows/storage/registry.js";
-import { openRawDatabase } from "../../utils/fixtures/raw-sqlite.js";
+import {
+  nodeSqliteAvailable,
+  openRawDatabase,
+} from "../../utils/fixtures/raw-sqlite.js";
 
 const dirs: string[] = [];
 
@@ -283,42 +286,46 @@ describe("event export pipeline", () => {
   });
 });
 
-describe("SQLite checkpoint store under a held lock", () => {
-  test("a save honours operationTimeoutMs without freezing the event loop", async () => {
-    const path = join(tempDir(), "c.db");
-    const store = await getWorkflowCheckpointStoreFromUri(
-      `sqlite://${path}?operationTimeoutMs=300`,
-    );
-    const first = await store.put({
-      checkpoint: await checkpoint("e1"),
-      expectedRevision: null,
-    });
-    const holder = openRawDatabase(path);
-    holder.exec("BEGIN IMMEDIATE");
-    let ticks = 0;
-    const timer = setInterval(() => {
-      ticks += 1;
-    }, 20);
-    const started = performance.now();
-    const error = await caught(async () =>
-      store.put({
-        checkpoint: { ...(await checkpoint("e1")), updatedAt: 2 },
-        expectedRevision: first.revision,
-      }),
-    );
-    const elapsed = performance.now() - started;
-    clearInterval(timer);
-    holder.exec("ROLLBACK");
-    holder.close();
-    await store.close();
-    expect(elapsed).toBeLessThan(2_500);
-    expect([
-      "WORKFLOW_STORAGE_TIMEOUT",
-      "WORKFLOW_STORAGE_UNAVAILABLE",
-    ]).toContain((error as WorkflowStorageError).code);
-    expect(ticks).toBeGreaterThan(3);
-  }, 20_000);
-});
+// Needs the built-in `node:sqlite` for the raw lock holder.
+describe.skipIf(!nodeSqliteAvailable)(
+  "SQLite checkpoint store under a held lock",
+  () => {
+    test("a save honours operationTimeoutMs without freezing the event loop", async () => {
+      const path = join(tempDir(), "c.db");
+      const store = await getWorkflowCheckpointStoreFromUri(
+        `sqlite://${path}?operationTimeoutMs=300`,
+      );
+      const first = await store.put({
+        checkpoint: await checkpoint("e1"),
+        expectedRevision: null,
+      });
+      const holder = openRawDatabase(path);
+      holder.exec("BEGIN IMMEDIATE");
+      let ticks = 0;
+      const timer = setInterval(() => {
+        ticks += 1;
+      }, 20);
+      const started = performance.now();
+      const error = await caught(async () =>
+        store.put({
+          checkpoint: { ...(await checkpoint("e1")), updatedAt: 2 },
+          expectedRevision: first.revision,
+        }),
+      );
+      const elapsed = performance.now() - started;
+      clearInterval(timer);
+      holder.exec("ROLLBACK");
+      holder.close();
+      await store.close();
+      expect(elapsed).toBeLessThan(2_500);
+      expect([
+        "WORKFLOW_STORAGE_TIMEOUT",
+        "WORKFLOW_STORAGE_UNAVAILABLE",
+      ]).toContain((error as WorkflowStorageError).code);
+      expect(ticks).toBeGreaterThan(3);
+    }, 20_000);
+  },
+);
 
 describe("JSONL writer lock", () => {
   test("a day-old lock whose pid belongs to an unrelated live process is taken over", async () => {
