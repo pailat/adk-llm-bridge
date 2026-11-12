@@ -129,7 +129,7 @@ export interface WorkflowStepUsage {
  * Collected over the successful attempt's non-partial events, nested agents
  * included. Each id appears once, in first-seen order. Neither list is proof
  * of what ran: `resolved` holds only what a trusted runtime reported (see
- * `ExternalAgentModelInfo`), so a Codex or Gemini step has an empty
+ * `ExternalAgentModelInfo`), so a Codex step has an empty
  * `resolved` and `unknown: true`.
  */
 export interface WorkflowStepModels {

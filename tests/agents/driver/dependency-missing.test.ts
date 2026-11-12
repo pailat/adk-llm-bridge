@@ -10,10 +10,6 @@ import {
 } from "../../../src/agents/driver/codex-cli.js";
 import { CodexSdkDriver } from "../../../src/agents/driver/codex-sdk.js";
 import {
-  GeminiCliDriver,
-  type GeminiCliSpawn,
-} from "../../../src/agents/driver/gemini-cli.js";
-import {
   EXTERNAL_AGENT_DEPENDENCY_MISSING,
   EXTERNAL_AGENT_MISSING_BINARY,
   isCommandNotFound,
@@ -25,9 +21,8 @@ import {
 import type { ExternalAgentEvent } from "../../../src/agents/events.js";
 import type { ExternalAgentRunRequest } from "../../../src/agents/external-agent-driver.js";
 import { CODEX_PROVIDER } from "../../../src/agents/provider/codex.js";
-import { GEMINI_CLI_PROVIDER } from "../../../src/agents/provider/gemini-cli.js";
 import { CLAUDE_PROVIDER } from "../../../src/agents/provider/schema.js";
-import { GEMINI_NETWORK_ON, noHostMcpServers } from "../helpers.js";
+import { noHostMcpServers } from "../helpers.js";
 
 const MISSING = "/nonexistent/adk-llm-bridge-test-binary";
 
@@ -114,8 +109,7 @@ for (const [label, runtime] of [
   describe(`a missing CLI binary is an error event (${label} spawn)`, () => {
     const spawn = ((command, args, options) =>
       spawnSubprocess(command, args, options, runtime)) as ClaudeCliSpawn &
-      CodexCliSpawn &
-      GeminiCliSpawn;
+      CodexCliSpawn;
 
     test("Claude CLI", async () => {
       const events = await collect(
@@ -140,20 +134,6 @@ for (const [label, runtime] of [
         events,
         EXTERNAL_AGENT_MISSING_BINARY,
         "npm install -g @openai/codex",
-      );
-    });
-
-    test("Gemini CLI", async () => {
-      const events = await collect(
-        new GeminiCliDriver({ command: MISSING, spawn }).run({
-          ...request(GEMINI_CLI_PROVIDER),
-          permissions: GEMINI_NETWORK_ON,
-        }),
-      );
-      expectRefused(
-        events,
-        EXTERNAL_AGENT_MISSING_BINARY,
-        "npm install -g @google/gemini-cli",
       );
     });
   });

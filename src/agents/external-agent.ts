@@ -299,7 +299,7 @@ export interface ExternalAgentConfig extends BaseAgentConfig {
    * it every prompt is denied. A confirmation never widens the effective policy
    * and `read-only` is never confirmable. Supported only by drivers that can
    * intercept prompts (Claude Agent SDK). An `approver` or `adk: true` on any
-   * other built-in driver (Claude CLI, Codex, Gemini CLI) throws
+   * other built-in driver (Claude CLI, Codex, fx) throws
    * `EXTERNAL_AGENT_APPROVALS_UNSUPPORTED` at construction, because the
    * runtime decides alone and the setting would be ignored. A custom driver
    * without `capabilities()` is not checked.
@@ -309,11 +309,11 @@ export interface ExternalAgentConfig extends BaseAgentConfig {
    * normalization and symlink resolution (dangling links included). The
    * Claude Agent SDK driver also checks every tool call, not only prompts,
    * and approves reads inside `readPaths` itself; the Claude CLI, Codex and
-   * Gemini CLI drivers refuse a run with `allowedPaths` or `readPaths` with
+   * fx drivers refuse a run with `allowedPaths` or `readPaths` with
    * `EXTERNAL_AGENT_PATHS_UNENFORCEABLE` unless built with
    * `allowUnenforcedPaths: true`.
    * Unless the policy sets `allowNetwork: true`, web tools (`WebFetch`,
-   * `WebSearch` and their Codex and Gemini CLI names) are denied, MCP tools
+   * `WebSearch` and their other runtime names) are denied, MCP tools
    * other than this run's registered bridge tools are denied too, and a shell call is approved only when the driver runs it
    * in a no-network sandbox (or the Claude driver was built with
    * `allowUnsandboxedShell: true`). An unset `allowNetwork`, or no policy,
@@ -321,9 +321,9 @@ export interface ExternalAgentConfig extends BaseAgentConfig {
    * run with `EXTERNAL_AGENT_NETWORK_UNENFORCEABLE` unless built with
    * `allowUnenforcedNetwork: true`: Codex in `full-access`, Codex when its
    * host MCP servers cannot be listed, a Codex driver given a prebuilt `sdk`
-   * client (its MCP servers cannot be turned off), and Gemini CLI in every
-   * mode. The Claude drivers refuse a run whose configured `tools` name a web
-   * tool while the network is off.
+   * client (its MCP servers cannot be turned off), and fx in every mode. The
+   * Claude drivers refuse a run whose configured `tools` name a web tool
+   * while the network is off.
    * Under `read-only` with `allowNetwork: true`, web tools run without a
    * confirmation (no approver is asked), so the agent can send what it reads
    * to the network; every other tool stays denied.
@@ -445,7 +445,7 @@ export interface ExternalAgentConfig extends BaseAgentConfig {
 }
 
 /**
- * ADK agent backed by an external runtime driver (Claude, Codex, Gemini CLI...).
+ * ADK agent backed by an external runtime driver (Claude, Codex, fx...).
  *
  * As a `BaseAgent` it is also a `BaseNode`: ADK's inherited `runImpl` delegates
  * to `runAsync`, so no override is needed to drop it into a `Workflow`.

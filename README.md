@@ -1,7 +1,7 @@
 # adk-llm-bridge
 
-Use any LLM provider and external coding agents (Claude Code, Codex, Gemini
-CLI, fx) with [Google ADK for TypeScript](https://github.com/google/adk-js).
+Use any LLM provider and external coding agents (Claude Code, Codex,
+fx) with [Google ADK for TypeScript](https://github.com/google/adk-js).
 
 [![npm version](https://img.shields.io/npm/v/adk-llm-bridge.svg)](https://www.npmjs.com/package/adk-llm-bridge)
 [![CI](https://github.com/pailat/adk-llm-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/pailat/adk-llm-bridge/actions/workflows/ci.yml)
@@ -23,8 +23,8 @@ CLI, fx) with [Google ADK for TypeScript](https://github.com/google/adk-js).
   OpenRouter, OpenAI, Anthropic, xAI, or any OpenAI-compatible endpoint
   (Ollama, vLLM, LM Studio). Tools, streaming, multi-agent transfer and ADK
   callbacks keep working.
-- **External agents as ADK agents.** `ClaudeAgent`, `CodexAgent`,
-  `GeminiCliAgent` and `FxAgent` run a coding-agent runtime as an ADK `BaseAgent`, so it can
+- **External agents as ADK agents.** `ClaudeAgent`, `CodexAgent`
+  and `FxAgent` run a coding-agent runtime as an ADK `BaseAgent`, so it can
   be a root agent, a sub-agent or a coordinator of ADK sub-agents.
 - **Durable workflows.** `WorkflowAgent` (TypeScript) and
   `ScriptWorkflowAgent` (sandboxed scripts) run agent steps with checkpoints,
@@ -61,7 +61,6 @@ Optional peers, only for the features that use them:
 | Run spec, `adk-llm-bridge/workflows/spec` (experimental) | `zod@^4`; zod >= 4 is required by this subpath only |
 | `ClaudeAgent` | `@anthropic-ai/claude-agent-sdk@">=0.3.319 <0.4"` |
 | `CodexAgent` | `@openai/codex-sdk@0.167.2` (exact); `CodexCliDriver` runs without it |
-| `GeminiCliAgent` | the `gemini` CLI on `PATH` |
 | `FxAgent` | the `fx` CLI on `PATH` (no peer dependency) |
 | `ScriptWorkflowAgent` | `quickjs-emscripten-core@">=0.32.0 <0.33.0"` and `@jitl/quickjs-wasmfile-release-sync@">=0.32.0 <0.33.0"` |
 
@@ -348,7 +347,6 @@ ADK events and applies the permission policy.
 |---|---|---|---|
 | `ClaudeAgent` | `ClaudeAgentSdkDriver` | `ClaudeCliDriver` | `@anthropic-ai/claude-agent-sdk` |
 | `CodexAgent` | `CodexSdkDriver` | `CodexCliDriver` | `@openai/codex-sdk` |
-| `GeminiCliAgent` | `GeminiCliDriver` | - | `gemini` CLI |
 | `FxAgent` | `FxCliDriver` | - | `fx` CLI |
 
 ```typescript
@@ -398,7 +396,7 @@ const hostSetup = new ClaudeAgent({
 });
 ```
 
-The Codex drivers (SDK and CLI), the Gemini CLI driver and the fx driver use
+The Codex drivers (SDK and CLI) and the fx driver use
 the host's configuration (fx needs `inheritHostConfig: true` to say so); unless
 the policy sets `allowNetwork: true`, Codex turns
 host MCP servers off. fx has no read-only mode: in `ask` mode it stops at the
@@ -437,9 +435,9 @@ to its runtime's sandbox and flags.
   working directory must be inside `allowedPaths` and outside temp
   directories, the shell must be sandboxed, and `inheritHostConfig` must be
   off; otherwise the run is refused with `EXTERNAL_AGENT_PATHS_UNENFORCEABLE`.
-  The Claude CLI, Codex, Gemini CLI and fx drivers cannot check paths: they refuse
+  The Claude CLI, Codex and fx drivers cannot check paths: they refuse
   `allowedPaths` unless built with `allowUnenforcedPaths: true`.
-- **Credentials.** The four agents use `EnvCredentialProvider`: only the
+- **Credentials.** The three agents use `EnvCredentialProvider`: only the
   runtime's allow-listed variables reach it (for Codex, `CODEX_API_KEY`,
   `CODEX_ACCESS_TOKEN`, `CODEX_HOME` and a few others, not
   `OPENAI_API_KEY`; for fx, `AI_GATEWAY_API_KEY` and `VERCEL_OIDC_TOKEN`).
@@ -463,7 +461,6 @@ none. The workflow agent factory (`ExternalAgentWorkflowFactory`) refuses
 |---|---|
 | Claude (SDK and CLI) | Bash runs in the Claude Code sandbox with every host denied; web tools are removed from the default tool list, and naming them in `tools` refuses the run with `EXTERNAL_AGENT_NETWORK_UNENFORCEABLE`. Where the sandbox cannot run (Windows, Linux without bubblewrap) the run fails, unless the driver has `allowUnsandboxedShell: true`. |
 | Codex (SDK and CLI) | No-network sandbox, web search off and host MCP servers turned off for the run. Refused with `EXTERNAL_AGENT_NETWORK_UNENFORCEABLE` in `full-access` mode, when the MCP server listing fails, for a server name that cannot be overridden, and for a prebuilt `sdk` client, unless `allowUnenforcedNetwork: true`. |
-| Gemini CLI | Cannot be enforced: every run without `allowNetwork: true` is refused with `EXTERNAL_AGENT_NETWORK_UNENFORCEABLE` (set `allowNetwork: true`, or build the driver with `allowUnenforcedNetwork: true`). |
 | fx | Cannot be enforced: fx has no sandbox and no network block, so every run without `allowNetwork: true` is refused with `EXTERNAL_AGENT_NETWORK_UNENFORCEABLE` (set `allowNetwork: true`, or build the driver with `allowUnenforcedNetwork: true`). |
 
 A `read-only` agent with `allowNetwork: true` can read the web: its web tools
@@ -674,7 +671,6 @@ directory). See [examples/README.md](examples/README.md).
 | [express-server](examples/express-server) | HTTP API with sessions, tools, state and streaming |
 | [basic-agent-claude](examples/basic-agent-claude) | Claude Code as an ADK agent |
 | [basic-agent-codex](examples/basic-agent-codex) | Codex as an ADK agent |
-| [basic-agent-gemini](examples/basic-agent-gemini) | Gemini CLI as an ADK agent |
 | [external-agents](examples/external-agents) | A Claude coordinator with Codex and LLM sub-agents |
 | [codex-workflow](examples/codex-workflow) | Planner, implementer and reviewer script workflow with Codex agents |
 

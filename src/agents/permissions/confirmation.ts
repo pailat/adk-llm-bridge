@@ -107,7 +107,7 @@ export interface ExternalAgentConfirmationOptions {
 
 /**
  * Tools that reach the network on their own, across runtimes (Claude Code,
- * Codex, Gemini CLI names). Denied unless the policy sets `allowNetwork: true`.
+ * Codex and other known names). Denied unless the policy sets `allowNetwork: true`.
  */
 const NETWORK_TOOLS = new Set([
   "WebFetch",
@@ -136,8 +136,8 @@ const SHELL_TOOLS = new Set([
 
 /**
  * Input keys that carry a file path in the file tools of Claude Code
- * (`file_path`, `notebook_path`, `path`), Gemini CLI (`absolute_path`,
- * `file_path`, `dir_path`, `paths`) and Codex (`path`, `workdir`, `cwd`). The
+ * (`file_path`, `notebook_path`, `path`), other known file tools
+ * (`absolute_path`, `file_path`, `dir_path`, `paths`) and Codex (`path`, `workdir`, `cwd`). The
  * scan is runtime-neutral: every request is checked for these keys, so a file
  * tool from any runtime is checked against `allowedPaths`, not only the names
  * this module knows. Nested `changes[].path` (Codex file changes) and the
@@ -162,8 +162,8 @@ const PATH_KEYS = new Set([
 
 /**
  * Input keys that carry a glob in file-search tools: Claude Code `Glob`
- * (`pattern`) and `Grep` (`glob`), Gemini CLI `glob` (`pattern`) and
- * `read_many_files` (`include`). A glob that is absolute, starts with `~` or
+ * (`pattern`) and `Grep` (`glob`), and the known `glob` (`pattern`) and
+ * `read_many_files` (`include`) tools. A glob that is absolute, starts with `~` or
  * has a `..` segment can reach outside `allowedPaths` without any
  * {@link PATH_KEYS} argument, so its static base is checked as a path.
  */
@@ -187,14 +187,14 @@ const MAX_BRACE_ALTERNATIVES = 64;
 
 /**
  * Input keys that set where a file-search tool matches its glob (Claude
- * `Glob`/`Grep` `path`, Gemini `glob` `dir_path`). A relative glob is
+ * `Glob`/`Grep` `path`, a `glob` tool's `dir_path`). A relative glob is
  * resolved against it, not against the working directory.
  */
 const SEARCH_ROOT_KEYS = ["path", "dir_path", "directory", "cwd"] as const;
 
 /**
- * File-search tools (Claude Code `Glob`/`Grep`, Gemini CLI `glob`,
- * `grep_search`, `search_file_content`). Without a search-root argument they
+ * File-search tools (Claude Code `Glob`/`Grep`, and the known `glob`,
+ * `grep_search`, `search_file_content` tools). Without a search-root argument they
  * search the working directory, so it is checked as their path.
  */
 const SEARCH_TOOLS = new Set([
@@ -208,7 +208,7 @@ const SEARCH_TOOLS = new Set([
 
 /**
  * Tools that only read files, by their exact runtime names: Claude Code
- * `Read`, `Glob`, `Grep`, `LS`, `NotebookRead` and Gemini CLI `read_file`,
+ * `Read`, `Glob`, `Grep`, `LS`, `NotebookRead` and the known `read_file`,
  * `read_many_files`, `list_directory`, `glob`, `grep`, `grep_search`,
  * `search_file_content`. Only these may reach `readPaths`; any other name,
  * another spelling or an MCP tool with the same suffix counts as a write.
@@ -707,7 +707,7 @@ function globBases(pattern: string, root: string | undefined): string[] {
     const base = globBase(alternative);
     if (base === undefined) {
       // A relative glob matches under its search root, or under the working
-      // directory when there is none (Gemini `read_many_files` `include`, or
+      // directory when there is none (a `read_many_files` `include`, or
       // any tool whose only path input is a glob).
       bases.push(root !== undefined ? expandHome(root) : ".");
       continue;

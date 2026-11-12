@@ -9,10 +9,6 @@ import {
   type CodexCliSpawn,
 } from "../../../src/agents/driver/codex-cli.js";
 import { CodexSdkDriver } from "../../../src/agents/driver/codex-sdk.js";
-import {
-  GeminiCliDriver,
-  type GeminiCliSpawn,
-} from "../../../src/agents/driver/gemini-cli.js";
 import { EXTERNAL_AGENT_PATHS_UNENFORCEABLE } from "../../../src/agents/driver/policy-errors.js";
 import type { ExternalAgentEvent } from "../../../src/agents/events.js";
 import type { ExternalAgentRunRequest } from "../../../src/agents/external-agent-driver.js";
@@ -20,7 +16,6 @@ import { EXTERNAL_AGENT_PATHS_UNENFORCEABLE as PUBLIC_CODE } from "../../../src/
 import type { ExternalAgentPermissionPolicy } from "../../../src/agents/permissions/schema.js";
 import { CLAUDE_PROVIDER } from "../../../src/agents/provider/claude.js";
 import { CODEX_PROVIDER } from "../../../src/agents/provider/codex.js";
-import { GEMINI_CLI_PROVIDER } from "../../../src/agents/provider/gemini-cli.js";
 
 function request(
   permissions: ExternalAgentPermissionPolicy,
@@ -121,17 +116,6 @@ describe("drivers that never ask the bridge refuse allowedPaths", () => {
       expectRefused(events);
     });
 
-    test(`Gemini CLI does not spawn (${label})`, async () => {
-      const { spawn, state } = countingSpawn();
-      const events = await collect(
-        new GeminiCliDriver({ spawn: spawn as GeminiCliSpawn }).run(
-          request(permissions, GEMINI_CLI_PROVIDER),
-        ),
-      );
-      expect(state.spawned).toBe(0);
-      expectRefused(events);
-    });
-
     test(`Claude CLI does not spawn (${label})`, async () => {
       const { spawn, state } = countingSpawn();
       const events = await collect(
@@ -153,15 +137,6 @@ describe("drivers that never ask the bridge refuse allowedPaths", () => {
       }).run(request(WITH_PATHS)),
     );
     expect(codexCli.state.spawned).toBe(1);
-
-    const gemini = countingSpawn();
-    await collect(
-      new GeminiCliDriver({
-        spawn: gemini.spawn as GeminiCliSpawn,
-        allowUnenforcedPaths: true,
-      }).run(request(WITH_PATHS, GEMINI_CLI_PROVIDER)),
-    );
-    expect(gemini.state.spawned).toBe(1);
 
     const claude = countingSpawn();
     await collect(

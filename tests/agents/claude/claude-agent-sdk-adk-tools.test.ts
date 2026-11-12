@@ -20,9 +20,9 @@ import {
   claudeSdkSessionStateKey,
 } from "../../../src/agents/driver/claude-agent-sdk.js";
 import { CodexSdkDriver } from "../../../src/agents/driver/codex-sdk.js";
-import { GeminiCliDriver } from "../../../src/agents/driver/gemini-cli.js";
+import { FxCliDriver } from "../../../src/agents/driver/fx-cli.js";
 import { ExternalAgent } from "../../../src/agents/external-agent.js";
-import { GEMINI_CLI_AGENT_DEFINITION } from "../../../src/agents/gemini-cli-agent.js";
+import { FX_AGENT_DEFINITION } from "../../../src/agents/fx-agent.js";
 import { CLAUDE_PROVIDER } from "../../../src/agents/provider/schema.js";
 import { createAdkToolBridge } from "../../../src/agents/tools/adk-tool-bridge.js";
 import { captureWarnings } from "../../helpers/fake-logger.js";
@@ -568,14 +568,14 @@ describe("runtime capabilities are honest", () => {
     expect(codex.tools).toBeUndefined();
     expect(codex.mcpServers).toBeUndefined();
     expect(codex.approvals).toBeUndefined();
-    expect(new GeminiCliDriver().capabilities().tools).toBeUndefined();
+    expect(new FxCliDriver({ model: "anthropic/claude-haiku-4-5" }).capabilities().tools).toBeUndefined();
   });
 
   test("definitions carry no capabilities: the driver is the only source", () => {
     for (const definition of [
       CLAUDE_AGENT_DEFINITION,
       CODEX_AGENT_DEFINITION,
-      GEMINI_CLI_AGENT_DEFINITION,
+      FX_AGENT_DEFINITION,
     ]) {
       expect(definition).not.toHaveProperty("capabilities");
     }

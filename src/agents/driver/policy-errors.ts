@@ -104,11 +104,12 @@ export const EXTERNAL_AGENT_OPTION_UNSUPPORTED =
 
 /**
  * On Windows, the command resolves to a batch file (`.cmd` or `.bat`), for
- * example an npm shim such as `gemini.cmd`. Running one means going through
+ * example an npm shim such as `claude.cmd`. Running one means going through
  * `cmd.exe`, which re-parses the arguments (a prompt with `&` or `|` would
  * run as a command), so the driver never runs it. Point `command` at the
- * native `.exe` or, for Gemini CLI, set `interpreter` (a native `node.exe`)
- * and `entry` (the package's JavaScript entry).
+ * native `.exe` or, for a CLI that ships as a JavaScript package, set
+ * `interpreter` (a native `node.exe`) and `entry` (the package's JavaScript
+ * entry).
  */
 export const EXTERNAL_AGENT_BATCH_COMMAND_REFUSED =
   "EXTERNAL_AGENT_BATCH_COMMAND_REFUSED";
@@ -139,7 +140,7 @@ export const EXTERNAL_AGENT_MODEL_INVALID = "EXTERNAL_AGENT_MODEL_INVALID";
 /**
  * The driver was built with `requireExplicitModel: true` and has no `model`,
  * or its `model` is a router or default alias that lets the runtime choose
- * (Claude `default`, `best`, `opusplan`; Gemini `auto`, `auto-*`). Thrown
+ * (Claude `default`, `best`, `opusplan`). Thrown
  * when the driver is built.
  */
 export const EXTERNAL_AGENT_MODEL_REQUIRED = "EXTERNAL_AGENT_MODEL_REQUIRED";
@@ -147,9 +148,8 @@ export const EXTERNAL_AGENT_MODEL_REQUIRED = "EXTERNAL_AGENT_MODEL_REQUIRED";
 /**
  * Something other than the driver's `model` option would set, remap or route
  * the model: an extra `args` entry or Codex SDK `config` key (thrown when the
- * driver is built), a model variable in the run's environment, or a Gemini
- * CLI read-only run, whose plan mode may route turns to another model
- * (reported as the run's error event). `allowPolicyOverrideArgs` does not
+ * driver is built) or a model variable in the run's environment (reported as
+ * the run's error event). `allowPolicyOverrideArgs` does not
  * lift it.
  */
 export const EXTERNAL_AGENT_MODEL_OVERRIDE = "EXTERNAL_AGENT_MODEL_OVERRIDE";
@@ -513,8 +513,6 @@ const BATCH_REMEDY = {
     "Set `command` to the native claude.exe from Claude's native installer.",
   codex:
     "Set `command` to the codex.exe inside the @openai/codex package, for example node_modules\\@openai\\codex-win32-x64\\vendor\\x86_64-pc-windows-msvc\\bin\\codex.exe (win32-arm64 uses codex-win32-arm64 and aarch64-pc-windows-msvc).",
-  gemini:
-    "Gemini CLI has no native .exe: set `interpreter` to node (a native node.exe) and `entry` to the package's JavaScript entry, the file named by `bin.gemini` in @google/gemini-cli's package.json.",
   fx: "fx has no documented native Windows build and a batch shim cannot be launched safely, so run fx where it is supported.",
 } as const;
 

@@ -305,7 +305,7 @@ export interface CodexCliDriverConfig {
   command?: string;
   /**
    * Runs the CLI as `<interpreter> <entry> <flags>` instead of `command`, for
-   * a CLI that ships as a JavaScript package (Gemini CLI on Windows, where
+   * a CLI that ships as a JavaScript package (on Windows, where
    * the npm `.cmd` shim is refused). Set it with `entry`, and leave
    * `command` unset.
    *

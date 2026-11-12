@@ -2,7 +2,7 @@ import {
   CodexAgent,
   type ExternalAgent,
   ExternalAgentDefinitionRegistry,
-  GeminiCliAgent,
+  FxAgent,
 } from "../../../dist/agents/index.js";
 import { OpenAI, OpenRouter } from "../../../dist/index.js";
 import type { SqliteWorkflowCheckpointStore } from "../../../dist/workflows/checkpoint/sqlite/index.js";
@@ -28,7 +28,7 @@ import { workflowCheckpointStoreConformanceCases } from "../../../dist/workflows
 void OpenAI;
 void OpenRouter;
 void CodexAgent;
-void GeminiCliAgent;
+void FxAgent;
 void WorkflowAgent;
 void ScriptWorkflowAgent;
 void defineWorkflow;

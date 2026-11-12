@@ -15,7 +15,7 @@ from the 0.6.0 tag.
 
 - **Driver options are checked by name.** Every built-in driver
   (`ClaudeAgentSdkDriver`, `ClaudeCliDriver`, `CodexSdkDriver`,
-  `CodexCliDriver`, `GeminiCliDriver`, `FxCliDriver`,
+  `CodexCliDriver`, `FxCliDriver`,
   `SubprocessJsonlDriver`) throws `ExternalAgentPolicyError`
   `EXTERNAL_AGENT_OPTION_UNKNOWN` for a config key it does not know, and for a
   config that is not a plain object, instead of ignoring it. An option of
@@ -38,13 +38,9 @@ from the 0.6.0 tag.
     `profiles`; the same keys anywhere in the Codex SDK `config`.
   - A run whose environment would carry a model-selection variable
     (`ANTHROPIC_MODEL`, `ANTHROPIC_DEFAULT_*_MODEL`,
-    `ANTHROPIC_SMALL_FAST_MODEL`, `CLAUDE_CODE_SUBAGENT_MODEL`,
-    `GEMINI_MODEL`, and for Codex `OPENAI_BASE_URL`, `CODEX_OSS_BASE_URL`,
+    `ANTHROPIC_SMALL_FAST_MODEL`, `CLAUDE_CODE_SUBAGENT_MODEL`, and for Codex `OPENAI_BASE_URL`, `CODEX_OSS_BASE_URL`,
     `CODEX_OSS_PORT`) through a custom provider `envAllowlist` is refused
     (`EXTERNAL_AGENT_MODEL_OVERRIDE`).
-  - `GeminiCliDriver` refuses a read-only run (`--approval-mode=plan`) when
-    `model` is set or `requireExplicitModel` is true, because plan mode may
-    route turns to another model (`EXTERNAL_AGENT_MODEL_OVERRIDE`).
 - **OpenAI-compatible `candidatesTokenCount` no longer includes reasoning
   tokens.** It is now `completion_tokens` minus
   `completion_tokens_details.reasoning_tokens`, as genai and Gemini define it,
@@ -120,7 +116,7 @@ from the 0.6.0 tag.
     `transfer_to_agent` response carries `skipSummarization: true` and the
     sub-agent's answer is final. Use `finalAnswer: "coordinator"` to let the
     coordinator write the final answer (fan-out, aggregation);
-  - the Codex and Gemini CLI definitions no longer declare `tools` or
+  - the Codex definition no longer declares `tools` or
     `mcpServers` support.
   - `ClaudeAgent` with its default Claude Agent SDK driver no longer inherits
     the host's Claude Code setup. The agent gets the built-in tools in
@@ -168,11 +164,6 @@ from the 0.6.0 tag.
     the host MCP servers with `codex mcp list --json` to turn them off, and is
     refused with the same error when the listing fails or a server name
     cannot be turned off;
-  - Gemini CLI agents without `allowNetwork: true` are refused with
-    `EXTERNAL_AGENT_NETWORK_UNENFORCEABLE` in every mode, because Gemini's web
-    tools and MCP servers cannot be kept off the network. Set
-    `allowNetwork: true` in the agent's permissions (the error message says
-    so), or build `GeminiCliDriver` with `allowUnenforcedNetwork: true`;
   - `ClaudeAgentSdkDriver` throws `InputValidationError` when
     `requiredMcpServers` names a server other than `adk_bridge` without
     `inheritHostConfig: true`; such a server could never connect in an
@@ -181,7 +172,7 @@ from the 0.6.0 tag.
   - a missing optional dependency is an error event instead of an exception
     from the agent: `EXTERNAL_AGENT_DEPENDENCY_MISSING` for
     `@anthropic-ai/claude-agent-sdk` or `@openai/codex-sdk`, `MISSING_BINARY`
-    (`EXTERNAL_AGENT_MISSING_BINARY`) for the `claude`, `codex` or `gemini`
+    (`EXTERNAL_AGENT_MISSING_BINARY`) for the `claude` or `codex`
     binary. The message names the install command.
 - **Agent invocation gateway:**
   - `AgentInvocationResult.output` is the text of the last final response, as
@@ -251,8 +242,7 @@ from the 0.6.0 tag.
     kind other than `env` or `none` ends the turn with
     `EXTERNAL_AGENT_CREDENTIAL_UNSUPPORTED`;
   - `CodexAgent` reads credentials with `EnvCredentialProvider` by default
-    (allow-listed `CODEX_*` variables), like `ClaudeAgent` and
-    `GeminiCliAgent`;
+    (allow-listed `CODEX_*` variables), like `ClaudeAgent`;
   - `ExternalAgent` no longer sends `runtimeSession` to the driver (it carried
     the invocation id, not a runtime session id); the SDK drivers resume
     `request.runtimeSession.id` when a host sets it (Claude:
@@ -273,7 +263,6 @@ from the 0.6.0 tag.
     `collectContents`, `flattenContentsToPrompt`,
     `mapPolicyToClaudeSdkPermission`, `mapPolicyToCodexArgs`,
     `mapPolicyToCodexSdkThreadOptions`, `mapClaudePermissionArgs`,
-    `mapGeminiPermissionArgs`, `buildGeminiArgs`,
     `mapPermissionPolicyToFlags`, `ProviderPermissionFlags`,
     `externalAgentProviderRegistry` or `externalAgentDefinitionRegistry`.
 - **Workflow surface, identifiers, paths and codes**
@@ -367,7 +356,7 @@ from the 0.6.0 tag.
     stops reading pauses the run.
 
 - **Drivers that cannot check tool paths refuse `allowedPaths`.**
-  `ClaudeCliDriver`, `CodexSdkDriver`, `CodexCliDriver` and `GeminiCliDriver`
+  `ClaudeCliDriver`, `CodexSdkDriver` and `CodexCliDriver`
   run file tools without asking the bridge, so `allowedPaths` (and the
   `pathBounds` a parent agent passes to a delegated child) were never
   enforced on them. A run with either now ends with the new non-recoverable
@@ -394,8 +383,8 @@ from the 0.6.0 tag.
   The new `WorkflowStepInterruptedEvent` type is exported from
   `adk-llm-bridge/workflows`.
 - **Boolean driver options must be booleans.** Every `?: boolean` option of
-  `ClaudeAgentSdkDriver`, `ClaudeCliDriver`, `CodexSdkDriver`, `CodexCliDriver`,
-  `GeminiCliDriver` and `FxCliDriver` (for example `allowUnsandboxedShell`,
+  `ClaudeAgentSdkDriver`, `ClaudeCliDriver`, `CodexSdkDriver`, `CodexCliDriver`
+  and `FxCliDriver` (for example `allowUnsandboxedShell`,
   `inheritHostConfig`, `allowLocalBinding`, `allowUnenforcedPaths`,
   `allowUnenforcedNetwork`, `allowPolicyOverrideArgs`,
   `allowUncontainedCodexSdk`, `strictBinaryResolution`, `requireExplicitModel`,
@@ -479,9 +468,8 @@ from the 0.6.0 tag.
   write remains exposed: install it outside, give the run another
   `workingDirectory`, or turn on `strictBinaryResolution` to refuse such
   runs.
-- **The CLI drivers no longer start a `claude`, `codex` or `gemini` from the
-  run's working directory.** `ClaudeCliDriver`, `CodexCliDriver` and
-  `GeminiCliDriver` started a bare `command` through the child's `PATH`,
+- **The CLI drivers no longer start a `claude` or `codex` from the
+  run's working directory.** `ClaudeCliDriver` and `CodexCliDriver` started a bare `command` through the child's `PATH`,
   which under `npm run` / `bun run` starts with `<cwd>/node_modules/.bin`, so
   with the default `workingDirectory` a binary the agent planted there ran
   on the host the next run. With the built-in spawn a bare `command` is now
@@ -498,8 +486,7 @@ from the 0.6.0 tag.
   `CodexCliDriver` now passes `--` before the prompt. `ClaudeCliDriver` writes
   the prompt to `claude -p --input-format text` on stdin and passes no prompt
   argument, because Claude Code runs a subcommand named by its first operand
-  even after `--` (a prompt of `update` ran `claude update`). `GeminiCliDriver`
-  passes `--prompt=<prompt>` instead of `-p <prompt>`, so `--yolo` stays text.
+  even after `--` (a prompt of `update` ran `claude update`).
 - **Driver `args` cannot override the policy flags.** `ClaudeCliDriver` and
   `CodexCliDriver` append `args` after the flags they set from the permission
   policy and isolation, so an entry such as `--permission-mode
@@ -556,7 +543,7 @@ from the 0.6.0 tag.
   working directory or allowed roots lie in a temp directory the sandbox
   always keeps writable (`/tmp`, the host temp directory, `TMPDIR`). `Glob`
   and `Grep` without a search path, and any relative glob without one (such
-  as Gemini `read_many_files` `include`), are checked against the working
+  as a `read_many_files` `include`), are checked against the working
   directory. The sandbox confines Bash writes, not reads.
 - **The workflow agent factory resolves symlinks before checking roots.**
   `workingDirectory` and `allowedPaths` were checked against
@@ -655,9 +642,9 @@ from the 0.6.0 tag.
   web search unless `allowNetwork: true`, so a host `config.toml` cannot widen
   them.
 - The confirmation path guard checks the path arguments of file tools of every
-  runtime (Claude Code, Codex and Gemini CLI names, nested file changes,
+  runtime (Claude Code, Codex and other known names, nested file changes,
   `apply_patch` file headers), and the base of globs that leave the working
-  directory (`Glob`, `Grep`'s `glob`, Gemini `glob` and `read_many_files`),
+  directory (`Glob`, `Grep`'s `glob`, and the known `glob` and `read_many_files`),
   including brace alternatives and globs relative to the tool's own search
   root (`path`, `dir_path`). Its denial is final: it runs before the approver
   and the ADK confirmation, and no approval overrides it. It does not check
@@ -876,7 +863,7 @@ from the 0.6.0 tag.
   own defaults.
 - `requireExplicitModel` on `ExternalAgentWorkflowFactory`: a request without
   `config.model`, or with a router or default alias of a built-in provider id
-  (`claude`, `gemini-cli`), fails with `WORKFLOW_AGENT_MODEL_REQUIRED` before
+  (`claude`), fails with `WORKFLOW_AGENT_MODEL_REQUIRED` before
   the driver is created. The option is forwarded to the driver, whose refusal
   is rethrown with the same code and the original as `cause`.
 - Run rules `allowedModelsByRole` (keys `architect`, `worker`, `integration`,
@@ -886,16 +873,16 @@ from the 0.6.0 tag.
 - Run spec model ids may end in one bracket suffix of letters and digits
   (`opus[1m]`, `claude-opus-5-5[1m]`), in lanes, reviewers, `allowedModels`
   and `allowedModelsByRole`; 256 characters in all.
-- `model` option on `CodexCliDriver` and `GeminiCliDriver`, sent as
+- `model` option on `CodexCliDriver`, sent as
   `--model=<id>` and reported as `gen_ai.request.model`.
 - `requireExplicitModel` on every built-in driver: refuses a driver without a
-  model or with a router/default alias (`default`, `best`, `opusplan`, Gemini
-  `auto`) with `EXTERNAL_AGENT_MODEL_REQUIRED`.
+  model or with a router/default alias (`default`, `best`, `opusplan`) with `EXTERNAL_AGENT_MODEL_REQUIRED`.
 - `ExternalAgentDriver.reportsResolvedModel` (`true` on the Claude drivers),
   and the policy codes `EXTERNAL_AGENT_MODEL_INVALID`,
   `EXTERNAL_AGENT_MODEL_REQUIRED` and `EXTERNAL_AGENT_MODEL_OVERRIDE`.
-- `ExternalAgentStartedEvent.modelRouting` (`"plan-mode"`), set on a Gemini
-  CLI read-only run without a model.
+- `ExternalAgentStartedEvent.modelRouting` (`"plan-mode"`), for a driver
+  whose runtime may route a run's turns to another model than the requested
+  one.
 - `customMetadata.externalAgentModel` (`ExternalAgentModelInfo`: `requested`,
   `resolved`, `status` of `reported`, `not-reported` or `unsupported`) on an
   external agent run's final event, or its last error event when it has no
@@ -905,7 +892,7 @@ from the 0.6.0 tag.
 - Workflow `step_started.requestedModel`, and `step_completed`
   `result.models` (`requested`, `resolved`, `unknown`) on every step whose
   agent names or reports a model, also on `AgentInvocationResult.models`. A
-  Codex or Gemini step has an empty `resolved` and `unknown: true`, and so does
+  Codex step has an empty `resolved` and `unknown: true`, and so does
   a step whose `LlmAgent` inherits its model. Checkpoints written before this
   have no `models` and still load; a malformed `models` is rejected as corrupt.
 - **Run spec, `adk-llm-bridge/workflows/spec` (experimental).** Validation,
@@ -954,7 +941,7 @@ from the 0.6.0 tag.
 - **`ExternalAgentPermissionPolicy.readPaths`: read wider than you write.**
   Extra roots for read tools only, on top of `allowedPaths` (which it
   requires). The guard knows an explicit set of read tools (Claude Code
-  `Read`, `Glob`, `Grep`, `LS`, `NotebookRead`; Gemini CLI `read_file`,
+  `Read`, `Glob`, `Grep`, `LS`, `NotebookRead`; the known `read_file`,
   `read_many_files`, `list_directory`, `glob`, `grep`, `grep_search`,
   `search_file_content`). Every other tool, an unknown one included, counts as
   a write and stays inside `allowedPaths`. `ClaudeAgentSdkDriver` approves
@@ -972,10 +959,10 @@ from the 0.6.0 tag.
   stay denied, but services already listening on loopback ports may become
   reachable, so treat it as network access. The local-port limit of the
   sandbox is now documented.
-- **`interpreter` and `entry` on `ClaudeCliDriver`, `CodexCliDriver` and
-  `GeminiCliDriver`**, so a CLI that ships as a JavaScript package runs as
-  `<interpreter> <entry> <flags>`: Gemini CLI on Windows, where the npm
-  `.cmd` shim is refused, now runs without a custom `spawn`. Only the native
+- **`interpreter` and `entry` on `ClaudeCliDriver` and `CodexCliDriver`**,
+  so a CLI that ships as a JavaScript package runs as
+  `<interpreter> <entry> <flags>`: on Windows, where the npm `.cmd` shim is
+  refused, it runs without a custom `spawn`. Only the native
   Node binary is accepted: the interpreter's real path must be
   `node`/`node.exe` and a native executable (PE, Mach-O thin or fat, ELF,
   checked from the file header), because Bun and version-manager shims, the
@@ -1154,10 +1141,10 @@ from the 0.6.0 tag.
   (registration is explicit), so a bundler can drop the modules a consumer
   does not use. The bridge's own build output is the same with or without it.
 - A runnable Codex-only planner → implementer → reviewer workflow smoke example.
-- `ClaudeAgent`, `CodexAgent` and `GeminiCliAgent` accept `driverOptions`, the
+- `ClaudeAgent` and `CodexAgent` accept `driverOptions`, the
   options of their default driver (for example Claude `tools`,
-  `inheritHostConfig`, `allowUnsandboxedShell`; Gemini `killGraceMs`; Codex and
-  Gemini `allowUnenforcedNetwork`). Passing both `driver` and `driverOptions`
+  `inheritHostConfig`, `allowUnsandboxedShell`; Codex
+  `allowUnenforcedNetwork`). Passing both `driver` and `driverOptions`
   throws `InputValidationError`.
 - `adk-llm-bridge/agents` exports `ExternalAgentPolicyError`,
   `ExternalAgentPolicyErrorCode`, `EXTERNAL_AGENT_ISOLATION_VIOLATED`,
@@ -1173,8 +1160,8 @@ from the 0.6.0 tag.
   `{ response: "<json>" }` answers are accepted (a malformed one is a
   rejection), and an approver's `PermissionDecision` can carry `payload`, which
   reaches bridged ADK tools as `toolConfirmation.payload`.
-- Driver options `killGraceMs` (CLI drivers), `allowUnenforcedNetwork` (Codex
-  and Gemini), `allowUnsandboxedShell`, `tools` and `inheritHostConfig`
+- Driver options `killGraceMs` (CLI drivers), `allowUnenforcedNetwork`
+  (Codex), `allowUnsandboxedShell`, `tools` and `inheritHostConfig`
   (Claude), and `listMcpServers` (Codex).
 - `WORKFLOW_CONTROL_UNAUTHORIZED` in `WorkflowControlPlaneErrorCode`.
 - Types `WorkflowExecutionRecordErrorCode`, `WorkflowTaskRecordErrorCode`,
@@ -1337,8 +1324,8 @@ from the 0.6.0 tag.
   event) now reports the finish reason. `AgentInvocationResult` gains `finishReason` and
   `incomplete`; the gateway itself still does not fail the run.
 
-- **CLI drivers refuse `runtimeSession`.** `ClaudeCliDriver`, `CodexCliDriver` and
-  `GeminiCliDriver` used to ignore `request.runtimeSession`. They now fail the run with
+- **CLI drivers refuse `runtimeSession`.** `ClaudeCliDriver` and `CodexCliDriver`
+  used to ignore `request.runtimeSession`. They now fail the run with
   `EXTERNAL_AGENT_SESSIONS_UNSUPPORTED` (exported from `adk-llm-bridge/agents`) before any
   process starts, and so does the new `FxCliDriver`. `ClaudeAgentSdkDriver` now declares
   `capabilities().sessions = true`, matching what it already did.
@@ -1371,7 +1358,7 @@ from the 0.6.0 tag.
     `EXTERNAL_AGENT_READ_ONLY_TOOL_UNKNOWN`;
   - a listed name that resolves to more than one tool at run time exposes none
     of them and is reported as `ambiguous`;
-  - tools on a driver that cannot host them (Codex, Gemini CLI, Claude CLI)
+  - tools on a driver that cannot host them (Codex, Claude CLI)
     throw `EXTERNAL_AGENT_TOOLS_UNSUPPORTED`;
   - tools hidden by a `read-only` policy (an inherited one included) are
     reported by one `EXTERNAL_AGENT_TOOLS_HIDDEN` warning per run, on the final
@@ -1379,8 +1366,8 @@ from the 0.6.0 tag.
 - **An approver or ADK confirmation on a driver that never asks is refused**
   (see
   [Approvers and ADK confirmation](./docs/external-agent-isolation.md#approvers-and-adk-confirmation-need-a-driver-that-asks)):
-  `confirmation.approver` or `confirmation.adk` on the Claude CLI, Codex or
-  Gemini CLI drivers used to be ignored silently (the runtime decided alone and
+  `confirmation.approver` or `confirmation.adk` on the Claude CLI or Codex
+  drivers used to be ignored silently (the runtime decided alone and
   denied what needed approval). It now throws `EXTERNAL_AGENT_APPROVALS_UNSUPPORTED`
   when the agent is built, also on `clone()`. Only `ClaudeAgent` asks the host.
 - The Claude drivers refuse every forwarded environment variable whose name
@@ -1396,7 +1383,7 @@ from the 0.6.0 tag.
 - **Sub-agents, `permissions`, `delegation` and `tools` entries are checked
   when an `ExternalAgent` is built**, instead of being ignored silently (see
   [Sub-agents need a driver that exposes them](./docs/external-agent-isolation.md#sub-agents-need-a-driver-that-exposes-them)):
-  - `subAgents` on the Claude CLI, Codex CLI, Codex SDK, Gemini CLI or fx driver
+  - `subAgents` on the Claude CLI, Codex CLI, Codex SDK or fx driver
     (any driver whose `capabilities()` lacks `subagents`) throws
     `EXTERNAL_AGENT_SUBAGENTS_UNSUPPORTED`, also on `clone()`. Those drivers
     never exposed the sub-agents, so they were never called. Use
@@ -1578,6 +1565,12 @@ from the 0.6.0 tag.
 - `LEGACY_RECOVERABLE_ERROR_CODES` in `adk-llm-bridge/agents` is
   `@deprecated`: use `normalizeRecoverableErrorCode()`, which maps every code
   in it.
+
+### Removed
+
+- The Gemini CLI external agent (`GeminiCliAgent`, `GeminiCliDriver`), which
+  the v0.6.0 GitHub release had, is removed. Use Antigravity or Gemini models
+  through ADK instead.
 
 ### Fixed
 
@@ -1766,7 +1759,7 @@ from the 0.6.0 tag.
 - **The CLI drivers never run a Windows `.cmd` or `.bat` file.** The command is
   resolved over `.com` and `.exe` on `PATH`; a batch shim ends the run with
   `EXTERNAL_AGENT_BATCH_COMMAND_REFUSED` (use the native `.exe`, or
-  `interpreter` + `entry` for Gemini CLI; see docs/external-agent-isolation.md),
+  `interpreter` + `entry`; see docs/external-agent-isolation.md),
   and a Windows CI job checks it with fake `.cmd` files on Bun and Node.
 - **Aborting a workflow run records an explicit `interrupted` state.** The
   execution is `cancelled` and each in-flight step is checkpointed as
@@ -1811,8 +1804,7 @@ from the 0.6.0 tag.
   path outside `allowedPaths` in a web tool's input. Read-only does not stop
   data leaving: such an agent can send what it reads to any host without an
   approver, so turn the network on only for agents whose inputs you trust.
-  Codex and Gemini CLI web tools never went through the guard and are
-  unchanged.
+  Codex web tools never went through the guard and are unchanged.
 - **The Claude isolation stop message names what the bridge saw.** The
   `EXTERNAL_AGENT_ISOLATION_VIOLATED` message of the Claude drivers no longer
   always blames host settings: a tool the runtime offered at start points to a
@@ -2014,7 +2006,6 @@ from the 0.6.0 tag.
   - Codex: `turn.failed` becomes an error event, "usage limit" errors are
     non-recoverable `QUOTA_EXHAUSTED`, and one failure gives one error
     event;
-  - Gemini CLI: the native `stream-json` schema is parsed;
   - clones no longer share driver session state;
   - a sub-agent waiting for confirmation is reported to the coordinator as an
     interrupt, never as a successful empty result;
@@ -2066,7 +2057,7 @@ from the 0.6.0 tag.
   targets see the coordinator's latest events (its text, the call and the
   transfer response) in their session view. A transfer target sees the user
   message once.
-- Cancelling a Claude, Codex or Gemini CLI run kills the CLI's whole process
+- Cancelling a Claude or Codex CLI run kills the CLI's whole process
   group on macOS and Linux (shells, MCP servers and other children it
   started), with SIGKILL after `killGraceMs` (default 2000 ms) if SIGTERM is
   ignored. Ctrl-C, SIGTERM and SIGHUP of the host reach the CLI's group, and
@@ -2077,7 +2068,7 @@ from the 0.6.0 tag.
   the CLI process is signaled.
 - `CodexCliDriver`: an empty `turn.failed` has a readable message; a non-JSON
   stdout line is logged as a warning instead of ending the run (also in
-  `ClaudeCliDriver` and `GeminiCliDriver`); an explicit code such as
+  `ClaudeCliDriver`); an explicit code such as
   `quota_exhausted` is classified as `QUOTA_EXHAUSTED`.
 - The usage-cap rule no longer classifies resource limits ("memory usage limit
   exceeded") as `QUOTA_EXHAUSTED`. A subtype named like an
@@ -2118,8 +2109,7 @@ from the 0.6.0 tag.
 - Recorded error messages and codes are never cut inside a surrogate pair.
 - `WorkflowOrchestrationControlError.details` is deep-frozen; default
   ownership ids use `crypto.randomUUID()`.
-- Codex CLI and Gemini CLI send the user's message, not only the
-  instruction.
+- Codex CLI sends the user's message, not only the instruction.
 - A missing Claude Code executable in the Claude SDK driver is
   `MISSING_BINARY` and not recoverable, as in the other drivers.
 - CLI exit errors are classified: auth, billing and quota failures are no
@@ -2147,7 +2137,7 @@ from the 0.6.0 tag.
 - With an `outputSchema`, integers beyond `Number.MAX_SAFE_INTEGER` in the
   agent's JSON answer (object, array or scalar) arrive as strings of their
   exact digits; declare such fields as `z.string()` or a union.
-- The Claude, Codex and Gemini CLI drivers and `SubprocessJsonlDriver.parseLine`
+- The Claude and Codex CLI drivers and `SubprocessJsonlDriver.parseLine`
   keep integers beyond `Number.MAX_SAFE_INTEGER` exact, as strings, in the
   tool inputs and results they read from stdout.
 - Sub-agent event titles show the query or tool name like the other titles.

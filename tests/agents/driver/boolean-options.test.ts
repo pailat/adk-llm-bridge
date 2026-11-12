@@ -14,7 +14,6 @@ import { ClaudeCliDriver } from "../../../src/agents/driver/claude-cli.js";
 import { CodexCliDriver } from "../../../src/agents/driver/codex-cli.js";
 import { CodexSdkDriver } from "../../../src/agents/driver/codex-sdk.js";
 import { FxCliDriver } from "../../../src/agents/driver/fx-cli.js";
-import { GeminiCliDriver } from "../../../src/agents/driver/gemini-cli.js";
 
 interface DriverCase {
   readonly name: string;
@@ -79,16 +78,6 @@ const DRIVERS: readonly DriverCase[] = [
       "strictBinaryResolution",
     ],
     build: (config) => new CodexSdkDriver(config as never),
-  },
-  {
-    name: "GeminiCliDriver",
-    base: { model: "some-model-id" },
-    keys: [
-      "allowUnenforcedNetwork",
-      "allowUnenforcedPaths",
-      "requireExplicitModel",
-    ],
-    build: (config) => new GeminiCliDriver(config as never),
   },
   {
     name: "FxCliDriver",

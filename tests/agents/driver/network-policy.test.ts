@@ -19,10 +19,6 @@ import {
 import { parseCodexMcpList } from "../../../src/agents/driver/codex-mcp.js";
 import { CodexSdkDriver } from "../../../src/agents/driver/codex-sdk.js";
 import {
-  GeminiCliDriver,
-  type GeminiCliSpawn,
-} from "../../../src/agents/driver/gemini-cli.js";
-import {
   EXTERNAL_AGENT_MISSING_BINARY,
   EXTERNAL_AGENT_NETWORK_UNENFORCEABLE,
 } from "../../../src/agents/driver/policy-errors.js";
@@ -30,7 +26,6 @@ import type { ExternalAgentEvent } from "../../../src/agents/events.js";
 import type { ExternalAgentRunRequest } from "../../../src/agents/external-agent-driver.js";
 import type { ExternalAgentPermissionPolicy } from "../../../src/agents/permissions/schema.js";
 import { CODEX_PROVIDER } from "../../../src/agents/provider/codex.js";
-import { GEMINI_CLI_PROVIDER } from "../../../src/agents/provider/gemini-cli.js";
 
 const UNSANDBOXED_NO_NETWORK: ExternalAgentPermissionPolicy = {
   mode: "full-access",
@@ -137,19 +132,6 @@ describe("full-access with allowNetwork: false is refused", () => {
       recoverable: false,
     });
     expect(events.at(-1)).toMatchObject({ type: "completed", exitCode: 1 });
-  });
-
-  test("Gemini CLI does not spawn", async () => {
-    const { spawn, state } = countingSpawn();
-    const events = await collect(
-      new GeminiCliDriver({ spawn: spawn as GeminiCliSpawn }).run(
-        request(UNSANDBOXED_NO_NETWORK, GEMINI_CLI_PROVIDER),
-      ),
-    );
-    expect(state.spawned).toBe(0);
-    expect(events.find((event) => event.type === "error")).toMatchObject({
-      code: EXTERNAL_AGENT_NETWORK_UNENFORCEABLE,
-    });
   });
 
   test("sandboxed modes and full-access with the network on are not refused", async () => {
@@ -463,63 +445,6 @@ describe("parseCodexMcpList", () => {
     expect(() => parseCodexMcpList("")).toThrow();
     expect(() => parseCodexMcpList('{"servers":[]}')).toThrow();
     expect(() => parseCodexMcpList('[{"enabled":true}]')).toThrow();
-  });
-});
-
-describe("Gemini CLI under allowNetwork: false", () => {
-  for (const mode of [
-    "read-only",
-    "ask",
-    "workspace-write",
-    "full-access",
-  ] as const) {
-    test(`is refused in ${mode} mode`, async () => {
-      const { spawn, state } = countingSpawn();
-      const events = await collect(
-        new GeminiCliDriver({ spawn: spawn as GeminiCliSpawn }).run(
-          request({ mode, allowNetwork: false }, GEMINI_CLI_PROVIDER),
-        ),
-      );
-      expect(state.spawned).toBe(0);
-      expect(events.map((event) => event.type)).toEqual([
-        "started",
-        "error",
-        "completed",
-      ]);
-      expect(events[1]).toMatchObject({
-        code: EXTERNAL_AGENT_NETWORK_UNENFORCEABLE,
-        recoverable: false,
-      });
-      expect(events[2]).toMatchObject({ exitCode: 1 });
-    });
-  }
-
-  test("runs with allowUnenforcedNetwork", async () => {
-    for (const mode of ["workspace-write", "full-access"] as const) {
-      const { spawn, state } = countingSpawn();
-      await collect(
-        new GeminiCliDriver({
-          spawn: spawn as GeminiCliSpawn,
-          allowUnenforcedNetwork: true,
-        }).run(request({ mode, allowNetwork: false }, GEMINI_CLI_PROVIDER)),
-      );
-      expect(state.spawned).toBe(1);
-    }
-  });
-
-  test("runs when the network is allowed", async () => {
-    for (const permissions of [
-      { mode: "workspace-write" as const, allowNetwork: true },
-      { mode: "full-access" as const, allowNetwork: true },
-    ]) {
-      const { spawn, state } = countingSpawn();
-      await collect(
-        new GeminiCliDriver({ spawn: spawn as GeminiCliSpawn }).run(
-          request(permissions, GEMINI_CLI_PROVIDER),
-        ),
-      );
-      expect(state.spawned).toBe(1);
-    }
   });
 });
 

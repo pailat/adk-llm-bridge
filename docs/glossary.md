@@ -6,7 +6,7 @@ code reviews. If you need a new meaning, add a new term instead of reusing one.
 | Term | Meaning |
 |------|---------|
 | **Provider** | A source of LLM models behind `adk-llm-bridge` (AI Gateway, OpenRouter, OpenAI, Anthropic, xAI, a custom endpoint). A provider is used through an ADK model (`BaseLlm`). |
-| **ExternalAgent** | An ADK agent (`BaseAgent`) whose work is done by an external coding-agent runtime (Claude Code, Codex, Gemini CLI, fx) instead of a model call. `ClaudeAgent`, `CodexAgent`, `GeminiCliAgent` and `FxAgent` are `ExternalAgent`s. |
+| **ExternalAgent** | An ADK agent (`BaseAgent`) whose work is done by an external coding-agent runtime (Claude Code, Codex, fx) instead of a model call. `ClaudeAgent`, `CodexAgent` and `FxAgent` are `ExternalAgent`s. |
 | **fx** | The [fx](https://fx.sh) coding agent CLI. `FxAgent` runs `fx ask --json` with the prompt on stdin and resumes the fx session with `--resume-id` on later turns of an ADK session (`persistSession: false` runs `--no-save`). fx has no sandbox, read-only mode, path limit or network block, so the driver refuses what it cannot enforce. |
 | **Runtime** | The external program or SDK that an `ExternalAgent` controls, for example the Claude Code CLI or the Codex SDK. Not to be confused with the *workflow runtime*. |
 | **Driver** | The adapter that starts one turn on a runtime and maps its output to ADK events (`ExternalAgentDriver`). One driver per way of talking to a runtime (SDK or CLI). |

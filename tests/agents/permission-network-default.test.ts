@@ -15,10 +15,6 @@ import {
   CodexSdkDriver,
   mapPolicyToCodexSdkThreadOptions,
 } from "../../src/agents/driver/codex-sdk.js";
-import {
-  GeminiCliDriver,
-  type GeminiCliSpawn,
-} from "../../src/agents/driver/gemini-cli.js";
 import { EXTERNAL_AGENT_NETWORK_UNENFORCEABLE } from "../../src/agents/driver/policy-errors.js";
 import type { ExternalAgentEvent } from "../../src/agents/events.js";
 import {
@@ -32,7 +28,6 @@ import {
   resolveEffectivePermissions,
 } from "../../src/agents/permissions/inheritance.js";
 import type { ExternalAgentPermissionPolicy } from "../../src/agents/permissions/schema.js";
-import { GEMINI_CLI_PROVIDER } from "../../src/agents/provider/gemini-cli.js";
 import {
   CLAUDE_PROVIDER,
   CODEX_PROVIDER,
@@ -354,39 +349,5 @@ describe("Codex drivers default to no network", () => {
         code: EXTERNAL_AGENT_NETWORK_UNENFORCEABLE,
       });
     }
-  });
-});
-
-describe("Gemini CLI is refused by default", () => {
-  for (const [label, policy] of [
-    ["allowNetwork unset", UNSET],
-    ["no policy", undefined],
-  ] as const) {
-    test(`${label}: refused with a message naming allowNetwork: true`, async () => {
-      const { spawn, state } = recordingSpawn();
-      const events = await collect(
-        new GeminiCliDriver({ spawn: spawn as GeminiCliSpawn }).run(
-          request(policy, GEMINI_CLI_PROVIDER),
-        ),
-      );
-      expect(state.spawned).toBe(0);
-      const error = events.find((event) => event.type === "error");
-      expect(error).toMatchObject({
-        code: EXTERNAL_AGENT_NETWORK_UNENFORCEABLE,
-      });
-      expect((error as { message: string }).message).toContain(
-        "allowNetwork: true",
-      );
-    });
-  }
-
-  test("allowNetwork: true runs", async () => {
-    const { spawn, state } = recordingSpawn();
-    await collect(
-      new GeminiCliDriver({ spawn: spawn as GeminiCliSpawn }).run(
-        request({ mode: "ask", allowNetwork: true }, GEMINI_CLI_PROVIDER),
-      ),
-    );
-    expect(state.spawned).toBe(1);
   });
 });

@@ -1,17 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { ClaudeCliDriver } from "../../../src/agents/driver/claude-cli.js";
 import { CodexCliDriver } from "../../../src/agents/driver/codex-cli.js";
-import { GeminiCliDriver } from "../../../src/agents/driver/gemini-cli.js";
 import type { ExternalAgentEvent } from "../../../src/agents/events.js";
 import type { ExternalAgentRunRequest } from "../../../src/agents/external-agent-driver.js";
 import { CODEX_PROVIDER } from "../../../src/agents/provider/codex.js";
-import { GEMINI_CLI_PROVIDER } from "../../../src/agents/provider/gemini-cli.js";
 import { CLAUDE_PROVIDER } from "../../../src/agents/provider/schema.js";
-import {
-  GEMINI_NETWORK_ON,
-  noHostMcpServers,
-  withDeadline,
-} from "../helpers.js";
+import { noHostMcpServers, withDeadline } from "../helpers.js";
 
 /**
  * A controllable fake CLI process: the test pushes stdout lines, and the
@@ -108,12 +102,6 @@ const CASES: DriverCase[] = [
       item: { id: "m1", type: "agent_message", text: "working" },
     },
   },
-  {
-    name: "GeminiCliDriver",
-    provider: GEMINI_CLI_PROVIDER,
-    create: (fake) => new GeminiCliDriver({ spawn: fake.spawn, env: {} }),
-    outputLine: { type: "message", role: "assistant", content: "working" },
-  },
 ];
 
 function request(
@@ -124,9 +112,6 @@ function request(
     provider,
     context: { userContent: { parts: [{ text: "go" }] } } as never,
     instruction: "go",
-    ...(provider.id === GEMINI_CLI_PROVIDER.id
-      ? { permissions: GEMINI_NETWORK_ON }
-      : {}),
     ...extra,
   };
 }

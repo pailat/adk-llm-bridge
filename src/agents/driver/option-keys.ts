@@ -106,20 +106,6 @@ export const CODEX_CLI_OPTION_KEYS = Object.freeze([
   "spawn",
 ] as const);
 
-/** Keys of `GeminiCliDriverConfig`. */
-export const GEMINI_CLI_OPTION_KEYS = Object.freeze([
-  "allowUnenforcedNetwork",
-  "allowUnenforcedPaths",
-  "command",
-  "entry",
-  "env",
-  "interpreter",
-  "killGraceMs",
-  "model",
-  "requireExplicitModel",
-  "spawn",
-] as const);
-
 /** Keys of `FxCliDriverConfig`. */
 export const FX_CLI_OPTION_KEYS = Object.freeze([
   "allowPolicyOverrideArgs",
@@ -159,7 +145,6 @@ export const CLAUDE_AGENT_SDK_ONLY_KEYS: ReadonlySet<string> = (() => {
     ...CLAUDE_CLI_OPTION_KEYS,
     ...CODEX_SDK_OPTION_KEYS,
     ...CODEX_CLI_OPTION_KEYS,
-    ...GEMINI_CLI_OPTION_KEYS,
     ...FX_CLI_OPTION_KEYS,
     ...SUBPROCESS_JSONL_OPTION_KEYS,
   ]);

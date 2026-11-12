@@ -15,7 +15,6 @@ Examples of using `adk-llm-bridge` with Google ADK and multiple LLM providers.
 | [keyless](./keyless) | Custom (local fake endpoint) | One agent end to end with no API key and no network |
 | [basic-agent-claude](./basic-agent-claude) | Claude Agent SDK | Claude as an external ADK agent |
 | [basic-agent-codex](./basic-agent-codex) | OpenAI Codex | Codex as an external ADK agent |
-| [basic-agent-gemini](./basic-agent-gemini) | Gemini CLI | Gemini CLI as an external ADK agent |
 | [external-agents](./external-agents) | Claude Code, Codex, OpenRouter | HelpDesk mixing external runtime agents and an `LlmAgent` |
 | [express-server](./express-server) | AI Gateway | Full HTTP API with tools, state & streaming |
 | [native-features](./native-features) | Anthropic / OpenAI | CLI showcasing sampling, reasoning, structured output, multimodal, tool choice & streaming |

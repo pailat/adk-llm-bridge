@@ -7,7 +7,6 @@
 import { describe, expect, test } from "bun:test";
 import { ClaudeCliDriver } from "../../../src/agents/driver/claude-cli.js";
 import { CodexCliDriver } from "../../../src/agents/driver/codex-cli.js";
-import { GeminiCliDriver } from "../../../src/agents/driver/gemini-cli.js";
 import {
   collectTail,
   readLines,
@@ -18,12 +17,8 @@ import {
   exitErrorEvent,
 } from "../../../src/agents/driver/shared.js";
 import type { ExternalAgentEvent } from "../../../src/agents/events.js";
-import {
-  CLAUDE_PROVIDER,
-  CODEX_PROVIDER,
-  GEMINI_CLI_PROVIDER,
-} from "../../../src/agents/index.js";
-import { GEMINI_NETWORK_ON, noHostMcpServers } from "../helpers.js";
+import { CLAUDE_PROVIDER, CODEX_PROVIDER } from "../../../src/agents/index.js";
+import { noHostMcpServers } from "../helpers.js";
 
 async function collect<T>(iterable: AsyncIterable<T>): Promise<T[]> {
   const result: T[] = [];
@@ -45,23 +40,6 @@ function claudeRun(lines: unknown[], exitCode = 0, stderr: string[] = []) {
   });
   return collect(
     driver.run({ provider: CLAUDE_PROVIDER, context: {} as never }),
-  );
-}
-
-function geminiRun(lines: unknown[], exitCode = 0, stderr: string[] = []) {
-  const driver = new GeminiCliDriver({
-    spawn: () => ({
-      stdout: jsonl(lines),
-      stderr: stderr.map((line) => `${line}\n`),
-      exited: Promise.resolve(exitCode),
-    }),
-  });
-  return collect(
-    driver.run({
-      provider: GEMINI_CLI_PROVIDER,
-      context: {} as never,
-      permissions: GEMINI_NETWORK_ON,
-    }),
   );
 }
 
@@ -97,18 +75,6 @@ describe("error lines with a null or malformed detail", () => {
     );
   });
 
-  test("Gemini reports a generic error instead of throwing", () => {
-    expect(new GeminiCliDriver().parseGeminiLine(JSON.stringify(line))).toEqual(
-      {
-        type: "error",
-        message: "Gemini CLI error",
-        code: undefined,
-        recoverable: true,
-        timestamp: expect.any(Number),
-      },
-    );
-  });
-
   test("an object detail gives its string message and code", () => {
     const detailed = {
       type: "error",
@@ -116,9 +82,6 @@ describe("error lines with a null or malformed detail", () => {
     };
     expect(
       new ClaudeCliDriver().parseClaudeLine(JSON.stringify(detailed)),
-    ).toMatchObject({ message: "boom", code: "E1" });
-    expect(
-      new GeminiCliDriver().parseGeminiLine(JSON.stringify(detailed)),
     ).toMatchObject({ message: "boom", code: "E1" });
   });
 });
@@ -152,27 +115,6 @@ describe("legacy line shapes that look like bridge events", () => {
     ).toMatchObject({
       type: "tool_call",
       name: "Read",
-      input: { path: "a.ts" },
-    });
-  });
-
-  test("Gemini reads a legacy output and toolCall", () => {
-    const driver = new GeminiCliDriver();
-    expect(
-      driver.parseGeminiLine(
-        JSON.stringify({ type: "output", text: "legacy text" }),
-      ),
-    ).toMatchObject({ type: "output", content: "legacy text" });
-    expect(
-      driver.parseGeminiLine(
-        JSON.stringify({
-          type: "tool_call",
-          toolCall: { name: "read_file", input: { path: "a.ts" } },
-        }),
-      ),
-    ).toMatchObject({
-      type: "tool_call",
-      name: "read_file",
       input: { path: "a.ts" },
     });
   });
@@ -223,31 +165,6 @@ describe("terminal lines from the child", () => {
     });
   });
 
-  test("Gemini sends one completed for a native result line", async () => {
-    const events = await geminiRun([
-      { type: "message", role: "assistant", content: "hi" },
-      { type: "result", status: "success" },
-    ]);
-    expect(completedEvents(events)).toEqual([
-      { type: "completed", exitCode: 0, timestamp: expect.any(Number) },
-    ]);
-  });
-
-  test("Gemini ignores a legacy complete line and reports the failed exit", async () => {
-    const events = await geminiRun([{ type: "complete", exitCode: 0 }], 1, [
-      "Error: boom",
-    ]);
-    expect(events.map((event) => event.type)).toEqual([
-      "started",
-      "error",
-      "completed",
-    ]);
-    expect(events[1]).toMatchObject({ code: "GEMINI_CLI_EXIT" });
-    expect(completedEvents(events)).toEqual([
-      { type: "completed", exitCode: 1, timestamp: expect.any(Number) },
-    ]);
-  });
-
   test("Codex reports the failed exit after turn.completed", async () => {
     const events = await codexRun(
       [
@@ -274,18 +191,18 @@ describe("terminal lines from the child", () => {
 describe("exitErrorEvent", () => {
   test("classifies the last stderr line, not an earlier warning", () => {
     const event = exitErrorEvent({
-      runtime: "Gemini CLI",
+      runtime: "Claude CLI",
       exitCode: 1,
       stderr: [
-        "Warning: no such file ~/.gemini/settings.json, using defaults",
+        "Warning: no such file ~/.claude/settings.json, using defaults",
         "",
         "Error: 503 Service Unavailable",
       ],
-      code: "GEMINI_CLI_EXIT",
+      code: "CLAUDE_CLI_EXIT",
     });
     expect(event.recoverable).toBe(true);
     expect(event.message).toBe(
-      "Warning: no such file ~/.gemini/settings.json, using defaults\nError: 503 Service Unavailable",
+      "Warning: no such file ~/.claude/settings.json, using defaults\nError: 503 Service Unavailable",
     );
   });
 

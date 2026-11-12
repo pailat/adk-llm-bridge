@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import {
-  GeminiCliDriver,
-  type GeminiCliSpawn,
-} from "../../../src/agents/driver/gemini-cli.js";
+  ClaudeCliDriver,
+  type ClaudeCliSpawn,
+} from "../../../src/agents/driver/claude-cli.js";
 import {
   DEFAULT_KILL_GRACE_MS,
   type DriverSubprocess,
@@ -10,8 +10,8 @@ import {
   superviseSubprocess,
 } from "../../../src/agents/driver/spawn.js";
 import type { ExternalAgentEvent } from "../../../src/agents/events.js";
-import { GEMINI_CLI_PROVIDER } from "../../../src/agents/provider/gemini-cli.js";
-import { GEMINI_NETWORK_ON, waitUntil, withDeadline } from "../helpers.js";
+import { CLAUDE_PROVIDER } from "../../../src/agents/provider/schema.js";
+import { waitUntil, withDeadline } from "../helpers.js";
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -206,16 +206,19 @@ for (const [label, runtime] of [
 }
 
 describe("CLI drivers escalate on cancel", () => {
-  test("a cancelled Gemini CLI that ignores SIGTERM gets SIGKILL", async () => {
+  test("a cancelled Claude CLI that ignores SIGTERM gets SIGKILL", async () => {
     const child = stubbornProcess();
-    let push!: (line: string) => void;
+    // Claude reports `started` with its first stdout line, so the line is
+    // there from the start; the run is aborted on its output.
     const stdout = new ReadableStream<string>({
       start(controller) {
-        push = (line) => controller.enqueue(line);
+        controller.enqueue(
+          `${JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "x" }] } })}\n`,
+        );
         child.exited.then(() => controller.close());
       },
     });
-    const spawn: GeminiCliSpawn = () => ({
+    const spawn: ClaudeCliSpawn = () => ({
       stdout,
       stderr: null,
       exited: child.exited,
@@ -224,21 +227,16 @@ describe("CLI drivers escalate on cancel", () => {
     const controller = new AbortController();
     const events: ExternalAgentEvent[] = [];
     const run = (async () => {
-      for await (const event of new GeminiCliDriver({
+      for await (const event of new ClaudeCliDriver({
         spawn,
+        env: {},
         killGraceMs: 10,
       }).run({
-        provider: GEMINI_CLI_PROVIDER,
+        provider: CLAUDE_PROVIDER,
         context: { input: "hi" } as never,
-        permissions: GEMINI_NETWORK_ON,
         abortSignal: controller.signal,
       })) {
         events.push(event);
-        if (event.type === "started") {
-          push(
-            `${JSON.stringify({ type: "message", role: "assistant", content: "x" })}\n`,
-          );
-        }
         if (event.type === "output") controller.abort();
       }
     })();
@@ -247,19 +245,18 @@ describe("CLI drivers escalate on cancel", () => {
     expect(child.signals).toEqual(["SIGTERM", "SIGKILL"]);
   });
 
-  test("Gemini CLI skips a non-JSON stdout line", async () => {
-    const spawn: GeminiCliSpawn = () => ({
+  test("Claude CLI skips a non-JSON stdout line", async () => {
+    const spawn: ClaudeCliSpawn = () => ({
       stdout: [
-        `Sandbox starting\n${JSON.stringify({ type: "message", role: "assistant", content: "hello" })}\n`,
+        `Sandbox starting\n${JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "hello" }] } })}\n`,
       ],
       stderr: null,
       exited: Promise.resolve(0),
     });
     const events: ExternalAgentEvent[] = [];
-    for await (const event of new GeminiCliDriver({ spawn }).run({
-      provider: GEMINI_CLI_PROVIDER,
+    for await (const event of new ClaudeCliDriver({ spawn, env: {} }).run({
+      provider: CLAUDE_PROVIDER,
       context: { input: "hi" } as never,
-      permissions: GEMINI_NETWORK_ON,
     })) {
       events.push(event);
     }

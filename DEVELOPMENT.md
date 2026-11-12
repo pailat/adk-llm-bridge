@@ -14,7 +14,7 @@ adk-llm-bridge/
 │   ├── core/               # Base classes, provider definitions, config resolution
 │   ├── converters/         # ADK <-> OpenAI request and response conversion
 │   ├── providers/          # ai-gateway, openrouter, openai, anthropic, xai, custom
-│   ├── agents/             # External agents (Claude, Codex, Gemini CLI)
+│   ├── agents/             # External agents (Claude, Codex, fx)
 │   ├── workflows/          # Workflow engine, control plane, durability
 │   ├── runtime/            # Agent invocation gateway
 │   └── utils/              # JSON, logging, URI and validation helpers

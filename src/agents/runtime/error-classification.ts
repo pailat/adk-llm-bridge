@@ -1,7 +1,7 @@
 /**
  * Shared error-classification helper for external-agent drivers.
  *
- * Every driver (Codex SDK and CLI, Claude Agent SDK and CLI, Gemini CLI)
+ * Every driver (Codex SDK and CLI, Claude Agent SDK and CLI, fx CLI)
  * shares this one contract for the recoverable-vs-non-recoverable
  * decision. Labelling every error `recoverable: true` would make upstream retry
  * loops spin on unfixable conditions (auth, billing, missing binary, quota).
@@ -15,7 +15,7 @@
 /**
  * Codes {@link classifyRecoverable} reports for a recognized failure. They are
  * the same for every provider: a usage cap is `QUOTA_EXHAUSTED` whether Codex,
- * Claude or the Gemini CLI hit it.
+ * Claude or fx hit it.
  *
  * - `AUTH_ERROR`: the credential was rejected. Not recoverable.
  * - `BILLING_ERROR`: billing or credit problem. Not recoverable.

@@ -48,9 +48,3 @@ export async function waitUntil(
  * that are not about that listing use this instead of spawning `mcp list`.
  */
 export const noHostMcpServers = async (): Promise<readonly string[]> => [];
-
-/**
- * Permissions for a Gemini CLI run. Gemini CLI cannot keep the network off,
- * so it is refused unless the policy sets `allowNetwork: true`.
- */
-export const GEMINI_NETWORK_ON = { mode: "ask", allowNetwork: true } as const;

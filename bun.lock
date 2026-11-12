@@ -86,17 +86,6 @@
         "typescript": "^7.0.2",
       },
     },
-    "examples/basic-agent-gemini": {
-      "name": "basic-agent-gemini",
-      "dependencies": {
-        "@google/adk": "^2.4.0",
-        "adk-llm-bridge": "file:../..",
-      },
-      "devDependencies": {
-        "@types/bun": "^1.4.4",
-        "typescript": "^7.0.2",
-      },
-    },
     "examples/basic-agent-lmstudio": {
       "name": "basic-agent-lmstudio",
       "dependencies": {
@@ -596,8 +585,6 @@
     "basic-agent-claude": ["basic-agent-claude@workspace:examples/basic-agent-claude"],
 
     "basic-agent-codex": ["basic-agent-codex@workspace:examples/basic-agent-codex"],
-
-    "basic-agent-gemini": ["basic-agent-gemini@workspace:examples/basic-agent-gemini"],
 
     "basic-agent-lmstudio": ["basic-agent-lmstudio@workspace:examples/basic-agent-lmstudio"],
 

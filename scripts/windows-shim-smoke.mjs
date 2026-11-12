@@ -1,7 +1,7 @@
 /**
  * Windows check, run by the CI job `windows shims` after `bun run build`.
  *
- * 1. Puts a fake `gemini.cmd`, `claude.cmd` and `codex.cmd` on PATH, runs each
+ * 1. Puts a fake `claude.cmd` and `codex.cmd` on PATH, runs each
  *    CLI driver from the built package under Node, and fails when a shim ran
  *    or the run did not end with a refusal or a missing-binary event
  *    (Windows only).
@@ -27,7 +27,7 @@ import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const { ClaudeCliDriver, CodexCliDriver, GeminiCliDriver } = await import(
+const { ClaudeCliDriver, CodexCliDriver } = await import(
   "../dist/agents/index.js"
 );
 
@@ -52,7 +52,6 @@ async function collect(events) {
 
 async function shims() {
   const drivers = {
-    gemini: () => new GeminiCliDriver({}),
     claude: () => new ClaudeCliDriver({}),
     codex: () => new CodexCliDriver({}),
   };
@@ -116,7 +115,6 @@ async function interpreterRoute() {
   );
   const config = { interpreter: process.execPath, entry };
   const drivers = {
-    gemini: () => new GeminiCliDriver(config),
     claude: () => new ClaudeCliDriver(config),
     codex: () => new CodexCliDriver(config),
   };

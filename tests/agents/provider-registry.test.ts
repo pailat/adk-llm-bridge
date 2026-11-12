@@ -10,8 +10,8 @@ import {
   ExternalAgent,
   ExternalAgentDefinitionRegistry,
   ExternalAgentProviderRegistry,
-  GEMINI_CLI_AGENT_DEFINITION,
-  GEMINI_CLI_PROVIDER,
+  FX_AGENT_DEFINITION,
+  FX_PROVIDER,
 } from "../../src/agents/index.js";
 
 describe("ExternalAgentProviderRegistry", () => {
@@ -29,7 +29,7 @@ describe("ExternalAgentProviderRegistry", () => {
 
     expect(registry.get("codex")).toEqual(CODEX_PROVIDER);
     expect(registry.get("claude")).toEqual(CLAUDE_PROVIDER);
-    expect(registry.get("gemini-cli")).toEqual(GEMINI_CLI_PROVIDER);
+    expect(registry.get("fx")).toEqual(FX_PROVIDER);
   });
 });
 
@@ -48,7 +48,7 @@ describe("ExternalAgentDefinitionRegistry", () => {
 
     expect(registry.get("codex")).toEqual(CODEX_AGENT_DEFINITION);
     expect(registry.get("claude")).toEqual(CLAUDE_AGENT_DEFINITION);
-    expect(registry.get("gemini-cli")).toEqual(GEMINI_CLI_AGENT_DEFINITION);
+    expect(registry.get("fx")).toEqual(FX_AGENT_DEFINITION);
   });
 
   test("creates agents through the shared definition schema", () => {
