@@ -22,11 +22,14 @@ Examples of using `adk-llm-bridge` with Google ADK and multiple LLM providers.
 
 ## Requirements
 
-Every example needs Bun and Node.js 22 or newer. `@google/genai` and
-`@opentelemetry/api` are required peers of `adk-llm-bridge` 0.7. The examples do
-not list them in their own `package.json`: inside this workspace they come from
-the root install. If you copy an example out of the repository, install both
-next to `@google/adk` and `adk-llm-bridge`.
+Every example needs Bun and Node.js 22 or newer. Each one is a standalone
+project: its `package.json` depends on the published `adk-llm-bridge` (`^0.7.0`)
+and `@google/adk` (`^2.5.0`), plus the other required peers, `@google/genai`
+and `@opentelemetry/api`. Run `bun install` (or `npm install`) in the example's
+own directory; a copy of the folder works the same outside the repository.
+
+To try an example against the library in this checkout before it is
+published, see [Running Examples Locally](../DEVELOPMENT.md#running-examples-locally).
 
 ## Feature Portability
 

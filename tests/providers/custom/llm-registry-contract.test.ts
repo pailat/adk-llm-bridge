@@ -1,5 +1,5 @@
 /**
- * Pins the ADK 2.4 `LLMRegistry` behavior that adk-llm-bridge's registration
+ * Pins the ADK `LLMRegistry` behavior that adk-llm-bridge's registration
  * model depends on (see the warning on `registerCustomProvider`). If an ADK
  * upgrade changes any of these, provider routing changes with it.
  *

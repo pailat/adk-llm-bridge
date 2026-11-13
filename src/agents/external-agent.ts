@@ -11,6 +11,7 @@ import {
   type InvocationContext,
   isBaseTool,
   isBaseToolset,
+  newId,
   type SingleAfterToolCallback,
   type SingleBeforeToolCallback,
   type ToolUnion,
@@ -1596,8 +1597,7 @@ function routeAdkToolActions(
         // decision, as ADK's resume does. A call the bridge would reject
         // (an unknown tool or arguments that are not an object) leaves the
         // answer for a well-formed retry.
-        const requestId =
-          options.functionCallId ?? `adk-bridge-${crypto.randomUUID()}`;
+        const requestId = options.functionCallId ?? `adk-bridge-${newId()}`;
         const decision = await hooks.requestPermission({
           requestId,
           toolName: name,

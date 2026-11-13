@@ -52,8 +52,10 @@ export type WorkflowEventExportPluginOptions = (
  * Register it in the `plugins` list of the Runner (or of the `App`). It only
  * observes: `onEventCallback` queues the event and returns `undefined`, so
  * the event is never changed or delayed, and it catches its own errors. The
- * end of a run waits for the buffer for at most `flushOnRunEndMs`. Without
- * the plugin nothing in the workflow runtime changes.
+ * end of a run waits for the buffer for at most `flushOnRunEndMs`: a run that
+ * completes, is aborted or whose consumer stops reading (`afterRunCallback`),
+ * and a run that fails (`onRunErrorCallback`, before the error reaches the
+ * caller). Without the plugin nothing in the workflow runtime changes.
  *
  * @example
  * ```ts
@@ -123,6 +125,26 @@ export class WorkflowEventExportPlugin extends BasePlugin {
     invocationContext: InvocationContext;
   }): Promise<void> {
     void params;
+    await this.#flushRunEnd();
+  }
+
+  /**
+   * Waits for the buffered records of a run that failed, for at most
+   * `flushOnRunEndMs`, so its failed step and error event are exported before
+   * the error reaches the caller. ADK skips `afterRunCallback` for such a run.
+   *
+   * @param params - The invocation context and the error, which is left as it
+   * is.
+   */
+  override async onRunErrorCallback(params: {
+    invocationContext: InvocationContext;
+    error: Error;
+  }): Promise<void> {
+    void params;
+    await this.#flushRunEnd();
+  }
+
+  async #flushRunEnd(): Promise<void> {
     try {
       await this.pipeline.flush(this.#flushOnRunEndMs);
     } catch {

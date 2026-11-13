@@ -43,15 +43,14 @@ upgrade from 0.5.3.
   tokens.** It is now `completion_tokens` minus
   `completion_tokens_details.reasoning_tokens`, as genai and Gemini define it,
   and `thoughtsTokenCount` keeps the reasoning part. Candidates plus thoughts
-  equals `completion_tokens`; `totalTokenCount` is unchanged. ADK main adds
+  equals `completion_tokens`; `totalTokenCount` is unchanged. ADK 2.5 adds
   the two for `gen_ai.usage.output_tokens`, which double counted reasoning
-  before. ADK 2.4 writes only `candidatesTokenCount` to that attribute, so on
-  2.4 it no longer counts reasoning tokens, the same as for Gemini.
+  before.
 - **`OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true` (or `1`) keeps
-  content off the bridge's spans.** As on ADK main, the old boolean form means
+  content off the bridge's spans.** As in ADK 2.5, the old boolean form means
   `EVENT_ONLY` (content on log records only). Only `SPAN_ONLY` and
-  `SPAN_AND_EVENT` put content on spans. When the variable is unset, the
-  bridge still follows `ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS`.
+  `SPAN_AND_EVENT` put content on spans; with the variable unset, no content
+  goes on spans either (see Changed).
 - **Node.js `>=22.0.0` is now required** (`openai` 7 requires it).
 - **AI Gateway reads only `AI_GATEWAY_API_KEY` and `AI_GATEWAY_URL`.** It no
   longer falls back to `OPENAI_API_KEY` / `OPENAI_BASE_URL`. A host that set
@@ -65,10 +64,11 @@ upgrade from 0.5.3.
   `reasoning_effort`, and lose `temperature`, `top_p`, stop sequences,
   penalties and logprobs.
 - **Peers:**
-  - `@google/adk` is now `>=2.4.0 <3`. ADK 0.x and 1.x are no longer supported.
+  - `@google/adk` is now `>=2.5.0 <3`. ADK 0.x, 1.x and 2.0 to 2.4 are not
+    supported.
   - `@google/genai` (`>=2.29.1 <3`) and `@opentelemetry/api` (`>=1.9.1 <2`) are
     now required peers. `@opentelemetry/api` was a regular dependency before.
-  - `zod` is an optional peer at `^4` (ADK 2.4 requires zod 4); zod 3 is no
+  - `zod` is an optional peer at `^4` (ADK 2.5 requires zod 4); zod 3 is no
     longer supported.
   - `@anthropic-ai/claude-agent-sdk` `>=0.3.319 <0.4` and `@openai/codex-sdk`
     exactly `0.167.2` (optional, for `adk-llm-bridge/agents`). The Codex SDK
@@ -611,10 +611,13 @@ upgrade from 0.5.3.
   `instanceof`, so a duplicated install or a bundle split can no longer skip an
   ancestor's policy. An ancestor's policy is read through a frozen, validated
   reader; an unreadable policy counts as `ask`.
-- With `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=NO_CONTENT` (or
-  `ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS=false`), the bridge's spans carry no
-  prompts, tool arguments or results, not even in span names or
-  `gcp.vertex.agent.event_title`.
+- **No message content on spans unless you ask for it.** Unless
+  `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` is `SPAN_ONLY` or
+  `SPAN_AND_EVENT`, the bridge's spans carry no prompts, model output, tool
+  arguments or results, not even in span names or
+  `gcp.vertex.agent.event_title`. Before, they carried them by default.
+  `ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS=true` no longer turns capture on (see
+  Changed).
 - Dynamic scripts have no imports or host globals. Each execution receives a
   fresh QuickJS runtime with CPU, memory, stack, source, message, and step
   limits; ADK work runs outside the VM through a JSON generator/yield protocol.
@@ -764,7 +767,7 @@ upgrade from 0.5.3.
   `host`. The same value is the span attribute
   `gcp.vertex.agent.agent_kind`, always on the step's parent `execute_node` span
   and on `invoke_agent` only for
-  `ExternalAgent` runs: ADK 2.4 creates the `invoke_agent` span of `llm`,
+  `ExternalAgent` runs: ADK creates the `invoke_agent` span of `llm`,
   `workflow` and `host` agents privately in `BaseAgent.runAsync`, and the bridge
   has no hook inside it. Additive: events recorded before this have no
   `agentKind` and are still valid. See
@@ -1099,7 +1102,7 @@ upgrade from 0.5.3.
   - Human-in-the-loop steps (`WorkflowInterruptedError`,
     `WorkflowStepInterrupt`) that resume exactly once.
   - ADK node options: `retryConfig`, `timeout`, `rerunOnResume` (default
-    `true`) and `retryFailedSteps`; workflows interoperate as ADK 2.4
+    `true`) and `retryFailedSteps`; workflows interoperate as ADK 2.5
     `Workflow` nodes.
   - Durable tasks, mailboxes and a workflow control plane, plus orchestration
     host APIs and a Node Git worktree host adapter
@@ -1315,6 +1318,28 @@ upgrade from 0.5.3.
 
 ### Changed
 
+- **Message content on spans follows ADK 2.5's rule.** The bridge's spans
+  (`call_llm`, `execute_tool`, workflow spans) get prompts, model output, tool
+  arguments and results only with
+  `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=SPAN_ONLY` or
+  `SPAN_AND_EVENT`; the default is no content. The bridge no longer reads
+  `ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS`: when it is `true` and the OTel
+  variable is unset, the bridge logs one warning
+  (`SPAN_CONTENT_CAPTURE_VARIABLE_IGNORED`) and captures nothing. See
+  [Telemetry](./README.md#telemetry).
+- **The examples are standalone projects.** Each one depends on the published
+  `adk-llm-bridge` (`^0.7.0`), `@google/adk` (`^2.5.0`), `@google/genai` and
+  `@opentelemetry/api`, and the root `package.json` no longer lists them as
+  workspaces, so a copied example installs on its own. CI packs the library and
+  installs, type checks and bundles every example against the tarball
+  (`bun run check:examples`).
+- **Ids the bridge generates come from ADK's id provider.** Tool call ids,
+  confirmation request ids, bridged ADK tool call ids and the invocation ids
+  of `ToolGateway` child contexts use ADK's `newId()`, so an id provider set
+  with `setIdProvider` applies to them too. Without one, the formats are
+  unchanged, except that `ToolGateway` sub-agent call ids are now
+  `adk-run-subagent-<uuid>`.
+
 - **One Codex run loop.** `CodexCliDriver` is now a compatibility transport in
   front of the same run loop `CodexSdkDriver` uses: both start the thread from
   the same input, report one error per failure (a stream error followed by a
@@ -1443,11 +1468,12 @@ upgrade from 0.5.3.
   comments and test names; see [comments.md](./docs/contributing/comments.md).
 - License holder is now "adk-llm-bridge contributors" (MIT, unchanged); per-file
   license headers were removed, LICENSE is the single source.
-- **Dependency upgrade.** Built and tested against `@google/adk` 2.4.0,
+- **Dependency upgrade.** Built and tested against `@google/adk` 2.5.0 (the
+  only ADK version 0.7.0 supports and tests; see Peers under Breaking),
   `openai` 7, `@anthropic-ai/sdk` 1.6, TypeScript 7 and Biome 2.6; CI uses
   Node 22, 24 and 26 and Bun 1.4.4.
 - Providers accept ADK's `parametersJsonSchema` (and `responseJsonSchema`) and
-  pass it through as JSON Schema, and follow ADK 2.4 request handling
+  pass it through as JSON Schema, and follow ADK 2.5 request handling
   (for example, the Anthropic provider no longer returns 400 on empty or
   assistant-final turns).
 - Reasoning round trips: OpenAI-compatible `reasoning_details` with ADK
@@ -1459,7 +1485,7 @@ upgrade from 0.5.3.
 - `AgentInvocationGateway` shares the `maxLlmCalls` counter and the ADK 2
   context fields (`isolationScope`, `nodeToolDepth`, ...) between a parent and
   its child agents, and writes child events through ADK session semantics.
-- `ExternalAgent` is a first-class ADK 2.4 node (`BaseAgentConfig`, `clone()`,
+- `ExternalAgent` is a first-class ADK 2.5 node (`BaseAgentConfig`, `clone()`,
   `output` and `nodeInfo` on final events).
 - `ClaudeCliDriver` uses `--permission-mode manual` instead of the undocumented
   `default` alias. An aborted CLI run now ends without the trailing exit error
@@ -1588,6 +1614,9 @@ upgrade from 0.5.3.
 
 ### Fixed
 
+- `WorkflowEventExportPlugin` exports the buffered workflow events of a run
+  that fails (its `onRunErrorCallback`, called by ADK 2.5) before the error
+  reaches the caller, waiting at most `flushOnRunEndMs`.
 - `FxCliDriver` remembers and resumes session ids that start with `-`, and describes rejected ids without exposing them.
 
 - `ClaudeCliDriver` remembers earlier turns: each turn's prompt now starts with a transcript of the earlier ADK turns (thought parts left out, the current turn last), the same one the Codex drivers send on a fresh thread. Before, a second turn saw only the instruction and its own message.
@@ -1995,7 +2024,7 @@ upgrade from 0.5.3.
   answers nothing is rejected with `WORKFLOW_INPUT_MISMATCH`, or, if it repeats
   the original input, replays the finished steps and keeps waiting. A
   long-running tool call now counts as an interrupt even when it is not on the
-  last event (as with ADK 2.4's `LlmAgent` and `LongRunningFunctionTool`), so
+  last event (as with ADK's `LlmAgent` and `LongRunningFunctionTool`), so
   the step waits instead of completing. ADK `NodeTool` calls are not
   interrupts themselves; a paused node's own request is. Gateway,
   `ToolGateway` and `ExternalAgent` delegations report the same interrupt.
@@ -2300,6 +2329,15 @@ upgrade from 0.5.3.
 - `docs/external-agent-isolation.md` and `docs/migration-0.7.md`: a "Planned
   changes" note: 0.8 is planned to replace the CLI drivers' `args` denylist
   with an allowlist, so other flags would need `allowPolicyOverrideArgs`.
+- `docs/telemetry-span-names.md`: which spans ADK 2.5 creates and which the
+  bridge creates, and the content capture rule they share.
+
+### Known limitations
+
+- The bridge's own spans keep the ADK 2.4 names and attributes (`call_llm`,
+  `execute_node`, content in `gcp.vertex.agent.*` attributes) next to ADK
+  2.5's spans; a later release moves them to ADK 2.5's schema in one step. See
+  [Span names and ADK 2.5](./docs/telemetry-span-names.md).
 
 ## [0.5.3] - 2026-06-19
 

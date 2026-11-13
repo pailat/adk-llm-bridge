@@ -111,7 +111,7 @@ class PreAgent extends BaseAgent {
 }
 
 /**
- * Mirrors ADK 2.4's `LlmAgent` with a `LongRunningFunctionTool`: the call, the
+ * Mirrors ADK's `LlmAgent` with a `LongRunningFunctionTool`: the call, the
  * tool's own pending response, then the model keeps going with text.
  */
 class LongRunningLlmLikeAgent extends BaseAgent {

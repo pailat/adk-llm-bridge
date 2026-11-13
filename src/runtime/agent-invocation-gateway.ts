@@ -118,7 +118,7 @@ export type AgentInvocationInterruptKind = UserInputKind | "long-running";
  * `adk_request_credential` function call, or an unanswered long-running tool
  * call (an id in any event's `longRunningToolIds`). A long-running call counts
  * as answered only by a later `functionResponse` with the same id authored by
- * `user` (the resume input); the tool's own immediate response, which ADK 2.4
+ * `user` (the resume input); the tool's own immediate response, which ADK's `LlmAgent`
  * emits before the model continues with more events, does not answer it. ADK
  * `NodeTool` calls are not interrupts themselves (ADK marks them long-running
  * only so a paused node can resume); when the wrapped node pauses, its own
@@ -873,7 +873,7 @@ function isUnderNestedWorkflow(root: BaseAgent, author: string): boolean {
  * @remarks
  * `LlmAgent` catches the `LlmCallsLimitExceededError` thrown by
  * `incrementLlmCallCount()` and yields an error event instead of rethrowing
- * (ADK 2.4, `LlmAgent.runAndHandleError`). The event has no typed marker, so
+ * (ADK 2.5, `LlmAgent.runAndHandleError`). The event has no typed marker, so
  * all three signals must hold: `errorCode` `UNKNOWN_ERROR`, the message
  * `Max number of llm calls limit of <maxLlmCalls> exceeded` with the run's own
  * positive budget, and ADK's shared call counter over that budget (ADK
@@ -1398,7 +1398,7 @@ function isFinal(event: Event): boolean {
 /**
  * Whether the events end waiting for a human or external system. Uses ADK's
  * own `getPendingUserInputRequests` (unanswered `adk_request_*` calls) plus
- * every unanswered long-running call, wherever its event is: ADK 2.4's
+ * every unanswered long-running call, wherever its event is: ADK's
  * `LlmAgent` emits the call, the tool's pending response and then keeps going,
  * so the call is not necessarily on the last event. ADK's `Workflow` likewise
  * marks a node as interrupted by any event carrying `longRunningToolIds`.

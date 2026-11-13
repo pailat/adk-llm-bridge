@@ -1,11 +1,15 @@
 /**
- * OpenTelemetry spans for workflow runs, following ADK 2.4's conventions.
+ * OpenTelemetry spans for workflow runs, with the span names and attribute
+ * keys of ADK 2.4. ADK 2.5 names its node spans `invoke_node <name>`; the
+ * bridge keeps the earlier names until it moves to ADK 2.5's span schema in
+ * one step (see docs/telemetry-span-names.md).
  *
- * ADK's own `Workflow` emits `invoke_workflow <name>` and `execute_node <name>`
- * spans (`telemetry/tracing.ts`: `traceWorkflowInvocation`,
- * `traceNodeExecution`; `workflow/node_runner.ts`). Those helpers are not part
- * of the public API, so this module reproduces the span names and attribute
- * keys for our workflow runtime, using only `@opentelemetry/api`:
+ * ADK 2.4's own `Workflow` emitted `invoke_workflow <name>` and
+ * `execute_node <name>` spans (`telemetry/tracing.ts`:
+ * `traceWorkflowInvocation`, `traceNodeExecution`; `workflow/node_runner.ts`).
+ * Those helpers are not part of the public API, so this module reproduces the
+ * span names and attribute keys for our workflow runtime, using only
+ * `@opentelemetry/api`:
  *
  * - `invoke_workflow <workflowName>`: `gen_ai.operation.name=invoke_workflow`,
  *   `gen_ai.conversation.id`, `adk.workflow.name`, `adk.node.path`.
@@ -20,15 +24,14 @@
  *
  * Spans use the same tracer name as ADK (`gcp.vertex.agent`) and run the
  * wrapped work inside the span's context, so spans created by ADK underneath
- * (`invoke_agent`, the model-call span `call_llm` / ADK 2.5
- * `generate_content {model}`, `execute_tool`) nest under the step span.
+ * (`invoke_agent`, the model-call span `generate_content {model}`,
+ * `execute_tool`) nest under the step span.
  *
  * Nothing sensitive is recorded: names, paths, ids and counts only, never node
  * input/output or error messages, in span names as much as in attributes. These
  * spans therefore carry no message content under any capture setting
- * (`OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=NO_CONTENT`,
- * `ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS=false`, ...), and the capture variables
- * have nothing to gate here. Callers must pass identifiers (workflow and step
+ * (`OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` unset, `NO_CONTENT`,
+ * `SPAN_ONLY`, ...), and the capture variable has nothing to gate here. Callers must pass identifiers (workflow and step
  * ids), never user text; as a safety net every identifier is bounded to
  * {@link MAX_IDENTIFIER_LENGTH} characters so free-form text cannot ride along
  * in a span name. Failures set `error.type` (the error class name, or `status`

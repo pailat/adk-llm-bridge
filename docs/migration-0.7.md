@@ -9,13 +9,13 @@ The full list of changes is in the [CHANGELOG](../CHANGELOG.md#070---2026-11-13)
 | Requirement | 0.5.3 | 0.7.0 |
 |---|---|---|
 | Node.js | `>=18` | **`>=22`** (`openai` 7 requires it) |
-| `@google/adk` | `>=0.5.0 <2` | **`>=2.4.0 <3`** |
+| `@google/adk` | `>=0.5.0 <2` | **`>=2.5.0 <3`** (built and tested with 2.5.0) |
 | `@google/genai` | not declared (comes with ADK) | **required peer** `>=2.29.1 <3` (3.x is not supported yet) |
 | `@opentelemetry/api` | not used | **required peer** `>=1.9.1 <2` |
-| `zod` | not declared | optional peer **`^4`** (ADK 2.4 requires zod 4) |
+| `zod` | not declared | optional peer **`^4`** (ADK 2.5 requires zod 4) |
 
 ```bash
-npm install adk-llm-bridge@0.7.0 @google/adk@^2.4.0 @google/genai@^2.29.1 @opentelemetry/api
+npm install adk-llm-bridge@0.7.0 @google/adk@^2.5.0 @google/genai@^2.29.1 @opentelemetry/api
 ```
 
 Most package managers install a matching `@google/genai` together with ADK. If
@@ -35,7 +35,7 @@ modules you do not import.
 Upgrade ADK first by following ADK's own 2.x notes. ADK 2 changes
 `InvocationContext` and the event types that custom agents and plugins use.
 User code that only builds `LlmAgent`, `FunctionTool` and `Context` tools
-compiles on ADK 2.4 unchanged.
+compiles on ADK 2.5 unchanged.
 
 ### `*Llm` classes and `LLMRegistry`
 
@@ -79,7 +79,8 @@ What to change:
   provider errors.
 - **To recover from an error**, return an ADK `Event` built with
   `createEvent(...)` from `onModelErrorCallback`, not a bare `LlmResponse`.
-  ADK 2.4 reads `actions` from the returned value and fails on a plain object.
+  ADK yields the returned value as an event, reads its `actions` and fails on
+  a plain object.
 - **Read the text from `error.detail`.** `error.message` is a JSON string
   (`{"error":{"code":...,"message":...}}`) because ADK parses it to fill the
   event's `errorCode`. `error.code`, `error.status`, `error.provider` and
@@ -220,9 +221,8 @@ Related behavior changes:
 - On OpenAI-compatible providers, `candidatesTokenCount` no longer includes
   reasoning tokens: it is `completion_tokens` minus the reasoning tokens, as
   genai and Gemini define it, and `thoughtsTokenCount` reports the reasoning
-  part. To get OpenAI's `completion_tokens`, add the two. ADK main adds them
-  for `gen_ai.usage.output_tokens`; ADK 2.4 reports only
-  `candidatesTokenCount` there.
+  part. To get OpenAI's `completion_tokens`, add the two, as ADK 2.5 does for
+  `gen_ai.usage.output_tokens`.
 - OpenAI-compatible requests get ADK's user turn when the contents are empty
   or end on a model turn (as on Anthropic and Gemini), and contents with no
   parts are dropped first.
@@ -240,19 +240,18 @@ Related behavior changes:
 `@opentelemetry/api` is now a peer: install it (see section 1). Nothing is
 recorded until you register an OpenTelemetry provider.
 
-To keep message content out of traces on ADK 2.4, set both variables:
+Message content is no longer captured on spans by default, on ADK's spans or
+the bridge's. To capture it, set
+`OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=SPAN_ONLY` (or
+`SPAN_AND_EVENT`). The bridge no longer reads
+`ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS`: set to `true` with the OTel variable
+unset, it captures nothing and logs `SPAN_CONTENT_CAPTURE_VARIABLE_IGNORED`
+once. `true` and `1` in the OTel variable mean `EVENT_ONLY`: no content on
+spans.
 
-```bash
-OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=NO_CONTENT  # the bridge's spans
-ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS=false                     # ADK's own spans
-```
-
-When the `OTEL_...` variable is not set, the bridge's spans follow
-`ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS` too.
-
-`OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true` (or `1`) no longer
-puts content on the bridge's spans. As on ADK main, it means `EVENT_ONLY`. To
-keep content on spans, set `SPAN_ONLY` or `SPAN_AND_EVENT`.
+ADK 2.5's own spans use its new names (`generate_content <model>`,
+`invoke_node`); the bridge's own spans keep the ADK 2.4 names (`call_llm`,
+`execute_node`). See [Span names and ADK 2.5](telemetry-span-names.md).
 
 `gen_ai.provider.name` uses the OpenTelemetry semantic-convention value where
 one exists: xAI is `x_ai`, not `xai`. OpenAI is `openai`, Anthropic is

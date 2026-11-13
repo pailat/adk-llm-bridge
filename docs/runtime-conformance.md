@@ -179,7 +179,7 @@ The integrated registry tests exercise `LLMRegistry.resolve` and
 `LLMRegistry.newLlm` with the repository's installed `@google/adk` development
 version. This conformance infrastructure cannot prove that `resolve` has the
 same public behavior across the entire declared peer range
-`@google/adk >=2.4.0 <3`: the deterministic protocol fixtures do not install
+`@google/adk >=2.5.0 <3`: the deterministic protocol fixtures do not install
 alternate peer versions, and doing so here would require dependency/lockfile
 changes outside issue #86 ownership.
 

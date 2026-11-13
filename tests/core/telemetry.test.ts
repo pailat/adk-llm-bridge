@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { type Span, SpanStatusCode, trace } from "@opentelemetry/api";
 import {
   annotateLlmSpan,
@@ -7,7 +7,9 @@ import {
   serverAddress,
   shouldCaptureMessageContent,
 } from "../../src/core/telemetry.js";
+import { LogCode, resetWarnOnce } from "../../src/utils/log.js";
 import { useCleanEnv } from "../helpers/env.js";
+import { captureWarnings } from "../helpers/fake-logger.js";
 
 const CAPTURE_ENV = [
   "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT",
@@ -147,6 +149,13 @@ describe("annotateLlmSpan", () => {
 });
 
 describe("recordLlmError", () => {
+  useCleanEnv(CAPTURE_ENV);
+  // Content capture on: these tests check that the exception is recorded.
+  beforeEach(() => {
+    process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT =
+      "SPAN_ONLY";
+  });
+
   it("records the exception, HTTP status as error.type and ERROR status", () => {
     const { span, record } = fakeSpan();
     const error = Object.assign(new Error("secret detail"), { status: 429 });
@@ -172,18 +181,76 @@ describe("recordLlmError", () => {
   });
 });
 
+describe("ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS is no longer read", () => {
+  useCleanEnv(CAPTURE_ENV);
+  let warnings: ReturnType<typeof captureWarnings>;
+  beforeEach(() => {
+    resetWarnOnce();
+    warnings = captureWarnings();
+  });
+  afterEach(() => {
+    warnings.mockRestore();
+    resetWarnOnce();
+  });
+
+  for (const value of ["true", "1", " TRUE "]) {
+    it(`warns once, and captures nothing, when only the old variable is ${JSON.stringify(value)}`, () => {
+      process.env.ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS = value;
+      for (let i = 0; i < 5; i += 1) {
+        expect(shouldCaptureMessageContent()).toBe(false);
+      }
+      expect(warnings.codes).toEqual([
+        LogCode.SPAN_CONTENT_CAPTURE_VARIABLE_IGNORED,
+      ]);
+      const message = String(warnings.mock.calls[0]?.[0]);
+      expect(message).toContain("ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS");
+      expect(message).toContain(
+        "set OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=SPAN_ONLY",
+      );
+      // Only variable names and the documented value: never the old value.
+      expect(message).not.toContain(value.trim());
+      expect(message).not.toMatch(/\btrue\b|=1\b/i);
+    });
+  }
+
+  for (const value of [undefined, "", "false", "0", "no"]) {
+    it(`does not warn when the old variable is ${JSON.stringify(value)}`, () => {
+      if (value !== undefined) {
+        process.env.ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS = value;
+      }
+      expect(shouldCaptureMessageContent()).toBe(false);
+      expect(warnings.codes).toEqual([]);
+    });
+  }
+
+  for (const [mode, captured] of [
+    ["SPAN_ONLY", true],
+    ["NO_CONTENT", false],
+    ["EVENT_ONLY", false],
+  ] as const) {
+    it(`does not warn when the OTel variable is ${mode}`, () => {
+      process.env.ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS = "true";
+      process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT = mode;
+      expect(shouldCaptureMessageContent()).toBe(captured);
+      expect(warnings.codes).toEqual([]);
+    });
+  }
+});
+
 describe("message-content capture gating", () => {
   useCleanEnv(CAPTURE_ENV);
 
   const secret = "user asked: summarize my diagnosis for Jane Roe";
 
-  it("matches the agents telemetry precedence rules", () => {
-    expect(shouldCaptureMessageContent()).toBe(true);
-    process.env.ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS = "false";
+  it("follows ADK's rules: content on spans only with SPAN_ONLY or SPAN_AND_EVENT", () => {
+    // No content without the OTel variable, as in ADK 2.5.
     expect(shouldCaptureMessageContent()).toBe(false);
-    process.env.ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS = "1";
-    expect(shouldCaptureMessageContent()).toBe(true);
-    // The OTel variable wins when set.
+    // ADK 2.5 reads ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS for live spans
+    // only, so it never turns content on for the bridge's spans.
+    for (const legacy of ["true", "1"]) {
+      process.env.ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS = legacy;
+      expect(shouldCaptureMessageContent()).toBe(false);
+    }
     process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT =
       "NO_CONTENT";
     expect(shouldCaptureMessageContent()).toBe(false);
@@ -214,8 +281,7 @@ describe("message-content capture gating", () => {
     expect(record.status).toEqual({ code: SpanStatusCode.ERROR });
   });
 
-  it("does the same for non-Error values", () => {
-    process.env.ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS = "false";
+  it("does the same for non-Error values, with no capture variable set", () => {
     const { span, record } = fakeSpan();
     recordLlmError(secret, span);
     expect(JSON.stringify(record)).not.toContain("Jane Roe");

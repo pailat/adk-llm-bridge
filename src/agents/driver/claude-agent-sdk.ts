@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { InputValidationError } from "@google/adk";
+import { InputValidationError, newId } from "@google/adk";
 import { warn } from "../../utils/log.js";
 import type { ExternalAgentEvent } from "../events.js";
 import {
@@ -1752,7 +1752,7 @@ export class ClaudeAgentSdkDriver {
       }
       try {
         const decision = await requestPermission({
-          requestId: options.toolUseID ?? `claude-${crypto.randomUUID()}`,
+          requestId: options.toolUseID ?? `claude-${newId()}`,
           toolName,
           input,
           ...(options.title ? { title: options.title } : {}),
@@ -2532,7 +2532,7 @@ export class ClaudeAgentSdkDriver {
     if (!bridge) {
       return toolTextResult("ADK tools are not available.", true);
     }
-    const functionCallId = `claude-adk-${crypto.randomUUID()}`;
+    const functionCallId = `claude-adk-${newId()}`;
     let result = await bridge.execute(name, args, request.context, {
       functionCallId,
     });

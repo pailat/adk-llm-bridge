@@ -6,7 +6,9 @@ import {
   GOOGLE_SEARCH,
   type InvocationContext,
   LongRunningFunctionTool,
+  resetIdProvider,
   resetLogger,
+  setIdProvider,
 } from "@google/adk";
 import { z } from "zod";
 import {
@@ -461,6 +463,47 @@ describe("ExternalAgent read-only exposure of ADK tools", () => {
       // drain
     }
     expect(result?.status).toBe("error");
+  });
+});
+
+describe("Claude SDK driver ids from ADK's id provider", () => {
+  afterEach(() => resetIdProvider());
+
+  test("an ADK tool call through the SDK asks with claude-adk-<id>", async () => {
+    const seen: string[] = [];
+    const { handlers } = await setup({
+      requestPermission: async (request) => {
+        seen.push(request.requestId);
+        return { behavior: "deny", message: "no" };
+      },
+    });
+    let n = 0;
+    setIdProvider(() => `id-${++n}`);
+
+    await handlers.get("adk_tool__delete_all")?.({});
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatch(/^claude-adk-id-\d+$/);
+  });
+
+  test("a permission request without a toolUseID is claude-<id>", async () => {
+    const seen: string[] = [];
+    const driver = new ClaudeAgentSdkDriver({ sdk: fakeSdk().sdk });
+    const options = driver.buildOptions({
+      provider: CLAUDE_PROVIDER,
+      context: invocation(),
+      requestPermission: async (request) => {
+        seen.push(request.requestId);
+        return { behavior: "allow" };
+      },
+    });
+    let n = 0;
+    setIdProvider(() => `id-${++n}`);
+
+    await options.canUseTool?.("Bash", { command: "ls" }, {} as never);
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatch(/^claude-id-\d+$/);
   });
 });
 

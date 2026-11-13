@@ -17,9 +17,11 @@
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.319",
-    "@google/adk": "^2.4.0",
+    "@google/adk": "^2.5.0",
+    "@google/genai": "^2.32.0",
     "@openai/codex-sdk": "0.167.2",
-    "adk-llm-bridge": "file:../.."
+    "@opentelemetry/api": "^1.10.0",
+    "adk-llm-bridge": "^0.7.0"
   },
   "devDependencies": {
     "@types/bun": "^1.4.4",

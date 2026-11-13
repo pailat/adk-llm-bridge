@@ -89,7 +89,7 @@ function copyConfig<T>(config: T): T {
 
 /**
  * The message ADK's `LLMRegistry.resolve` throws for a model no class claims
- * (`models/registry.js` in ADK 2.4).
+ * (`models/registry.js` in ADK 2.5).
  *
  * @remarks
  * ADK throws a plain `Error` here, with no code or error class, so this

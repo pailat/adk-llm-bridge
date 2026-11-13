@@ -320,8 +320,6 @@ describe("WorkflowEventExportPlugin in a real Runner", () => {
     const plugin = new WorkflowEventExportPlugin({ exporter });
 
     const { events } = await runTurns(failingWorkflow(), [START], plugin);
-    // A run that throws skips the Runner's end-of-run callback.
-    await plugin.pipeline.flush();
 
     const [executionId] = await executionsOf(exporter);
     const records = await readAll(exporter, executionId as string);
@@ -331,6 +329,66 @@ describe("WorkflowEventExportPlugin in a real Runner", () => {
     const types = records.map((record) => record.type);
     expect(types).toContain("step_failed");
     expect(types).toContain("error");
+  });
+
+  test("exports the records of a failing run before the error reaches the caller", async () => {
+    const exporter = new InMemoryWorkflowEventExporter();
+    // No periodic flush: only the end of the run can export the buffer.
+    const plugin = new WorkflowEventExportPlugin({
+      exporter,
+      flushIntervalMs: 60_000,
+    });
+
+    const { events, errors } = await runTurns(
+      failingWorkflow(),
+      [START],
+      plugin,
+    );
+
+    expect(errors).toHaveLength(1);
+    const [executionId] = await executionsOf(exporter);
+    expect(executionId).toBeDefined();
+    const records = await readAll(exporter, executionId as string);
+    expect(records.map((record) => record.id)).toEqual(
+      events.flat().map((event) => event.id),
+    );
+    expect(records.map((record) => record.type)).toContain("step_failed");
+  });
+
+  test("exports the records of a run whose consumer stops reading early", async () => {
+    const exporter = new InMemoryWorkflowEventExporter();
+    const plugin = new WorkflowEventExportPlugin({
+      exporter,
+      flushIntervalMs: 60_000,
+    });
+    const sessions = new InMemorySessionService();
+    const runner = new Runner({
+      appName: "app",
+      agent: waitingWorkflow(),
+      sessionService: sessions,
+      plugins: [plugin],
+    });
+    const { id } = await sessions.createSession({
+      appName: "app",
+      userId: "u",
+    });
+
+    const read: Event[] = [];
+    for await (const event of runner.runAsync({
+      userId: "u",
+      sessionId: id,
+      newMessage: START,
+    })) {
+      read.push(event);
+      if (workflowEventOf(event)?.type === "workflow_started") break;
+    }
+
+    const executionId = workflowEventOf(read.at(-1) as Event)?.executionId;
+    expect(executionId).toBeDefined();
+    const records = await readAll(exporter, executionId as string);
+    expect(records.map((record) => record.id)).toEqual(
+      read.map((event) => event.id),
+    );
   });
 
   test("records of workflow events carry the execution id of the workflow events", async () => {
@@ -555,6 +613,52 @@ describe("WorkflowEventExportPlugin.afterRunCallback", () => {
     const plugin = new WorkflowEventExportPlugin({ pipeline });
 
     await expect(plugin.afterRunCallback(ctx)).resolves.toBeUndefined();
+  });
+});
+
+describe("WorkflowEventExportPlugin.onRunErrorCallback", () => {
+  const ctx = {
+    invocationContext: {} as InvocationContext,
+    error: new Error("run failed"),
+  };
+
+  test("exports the buffered records before it resolves", async () => {
+    const exporter = new InMemoryWorkflowEventExporter();
+    const plugin = new WorkflowEventExportPlugin({
+      exporter,
+      flushIntervalMs: 60_000,
+    });
+    await callback(plugin, workflowStarted("inv-1", "exec-1"));
+
+    await plugin.onRunErrorCallback(ctx);
+
+    expect(await readAll(exporter, "exec-1")).toHaveLength(1);
+  });
+
+  test("waits at most flushOnRunEndMs for an exporter that never answers", async () => {
+    const plugin = new WorkflowEventExportPlugin({
+      exporter: new HangingExporter(),
+      appendTimeoutMs: 60_000,
+      flushOnRunEndMs: 150,
+    });
+    await callback(plugin, workflowStarted("inv-1", "exec-1"));
+
+    const started = performance.now();
+    await plugin.onRunErrorCallback(ctx);
+    const elapsed = performance.now() - started;
+
+    expect(elapsed).toBeGreaterThanOrEqual(100);
+    expect(elapsed).toBeLessThan(1_000);
+  });
+
+  test("resolves when the pipeline flush rejects", async () => {
+    const pipeline = {
+      offerAdkEvent: () => 0,
+      flush: () => Promise.reject(new Error("flush broke")),
+    } as unknown as WorkflowEventExportPipeline;
+    const plugin = new WorkflowEventExportPlugin({ pipeline });
+
+    await expect(plugin.onRunErrorCallback(ctx)).resolves.toBeUndefined();
   });
 });
 

@@ -54,6 +54,7 @@ import {
   isBaseTool,
   isBaseToolset,
   isInModelTool,
+  newId,
   ReadonlyContext,
   type SingleAfterToolCallback,
   type SingleBeforeToolCallback,
@@ -730,8 +731,7 @@ export async function createAdkToolBridge(
         );
       }
 
-      const functionCallId =
-        options.functionCallId ?? `adk-bridge-${crypto.randomUUID()}`;
+      const functionCallId = options.functionCallId ?? `adk-bridge-${newId()}`;
       const decision = options.toolConfirmation;
       const toolContext = new Context({
         invocationContext: context,

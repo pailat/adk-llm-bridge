@@ -1437,7 +1437,7 @@ describe("AgentInvocationGateway", () => {
       expect(resumed.interrupt?.events).toHaveLength(4);
     });
 
-    // ADK 2.4 LlmAgent + LongRunningFunctionTool: the call, the tool's own
+    // ADK's LlmAgent + LongRunningFunctionTool: the call, the tool's own
     // pending response (authored by the agent) and then the model's text.
     const longRunningTurn = () => [
       createEvent({

@@ -10,7 +10,7 @@ import {
   SpanStatusCode,
   trace,
 } from "@opentelemetry/api";
-// One copy of the capture rules (OTel GenAI variable, then the ADK 2.4 one).
+// One copy of the capture rules (the OTel GenAI variable, as in ADK).
 import { shouldCaptureMessageContent } from "../core/telemetry.js";
 import { AGENT_KIND_ATTRIBUTE } from "../runtime/agent-kind.js";
 import {

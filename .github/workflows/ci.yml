@@ -172,8 +172,30 @@ jobs:
             console.log('spec entry imports with zod on', process.version);
           "
 
+  # The examples are standalone projects that depend on the published package.
+  # Each one is copied out of the repository, installs the tarball `npm pack`
+  # makes from this commit (in the copy only), then type checks and builds, so
+  # the examples are proven before a release is on npm. It also audits their
+  # dependencies, which the root lockfile no longer covers.
+  examples:
+    name: examples against the packed tarball
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.4
+      - run: bun install --frozen-lockfile
+      - run: scripts/check-examples.sh --audit
+
   # Non-blocking canary: builds @google/adk from google/adk-js `main` (the next
-  # release, e.g. 2.5.0, is not on npm until it is published) and runs the full
+  # release, e.g. 2.6.0, is not on npm until it is published) and runs the full
   # suite against it, so incompatibilities show up before the release lands.
   adk-canary:
     name: adk-canary (@google/adk from main)

@@ -308,7 +308,7 @@ describe("llmRequest.model", () => {
     }
   });
 
-  describe("through ADK 2.4 LlmAgent", () => {
+  describe("through ADK's LlmAgent", () => {
     async function runAgent(
       llm: OpenAICompatibleLlm,
       beforeModelCallback?: (params: {

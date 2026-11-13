@@ -175,6 +175,9 @@ let spans: RecordedSpan[];
 
 beforeEach(() => {
   for (const key of ENV_KEYS) delete process.env[key];
+  // Content capture on: these tests check what the spans carry. The
+  // redaction tests set their own capture variables.
+  process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT = "SPAN_ONLY";
   spans = installOtel();
 });
 
@@ -661,20 +664,24 @@ describe("ExternalAgent spans: one agent with a built-in tool", () => {
     );
   });
 
-  for (const [label, key, value] of [
+  for (const [label, env] of [
     [
       "NO_CONTENT",
-      "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT",
-      "NO_CONTENT",
+      { OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT: "NO_CONTENT" },
     ],
     [
       "ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS=false",
-      "ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS",
-      "false",
+      { ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS: "false" },
     ],
+    [
+      "ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS=true alone",
+      { ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS: "true" },
+    ],
+    ["no capture variable", {}],
   ] as const) {
     test(`${label}: built-in tool spans carry no args or results`, async () => {
-      process.env[key] = value;
+      for (const key of ENV_KEYS) delete process.env[key];
+      Object.assign(process.env, env);
       await runTurn(builtinToolRun());
 
       const tool = named("execute_tool Read")[0];

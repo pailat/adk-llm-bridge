@@ -33,13 +33,20 @@ disposable Git worktree, never at your primary checkout.
 
 ## Run
 
-From the repository root:
+This example is a standalone project: install its own dependencies first. From
+the repository root:
 
 ```bash
+bun install --cwd examples/codex-workflow
 git worktree add /tmp/adk-llm-bridge-codex-smoke HEAD
 WORKFLOW_TARGET=/tmp/adk-llm-bridge-codex-smoke \
   bun run --cwd examples/codex-workflow smoke
 ```
+
+To run it against the library in this checkout instead of the published
+package, see [Running Examples Locally](../../DEVELOPMENT.md#running-examples-locally)
+(`KEEP_EXAMPLES_DIR=1 scripts/check-examples.sh codex-workflow` keeps an
+installed copy to run from).
 
 Authentication may come from `CODEX_API_KEY`, `OPENAI_API_KEY`, or a readable
 `~/.codex/auth.json`. The workflow disables network access for agent tools; this

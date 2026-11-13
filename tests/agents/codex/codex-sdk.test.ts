@@ -16,6 +16,7 @@ import {
   mapPolicyToCodexSdkThreadOptions,
 } from "../../../src/agents/driver/codex-sdk.js";
 import { CODEX_PROVIDER } from "../../../src/agents/provider/schema.js";
+import { resolveBridgeToSource } from "../../helpers/example-modules.js";
 import { withDeadline } from "../helpers.js";
 
 // The driver cannot turn off the host MCP servers of an injected sdk client,
@@ -1045,9 +1046,9 @@ describe("CodexSdkDriver", () => {
 // PATH"); driver adds no OPENAI_API_KEY fallback to credential resolution.
 // ===========================================================================
 
-// A path in a variable keeps tsc from type-checking the example, whose
-// `adk-llm-bridge/agents` import resolves to `dist/`, which CI builds after the
-// typecheck. Bun still loads the same file.
+// A path in a variable keeps tsc from type-checking the example, a standalone
+// project; its `adk-llm-bridge/agents` import loads `src/`.
+resolveBridgeToSource();
 const CODEX_EXAMPLE = "../../../examples/basic-agent-codex/agent.ts";
 
 async function importCodexExample(): Promise<{

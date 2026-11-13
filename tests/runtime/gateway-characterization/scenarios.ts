@@ -156,10 +156,10 @@ const isTempKey = (key: string): boolean => key.startsWith("temp:");
 
 /**
  * The state without its `temp:` keys. Whether a child session keeps `temp:`
- * keys after an event is ADK's choice: 2.4 trims them, ADK main keeps them for
- * the rest of the invocation. The `childState:` record of the merge-order
- * scenario leaves them out so the snapshot holds what the bridge guarantees on
- * both. Persisted events are recorded as ADK yields them.
+ * keys after an event is ADK's choice: ADK 2.5 keeps them for the rest of the
+ * invocation, earlier releases trimmed them. The `childState:` record of the
+ * merge-order scenario leaves them out so the snapshot holds what the bridge
+ * guarantees either way. Persisted events are recorded as ADK yields them.
  */
 function withoutTemp(state: Record<string, unknown>): Record<string, unknown> {
   return Object.fromEntries(
