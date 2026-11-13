@@ -13,9 +13,12 @@ import {
   type ExternalAgentEvent,
   type ExternalAgentPermissionPolicy,
 } from "../../src/agents/index.js";
+import { resolveBridgeToSource } from "../helpers/example-modules.js";
 
-// Paths in variables keep tsc from type-checking the examples; Bun loads
-// them through each example's tsconfig `paths`, which point at `src/`.
+resolveBridgeToSource();
+
+// Paths in variables keep tsc from type-checking the examples, which are
+// standalone projects; their `adk-llm-bridge` imports load `src/`.
 const BASIC_CODEX = "../../examples/basic-agent-codex/agent.ts";
 const CODEX_WORKFLOW = "../../examples/codex-workflow/agent.ts";
 const EXTERNAL_AGENTS = "../../examples/external-agents/agent.ts";

@@ -3,11 +3,6 @@
     "target": "ES2022",
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
-    "paths": {
-      "@google/adk": ["./node_modules/@google/adk/dist/types/index.d.ts"],
-      "adk-llm-bridge/agents": ["../../src/agents/index.ts"],
-      "adk-llm-bridge/workflows": ["../../src/workflows/index.ts"]
-    },
     "strict": true,
     "skipLibCheck": true,
     "types": ["bun"],
