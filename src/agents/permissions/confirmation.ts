@@ -20,6 +20,7 @@ import {
   createEventActions,
   type Event,
   type InvocationContext,
+  newId,
   REQUEST_CONFIRMATION_FUNCTION_CALL_NAME,
 } from "@google/adk";
 import { parseJson } from "../../utils/json.js";
@@ -920,7 +921,7 @@ export function createConfirmationRequestEvent({
       ...(request.reason ? { reason: request.reason } : {}),
     },
   };
-  const requestCallId = `adk-${crypto.randomUUID()}`;
+  const requestCallId = `adk-${newId()}`;
   return createEvent({
     invocationId: context.invocationId,
     author: agentName,

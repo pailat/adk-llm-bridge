@@ -6,6 +6,7 @@ import {
   type Event,
   InvocationContext,
   type InvocationContextParams,
+  newId,
   PluginManager,
 } from "@google/adk";
 import { type Content, FinishReason } from "@google/genai";
@@ -757,7 +758,7 @@ function unknownAgentResult(
 }
 
 function createBridgeCallId(): string {
-  return `adk-run-subagent-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  return `adk-run-subagent-${newId()}`;
 }
 
 function childBranch(
@@ -786,7 +787,7 @@ function withToolGatewaySession(context: InvocationContext): InvocationContext {
   }
   const fields: Partial<InvocationContextParams> = context;
   return new InvocationContext({
-    invocationId: `e-${crypto.randomUUID()}`,
+    invocationId: `e-${newId()}`,
     pluginManager: new PluginManager(),
     ...fields,
     session,

@@ -11,6 +11,8 @@
  * call and response through it, in history order.
  */
 
+import { newId } from "@google/adk";
+
 /** Pattern accepted for tool call IDs by Anthropic (and by OpenAI in practice). */
 const PORTABLE_TOOL_CALL_ID = /^[a-zA-Z0-9_-]{1,64}$/;
 
@@ -22,9 +24,21 @@ export function isPortableToolCallId(id: string): boolean {
   return PORTABLE_TOOL_CALL_ID.test(id);
 }
 
-/** Generates a collision-safe ID accepted by OpenAI-compatible tool calls. */
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Generates a collision-safe ID accepted by OpenAI-compatible tool calls:
+ * `call_` plus an ID from ADK's `newId()`, so an ID provider set with ADK's
+ * `setIdProvider` applies. A UUID loses its dashes (the default stays
+ * `call_<32 hex digits>`); an ID that would not be portable is replaced with a
+ * random one.
+ */
 export function generateToolCallId(): string {
-  return `call_${crypto.randomUUID().replaceAll("-", "")}`;
+  const id = newId();
+  const candidate = `call_${UUID.test(id) ? id.replaceAll("-", "") : id}`;
+  return isPortableToolCallId(candidate)
+    ? candidate
+    : `call_${crypto.randomUUID().replaceAll("-", "")}`;
 }
 
 /** Options for {@link ToolCallIdCorrelator}. */
