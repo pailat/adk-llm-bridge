@@ -578,8 +578,10 @@ changed for code written against a 0.7.0 pre-release build:
   it before delegation, tracing or ADK processing, so no message, turn
   completion or Workflow node output is produced. Legitimate empty outputs
   still pass through. Other
-  recognized event records keep their original fields unchanged, including
-  `turnComplete`. Yield lifecycle and state events from the subclass's own `run` method, rather
+  recognized event records keep their fields unchanged, including
+  `turnComplete`, except `metadata`: a JSON object moves under
+  `childMetadata` (`EXTERNAL_AGENT_CHILD_METADATA_KEY`) and any other value
+  is dropped. Yield lifecycle and state events from the subclass's own `run` method, rather
   than passing them through from child stdout.
 - **Child metadata moves under `childMetadata`.** The `metadata` object of a
   bridge-shaped `output`, `tool_call` or `tool_result` line a child process

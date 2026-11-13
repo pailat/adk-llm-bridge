@@ -427,7 +427,9 @@ upgrade from 0.5.3.
   turn completion or Workflow node output. Legitimate empty outputs still
   pass through. Other
   recognized event records keep their fields unchanged, including
-  `turnComplete`. Subclasses yield driver-owned events from their own `run` instead. Codex's
+  `turnComplete`, except `metadata`: a JSON object moves under
+  `childMetadata` (`EXTERNAL_AGENT_CHILD_METADATA_KEY`) and any other value
+  is dropped. Subclasses yield driver-owned events from their own `run` instead. Codex's
   internal transport envelopes use a private symbol and cannot be forged
   through child JSON stdout.
 
