@@ -26,9 +26,8 @@
  * Nothing sensitive is recorded: names, paths, ids and counts only, never node
  * input/output or error messages, in span names as much as in attributes. These
  * spans therefore carry no message content under any capture setting
- * (`OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=NO_CONTENT`,
- * `ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS=false`, ...), and the capture variables
- * have nothing to gate here. Callers must pass identifiers (workflow and step
+ * (`OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` unset, `NO_CONTENT`,
+ * `SPAN_ONLY`, ...), and the capture variable has nothing to gate here. Callers must pass identifiers (workflow and step
  * ids), never user text; as a safety net every identifier is bounded to
  * {@link MAX_IDENTIFIER_LENGTH} characters so free-form text cannot ride along
  * in a span name. Failures set `error.type` (the error class name, or `status`

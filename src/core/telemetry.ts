@@ -24,27 +24,41 @@ import {
   CACHE_CREATION_METADATA_KEY,
   COST_METADATA_KEY,
 } from "../converters/cache-usage.js";
+import { LogCode, warnOnce } from "../utils/log.js";
 import { httpStatusOf } from "./provider-llm-error.js";
 
 /**
- * Whether message content may be written to spans.
+ * Whether message content may be written to spans, by ADK's rules.
  *
- * `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` wins when set: only
- * `SPAN_ONLY` and `SPAN_AND_EVENT` (any case) capture. `NO_CONTENT`,
- * `EVENT_ONLY` and anything else do not; as on ADK main, the old boolean
- * values `true` and `1` mean `EVENT_ONLY`, so they keep content off spans too.
- * Otherwise the ADK 2.4 variable
- * `ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS` applies, capturing unless it is set
- * to something other than `true`/`1`. Also used by `src/agents/telemetry.ts`.
+ * Only `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` set to `SPAN_ONLY`
+ * or `SPAN_AND_EVENT` (any case) captures. Unset, `NO_CONTENT`, `EVENT_ONLY`
+ * and anything else do not; the boolean values `true` and `1` mean
+ * `EVENT_ONLY`, so they keep content off spans too.
+ * `ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS` turns nothing on (ADK applies it to
+ * live runs only); when it asks for content and the OTel variable is unset,
+ * a warning names the variable to set, once per process. Also used by
+ * `src/agents/telemetry.ts`.
  */
 export function shouldCaptureMessageContent(): boolean {
   const otel = process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT;
-  if (otel !== undefined && otel.trim() !== "") {
-    const mode = otel.trim().toUpperCase();
-    return mode === "SPAN_ONLY" || mode === "SPAN_AND_EVENT";
-  }
-  const value = process.env.ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS || "true";
-  return value === "true" || value === "1";
+  const mode = (otel ?? "").trim().toUpperCase();
+  if (mode === "") warnIfOldCaptureVariableSet();
+  return mode === "SPAN_ONLY" || mode === "SPAN_AND_EVENT";
+}
+
+function warnIfOldCaptureVariableSet(): void {
+  const old = (process.env.ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS ?? "")
+    .trim()
+    .toLowerCase();
+  if (old !== "true" && old !== "1") return;
+  // Variable names and the documented value only, never the old value.
+  warnOnce(
+    LogCode.SPAN_CONTENT_CAPTURE_VARIABLE_IGNORED,
+    "ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS is no longer read, so no message " +
+      "content is captured on spans; set " +
+      "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=SPAN_ONLY to " +
+      "capture message content on spans.",
+  );
 }
 
 /**
