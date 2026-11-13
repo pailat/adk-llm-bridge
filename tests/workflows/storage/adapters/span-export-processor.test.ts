@@ -765,8 +765,15 @@ class LocalContextManager implements ContextManager {
     return this.#storage.run(ctx, () => fn.call(thisArg, ...args));
   }
 
-  bind<T>(_ctx: Context, target: T): T {
-    return target;
+  // Binds functions as the async-hooks context manager does: ADK binds each
+  // step of its traced generators this way.
+  bind<T>(ctx: Context, target: T): T {
+    if (typeof target !== "function") return target;
+    const run = (thisArg: unknown, args: unknown[]) =>
+      this.with(ctx, () => Reflect.apply(target, thisArg, args));
+    return function (this: unknown, ...args: unknown[]) {
+      return run(this, args);
+    } as T;
   }
 
   enable(): this {
@@ -858,21 +865,38 @@ describe.skipIf(sdk === undefined)("with a real tracer provider", () => {
       await provider.forceFlush();
       await pipeline.flush();
 
-      const workflowSpan = captured.find((span) =>
-        span.name.startsWith("invoke_workflow"),
+      // ADK 2.5 opens its own `invoke_workflow <root agent>` span for every
+      // Runner run: with this root agent it has the same name as the
+      // workflow's span, which is the one that carries the execution id.
+      const named = captured.filter(
+        (span) => span.name === "invoke_workflow wf",
       );
+      expect(named).toHaveLength(2);
+      const workflowSpans = named.filter(
+        (span) =>
+          span.attributes[WORKFLOW_EXECUTION_ID_SPAN_ATTRIBUTE] !== undefined,
+      );
+      expect(workflowSpans).toHaveLength(1);
+      const workflowSpan = workflowSpans[0];
       const executionId =
         workflowSpan?.attributes[WORKFLOW_EXECUTION_ID_SPAN_ATTRIBUTE];
       expect(typeof executionId).toBe("string");
       const records = (await readAll(exporter, executionId as string)).filter(
         (record) => record.kind === "span",
       );
-      // ADK's own runner spans start in other traces; only the spans of the
-      // workflow trace belong to the execution.
+      // One trace: ADK's Runner span, its `invoke_agent` span of the workflow
+      // agent, then the workflow's own spans. All of them belong to the
+      // execution.
       const inTrace = captured.filter(
         (span) => span.traceId === workflowSpan?.traceId,
       );
-      expect(inTrace.length).toBeGreaterThan(1);
+      expect(inTrace.map((span) => span.name).sort()).toEqual([
+        "execute_node echo",
+        "invoke_agent echo",
+        "invoke_agent wf",
+        "invoke_workflow wf",
+        "invoke_workflow wf",
+      ]);
       expect(records.length).toBe(inTrace.length);
       expect(records.map((record) => record.payload.name).sort()).toEqual(
         inTrace.map((span) => span.name).sort(),
