@@ -194,7 +194,7 @@ describe("run spec links and entry points", () => {
     const changelog = read("CHANGELOG.md");
     const release = changelog.slice(
       changelog.indexOf("## [0.7.0]"),
-      changelog.indexOf("## [0.6.0]"),
+      changelog.indexOf("## [0.5.3]"),
     );
     const added = section(release, "Added");
     expect(added).toContain("adk-llm-bridge/workflows/spec");

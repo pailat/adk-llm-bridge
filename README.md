@@ -13,7 +13,7 @@ fx) with [Google ADK for TypeScript](https://github.com/google/adk-js).
 [What it is](#what-it-is) · [Install](#install) · [Quick start](#quick-start) ·
 [Providers](#providers) · [Models](#models) · [Features](#features) ·
 [External agents](#external-agents) · [Workflows](#workflows) ·
-[Upgrading from 0.5.x or 0.6.0](#upgrading-from-05x-or-060) ·
+[Upgrading from 0.5.x](#upgrading-from-05x) ·
 [Examples](#examples) · [Documentation](#documentation) ·
 [Contributing](#contributing) · [License](#license)
 
@@ -630,10 +630,9 @@ export const workflow = new WorkflowAgent({
   durable layer. See
   [Workflows and ADK's `Workflow`](docs/workflow-adk-interop.md).
 
-## Upgrading from 0.5.x or 0.6.0
+## Upgrading from 0.5.x
 
-0.7.0 is the first npm release after 0.5.3; 0.6.0 was published on GitHub
-only. The main breaking changes:
+0.7.0 follows 0.5.3. The main breaking changes:
 
 - Node.js `>=22`; `@google/adk` `>=2.4.0 <3`; `@google/genai` and
   `@opentelemetry/api` are required peers; zod 3 is no longer supported.
