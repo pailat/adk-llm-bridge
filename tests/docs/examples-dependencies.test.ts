@@ -66,6 +66,22 @@ describe("examples depend on the published package", () => {
     expect(tsconfig).not.toContain("../../");
   });
 
+  test("the scheduled dependency audit also audits every example", () => {
+    // The examples are outside the root lockfile, so `bun audit` alone never
+    // sees their dependencies.
+    const audit = Bun.YAML.parse(
+      readFileSync(join(ROOT, ".github/workflows/audit.yml"), "utf8"),
+    ) as {
+      on: { schedule?: unknown[] };
+      jobs: Record<string, { steps: Array<{ run?: string }> }>;
+    };
+    expect(audit.on.schedule?.length).toBeGreaterThan(0);
+    const runs = Object.values(audit.jobs).flatMap((job) =>
+      job.steps.flatMap((step) => (step.run ? [step.run] : [])),
+    );
+    expect(runs).toContain("scripts/check-examples.sh --audit");
+  });
+
   test("the root peer range for @google/adk starts at 2.5.0", () => {
     expect(root.peerDependencies?.["@google/adk"]).toBe(">=2.5.0 <3");
     expect(root.devDependencies?.["@google/adk"]).toBe("^2.5.0");
