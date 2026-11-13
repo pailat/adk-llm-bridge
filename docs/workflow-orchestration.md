@@ -123,11 +123,10 @@ Where to read `agentKind`:
 | the `invoke_agent` span, same attribute | only for `ExternalAgent` runs |
 
 The `invoke_agent` span of an `llm`, `workflow` or `host` agent does not carry
-it. ADK 2.4 creates that span privately in `BaseAgent.runAsync`, and the bridge
-has no hook inside it: ADK never calls the plugin `beforeAgentCallback`, and
-the only code that runs in that span is the agent's own `beforeAgentCallback`,
-which belongs to the user's agent. To get the kind of those agents, read it
-from the `execute_node` span, their parent.
+it. ADK creates that span privately in `BaseAgent.runAsync`; the bridge sets
+the attribute from inside the agent's own run, which only `ExternalAgent`
+has. To get the kind of those agents, read it from the `execute_node` span,
+their parent.
 
 ### Which models a step ran
 

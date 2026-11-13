@@ -150,7 +150,7 @@ When a sub-agent stops on an ADK interrupt (an unanswered `adk_request_input`,
 `adk_request_confirmation` or `adk_request_credential` call, or an unanswered
 long-running tool call), the workflow does not fail. A long-running call is any
 id in an event's `longRunningToolIds`, wherever that event is in the turn: ADK
-2.4's `LlmAgent` emits the call, the tool's own pending response and then keeps
+2.5's `LlmAgent` emits the call, the tool's own pending response and then keeps
 going (often with a text event), and the call still counts as waiting. Only a
 later `functionResponse` with the same id from the user answers it. A
 `LongRunningFunctionTool` therefore always pauses the step, even when it returns

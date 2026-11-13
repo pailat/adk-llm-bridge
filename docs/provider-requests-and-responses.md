@@ -45,7 +45,7 @@ OpenAI reasoning models, follow the id that is sent.
 
 `LLMRegistry.register(OpenRouterLlm)` (or a `register*()` function) adds the
 class's patterns to ADK's registry. When an agent's `model` is a string, ADK
-resolves it like this (ADK 2.4):
+resolves it like this (ADK 2.5):
 
 - Each pattern is matched against the **whole** model name, as
   `^(?:pattern)$`. `gpt-4o` does not match `openai/gpt-4o`.

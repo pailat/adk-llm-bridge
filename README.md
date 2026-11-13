@@ -49,15 +49,16 @@ Requirements:
   `require("adk-llm-bridge")` fails with `ERR_PACKAGE_PATH_NOT_EXPORTED`.
   `@google/adk` ships separate CommonJS and ESM builds, and mixing them breaks
   ADK's class identity checks.
-- Required peers: `@google/adk` `>=2.4.0 <3`, `@google/genai` `>=2.29.1 <3`
+- Required peers: `@google/adk` `>=2.5.0 <3`, `@google/genai` `>=2.29.1 <3`
   (3.x is not supported yet, so pin it if you add it yourself) and
-  `@opentelemetry/api` `>=1.9.1 <2`.
+  `@opentelemetry/api` `>=1.9.1 <2`. 0.7.0 is built and tested with
+  `@google/adk` 2.5.0; earlier ADK versions are not supported.
 
 Optional peers, only for the features that use them:
 
 | Feature | Install |
 |---|---|
-| zod schemas (ADK 2.4 requires zod 4) | `zod@^4` |
+| zod schemas (ADK 2.5 requires zod 4) | `zod@^4` |
 | Run spec, `adk-llm-bridge/workflows/spec` (experimental) | `zod@^4`; zod >= 4 is required by this subpath only |
 | `ClaudeAgent` | `@anthropic-ai/claude-agent-sdk@">=0.3.319 <0.4"` |
 | `CodexAgent` | `@openai/codex-sdk@0.167.2` (exact); `CodexCliDriver` runs without it |
@@ -315,26 +316,31 @@ model span and sets ERROR status on failures. It also emits its own spans:
 `call_llm` and `execute_tool <name>` for external agents (see
 [Events and spans](#events-and-spans)), and `invoke_workflow` and
 `execute_node` for workflows.
+ADK 2.5's own spans follow its new span tree (`invoke_agent`,
+`generate_content <model>`, `execute_tool`, `invoke_node`), while the bridge's
+spans keep the names and attributes of ADK 2.4. A later release will move the
+bridge's spans to the ADK 2.5 names in one step; see
+[Span names and ADK 2.5](./docs/telemetry-span-names.md).
 The `execute_node` step span carries `gcp.vertex.agent.agent_kind` (`llm`,
 `external`, `host` or `workflow`), the same value as `agentKind` on workflow
 `step_started` and `step_completed`; `invoke_agent` carries it only for
 `ExternalAgent` runs (see
 [Which agent ran a step](./docs/workflow-orchestration.md#which-agent-ran-a-step)).
 
-To keep prompts, tool arguments and results out of traces on ADK 2.4, set
-both variables:
+No message content goes on spans by default, on ADK's spans or the bridge's.
+To capture prompts, responses, tool arguments and results on spans, set:
 
 ```bash
-OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=NO_CONTENT  # the bridge's spans
-ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS=false                     # ADK's own spans
+OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=SPAN_ONLY  # or SPAN_AND_EVENT
 ```
 
-Content capture is on by default. External agent tool spans then export raw
-tool inputs and results, for example full file contents from `Read`. These
-settings apply to spans, not to session events.
-`OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true` (or `1`) means
-`EVENT_ONLY`, as on ADK main: no content on spans. Use `SPAN_ONLY` or
-`SPAN_AND_EVENT` to keep it. ADK always exports the agent's `description` as
+With capture on, external agent tool spans export raw tool inputs and results,
+for example full file contents from `Read`. `NO_CONTENT`, `EVENT_ONLY`, `true`
+and `1` keep content off spans (`true` and `1` mean `EVENT_ONLY`). The setting
+applies to spans, not to session events. The bridge no longer reads
+`ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS` (ADK 2.5 applies it to live runs only):
+when it is `true` and the OTel variable is unset, the bridge captures nothing
+and logs the `SPAN_CONTENT_CAPTURE_VARIABLE_IGNORED` warning once. ADK always exports the agent's `description` as
 `gen_ai.agent.description`, so do not put prompt text or secrets there.
 
 ## External agents
@@ -634,7 +640,7 @@ export const workflow = new WorkflowAgent({
 
 0.7.0 follows 0.5.3. The main breaking changes:
 
-- Node.js `>=22`; `@google/adk` `>=2.4.0 <3`; `@google/genai` and
+- Node.js `>=22`; `@google/adk` `>=2.5.0 <3`; `@google/genai` and
   `@opentelemetry/api` are required peers; zod 3 is no longer supported.
 - Providers throw `ProviderLlmError` by default. Move error handling from
   `afterModelCallback` to `onModelErrorCallback`, or set

@@ -16,6 +16,7 @@ Guides and references for `adk-llm-bridge`. The package overview is in the
 | [External agent isolation](external-agent-isolation.md) | Host configuration, network off by default per driver, the confirmation guard |
 | [Persisting Claude sessions](claude-session-store.md) | Mirror Claude Agent SDK sessions to durable storage, SQLite included (experimental) |
 | [Runtime conformance](runtime-conformance.md) | How local runtimes (Ollama, vLLM, LM Studio) are tested |
+| [Span names and ADK 2.5](telemetry-span-names.md) | Which spans ADK creates (ADK 2.5 names) and which the bridge creates (ADK 2.4 names), and the content capture rule |
 
 ## Workflows
 
