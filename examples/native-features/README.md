@@ -5,7 +5,7 @@
 A programmatic [Bun](https://bun.sh) + TypeScript CLI that demonstrates **every
 native-model capability** [`adk-llm-bridge`](https://www.npmjs.com/package/adk-llm-bridge)
 passes through to [Google ADK](https://google.github.io/adk-docs/)
-([adk-js](https://github.com/google/adk-js), `@google/adk@^2.4.0`).
+([adk-js](https://github.com/google/adk-js), `@google/adk@^2.5.0`).
 
 Each feature is an isolated "demo" you can run on its own, so you can inspect the
 exact events, parts, and usage metadata the chat UI normally hides
@@ -237,43 +237,21 @@ model behavior (not bridge limitations):
 
 ## Local development (testing against the local build)
 
-This example's `package.json` pins the **published** range
-`"adk-llm-bridge": "^0.5.3"` — that's what end users install. When you are
-working on the library itself and want to validate this example against your
-**local, unpublished** source, use the `npm pack` flow from
-[`../../DEVELOPMENT.md`](../../DEVELOPMENT.md) ("Manual Testing").
-
-Do **not** use `file:../..`: it creates two copies of `@google/adk`, which
-breaks type-checking via ADK's private `BASE_MODEL_SYMBOL` (see
-[DEVELOPMENT.md → "The Problem with `file:../..`"](../../DEVELOPMENT.md)). A
-packed tarball installs through `peerDependencies` and **deduplicates**
-`@google/adk`, exactly like a real npm install.
+This example's `package.json` depends on the **published** range
+`"adk-llm-bridge": "^0.7.0"`, which is what end users install. To run it
+against the library in this checkout instead, use the packed-build flow from
+[`../../DEVELOPMENT.md`](../../DEVELOPMENT.md#running-examples-locally). It
+installs `npm pack`'s tarball into a temporary copy of the example, so this
+folder and its `package.json` stay as they are:
 
 ```bash
-# 1. Build + pack the library (run from the repo root)
-cd ../..                       # repo root: adk-llm-bridge/
-bun run build
-rm -f adk-llm-bridge-*.tgz
-npm pack                       # -> adk-llm-bridge-0.5.3.tgz
-
-# 2. Install that tarball in THIS example
-cd examples/native-features
-rm -rf node_modules bun.lock package-lock.json
-npm install ../../adk-llm-bridge-*.tgz
-
-# 3. Prove there is a SINGLE, deduped @google/adk
-npm ls @google/adk
-#   native-features-example@
-#   ├── @google/adk@2.4.0
-#   └─┬ adk-llm-bridge@0.5.3
-#     └── @google/adk@2.4.0 deduped     <-- one copy, deduped
-
-# 4. Run the demos against the local build
-cp .env.example .env           # add your ANTHROPIC_API_KEY
-bun run all
+# From the repository root
+scripts/check-examples.sh native-features   # install, type check and bundle
+scripts/test-example.sh native-features     # install, then start `bun run web`
 ```
 
-The tarball install is **only** for local validation — the committed
-`package.json` keeps the published `^0.5.3` range. The dev tarball
-(`adk-llm-bridge-*.tgz`) and your real-key `.env` are throwaway artifacts: do
-not commit them (`node_modules/`, `bun.lock`, and `.env` are gitignored).
+To run the demos from such a copy, keep it with `KEEP_EXAMPLES_DIR=1
+scripts/check-examples.sh native-features`, then `cd` into the printed
+directory and run `bun run all` with your `.env` in place. Your real-key `.env`
+is a throwaway: do not commit it (`node_modules/`, `bun.lock`, and `.env` are
+gitignored).
