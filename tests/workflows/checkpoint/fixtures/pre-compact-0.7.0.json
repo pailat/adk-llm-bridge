@@ -1,0 +1,129 @@
+{
+  "meta": {
+    "writtenBy": "adk-llm-bridge release/0.7.0 at commit 0b06133, before a step's text was stored once",
+    "how": "the fixtureWorkflow of compact-step-content.test.ts (steps plain, multi, flaky; flaky fails) run once against that commit's sources with FileSystemWorkflowCheckpointStore and ADKSessionCheckpointStore",
+    "fsRunError": "Workflow step flaky failed: flaky failed on the first run",
+    "sessionRunError": "Workflow step flaky failed: flaky failed on the first run"
+  },
+  "files": {
+    "62/62bf9a861b85677d7b88443adda3cb8b67553e5ce0140d0c3d2d3abe828d4f9c.json": "{\"format\":\"adk-llm-bridge/workflow-checkpoint-file\",\"formatVersion\":1,\"checkpointKey\":\"__adk_llm_bridge_workflow_v1:compact-fixture:run-1\",\"revision\":\"sha256:5b36df3993cea928f28c7a9099e2e5f66d529ed5ccc2047a1ab199bf4f32a220\",\"checkpoint\":{\"schemaVersion\":1,\"workflowId\":\"compact-fixture\",\"workflowVersion\":\"1\",\"executionId\":\"run-1\",\"inputHash\":\"sha256:9a80c3f4dbd9e50c26336c1bbb78d292c96d0625108ce7a77263c96dc871ecda\",\"status\":\"failed\",\"steps\":{\"plain\":{\"id\":\"plain\",\"agentName\":\"plain\",\"inputHash\":\"sha256:945603a8f587786b463c3f94fce115c0fae88fac2728cc96ddf5981cf7f61741\",\"status\":\"completed\",\"attempts\":1,\"startedAt\":1794328891056,\"updatedAt\":1794328891062,\"result\":{\"status\":\"completed\",\"id\":\"plain\",\"agentName\":\"plain\",\"output\":\"plain step text ✓ ünïcode\",\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"plain step text ✓ ünïcode\"}]},\"usage\":{\"promptTokens\":0,\"completionTokens\":0,\"totalTokens\":0,\"cachedTokens\":0,\"toolCalls\":0,\"llmCalls\":0},\"attempts\":1,\"startedAt\":1794328891059,\"completedAt\":1794328891062},\"completedAt\":1794328891062},\"multi\":{\"id\":\"multi\",\"agentName\":\"multi\",\"inputHash\":\"sha256:7d12955c590b9f600ec5834ec7ef72a98ecd8ed41ab2e475982cbd54cc5e2d94\",\"status\":\"completed\",\"attempts\":1,\"startedAt\":1794328891077,\"updatedAt\":1794328891080,\"result\":{\"status\":\"completed\",\"id\":\"multi\",\"agentName\":\"multi\",\"output\":\"first second\",\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"first \"},{\"text\":\"second\"}]},\"usage\":{\"promptTokens\":0,\"completionTokens\":0,\"totalTokens\":0,\"cachedTokens\":0,\"toolCalls\":0,\"llmCalls\":0},\"attempts\":1,\"startedAt\":1794328891080,\"completedAt\":1794328891080},\"completedAt\":1794328891080},\"flaky\":{\"id\":\"flaky\",\"agentName\":\"flaky\",\"inputHash\":\"sha256:9942ea1268b0765e8af1100a74a092599571cc2d192f7fbcc9c73c93c54783a0\",\"status\":\"failed\",\"attempts\":1,\"startedAt\":1794328891082,\"updatedAt\":1794328891086,\"error\":{\"code\":\"WORKFLOW_EXECUTION_ERROR\",\"message\":\"Workflow step flaky failed: flaky failed on the first run\",\"details\":{\"agentName\":\"flaky\",\"stepId\":\"flaky\",\"attempt\":1,\"errorKind\":\"agent-error\"}},\"completedAt\":1794328891086}},\"startedAt\":1794328891050,\"updatedAt\":1794328891089,\"error\":{\"code\":\"WORKFLOW_EXECUTION_ERROR\",\"message\":\"Workflow step flaky failed: flaky failed on the first run\",\"details\":{\"agentName\":\"flaky\",\"stepId\":\"flaky\",\"attempt\":1,\"errorKind\":\"agent-error\"}},\"completedAt\":1794328891089}}\n"
+  },
+  "sessionState": {
+    "__adk_llm_bridge_workflow_v1:compact-fixture:run-1": {
+      "schemaVersion": 1,
+      "workflowId": "compact-fixture",
+      "workflowVersion": "1",
+      "executionId": "run-1",
+      "inputHash": "sha256:9a80c3f4dbd9e50c26336c1bbb78d292c96d0625108ce7a77263c96dc871ecda",
+      "status": "failed",
+      "steps": {
+        "plain": {
+          "id": "plain",
+          "agentName": "plain",
+          "inputHash": "sha256:945603a8f587786b463c3f94fce115c0fae88fac2728cc96ddf5981cf7f61741",
+          "status": "completed",
+          "attempts": 1,
+          "startedAt": 1794328891092,
+          "updatedAt": 1794328891093,
+          "result": {
+            "status": "completed",
+            "id": "plain",
+            "agentName": "plain",
+            "output": "plain step text ✓ ünïcode",
+            "content": {
+              "role": "model",
+              "parts": [
+                {
+                  "text": "plain step text ✓ ünïcode"
+                }
+              ]
+            },
+            "usage": {
+              "promptTokens": 0,
+              "completionTokens": 0,
+              "totalTokens": 0,
+              "cachedTokens": 0,
+              "toolCalls": 0,
+              "llmCalls": 0
+            },
+            "attempts": 1,
+            "startedAt": 1794328891093,
+            "completedAt": 1794328891093
+          },
+          "completedAt": 1794328891093
+        },
+        "multi": {
+          "id": "multi",
+          "agentName": "multi",
+          "inputHash": "sha256:7d12955c590b9f600ec5834ec7ef72a98ecd8ed41ab2e475982cbd54cc5e2d94",
+          "status": "completed",
+          "attempts": 1,
+          "startedAt": 1794328891093,
+          "updatedAt": 1794328891093,
+          "result": {
+            "status": "completed",
+            "id": "multi",
+            "agentName": "multi",
+            "output": "first second",
+            "content": {
+              "role": "model",
+              "parts": [
+                {
+                  "text": "first "
+                },
+                {
+                  "text": "second"
+                }
+              ]
+            },
+            "usage": {
+              "promptTokens": 0,
+              "completionTokens": 0,
+              "totalTokens": 0,
+              "cachedTokens": 0,
+              "toolCalls": 0,
+              "llmCalls": 0
+            },
+            "attempts": 1,
+            "startedAt": 1794328891093,
+            "completedAt": 1794328891093
+          },
+          "completedAt": 1794328891093
+        },
+        "flaky": {
+          "id": "flaky",
+          "agentName": "flaky",
+          "inputHash": "sha256:9942ea1268b0765e8af1100a74a092599571cc2d192f7fbcc9c73c93c54783a0",
+          "status": "failed",
+          "attempts": 1,
+          "startedAt": 1794328891094,
+          "updatedAt": 1794328891094,
+          "error": {
+            "code": "WORKFLOW_EXECUTION_ERROR",
+            "message": "Workflow step flaky failed: flaky failed on the first run",
+            "details": {
+              "agentName": "flaky",
+              "stepId": "flaky",
+              "attempt": 1,
+              "errorKind": "agent-error"
+            }
+          },
+          "completedAt": 1794328891094
+        }
+      },
+      "startedAt": 1794328891092,
+      "updatedAt": 1794328891094,
+      "error": {
+        "code": "WORKFLOW_EXECUTION_ERROR",
+        "message": "Workflow step flaky failed: flaky failed on the first run",
+        "details": {
+          "agentName": "flaky",
+          "stepId": "flaky",
+          "attempt": 1,
+          "errorKind": "agent-error"
+        }
+      },
+      "completedAt": 1794328891094
+    }
+  }
+}

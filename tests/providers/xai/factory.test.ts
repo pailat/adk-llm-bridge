@@ -22,7 +22,7 @@ describe("XAI factory (provider-specific)", () => {
     expect(llm.model).toBe("grok-4");
   });
 
-  it("works with different grok models", () => {
+  it("keeps the requested model id for each grok model", () => {
     const models = ["grok-4", "grok-3-beta", "grok-code-fast-1"];
     for (const model of models) {
       const llm = XAI(model, { apiKey: "test-key" });

@@ -1,0 +1,27 @@
+{
+  "name": "codex-workflow",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "main": "agent.ts",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "smoke": "bun agent.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@google/adk": "^2.5.0",
+    "@google/genai": "^2.32.0",
+    "@jitl/quickjs-wasmfile-release-sync": "^0.32.0",
+    "@openai/codex-sdk": "0.167.2",
+    "@opentelemetry/api": "^1.10.0",
+    "adk-llm-bridge": "^0.7.0",
+    "quickjs-emscripten-core": "^0.32.0"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.4",
+    "typescript": "^7.0.2"
+  }
+}

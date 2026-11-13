@@ -1,0 +1,229 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main, "release/**"]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    name: bun run ci (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [22, 24, 26]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ matrix.node }}
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.4
+      - run: bun install --frozen-lockfile
+      # Builds once; the NodeNext consumer check runs on that build. The step
+      # timeout (typecheck, lint, tests and build together) ends a stuck run
+      # before the job's, so its log is kept; a sandbox test that blocks the
+      # host is named sooner by the test watchdog.
+      - run: bun run ci
+        timeout-minutes: 12
+      - name: Smoke-import dist on Node ${{ matrix.node }}
+        run: |
+          node --input-type=module -e "
+            for (const p of ['./dist/index.js','./dist/agents/index.js','./dist/workflows/index.js','./dist/workflows/node/index.js','./dist/workflows/spec/index.js']) await import(p);
+            console.log('dist imports OK on', process.version);
+          "
+
+  # Fake `.cmd` shims on PATH must never run: the CLI drivers refuse a batch
+  # file (or report a missing binary) on Windows, under Bun and under Node.
+  # The `interpreter` + `entry` route runs a fake JavaScript entry through the
+  # native node.exe (the only interpreter accepted), under Bun and under Node,
+  # with a prompt cmd.exe would re-parse.
+  # Only Windows-safe driver checks run here: the rest assume POSIX. The
+  # file-system store and storage provider suites run whole, under Bun and
+  # under Node.
+  windows-shims:
+    name: windows shims (Bun and Node)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      # `./` makes `bun test` take each entry as a path, not a name filter, so
+      # both legs run exactly these files.
+      FS_STORE_SUITES: >-
+        ./tests/workflows/checkpoint
+        ./tests/workflows/internal
+        ./tests/workflows/checkpoint-store.test.ts
+        ./tests/workflows/checkpoint-size-limit.test.ts
+        ./tests/workflows/workspace/file-system-workspace-adapter.test.ts
+        ./tests/workflows/wall-clock-step.test.ts
+        ./tests/workflows/storage
+        ./tests/utils/sqlite-database.test.ts
+        ./tests/utils/sqlite-open-while-locked.test.ts
+        ./tests/utils/windows-contract.test.ts
+        ./tests/agents/session-store
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.4
+      - run: bun install --frozen-lockfile
+      - name: Fake .cmd shims and the interpreter + entry route under Bun
+        run: bun test tests/agents/driver/windows-command.test.ts tests/agents/driver/cli-interpreter-entry.test.ts
+      # The steps below run even when an earlier step fails, so the Node
+      # Windows contract is reported on its own.
+      - run: bun run build
+        if: ${{ !cancelled() }}
+      - name: Fake .cmd shims and the interpreter + entry route under Node
+        if: ${{ !cancelled() }}
+        run: node scripts/windows-shim-smoke.mjs
+      # The file-system stores, the storage providers and the lock protocol on
+      # NTFS, under Bun and under Node (their file-system implementations
+      # differ on Windows). Both legs run even when the other fails, so one run
+      # shows every failure.
+      - name: File-system stores and lock protocol on NTFS under Bun
+        if: ${{ !cancelled() }}
+        run: bun test ${{ env.FS_STORE_SUITES }}
+      - name: File-system stores and lock protocol on NTFS under Node
+        if: ${{ !cancelled() }}
+        run: node scripts/node-test.mjs ${{ env.FS_STORE_SUITES }}
+
+  # Installs the packed tarball with npm into an empty project, which pulls in
+  # the required peers and skips the optional ones, then imports every entry.
+  package-consumer:
+    name: packed tarball without optional peers
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.4
+      - run: bun install --frozen-lockfile
+      - run: bun run build
+      - name: Pack
+        run: npm pack --pack-destination "$RUNNER_TEMP"
+      - name: Install the tarball in an empty project
+        working-directory: ${{ runner.temp }}
+        run: |
+          mkdir consumer && cd consumer
+          npm init -y > /dev/null
+          npm pkg set type=module
+          npm install --no-audit --no-fund "$RUNNER_TEMP"/adk-llm-bridge-*.tgz
+      - name: Import every entry with the optional peers absent
+        working-directory: ${{ runner.temp }}/consumer
+        run: |
+          node --input-type=module -e "
+            const optional = Object.entries(JSON.parse(
+              (await import('node:fs')).readFileSync('node_modules/adk-llm-bridge/package.json', 'utf8'),
+            ).peerDependenciesMeta).filter(([, m]) => m.optional).map(([n]) => n);
+            // An optional peer may still be present when a required peer depends on it
+            // (zod comes with @google/adk). It must never be installed because of this package.
+            const { execFileSync } = await import('node:child_process');
+            const transitive = [];
+            for (const name of optional) {
+              let nodes = [];
+              try { nodes = JSON.parse(execFileSync('npm', ['explain', name, '--json'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })); }
+              catch { continue; }
+              const dependents = nodes.flatMap((n) => n.dependents ?? []).map((d) => d.from?.name);
+              if (dependents.length === 0 || dependents.every((d) => d === 'adk-llm-bridge' || d === undefined)) {
+                throw new Error(name + ' is installed for adk-llm-bridge alone');
+              }
+              transitive.push(name + ' (via ' + [...new Set(dependents)].join(', ') + ')');
+            }
+            for (const p of ['adk-llm-bridge', 'adk-llm-bridge/agents', 'adk-llm-bridge/agents/session-store/sqlite', 'adk-llm-bridge/agents/session-store/adk-artifacts', 'adk-llm-bridge/workflows', 'adk-llm-bridge/workflows/node', 'adk-llm-bridge/workflows/checkpoint/sqlite', 'adk-llm-bridge/workflows/events/sqlite', 'adk-llm-bridge/workflows/storage/conformance']) await import(p);
+            await import('adk-llm-bridge/package.json', { with: { type: 'json' } });
+            console.log('entries import with optional peers absent on', process.version, '| present transitively:', transitive.join('; ') || 'none');
+          "
+      # The spec entry needs zod, an optional peer: install it explicitly so the
+      # entry is exercised with zod present and never relies on a transitive copy.
+      - name: Import the spec entry with zod installed
+        working-directory: ${{ runner.temp }}/consumer
+        run: |
+          npm install --no-audit --no-fund zod@^4
+          node --input-type=module -e "
+            await import('zod');
+            const spec = await import('adk-llm-bridge/workflows/spec');
+            if (typeof spec.validateRunSpec !== 'function') throw new Error('validateRunSpec is missing');
+            console.log('spec entry imports with zod on', process.version);
+          "
+
+  # The examples are standalone projects that depend on the published package.
+  # Each one is copied out of the repository, installs the tarball `npm pack`
+  # makes from this commit (in the copy only), then type checks and builds, so
+  # the examples are proven before a release is on npm. It also audits their
+  # dependencies, which the root lockfile no longer covers.
+  examples:
+    name: examples against the packed tarball
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.4
+      - run: bun install --frozen-lockfile
+      - run: scripts/check-examples.sh --audit
+
+  # Non-blocking canary: builds @google/adk from google/adk-js `main` (the next
+  # release, e.g. 2.6.0, is not on npm until it is published) and runs the full
+  # suite against it, so incompatibilities show up before the release lands.
+  adk-canary:
+    name: adk-canary (@google/adk from main)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.4
+      - name: Build @google/adk from google/adk-js main
+        run: |
+          git clone --depth 1 https://github.com/google/adk-js.git "$RUNNER_TEMP/adk-js"
+          git -C "$RUNNER_TEMP/adk-js" log -1 --format='ADK canary commit: %H (%s)' | tee -a "$GITHUB_STEP_SUMMARY"
+          cd "$RUNNER_TEMP/adk-js"
+          npm ci --ignore-scripts
+          cd core
+          npm run build
+          npm pack --ignore-scripts --pack-destination "$RUNNER_TEMP"
+          echo "ADK_TARBALL=$(ls "$RUNNER_TEMP"/google-adk-*.tgz | head -n1)" >> "$GITHUB_ENV"
+      - run: bun install --frozen-lockfile
+      - name: Install the canary @google/adk (not committed)
+        run: bun add --dev "@google/adk@file:$ADK_TARBALL"
+      # Includes the NodeNext consumer check on the same build.
+      - run: bun run ci

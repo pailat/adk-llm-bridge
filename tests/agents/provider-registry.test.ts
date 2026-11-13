@@ -1,10 +1,5 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import { describe, expect, test } from "bun:test";
+import { InputValidationError } from "@google/adk";
 import {
   CLAUDE_AGENT_DEFINITION,
   CLAUDE_PROVIDER,
@@ -15,8 +10,8 @@ import {
   ExternalAgent,
   ExternalAgentDefinitionRegistry,
   ExternalAgentProviderRegistry,
-  GEMINI_CLI_AGENT_DEFINITION,
-  GEMINI_CLI_PROVIDER,
+  FX_AGENT_DEFINITION,
+  FX_PROVIDER,
 } from "../../src/agents/index.js";
 
 describe("ExternalAgentProviderRegistry", () => {
@@ -34,7 +29,7 @@ describe("ExternalAgentProviderRegistry", () => {
 
     expect(registry.get("codex")).toEqual(CODEX_PROVIDER);
     expect(registry.get("claude")).toEqual(CLAUDE_PROVIDER);
-    expect(registry.get("gemini-cli")).toEqual(GEMINI_CLI_PROVIDER);
+    expect(registry.get("fx")).toEqual(FX_PROVIDER);
   });
 });
 
@@ -53,7 +48,7 @@ describe("ExternalAgentDefinitionRegistry", () => {
 
     expect(registry.get("codex")).toEqual(CODEX_AGENT_DEFINITION);
     expect(registry.get("claude")).toEqual(CLAUDE_AGENT_DEFINITION);
-    expect(registry.get("gemini-cli")).toEqual(GEMINI_CLI_AGENT_DEFINITION);
+    expect(registry.get("fx")).toEqual(FX_AGENT_DEFINITION);
   });
 
   test("creates agents through the shared definition schema", () => {
@@ -63,5 +58,29 @@ describe("ExternalAgentDefinitionRegistry", () => {
     expect(agent).toBeInstanceOf(ExternalAgent);
     expect(agent.provider).toEqual(CODEX_PROVIDER);
     expect(agent.driver.providerId).toBe("codex");
+  });
+});
+
+describe("registry input errors", () => {
+  test("an empty provider id is an InputValidationError in both registries", () => {
+    expect(() =>
+      new ExternalAgentProviderRegistry().register({
+        ...CODEX_PROVIDER,
+        id: "",
+      }),
+    ).toThrow(InputValidationError);
+    expect(() =>
+      new ExternalAgentDefinitionRegistry().register({
+        ...CODEX_AGENT_DEFINITION,
+        provider: { ...CODEX_PROVIDER, id: "" },
+      }),
+    ).toThrow(InputValidationError);
+  });
+
+  test("creating an unknown provider is an InputValidationError", () => {
+    const registry = createDefaultExternalAgentDefinitionRegistry();
+    const create = () => registry.create("nope", { name: "x" });
+    expect(create).toThrow(InputValidationError);
+    expect(create).toThrow("Unknown external agent provider: nope");
   });
 });

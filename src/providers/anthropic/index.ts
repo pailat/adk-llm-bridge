@@ -1,36 +1,15 @@
 /**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
-/**
  * Anthropic (Claude) provider module.
- *
- * @module providers/anthropic
  */
 
-import { LLMRegistry } from "@google/adk";
-import { resetProviderConfig, setProviderConfig } from "../../config.js";
+import { createRegisterFunction } from "../../core/create-register.js";
 import type {
   AnthropicProviderConfig,
   AnthropicRegisterOptions,
 } from "../../types.js";
 import { AnthropicLlm } from "./anthropic-llm.js";
 
-// Re-exports
-export { ANTHROPIC_MODEL_PATTERNS, AnthropicLlm } from "./anthropic-llm.js";
-export type { ConvertedAnthropicRequest } from "./converters/request.js";
-export { convertAnthropicRequest } from "./converters/request.js";
-export type {
-  AnthropicStreamAccumulator,
-  AnthropicStreamResult,
-} from "./converters/response.js";
-export {
-  convertAnthropicResponse,
-  convertAnthropicStreamEvent,
-  createAnthropicStreamAccumulator,
-} from "./converters/response.js";
+export { AnthropicLlm } from "./anthropic-llm.js";
 
 /**
  * Creates an Anthropic (Claude) LLM instance.
@@ -46,27 +25,32 @@ export function Anthropic(
   return new AnthropicLlm({ model, ...options });
 }
 
-// --- Registration (singleton pattern) ---
+const reg = createRegisterFunction<AnthropicRegisterOptions>(
+  { id: "anthropic" },
+  AnthropicLlm,
+);
 
-let registered = false;
-
+/**
+ * Registers {@link AnthropicLlm} with ADK's `LLMRegistry`.
+ *
+ * @remarks
+ * Idempotent: a second call logs a warning and does nothing.
+ *
+ * @param options - Optional global config stored for the `anthropic` provider.
+ * @throws InputValidationError (from `@google/adk`) when `timeout`,
+ *   `maxRetries` or `maxTokens` is not an integer, or `timeout` is above
+ *   2147483647 ms; nothing is stored or registered then.
+ */
 export function registerAnthropic(options?: AnthropicRegisterOptions): void {
-  if (registered) {
-    console.warn("[adk-llm-bridge] anthropic already registered, skipping");
-    return;
-  }
-  if (options) {
-    setProviderConfig("anthropic", options);
-  }
-  LLMRegistry.register(AnthropicLlm);
-  registered = true;
+  reg.register(options);
 }
 
+/** Whether {@link registerAnthropic} has run. */
 export function isAnthropicRegistered(): boolean {
-  return registered;
+  return reg.isRegistered();
 }
 
+/** @internal Resets registration state and global config; for tests. */
 export function _resetAnthropicRegistration(): void {
-  registered = false;
-  resetProviderConfig("anthropic");
+  reg._reset();
 }

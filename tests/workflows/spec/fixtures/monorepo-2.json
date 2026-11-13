@@ -1,0 +1,503 @@
+{
+  "description": "The second monorepo run: an Opus design alongside a scaffold, a contracts commit, 13 lanes that each build one part of the monorepo in their own worktree, then an integration lane, QA through turbo and a human approval before the lanes are integrated. In each lane a test writer and an implementer work first, then an Opus or Sonnet review with up to two change rounds. The run shape, the 13-lane fan-out, the lane ids web-flow and srv-steps and the srv-steps paths come from the run record; the other lane ids and paths are reconstructed from the package layout of the monorepo brief.",
+  "rules": {
+    "id": "monorepo-host",
+    "maxBudgetUsd": 300,
+    "maxConcurrency": 20,
+    "maxLanes": 20,
+    "maxStringLength": 4096,
+    "maxArrayLength": 64,
+    "maxChangeRounds": 2,
+    "maxAgentRuns": 200,
+    "allowedProviderIds": ["claude"],
+    "allowedModels": [
+      "claude-haiku-5-5",
+      "claude-opus-5-5",
+      "claude-sonnet-5-5"
+    ],
+    "allowedPermissionModes": ["read-only", "workspace-write"],
+    "allowNetwork": false,
+    "allowedTools": [
+      "Bash",
+      "Edit",
+      "Glob",
+      "Grep",
+      "NotebookEdit",
+      "Read",
+      "Write"
+    ],
+    "allowedEnvNames": [],
+    "allowedMcpProviders": [],
+    "deniedPathPatterns": [
+      ".env",
+      ".env.*",
+      "*.pem",
+      "*.key",
+      "*.p12",
+      "*.pfx",
+      "*.jks",
+      "*.keystore",
+      "id_rsa*",
+      "id_dsa*",
+      "id_ecdsa*",
+      "id_ed25519*",
+      ".ssh",
+      ".gnupg",
+      ".aws",
+      ".npmrc",
+      ".netrc",
+      ".pypirc",
+      ".git",
+      ".git-credentials",
+      "credentials.json",
+      "secrets.*"
+    ],
+    "allowedQaCommands": [
+      ["bunx", "turbo", "run", "lint", "typecheck", "test", "build"]
+    ],
+    "requireQa": true,
+    "allowedPublishKinds": ["none", "commit", "integration"],
+    "allowedWorkflows": [
+      {
+        "workflowId": "monorepo-2",
+        "workflowVersion": "1"
+      }
+    ],
+    "allowedTargetRefs": ["refs/heads/feat/monorepo-2"]
+  },
+  "spec": {
+    "specVersion": 1,
+    "workflowId": "monorepo-2",
+    "workflowVersion": "1",
+    "projectRoot": ".",
+    "budget": {
+      "maxUsd": 300
+    },
+    "maxConcurrency": 13,
+    "gates": {
+      "qa": [
+        {
+          "id": "turbo",
+          "command": [
+            "bunx",
+            "turbo",
+            "run",
+            "lint",
+            "typecheck",
+            "test",
+            "build"
+          ]
+        }
+      ],
+      "publish": {
+        "kind": "integration",
+        "targetRef": "refs/heads/feat/monorepo-2",
+        "hitl": true
+      }
+    },
+    "env": [],
+    "lanes": [
+      {
+        "taskId": "design",
+        "title": "Write the monorepo design and the contracts the lanes build against",
+        "role": "architect",
+        "dependsOn": [],
+        "allowedPaths": ["docs/design"],
+        "agent": {
+          "providerId": "claude",
+          "model": "claude-opus-5-5",
+          "mode": "read-only",
+          "tools": ["Glob", "Grep", "Read"]
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "scaffold",
+        "title": "Scaffold the workspace and move the UI into apps/web",
+        "role": "worker",
+        "dependsOn": [],
+        "allowedPaths": [
+          "package.json",
+          "turbo.json",
+          "bun.lock",
+          "packages/typescript-config",
+          "apps/web/package.json"
+        ],
+        "agent": {
+          "providerId": "claude",
+          "model": "claude-haiku-5-5",
+          "mode": "workspace-write",
+          "tools": ["Bash", "Edit", "Glob", "Grep", "Read", "Write"]
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      },
+      {
+        "taskId": "contracts",
+        "title": "Commit the contract files every lane builds against",
+        "role": "worker",
+        "dependsOn": ["design", "scaffold"],
+        "allowedPaths": [
+          "packages/core/src/api",
+          "packages/db/src/schema.ts",
+          "apps/server/src/app-type.ts"
+        ],
+        "agent": {
+          "providerId": "claude",
+          "model": "claude-sonnet-5-5",
+          "mode": "workspace-write",
+          "tools": ["Bash", "Edit", "Glob", "Grep", "Read", "Write"]
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "agent",
+            "providerId": "claude",
+            "model": "claude-opus-5-5",
+            "maxChangeRounds": 1
+          }
+        }
+      },
+      {
+        "taskId": "core-model",
+        "title": "Port the run model into packages/core",
+        "role": "worker",
+        "dependsOn": ["contracts"],
+        "allowedPaths": ["packages/core/src/model", "packages/core/test/model"],
+        "agent": {
+          "providerId": "claude",
+          "model": "claude-sonnet-5-5",
+          "mode": "workspace-write",
+          "tools": ["Bash", "Edit", "Glob", "Grep", "Read", "Write"]
+        },
+        "steps": {
+          "testsFirst": true,
+          "review": {
+            "kind": "agent",
+            "providerId": "claude",
+            "model": "claude-sonnet-5-5",
+            "maxChangeRounds": 2
+          }
+        }
+      },
+      {
+        "taskId": "core-cost",
+        "title": "Port the cost totals into packages/core",
+        "role": "worker",
+        "dependsOn": ["contracts"],
+        "allowedPaths": ["packages/core/src/cost", "packages/core/test/cost"],
+        "agent": {
+          "providerId": "claude",
+          "model": "claude-sonnet-5-5",
+          "mode": "workspace-write",
+          "tools": ["Bash", "Edit", "Glob", "Grep", "Read", "Write"]
+        },
+        "steps": {
+          "testsFirst": true,
+          "review": {
+            "kind": "agent",
+            "providerId": "claude",
+            "model": "claude-sonnet-5-5",
+            "maxChangeRounds": 2
+          }
+        }
+      },
+      {
+        "taskId": "db-runs",
+        "title": "Add the runs repository to packages/db",
+        "role": "worker",
+        "dependsOn": ["contracts"],
+        "allowedPaths": ["packages/db/src/runs", "packages/db/test/runs"],
+        "agent": {
+          "providerId": "claude",
+          "model": "claude-sonnet-5-5",
+          "mode": "workspace-write",
+          "tools": ["Bash", "Edit", "Glob", "Grep", "Read", "Write"]
+        },
+        "steps": {
+          "testsFirst": true,
+          "review": {
+            "kind": "agent",
+            "providerId": "claude",
+            "model": "claude-opus-5-5",
+            "maxChangeRounds": 2
+          }
+        }
+      },
+      {
+        "taskId": "db-events",
+        "title": "Add the events repository to packages/db",
+        "role": "worker",
+        "dependsOn": ["contracts"],
+        "allowedPaths": ["packages/db/src/events", "packages/db/test/events"],
+        "agent": {
+          "providerId": "claude",
+          "model": "claude-sonnet-5-5",
+          "mode": "workspace-write",
+          "tools": ["Bash", "Edit", "Glob", "Grep", "Read", "Write"]
+        },
+        "steps": {
+          "testsFirst": true,
+          "review": {
+            "kind": "agent",
+            "providerId": "claude",
+            "model": "claude-opus-5-5",
+            "maxChangeRounds": 2
+          }
+        }
+      },
+      {
+        "taskId": "srv-discovery",
+        "title": "Serve project discovery from apps/server",
+        "role": "worker",
+        "dependsOn": ["contracts"],
+        "allowedPaths": [
+          "apps/server/src/discovery",
+          "apps/server/test/discovery"
+        ],
+        "agent": {
+          "providerId": "claude",
+          "model": "claude-sonnet-5-5",
+          "mode": "workspace-write",
+          "tools": ["Bash", "Edit", "Glob", "Grep", "Read", "Write"]
+        },
+        "steps": {
+          "testsFirst": true,
+          "review": {
+            "kind": "agent",
+            "providerId": "claude",
+            "model": "claude-opus-5-5",
+            "maxChangeRounds": 2
+          }
+        }
+      },
+      {
+        "taskId": "srv-runs",
+        "title": "Serve the runs API from apps/server",
+        "role": "worker",
+        "dependsOn": ["contracts"],
+        "allowedPaths": ["apps/server/src/runs", "apps/server/test/runs"],
+        "agent": {
+          "providerId": "claude",
+          "model": "claude-sonnet-5-5",
+          "mode": "workspace-write",
+          "tools": ["Bash", "Edit", "Glob", "Grep", "Read", "Write"]
+        },
+        "steps": {
+          "testsFirst": true,
+          "review": {
+            "kind": "agent",
+            "providerId": "claude",
+            "model": "claude-opus-5-5",
+            "maxChangeRounds": 2
+          }
+        }
+      },
+      {
+        "taskId": "srv-steps",
+        "title": "Serve the steps API from apps/server",
+        "role": "worker",
+        "dependsOn": ["contracts"],
+        "allowedPaths": ["apps/server/src/steps", "apps/server/test/steps"],
+        "agent": {
+          "providerId": "claude",
+          "model": "claude-sonnet-5-5",
+          "mode": "workspace-write",
+          "tools": ["Bash", "Edit", "Glob", "Grep", "Read", "Write"]
+        },
+        "steps": {
+          "testsFirst": true,
+          "review": {
+            "kind": "agent",
+            "providerId": "claude",
+            "model": "claude-opus-5-5",
+            "maxChangeRounds": 2
+          }
+        }
+      },
+      {
+        "taskId": "srv-sse",
+        "title": "Stream run events over SSE from apps/server",
+        "role": "worker",
+        "dependsOn": ["contracts"],
+        "allowedPaths": ["apps/server/src/sse", "apps/server/test/sse"],
+        "agent": {
+          "providerId": "claude",
+          "model": "claude-sonnet-5-5",
+          "mode": "workspace-write",
+          "tools": ["Bash", "Edit", "Glob", "Grep", "Read", "Write"]
+        },
+        "steps": {
+          "testsFirst": true,
+          "review": {
+            "kind": "agent",
+            "providerId": "claude",
+            "model": "claude-opus-5-5",
+            "maxChangeRounds": 2
+          }
+        }
+      },
+      {
+        "taskId": "web-client",
+        "title": "Add the typed API client to apps/web",
+        "role": "worker",
+        "dependsOn": ["contracts"],
+        "allowedPaths": ["apps/web/lib/client", "apps/web/test/client"],
+        "agent": {
+          "providerId": "claude",
+          "model": "claude-sonnet-5-5",
+          "mode": "workspace-write",
+          "tools": ["Bash", "Edit", "Glob", "Grep", "Read", "Write"]
+        },
+        "steps": {
+          "testsFirst": true,
+          "review": {
+            "kind": "agent",
+            "providerId": "claude",
+            "model": "claude-sonnet-5-5",
+            "maxChangeRounds": 2
+          }
+        }
+      },
+      {
+        "taskId": "web-flow",
+        "title": "Draw the Flow view from the steps API",
+        "role": "worker",
+        "dependsOn": ["contracts"],
+        "allowedPaths": ["apps/web/components/flow", "apps/web/test/flow"],
+        "agent": {
+          "providerId": "claude",
+          "model": "claude-sonnet-5-5",
+          "mode": "workspace-write",
+          "tools": ["Bash", "Edit", "Glob", "Grep", "Read", "Write"]
+        },
+        "steps": {
+          "testsFirst": true,
+          "review": {
+            "kind": "agent",
+            "providerId": "claude",
+            "model": "claude-sonnet-5-5",
+            "maxChangeRounds": 2
+          }
+        }
+      },
+      {
+        "taskId": "web-events",
+        "title": "Page the Events view from the server",
+        "role": "worker",
+        "dependsOn": ["contracts"],
+        "allowedPaths": ["apps/web/components/events", "apps/web/test/events"],
+        "agent": {
+          "providerId": "claude",
+          "model": "claude-sonnet-5-5",
+          "mode": "workspace-write",
+          "tools": ["Bash", "Edit", "Glob", "Grep", "Read", "Write"]
+        },
+        "steps": {
+          "testsFirst": true,
+          "review": {
+            "kind": "agent",
+            "providerId": "claude",
+            "model": "claude-sonnet-5-5",
+            "maxChangeRounds": 2
+          }
+        }
+      },
+      {
+        "taskId": "service",
+        "title": "Add the launchd service scripts and docs",
+        "role": "worker",
+        "dependsOn": ["contracts"],
+        "allowedPaths": ["tools/service", "docs/service.md"],
+        "agent": {
+          "providerId": "claude",
+          "model": "claude-sonnet-5-5",
+          "mode": "workspace-write",
+          "tools": ["Bash", "Edit", "Glob", "Grep", "Read", "Write"]
+        },
+        "steps": {
+          "testsFirst": true,
+          "review": {
+            "kind": "agent",
+            "providerId": "claude",
+            "model": "claude-sonnet-5-5",
+            "maxChangeRounds": 2
+          }
+        }
+      },
+      {
+        "taskId": "tooling",
+        "title": "Wire lint, typecheck and CI for every package",
+        "role": "worker",
+        "dependsOn": ["contracts"],
+        "allowedPaths": ["eslint.config.mjs", ".github/workflows", "scripts"],
+        "agent": {
+          "providerId": "claude",
+          "model": "claude-haiku-5-5",
+          "mode": "workspace-write",
+          "tools": ["Bash", "Edit", "Glob", "Grep", "Read", "Write"]
+        },
+        "steps": {
+          "testsFirst": true,
+          "review": {
+            "kind": "agent",
+            "providerId": "claude",
+            "model": "claude-sonnet-5-5",
+            "maxChangeRounds": 2
+          }
+        }
+      },
+      {
+        "taskId": "integration",
+        "title": "Merge the lane branches and wire their entry points together",
+        "role": "integration",
+        "dependsOn": [
+          "core-model",
+          "core-cost",
+          "db-runs",
+          "db-events",
+          "srv-discovery",
+          "srv-runs",
+          "srv-steps",
+          "srv-sse",
+          "web-client",
+          "web-flow",
+          "web-events",
+          "service",
+          "tooling"
+        ],
+        "allowedPaths": [
+          "apps/server/src/index.ts",
+          "apps/web/app",
+          "packages/core/src/index.ts",
+          "packages/db/src/index.ts",
+          "docs/integration.md"
+        ],
+        "agent": {
+          "providerId": "claude",
+          "model": "claude-sonnet-5-5",
+          "mode": "workspace-write",
+          "tools": ["Bash", "Edit", "Glob", "Grep", "Read", "Write"]
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "agent",
+            "providerId": "claude",
+            "model": "claude-opus-5-5",
+            "maxChangeRounds": 2
+          }
+        }
+      }
+    ]
+  }
+}

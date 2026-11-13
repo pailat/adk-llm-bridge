@@ -1,21 +1,26 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
+import { networkAllowed } from "./network.js";
 import type {
   ExternalAgentPermissionMode,
   ExternalAgentPermissionPolicy,
   ProviderPermissionFlags,
 } from "./schema.js";
 
+/**
+ * Translates a policy into provider-neutral permission flags.
+ *
+ * @param policy - Policy to translate.
+ * @returns Flags for the policy's mode, plus `network` (`true` only for
+ * `allowNetwork: true`), `paths` copied from `allowedPaths` and `readPaths`
+ * copied from `readPaths` (when set). An unknown
+ * mode maps to the read-only flags.
+ */
 export function mapPermissionPolicyToFlags(
   policy: ExternalAgentPermissionPolicy,
 ): ProviderPermissionFlags {
   const common = {
-    network: policy.allowNetwork,
+    network: networkAllowed(policy),
     paths: policy.allowedPaths,
+    ...(policy.readPaths ? { readPaths: policy.readPaths } : {}),
   };
 
   switch (policy.mode) {
@@ -27,9 +32,18 @@ export function mapPermissionPolicyToFlags(
       return { ...common, workspaceWrite: true, requireApproval: false };
     case "full-access":
       return { ...common, fullAccess: true, requireApproval: false };
+    default:
+      // An unknown mode (only reachable from untyped input) fails closed.
+      return { ...common, readOnly: true, requireApproval: false };
   }
 }
 
+/**
+ * Builds a policy from a bare mode, with no network or path settings.
+ *
+ * @param mode - Permission mode.
+ * @returns A policy that only sets `mode`.
+ */
 export function mapPermissionModeToPolicy(
   mode: ExternalAgentPermissionMode,
 ): ExternalAgentPermissionPolicy {

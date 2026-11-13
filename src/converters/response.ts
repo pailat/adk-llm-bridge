@@ -1,23 +1,23 @@
 /**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
-/**
  * Response converter for OpenAI to ADK format.
  *
  * This module handles the conversion of OpenAI API responses to
  * ADK LlmResponse format, supporting both single responses and streaming.
- *
- * @module converters/response
  */
 
 import type { LlmResponse } from "@google/adk";
 import { FinishReason, type Part } from "@google/genai";
 import type OpenAI from "openai";
+import { PROVIDER_ERROR_NO_CHOICE } from "../core/provider-llm-error.js";
 import type { StreamAccumulator, StreamChunkResult } from "../types.js";
-import { safeJsonParse } from "../utils/index.js";
+import { reportedCost, withCacheCreation, withCost } from "./cache-usage.js";
+import { contentFilteredError, modelVersionOf } from "./finish.js";
+import {
+  type MalformedToolCall,
+  malformedToolCallResponse,
+  parseToolArguments,
+} from "./tool-arguments.js";
+import { generateToolCallId } from "./tool-call-ids.js";
 
 /**
  * Maps an OpenAI `finish_reason` to the ADK/genai {@link FinishReason} enum.
@@ -28,8 +28,9 @@ import { safeJsonParse } from "../utils/index.js";
  * @internal
  */
 function mapOpenAIFinishReason(
-  reason: string | null | undefined,
+  reason: OpenAI.ChatCompletion.Choice["finish_reason"] | null | undefined,
 ): FinishReason | undefined {
+  if (reason == null) return undefined;
   switch (reason) {
     case "stop":
     case "tool_calls":
@@ -39,8 +40,13 @@ function mapOpenAIFinishReason(
       return FinishReason.MAX_TOKENS;
     case "content_filter":
       return FinishReason.SAFETY;
-    default:
+    default: {
+      // Every SDK value has a case, so a new one is a compile error here.
+      // A gateway can still send other strings: they map to undefined.
+      const unknown: never = reason;
+      void unknown;
       return undefined;
+    }
   }
 }
 
@@ -53,7 +59,9 @@ function mapOpenAIFinishReason(
  * - Usage metadata mapping
  *
  * @param response - The OpenAI ChatCompletion response
- * @returns The converted ADK LlmResponse
+ * @returns The converted ADK LlmResponse; a `NO_CHOICE` error response when
+ *   `choices` is empty or missing (some gateways answer HTTP 200 with an
+ *   error object)
  *
  * @example
  * ```typescript
@@ -71,10 +79,11 @@ function mapOpenAIFinishReason(
  * ```
  */
 export function convertResponse(response: OpenAI.ChatCompletion): LlmResponse {
-  const choice = response.choices[0];
+  // Some gateways answer HTTP 200 with an error object and no `choices`.
+  const choice = response.choices?.[0];
   if (!choice) {
     return {
-      errorCode: "NO_CHOICE",
+      errorCode: PROVIDER_ERROR_NO_CHOICE,
       errorMessage: "No response choice",
       turnComplete: true,
     };
@@ -82,41 +91,68 @@ export function convertResponse(response: OpenAI.ChatCompletion): LlmResponse {
 
   const parts: Part[] = [];
 
-  // Surface provider reasoning text as a thought part before the answer text.
-  // OpenAI/OpenRouter use `reasoning`; xAI/DeepSeek use `reasoning_content`.
-  // These fields are not in the OpenAI SDK types, so read them defensively.
-  const reasoning = extractReasoning(choice.message);
-  if (reasoning) {
-    parts.push({ text: reasoning, thought: true });
-  }
+  // Surface provider reasoning as a thought part before the answer text.
+  // OpenAI/OpenRouter use `reasoning`; xAI/DeepSeek use `reasoning_content`;
+  // OpenRouter also returns a structured `reasoning_details` array. These fields
+  // are not in the OpenAI SDK types, so read them defensively.
+  const thoughtPart = buildThoughtPart(choice.message);
+  if (thoughtPart) parts.push(thoughtPart);
 
   if (choice.message.content) {
     parts.push({ text: choice.message.content });
   }
 
+  const malformed: MalformedToolCall[] = [];
   for (const tc of choice.message.tool_calls ?? []) {
     if (tc.type !== "function") continue;
+    const parsed = parseToolArguments(tc.function.arguments, tc.function.name);
+    if (!parsed.ok) {
+      malformed.push(parsed.failure);
+      continue;
+    }
     parts.push({
       functionCall: {
-        id: tc.id,
+        // Some gateways send an empty id; ADK pairs the response by id.
+        id: tc.id || generateToolCallId(),
         name: tc.function.name,
-        args: safeJsonParse(tc.function.arguments),
+        args: parsed.args,
       },
     });
   }
 
+  const usageMetadata = response.usage
+    ? buildUsageMetadata(response.usage)
+    : undefined;
+  // Namespaced key so downstream code can read per-token logprobs.
+  const customMetadata = withCost(
+    withCacheCreation(
+      choice.logprobs?.content?.length
+        ? { logprobs: choice.logprobs }
+        : undefined,
+      cacheWriteTokens(response.usage),
+    ),
+    reportedCost(response.usage),
+  );
+
+  const modelVersion = modelVersionOf(response.model);
+
+  if (malformed.length) {
+    return malformedToolCallResponse(parts, malformed, {
+      usageMetadata,
+      customMetadata,
+      ...modelVersion,
+    });
+  }
+
+  const finishReason = mapOpenAIFinishReason(choice.finish_reason);
   return {
     content: parts.length ? { role: "model", parts } : undefined,
     turnComplete: true,
-    finishReason: mapOpenAIFinishReason(choice.finish_reason),
-    usageMetadata: response.usage
-      ? buildUsageMetadata(response.usage)
-      : undefined,
-    // Surface per-token logprobs (when the caller requested them) under a
-    // namespaced key so downstream code can read them off the response.
-    customMetadata: choice.logprobs?.content?.length
-      ? { logprobs: choice.logprobs }
-      : undefined,
+    finishReason,
+    ...contentFilteredError(finishReason, parts.length > 0),
+    usageMetadata,
+    customMetadata,
+    ...modelVersion,
   };
 }
 
@@ -145,10 +181,130 @@ function extractReasoning(source: unknown): string | undefined {
 }
 
 /**
+ * Reads a structured `reasoning_details` array from a chat message/delta.
+ *
+ * OpenRouter returns reasoning both as a flat string (`reasoning`) AND as a
+ * structured array (`reasoning_details`, e.g.
+ * `[{ type: "reasoning.text", text, signature, index }]`). The structured array
+ * carries the provider signature needed to replay signed reasoning across turns
+ * for signature-strict upstreams (Anthropic/Gemini thinking via OpenRouter).
+ *
+ * Not in the OpenAI SDK types — read defensively.
+ *
+ * @returns The reasoning_details array when present and non-empty, else undefined
+ *
+ * @internal
+ */
+function extractReasoningDetails(
+  source: unknown,
+): Record<string, unknown>[] | undefined {
+  if (!source || typeof source !== "object") return undefined;
+  const details = (source as Record<string, unknown>).reasoning_details;
+  if (!Array.isArray(details) || details.length === 0) return undefined;
+  return details as Record<string, unknown>[];
+}
+
+/**
+ * Concatenates the human-readable text out of a `reasoning_details` array.
+ *
+ * Handles the divergent vendor shapes opaquely: `reasoning.text` (anthropic /
+ * gemini / glm / deepseek via OpenRouter) and `reasoning.summary` (openai / grok
+ * via OpenRouter). Encrypted-only payloads contribute no display text.
+ *
+ * @internal
+ */
+function reasoningDetailsText(details: Record<string, unknown>[]): string {
+  return details
+    .map((d) =>
+      typeof d.text === "string"
+        ? d.text
+        : typeof d.summary === "string"
+          ? d.summary
+          : "",
+    )
+    .filter(Boolean)
+    .join("");
+}
+
+/**
+ * Builds the thought {@link Part} for a `reasoning_details` array.
+ *
+ * `text` is omitted (not `""`) when the details carry no display text, which is
+ * the case for encrypted-only payloads (for example xAI Grok). ADK drops any
+ * event whose first part has `text === ""` from the conversation history
+ * (`shouldIncludeEventInContext`), so an empty-text thought part in front of a
+ * function call makes the call disappear and the next turn fail with "No
+ * function call event found". The signature still carries the full details for
+ * the multi-turn round-trip.
+ *
+ * @internal
+ */
+function thoughtPartFromDetails(details: Record<string, unknown>[]): Part {
+  const text = reasoningDetailsText(details);
+  return {
+    ...(text ? { text } : {}),
+    thought: true,
+    thoughtSignature: JSON.stringify(details),
+  };
+}
+
+/**
+ * Builds the ADK thought {@link Part} for a non-streaming message.
+ *
+ * Prefers the structured `reasoning_details` array (carries the signature, which
+ * is preserved verbatim on `thoughtSignature` for multi-turn round-trip);
+ * otherwise falls back to the flat reasoning string. Returns undefined when the
+ * message carries no reasoning.
+ *
+ * @internal
+ */
+function buildThoughtPart(source: unknown): Part | undefined {
+  const details = extractReasoningDetails(source);
+  if (details) return thoughtPartFromDetails(details);
+  const reasoning = extractReasoning(source);
+  if (reasoning) {
+    return { text: reasoning, thought: true };
+  }
+  return undefined;
+}
+
+/**
+ * Tokens written to the prompt cache, when the provider reports them:
+ * `prompt_tokens_details.cache_write_tokens` (OpenRouter) or the top-level
+ * `cache_creation_input_tokens` (AI Gateway, seen in a live probe). Absent or
+ * non-numeric: `undefined`.
+ *
+ * @internal
+ */
+function cacheWriteTokens(
+  usage: OpenAI.CompletionUsage | undefined,
+): number | undefined {
+  const details = usage?.prompt_tokens_details as
+    | { cache_write_tokens?: unknown }
+    | undefined;
+  for (const value of [
+    details?.cache_write_tokens,
+    (usage as { cache_creation_input_tokens?: unknown } | undefined)
+      ?.cache_creation_input_tokens,
+  ]) {
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+  }
+  return undefined;
+}
+
+/**
  * Maps an OpenAI usage object to ADK `usageMetadata`.
  *
  * `completion_tokens_details.reasoning_tokens` (present on reasoning models) is
- * surfaced as `thoughtsTokenCount` when available.
+ * surfaced as `thoughtsTokenCount` when available, and
+ * `prompt_tokens_details.cached_tokens` as `cachedContentTokenCount`
+ * (`promptTokenCount` keeps OpenAI's meaning: it already includes cached tokens).
+ *
+ * `completion_tokens` includes the reasoning tokens, while genai's
+ * `candidatesTokenCount` does not (Gemini reports thoughts apart). So
+ * `candidatesTokenCount` is `completion_tokens` minus the reasoning tokens, and
+ * candidates plus thoughts equals `completion_tokens`. `totalTokenCount` is the
+ * provider's total.
  *
  * @internal
  */
@@ -163,6 +319,14 @@ function buildUsageMetadata(
   const reasoningTokens = usage.completion_tokens_details?.reasoning_tokens;
   if (reasoningTokens !== undefined && reasoningTokens !== null) {
     metadata.thoughtsTokenCount = reasoningTokens;
+    metadata.candidatesTokenCount = Math.max(
+      0,
+      usage.completion_tokens - reasoningTokens,
+    );
+  }
+  const cachedTokens = usage.prompt_tokens_details?.cached_tokens;
+  if (cachedTokens !== undefined && cachedTokens !== null) {
+    metadata.cachedContentTokenCount = cachedTokens;
   }
   return metadata;
 }
@@ -188,18 +352,27 @@ function buildUsageMetadata(
  *
  * const accumulator = createStreamAccumulator();
  *
+ * let finalResponse;
  * for await (const chunk of stream) {
  *   const { response, isComplete } = convertStreamChunk(chunk, accumulator);
+ *
+ *   if (isComplete) {
+ *     // Hold the final response (complete tool calls) but keep draining: with
+ *     // `stream_options.include_usage`, a usage-only chunk arrives AFTER the
+ *     // finish chunk and lands in `accumulator.usage`.
+ *     finalResponse = response;
+ *     continue;
+ *   }
  *
  *   if (response?.content?.parts?.[0]?.text) {
  *     // Stream text to user immediately
  *     process.stdout.write(response.content.parts[0].text);
  *   }
+ * }
  *
- *   if (isComplete) {
- *     // Final response with complete tool calls
- *     return response;
- *   }
+ * if (finalResponse) {
+ *   if (accumulator.usage) finalResponse.usageMetadata = accumulator.usage;
+ *   return finalResponse;
  * }
  * ```
  */
@@ -211,7 +384,13 @@ export function convertStreamChunk(
   // carries the cumulative token usage — capture it without completing.
   if (chunk.usage) {
     acc.usage = buildUsageMetadata(chunk.usage);
+    acc.cacheCreationTokens = cacheWriteTokens(chunk.usage);
+    const cost = reportedCost(chunk.usage);
+    acc.costUsd = cost.costUsd;
+    acc.costSource = cost.costSource;
+    acc.marketCostUsd = cost.marketCostUsd;
   }
+  if (chunk.model) acc.model = chunk.model;
 
   const choice = chunk.choices[0];
   if (!choice) return { isComplete: false };
@@ -231,6 +410,31 @@ export function convertStreamChunk(
     partialParts.push({ text: reasoningDelta, thought: true });
   }
 
+  // Accumulate structured reasoning_details fragments by their `index` so the
+  // signed reasoning can be reassembled (in order) on finish. Fragments for the
+  // same index carry incremental `text` plus a (usually final) `signature`.
+  const detailFragments = extractReasoningDetails(delta);
+  if (detailFragments) {
+    for (const frag of detailFragments) {
+      const idx = reasoningDetailKey(acc.reasoningDetails, frag);
+      const existing = acc.reasoningDetails.get(idx);
+      if (!existing) {
+        acc.reasoningDetails.set(idx, { ...frag });
+      } else {
+        // Merge: append streamed text, overwrite scalar fields (signature, etc.)
+        // with the latest non-undefined value.
+        for (const [key, value] of Object.entries(frag)) {
+          if (key === "text" && typeof value === "string") {
+            existing.text =
+              (typeof existing.text === "string" ? existing.text : "") + value;
+          } else if (value !== undefined) {
+            existing[key] = value;
+          }
+        }
+      }
+    }
+  }
+
   if (delta?.content) {
     acc.text += delta.content;
     partialParts.push({ text: delta.content });
@@ -238,29 +442,47 @@ export function convertStreamChunk(
 
   if (delta?.tool_calls) {
     for (const tc of delta.tool_calls) {
-      const idx = tc.index ?? acc.toolCalls.size;
+      const idx = toolCallKey(acc.toolCalls, tc);
       let a = acc.toolCalls.get(idx);
       if (!a) {
         a = { id: "", name: "", arguments: "" };
         acc.toolCalls.set(idx, a);
       }
       if (tc.id) a.id = tc.id;
-      if (tc.function?.name) a.name += tc.function.name;
+      const name = tc.function?.name;
+      // Most gateways stream the name once or in pieces; some repeat the
+      // whole name (or the name so far) on every fragment.
+      if (name) a.name = name.startsWith(a.name) ? name : a.name + name;
       if (tc.function?.arguments) a.arguments += tc.function.arguments;
     }
   }
 
   if (choice.finish_reason) {
     const parts: Part[] = [];
-    if (acc.reasoning) parts.push({ text: acc.reasoning, thought: true });
+    // Prefer structured reasoning_details (carries the signature for round-trip)
+    // over the flat reasoning string when both were streamed.
+    if (acc.reasoningDetails.size) {
+      const details = Array.from(acc.reasoningDetails.entries())
+        .sort((a, b) => a[0] - b[0])
+        .map(([, value]) => value);
+      parts.push(thoughtPartFromDetails(details));
+    } else if (acc.reasoning) {
+      parts.push({ text: acc.reasoning, thought: true });
+    }
     if (acc.text) parts.push({ text: acc.text });
+    const malformed: MalformedToolCall[] = [];
     for (const tc of Array.from(acc.toolCalls.values())) {
       if (tc.name) {
+        const parsed = parseToolArguments(tc.arguments, tc.name);
+        if (!parsed.ok) {
+          malformed.push(parsed.failure);
+          continue;
+        }
         parts.push({
           functionCall: {
-            id: tc.id,
+            id: tc.id || generateToolCallId(),
             name: tc.name,
-            args: safeJsonParse(tc.arguments),
+            args: parsed.args,
           },
         });
       }
@@ -268,18 +490,50 @@ export function convertStreamChunk(
 
     const finishReason = mapOpenAIFinishReason(choice.finish_reason);
     const usageMetadata = acc.usage;
+    const customMetadata = withCost(
+      withCacheCreation(undefined, acc.cacheCreationTokens),
+      {
+        costUsd: acc.costUsd,
+        costSource: acc.costSource,
+        marketCostUsd: acc.marketCostUsd,
+      },
+    );
+    const modelVersion = modelVersionOf(acc.model);
 
     acc.text = "";
     acc.reasoning = "";
+    acc.reasoningDetails.clear();
     acc.toolCalls.clear();
     acc.usage = undefined;
+    acc.cacheCreationTokens = undefined;
+    acc.costUsd = undefined;
+    acc.costSource = undefined;
+    acc.marketCostUsd = undefined;
+
+    if (malformed.length) {
+      return {
+        response: {
+          ...malformedToolCallResponse(parts, malformed, {
+            usageMetadata,
+            customMetadata,
+            ...modelVersion,
+          }),
+          partial: false,
+        },
+        isComplete: true,
+      };
+    }
 
     return {
       response: {
         content: parts.length ? { role: "model", parts } : undefined,
+        partial: false,
         turnComplete: true,
         finishReason,
+        ...contentFilteredError(finishReason, parts.length > 0),
         usageMetadata,
+        customMetadata,
+        ...modelVersion,
       },
       isComplete: true,
     };
@@ -305,7 +559,9 @@ export function convertStreamChunk(
  *
  * The accumulator stores:
  * - Accumulated text content
+ * - Accumulated reasoning text and structured reasoning details
  * - Partial tool call data (indexed by position)
+ * - Token usage from the trailing usage chunk
  *
  * Use with {@link convertStreamChunk} to process streaming responses.
  *
@@ -322,5 +578,70 @@ export function convertStreamChunk(
  * ```
  */
 export function createStreamAccumulator(): StreamAccumulator {
-  return { text: "", reasoning: "", toolCalls: new Map() };
+  return {
+    text: "",
+    reasoning: "",
+    reasoningDetails: new Map(),
+    toolCalls: new Map(),
+  };
+}
+
+/** Last key inserted in a map (maps keep insertion order). */
+function lastKey<V>(map: Map<number, V>): number | undefined {
+  let last: number | undefined;
+  for (const key of map.keys()) last = key;
+  return last;
+}
+
+/** A key above every key in use. */
+function nextKey<V>(map: Map<number, V>): number {
+  let max = -1;
+  for (const key of map.keys()) max = Math.max(max, key);
+  return max + 1;
+}
+
+/**
+ * Accumulator key of a streamed tool-call fragment.
+ *
+ * @remarks
+ * The fragment's `index` when it has one. Without it, a fragment with no id,
+ * or with the id of the last call, continues the last call; a new id starts a
+ * new call.
+ *
+ * @internal
+ */
+function toolCallKey(
+  calls: StreamAccumulator["toolCalls"],
+  fragment: { index?: number; id?: string },
+): number {
+  if (typeof fragment.index === "number") return fragment.index;
+  const last = lastKey(calls);
+  if (last !== undefined) {
+    const lastId = calls.get(last)?.id;
+    if (!fragment.id || !lastId || fragment.id === lastId) return last;
+  }
+  return nextKey(calls);
+}
+
+/**
+ * Accumulator key of a streamed `reasoning_details` fragment.
+ *
+ * @remarks
+ * The fragment's `index` when it has one. Without it, the fragment continues
+ * the last entry unless it names a different `type` (an encrypted block after
+ * a text block is a new entry).
+ *
+ * @internal
+ */
+function reasoningDetailKey(
+  details: StreamAccumulator["reasoningDetails"],
+  fragment: Record<string, unknown>,
+): number {
+  if (typeof fragment.index === "number") return fragment.index;
+  const last = lastKey(details);
+  if (last !== undefined) {
+    const lastType = details.get(last)?.type;
+    if (fragment.type === undefined || fragment.type === lastType) return last;
+  }
+  return nextKey(details);
 }

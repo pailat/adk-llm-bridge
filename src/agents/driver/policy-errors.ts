@@ -1,0 +1,554 @@
+/**
+ * Typed, non-recoverable refusals shared by the drivers. A driver that cannot
+ * keep a security guarantee, or cannot run at all, stops the run with one of
+ * these codes instead of running with less protection than the policy asks
+ * for, or throwing out of the agent.
+ */
+
+import type { ExternalAgentEvent } from "../events.js";
+import { networkAllowed } from "../permissions/network.js";
+import { policySetsPaths } from "../permissions/paths.js";
+import type { ExternalAgentPermissionPolicy } from "../permissions/schema.js";
+
+/**
+ * The runtime reported tools or MCP servers outside the set the driver
+ * configured (host tools, claude.ai connectors, host MCP servers).
+ */
+export const EXTERNAL_AGENT_ISOLATION_VIOLATED =
+  "EXTERNAL_AGENT_ISOLATION_VIOLATED";
+
+/**
+ * Not an error: the value of `metadata.isolation` on the `tool_result` event
+ * of a call to a tool the model was not offered, which the runtime refused
+ * without running it. `ClaudeAgentSdkDriver` reports such a call and goes on;
+ * the third one in a run stops it with
+ * {@link EXTERNAL_AGENT_ISOLATION_VIOLATED}.
+ */
+export const EXTERNAL_AGENT_TOOL_NOT_OFFERED =
+  "EXTERNAL_AGENT_TOOL_NOT_OFFERED";
+
+/**
+ * Not a refusal: the code of the `error` event of a Claude run that reached
+ * its result while a background task it started was still running. A
+ * headless run cannot wait for the task, so its work is not done; the run
+ * ends with exit code 1 instead of reporting success.
+ */
+export const EXTERNAL_AGENT_BACKGROUND_TASK_PENDING =
+  "EXTERNAL_AGENT_BACKGROUND_TASK_PENDING";
+
+/**
+ * Not a refusal: the code of the `error` event of a Claude Agent SDK run
+ * whose stream ended with no turn run: Claude Code wrote only "model-less"
+ * results (success, `num_turns` 0, empty `result`) and never ran the input.
+ * The run ends with exit code 1 instead of an empty success. Recoverable: a
+ * new run of the same input can work.
+ */
+export const EXTERNAL_AGENT_NO_TURN = "EXTERNAL_AGENT_NO_TURN";
+
+/**
+ * A Claude Agent SDK stream ended without any `result` message (the child
+ * exited or the pipe closed mid-run), so the run has no outcome to report.
+ * The run ends with exit code 1 instead of a clean exit 0. Recoverable: a new
+ * run of the same input can work. A stream that ended after only
+ * "model-less" results reports {@link EXTERNAL_AGENT_NO_TURN} instead.
+ */
+export const EXTERNAL_AGENT_NO_RESULT = "EXTERNAL_AGENT_NO_RESULT";
+
+/**
+ * The policy does not set `allowNetwork: true` (network is off), and the
+ * runtime cannot keep its
+ * tools (shell commands, web tools, MCP servers) off the network in the
+ * requested mode.
+ */
+export const EXTERNAL_AGENT_NETWORK_UNENFORCEABLE =
+  "EXTERNAL_AGENT_NETWORK_UNENFORCEABLE";
+
+/**
+ * The policy sets `allowedPaths` or `readPaths` (or inherited path bounds), and the driver
+ * cannot check the paths of the runtime's tool calls against them: the
+ * runtime never asks the bridge before a file tool runs.
+ */
+export const EXTERNAL_AGENT_PATHS_UNENFORCEABLE =
+  "EXTERNAL_AGENT_PATHS_UNENFORCEABLE";
+
+/**
+ * An optional SDK package the driver needs is not installed. The message
+ * names it and the install command.
+ */
+export const EXTERNAL_AGENT_DEPENDENCY_MISSING =
+  "EXTERNAL_AGENT_DEPENDENCY_MISSING";
+
+/**
+ * The runtime's binary was not found. Same code the error classifier gives
+ * an "unable to locate" or `ENOENT` message, so every driver reports a
+ * missing binary the same way.
+ */
+export const EXTERNAL_AGENT_MISSING_BINARY = "MISSING_BINARY";
+
+/**
+ * The credential provider returned a credential whose `kind` is neither
+ * `"env"` nor `"none"`. No driver can deliver it, so the run is refused
+ * instead of falling back to the runtime's own login.
+ */
+export const EXTERNAL_AGENT_CREDENTIAL_UNSUPPORTED =
+  "EXTERNAL_AGENT_CREDENTIAL_UNSUPPORTED";
+
+/**
+ * The driver was configured with an option its runtime cannot honor, for
+ * example a `sessionStore` on the Claude CLI driver (only the Claude Agent
+ * SDK mirrors transcripts to a store). Thrown when the driver is built, so the
+ * option is never silently ignored.
+ */
+export const EXTERNAL_AGENT_OPTION_UNSUPPORTED =
+  "EXTERNAL_AGENT_OPTION_UNSUPPORTED";
+
+/**
+ * On Windows, the command resolves to a batch file (`.cmd` or `.bat`), for
+ * example an npm shim such as `claude.cmd`. Running one means going through
+ * `cmd.exe`, which re-parses the arguments (a prompt with `&` or `|` would
+ * run as a command), so the driver never runs it. Point `command` at the
+ * native `.exe` or, for a CLI that ships as a JavaScript package, set
+ * `interpreter` (a native `node.exe`) and `entry` (the package's JavaScript
+ * entry).
+ */
+export const EXTERNAL_AGENT_BATCH_COMMAND_REFUSED =
+  "EXTERNAL_AGENT_BATCH_COMMAND_REFUSED";
+
+/**
+ * A CLI driver built with `interpreter` and `entry` was asked to start a file
+ * the run's agent can write: the entry script, or an interpreter given as a
+ * path, or the entry's directory (where the interpreter starts), is at or
+ * under the run's working directory, an `allowedPaths` root or a temp
+ * directory a runtime sandbox keeps writable (symlinks resolved). The agent could replace it in one run and have the
+ * next run execute it on the host, outside the runtime's sandbox, so the run
+ * is refused before anything starts. Also used when the interpreter is not
+ * the native Node binary (its real path is not named `node` or `node.exe`,
+ * or the file is not a native executable, such as a script shim): other
+ * interpreters and version-manager shims read configuration from the run's
+ * working directory.
+ */
+export const EXTERNAL_AGENT_INTERPRETER_UNSAFE =
+  "EXTERNAL_AGENT_INTERPRETER_UNSAFE";
+
+/**
+ * The driver's `model` option is not a usable model id: not a string, empty,
+ * longer than 256 characters, with whitespace or a control character, or
+ * starting with `-`. Thrown when the driver is built.
+ */
+export const EXTERNAL_AGENT_MODEL_INVALID = "EXTERNAL_AGENT_MODEL_INVALID";
+
+/**
+ * The driver was built with `requireExplicitModel: true` and has no `model`,
+ * or its `model` is a router or default alias that lets the runtime choose
+ * (Claude `default`, `best`, `opusplan`). Thrown
+ * when the driver is built.
+ */
+export const EXTERNAL_AGENT_MODEL_REQUIRED = "EXTERNAL_AGENT_MODEL_REQUIRED";
+
+/**
+ * Something other than the driver's `model` option would set, remap or route
+ * the model: an extra `args` entry or Codex SDK `config` key (thrown when the
+ * driver is built) or a model variable in the run's environment (reported as
+ * the run's error event). `allowPolicyOverrideArgs` does not
+ * lift it.
+ */
+export const EXTERNAL_AGENT_MODEL_OVERRIDE = "EXTERNAL_AGENT_MODEL_OVERRIDE";
+
+/**
+ * `ExternalAgentConfig.tools` was given to an agent whose driver cannot host
+ * ADK tools (`capabilities().tools` is not `true`): the tools would never
+ * reach the runtime. Thrown when the agent is built. Use `ClaudeAgent` (the
+ * Claude Agent SDK driver) or remove `tools`.
+ */
+export const EXTERNAL_AGENT_TOOLS_UNSUPPORTED =
+  "EXTERNAL_AGENT_TOOLS_UNSUPPORTED";
+
+/**
+ * The agent has an approver (`confirmation.approver`) or ADK confirmation
+ * (`confirmation.adk`), and its driver never asks the host for permission
+ * (`capabilities().approvals` is not `true`): the runtime decides alone, so
+ * the setting would be ignored silently. Thrown when the agent is built. Use
+ * `ClaudeAgent` (the Claude Agent SDK driver), or remove `confirmation`.
+ */
+export const EXTERNAL_AGENT_APPROVALS_UNSUPPORTED =
+  "EXTERNAL_AGENT_APPROVALS_UNSUPPORTED";
+
+/**
+ * The run asked for a runtime session (`request.runtimeSession`) from a driver
+ * whose `capabilities().sessions` is not `true`, so the id would be ignored.
+ * The run is refused before any process starts. Use a driver that resumes
+ * (`ClaudeAgent`, `CodexAgent`), or drop `runtimeSession`. `FxCliDriver`
+ * refuses it only with `persistSession: false`; the fix there is to drop that
+ * option.
+ */
+export const EXTERNAL_AGENT_SESSIONS_UNSUPPORTED =
+  "EXTERNAL_AGENT_SESSIONS_UNSUPPORTED";
+
+/**
+ * `subAgents` are set on an `ExternalAgent` whose driver does not expose them
+ * (`capabilities().subagents` is not `true`): the delegation tool reaches the
+ * runtime only through the Claude Agent SDK driver, so the sub-agents could
+ * never be called and the run would complete without them. Thrown when the
+ * agent is built. Use `ClaudeAgent` (the Claude Agent SDK driver), or put the
+ * sub-agents on an ADK `LlmAgent` parent.
+ */
+export const EXTERNAL_AGENT_SUBAGENTS_UNSUPPORTED =
+  "EXTERNAL_AGENT_SUBAGENTS_UNSUPPORTED";
+
+/**
+ * A `readOnlyTools` entry that cannot attest exactly one tool: it is empty,
+ * listed twice, matches no direct tool (when no toolset could add it), or
+ * names two or more direct tools. Thrown when the agent is built.
+ */
+export const EXTERNAL_AGENT_READ_ONLY_TOOL_UNKNOWN =
+  "EXTERNAL_AGENT_READ_ONLY_TOOL_UNKNOWN";
+
+/**
+ * The agent's own `permissions.mode` is `read-only` and a direct ADK tool is
+ * not named in `readOnlyTools`, so the run would drop it silently. Thrown
+ * when the agent is built. List the tool if it has no side effects, or
+ * remove it.
+ */
+export const EXTERNAL_AGENT_TOOL_NOT_READ_ONLY =
+  "EXTERNAL_AGENT_TOOL_NOT_READ_ONLY";
+
+/**
+ * The driver config is not a plain object, has a symbol key, or has a key the
+ * driver does not know (whatever its value, `undefined` included). Thrown
+ * when the driver is built, before any other check, so a misspelled or
+ * misplaced option is never silently ignored.
+ */
+export const EXTERNAL_AGENT_OPTION_UNKNOWN = "EXTERNAL_AGENT_OPTION_UNKNOWN";
+
+/**
+ * An `mcpServers` entry is malformed: a name outside the provider-id grammar,
+ * the reserved `adk_bridge`, a duplicate after case folding, more than 16
+ * servers, an unknown `type` or key, a URL outside the accepted grammar, a bad
+ * `tools` entry, `readOnly` without `tools`, a `timeoutMs` out of range, a
+ * relative stdio `command`, or a header or env name that is not valid.
+ * Thrown when the driver is built.
+ *
+ * @experimental
+ */
+export const EXTERNAL_AGENT_MCP_SERVER_INVALID =
+  "EXTERNAL_AGENT_MCP_SERVER_INVALID";
+
+/**
+ * An MCP header or env value is a bare string, or a `{ public }` value under a
+ * name that looks secret (`Authorization`, `Cookie`, `X-Api-Key`, or a name
+ * with token, secret, key, auth, cookie, session, passw or credential in it).
+ * Pass a secret as `{ resolve }` or `{ env }`. Thrown when the driver is
+ * built.
+ *
+ * @experimental
+ */
+export const EXTERNAL_AGENT_MCP_SECRET_LITERAL =
+  "EXTERNAL_AGENT_MCP_SECRET_LITERAL";
+
+/**
+ * An http or sse MCP server is not on loopback (`127.x.x.x` or `[::1]`) and
+ * the run's policy does not set `allowNetwork: true`.
+ *
+ * @experimental
+ */
+export const EXTERNAL_AGENT_MCP_SERVER_NETWORK_REQUIRED =
+  "EXTERNAL_AGENT_MCP_SERVER_NETWORK_REQUIRED";
+
+/**
+ * A stdio MCP server could run code the agent controls: its command is not a
+ * regular executable outside every agent-writable and sandbox temp root, is a
+ * package launcher, or an argument or env variable could load code or open a
+ * debugger. The message names the argument or variable.
+ *
+ * @experimental
+ */
+export const EXTERNAL_AGENT_MCP_STDIO_UNSAFE =
+  "EXTERNAL_AGENT_MCP_STDIO_UNSAFE";
+
+/**
+ * The run could not keep an MCP secret from the agent: the agent can read
+ * process environments (an `{ env }` ref, or a stdio env secret), can read
+ * process memory (Linux with `ptrace_scope` 0, or Windows, with a shell tool),
+ * or a debug switch in the runtime's environment would log it. The message
+ * names the fix.
+ *
+ * @experimental
+ */
+export const EXTERNAL_AGENT_MCP_SECRET_UNENFORCEABLE =
+  "EXTERNAL_AGENT_MCP_SECRET_UNENFORCEABLE";
+
+/**
+ * An MCP secret could not be read: the `{ env }` variable is missing or empty,
+ * the resolver threw, timed out or returned a non-string, or the value is
+ * shorter than 8 characters, longer than 8 KiB, or has CR, LF or NUL. The
+ * message names the server, field and key, never the value or the resolver's
+ * error text.
+ *
+ * @experimental
+ */
+export const EXTERNAL_AGENT_MCP_SECRET_UNRESOLVED =
+  "EXTERNAL_AGENT_MCP_SECRET_UNRESOLVED";
+
+/**
+ * `selectMcpServers` was given a provider id with no entry in the registry.
+ *
+ * @experimental
+ */
+export const EXTERNAL_AGENT_MCP_PROVIDER_UNKNOWN =
+  "EXTERNAL_AGENT_MCP_PROVIDER_UNKNOWN";
+
+/**
+ * Code of the recoverable `error` event a run reports when a required MCP
+ * server the driver declared did not connect within `mcpConnectTimeoutMs`, or
+ * the runtime reported an error for it. Not a policy error: the server may
+ * come up on a retry.
+ *
+ * @experimental
+ */
+export const EXTERNAL_AGENT_MCP_SERVER_UNAVAILABLE =
+  "EXTERNAL_AGENT_MCP_SERVER_UNAVAILABLE";
+
+/** Codes of {@link ExternalAgentPolicyError}. */
+export type ExternalAgentPolicyErrorCode =
+  | typeof EXTERNAL_AGENT_ISOLATION_VIOLATED
+  | typeof EXTERNAL_AGENT_NETWORK_UNENFORCEABLE
+  | typeof EXTERNAL_AGENT_PATHS_UNENFORCEABLE
+  | typeof EXTERNAL_AGENT_DEPENDENCY_MISSING
+  | typeof EXTERNAL_AGENT_MISSING_BINARY
+  | typeof EXTERNAL_AGENT_BATCH_COMMAND_REFUSED
+  | typeof EXTERNAL_AGENT_INTERPRETER_UNSAFE
+  | typeof EXTERNAL_AGENT_CREDENTIAL_UNSUPPORTED
+  | typeof EXTERNAL_AGENT_OPTION_UNSUPPORTED
+  | typeof EXTERNAL_AGENT_MODEL_INVALID
+  | typeof EXTERNAL_AGENT_MODEL_REQUIRED
+  | typeof EXTERNAL_AGENT_MODEL_OVERRIDE
+  | typeof EXTERNAL_AGENT_TOOLS_UNSUPPORTED
+  | typeof EXTERNAL_AGENT_APPROVALS_UNSUPPORTED
+  | typeof EXTERNAL_AGENT_SESSIONS_UNSUPPORTED
+  | typeof EXTERNAL_AGENT_SUBAGENTS_UNSUPPORTED
+  | typeof EXTERNAL_AGENT_READ_ONLY_TOOL_UNKNOWN
+  | typeof EXTERNAL_AGENT_TOOL_NOT_READ_ONLY
+  | typeof EXTERNAL_AGENT_OPTION_UNKNOWN
+  | typeof EXTERNAL_AGENT_MCP_SERVER_INVALID
+  | typeof EXTERNAL_AGENT_MCP_SECRET_LITERAL
+  | typeof EXTERNAL_AGENT_MCP_SERVER_NETWORK_REQUIRED
+  | typeof EXTERNAL_AGENT_MCP_STDIO_UNSAFE
+  | typeof EXTERNAL_AGENT_MCP_SECRET_UNENFORCEABLE
+  | typeof EXTERNAL_AGENT_MCP_SECRET_UNRESOLVED
+  | typeof EXTERNAL_AGENT_MCP_PROVIDER_UNKNOWN;
+
+/**
+ * A run the driver refuses to start or continue. Never recoverable: retrying
+ * hits the same configuration.
+ */
+export class ExternalAgentPolicyError extends Error {
+  /** Why the run was refused. */
+  readonly code: ExternalAgentPolicyErrorCode;
+  /** Always `false`: retrying hits the same configuration. */
+  readonly recoverable = false;
+
+  /**
+   * Creates a policy error.
+   *
+   * @param code - One of the policy error codes.
+   * @param message - What went wrong and how to fix or opt in.
+   */
+  constructor(code: ExternalAgentPolicyErrorCode, message: string) {
+    super(message);
+    this.name = "ExternalAgentPolicyError";
+    this.code = code;
+  }
+}
+
+/**
+ * The `error` event for a refused run.
+ *
+ * @param error - The refusal.
+ * @returns A non-recoverable error event carrying `error.code`.
+ */
+export function policyErrorEvent(
+  error: ExternalAgentPolicyError,
+): ExternalAgentEvent {
+  return {
+    type: "error",
+    message: error.message,
+    code: error.code,
+    recoverable: false,
+    timestamp: Date.now(),
+  };
+}
+
+/**
+ * Refuses a run that sets `request.runtimeSession` on a driver that cannot
+ * resume a runtime session.
+ *
+ * @param driverName - Driver class name for the message.
+ * @param request - The run request.
+ * @param remedy - What to do about it, when the default advice (use
+ * `ClaudeAgent` or `CodexAgent`, or remove `runtimeSession`) does not fit the
+ * driver, for example a driver that resumes once a setting is changed.
+ * @returns An `EXTERNAL_AGENT_SESSIONS_UNSUPPORTED` error to report, or
+ * `undefined` when the request has no `runtimeSession`.
+ */
+export function sessionRefusal(
+  driverName: string,
+  request: { readonly runtimeSession?: unknown },
+  remedy = "Use ClaudeAgent or CodexAgent, or remove runtimeSession.",
+): ExternalAgentPolicyError | undefined {
+  if (request.runtimeSession === undefined) {
+    return undefined;
+  }
+  return new ExternalAgentPolicyError(
+    EXTERNAL_AGENT_SESSIONS_UNSUPPORTED,
+    `${driverName} cannot resume a runtime session (capabilities().sessions is not true), so request.runtimeSession would be ignored. ${remedy}`,
+  );
+}
+
+/**
+ * A runtime whose `full-access` mode has no sandbox cannot keep shell
+ * commands off the network. Unless the policy sets `allowNetwork: true` the
+ * run is refused,
+ * unless the driver was built with `allowUnenforcedNetwork: true`.
+ *
+ * @param policy - The effective permission policy of the run.
+ * @param options - Runtime name for the message, and the driver opt-in.
+ * @returns An `EXTERNAL_AGENT_NETWORK_UNENFORCEABLE` error to report, or
+ * `undefined` when the run may start.
+ */
+export function unsandboxedShellRefusal(
+  policy: ExternalAgentPermissionPolicy | undefined,
+  options: { runtime: string; allowUnenforcedNetwork: boolean },
+): ExternalAgentPolicyError | undefined {
+  if (
+    networkAllowed(policy) ||
+    policy?.mode !== "full-access" ||
+    options.allowUnenforcedNetwork
+  ) {
+    return undefined;
+  }
+  return networkUnenforceable(
+    `${options.runtime} runs shell commands without a sandbox in full-access mode, so the network cannot be kept off (it is off unless allowNetwork is true). Use the workspace-write or ask mode, set allowNetwork: true, or build the driver with allowUnenforcedNetwork: true to run anyway.`,
+  );
+}
+
+/**
+ * A driver whose runtime runs file tools without asking the bridge cannot keep
+ * a run inside `allowedPaths`, `readPaths` or the path bounds. Such a run is refused unless the
+ * driver was built with `allowUnenforcedPaths: true`.
+ *
+ * @param policy - The effective permission policy of the run.
+ * @param options - Runtime name for the message, and the driver opt-in.
+ * @returns An `EXTERNAL_AGENT_PATHS_UNENFORCEABLE` error to report, or
+ * `undefined` when the policy sets no paths or the driver opted in.
+ */
+export function unenforceablePathsRefusal(
+  policy: ExternalAgentPermissionPolicy | undefined,
+  options: { runtime: string; allowUnenforcedPaths: boolean },
+): ExternalAgentPolicyError | undefined {
+  if (!policySetsPaths(policy) || options.allowUnenforcedPaths) {
+    return undefined;
+  }
+  return new ExternalAgentPolicyError(
+    EXTERNAL_AGENT_PATHS_UNENFORCEABLE,
+    `${options.runtime} runs file tools without asking the bridge, so allowedPaths and readPaths (or the path bounds inherited from a parent agent) cannot be enforced. Use ClaudeAgentSdkDriver, remove allowedPaths, or build the driver with allowUnenforcedPaths: true to run anyway (the runtime's own sandbox then decides which paths it reaches).`,
+  );
+}
+
+/**
+ * Why a Claude run that offers web tools with the network off is refused.
+ *
+ * @param runtime - Runtime name for the message.
+ * @param tools - The web tools named in the configured `tools`.
+ * @returns The message for {@link networkUnenforceable}.
+ */
+export function webToolsRefusal(
+  runtime: string,
+  tools: readonly string[],
+): string {
+  return `${runtime} was configured with web tools (${tools.join(", ")}), but the network is off (it is off unless allowNetwork is true). Set allowNetwork: true, or remove the web tools from tools.`;
+}
+
+/**
+ * An `EXTERNAL_AGENT_NETWORK_UNENFORCEABLE` refusal.
+ *
+ * @param message - Why, and how to opt in.
+ * @returns The error to report with {@link policyErrorEvent}.
+ */
+export function networkUnenforceable(
+  message: string,
+): ExternalAgentPolicyError {
+  return new ExternalAgentPolicyError(
+    EXTERNAL_AGENT_NETWORK_UNENFORCEABLE,
+    message,
+  );
+}
+
+/**
+ * An error naming what to install: `EXTERNAL_AGENT_DEPENDENCY_MISSING` for
+ * an SDK package, `MISSING_BINARY` for a CLI binary.
+ *
+ * @param kind - `package` or `binary`.
+ * @param what - The missing package or binary, as the user would name it.
+ * @param install - The command that installs it.
+ * @param alternative - Another way to run, if any.
+ * @returns The error to report with {@link policyErrorEvent}.
+ */
+export function dependencyMissing(
+  kind: "package" | "binary",
+  what: string,
+  install: string,
+  alternative?: string,
+): ExternalAgentPolicyError {
+  return new ExternalAgentPolicyError(
+    kind === "package"
+      ? EXTERNAL_AGENT_DEPENDENCY_MISSING
+      : EXTERNAL_AGENT_MISSING_BINARY,
+    `${what} is not installed. Install it with \`${install}\`${alternative ? `, or ${alternative}` : ""}.`,
+  );
+}
+
+/** What to do instead, per CLI, when a Windows command resolved to a batch file. */
+const BATCH_REMEDY = {
+  claude:
+    "Set `command` to the native claude.exe from Claude's native installer.",
+  codex:
+    "Set `command` to the codex.exe inside the @openai/codex package, for example node_modules\\@openai\\codex-win32-x64\\vendor\\x86_64-pc-windows-msvc\\bin\\codex.exe (win32-arm64 uses codex-win32-arm64 and aarch64-pc-windows-msvc).",
+  fx: "fx has no documented native Windows build and a batch shim cannot be launched safely, so run fx where it is supported.",
+} as const;
+
+/**
+ * The policy error for a Windows command that resolved to a batch file.
+ *
+ * @param error - The error the spawn threw (an `Error` with the code
+ * `EXTERNAL_AGENT_BATCH_COMMAND_REFUSED`).
+ * @param cli - The CLI the driver runs, for the advice in the message.
+ * @returns The error to report with {@link policyErrorEvent}.
+ */
+export function batchCommandRefusal(
+  error: Error,
+  cli: keyof typeof BATCH_REMEDY,
+): ExternalAgentPolicyError {
+  return new ExternalAgentPolicyError(
+    EXTERNAL_AGENT_BATCH_COMMAND_REFUSED,
+    `${error.message} ${BATCH_REMEDY[cli]} See docs/external-agent-isolation.md, "Windows: batch files and npm installs".`,
+  );
+}
+
+/**
+ * True for the error a spawn reports when the command does not exist
+ * (`ENOENT`, from Node's `error` event or a throwing `Bun.spawn`).
+ *
+ * @param error - Anything thrown or rejected by a spawn.
+ * @returns Whether the command was not found.
+ */
+export function isCommandNotFound(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) {
+    return false;
+  }
+  const record = error as { code?: unknown; message?: unknown };
+  return (
+    record.code === "ENOENT" ||
+    (typeof record.message === "string" &&
+      /\bENOENT\b|executable not found|command not found/i.test(record.message))
+  );
+}

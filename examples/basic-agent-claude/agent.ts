@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import type * as Adk from "@google/adk";
 import {
   ClaudeAgent,
@@ -68,20 +69,40 @@ Answer the user's question clearly and concisely. Do not modify files.`,
 // Typechecks and builds without credentials. At runtime, if no credential or
 // Claude Code CLI is available, print a clear message and exit 0.
 
+/**
+ * Reports whether a local Claude Code CLI is logged in, using
+ * `claude auth status --json`. Any failure (no CLI, timeout, bad JSON) counts
+ * as "not logged in".
+ */
+function hasLoggedInClaudeCli(): boolean {
+  try {
+    const result = spawnSync("claude", ["auth", "status", "--json"], {
+      encoding: "utf8",
+      timeout: 10_000,
+    });
+    if (result.status !== 0) return false;
+    const status = JSON.parse(result.stdout) as { loggedIn?: unknown };
+    return status.loggedIn === true;
+  } catch {
+    return false;
+  }
+}
+
 function hasClaudeCredential(): boolean {
   return Boolean(
     process.env.ANTHROPIC_API_KEY ||
       process.env.ANTHROPIC_AUTH_TOKEN ||
       process.env.CLAUDE_CODE_OAUTH_TOKEN ||
       process.env.CLAUDE_CODE_EXECUTABLE ||
-      process.env.CLAUDE_CODE_PATH,
+      process.env.CLAUDE_CODE_PATH ||
+      hasLoggedInClaudeCli(),
   );
 }
 
 export async function main(): Promise<void> {
   if (!hasClaudeCredential()) {
     console.log(
-      "set ANTHROPIC_API_KEY (or local Claude Code CLI) to run this example",
+      "set ANTHROPIC_API_KEY or log in with the Claude Code CLI (`claude auth login`) to run this example",
     );
     process.exit(0);
   }

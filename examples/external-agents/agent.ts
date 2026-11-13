@@ -4,6 +4,7 @@ import {
   ClaudeAgent,
   ClaudeAgentSdkDriver,
   CodexAgent,
+  CodexSdkDriver,
   EnvCredentialProvider,
   mapPermissionModeToPolicy,
 } from "adk-llm-bridge/agents";
@@ -128,6 +129,15 @@ const codexBillingSpecialist = new CodexAgent({
     "Handles billing inquiries, invoice lookups, and refund request analysis using the Codex runtime.",
   credentialProvider,
   workingDirectory,
+  // Codex refuses to run outside a trusted git repository unless the check is
+  // skipped; the read-only policy below still limits what it can touch.
+  // allowUnenforcedPaths: this sub-agent inherits the Claude root's
+  // allowedPaths as path bounds, which Codex cannot enforce; Codex's own
+  // read-only sandbox decides what it reaches.
+  driver: new CodexSdkDriver({
+    skipGitRepoCheck: true,
+    allowUnenforcedPaths: true,
+  }),
   permissions: {
     ...mapPermissionModeToPolicy("read-only"),
     allowedPaths,

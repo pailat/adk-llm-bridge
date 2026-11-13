@@ -4,8 +4,9 @@
  * These types give the demos, the harness, and the CLI a single vocabulary.
  * Kept dependency-light: only structural types, no ADK runtime imports.
  */
-import type { AgentHarness } from "./runner";
+
 import type { Output } from "./output";
+import type { AgentHarness } from "./runner";
 
 /** Which library factory builds the model. */
 export type ProviderName =

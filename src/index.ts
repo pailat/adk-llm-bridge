@@ -1,21 +1,19 @@
 /**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
-/**
  * adk-llm-bridge - Connect Google ADK to 100+ LLM models.
  *
  * This library bridges Google ADK (Agent Development Kit) to multiple LLM providers
- * through OpenAI-compatible APIs, enabling access to models from Anthropic, OpenAI,
- * Google, Meta, and more while preserving ADK features like multi-agent orchestration,
- * tool calling, and streaming.
+ * through OpenAI-compatible APIs (and a native SDK for Anthropic), enabling access to
+ * models from Anthropic, OpenAI, Google, Meta, and more while preserving ADK features
+ * like multi-agent orchestration, tool calling, and streaming.
  *
  * ## Supported Providers
  *
  * - **AI Gateway** (Vercel): Unified gateway for 100+ models
  * - **OpenRouter**: Multi-provider routing with fallbacks and price optimization
+ * - **OpenAI**: Direct OpenAI API
+ * - **xAI**: Direct xAI (Grok) API
+ * - **Anthropic**: Direct Anthropic API via the native `@anthropic-ai/sdk`
+ *   (not OpenAI-compatible)
  *
  * ## Quick Start
  *
@@ -27,7 +25,7 @@
  *
  * const agent = new LlmAgent({
  *   name: "assistant",
- *   llm: AIGateway("anthropic/claude-sonnet-4")
+ *   model: AIGateway("anthropic/claude-sonnet-5.5")
  * });
  * ```
  *
@@ -41,7 +39,7 @@
  *
  * const agent = new LlmAgent({
  *   name: "assistant",
- *   model: "anthropic/claude-sonnet-4"
+ *   model: "anthropic/claude-sonnet-5.5"
  * });
  * ```
  *
@@ -52,8 +50,6 @@
  * 2. Global configuration (via `setProviderConfig`)
  * 3. Environment variables
  * 4. Default values
- *
- * @module adk-llm-bridge
  *
  * @see {@link https://github.com/pailat/adk-llm-bridge|GitHub Repository}
  * @see {@link https://google.github.io/adk-docs/|Google ADK Documentation}
@@ -74,6 +70,16 @@ export { BaseLlm } from "@google/adk";
 export { BaseProviderLlm } from "./core/base-provider-llm.js";
 export type { OpenAIClientConfig } from "./core/openai-compatible-llm.js";
 export { OpenAICompatibleLlm } from "./core/openai-compatible-llm.js";
+export type {
+  ProviderErrorCode,
+  ProviderLlmErrorInit,
+} from "./core/provider-llm-error.js";
+export {
+  PROVIDER_ERROR_INCOMPLETE_STREAM,
+  PROVIDER_ERROR_MALFORMED_FUNCTION_CALL,
+  PROVIDER_ERROR_NO_CHOICE,
+  ProviderLlmError,
+} from "./core/provider-llm-error.js";
 
 // =============================================================================
 // AI Gateway Provider
@@ -112,7 +118,12 @@ export {
 // xAI Provider
 // =============================================================================
 
-export { isXAIRegistered, registerXAI, XAI, XAILlm } from "./providers/xai/index.js";
+export {
+  isXAIRegistered,
+  registerXAI,
+  XAI,
+  XAILlm,
+} from "./providers/xai/index.js";
 
 // =============================================================================
 // Anthropic Provider
@@ -133,7 +144,10 @@ export {
   Custom,
   CustomLlm,
   type CustomLlmProviderConfig,
+  type CustomProviderRegistrationConfig,
+  type CustomRegisterOptions,
   createCustomLlm,
+  registerCustomProvider,
 } from "./providers/custom/index.js";
 
 // =============================================================================
@@ -143,18 +157,24 @@ export {
 export type {
   // AI Gateway types
   AIGatewayConfig,
+  AIGatewayProviderConfig,
+  AIGatewayRegisterOptions,
   // Anthropic types
   AnthropicProviderConfig,
   AnthropicRegisterOptions,
   // Base types
   BaseProviderConfig,
+  BaseRegisterOptions,
   // Custom LLM types
   CustomLlmConfig,
+  CustomProviderConfig,
+  ErrorMode,
   // OpenAI types
   OpenAIProviderConfig,
   OpenAIRegisterOptions,
   // OpenRouter types
   OpenRouterConfig,
+  OpenRouterProviderConfig,
   OpenRouterProviderPreferences,
   OpenRouterRegisterOptions,
   RegisterOptions,

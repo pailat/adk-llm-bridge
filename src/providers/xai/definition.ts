@@ -1,10 +1,6 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
 import type { ProviderDefinition } from "../../core/provider-definition.js";
 
+/** Declarative definition of the xAI provider (endpoint, env keys, model patterns). */
 export const XAI_DEFINITION: ProviderDefinition = {
   id: "xai",
   errorPrefix: "XAI",
@@ -12,4 +8,7 @@ export const XAI_DEFINITION: ProviderDefinition = {
   envKeys: { apiKey: ["XAI_API_KEY"] },
   modelPatterns: [/grok-.+/],
   requireApiKey: true,
+  // Direct xAI 400s if reasoning_effort is sent to a non-reasoning Grok model,
+  // so keep the strict, model-name-gated effort path.
+  reasoning: { style: "openai-effort" },
 };

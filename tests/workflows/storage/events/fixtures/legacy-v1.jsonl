@@ -1,0 +1,4 @@
+{"format":"adk-llm-bridge/workflow-events-jsonl","formatVersion":1,"executionId":"legacy-exec"}
+{"id":"evt-1","executionId":"legacy-exec","kind":"workflow","type":"workflow_started","timestamp":1700000000000,"workflowId":"wf","payload":{"type":"workflow_started"},"sequence":1}
+{"id":"evt-2","executionId":"legacy-exec","kind":"step","type":"step_started","timestamp":1700000000100,"workflowId":"wf","stepId":"s1","attempt":1,"payload":{"text":"héllo 世界"},"sequence":2}
+{"id":"span:abc","executionId":"legacy-exec","kind":"span","type":"span","timestamp":1700000000200,"traceId":"t","spanId":"abc","parentSpanId":"p","payload":{"name":"x"},"clipped":{"originalBytes":999,"sha256":"00","paths":["/name"],"payloadDropped":false},"sequence":3}

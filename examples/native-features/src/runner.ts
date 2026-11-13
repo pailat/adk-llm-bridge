@@ -9,9 +9,9 @@
  * ADK plumbing.
  */
 import {
+  InMemorySessionService,
   type LlmAgent,
   Runner,
-  InMemorySessionService,
   StreamingMode,
 } from "@google/adk";
 import type { Content, Part } from "@google/genai";
@@ -99,9 +99,7 @@ export class AgentHarness {
       sessionId: session.id,
       newMessage: message,
       runConfig: {
-        streamingMode: opts.streaming
-          ? StreamingMode.SSE
-          : StreamingMode.NONE,
+        streamingMode: opts.streaming ? StreamingMode.SSE : StreamingMode.NONE,
         // Only set when provided; <= 0 / undefined means "unbounded".
         ...(opts.maxLlmCalls ? { maxLlmCalls: opts.maxLlmCalls } : {}),
       },

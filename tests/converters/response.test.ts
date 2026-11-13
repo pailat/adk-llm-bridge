@@ -131,7 +131,7 @@ describe("convertResponse", () => {
           logprobs,
         },
       ],
-    } as Partial<ChatCompletion>);
+    } as unknown as Partial<ChatCompletion>);
 
     const result = convertResponse(response);
     expect(result.customMetadata).toEqual({ logprobs });
@@ -147,7 +147,7 @@ describe("convertResponse", () => {
           logprobs: { content: [] },
         },
       ],
-    } as Partial<ChatCompletion>);
+    } as unknown as Partial<ChatCompletion>);
 
     expect(convertResponse(response).customMetadata).toBeUndefined();
   });
@@ -396,7 +396,7 @@ describe("reasoning passthrough", () => {
           logprobs: null,
         },
       ],
-    } as Partial<ChatCompletion>);
+    } as unknown as Partial<ChatCompletion>);
 
     const result = convertResponse(response);
     const parts = result.content?.parts ?? [];
@@ -419,7 +419,7 @@ describe("reasoning passthrough", () => {
           logprobs: null,
         },
       ],
-    } as Partial<ChatCompletion>);
+    } as unknown as Partial<ChatCompletion>);
 
     const parts = convertResponse(response).content?.parts ?? [];
     expect(parts[0]).toEqual({ text: "thinking hard", thought: true });
@@ -443,10 +443,58 @@ describe("reasoning passthrough", () => {
 
     expect(convertResponse(response).usageMetadata).toEqual({
       promptTokenCount: 10,
-      candidatesTokenCount: 50,
+      candidatesTokenCount: 18,
       totalTokenCount: 60,
       thoughtsTokenCount: 32,
     });
+  });
+
+  it("maps prompt_tokens_details.cached_tokens to cachedContentTokenCount", () => {
+    const response = createCompletion({
+      usage: {
+        prompt_tokens: 100,
+        completion_tokens: 5,
+        total_tokens: 105,
+        prompt_tokens_details: { cached_tokens: 64 },
+      },
+    } as Partial<ChatCompletion>);
+
+    expect(convertResponse(response).usageMetadata).toEqual({
+      promptTokenCount: 100,
+      candidatesTokenCount: 5,
+      totalTokenCount: 105,
+      cachedContentTokenCount: 64,
+    });
+  });
+
+  it("omits cachedContentTokenCount when the provider reports no cache details", () => {
+    const response = createCompletion({
+      usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+    });
+    expect(
+      convertResponse(response).usageMetadata?.cachedContentTokenCount,
+    ).toBeUndefined();
+  });
+
+  it("maps cached_tokens from the streaming usage chunk", () => {
+    const acc = createStreamAccumulator();
+    convertStreamChunk(
+      {
+        id: "c",
+        object: "chat.completion.chunk",
+        created: 0,
+        model: "m",
+        choices: [],
+        usage: {
+          prompt_tokens: 20,
+          completion_tokens: 2,
+          total_tokens: 22,
+          prompt_tokens_details: { cached_tokens: 16 },
+        },
+      } as ChatCompletionChunk,
+      acc,
+    );
+    expect(acc.usage?.cachedContentTokenCount).toBe(16);
   });
 
   it("omits thoughtsTokenCount when reasoning_tokens is absent", () => {
@@ -539,13 +587,556 @@ describe("reasoning passthrough", () => {
     } as ChatCompletionChunk;
     convertStreamChunk(usageChunk, acc);
 
-    // The accumulator now holds the usage (with reasoning tokens) for the LLM
+    // The accumulator holds the usage (with reasoning tokens) for the LLM
     // stream loop to merge into the held final response.
     expect(acc.usage).toEqual({
       promptTokenCount: 12,
-      candidatesTokenCount: 40,
+      candidatesTokenCount: 15,
       totalTokenCount: 52,
       thoughtsTokenCount: 25,
     });
+  });
+});
+
+describe("reasoning_details (structured, signed) passthrough", () => {
+  const details = [
+    { type: "reasoning.text", text: "step A", signature: "sig-1", index: 0 },
+  ];
+
+  it("builds a thought part with thoughtSignature round-tripping the array", () => {
+    const response = createCompletion({
+      choices: [
+        {
+          index: 0,
+          message: {
+            role: "assistant",
+            content: "The answer.",
+            reasoning: "step A",
+            reasoning_details: details,
+            refusal: null,
+          },
+          finish_reason: "stop",
+          logprobs: null,
+        },
+      ],
+    } as unknown as Partial<ChatCompletion>);
+
+    const parts = convertResponse(response).content?.parts ?? [];
+    expect(parts[0]?.thought).toBe(true);
+    expect(parts[0]?.text).toBe("step A");
+    expect(parts[0]?.thoughtSignature).toBeDefined();
+    expect(JSON.parse(parts[0]?.thoughtSignature as string)).toEqual(details);
+    expect(parts[1]).toEqual({ text: "The answer." });
+  });
+
+  it("uses reasoning.summary text when reasoning.text is absent", () => {
+    const summaryDetails = [
+      { type: "reasoning.summary", summary: "brief", index: 0 },
+    ];
+    const response = createCompletion({
+      choices: [
+        {
+          index: 0,
+          message: {
+            role: "assistant",
+            content: "ok",
+            reasoning_details: summaryDetails,
+            refusal: null,
+          },
+          finish_reason: "stop",
+          logprobs: null,
+        },
+      ],
+    } as unknown as Partial<ChatCompletion>);
+
+    const parts = convertResponse(response).content?.parts ?? [];
+    expect(parts[0]?.text).toBe("brief");
+    expect(JSON.parse(parts[0]?.thoughtSignature as string)).toEqual(
+      summaryDetails,
+    );
+  });
+
+  it("falls back to a flat thought part (no signature) without reasoning_details", () => {
+    const response = createCompletion({
+      choices: [
+        {
+          index: 0,
+          message: {
+            role: "assistant",
+            content: "ok",
+            reasoning: "plain thinking",
+            refusal: null,
+          },
+          finish_reason: "stop",
+          logprobs: null,
+        },
+      ],
+    } as unknown as Partial<ChatCompletion>);
+
+    const parts = convertResponse(response).content?.parts ?? [];
+    expect(parts[0]).toEqual({ text: "plain thinking", thought: true });
+    expect(parts[0]?.thoughtSignature).toBeUndefined();
+  });
+
+  it("accumulates streamed reasoning_details fragments and assembles on finish", () => {
+    const acc = createStreamAccumulator();
+
+    convertStreamChunk(
+      createChunk({
+        reasoning_details: [{ type: "reasoning.text", text: "foo ", index: 0 }],
+      } as unknown as ChatCompletionChunk["choices"][0]["delta"]),
+      acc,
+    );
+    convertStreamChunk(
+      createChunk({
+        reasoning_details: [
+          { type: "reasoning.text", text: "bar", signature: "sig-z", index: 0 },
+        ],
+      } as unknown as ChatCompletionChunk["choices"][0]["delta"]),
+      acc,
+    );
+    convertStreamChunk(createChunk({ content: "answer" }), acc);
+
+    const final = convertStreamChunk(createChunk({}, "stop"), acc);
+    const parts = final.response?.content?.parts ?? [];
+    expect(parts[0]?.thought).toBe(true);
+    expect(parts[0]?.text).toBe("foo bar");
+    const sig = JSON.parse(parts[0]?.thoughtSignature as string);
+    expect(sig).toEqual([
+      { type: "reasoning.text", text: "foo bar", signature: "sig-z", index: 0 },
+    ]);
+    expect(parts[1]).toEqual({ text: "answer" });
+    // accumulator reset after completion
+    expect(acc.reasoningDetails.size).toBe(0);
+  });
+});
+
+describe("malformed tool-call arguments", () => {
+  const toolCompletion = (args: string, finish = "length") =>
+    createCompletion({
+      choices: [
+        {
+          index: 0,
+          message: {
+            role: "assistant",
+            content: "let me check",
+            tool_calls: [
+              {
+                id: "call_1",
+                type: "function",
+                function: { name: "get_weather", arguments: args },
+              },
+            ],
+          },
+          finish_reason: finish,
+          logprobs: null,
+        },
+      ],
+    } as Partial<ChatCompletion>);
+
+  it("reports truncated arguments as MALFORMED_FUNCTION_CALL instead of calling with {}", () => {
+    const response = convertResponse(toolCompletion('{"city":"Par'));
+    expect(response.finishReason).toBe(FinishReason.MALFORMED_FUNCTION_CALL);
+    expect(response.errorCode).toBe("MALFORMED_FUNCTION_CALL");
+    expect(response.errorMessage).toContain("get_weather (invalid-json)");
+    expect(response.content?.parts?.some((p) => p.functionCall)).toBe(false);
+    expect(response.content?.parts?.[0]?.text).toBe("let me check");
+  });
+
+  it("still emits calls whose arguments are empty or valid", () => {
+    for (const args of ["", "{}", '{"city":"Paris"}']) {
+      const response = convertResponse(toolCompletion(args, "tool_calls"));
+      expect(response.finishReason).toBe(FinishReason.STOP);
+      expect(response.content?.parts?.some((p) => p.functionCall)).toBe(true);
+    }
+  });
+
+  it("drops every function call of the turn when any one is malformed", () => {
+    const completion = toolCompletion('{"a":1}');
+    // biome-ignore lint/suspicious/noExplicitAny: test fixture mutation
+    (completion.choices[0] as any).message.tool_calls.push({
+      id: "call_2",
+      type: "function",
+      function: { name: "other", arguments: "{oops" },
+    });
+    const response = convertResponse(completion);
+    expect(response.finishReason).toBe(FinishReason.MALFORMED_FUNCTION_CALL);
+    expect(response.content?.parts?.some((p) => p.functionCall)).toBe(false);
+  });
+
+  it("applies to the final streaming response too", () => {
+    const acc = createStreamAccumulator();
+    convertStreamChunk(
+      createChunk({
+        tool_calls: [
+          {
+            index: 0,
+            id: "call_1",
+            type: "function",
+            function: { name: "get_weather", arguments: '{"city":"Pa' },
+          },
+        ],
+      }),
+      acc,
+    );
+    const { response, isComplete } = convertStreamChunk(
+      createChunk({}, "length"),
+      acc,
+    );
+    expect(isComplete).toBe(true);
+    expect(response?.finishReason).toBe(FinishReason.MALFORMED_FUNCTION_CALL);
+    expect(response?.errorCode).toBe("MALFORMED_FUNCTION_CALL");
+    expect(response?.content).toBeUndefined();
+  });
+});
+
+describe("encrypted-only reasoning_details (no display text)", () => {
+  // xAI Grok returns reasoning only as an encrypted blob. ADK drops any event
+  // whose parts[0].text is "" from the history, which silently removes the
+  // function call that follows.
+  const encrypted = [
+    { type: "reasoning.encrypted", data: "gAAAA-opaque", index: 0 },
+  ];
+  const toolCall = {
+    id: "call_1",
+    type: "function",
+    function: { name: "get_weather", arguments: '{"city":"Lima"}' },
+  };
+
+  function noEmptyFirstText(parts: { text?: string }[] | undefined): void {
+    expect(parts?.[0]?.text).not.toBe("");
+  }
+
+  it("omits text on the thought part instead of emitting an empty string", () => {
+    const response = convertResponse(
+      createCompletion({
+        choices: [
+          {
+            index: 0,
+            finish_reason: "tool_calls",
+            logprobs: null,
+            message: {
+              role: "assistant",
+              content: null,
+              tool_calls: [toolCall],
+              reasoning_details: encrypted,
+            },
+          },
+        ],
+      } as unknown as Partial<ChatCompletion>),
+    );
+    const parts = response.content?.parts ?? [];
+    expect(parts).toHaveLength(2);
+    expect(parts[0]?.thought).toBe(true);
+    expect("text" in (parts[0] ?? {})).toBe(false);
+    expect(JSON.parse(parts[0]?.thoughtSignature ?? "[]")).toEqual(encrypted);
+    expect(parts[1]?.functionCall?.name).toBe("get_weather");
+    noEmptyFirstText(parts);
+  });
+
+  it("does the same on the final streaming response", () => {
+    const acc = createStreamAccumulator();
+    convertStreamChunk(
+      createChunk({
+        reasoning_details: encrypted,
+        tool_calls: [
+          {
+            index: 0,
+            id: "call_1",
+            type: "function",
+            function: { name: "get_weather", arguments: '{"city":"Lima"}' },
+          },
+        ],
+      } as never),
+      acc,
+    );
+    const { response, isComplete } = convertStreamChunk(
+      createChunk({}, "tool_calls"),
+      acc,
+    );
+    expect(isComplete).toBe(true);
+    const parts = response?.content?.parts ?? [];
+    expect(parts[0]?.thought).toBe(true);
+    expect("text" in (parts[0] ?? {})).toBe(false);
+    expect(parts[1]?.functionCall?.name).toBe("get_weather");
+    noEmptyFirstText(parts);
+  });
+
+  it("keeps display text when the details carry some", () => {
+    const response = convertResponse(
+      createCompletion({
+        choices: [
+          {
+            index: 0,
+            finish_reason: "stop",
+            logprobs: null,
+            message: {
+              role: "assistant",
+              content: "answer",
+              reasoning_details: [
+                { type: "reasoning.text", text: "step 1", signature: "s" },
+                ...encrypted,
+              ],
+            },
+          },
+        ],
+      } as unknown as Partial<ChatCompletion>),
+    );
+    expect(response.content?.parts?.[0]).toMatchObject({
+      text: "step 1",
+      thought: true,
+    });
+  });
+
+  it("never yields an empty-string first part for any reasoning shape", () => {
+    for (const message of [
+      { content: null, reasoning_details: encrypted },
+      {
+        content: null,
+        reasoning_details: [{ type: "reasoning.text", text: "" }],
+      },
+      { content: "x", reasoning: "" },
+      { content: "x", reasoning_content: "" },
+    ]) {
+      const response = convertResponse(
+        createCompletion({
+          choices: [
+            {
+              index: 0,
+              finish_reason: "stop",
+              logprobs: null,
+              message: { role: "assistant", ...message },
+            },
+          ],
+        } as unknown as Partial<ChatCompletion>),
+      );
+      noEmptyFirstText(response.content?.parts);
+    }
+  });
+});
+
+describe("streamed tool-call fragments", () => {
+  function stream(chunks: ChatCompletionChunk[]) {
+    const acc = createStreamAccumulator();
+    let final: ReturnType<typeof convertStreamChunk>["response"];
+    for (const chunk of chunks) {
+      const result = convertStreamChunk(chunk, acc);
+      if (result.isComplete) final = result.response;
+    }
+    return final?.content?.parts?.filter((p) => p.functionCall) ?? [];
+  }
+
+  it("keeps a name that a gateway repeats on every fragment", () => {
+    const calls = stream([
+      createChunk({
+        tool_calls: [
+          {
+            index: 0,
+            id: "call_1",
+            function: { name: "get_weather", arguments: '{"city":' },
+          },
+        ],
+      }),
+      createChunk({
+        tool_calls: [
+          { index: 0, function: { name: "get_weather", arguments: '"Lima"}' } },
+        ],
+      }),
+      createChunk({}, "tool_calls"),
+    ]);
+    expect(calls).toEqual([
+      {
+        functionCall: {
+          id: "call_1",
+          name: "get_weather",
+          args: { city: "Lima" },
+        },
+      },
+    ]);
+  });
+
+  it("still joins a name split across fragments", () => {
+    const calls = stream([
+      createChunk({
+        tool_calls: [
+          { index: 0, id: "call_1", function: { name: "get_", arguments: "" } },
+        ],
+      }),
+      createChunk({
+        tool_calls: [
+          { index: 0, function: { name: "weather", arguments: "{}" } },
+        ],
+      }),
+      createChunk({}, "tool_calls"),
+    ]);
+    expect(calls.map((p) => p.functionCall?.name)).toEqual(["get_weather"]);
+  });
+
+  it("attaches a fragment without index or id to the last call", () => {
+    const calls = stream([
+      createChunk({
+        tool_calls: [
+          {
+            id: "call_1",
+            function: { name: "get_weather", arguments: '{"city":' },
+          } as never,
+        ],
+      }),
+      createChunk({
+        tool_calls: [{ function: { arguments: '"Lima"}' } } as never],
+      }),
+      createChunk({}, "tool_calls"),
+    ]);
+    expect(calls).toEqual([
+      {
+        functionCall: {
+          id: "call_1",
+          name: "get_weather",
+          args: { city: "Lima" },
+        },
+      },
+    ]);
+  });
+
+  it("starts a new call for a fragment without index that has a new id", () => {
+    const calls = stream([
+      createChunk({
+        tool_calls: [
+          { id: "call_1", function: { name: "a", arguments: "{}" } } as never,
+        ],
+      }),
+      createChunk({
+        tool_calls: [
+          { id: "call_2", function: { name: "b", arguments: "{}" } } as never,
+        ],
+      }),
+      createChunk({}, "tool_calls"),
+    ]);
+    expect(
+      calls.map((p) => [p.functionCall?.id, p.functionCall?.name]),
+    ).toEqual([
+      ["call_1", "a"],
+      ["call_2", "b"],
+    ]);
+  });
+
+  it("generates an id for a streamed call that has none", () => {
+    const calls = stream([
+      createChunk({
+        tool_calls: [{ index: 0, function: { name: "a", arguments: "{}" } }],
+      }),
+      createChunk({}, "tool_calls"),
+    ]);
+    expect(calls[0]?.functionCall?.id).toMatch(/^call_[0-9a-f]{32}$/);
+  });
+});
+
+describe("tool calls without an id", () => {
+  it("convertResponse generates an id for a call that has none", () => {
+    const response = createCompletion({
+      choices: [
+        {
+          index: 0,
+          message: {
+            role: "assistant",
+            content: null,
+            tool_calls: [
+              {
+                id: "",
+                type: "function",
+                function: { name: "a", arguments: "{}" },
+              },
+            ],
+          },
+          finish_reason: "tool_calls",
+          logprobs: null,
+        },
+      ],
+    } as Partial<ChatCompletion>);
+    const call = convertResponse(response).content?.parts?.[0]?.functionCall;
+    expect(call?.id).toMatch(/^call_[0-9a-f]{32}$/);
+  });
+});
+
+describe("streamed reasoning_details without index", () => {
+  it("merges fragments without index into the last entry", () => {
+    const acc = createStreamAccumulator();
+    convertStreamChunk(
+      createChunk({
+        reasoning_details: [{ type: "reasoning.text", text: "Think" }],
+      } as never),
+      acc,
+    );
+    convertStreamChunk(
+      createChunk({
+        reasoning_details: [
+          { type: "reasoning.text", text: "ing.", signature: "sig" },
+        ],
+      } as never),
+      acc,
+    );
+    const { response } = convertStreamChunk(
+      createChunk({ content: "Done" }, "stop"),
+      acc,
+    );
+    const thought = response?.content?.parts?.find((p) => p.thought);
+    expect(thought?.text).toBe("Thinking.");
+    expect(JSON.parse(thought?.thoughtSignature ?? "[]")).toEqual([
+      { type: "reasoning.text", text: "Thinking.", signature: "sig" },
+    ]);
+  });
+
+  it("keeps indexed entries apart", () => {
+    const acc = createStreamAccumulator();
+    convertStreamChunk(
+      createChunk({
+        reasoning_details: [
+          { type: "reasoning.text", text: "A", index: 0 },
+          { type: "reasoning.text", text: "B", index: 1 },
+        ],
+      } as never),
+      acc,
+    );
+    const { response } = convertStreamChunk(createChunk({}, "stop"), acc);
+    const thought = response?.content?.parts?.find((p) => p.thought);
+    expect(JSON.parse(thought?.thoughtSignature ?? "[]")).toHaveLength(2);
+  });
+});
+
+describe("reasoning tokens are not counted twice", () => {
+  it("candidatesTokenCount excludes reasoning tokens, as Gemini reports it", () => {
+    const response = createCompletion({
+      usage: {
+        prompt_tokens: 10,
+        completion_tokens: 50,
+        total_tokens: 60,
+        completion_tokens_details: { reasoning_tokens: 32 },
+      },
+    } as Partial<ChatCompletion>);
+    const usage = convertResponse(response).usageMetadata;
+    expect(usage).toEqual({
+      promptTokenCount: 10,
+      candidatesTokenCount: 18,
+      totalTokenCount: 60,
+      thoughtsTokenCount: 32,
+    });
+    // ADK main's output tokens (candidates + thoughts) equal completion_tokens.
+    expect(
+      (usage?.candidatesTokenCount ?? 0) + (usage?.thoughtsTokenCount ?? 0),
+    ).toBe(50);
+  });
+
+  it("never reports negative candidate tokens", () => {
+    const response = createCompletion({
+      usage: {
+        prompt_tokens: 1,
+        completion_tokens: 5,
+        total_tokens: 6,
+        completion_tokens_details: { reasoning_tokens: 9 },
+      },
+    } as Partial<ChatCompletion>);
+    expect(convertResponse(response).usageMetadata?.candidatesTokenCount).toBe(
+      0,
+    );
   });
 });

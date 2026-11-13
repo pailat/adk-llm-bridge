@@ -1,7 +1,9 @@
 import { existsSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, relative } from "node:path";
 
-export function parseArchitectureAnalysisPaths(value: string | undefined): string[] {
+export function parseArchitectureAnalysisPaths(
+  value: string | undefined,
+): string[] {
   const paths = (value ?? "")
     .split(",")
     .map((item) => item.trim())
@@ -34,7 +36,10 @@ export function normalizeAllowedDirectory(path: string): string {
   return realPath;
 }
 
-export function isPathAllowed(requestedPath: string, allowedPaths: readonly string[]): boolean {
+export function isPathAllowed(
+  requestedPath: string,
+  allowedPaths: readonly string[],
+): boolean {
   const requested = normalizeAllowedDirectory(requestedPath);
   return allowedPaths.some((allowedPath) => {
     const allowed = normalizeAllowedDirectory(allowedPath);

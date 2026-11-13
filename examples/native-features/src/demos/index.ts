@@ -6,12 +6,12 @@
  * this is the single place that knows the full demo set.
  */
 import { registry } from "../registry";
-import { samplingDemo } from "./sampling";
-import { reasoningDemo } from "./reasoning";
-import { structuredOutputDemo } from "./structured-output";
 import { multimodalDemo } from "./multimodal";
-import { toolChoiceDemo } from "./tool-choice";
+import { reasoningDemo } from "./reasoning";
+import { samplingDemo } from "./sampling";
 import { streamingDemo } from "./streaming";
+import { structuredOutputDemo } from "./structured-output";
+import { toolChoiceDemo } from "./tool-choice";
 
 registry.register(samplingDemo);
 registry.register(reasoningDemo);

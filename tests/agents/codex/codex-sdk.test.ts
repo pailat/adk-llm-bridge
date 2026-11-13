@@ -1,7 +1,14 @@
-import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
+import { afterEach, describe, expect, test } from "bun:test";
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { describe, expect, test } from "bun:test";
+import { dirname, join } from "node:path";
 import { CodexAgent } from "../../../src/agents/codex-agent.js";
 import { CodexCliDriver } from "../../../src/agents/driver/codex-cli.js";
 import {
@@ -9,6 +16,12 @@ import {
   mapPolicyToCodexSdkThreadOptions,
 } from "../../../src/agents/driver/codex-sdk.js";
 import { CODEX_PROVIDER } from "../../../src/agents/provider/schema.js";
+import { resolveBridgeToSource } from "../../helpers/example-modules.js";
+import { withDeadline } from "../helpers.js";
+
+// The driver cannot turn off the host MCP servers of an injected sdk client,
+// and network is off unless allowNetwork is true, so these runs opt in.
+const INJECTED_SDK_RUN = { mode: "read-only", allowNetwork: true } as const;
 
 async function* sdkEvents(events: readonly Record<string, unknown>[]) {
   for (const event of events) {
@@ -68,6 +81,7 @@ describe("CodexSdkDriver", () => {
       baseUrl: "https://example.test/v1",
       apiKey: "codex-key",
       config: { show_raw_agent_reasoning: true },
+      configOverrides: ['approvals_reviewer="user"'],
       env: {
         PATH: "/bin",
         HOME: "/Users/example",
@@ -86,10 +100,15 @@ describe("CodexSdkDriver", () => {
 
   test("detects Codex binary from explicit environment overrides", () => {
     const dir = mkdtempSync(join(tmpdir(), "codex-sdk-driver-"));
-    const executable = join(dir, process.platform === "win32" ? "codex.exe" : "codex");
+    const executable = join(
+      dir,
+      process.platform === "win32" ? "codex.exe" : "codex",
+    );
     writeFileSync(executable, "#!/bin/sh\nexit 0\n");
     chmodSync(executable, 0o755);
-    const driver = new CodexSdkDriver({ env: { CODEX_EXECUTABLE: executable } });
+    const driver = new CodexSdkDriver({
+      env: { CODEX_EXECUTABLE: executable },
+    });
 
     const resolution = driver.resolveCodexBinary({
       provider: CODEX_PROVIDER,
@@ -104,14 +123,104 @@ describe("CodexSdkDriver", () => {
     expect(options.codexPathOverride).toBe(executable);
   });
 
+  test("never picks a Codex binary from the run's working directory", () => {
+    // The agent can write its working directory, so a binary planted there
+    // in one run would otherwise start, unsandboxed, the next run.
+    const workspace = mkdtempSync(join(tmpdir(), "codex-sdk-workspace-"));
+    const executable = process.platform === "win32" ? "codex.exe" : "codex";
+    const planted = join(workspace, "node_modules", ".bin", executable);
+    mkdirSync(dirname(planted), { recursive: true });
+    writeFileSync(planted, "#!/bin/sh\nexit 0\n");
+    chmodSync(planted, 0o755);
+    const driver = new CodexSdkDriver({ env: { PATH: "", HOME: workspace } });
+
+    const resolution = driver.resolveCodexBinary({
+      provider: CODEX_PROVIDER,
+      context: {} as never,
+      workingDirectory: workspace,
+    });
+
+    expect(resolution.path).not.toBe(planted);
+    expect(
+      resolution.checked.some((path) =>
+        path.startsWith(join(workspace, "node_modules")),
+      ),
+    ).toBe(false);
+  });
+
+  for (const [label, workingDirectory] of [
+    ["unset", () => undefined],
+    ["the process directory", () => process.cwd()],
+  ] as const) {
+    test(`skips a binary planted in the process directory when workingDirectory is ${label}`, () => {
+      // The host runs from a directory the agent can write (the default
+      // setup): neither its node_modules nor a PATH entry inside it may
+      // supply the next run's binary.
+      const workspace = realpathSync(
+        mkdtempSync(join(tmpdir(), "codex-sdk-cwd-")),
+      );
+      const executable = process.platform === "win32" ? "codex.exe" : "codex";
+      const bin = join(workspace, "node_modules", ".bin");
+      const planted = join(bin, executable);
+      mkdirSync(bin, { recursive: true });
+      writeFileSync(planted, "#!/bin/sh\nexit 0\n");
+      chmodSync(planted, 0o755);
+      const previous = process.cwd();
+      process.chdir(workspace);
+      try {
+        const driver = new CodexSdkDriver({
+          env: { PATH: bin, HOME: join(workspace, "home") },
+        });
+        const resolution = driver.resolveCodexBinary({
+          provider: CODEX_PROVIDER,
+          context: {} as never,
+          workingDirectory: workingDirectory(),
+        });
+
+        expect(resolution.path).toBeUndefined();
+        expect(
+          resolution.checked.filter((path) => path.startsWith(workspace)),
+        ).toEqual([]);
+      } finally {
+        process.chdir(previous);
+        rmSync(workspace, { recursive: true, force: true });
+      }
+    });
+  }
+
+  test("an explicit binary inside the working directory is still used", () => {
+    const workspace = realpathSync(
+      mkdtempSync(join(tmpdir(), "codex-sdk-explicit-")),
+    );
+    const executable = join(workspace, "codex");
+    try {
+      const driver = new CodexSdkDriver({
+        env: { PATH: "", CODEX_EXECUTABLE: executable },
+      });
+      expect(
+        driver.resolveCodexBinary({
+          provider: CODEX_PROVIDER,
+          context: {} as never,
+          workingDirectory: workspace,
+        }).path,
+      ).toBe(executable);
+    } finally {
+      rmSync(workspace, { recursive: true, force: true });
+    }
+  });
+
   test("emits actionable Codex binary lookup errors", async () => {
     const driver = new CodexSdkDriver({
       env: { CODEX_EXECUTABLE: "/missing/codex" },
+      // No host MCP servers to list, so the error comes from startThread.
+      listMcpServers: async () => [],
       Codex: class {
-        startThread() {
-          throw new Error("Unable to locate Codex CLI binaries. Ensure @openai/codex is installed with optional dependencies.");
+        startThread(): never {
+          throw new Error(
+            "Unable to locate Codex CLI binaries. Ensure @openai/codex is installed with optional dependencies.",
+          );
         }
-        resumeThread() {
+        resumeThread(): never {
           throw new Error("not used");
         }
       },
@@ -129,9 +238,11 @@ describe("CodexSdkDriver", () => {
       { type: "started", providerId: "codex", timestamp: expect.any(Number) },
       {
         type: "error",
-        message: expect.stringContaining("Set CODEX_EXECUTABLE=/absolute/path/to/codex"),
+        message: expect.stringContaining(
+          "Set CODEX_EXECUTABLE=/absolute/path/to/codex",
+        ),
         // A missing-binary condition is non-recoverable: retrying without
-        // installing the binary is futile (CODEX-5).
+        // installing the binary is futile.
         code: "MISSING_BINARY",
         recoverable: false,
         timestamp: expect.any(Number),
@@ -141,21 +252,28 @@ describe("CodexSdkDriver", () => {
   });
 
   test("maps bridge permissions to Codex SDK thread options", () => {
+    // Network access is off unless allowNetwork is true.
     expect(mapPolicyToCodexSdkThreadOptions()).toEqual({
       sandboxMode: "read-only",
       approvalPolicy: "never",
+      networkAccessEnabled: false,
     });
     expect(mapPolicyToCodexSdkThreadOptions({ mode: "ask" })).toEqual({
       sandboxMode: "workspace-write",
       approvalPolicy: "on-request",
+      networkAccessEnabled: false,
     });
-    expect(mapPolicyToCodexSdkThreadOptions({ mode: "workspace-write" })).toEqual({
+    expect(
+      mapPolicyToCodexSdkThreadOptions({ mode: "workspace-write" }),
+    ).toEqual({
       sandboxMode: "workspace-write",
       approvalPolicy: "never",
+      networkAccessEnabled: false,
     });
     expect(mapPolicyToCodexSdkThreadOptions({ mode: "full-access" })).toEqual({
       sandboxMode: "danger-full-access",
       approvalPolicy: "never",
+      networkAccessEnabled: false,
     });
     expect(
       mapPolicyToCodexSdkThreadOptions({
@@ -179,7 +297,7 @@ describe("CodexSdkDriver", () => {
         startThread: (options) => {
           startThreadOptions = options;
           return {
-            runStreamed: async (input) => {
+            runStreamed: async (input: unknown) => {
               runInput = input;
               return {
                 events: sdkEvents([
@@ -216,7 +334,7 @@ describe("CodexSdkDriver", () => {
       context: { userContent: { parts: [{ text: "Review this" }] } } as never,
       instruction: "Be concise.",
       workingDirectory: "/repo",
-      permissions: { mode: "read-only" },
+      permissions: INJECTED_SDK_RUN,
     })) {
       events.push(event);
     }
@@ -229,7 +347,12 @@ describe("CodexSdkDriver", () => {
     expect(runInput).toBe("Be concise.\n\nReview this");
     expect(events).toEqual([
       { type: "started", providerId: "codex", timestamp: expect.any(Number) },
-      { type: "output", content: "Done", stream: "stdout", timestamp: expect.any(Number) },
+      {
+        type: "output",
+        content: "Done",
+        stream: "stdout",
+        timestamp: expect.any(Number),
+      },
       {
         type: "tool_call",
         name: "command_execution",
@@ -237,6 +360,7 @@ describe("CodexSdkDriver", () => {
         callId: "item-2",
         metadata: {
           itemType: "command_execution",
+          builtin: true,
           status: "completed",
           command: "pwd",
           title: "Codex: command_execution call",
@@ -250,6 +374,7 @@ describe("CodexSdkDriver", () => {
         callId: "item-2",
         metadata: {
           itemType: "command_execution",
+          builtin: true,
           status: "completed",
           command: "pwd",
           exitCode: 0,
@@ -257,8 +382,70 @@ describe("CodexSdkDriver", () => {
         },
         timestamp: expect.any(Number),
       },
-      { type: "completed", exitCode: 0, timestamp: expect.any(Number) },
+      {
+        type: "completed",
+        exitCode: 0,
+        usage: { inputTokens: 1 },
+        timestamp: expect.any(Number),
+      },
     ]);
+  });
+
+  test("returns the SDK event iterator after turn.completed without waiting for EOF", async () => {
+    let returned = false;
+    let read = false;
+    const never = new Promise<IteratorResult<Record<string, unknown>>>(
+      () => {},
+    );
+    const sdkStream: AsyncIterable<Record<string, unknown>> = {
+      [Symbol.asyncIterator]() {
+        return {
+          next: async () => {
+            if (!read) {
+              read = true;
+              return { value: { type: "turn.completed" }, done: false };
+            }
+            return never;
+          },
+          return: async () => {
+            returned = true;
+            return { value: undefined, done: true };
+          },
+        };
+      },
+    };
+    const driver = new CodexSdkDriver({
+      sdk: {
+        startThread: () => ({
+          // The driver only iterates `events`, so a bare iterable stands in for the SDK generator.
+          runStreamed: async () => ({
+            events: sdkStream as AsyncGenerator<Record<string, unknown>>,
+          }),
+        }),
+        resumeThread: () => {
+          throw new Error("not used");
+        },
+      },
+    });
+
+    const events = await withDeadline(
+      (async () => {
+        const collected = [];
+        for await (const event of driver.run({
+          provider: CODEX_PROVIDER,
+          context: { userContent: { parts: [{ text: "finish" }] } } as never,
+          permissions: INJECTED_SDK_RUN,
+        })) {
+          collected.push(event);
+        }
+        return collected;
+      })(),
+      2000,
+      "Codex driver waited for SDK EOF after turn.completed",
+    );
+
+    expect(events.map((event) => event.type)).toEqual(["started", "completed"]);
+    expect(returned).toBe(true);
   });
 
   test("buildPrompt includes prior session history alongside userContent", async () => {
@@ -266,7 +453,7 @@ describe("CodexSdkDriver", () => {
     const driver = new CodexSdkDriver({
       sdk: {
         startThread: () => ({
-          runStreamed: async (input) => {
+          runStreamed: async (input: unknown) => {
             capturedInput = String(input);
             return {
               events: sdkEvents([{ type: "turn.completed" }]),
@@ -298,7 +485,7 @@ describe("CodexSdkDriver", () => {
         },
         userContent: { role: "user", parts: [{ text: "follow-up question" }] },
       } as never,
-      permissions: { mode: "read-only" },
+      permissions: INJECTED_SDK_RUN,
     })) {
       void _event;
     }
@@ -331,6 +518,7 @@ describe("CodexSdkDriver", () => {
         turnComplete: false,
         metadata: {
           itemType: "mcp_tool_call",
+          itemId: "mcp-1",
           toolName: "search_docs",
           status: "in_progress",
           title: "Codex: search_docs in_progress",
@@ -364,6 +552,8 @@ describe("CodexSdkDriver", () => {
         callId: "mcp-1",
         metadata: {
           itemType: "mcp_tool_call",
+          builtin: true,
+          mcp: { server: "docs", tool: "search_docs" },
           status: "completed",
           title: "Codex: search_docs call",
         },
@@ -382,6 +572,8 @@ describe("CodexSdkDriver", () => {
         error: undefined,
         metadata: {
           itemType: "mcp_tool_call",
+          builtin: true,
+          mcp: { server: "docs", tool: "search_docs" },
           status: "completed",
           title: "Codex: search_docs completed",
         },
@@ -400,7 +592,7 @@ describe("CodexSdkDriver", () => {
           startCalls++;
           return {
             id: "thread-test-123",
-            runStreamed: async (input) => {
+            runStreamed: async (input: unknown) => {
               runInput = input;
               return {
                 events: sdkEvents([
@@ -432,7 +624,7 @@ describe("CodexSdkDriver", () => {
         session,
         userContent: { role: "user", parts: [{ text: "hello" }] },
       } as never,
-      permissions: { mode: "read-only" },
+      permissions: INJECTED_SDK_RUN,
     })) {
       events.push(event);
     }
@@ -455,16 +647,19 @@ describe("CodexSdkDriver", () => {
     );
     const adkEvent = new (class extends ExternalAgent {
       expose(ev: unknown, ctx: unknown) {
-        return (this as unknown as {
-          toAdkEvent: (e: unknown, c: unknown) => unknown;
-        }).toAdkEvent(ev, ctx);
+        return (
+          this as unknown as {
+            toAdkEvent: (e: unknown, c: unknown) => unknown;
+          }
+        ).toAdkEvent(ev, ctx);
       }
     })({ name: "codex", provider: CODEX_PROVIDER }).expose(stateDeltaEvent, {
       invocationId: "inv-1",
       branch: "root",
     });
-    expect((adkEvent as { actions?: { stateDelta?: unknown } }).actions?.stateDelta)
-      .toEqual({ "codex_thread:codex": "thread-test-123" });
+    expect(
+      (adkEvent as { actions?: { stateDelta?: unknown } }).actions?.stateDelta,
+    ).toEqual({ "codex_thread:codex": "thread-test-123" });
   });
 
   test("second invocation resumes the saved thread and sends only the current turn", async () => {
@@ -481,7 +676,7 @@ describe("CodexSdkDriver", () => {
           resumeId = id;
           return {
             id,
-            runStreamed: async (input) => {
+            runStreamed: async (input: unknown) => {
               runInput = input;
               return {
                 events: sdkEvents([
@@ -519,7 +714,7 @@ describe("CodexSdkDriver", () => {
         },
         userContent: { role: "user", parts: [{ text: "follow-up" }] },
       } as never,
-      permissions: { mode: "read-only" },
+      permissions: INJECTED_SDK_RUN,
     })) {
       events.push(event);
     }
@@ -536,15 +731,16 @@ describe("CodexSdkDriver", () => {
     let capturedInput: unknown;
     const driver = new CodexSdkDriver({
       sdk: {
-        startThread: () => ({
-          id: "thread-cold-1",
-          runStreamed: async (input) => {
-            capturedInput = input;
-            return {
-              events: sdkEvents([{ type: "turn.completed" }]),
-            };
-          },
-        }) as never,
+        startThread: () =>
+          ({
+            id: "thread-cold-1",
+            runStreamed: async (input: unknown) => {
+              capturedInput = input;
+              return {
+                events: sdkEvents([{ type: "turn.completed" }]),
+              };
+            },
+          }) as never,
         resumeThread: () => {
           throw new Error("not used");
         },
@@ -572,7 +768,7 @@ describe("CodexSdkDriver", () => {
         },
         userContent: { role: "user", parts: [{ text: "follow-up question" }] },
       } as never,
-      permissions: { mode: "read-only" },
+      permissions: INJECTED_SDK_RUN,
     })) {
       void _event;
     }
@@ -607,7 +803,10 @@ describe("CodexSdkDriver", () => {
     ]);
 
     expect(
-      driver.normalizeEvent({ type: "turn.failed", error: { message: "failed" } }),
+      driver.normalizeEvent({
+        type: "turn.failed",
+        error: { message: "failed" },
+      }),
     ).toEqual([
       {
         type: "error",
@@ -621,7 +820,7 @@ describe("CodexSdkDriver", () => {
   });
 
   // ===========================================================================
-  // CODEX-3: env passthrough (proxy/cert/CODEX_HOME) + CODEX_ACCESS_TOKEN
+  // Env passthrough (proxy/cert/CODEX_HOME) + CODEX_ACCESS_TOKEN
   // ===========================================================================
 
   test("CODEX_ENV_ALLOWLIST includes CODEX_ACCESS_TOKEN", () => {
@@ -687,7 +886,7 @@ describe("CodexSdkDriver", () => {
   });
 
   // ===========================================================================
-  // CODEX-4: thread.started captures the id immediately (resumability survives
+  // thread.started captures the id immediately (resumability survives
   // a mid-turn throw).
   // ===========================================================================
 
@@ -722,7 +921,7 @@ describe("CodexSdkDriver", () => {
         session: { state: {} },
         userContent: { role: "user", parts: [{ text: "hi" }] },
       } as never,
-      permissions: { mode: "read-only" },
+      permissions: INJECTED_SDK_RUN,
     })) {
       events.push(event);
     }
@@ -740,7 +939,7 @@ describe("CodexSdkDriver", () => {
   });
 
   // ===========================================================================
-  // CODEX-5: error classification — auth/missing-binary non-recoverable;
+  // Error classification — auth/missing-binary non-recoverable;
   // transport recoverable.
   // ===========================================================================
 
@@ -759,11 +958,15 @@ describe("CodexSdkDriver", () => {
     "run() classifies thrown error %p as recoverable=%p (%s)",
     async (message, recoverable, code) => {
       const driver = new CodexSdkDriver({
+        // No real `codex mcp list` and no host binary: the path is given and
+        // the lister is a fake, so the run never depends on the host PATH.
+        codexPathOverride: "/opt/codex",
+        listMcpServers: async () => [],
         Codex: class {
-          startThread() {
+          startThread(): never {
             throw new Error(message as string);
           }
-          resumeThread() {
+          resumeThread(): never {
             throw new Error("not used");
           }
         },
@@ -800,10 +1003,10 @@ describe("CodexSdkDriver", () => {
   });
 
   // ===========================================================================
-  // CODEX-7: web search forwarded only when network access is enabled.
+  // Web search forwarded only when network access is enabled.
   // ===========================================================================
 
-  test("drops webSearch options when allowNetwork is false", () => {
+  test("turns web search off when allowNetwork is false", () => {
     const driver = new CodexSdkDriver({
       webSearchMode: "live",
       webSearchEnabled: true,
@@ -815,7 +1018,8 @@ describe("CodexSdkDriver", () => {
       permissions: { mode: "read-only", allowNetwork: false },
     });
 
-    expect(options.webSearchMode).toBeUndefined();
+    // Explicitly disabled, so a host config.toml cannot turn it on.
+    expect(options.webSearchMode).toBe("disabled");
     expect(options.webSearchEnabled).toBeUndefined();
   });
 
@@ -838,11 +1042,22 @@ describe("CodexSdkDriver", () => {
 });
 
 // ===========================================================================
-// CODEX-1: example credential guard keys on real Codex signals (not "codex on
+// The example credential guard keys on real Codex signals (not "codex on
 // PATH"); driver adds no OPENAI_API_KEY fallback to credential resolution.
 // ===========================================================================
 
-describe("basic-agent-codex credential guard (CODEX-1)", () => {
+// A path in a variable keeps tsc from type-checking the example, a standalone
+// project; its `adk-llm-bridge/agents` import loads `src/`.
+resolveBridgeToSource();
+const CODEX_EXAMPLE = "../../../examples/basic-agent-codex/agent.ts";
+
+async function importCodexExample(): Promise<{
+  codexCredentialsAvailable(): boolean;
+}> {
+  return await import(CODEX_EXAMPLE);
+}
+
+describe("basic-agent-codex credential guard", () => {
   const CRED_KEYS = [
     "CODEX_API_KEY",
     "OPENAI_API_KEY",
@@ -851,14 +1066,26 @@ describe("basic-agent-codex credential guard (CODEX-1)", () => {
     "CODEX_HOME",
   ] as const;
 
-  function withClearedEnv<T>(fn: () => T): T {
+  const tempDirs: string[] = [];
+  function makeTempDir(prefix: string): string {
+    const dir = mkdtempSync(join(tmpdir(), prefix));
+    tempDirs.push(dir);
+    return dir;
+  }
+  afterEach(() => {
+    for (const dir of tempDirs.splice(0)) {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  async function withClearedEnv<T>(fn: () => T | Promise<T>): Promise<T> {
     const saved: Record<string, string | undefined> = {};
     for (const key of CRED_KEYS) {
       saved[key] = process.env[key];
       delete process.env[key];
     }
     try {
-      return fn();
+      return await fn();
     } finally {
       for (const key of CRED_KEYS) {
         if (saved[key] === undefined) {
@@ -871,20 +1098,16 @@ describe("basic-agent-codex credential guard (CODEX-1)", () => {
   }
 
   test("returns true for a readable auth.json with no PATH binary, false for none", async () => {
-    const { codexCredentialsAvailable } = await import(
-      "../../../examples/basic-agent-codex/agent.ts"
-    );
+    const { codexCredentialsAvailable } = await importCodexExample();
 
     await withClearedEnv(async () => {
       // No credential at all → false (an absent CODEX_HOME points at
       // ~/.codex/auth.json which does not exist in CI).
-      process.env.CODEX_HOME = join(
-        mkdtempSync(join(tmpdir(), "codex-empty-home-")),
-      );
+      process.env.CODEX_HOME = makeTempDir("codex-empty-home-");
       expect(codexCredentialsAvailable()).toBe(false);
 
       // A readable auth.json under $CODEX_HOME → true, even with no PATH binary.
-      const home = mkdtempSync(join(tmpdir(), "codex-home-"));
+      const home = makeTempDir("codex-home-");
       writeFileSync(join(home, "auth.json"), '{"OPENAI_API_KEY":"x"}');
       process.env.CODEX_HOME = home;
       expect(codexCredentialsAvailable()).toBe(true);
@@ -892,11 +1115,9 @@ describe("basic-agent-codex credential guard (CODEX-1)", () => {
   });
 
   test("returns true when CODEX_API_KEY is set", async () => {
-    const { codexCredentialsAvailable } = await import(
-      "../../../examples/basic-agent-codex/agent.ts"
-    );
+    const { codexCredentialsAvailable } = await importCodexExample();
     await withClearedEnv(() => {
-      process.env.CODEX_HOME = mkdtempSync(join(tmpdir(), "codex-empty-"));
+      process.env.CODEX_HOME = makeTempDir("codex-empty-");
       process.env.CODEX_API_KEY = "key-abc";
       expect(codexCredentialsAvailable()).toBe(true);
     });
@@ -904,7 +1125,7 @@ describe("basic-agent-codex credential guard (CODEX-1)", () => {
 
   test("driver credential resolution has no OPENAI_API_KEY fallback", () => {
     // Only OPENAI_API_KEY present in env — the driver must NOT pick it up as the
-    // Codex apiKey (CODEX-2 refuted: OPENAI_API_KEY is not a Codex CLI var).
+    // Codex apiKey (OPENAI_API_KEY is not a Codex CLI var).
     const driver = new CodexSdkDriver({
       env: { OPENAI_API_KEY: "openai-only" },
     });
@@ -913,5 +1134,81 @@ describe("basic-agent-codex credential guard (CODEX-1)", () => {
       context: {} as never,
     });
     expect(options.apiKey).toBeUndefined();
+  });
+
+  describe("one error event per failure", () => {
+    async function runWith(events: readonly Record<string, unknown>[]) {
+      const driver = new CodexSdkDriver({
+        sdk: {
+          startThread: () => ({
+            runStreamed: async () => ({ events: sdkEvents(events) }),
+          }),
+          resumeThread: () => {
+            throw new Error("not used");
+          },
+        },
+      });
+      const collected = [];
+      for await (const event of driver.run({
+        provider: CODEX_PROVIDER,
+        context: { userContent: { parts: [{ text: "go" }] } } as never,
+        permissions: INJECTED_SDK_RUN,
+      })) {
+        collected.push(event);
+      }
+      return collected;
+    }
+
+    test("a stream error followed by turn.failed yields a single error", async () => {
+      const message = "You've hit your usage limit. Try again later.";
+      const events = await runWith([
+        { type: "thread.started", thread_id: "t1" },
+        { type: "turn.started" },
+        { type: "error", message },
+        { type: "turn.failed", error: { message } },
+      ]);
+
+      const errors = events.filter((event) => event.type === "error");
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toMatchObject({ message });
+      expect(events.at(-1)).toMatchObject({ type: "completed", exitCode: 1 });
+    });
+
+    test("turn.failed without a message keeps the stream error message", async () => {
+      const events = await runWith([
+        { type: "error", message: "stream broke" },
+        { type: "turn.failed", error: {} },
+      ]);
+
+      const errors = events.filter((event) => event.type === "error");
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toMatchObject({ message: "stream broke" });
+    });
+
+    test("a stream error not followed by turn.failed is still emitted", async () => {
+      const events = await runWith([
+        { type: "error", message: "transient" },
+        {
+          type: "item.completed",
+          item: { id: "m1", type: "agent_message", text: "recovered" },
+        },
+        { type: "turn.completed" },
+      ]);
+
+      expect(events.map((event) => event.type)).toEqual([
+        "started",
+        "error",
+        "output",
+        "completed",
+      ]);
+    });
+
+    test("a trailing stream error at end of stream is emitted", async () => {
+      const events = await runWith([{ type: "error", message: "last words" }]);
+
+      expect(events.filter((event) => event.type === "error")).toMatchObject([
+        { message: "last words" },
+      ]);
+    });
   });
 });

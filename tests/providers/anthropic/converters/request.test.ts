@@ -1,6 +1,6 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import type Anthropic from "@anthropic-ai/sdk";
-import type { LlmRequest } from "@google/adk";
+import { InputValidationError, type LlmRequest } from "@google/adk";
 import { FunctionCallingConfigMode, type Schema } from "@google/genai";
 import {
   applyAnthropicPromptCaching,
@@ -9,6 +9,13 @@ import {
   convertAnthropicStructuredOutput,
   convertAnthropicToolChoice,
 } from "../../../../src/providers/anthropic/converters/request.js";
+import { convertAnthropicResponse } from "../../../../src/providers/anthropic/converters/response.js";
+import {
+  EMPTY_THINKING_SIGNATURE_PREFIX,
+  THINKING_SIGNATURE_PREFIX,
+} from "../../../../src/providers/anthropic/converters/thinking-signature.js";
+import { LogCode } from "../../../../src/utils/log.js";
+import { captureWarnings } from "../../../helpers/fake-logger.js";
 
 function createLlmRequest(overrides: Partial<LlmRequest> = {}): LlmRequest {
   return {
@@ -183,6 +190,457 @@ describe("convertAnthropicRequest", () => {
       expect(props.count.type).toBe("integer");
       expect(props.active.type).toBe("boolean");
       expect(props.items.type).toBe("array");
+    });
+  });
+
+  describe("parametersJsonSchema", () => {
+    const jsonSchema = {
+      type: "object" as const,
+      properties: { city: { type: "string" } },
+      required: ["city"],
+      additionalProperties: false,
+    };
+
+    function withDeclaration(
+      declaration: Record<string, unknown>,
+    ): Anthropic.Tool | undefined {
+      const result = convertAnthropicRequest(
+        createLlmRequest({
+          contents: [{ role: "user", parts: [{ text: "hi" }] }],
+          config: { tools: [{ functionDeclarations: [declaration] }] },
+        } as Partial<LlmRequest>),
+      );
+      return result.tools?.[0];
+    }
+
+    it("forwards parametersJsonSchema as-is when parameters is absent", () => {
+      const tool = withDeclaration({
+        name: "get_weather",
+        parametersJsonSchema: jsonSchema,
+      });
+      expect(tool?.input_schema).toEqual(jsonSchema);
+    });
+
+    it("prefers parametersJsonSchema over parameters when both are present", () => {
+      const tool = withDeclaration({
+        name: "get_weather",
+        parameters: {
+          type: "OBJECT",
+          properties: { other: { type: "STRING" } },
+        },
+        parametersJsonSchema: jsonSchema,
+      });
+      expect(tool?.input_schema).toEqual(jsonSchema);
+    });
+
+    it("still normalizes parameters when parametersJsonSchema is absent", () => {
+      const tool = withDeclaration({
+        name: "get_weather",
+        parameters: {
+          type: "OBJECT",
+          properties: { city: { type: "STRING" } },
+        },
+      });
+      expect(tool?.input_schema).toMatchObject({
+        type: "object",
+        properties: { city: { type: "string" } },
+      });
+    });
+
+    it("falls back to an empty object schema when neither is present", () => {
+      const tool = withDeclaration({ name: "ping" });
+      expect(tool?.input_schema).toEqual({ type: "object", properties: {} });
+    });
+
+    it("ignores an array parametersJsonSchema, as the OpenAI converter does", () => {
+      const tool = withDeclaration({
+        name: "ping",
+        parametersJsonSchema: [{ type: "string" }],
+        parameters: { type: "OBJECT", properties: { q: { type: "STRING" } } },
+      });
+      expect(tool?.input_schema).toMatchObject({
+        type: "object",
+        properties: { q: { type: "string" } },
+      });
+      expect(
+        withDeclaration({ name: "ping", parametersJsonSchema: [] })
+          ?.input_schema,
+      ).toEqual({ type: "object", properties: {} });
+    });
+  });
+
+  describe("tool call id correlation", () => {
+    type Block = { type: string; id?: string; tool_use_id?: string };
+
+    function convert(contents: LlmRequest["contents"]): Block[] {
+      const { messages } = convertAnthropicRequest(
+        createLlmRequest({ contents }),
+      );
+      return messages.flatMap((m) =>
+        Array.isArray(m.content) ? (m.content as unknown as Block[]) : [],
+      );
+    }
+
+    const user = { role: "user", parts: [{ text: "go" }] };
+
+    it("gives a response without id the generated id of its call", () => {
+      const blocks = convert([
+        user,
+        { role: "model", parts: [{ functionCall: { name: "a", args: {} } }] },
+        {
+          role: "user",
+          parts: [{ functionResponse: { name: "a", response: { ok: 1 } } }],
+        },
+      ]);
+
+      const use = blocks.find((b) => b.type === "tool_use");
+      const result = blocks.find((b) => b.type === "tool_result");
+      expect(use?.id).toMatch(/^[a-zA-Z0-9_-]{1,64}$/);
+      expect(result?.tool_use_id).toBe(use?.id as string);
+    });
+
+    it("matches parallel same-name calls in order and other names by name", () => {
+      const blocks = convert([
+        user,
+        {
+          role: "model",
+          parts: [
+            { functionCall: { name: "a", args: {} } },
+            { functionCall: { name: "b", args: {} } },
+          ],
+        },
+        {
+          role: "user",
+          parts: [
+            { functionResponse: { name: "b", response: {} } },
+            { functionResponse: { name: "a", response: {} } },
+          ],
+        },
+      ]);
+
+      const [a, b] = blocks.filter((x) => x.type === "tool_use");
+      const [rb, ra] = blocks.filter((x) => x.type === "tool_result");
+      expect(rb?.tool_use_id).toBe(b?.id as string);
+      expect(ra?.tool_use_id).toBe(a?.id as string);
+      expect(a?.id).not.toBe(b?.id);
+    });
+
+    it("treats an empty-string id as missing", () => {
+      const blocks = convert([
+        user,
+        {
+          role: "model",
+          parts: [{ functionCall: { id: "", name: "a", args: {} } }],
+        },
+        {
+          role: "user",
+          parts: [{ functionResponse: { id: "", name: "a", response: {} } }],
+        },
+      ]);
+
+      const use = blocks.find((b) => b.type === "tool_use");
+      const result = blocks.find((b) => b.type === "tool_result");
+      expect(use?.id).toMatch(/^[a-zA-Z0-9_-]{1,64}$/);
+      expect(result?.tool_use_id).toBe(use?.id as string);
+    });
+
+    it("keeps valid explicit ids untouched", () => {
+      const blocks = convert([
+        user,
+        {
+          role: "model",
+          parts: [{ functionCall: { id: "toolu_01AbC", name: "a", args: {} } }],
+        },
+        {
+          role: "user",
+          parts: [
+            {
+              functionResponse: { id: "toolu_01AbC", name: "a", response: {} },
+            },
+          ],
+        },
+      ]);
+
+      expect(blocks.find((b) => b.type === "tool_use")?.id).toBe("toolu_01AbC");
+      expect(blocks.find((b) => b.type === "tool_result")?.tool_use_id).toBe(
+        "toolu_01AbC",
+      );
+    });
+
+    it("sanitizes ids Anthropic would reject, consistently for call and response", () => {
+      const bad = "adk-1234.5678:xyz/abc";
+      const blocks = convert([
+        user,
+        {
+          role: "model",
+          parts: [{ functionCall: { id: bad, name: "a", args: {} } }],
+        },
+        {
+          role: "user",
+          parts: [{ functionResponse: { id: bad, name: "a", response: {} } }],
+        },
+      ]);
+
+      const use = blocks.find((b) => b.type === "tool_use");
+      const result = blocks.find((b) => b.type === "tool_result");
+      expect(use?.id).not.toBe(bad);
+      expect(use?.id).toMatch(/^[a-zA-Z0-9_-]{1,64}$/);
+      expect(result?.tool_use_id).toBe(use?.id as string);
+    });
+  });
+
+  describe("thinking signature namespace", () => {
+    type Block = {
+      type: string;
+      thinking?: string;
+      signature?: string;
+      data?: string;
+      text?: string;
+      name?: string;
+    };
+    const ns = (value: string) => `${THINKING_SIGNATURE_PREFIX}${value}`;
+    const user = { role: "user", parts: [{ text: "go" }] };
+
+    function assistantBlocks(contents: LlmRequest["contents"]): Block[] {
+      const { messages } = convertAnthropicRequest(
+        createLlmRequest({ contents }),
+      );
+      const assistant = messages.find((m) => m.role === "assistant");
+      return (assistant?.content ?? []) as unknown as Block[];
+    }
+
+    it("replays a namespaced thinking part as a thinking block when a planner stripped thought:true", () => {
+      // BuiltInPlanner removes `thought` from every part but keeps the signature.
+      const blocks = assistantBlocks([
+        user,
+        {
+          role: "model",
+          parts: [
+            { text: "I should call the tool", thoughtSignature: ns("sig-1") },
+            { functionCall: { id: "toolu_1", name: "lookup", args: {} } },
+          ],
+        },
+        {
+          role: "user",
+          parts: [
+            {
+              functionResponse: { id: "toolu_1", name: "lookup", response: {} },
+            },
+          ],
+        },
+      ]);
+
+      expect(blocks.map((b) => b.type)).toEqual(["thinking", "tool_use"]);
+      expect(blocks[0]).toMatchObject({
+        thinking: "I should call the tool",
+        signature: "sig-1",
+      });
+    });
+
+    it("replays a planner-stripped redacted_thinking payload", () => {
+      const blocks = assistantBlocks([
+        user,
+        {
+          role: "model",
+          parts: [{ thoughtSignature: ns("opaque") }, { text: "Answer" }],
+        },
+      ]);
+
+      expect(blocks).toEqual([
+        { type: "redacted_thinking", data: "opaque" },
+        { type: "text", text: "Answer" },
+      ]);
+    });
+
+    it("still reads the namespaced form with thought:true", () => {
+      const blocks = assistantBlocks([
+        user,
+        {
+          role: "model",
+          parts: [{ text: "hmm", thought: true, thoughtSignature: ns("s") }],
+        },
+      ]);
+
+      expect(blocks[0]).toMatchObject({ type: "thinking", signature: "s" });
+    });
+
+    it("keeps reading legacy un-prefixed signatures when thought:true is present", () => {
+      const blocks = assistantBlocks([
+        user,
+        {
+          role: "model",
+          parts: [
+            { text: "old", thought: true, thoughtSignature: "legacy-sig" },
+            { thought: true, thoughtSignature: "legacy-redacted" },
+          ],
+        },
+      ]);
+
+      expect(blocks).toEqual([
+        { type: "thinking", thinking: "old", signature: "legacy-sig" },
+        { type: "redacted_thinking", data: "legacy-redacted" },
+      ]);
+    });
+
+    it("never replays a foreign (Gemini) signature without thought:true as thinking", () => {
+      const blocks = assistantBlocks([
+        user,
+        {
+          role: "model",
+          parts: [
+            { text: "plain answer", thoughtSignature: "gemini-sig" },
+            {
+              functionCall: { id: "toolu_1", name: "lookup", args: {} },
+              thoughtSignature: "gemini-call-sig",
+            },
+          ],
+        },
+      ]);
+
+      expect(blocks.map((b) => b.type)).toEqual(["text", "tool_use"]);
+      expect(blocks[0]?.text).toBe("plain answer");
+    });
+
+    it("does not treat a namespaced signature on a function call as thinking", () => {
+      const blocks = assistantBlocks([
+        user,
+        {
+          role: "model",
+          parts: [
+            {
+              functionCall: { id: "toolu_1", name: "lookup", args: {} },
+              thoughtSignature: ns("x"),
+            },
+          ],
+        },
+      ]);
+
+      expect(blocks.map((b) => b.type)).toEqual(["tool_use"]);
+    });
+
+    it("drops a namespaced part with an empty payload instead of emitting an empty block", () => {
+      const blocks = assistantBlocks([
+        user,
+        {
+          role: "model",
+          parts: [
+            { thoughtSignature: THINKING_SIGNATURE_PREFIX },
+            { text: "ok" },
+          ],
+        },
+      ]);
+
+      expect(blocks).toEqual([{ type: "text", text: "ok" }]);
+    });
+
+    it("replays an empty-text thinking block (stored without text) as thinking with an empty string, not as redacted_thinking", () => {
+      const blocks = assistantBlocks([
+        user,
+        {
+          role: "model",
+          parts: [
+            {
+              thought: true,
+              thoughtSignature: `${EMPTY_THINKING_SIGNATURE_PREFIX}SIG`,
+            },
+            { functionCall: { id: "toolu_1", name: "lookup", args: {} } },
+          ],
+        },
+      ]);
+
+      expect(blocks[0]).toEqual({
+        type: "thinking",
+        thinking: "",
+        signature: "SIG",
+      });
+      expect(blocks[1]?.type).toBe("tool_use");
+    });
+
+    it("replays an empty-text thinking block after a planner stripped thought:true", () => {
+      const blocks = assistantBlocks([
+        user,
+        {
+          role: "model",
+          parts: [
+            { thoughtSignature: `${EMPTY_THINKING_SIGNATURE_PREFIX}SIG` },
+            { text: "ok" },
+          ],
+        },
+      ]);
+
+      expect(blocks[0]).toEqual({
+        type: "thinking",
+        thinking: "",
+        signature: "SIG",
+      });
+    });
+
+    it("round-trips empty thinking and redacted blocks from the response converter", () => {
+      const converted = convertAnthropicResponse({
+        id: "msg_2",
+        type: "message",
+        role: "assistant",
+        model: "claude-sonnet-4-5-20250929",
+        stop_reason: "tool_use",
+        stop_sequence: null,
+        content: [
+          { type: "thinking", thinking: "", signature: "SIG" },
+          { type: "redacted_thinking", data: "ENC" },
+          { type: "tool_use", id: "toolu_2", name: "lookup", input: {} },
+        ],
+        usage: { input_tokens: 1, output_tokens: 1 },
+      } as unknown as Anthropic.Message);
+      const stripped = (converted.content?.parts ?? []).map((part) => {
+        const { thought: _thought, ...rest } = part;
+        return rest;
+      });
+
+      const blocks = assistantBlocks([
+        user,
+        { role: "model", parts: stripped },
+      ]);
+
+      expect(blocks.map((b) => b.type)).toEqual([
+        "thinking",
+        "redacted_thinking",
+        "tool_use",
+      ]);
+      expect(blocks[0]).toMatchObject({ thinking: "", signature: "SIG" });
+      expect(blocks[1]).toMatchObject({ data: "ENC" });
+    });
+
+    it("round-trips what the response converter produces, even after the planner strips thought", () => {
+      const converted = convertAnthropicResponse({
+        id: "msg_1",
+        type: "message",
+        role: "assistant",
+        model: "claude-sonnet-4-5-20250929",
+        stop_reason: "tool_use",
+        stop_sequence: null,
+        content: [
+          { type: "thinking", thinking: "plan", signature: "SIG" },
+          { type: "redacted_thinking", data: "ENC" },
+          { type: "tool_use", id: "toolu_9", name: "lookup", input: {} },
+        ],
+        usage: { input_tokens: 1, output_tokens: 1 },
+      } as unknown as Anthropic.Message);
+      const stripped = (converted.content?.parts ?? []).map((part) => {
+        const { thought: _thought, ...rest } = part;
+        return rest;
+      });
+
+      const blocks = assistantBlocks([
+        user,
+        { role: "model", parts: stripped },
+      ]);
+
+      expect(blocks.map((b) => b.type)).toEqual([
+        "thinking",
+        "redacted_thinking",
+        "tool_use",
+      ]);
+      expect(blocks[0]).toMatchObject({ thinking: "plan", signature: "SIG" });
+      expect(blocks[1]).toMatchObject({ data: "ENC" });
     });
   });
 
@@ -639,6 +1097,58 @@ describe("convertAnthropicRequest", () => {
       expect(result.toolChoice).toEqual({ type: "tool", name: "json_output" });
       expect(result.tools?.some((t) => t.name === "json_output")).toBe(true);
     });
+
+    it("reports whether the json_output tool was injected", () => {
+      const schema = {
+        type: "OBJECT",
+        properties: { answer: { type: "STRING" } },
+      } as Schema;
+      expect(
+        convertAnthropicRequest(
+          createLlmRequest({ config: { responseSchema: schema } }),
+        ).structuredOutput,
+      ).toBe(true);
+      expect(
+        convertAnthropicRequest(createLlmRequest({ config: {} }))
+          .structuredOutput,
+      ).toBe(false);
+      expect(
+        convertAnthropicRequest(
+          createLlmRequest({
+            config: {
+              responseSchema: schema,
+              toolConfig: {
+                functionCallingConfig: { mode: FunctionCallingConfigMode.NONE },
+              },
+            },
+          }),
+        ).structuredOutput,
+      ).toBe(false);
+    });
+
+    it("rejects a user tool named json_output when structured output is on", () => {
+      const tools = [
+        {
+          functionDeclarations: [{ name: "json_output", description: "mine" }],
+        },
+      ];
+      const convert = () =>
+        convertAnthropicRequest(
+          createLlmRequest({
+            config: {
+              tools,
+              responseSchema: { type: "OBJECT" } as Schema,
+            },
+          }),
+        );
+      expect(convert).toThrow(InputValidationError);
+      expect(convert).toThrow(/reserved for the output tool/);
+      // Without structured output the name is the user's.
+      const plain = convertAnthropicRequest(
+        createLlmRequest({ config: { tools } }),
+      );
+      expect(plain.tools?.map((t) => t.name)).toEqual(["json_output"]);
+    });
   });
 
   describe("extended-thinking round-trip (processContent re-emits thoughts)", () => {
@@ -766,14 +1276,15 @@ describe("convertAnthropicRequest", () => {
 
       expect(result.system).toBeUndefined();
       expect(result.tools).toHaveLength(2);
+      const tools = result.tools ?? [];
       // First tool: no cache_control.
       expect(
-        (result.tools?.[0] as { cache_control?: unknown }).cache_control,
+        (tools[0] as { cache_control?: unknown }).cache_control,
       ).toBeUndefined();
       // Last tool: cache_control present.
-      expect(
-        (result.tools?.[1] as { cache_control?: unknown }).cache_control,
-      ).toEqual({ type: "ephemeral" });
+      expect((tools[1] as { cache_control?: unknown }).cache_control).toEqual({
+        type: "ephemeral",
+      });
     });
 
     it("does not mutate the input tools", () => {
@@ -808,8 +1319,10 @@ describe("convertAnthropicRequest", () => {
       const result = convertAnthropicRequest(request);
       // System stays a plain string; tools carry no cache_control.
       expect(typeof result.system).toBe("string");
+      expect(result.tools).toBeDefined();
+      const tools = result.tools ?? [];
       expect(
-        (result.tools?.[0] as { cache_control?: unknown }).cache_control,
+        (tools[0] as { cache_control?: unknown }).cache_control,
       ).toBeUndefined();
     });
   });
@@ -907,25 +1420,88 @@ describe("convertAnthropicRequest", () => {
         ],
       });
 
-      const result = convertAnthropicRequest(request);
+      const spy = captureWarnings();
+      let result: ReturnType<typeof convertAnthropicRequest>;
+      try {
+        result = convertAnthropicRequest(request);
+      } finally {
+        spy.mockRestore();
+      }
+      const warns = spy.mock.calls.map((c) => String(c[0]));
+      // Exact text, as pinned for the OpenAI-compatible converter in
+      // tests/converters/file-data-warning.test.ts.
+      const matches = warns.filter((w) =>
+        w.includes("dropping non-http fileData URI"),
+      );
+      expect(matches).toEqual([
+        "[adk-llm-bridge] dropping non-http fileData URI (scheme: gs)",
+      ]);
+      expect(warns.join("\n")).not.toContain("bucket");
+      expect(spy.codes).toContain(LogCode.MEDIA_URI_UNSUPPORTED);
       expect(result.messages[0].content).toEqual([
         { type: "text", text: "hi" },
       ]);
     });
   });
 
-  describe("Gemini-only built-in tools", () => {
-    function withConsoleWarn<T>(fn: () => T): { result: T; warns: string[] } {
-      const warns: string[] = [];
-      const original = console.warn;
-      console.warn = (...args: unknown[]) => {
-        warns.push(args.map(String).join(" "));
+  describe("warnings go through the ADK logger", () => {
+    it("tags missing-id warnings with stable codes and never touches console", () => {
+      const consoleSpy = spyOn(console, "warn").mockImplementation(() => {});
+      const spy = captureWarnings();
+      try {
+        convertAnthropicRequest(
+          createLlmRequest({
+            contents: [
+              { role: "user", parts: [{ text: "go" }] },
+              {
+                role: "model",
+                parts: [{ functionCall: { name: "a", args: {} } }],
+              },
+              {
+                role: "user",
+                parts: [{ functionResponse: { name: "a", response: {} } }],
+              },
+            ],
+          }),
+        );
+      } finally {
+        spy.mockRestore();
+      }
+      expect(spy.codes).toEqual([
+        LogCode.TOOL_CALL_MISSING_ID,
+        LogCode.TOOL_RESPONSE_MISSING_ID,
+      ]);
+      expect(spy.mock.calls[0]?.[0]).toStartWith("[adk-llm-bridge] ");
+      expect(consoleSpy).not.toHaveBeenCalled();
+      consoleSpy.mockRestore();
+    });
+
+    it("warns once per request for repeated unsupported media", () => {
+      const spy = captureWarnings();
+      const part = {
+        inlineData: { mimeType: "audio/wav", data: "AAAA" },
       };
       try {
-        const result = fn();
-        return { result, warns };
+        convertAnthropicRequest(
+          createLlmRequest({
+            contents: [{ role: "user", parts: [part, part, part] }],
+          }),
+        );
       } finally {
-        console.warn = original;
+        spy.mockRestore();
+      }
+      expect(spy.codes).toEqual([LogCode.MEDIA_MIME_UNSUPPORTED]);
+    });
+  });
+
+  describe("Gemini-only built-in tools", () => {
+    function withWarnings<T>(fn: () => T): { result: T; warns: string[] } {
+      const spy = captureWarnings();
+      try {
+        const result = fn();
+        return { result, warns: spy.mock.calls.map((c) => String(c[0])) };
+      } finally {
+        spy.mockRestore();
       }
     }
 
@@ -937,7 +1513,7 @@ describe("convertAnthropicRequest", () => {
         },
       });
 
-      const { result, warns } = withConsoleWarn(() =>
+      const { result, warns } = withWarnings(() =>
         convertAnthropicRequest(request),
       );
 
@@ -968,7 +1544,7 @@ describe("convertAnthropicRequest", () => {
         },
       });
 
-      const { result, warns } = withConsoleWarn(() =>
+      const { result, warns } = withWarnings(() =>
         convertAnthropicRequest(request),
       );
 

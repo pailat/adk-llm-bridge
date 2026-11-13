@@ -1,23 +1,22 @@
 /**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
-/**
  * Type definitions for adk-llm-bridge.
  *
  * This module contains all TypeScript interfaces and types used throughout
  * the library for configuration, streaming, and provider-specific options.
- *
- * @module types
  */
 
 import type { LlmResponse } from "@google/adk";
+import type { CostSource } from "./converters/cache-usage.js";
 
 // =============================================================================
 // Base Provider Types
 // =============================================================================
+
+/**
+ * How a failed provider call is reported: thrown as a `ProviderLlmError`
+ * (`"throw"`) or yielded as an error `LlmResponse` (`"response"`).
+ */
+export type ErrorMode = "throw" | "response";
 
 /**
  * Base configuration shared by all LLM providers.
@@ -27,7 +26,7 @@ import type { LlmResponse } from "@google/adk";
  * @example
  * ```typescript
  * const config: BaseProviderConfig = {
- *   model: "anthropic/claude-sonnet-4",
+ *   model: "anthropic/claude-sonnet-5.5",
  *   apiKey: "your-api-key",
  *   timeout: 30000
  * };
@@ -37,8 +36,8 @@ export interface BaseProviderConfig {
   /**
    * The model identifier in provider/model format.
    *
-   * @example "anthropic/claude-sonnet-4"
-   * @example "openai/gpt-4o"
+   * @example "anthropic/claude-sonnet-5.5"
+   * @example "openai/gpt-6.1-sol"
    */
   model: string;
 
@@ -69,6 +68,22 @@ export interface BaseProviderConfig {
    * @defaultValue 2
    */
   maxRetries?: number;
+
+  /**
+   * How a failed provider call is reported to ADK.
+   *
+   * - `"throw"`: throws a {@link ProviderLlmError}. ADK turns it into an event
+   *   with the same `errorCode` (for example `API_ERROR_429`), runs plugins'
+   *   `onModelErrorCallback`, and lets `RoutedLlm` fail over to the next model.
+   * - `"response"`: yields an `LlmResponse` carrying `errorCode`/`errorMessage`
+   *   instead of throwing; use it to keep the error-response contract of
+   *   earlier versions.
+   *
+   * Caller-initiated aborts never produce an error in either mode.
+   *
+   * @defaultValue "throw"
+   */
+  errorMode?: ErrorMode;
 }
 
 // =============================================================================
@@ -83,15 +98,62 @@ export interface BaseProviderConfig {
  *
  * @example
  * ```typescript
- * const config: AIGatewayConfig = {
- *   model: "anthropic/claude-sonnet-4",
+ * const config: AIGatewayProviderConfig = {
+ *   model: "anthropic/claude-sonnet-5.5",
  *   apiKey: process.env.AI_GATEWAY_API_KEY
  * };
  * ```
  *
  * @see {@link BaseProviderConfig} for inherited options
  */
-export interface AIGatewayConfig extends BaseProviderConfig {}
+export interface AIGatewayProviderConfig extends BaseProviderConfig {
+  /**
+   * Prompt caching for Anthropic models (`anthropic/*`), automatic by default.
+   *
+   * Unset, it is sent only when the request declares a tool or already holds
+   * an earlier model turn; a one-shot request sends nothing. `true` always
+   * sends it. Sends `providerOptions.gateway.caching = "auto"`, and the gateway places
+   * the Anthropic cache breakpoints itself. Other models are left untouched
+   * unless this is `true`. `false` disables it. The chat endpoint has a
+   * 5-minute lifetime only: `ttl: "1h"` warns and uses 5 minutes.
+   *
+   * @defaultValue automatic for `anthropic/*` models, off for others
+   * @see {@link PromptCachingConfig}
+   */
+  promptCaching?: PromptCachingConfig;
+}
+
+/**
+ * Prompt caching setting for Anthropic models.
+ *
+ * - `true`: always on, 5-minute lifetime.
+ * - `{ ttl }`: always on with that lifetime. `"1h"` writes cost 2x the base input
+ *   price instead of 1.25x; the AI Gateway chat endpoint only supports `"5m"`
+ *   and warns (`PROMPT_CACHE_TTL_IGNORED`) when `"1h"` is requested.
+ * - `false`: off, no marker of any kind.
+ */
+export type PromptCachingConfig = boolean | { ttl?: "5m" | "1h" };
+
+/**
+ * Options every `register*()` function accepts. They are stored as the
+ * provider's global config and apply to every model created through the
+ * registry, unless the model's own config sets them.
+ */
+export interface BaseRegisterOptions {
+  /**
+   * Request timeout in milliseconds.
+   *
+   * @defaultValue 60000 (60 seconds)
+   */
+  timeout?: number;
+
+  /**
+   * Maximum number of retry attempts for failed requests.
+   *
+   * @defaultValue 2
+   */
+  maxRetries?: number;
+}
 
 /**
  * Options for registering AI Gateway with ADK's LLMRegistry.
@@ -106,7 +168,23 @@ export interface AIGatewayConfig extends BaseProviderConfig {}
  * });
  * ```
  */
-export interface RegisterOptions {
+export interface AIGatewayRegisterOptions extends BaseRegisterOptions {
+  /**
+   * How a failed provider call is reported to ADK.
+   *
+   * - `"throw"`: throws a {@link ProviderLlmError}. ADK turns it into an event
+   *   with the same `errorCode` (for example `API_ERROR_429`), runs plugins'
+   *   `onModelErrorCallback`, and lets `RoutedLlm` fail over to the next model.
+   * - `"response"`: yields an `LlmResponse` carrying `errorCode`/`errorMessage`
+   *   instead of throwing; use it to keep the error-response contract of
+   *   earlier versions.
+   *
+   * Caller-initiated aborts never produce an error in either mode.
+   *
+   * @defaultValue "throw"
+   */
+  errorMode?: ErrorMode;
+
   /**
    * Base URL for the API endpoint.
    *
@@ -117,9 +195,16 @@ export interface RegisterOptions {
   /**
    * API key for authentication.
    *
-   * @defaultValue process.env.AI_GATEWAY_API_KEY || process.env.OPENAI_API_KEY
+   * @defaultValue process.env.AI_GATEWAY_API_KEY
    */
   apiKey?: string;
+
+  /**
+   * Prompt caching for all AI Gateway models created through the registry.
+   *
+   * @see {@link AIGatewayProviderConfig.promptCaching}
+   */
+  promptCaching?: PromptCachingConfig;
 }
 
 // =============================================================================
@@ -209,8 +294,8 @@ export interface OpenRouterProviderPreferences {
  *
  * @example
  * ```typescript
- * const config: OpenRouterConfig = {
- *   model: "anthropic/claude-sonnet-4",
+ * const config: OpenRouterProviderConfig = {
+ *   model: "anthropic/claude-sonnet-5.5",
  *   apiKey: process.env.OPENROUTER_API_KEY,
  *   siteUrl: "https://myapp.com",
  *   appName: "My Application",
@@ -224,7 +309,7 @@ export interface OpenRouterProviderPreferences {
  * @see {@link BaseProviderConfig} for inherited options
  * @see {@link OpenRouterProviderPreferences} for routing options
  */
-export interface OpenRouterConfig extends BaseProviderConfig {
+export interface OpenRouterProviderConfig extends BaseProviderConfig {
   /**
    * Your site URL for OpenRouter leaderboard rankings.
    *
@@ -251,6 +336,20 @@ export interface OpenRouterConfig extends BaseProviderConfig {
    * @see {@link OpenRouterProviderPreferences}
    */
   provider?: OpenRouterProviderPreferences;
+
+  /**
+   * Prompt caching for Anthropic models (`anthropic/*`). **Opt-in** in 0.7.0.
+   *
+   * `true` or `{ ttl }` sends OpenRouter's top-level automatic
+   * `cache_control`. It is off by default because this form is documented but
+   * not yet probed against every backend OpenRouter may route to (Bedrock,
+   * Vertex), where an unsupported marker may be rejected. An explicit `true`
+   * also applies to models that are not `anthropic/*`.
+   *
+   * @defaultValue false
+   * @see {@link PromptCachingConfig}
+   */
+  promptCaching?: PromptCachingConfig;
 }
 
 /**
@@ -267,7 +366,23 @@ export interface OpenRouterConfig extends BaseProviderConfig {
  * });
  * ```
  */
-export interface OpenRouterRegisterOptions {
+export interface OpenRouterRegisterOptions extends BaseRegisterOptions {
+  /**
+   * How a failed provider call is reported to ADK.
+   *
+   * - `"throw"`: throws a {@link ProviderLlmError}. ADK turns it into an event
+   *   with the same `errorCode` (for example `API_ERROR_429`), runs plugins'
+   *   `onModelErrorCallback`, and lets `RoutedLlm` fail over to the next model.
+   * - `"response"`: yields an `LlmResponse` carrying `errorCode`/`errorMessage`
+   *   instead of throwing; use it to keep the error-response contract of
+   *   earlier versions.
+   *
+   * Caller-initiated aborts never produce an error in either mode.
+   *
+   * @defaultValue "throw"
+   */
+  errorMode?: ErrorMode;
+
   /**
    * Base URL for the API endpoint.
    *
@@ -295,6 +410,14 @@ export interface OpenRouterRegisterOptions {
    * @example "My AI Assistant"
    */
   appName?: string;
+
+  /**
+   * Prompt caching for all OpenRouter models created through the registry.
+   * Opt-in.
+   *
+   * @see {@link OpenRouterProviderConfig.promptCaching}
+   */
+  promptCaching?: PromptCachingConfig;
 }
 
 // =============================================================================
@@ -307,10 +430,17 @@ export interface OpenRouterRegisterOptions {
  * Use this to connect any API that implements the OpenAI chat completions
  * interface, such as Ollama, LM Studio, vLLM, Azure OpenAI, or self-hosted models.
  *
+ * `baseURL` may be supplied explicitly or through `CUSTOM_LLM_BASE_URL`.
+ * `apiKey` is optional for unauthenticated local servers. `CUSTOM_LLM_API_KEY`
+ * is the credential of the `CUSTOM_LLM_BASE_URL` endpoint only: it is used
+ * when the base URL also comes from the environment, and never sent to an
+ * explicit `baseURL` (pass `apiKey` for that host). Explicit values, including
+ * an explicitly empty API key, take precedence over environment variables.
+ *
  * @example
  * ```typescript
  * // Ollama
- * const config: CustomLlmConfig = {
+ * const config: CustomProviderConfig = {
  *   name: "ollama",
  *   model: "llama3",
  *   baseURL: "http://localhost:11434/v1"
@@ -320,10 +450,10 @@ export interface OpenRouterRegisterOptions {
  * @example
  * ```typescript
  * // Azure OpenAI
- * const config: CustomLlmConfig = {
+ * const config: CustomProviderConfig = {
  *   name: "azure",
- *   model: "gpt-4",
- *   baseURL: "https://my-resource.openai.azure.com/openai/deployments/gpt-4",
+ *   model: "gpt-6.1-sol",
+ *   baseURL: "https://my-resource.openai.azure.com/openai/deployments/gpt-6.1-sol",
  *   headers: { "api-key": process.env.AZURE_API_KEY },
  *   queryParams: { "api-version": "2024-02-01" }
  * };
@@ -332,7 +462,7 @@ export interface OpenRouterRegisterOptions {
  * @see {@link BaseProviderConfig} for inherited options
  * @see {@link createCustomLlm} for the factory function
  */
-export interface CustomLlmConfig extends BaseProviderConfig {
+export interface CustomProviderConfig extends BaseProviderConfig {
   /**
    * Provider name for identification in logs and error messages.
    *
@@ -404,7 +534,7 @@ export interface CustomLlmConfig extends BaseProviderConfig {
  * @example
  * ```typescript
  * const config: OpenAIProviderConfig = {
- *   model: "gpt-4.1",
+ *   model: "gpt-6.1-sol",
  *   apiKey: process.env.OPENAI_API_KEY,
  *   organization: "org-xxx",
  *   project: "proj-xxx"
@@ -447,13 +577,36 @@ export interface OpenAIProviderConfig extends BaseProviderConfig {
  * });
  * ```
  */
-export interface OpenAIRegisterOptions {
+export interface OpenAIRegisterOptions extends BaseRegisterOptions {
+  /**
+   * How a failed provider call is reported to ADK.
+   *
+   * - `"throw"`: throws a {@link ProviderLlmError}. ADK turns it into an event
+   *   with the same `errorCode` (for example `API_ERROR_429`), runs plugins'
+   *   `onModelErrorCallback`, and lets `RoutedLlm` fail over to the next model.
+   * - `"response"`: yields an `LlmResponse` carrying `errorCode`/`errorMessage`
+   *   instead of throwing; use it to keep the error-response contract of
+   *   earlier versions.
+   *
+   * Caller-initiated aborts never produce an error in either mode.
+   *
+   * @defaultValue "throw"
+   */
+  errorMode?: ErrorMode;
+
   /**
    * API key for authentication.
    *
    * @defaultValue process.env.OPENAI_API_KEY
    */
   apiKey?: string;
+
+  /**
+   * Base URL for the API endpoint.
+   *
+   * @defaultValue process.env.OPENAI_BASE_URL || "https://api.openai.com/v1"
+   */
+  baseURL?: string;
 
   /**
    * OpenAI organization ID.
@@ -483,7 +636,7 @@ export interface OpenAIRegisterOptions {
  * @example
  * ```typescript
  * const config: XAIProviderConfig = {
- *   model: "grok-4",
+ *   model: "grok-4.7",
  *   apiKey: process.env.XAI_API_KEY
  * };
  * ```
@@ -505,13 +658,36 @@ export interface XAIProviderConfig extends BaseProviderConfig {}
  * });
  * ```
  */
-export interface XAIRegisterOptions {
+export interface XAIRegisterOptions extends BaseRegisterOptions {
+  /**
+   * How a failed provider call is reported to ADK.
+   *
+   * - `"throw"`: throws a {@link ProviderLlmError}. ADK turns it into an event
+   *   with the same `errorCode` (for example `API_ERROR_429`), runs plugins'
+   *   `onModelErrorCallback`, and lets `RoutedLlm` fail over to the next model.
+   * - `"response"`: yields an `LlmResponse` carrying `errorCode`/`errorMessage`
+   *   instead of throwing; use it to keep the error-response contract of
+   *   earlier versions.
+   *
+   * Caller-initiated aborts never produce an error in either mode.
+   *
+   * @defaultValue "throw"
+   */
+  errorMode?: ErrorMode;
+
   /**
    * API key for authentication.
    *
    * @defaultValue process.env.XAI_API_KEY
    */
   apiKey?: string;
+
+  /**
+   * Base URL for the API endpoint.
+   *
+   * @defaultValue "https://api.x.ai/v1"
+   */
+  baseURL?: string;
 }
 
 // =============================================================================
@@ -526,7 +702,7 @@ export interface XAIRegisterOptions {
  * @example
  * ```typescript
  * const config: AnthropicProviderConfig = {
- *   model: "claude-sonnet-4-5-20250929",
+ *   model: "claude-sonnet-5-5",
  *   apiKey: process.env.ANTHROPIC_API_KEY,
  *   maxTokens: 4096
  * };
@@ -546,21 +722,35 @@ export interface AnthropicProviderConfig extends BaseProviderConfig {
   maxTokens?: number;
 
   /**
-   * Opt-in Anthropic prompt caching.
+   * Anthropic prompt caching, automatic by default.
    *
-   * When `true`, attaches `cache_control: { type: "ephemeral" }` to the
-   * system prompt block and the last tool definition, marking the largely
-   * static prefix of the request (system instruction + tool schemas) as
-   * cacheable. This can substantially reduce cost and latency for prompts
-   * that reuse the same system instruction and tools across turns.
+   * Attaches `cache_control` to the system prompt block, the last tool
+   * definition and the last block of the last message (3 of the 4 allowed
+   * breakpoints), so each turn of a multi-turn agent reads the earlier turns
+   * from the cache instead of paying for them again. Below the model's minimum
+   * cacheable size (512 tokens on Haiku/Sonnet/Opus 5.5) nothing is cached and
+   * nothing extra is billed.
    *
-   * This is a bridge-level instance setting, NOT derived from ADK's
+   * A cache write costs 1.25x the base input price (2x with `ttl: "1h"`) and a
+   * read 0.1x or less, so caching pays off from the first reuse. A one-shot
+   * call that is never reused pays the write surcharge for nothing, so unset
+   * sends markers only when the request can be reused: it declares a tool of
+   * the caller (not the structured-output tool) or already holds an earlier
+   * model turn.
+   *
+   * - unset: automatic, 5-minute lifetime.
+   * - `true`: always on, 5-minute lifetime.
+   * - `{ ttl: "1h" }`: always on, 1-hour lifetime on every breakpoint.
+   * - `false`: no `cache_control` anywhere.
+   *
+   * This is a bridge-level setting, NOT derived from ADK's
    * `config.cachedContent` (which is a non-portable Gemini resource name).
    *
-   * @defaultValue false
-   * @see {@link https://platform.claude.com/docs/en/docs/build-with-claude/prompt-caching|Anthropic Prompt Caching}
+   * @defaultValue automatic
+   * @see {@link PromptCachingConfig}
+   * @see {@link https://platform.claude.com/docs/en/build-with-claude/prompt-caching|Anthropic Prompt Caching}
    */
-  promptCaching?: boolean;
+  promptCaching?: PromptCachingConfig;
 }
 
 /**
@@ -576,13 +766,36 @@ export interface AnthropicProviderConfig extends BaseProviderConfig {
  * });
  * ```
  */
-export interface AnthropicRegisterOptions {
+export interface AnthropicRegisterOptions extends BaseRegisterOptions {
+  /**
+   * How a failed provider call is reported to ADK.
+   *
+   * - `"throw"`: throws a {@link ProviderLlmError}. ADK turns it into an event
+   *   with the same `errorCode` (for example `API_ERROR_429`), runs plugins'
+   *   `onModelErrorCallback`, and lets `RoutedLlm` fail over to the next model.
+   * - `"response"`: yields an `LlmResponse` carrying `errorCode`/`errorMessage`
+   *   instead of throwing; use it to keep the error-response contract of
+   *   earlier versions.
+   *
+   * Caller-initiated aborts never produce an error in either mode.
+   *
+   * @defaultValue "throw"
+   */
+  errorMode?: ErrorMode;
+
   /**
    * API key for authentication.
    *
    * @defaultValue process.env.ANTHROPIC_API_KEY
    */
   apiKey?: string;
+
+  /**
+   * Base URL for the API endpoint, for a proxy or gateway.
+   *
+   * @defaultValue process.env.ANTHROPIC_BASE_URL || "https://api.anthropic.com"
+   */
+  baseURL?: string;
 
   /**
    * Maximum number of tokens to generate.
@@ -592,16 +805,12 @@ export interface AnthropicRegisterOptions {
   maxTokens?: number;
 
   /**
-   * Opt-in Anthropic prompt caching for all models created through the
-   * registry.
+   * Anthropic prompt caching for all models created through the registry.
    *
-   * When `true`, attaches `cache_control: { type: "ephemeral" }` to the
-   * system prompt block and the last tool definition.
-   *
-   * @defaultValue false
+   * @defaultValue true
    * @see {@link AnthropicProviderConfig.promptCaching}
    */
-  promptCaching?: boolean;
+  promptCaching?: PromptCachingConfig;
 }
 
 // =============================================================================
@@ -630,18 +839,24 @@ export interface ToolCallAccumulator {
 /**
  * Accumulator state for streaming responses.
  *
- * Tracks the accumulated text and tool calls across multiple stream chunks.
+ * Tracks the accumulated text, reasoning (and structured reasoning details),
+ * tool calls and token usage across multiple stream chunks.
  * Created using {@link createStreamAccumulator}.
  *
  * @example
  * ```typescript
  * const accumulator = createStreamAccumulator();
  *
+ * let finalResponse;
  * for await (const chunk of stream) {
  *   const result = convertStreamChunk(chunk, accumulator);
  *   if (result.isComplete) {
- *     return result.response;
+ *     // Keep draining: a usage-only chunk may follow the finish chunk.
+ *     finalResponse = result.response;
  *   }
+ * }
+ * if (finalResponse && accumulator.usage) {
+ *   finalResponse.usageMetadata = accumulator.usage;
  * }
  * ```
  *
@@ -660,8 +875,24 @@ export interface StreamAccumulator {
    */
   reasoning: string;
 
+  /**
+   * Accumulated structured reasoning_details fragments (OpenRouter), indexed by
+   * their `index` field so multi-block streamed reasoning reassembles in order.
+   *
+   * Each value is the verbatim provider object (for example an object with `type`, `text`,
+   * `signature` and `index`). Assembled on finish into the thought part's
+   * `thoughtSignature` so signed reasoning can round-trip across turns.
+   */
+  reasoningDetails: Map<number, Record<string, unknown>>;
+
   /** Map of tool call index to accumulated tool call data */
   toolCalls: Map<number, ToolCallAccumulator>;
+
+  /**
+   * Model the provider reports on its chunks (the last non-empty `model`
+   * seen). Emitted as `modelVersion` on the final response.
+   */
+  model?: string;
 
   /**
    * Token usage captured from the final OpenAI streaming chunk.
@@ -671,6 +902,30 @@ export interface StreamAccumulator {
    * the provider reports `completion_tokens_details.reasoning_tokens`.
    */
   usage?: LlmResponse["usageMetadata"];
+
+  /**
+   * Tokens written to the prompt cache, from the same usage chunk as
+   * {@link StreamAccumulator.usage}. Emitted as
+   * `customMetadata.cacheCreationTokenCount` on the final response.
+   */
+  cacheCreationTokens?: number;
+
+  /**
+   * Cost in US dollars the provider reported on the usage chunk
+   * (`usage.cost`). Emitted as `customMetadata.costUsd` on the final response.
+   */
+  costUsd?: number;
+
+  /**
+   * The usage field `costUsd` came from. Emitted as `customMetadata.costSource`.
+   */
+  costSource?: CostSource;
+
+  /**
+   * Market cost the AI Gateway reported (`usage.market_cost`). Emitted as
+   * `customMetadata.marketCostUsd`.
+   */
+  marketCostUsd?: number;
 }
 
 /**
@@ -696,3 +951,43 @@ export interface StreamChunkResult {
    */
   isComplete: boolean;
 }
+
+// =============================================================================
+// Deprecated aliases
+// =============================================================================
+
+/**
+ * Former name of {@link AIGatewayProviderConfig}.
+ *
+ * @deprecated Use {@link AIGatewayProviderConfig}, the same type under the
+ * `<Provider>ProviderConfig` naming scheme. This alias stays until the next
+ * major version.
+ */
+export type AIGatewayConfig = AIGatewayProviderConfig;
+
+/**
+ * Former name of {@link AIGatewayRegisterOptions}.
+ *
+ * @deprecated Use {@link AIGatewayRegisterOptions}, the same type under the
+ * `<Provider>RegisterOptions` naming scheme. This alias stays until the next
+ * major version.
+ */
+export type RegisterOptions = AIGatewayRegisterOptions;
+
+/**
+ * Former name of {@link OpenRouterProviderConfig}.
+ *
+ * @deprecated Use {@link OpenRouterProviderConfig}, the same type under the
+ * `<Provider>ProviderConfig` naming scheme. This alias stays until the next
+ * major version.
+ */
+export type OpenRouterConfig = OpenRouterProviderConfig;
+
+/**
+ * Former name of {@link CustomProviderConfig}.
+ *
+ * @deprecated Use {@link CustomProviderConfig}, the same type under the
+ * `<Provider>ProviderConfig` naming scheme. This alias stays until the next
+ * major version.
+ */
+export type CustomLlmConfig = CustomProviderConfig;

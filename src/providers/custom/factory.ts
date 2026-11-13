@@ -1,17 +1,9 @@
 /**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
-/**
  * Factory functions for custom LLM providers.
- *
- * @module providers/custom/factory
  */
 
-import type { CustomLlmConfig } from "../../types.js";
-import { CustomLlm, type CustomLlmProviderConfig } from "./custom-llm.js";
+import type { CustomProviderConfig } from "../../types.js";
+import { CustomLlm } from "./custom-llm.js";
 
 /**
  * Creates a custom LLM instance.
@@ -37,8 +29,8 @@ import { CustomLlm, type CustomLlmProviderConfig } from "./custom-llm.js";
  * // Azure OpenAI
  * const llm = createCustomLlm({
  *   name: "azure",
- *   model: "gpt-4",
- *   baseURL: "https://my-resource.openai.azure.com/openai/deployments/gpt-4",
+ *   model: "gpt-6.1-sol",
+ *   baseURL: "https://my-resource.openai.azure.com/openai/deployments/gpt-6.1-sol",
  *   apiKey: process.env.AZURE_API_KEY,
  *   headers: { "api-key": process.env.AZURE_API_KEY },
  *   queryParams: { "api-version": "2024-02-01" }
@@ -88,18 +80,18 @@ import { CustomLlm, type CustomLlmProviderConfig } from "./custom-llm.js";
  * @see {@link CustomLlm} for direct class usage
  * @see {@link Custom} for a shorthand alias
  */
-export function createCustomLlm(config: CustomLlmProviderConfig): CustomLlm {
+export function createCustomLlm(config: CustomProviderConfig): CustomLlm {
   return new CustomLlm(config);
 }
 
 /**
  * Configuration options for the Custom factory (model is specified separately).
  */
-type CustomOptions = Omit<CustomLlmConfig, "model"> & {
+type CustomOptions = Omit<CustomProviderConfig, "model"> & {
   /**
-   * Base URL for the API endpoint (required).
+   * Base URL for the API endpoint. Falls back to CUSTOM_LLM_BASE_URL.
    */
-  baseURL: string;
+  baseURL?: string;
 };
 
 /**
@@ -124,9 +116,9 @@ type CustomOptions = Omit<CustomLlmConfig, "model"> & {
  * @example
  * ```typescript
  * // With full options
- * const llm = Custom("gpt-4", {
+ * const llm = Custom("gpt-6.1-sol", {
  *   name: "azure",
- *   baseURL: "https://my-resource.openai.azure.com/openai/deployments/gpt-4",
+ *   baseURL: "https://my-resource.openai.azure.com/openai/deployments/gpt-6.1-sol",
  *   apiKey: process.env.AZURE_API_KEY,
  *   headers: { "api-key": process.env.AZURE_API_KEY },
  *   queryParams: { "api-version": "2024-02-01" }
@@ -147,6 +139,6 @@ type CustomOptions = Omit<CustomLlmConfig, "model"> & {
  *
  * @see {@link createCustomLlm} for the full configuration syntax
  */
-export function Custom(model: string, options: CustomOptions): CustomLlm {
+export function Custom(model: string, options: CustomOptions = {}): CustomLlm {
   return createCustomLlm({ model, ...options });
 }

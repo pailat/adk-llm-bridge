@@ -1,0 +1,195 @@
+import { describe, expect, test } from "bun:test";
+import { type Event, InMemoryRunner, Workflow } from "@google/adk";
+import { SubprocessJsonlDriver } from "../../src/agents/driver/subprocess-jsonl.js";
+import {
+  ExternalAgent,
+  type ExternalAgentDriver,
+  type ExternalAgentEvent,
+  type ExternalAgentRunRequest,
+} from "../../src/agents/index.js";
+import { CODEX_PROVIDER } from "../../src/agents/provider/schema.js";
+import { withDeadline } from "./helpers.js";
+
+/**
+ * The BaseNode options accepted by ExternalAgentConfig (`timeout`,
+ * `retryConfig`, ...) are honored by ADK when the agent runs as a Workflow
+ * node, and the driver contract (abort signal, clean re-run) holds.
+ */
+
+function scripted(
+  run: (request: ExternalAgentRunRequest) => AsyncIterable<ExternalAgentEvent>,
+): ExternalAgentDriver {
+  return { providerId: CODEX_PROVIDER.id, run };
+}
+
+async function runNode(agent: ExternalAgent) {
+  const received: unknown[] = [];
+  const sink = Object.defineProperty(
+    (_ctx: unknown, input: unknown) => {
+      received.push(input);
+      return "done";
+    },
+    "name",
+    { value: "sink" },
+  );
+  const runner = new InMemoryRunner({
+    agent: new Workflow({
+      name: "wf",
+      edges: [["START", agent, sink]],
+    } as never) as never,
+    appName: "app",
+  });
+  const session = await runner.sessionService.createSession({
+    appName: "app",
+    userId: "user",
+  });
+  const errors: string[] = [];
+  const events: Event[] = [];
+  try {
+    for await (const event of runner.runAsync({
+      userId: "user",
+      sessionId: session.id,
+      newMessage: { role: "user", parts: [{ text: "go" }] },
+    })) {
+      events.push(event);
+      if (event.errorCode) errors.push(event.errorMessage ?? event.errorCode);
+    }
+  } catch (error) {
+    errors.push(error instanceof Error ? error.message : String(error));
+  }
+  return { received, errors, events };
+}
+
+describe("ExternalAgent as an ADK Workflow node", () => {
+  test("a legitimate empty final output still completes the ADK turn", async () => {
+    const agent = new ExternalAgent({
+      name: "empty_final",
+      provider: CODEX_PROVIDER,
+      driver: scripted(async function* () {
+        yield { type: "output", content: "streamed chunk", partial: true };
+        yield { type: "output", content: "", turnComplete: true };
+        yield { type: "completed", exitCode: 0 };
+      }),
+    });
+    const { received, errors, events } = await runNode(agent);
+    expect(errors).toEqual([]);
+    const final = events.filter(
+      (event) => event.author === "empty_final" && event.turnComplete === true,
+    );
+    expect(final).toHaveLength(1);
+    expect(final[0]?.content?.parts).toEqual([{ text: "" }]);
+    expect(received).toEqual([""]);
+  });
+
+  for (const wrapped of [false, true]) {
+    test(`ignored child completion produces no ADK event (${wrapped ? "envelope" : "plain"})`, async () => {
+      class GuardedDriver extends SubprocessJsonlDriver {
+        override async *run(
+          _request: ExternalAgentRunRequest,
+        ): AsyncIterable<ExternalAgentEvent> {
+          const completed = { type: "completed", exitCode: 99 };
+          yield this.parseLine(
+            JSON.stringify(
+              wrapped
+                ? { type: "adk.bridge_event", event: completed }
+                : completed,
+            ),
+          );
+          yield { type: "output", content: "real output" };
+          yield { type: "completed", exitCode: 0 };
+        }
+      }
+      const agent = new ExternalAgent({
+        name: "guarded",
+        provider: CODEX_PROVIDER,
+        driver: new GuardedDriver({
+          providerId: CODEX_PROVIDER.id,
+          command: "unused",
+        }),
+      });
+      const { received, errors, events } = await runNode(agent);
+      expect(errors).toEqual([]);
+      const agentEvents = events.filter((event) => event.author === "guarded");
+      expect(agentEvents).toHaveLength(1);
+      expect(agentEvents[0]?.content?.parts).toEqual([{ text: "real output" }]);
+      expect(agentEvents[0]?.turnComplete).toBe(true);
+      expect(received).toEqual(["real output"]);
+    });
+  }
+
+  test("timeout aborts the driver through request.abortSignal", async () => {
+    let signal: AbortSignal | undefined;
+    let driverCleanedUp = false;
+    const agent = new ExternalAgent({
+      name: "slow",
+      provider: CODEX_PROVIDER,
+      timeout: 0.05, // seconds, ADK BaseNodeConfig.timeout
+      driver: scripted(async function* (request) {
+        signal = request.abortSignal;
+        try {
+          yield { type: "output", content: "working", partial: true };
+          await new Promise<never>((_, reject) => {
+            request.abortSignal?.addEventListener("abort", () =>
+              reject(new Error("driver aborted")),
+            );
+          });
+        } finally {
+          driverCleanedUp = true;
+        }
+      }),
+    });
+
+    const { received, errors } = await withDeadline(
+      runNode(agent),
+      5000,
+      "workflow did not time out the node",
+    );
+
+    expect(signal?.aborted).toBe(true);
+    expect(driverCleanedUp).toBe(true);
+    expect(received).toEqual([]);
+    expect(errors.length).toBeGreaterThan(0);
+  });
+
+  test("retryConfig re-runs the agent cleanly after a failed attempt", async () => {
+    let attempts = 0;
+    const agent = new ExternalAgent({
+      name: "flaky",
+      provider: CODEX_PROVIDER,
+      retryConfig: { maxAttempts: 3, initialDelay: 0, jitter: 0 },
+      driver: scripted(async function* () {
+        attempts += 1;
+        if (attempts === 1) {
+          throw new Error("transient failure");
+        }
+        yield { type: "output", content: `attempt ${attempts}` };
+      }),
+    });
+
+    const { received, errors } = await withDeadline(
+      runNode(agent),
+      5000,
+      "retry did not finish",
+    );
+
+    expect(errors).toEqual([]);
+    expect(attempts).toBe(2);
+    expect(received).toEqual(["attempt 2"]);
+  });
+
+  test("rerunOnResume and waitForOutput are accepted and exposed on the node", () => {
+    const agent = new ExternalAgent({
+      name: "resumable",
+      provider: CODEX_PROVIDER,
+      rerunOnResume: true,
+      waitForOutput: true,
+      driver: scripted(async function* () {
+        yield { type: "output", content: "x" };
+      }),
+    });
+
+    expect(agent.rerunOnResume).toBe(true);
+    expect(agent.waitForOutput).toBe(true);
+    expect(agent.clone().rerunOnResume).toBe(true);
+  });
+});

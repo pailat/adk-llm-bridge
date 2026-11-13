@@ -1,0 +1,5 @@
+# Keep the isolated layout the repository had while it declared workspaces:
+# the hoisted linker (Bun's default without workspaces) puts transitive
+# packages and their bins, such as node_modules/.bin/codex, at the root.
+[install]
+linker = "isolated"

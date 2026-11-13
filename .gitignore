@@ -36,3 +36,6 @@ Thumbs.db
 
 # npm pack tarballs
 *.tgz
+
+# Host-owned scratch directories of the interpreter tests
+.host-scratch-*/

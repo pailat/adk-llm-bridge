@@ -1,0 +1,1 @@
+{"output":"API request failed · HTTP 502 · model_not_found: Model 'anthropic/does-not-exist' not found\n","final_output":"","exit_code":1,"model":"anthropic/does-not-exist","resolved_provider":null,"session_id":"","steps":0,"tool_calls":[],"usage":{"input_tokens":null,"output_tokens":null}}

@@ -1,15 +1,26 @@
 {
   "name": "basic-agent-anthropic",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "main": "agent.ts",
+  "engines": {
+    "node": ">=22.0.0"
+  },
   "scripts": {
     "dev": "bunx @google/adk-devtools run agent.ts",
-    "web": "bunx @google/adk-devtools web"
+    "web": "bunx @google/adk-devtools web",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@google/adk": "^1.2.0",
-    "adk-llm-bridge": "^0.5.3",
-    "zod": "^4.2.1"
+    "@google/adk": "^2.5.0",
+    "@google/genai": "^2.32.0",
+    "@opentelemetry/api": "^1.10.0",
+    "adk-llm-bridge": "^0.7.0",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.4",
+    "typescript": "^7.0.2"
   }
 }

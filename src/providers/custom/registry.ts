@@ -1,0 +1,265 @@
+/**
+ * Opt-in ADK registry integration for named custom providers.
+ *
+ * Each registration creates a dedicated class for a finite set of exact model
+ * routes. The class closes over the endpoint configuration because ADK's
+ * LLMRegistry constructs registered classes with only a model string.
+ */
+
+import { InputValidationError, LLMRegistry } from "@google/adk";
+import type { CustomProviderConfig } from "../../types.js";
+import { CustomLlm, resolveCustomConfig } from "./custom-llm.js";
+
+/**
+ * Options of {@link registerCustomProvider}: the endpoint configuration
+ * captured by a named custom-provider registration, and its model routes.
+ */
+export type CustomRegisterOptions = Omit<CustomProviderConfig, "model"> & {
+  /**
+   * Complete remote model IDs exposed by this registration.
+   *
+   * ADK does not expose its registered patterns, so an open-ended prefix
+   * cannot be checked safely for partial overlap. Requiring an explicit list
+   * lets this API prove that every route is unclaimed before registering any
+   * of them.
+   *
+   * @example ["llama3", "meta-llama/Llama-3-8b"]
+   */
+  models: readonly string[];
+};
+
+const PREFIX_PATTERN = /^[a-z][a-z0-9._-]*(?:\/[a-z][a-z0-9._-]*)*$/;
+
+/**
+ * Prefixes owned by ADK or by first-party bridge providers.
+ *
+ * Reserving these even before their providers are registered makes validation
+ * independent of module import and registration order.
+ */
+const RESERVED_PREFIXES = new Set([
+  "ai-gateway",
+  "anthropic",
+  "apigee",
+  "custom",
+  "gemini",
+  "google",
+  "openai",
+  "openrouter",
+  "projects",
+  "vertex",
+  "xai",
+]);
+
+const registeredPrefixes = new Set<string>();
+
+function displayPrefix(prefix: unknown): string {
+  return typeof prefix === "string" ? JSON.stringify(prefix) : String(prefix);
+}
+
+function validatePrefix(prefix: string): void {
+  if (typeof prefix !== "string" || !PREFIX_PATTERN.test(prefix)) {
+    throw new InputValidationError(
+      `[adk-llm-bridge] Invalid custom provider prefix ${displayPrefix(prefix)}. ` +
+        "Use lowercase path segments beginning with a letter and containing only letters, numbers, dots, underscores, or hyphens.",
+    );
+  }
+
+  const rootPrefix = prefix.split("/", 1)[0];
+  if (RESERVED_PREFIXES.has(rootPrefix)) {
+    throw new InputValidationError(
+      `[adk-llm-bridge] Custom provider prefix ${JSON.stringify(prefix)} is reserved.`,
+    );
+  }
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function copyConfig<T>(config: T): T {
+  try {
+    return structuredClone(config);
+  } catch (error) {
+    throw new InputValidationError(
+      "[adk-llm-bridge] Custom provider registration configuration must contain only cloneable values.",
+      { cause: error },
+    );
+  }
+}
+
+/**
+ * The message ADK's `LLMRegistry.resolve` throws for a model no class claims
+ * (`models/registry.js` in ADK 2.5).
+ *
+ * @remarks
+ * ADK throws a plain `Error` here, with no code or error class, so this
+ * exact text is the only way to tell "unclaimed" from a registry failure.
+ * The LLMRegistry contract test pins it; a typed lookup (or error code) in
+ * ADK would remove the match.
+ *
+ * @internal
+ */
+export function adkModelNotFoundMessage(model: string): string {
+  return `Model ${model} not found.`;
+}
+
+function resolvesInAdk(model: string): boolean {
+  try {
+    LLMRegistry.resolve(model);
+    return true;
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      error.message === adkModelNotFoundMessage(model)
+    ) {
+      return false;
+    }
+
+    throw new Error(
+      `[adk-llm-bridge] Could not prove that custom provider route ${JSON.stringify(model)} is unclaimed; ADK registry resolution failed unexpectedly.`,
+      { cause: error },
+    );
+  }
+}
+
+/**
+ * Registers one named OpenAI-compatible endpoint with ADK's LLMRegistry.
+ *
+ * Models are addressed as `prefix/remote-model-id`. Every remote model ID must
+ * be declared in `config.models`; open-ended prefix ownership is intentionally
+ * unsupported because ADK's public registry API cannot prove that an arbitrary
+ * existing regular expression does not partially overlap a prefix.
+ *
+ * Registration is atomic: every exact route is checked before the class is
+ * registered. If an existing ADK registration (including AI Gateway or
+ * OpenRouter's broad pattern) already resolves any route, this function throws
+ * and registers none. Register custom providers before broad providers. When a
+ * broad provider is registered later, ADK's first-match ordering leaves these
+ * earlier exact routes with the custom provider.
+ *
+ * ADK `LLMRegistry` behavior this relies on (pinned by
+ * `tests/providers/custom/llm-registry-contract.test.ts`):
+ * - a pattern must match the **whole** model name (`^(?:pattern)$`);
+ * - the first registered matching pattern wins, and ADK's own (`gemini-.*`,
+ *   `apigee/.*`, `chrome/.*`) are registered before any of ours. Registering
+ *   again under the **same key** (the same string, or the same `RegExp`
+ *   object) replaces the class in its original position instead (ADK only
+ *   logs it at info level), which is not the case for distinct but equal
+ *   `RegExp` objects;
+ * - there is no `unregister`, so a registration lasts for the process;
+ * - resolutions are cached (LRU of 32) and the cache is **not** invalidated by
+ *   later registrations. Register custom providers at startup, before any
+ *   agent resolves a model name; a model that already resolved keeps its class.
+ *
+ * @param prefix - Unique routing prefix, for example `ollama` or `local/vllm`
+ * @param config - Endpoint configuration captured for all models under prefix
+ * @throws {@link InputValidationError} If the prefix, models, or endpoint configuration
+ *   are invalid, or a route is already claimed (ADK's `InputValidationError`,
+ *   an `Error` subclass)
+ * @throws {@link Error} If route safety cannot be proven because ADK resolution failed
+ *
+ * @example
+ * ```typescript
+ * registerCustomProvider("ollama", {
+ *   baseURL: "http://localhost:11434/v1",
+ *   models: ["llama3"],
+ * });
+ *
+ * // ADK resolves this registration and sends `llama3` to Ollama.
+ * const agent = new LlmAgent({ model: "ollama/llama3" });
+ * ```
+ */
+export function registerCustomProvider(
+  prefix: string,
+  config: CustomRegisterOptions,
+): void {
+  validatePrefix(prefix);
+
+  if (registeredPrefixes.has(prefix)) {
+    throw new InputValidationError(
+      `[adk-llm-bridge] Custom provider prefix ${JSON.stringify(prefix)} is already registered.`,
+    );
+  }
+
+  if (!Array.isArray(config.models) || config.models.length === 0) {
+    throw new InputValidationError(
+      `[adk-llm-bridge] Custom provider ${JSON.stringify(prefix)} must declare at least one model.`,
+    );
+  }
+
+  const { models, ...capturedConfig } = copyConfig(config);
+
+  const remoteModels = [...models];
+  for (const model of remoteModels) {
+    if (typeof model !== "string" || model.trim().length === 0) {
+      throw new InputValidationError(
+        `[adk-llm-bridge] Custom provider ${JSON.stringify(prefix)} contains an invalid model ID. Model IDs must contain non-whitespace characters.`,
+      );
+    }
+  }
+
+  if (new Set(remoteModels).size !== remoteModels.length) {
+    throw new InputValidationError(
+      `[adk-llm-bridge] Custom provider ${JSON.stringify(prefix)} contains duplicate model IDs.`,
+    );
+  }
+
+  // Resolve before touching ADK's registry, then capture the result. Named
+  // registrations therefore keep a stable endpoint/key even if process.env is
+  // changed later, and the copies keep later edits to the caller's objects
+  // out of the registration.
+  const resolved = resolveCustomConfig({
+    ...capturedConfig,
+    model: remoteModels[0],
+  });
+  const resolvedCapturedConfig = copyConfig({
+    ...capturedConfig,
+    apiKey: resolved.apiKey,
+    baseURL: resolved.baseURL,
+    maxRetries: resolved.maxRetries,
+    timeout: resolved.timeout,
+  });
+
+  const routes = new Map<string, string>(
+    remoteModels.map((model) => [`${prefix}/${model}`, model] as const),
+  );
+  const conflictingRoute = [...routes.keys()].find(resolvesInAdk);
+  if (conflictingRoute) {
+    throw new InputValidationError(
+      `[adk-llm-bridge] Custom provider route ${JSON.stringify(conflictingRoute)} is already claimed by an existing ADK LLM registration. Register custom providers before broad AI Gateway or OpenRouter registrations.`,
+    );
+  }
+
+  class NamedCustomLlm extends CustomLlm {
+    static readonly supportedModels = [...routes.keys()].map(
+      (route) => new RegExp(escapeRegExp(route)),
+    );
+
+    constructor({ model }: { model: string }) {
+      const remoteModel = routes.get(model);
+      if (remoteModel === undefined) {
+        throw new InputValidationError(
+          `[adk-llm-bridge] Model ${JSON.stringify(model)} is not declared by custom provider ${JSON.stringify(prefix)}.`,
+        );
+      }
+
+      super({
+        ...copyConfig(resolvedCapturedConfig),
+        name: resolvedCapturedConfig.name ?? prefix,
+        model: remoteModel,
+      });
+    }
+  }
+
+  LLMRegistry.register(NamedCustomLlm);
+  registeredPrefixes.add(prefix);
+}
+
+/**
+ * Former name of {@link CustomRegisterOptions}.
+ *
+ * @deprecated Use {@link CustomRegisterOptions}, the same type under the
+ * `<Provider>RegisterOptions` naming scheme. This alias stays until the next
+ * major version.
+ */
+export type CustomProviderRegistrationConfig = CustomRegisterOptions;

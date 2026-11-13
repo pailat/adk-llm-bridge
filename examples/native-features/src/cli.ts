@@ -10,11 +10,11 @@
  *   bun run src/cli.ts <name> [--provider anthropic|openai] [--model <id>]
  */
 import { loadConfig } from "./config";
+// Side-effect import: registers every demo into the registry.
+import { registry } from "./demos";
 import { createOutput } from "./output";
 import { AgentHarness } from "./runner";
 import type { DemoContext } from "./types";
-// Side-effect import: registers every demo into the registry.
-import { registry } from "./demos";
 
 interface ParsedArgs {
   command?: string;
@@ -71,7 +71,7 @@ async function main(): Promise<void> {
     return;
   }
 
-  let config;
+  let config: ReturnType<typeof loadConfig>;
   try {
     config = loadConfig({ provider, model });
   } catch (error) {

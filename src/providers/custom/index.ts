@@ -1,10 +1,4 @@
 /**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
-/**
  * Custom LLM provider for any compatible API.
  *
  * This module provides support for connecting to any API that implements
@@ -28,9 +22,12 @@
  *   baseURL: "http://localhost:11434/v1"
  * });
  * ```
- *
- * @module providers/custom
  */
 
 export { CustomLlm, type CustomLlmProviderConfig } from "./custom-llm.js";
 export { Custom, createCustomLlm } from "./factory.js";
+export {
+  type CustomProviderRegistrationConfig,
+  type CustomRegisterOptions,
+  registerCustomProvider,
+} from "./registry.js";

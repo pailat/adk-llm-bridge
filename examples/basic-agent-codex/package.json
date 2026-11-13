@@ -1,8 +1,12 @@
 {
   "name": "basic-agent-codex",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "main": "agent.ts",
+  "engines": {
+    "node": ">=22.0.0"
+  },
   "scripts": {
     "dev": "bunx @google/adk-devtools run agent.ts",
     "web": "bunx @google/adk-devtools web",
@@ -11,12 +15,14 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@google/adk": "^1.1.0",
-    "@openai/codex-sdk": "^0.141.0",
-    "adk-llm-bridge": "file:../.."
+    "@google/adk": "^2.5.0",
+    "@google/genai": "^2.32.0",
+    "@openai/codex-sdk": "0.167.2",
+    "@opentelemetry/api": "^1.10.0",
+    "adk-llm-bridge": "^0.7.0"
   },
   "devDependencies": {
-    "@types/bun": "latest",
-    "typescript": "^5.9.3"
+    "@types/bun": "^1.4.4",
+    "typescript": "^7.0.2"
   }
 }

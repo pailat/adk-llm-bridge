@@ -1,0 +1,72 @@
+{
+  "description": "A QA command has no executable.",
+  "rules": null,
+  "spec": {
+    "specVersion": 1,
+    "workflowId": "lanes",
+    "workflowVersion": "1",
+    "projectRoot": ".",
+    "budget": {
+      "maxUsd": 5
+    },
+    "maxConcurrency": 2,
+    "lanes": [
+      {
+        "taskId": "api",
+        "title": "Add the health endpoint",
+        "role": "worker",
+        "dependsOn": [],
+        "allowedPaths": ["src/api", "tests/api"],
+        "agent": {
+          "providerId": "claude-code",
+          "model": "claude-sonnet-5",
+          "mode": "workspace-write",
+          "tools": ["Read", "Edit"]
+        },
+        "steps": {
+          "testsFirst": true,
+          "review": {
+            "kind": "agent",
+            "providerId": "codex",
+            "model": "gpt-5.5",
+            "maxChangeRounds": 2
+          }
+        }
+      },
+      {
+        "taskId": "docs",
+        "title": "Document the health endpoint",
+        "role": "worker",
+        "dependsOn": ["api"],
+        "allowedPaths": ["docs/api.md"],
+        "agent": {
+          "providerId": "codex",
+          "model": "gpt-5.5",
+          "mode": "workspace-write",
+          "allowNetwork": false,
+          "tools": []
+        },
+        "steps": {
+          "testsFirst": false,
+          "review": {
+            "kind": "none"
+          }
+        }
+      }
+    ],
+    "gates": {
+      "qa": [
+        {
+          "id": "test",
+          "command": []
+        }
+      ],
+      "publish": {
+        "kind": "commit",
+        "hitl": true
+      }
+    },
+    "env": ["CI"]
+  },
+  "expectCodes": ["RUN_SPEC_ARRAY_TOO_SHORT"]
+}

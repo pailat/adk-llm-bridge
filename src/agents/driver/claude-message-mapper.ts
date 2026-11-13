@@ -1,65 +1,69 @@
-/**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
 import type { Content, Part } from "@google/genai";
 
-/**
- * Anthropic ContentBlockParam variant subset we emit. The full union from
- * `@anthropic-ai/sdk/resources/messages` is much broader, but we only use a
- * handful of block kinds when translating ADK history into Claude messages.
- */
+// The block types below are the subset of Anthropic's `ContentBlockParam`
+// that this mapper emits. The full union from
+// `@anthropic-ai/sdk/resources/messages` is much broader.
+
+/** Media types Claude accepts for a base64 image. */
 export type ClaudeBase64ImageMediaType =
   | "image/jpeg"
   | "image/png"
   | "image/gif"
   | "image/webp";
 
+/** Inline base64 image source. */
 export type ClaudeBase64ImageSource = {
   type: "base64";
   media_type: ClaudeBase64ImageMediaType;
   data: string;
 };
 
+/** Image referenced by URL. */
 export type ClaudeURLImageSource = {
   type: "url";
   url: string;
 };
 
+/** Inline base64 PDF source. */
 export type ClaudeBase64PDFSource = {
   type: "base64";
   media_type: "application/pdf";
   data: string;
 };
 
+/** Document referenced by URL. */
 export type ClaudeURLDocumentSource = {
   type: "url";
   url: string;
 };
 
+/** Plain text block. */
 export type ClaudeTextBlockParam = { type: "text"; text: string };
+/** Image block. */
 export type ClaudeImageBlockParam = {
   type: "image";
   source: ClaudeBase64ImageSource | ClaudeURLImageSource;
 };
+/** Document (PDF) block. */
 export type ClaudeDocumentBlockParam = {
   type: "document";
   source: ClaudeBase64PDFSource | ClaudeURLDocumentSource;
 };
+/** Assistant `tool_use` block. */
 export type ClaudeToolUseBlockParam = {
   type: "tool_use";
   id: string;
   name: string;
   input: Record<string, unknown>;
 };
+/** User `tool_result` block. */
 export type ClaudeToolResultBlockParam = {
   type: "tool_result";
   tool_use_id: string;
   content: string;
 };
 
+/** Any content block this mapper can emit. */
 export type ClaudeContentBlockParam =
   | ClaudeTextBlockParam
   | ClaudeImageBlockParam
@@ -67,8 +71,9 @@ export type ClaudeContentBlockParam =
   | ClaudeToolUseBlockParam
   | ClaudeToolResultBlockParam;
 
+/** A user-role message made of content blocks. */
 export type ClaudeMessageParam = {
-  role: "user" | "assistant";
+  role: "user";
   content: ClaudeContentBlockParam[];
 };
 
@@ -79,9 +84,13 @@ export type ClaudeMessageParam = {
  */
 export type SDKUserMessage = {
   type: "user";
+  /** The user message. */
   message: ClaudeMessageParam;
+  /** Always `null`: these messages are not replies to a tool call. */
   parent_tool_use_id: string | null;
+  /** Marks a history message the SDK appends to the transcript as is. */
   isSynthetic?: boolean;
+  /** Whether the SDK should start an assistant turn after this message. */
   shouldQuery?: boolean;
 };
 
@@ -94,10 +103,28 @@ const IMAGE_MEDIA_TYPES: ReadonlySet<string> = new Set([
 
 /**
  * Translate ADK history (`Content[]`) into a sequence of Claude SDK user
- * messages with native multimodal `ContentBlockParam` blocks. The final
- * emitted message is marked `shouldQuery: true` so the SDK triggers an
- * assistant turn; preceding messages are appended as synthetic transcript
+ * messages with native multimodal `ContentBlockParam` blocks.
+ *
+ * IMPORTANT: the Claude Agent SDK streaming-input channel
+ * (`AsyncIterable<SDKUserMessage>`) is USER-ROLE ONLY by contract — the
+ * `claude` CLI hard-rejects any input message whose inner `message.role` is
+ * `'assistant'` ("Expected message role 'user', got 'assistant'"). Therefore
+ * EVERY emitted message has `message.role === 'user'`. Prior assistant /
+ * tool_use / tool_result turns are restored by the SDK from its own on-disk
+ * transcript via `options.resume`; they are NEVER replayed through input.
+ *
+ * Model turns are rendered as readable user-role text markers (function calls
+ * as `[assistant tool-call <name>(<args>)]`, function responses as
+ * `[tool <name> result: <json>]`). Valid user multimodal image/document blocks
+ * are preserved as native blocks.
+ *
+ * The final emitted message is marked `shouldQuery: true` so the SDK triggers
+ * an assistant turn; preceding messages are appended as synthetic transcript
  * entries.
+ *
+ * @param contents - ADK conversation history.
+ * @returns User-role messages, in order, with empty contents skipped. Empty
+ * when no content has a mappable part.
  */
 export function contentsToSdkMessages(
   contents: ReadonlyArray<Content>,
@@ -106,24 +133,11 @@ export function contentsToSdkMessages(
 
   for (let i = 0; i < contents.length; i++) {
     const content = contents[i];
-    let role: "user" | "assistant" = content.role === "model" ? "assistant" : "user";
     const blocks: ClaudeContentBlockParam[] = [];
 
     const parts = content.parts ?? [];
-    let hasFunctionCall = false;
-    let hasFunctionResponse = false;
-    for (const part of parts) {
-      if (part.functionCall) hasFunctionCall = true;
-      if (part.functionResponse) hasFunctionResponse = true;
-    }
-    if (hasFunctionResponse) {
-      role = "user";
-    } else if (hasFunctionCall) {
-      role = "assistant";
-    }
-
     for (let p = 0; p < parts.length; p++) {
-      const block = mapPart(parts[p], i, p);
+      const block = mapPart(parts[p]);
       if (block) {
         blocks.push(block);
       }
@@ -133,10 +147,12 @@ export function contentsToSdkMessages(
       continue;
     }
 
+    // USER-ONLY: the streaming-input channel rejects assistant-role messages,
+    // so every emitted message is `role: "user"` regardless of the ADK turn.
     messages.push({
       type: "user",
       parent_tool_use_id: null,
-      message: { role, content: blocks },
+      message: { role: "user", content: blocks },
     });
   }
 
@@ -153,11 +169,7 @@ export function contentsToSdkMessages(
   return messages;
 }
 
-function mapPart(
-  part: Part,
-  contentIndex: number,
-  partIndex: number,
-): ClaudeContentBlockParam | undefined {
+function mapPart(part: Part): ClaudeContentBlockParam | undefined {
   if (part.thought) {
     return undefined;
   }
@@ -194,21 +206,19 @@ function mapPart(
     return { type: "text", text: `[file: ${uri} (${mime})]` };
   }
   if (part.functionCall) {
-    const id = part.functionCall.id ?? generatedId(contentIndex, partIndex);
-    return {
-      type: "tool_use",
-      id,
-      name: part.functionCall.name ?? "<unknown>",
-      input: (part.functionCall.args ?? {}) as Record<string, unknown>,
-    };
+    // USER-ONLY: render the model's tool call as a readable user-role text
+    // marker rather than an assistant `tool_use` block (which the input
+    // channel rejects). The SDK restores the real tool_use turn via resume.
+    const name = part.functionCall.name ?? "<unknown>";
+    const args = stringifyFunctionResponse(part.functionCall.args ?? {});
+    return { type: "text", text: `[assistant tool-call ${name}(${args})]` };
   }
   if (part.functionResponse) {
-    const id = part.functionResponse.id ?? generatedId(contentIndex, partIndex);
-    return {
-      type: "tool_result",
-      tool_use_id: id,
-      content: stringifyFunctionResponse(part.functionResponse.response),
-    };
+    // USER-ONLY: render the tool result as a readable user-role text marker
+    // rather than an orphan `tool_result` block.
+    const name = part.functionResponse.name ?? "<unknown>";
+    const result = stringifyFunctionResponse(part.functionResponse.response);
+    return { type: "text", text: `[tool ${name} result: ${result}]` };
   }
   if (part.executableCode) {
     const lang = part.executableCode.language ?? "PLAINTEXT";
@@ -221,10 +231,6 @@ function mapPart(
     return { type: "text", text: `[exec ${outcome}: ${output}]` };
   }
   return undefined;
-}
-
-function generatedId(contentIndex: number, partIndex: number): string {
-  return `tool_${contentIndex}_${partIndex}`;
 }
 
 function stringifyFunctionResponse(value: unknown): string {

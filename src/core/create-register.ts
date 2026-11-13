@@ -1,25 +1,21 @@
 /**
- * @license
- * Copyright 2025 PAI
- * SPDX-License-Identifier: MIT
- */
-
-/**
  * Factory for creating provider registration functions.
  *
- * Eliminates the duplicated singleton registration pattern that was
- * previously copy-pasted in every provider's register.ts file.
- *
- * @module core/create-register
+ * Each provider shares one singleton registration instead of repeating it in
+ * its own `register.ts`.
  */
 
 import type { BaseLlm } from "@google/adk";
 import { LLMRegistry } from "@google/adk";
 import { resetProviderConfig, setProviderConfig } from "../config.js";
+import { LogCode, warn } from "../utils/log.js";
+import { checkIntegerOptions } from "../utils/validate.js";
 import type { ProviderDefinition } from "./provider-definition.js";
 
 /** Type that LLMRegistry.register() expects. */
-type RegisterableLlm = (new (params: { model: string }) => BaseLlm) & {
+type RegisterableLlm = (new (params: {
+  model: string;
+}) => BaseLlm) & {
   readonly supportedModels: (string | RegExp)[];
 };
 
@@ -29,25 +25,31 @@ type RegisterableLlm = (new (params: { model: string }) => BaseLlm) & {
  * Returns an object with `register`, `isRegistered`, and `_reset` functions
  * that implement the idempotent singleton registration pattern.
  *
- * @param definition - The provider definition
+ * @typeParam O - The options `register` takes; they are stored as the
+ * provider's global config.
+ * @param definition - The provider definition, or just its `id`
  * @param ProviderClass - The LLM class to register (must have static supportedModels)
- * @returns Registration function set
+ * @returns Registration function set. `register` throws ADK's
+ *   `InputValidationError` when `timeout`, `maxRetries` or `maxTokens` is set
+ *   and is not an integer, or `timeout` is above 2147483647 ms, before it
+ *   stores or registers anything.
  */
-export function createRegisterFunction(
-  definition: ProviderDefinition,
-  ProviderClass: RegisterableLlm,
-) {
+export function createRegisterFunction<
+  O extends object = Record<string, unknown>,
+>(definition: Pick<ProviderDefinition, "id">, ProviderClass: RegisterableLlm) {
   let registered = false;
 
   return {
-    register(options?: Record<string, unknown>): void {
+    register(options?: O): void {
       if (registered) {
-        console.warn(
-          `[adk-llm-bridge] ${definition.id} already registered, skipping`,
+        warn(
+          LogCode.ALREADY_REGISTERED,
+          `${definition.id} already registered, skipping`,
         );
         return;
       }
       if (options) {
+        checkIntegerOptions(definition.id, options);
         setProviderConfig(
           definition.id as "ai-gateway",
           options as Parameters<typeof setProviderConfig>[1],

@@ -6,11 +6,20 @@ import {
   convertAnthropicStreamEvent,
   createAnthropicStreamAccumulator,
 } from "../../../../src/providers/anthropic/converters/response.js";
+import {
+  EMPTY_THINKING_SIGNATURE_PREFIX,
+  THINKING_SIGNATURE_PREFIX,
+} from "../../../../src/providers/anthropic/converters/thinking-signature.js";
 
 // Helper to create Anthropic Message with required fields
 function createMessage(overrides: {
   content: Anthropic.Message["content"];
-  usage: { input_tokens: number; output_tokens: number };
+  usage: {
+    input_tokens: number;
+    output_tokens: number;
+    cache_read_input_tokens?: number | null;
+    cache_creation_input_tokens?: number | null;
+  };
   id?: string;
   stop_reason?: Anthropic.Message["stop_reason"];
   stop_sequence?: string | null;
@@ -23,15 +32,22 @@ function createMessage(overrides: {
     model: overrides.model ?? "claude-sonnet-4-5-20250929",
     stop_reason: overrides.stop_reason ?? "end_turn",
     stop_sequence: overrides.stop_sequence ?? null,
+    stop_details: null,
+    container: null,
+    diagnostics: null,
     content: overrides.content,
     usage: {
       input_tokens: overrides.usage.input_tokens,
       output_tokens: overrides.usage.output_tokens,
       cache_creation: null,
-      cache_creation_input_tokens: null,
-      cache_read_input_tokens: null,
+      cache_creation_input_tokens:
+        overrides.usage.cache_creation_input_tokens ?? null,
+      cache_read_input_tokens: overrides.usage.cache_read_input_tokens ?? null,
       server_tool_use: null,
       service_tier: null,
+      inference_geo: null,
+      output_tokens_details: null,
+      speed: null,
     },
   };
 }
@@ -74,6 +90,7 @@ describe("convertAnthropicResponse", () => {
         content: [
           {
             type: "tool_use",
+            caller: { type: "direct" },
             id: "call_456",
             name: "get_weather",
             input: { city: "Tokyo" },
@@ -100,6 +117,7 @@ describe("convertAnthropicResponse", () => {
           { type: "text", text: "Let me check the weather.", citations: null },
           {
             type: "tool_use",
+            caller: { type: "direct" },
             id: "call_456",
             name: "get_weather",
             input: { city: "Tokyo" },
@@ -156,6 +174,19 @@ describe("convertAnthropicResponse", () => {
 
     it("maps refusal to SAFETY", () => {
       expect(withStop("refusal").finishReason).toBe(FinishReason.SAFETY);
+    });
+
+    it("maps model_context_window_exceeded to MAX_TOKENS", () => {
+      expect(withStop("model_context_window_exceeded").finishReason).toBe(
+        FinishReason.MAX_TOKENS,
+      );
+    });
+
+    it("gives pause_turn and an unknown reason no finish reason", () => {
+      expect(withStop("pause_turn").finishReason).toBeUndefined();
+      expect(
+        withStop("brand_new_reason" as Anthropic.StopReason).finishReason,
+      ).toBeUndefined();
     });
   });
 });
@@ -226,6 +257,7 @@ describe("convertAnthropicStreamEvent", () => {
         index: 0,
         content_block: {
           type: "tool_use",
+          caller: { type: "direct" },
           id: "call_123",
           name: "get_weather",
           input: {},
@@ -250,6 +282,7 @@ describe("convertAnthropicStreamEvent", () => {
           index: 0,
           content_block: {
             type: "tool_use",
+            caller: { type: "direct" },
             id: "call_123",
             name: "get_weather",
             input: {},
@@ -354,6 +387,8 @@ describe("convertAnthropicStreamEvent", () => {
         delta: {
           stop_reason: "end_turn",
           stop_sequence: null,
+          container: null,
+          stop_details: null,
         },
         usage: {
           output_tokens: 50,
@@ -361,6 +396,7 @@ describe("convertAnthropicStreamEvent", () => {
           cache_creation_input_tokens: null,
           cache_read_input_tokens: null,
           server_tool_use: null,
+          output_tokens_details: null,
         },
       };
 
@@ -424,13 +460,19 @@ describe("convertAnthropicStreamEvent", () => {
       convertAnthropicStreamEvent(
         {
           type: "message_delta",
-          delta: { stop_reason: "max_tokens", stop_sequence: null },
+          delta: {
+            stop_reason: "max_tokens",
+            stop_sequence: null,
+            container: null,
+            stop_details: null,
+          },
           usage: {
             output_tokens: 5,
             input_tokens: null,
             cache_creation_input_tokens: null,
             cache_read_input_tokens: null,
             server_tool_use: null,
+            output_tokens_details: null,
           },
         },
         acc,
@@ -453,13 +495,19 @@ describe("convertAnthropicStreamEvent", () => {
       convertAnthropicStreamEvent(
         {
           type: "message_delta",
-          delta: { stop_reason: "tool_use", stop_sequence: null },
+          delta: {
+            stop_reason: "tool_use",
+            stop_sequence: null,
+            container: null,
+            stop_details: null,
+          },
           usage: {
             output_tokens: 5,
             input_tokens: null,
             cache_creation_input_tokens: null,
             cache_read_input_tokens: null,
             server_tool_use: null,
+            output_tokens_details: null,
           },
         },
         acc,
@@ -490,7 +538,9 @@ describe("convertAnthropicStreamEvent", () => {
       const thought = result.content?.parts?.[0];
       expect(thought?.thought).toBe(true);
       expect(thought?.text).toBe("Let me reason about this...");
-      expect(thought?.thoughtSignature).toBe("sig-abc-123");
+      expect(thought?.thoughtSignature).toBe(
+        `${THINKING_SIGNATURE_PREFIX}sig-abc-123`,
+      );
       expect(result.content?.parts?.[1].text).toBe("The answer is 42.");
     });
 
@@ -507,7 +557,9 @@ describe("convertAnthropicStreamEvent", () => {
 
       const thought = result.content?.parts?.[0];
       expect(thought?.thought).toBe(true);
-      expect(thought?.thoughtSignature).toBe("encrypted-blob");
+      expect(thought?.thoughtSignature).toBe(
+        `${THINKING_SIGNATURE_PREFIX}encrypted-blob`,
+      );
       expect(thought?.text).toBeUndefined();
     });
   });
@@ -555,7 +607,9 @@ describe("convertAnthropicStreamEvent", () => {
       const thought = final.response?.content?.parts?.[0];
       expect(thought?.thought).toBe(true);
       expect(thought?.text).toBe("Step 1...");
-      expect(thought?.thoughtSignature).toBe("sig-xyz");
+      expect(thought?.thoughtSignature).toBe(
+        `${THINKING_SIGNATURE_PREFIX}sig-xyz`,
+      );
       expect(acc.thinkingBlocks.size).toBe(0);
     });
 
@@ -574,7 +628,9 @@ describe("convertAnthropicStreamEvent", () => {
       const part = result.response?.content?.parts?.[0];
       expect(result.response?.partial).toBe(true);
       expect(part?.thought).toBe(true);
-      expect(part?.thoughtSignature).toBe("enc-blob");
+      expect(part?.thoughtSignature).toBe(
+        `${THINKING_SIGNATURE_PREFIX}enc-blob`,
+      );
     });
   });
 });
@@ -585,6 +641,7 @@ describe("structured output (json_output synthetic tool)", () => {
       content: [
         {
           type: "tool_use",
+          caller: { type: "direct" },
           id: "call_1",
           name: "json_output",
           input: { city: "Tokyo", temp: 21 },
@@ -612,6 +669,7 @@ describe("structured output (json_output synthetic tool)", () => {
       content: [
         {
           type: "tool_use",
+          caller: { type: "direct" },
           id: "call_1",
           name: "get_weather",
           input: { city: "Tokyo" },
@@ -629,7 +687,11 @@ describe("structured output (json_output synthetic tool)", () => {
 
   it("streaming: json_output tool surfaces as TEXT at message_stop", () => {
     const acc = createAnthropicStreamAccumulator();
-    acc.toolUses.set(0, { id: "c1", name: "json_output", input: '{"answer":42}' });
+    acc.toolUses.set(0, {
+      id: "c1",
+      name: "json_output",
+      input: '{"answer":42}',
+    });
 
     const result = convertAnthropicStreamEvent({ type: "message_stop" }, acc);
 
@@ -660,6 +722,7 @@ describe("structured output (json_output synthetic tool)", () => {
       content: [
         {
           type: "tool_use",
+          caller: { type: "direct" },
           id: "call_1",
           name: "json_output",
           input: { a: 1, b: "two" },
@@ -678,5 +741,572 @@ describe("structured output (json_output synthetic tool)", () => {
     const resultStr = parts.map((p) => p.text ?? "").join("");
     expect(() => JSON.parse(resultStr)).not.toThrow();
     expect(JSON.parse(resultStr)).toEqual({ a: 1, b: "two" });
+  });
+});
+
+describe("cache read tokens", () => {
+  it("maps cache_read_input_tokens to cachedContentTokenCount (non-stream)", () => {
+    const result = convertAnthropicResponse(
+      createMessage({
+        content: [{ type: "text", text: "Hi", citations: null }],
+        usage: {
+          input_tokens: 10,
+          output_tokens: 5,
+          cache_read_input_tokens: 1234,
+        },
+      }),
+    );
+
+    expect(result.usageMetadata?.cachedContentTokenCount).toBe(1234);
+    // promptTokenCount is the full prompt (input + cache read).
+    expect(result.usageMetadata?.promptTokenCount).toBe(1244);
+    expect(result.usageMetadata?.totalTokenCount).toBe(1249);
+  });
+
+  it("omits cachedContentTokenCount when the API reports none (non-stream)", () => {
+    const result = convertAnthropicResponse(
+      createMessage({
+        content: [{ type: "text", text: "Hi", citations: null }],
+        usage: { input_tokens: 10, output_tokens: 5 },
+      }),
+    );
+
+    expect(result.usageMetadata).toBeDefined();
+    expect("cachedContentTokenCount" in (result.usageMetadata ?? {})).toBe(
+      false,
+    );
+  });
+
+  it("accumulates cache_read_input_tokens from message_start in streams", () => {
+    const acc = createAnthropicStreamAccumulator();
+    convertAnthropicStreamEvent(
+      {
+        type: "message_start",
+        message: {
+          usage: {
+            input_tokens: 7,
+            output_tokens: 0,
+            cache_read_input_tokens: 99,
+          },
+        },
+      } as unknown as Anthropic.MessageStreamEvent,
+      acc,
+    );
+    convertAnthropicStreamEvent(
+      {
+        type: "message_delta",
+        delta: { stop_reason: "end_turn" },
+        usage: { output_tokens: 3 },
+      } as unknown as Anthropic.MessageStreamEvent,
+      acc,
+    );
+    const { response } = convertAnthropicStreamEvent(
+      { type: "message_stop" } as Anthropic.MessageStreamEvent,
+      acc,
+    );
+
+    expect(response?.usageMetadata).toMatchObject({
+      promptTokenCount: 106,
+      candidatesTokenCount: 3,
+      totalTokenCount: 109,
+      cachedContentTokenCount: 99,
+    });
+    expect(acc.cacheReadTokens).toBeUndefined();
+  });
+
+  it("lets message_delta usage override the cache read count in streams", () => {
+    const acc = createAnthropicStreamAccumulator();
+    convertAnthropicStreamEvent(
+      {
+        type: "message_start",
+        message: { usage: { input_tokens: 7, cache_read_input_tokens: 10 } },
+      } as unknown as Anthropic.MessageStreamEvent,
+      acc,
+    );
+    convertAnthropicStreamEvent(
+      {
+        type: "message_delta",
+        delta: { stop_reason: "end_turn" },
+        usage: { output_tokens: 3, cache_read_input_tokens: 42 },
+      } as unknown as Anthropic.MessageStreamEvent,
+      acc,
+    );
+    const { response } = convertAnthropicStreamEvent(
+      { type: "message_stop" } as Anthropic.MessageStreamEvent,
+      acc,
+    );
+
+    expect(response?.usageMetadata?.cachedContentTokenCount).toBe(42);
+  });
+});
+
+describe("prompt token count includes the cache", () => {
+  it("adds cache read and creation tokens to promptTokenCount (non-stream)", () => {
+    const result = convertAnthropicResponse(
+      createMessage({
+        content: [{ type: "text", text: "Hi", citations: null }],
+        usage: {
+          input_tokens: 5,
+          output_tokens: 20,
+          cache_read_input_tokens: 100,
+          cache_creation_input_tokens: 30,
+        },
+      }),
+    );
+
+    expect(result.usageMetadata).toMatchObject({
+      promptTokenCount: 135,
+      candidatesTokenCount: 20,
+      totalTokenCount: 155,
+      cachedContentTokenCount: 100,
+    });
+  });
+
+  it("does not change counts when no cache is used", () => {
+    const result = convertAnthropicResponse(
+      createMessage({
+        content: [{ type: "text", text: "Hi", citations: null }],
+        usage: { input_tokens: 5, output_tokens: 20 },
+      }),
+    );
+
+    expect(result.usageMetadata).toEqual({
+      promptTokenCount: 5,
+      candidatesTokenCount: 20,
+      totalTokenCount: 25,
+    });
+  });
+
+  it("adds cache creation tokens in streams and resets the accumulator", () => {
+    const acc = createAnthropicStreamAccumulator();
+    convertAnthropicStreamEvent(
+      {
+        type: "message_start",
+        message: {
+          usage: {
+            input_tokens: 5,
+            cache_read_input_tokens: 100,
+            cache_creation_input_tokens: 30,
+          },
+        },
+      } as unknown as Anthropic.MessageStreamEvent,
+      acc,
+    );
+    convertAnthropicStreamEvent(
+      {
+        type: "message_delta",
+        delta: { stop_reason: "end_turn" },
+        usage: { output_tokens: 20 },
+      } as unknown as Anthropic.MessageStreamEvent,
+      acc,
+    );
+    const { response } = convertAnthropicStreamEvent(
+      { type: "message_stop" } as Anthropic.MessageStreamEvent,
+      acc,
+    );
+
+    expect(response?.usageMetadata).toMatchObject({
+      promptTokenCount: 135,
+      totalTokenCount: 155,
+      cachedContentTokenCount: 100,
+    });
+    expect(acc.cacheCreationTokens).toBeUndefined();
+  });
+});
+
+describe("malformed tool calls", () => {
+  function streamToolTurn(
+    json: string,
+    stopReason: string,
+    extra?: (acc: ReturnType<typeof createAnthropicStreamAccumulator>) => void,
+  ) {
+    const acc = createAnthropicStreamAccumulator();
+    const send = (event: unknown) =>
+      convertAnthropicStreamEvent(event as Anthropic.MessageStreamEvent, acc);
+    send({ type: "message_start", message: { usage: { input_tokens: 4 } } });
+    send({
+      type: "content_block_start",
+      index: 0,
+      content_block: { type: "tool_use", id: "toolu_1", name: "lookup" },
+    });
+    send({
+      type: "content_block_delta",
+      index: 0,
+      delta: { type: "input_json_delta", partial_json: json },
+    });
+    extra?.(acc);
+    send({
+      type: "message_delta",
+      delta: { stop_reason: stopReason },
+      usage: { output_tokens: 9 },
+    });
+    return send({ type: "message_stop" }).response;
+  }
+
+  it("reports truncated streamed arguments as MALFORMED_FUNCTION_CALL", () => {
+    const response = streamToolTurn('{"city": "Tok', "max_tokens");
+
+    expect(response?.finishReason).toBe(FinishReason.MALFORMED_FUNCTION_CALL);
+    // The shared helper sets errorCode so ADK does not drop the response when
+    // no retry plugin is installed (contract change in the helper, not here).
+    expect(response?.errorCode).toBe("MALFORMED_FUNCTION_CALL");
+    expect(response?.errorMessage).toContain("lookup");
+    expect(response?.content).toBeUndefined();
+    expect(response?.usageMetadata?.candidatesTokenCount).toBe(9);
+  });
+
+  it("keeps text and drops the function call when arguments are invalid", () => {
+    const response = streamToolTurn("not json", "tool_use", (acc) => {
+      acc.text = "Let me check.";
+    });
+
+    expect(response?.finishReason).toBe(FinishReason.MALFORMED_FUNCTION_CALL);
+    expect(response?.errorCode).toBe("MALFORMED_FUNCTION_CALL");
+    expect(response?.content?.parts).toEqual([{ text: "Let me check." }]);
+  });
+
+  it("treats a streamed tool call cut by max_tokens as truncated even if the JSON parses", () => {
+    const response = streamToolTurn('{"city": "Tokyo"}', "max_tokens");
+
+    expect(response?.finishReason).toBe(FinishReason.MALFORMED_FUNCTION_CALL);
+  });
+
+  it("accepts a streamed call without arguments", () => {
+    const response = streamToolTurn("", "tool_use");
+
+    expect(response?.finishReason).not.toBe(
+      FinishReason.MALFORMED_FUNCTION_CALL,
+    );
+    expect(response?.errorCode).toBeUndefined();
+    expect(response?.content?.parts?.[0]?.functionCall).toMatchObject({
+      name: "lookup",
+      args: {},
+    });
+  });
+
+  it("does not flag a complete tool call", () => {
+    const response = streamToolTurn('{"city": "Tokyo"}', "tool_use");
+
+    expect(response?.content?.parts?.[0]?.functionCall?.args).toEqual({
+      city: "Tokyo",
+    });
+  });
+
+  it("reports a non-stream tool_use cut by max_tokens as malformed", () => {
+    const result = convertAnthropicResponse(
+      createMessage({
+        content: [
+          { type: "text", text: "Checking", citations: null },
+          {
+            type: "tool_use",
+            id: "toolu_1",
+            name: "lookup",
+            input: { city: "To" },
+            caller: { type: "direct" },
+          } as unknown as Anthropic.ToolUseBlock,
+        ],
+        stop_reason: "max_tokens",
+        usage: { input_tokens: 4, output_tokens: 9 },
+      }),
+    );
+
+    expect(result.finishReason).toBe(FinishReason.MALFORMED_FUNCTION_CALL);
+    expect(result.errorCode).toBe("MALFORMED_FUNCTION_CALL");
+    expect(result.content?.parts).toEqual([{ text: "Checking" }]);
+  });
+
+  it("keeps a non-stream tool_use when the turn ended normally", () => {
+    const result = convertAnthropicResponse(
+      createMessage({
+        content: [
+          {
+            type: "tool_use",
+            caller: { type: "direct" },
+            id: "toolu_1",
+            name: "lookup",
+            input: { city: "Tokyo" },
+          } as unknown as Anthropic.ToolUseBlock,
+        ],
+        stop_reason: "tool_use",
+        usage: { input_tokens: 4, output_tokens: 9 },
+      }),
+    );
+
+    expect(result.finishReason).not.toBe(FinishReason.MALFORMED_FUNCTION_CALL);
+    expect(result.content?.parts?.[0]?.functionCall?.name).toBe("lookup");
+  });
+});
+
+describe("tool calls cut by the context window, and non-object inputs", () => {
+  function toolUse(input: unknown, name = "lookup"): Anthropic.ToolUseBlock {
+    return {
+      type: "tool_use",
+      caller: { type: "direct" },
+      id: "toolu_1",
+      name,
+      input,
+    } as unknown as Anthropic.ToolUseBlock;
+  }
+
+  it("reports a non-stream tool_use cut by the context window as malformed", () => {
+    const result = convertAnthropicResponse(
+      createMessage({
+        content: [toolUse({ city: "To" })],
+        stop_reason: "model_context_window_exceeded",
+        usage: { input_tokens: 4, output_tokens: 9 },
+      }),
+    );
+    expect(result.finishReason).toBe(FinishReason.MALFORMED_FUNCTION_CALL);
+  });
+
+  it("reports a streamed tool call cut by the context window as malformed", () => {
+    const acc = createAnthropicStreamAccumulator();
+    const send = (event: unknown) =>
+      convertAnthropicStreamEvent(event as Anthropic.MessageStreamEvent, acc);
+    send({ type: "message_start", message: { usage: { input_tokens: 4 } } });
+    send({
+      type: "content_block_start",
+      index: 0,
+      content_block: { type: "tool_use", id: "toolu_1", name: "lookup" },
+    });
+    send({
+      type: "content_block_delta",
+      index: 0,
+      delta: { type: "input_json_delta", partial_json: '{"city": "Tokyo"}' },
+    });
+    send({
+      type: "message_delta",
+      delta: { stop_reason: "model_context_window_exceeded" },
+      usage: { output_tokens: 9 },
+    });
+    const response = send({ type: "message_stop" }).response;
+    expect(response?.finishReason).toBe(FinishReason.MALFORMED_FUNCTION_CALL);
+  });
+
+  it("reports a non-object non-stream tool input as malformed, not as {}", () => {
+    for (const input of ["oops", 42, [1, 2], null]) {
+      const result = convertAnthropicResponse(
+        createMessage({
+          content: [toolUse(input)],
+          stop_reason: "tool_use",
+          usage: { input_tokens: 4, output_tokens: 9 },
+        }),
+      );
+      expect(result.finishReason).toBe(FinishReason.MALFORMED_FUNCTION_CALL);
+      expect(result.errorMessage).toContain("lookup (not-an-object)");
+    }
+  });
+
+  it("keeps a missing non-stream tool input as a call without arguments", () => {
+    const result = convertAnthropicResponse(
+      createMessage({
+        content: [toolUse(undefined)],
+        stop_reason: "tool_use",
+        usage: { input_tokens: 4, output_tokens: 9 },
+      }),
+    );
+    expect(result.content?.parts?.[0]?.functionCall?.args).toEqual({});
+  });
+});
+
+describe("a user tool named json_output", () => {
+  const block = {
+    type: "tool_use",
+    caller: { type: "direct" },
+    id: "toolu_1",
+    name: "json_output",
+    input: { a: 1 },
+  } as unknown as Anthropic.ToolUseBlock;
+
+  it("is a function call when structured output was not requested (non-stream)", () => {
+    const result = convertAnthropicResponse(
+      createMessage({
+        content: [block],
+        stop_reason: "tool_use",
+        usage: { input_tokens: 1, output_tokens: 1 },
+      }),
+      { structuredOutput: false },
+    );
+    expect(result.content?.parts?.[0]?.functionCall).toMatchObject({
+      name: "json_output",
+      args: { a: 1 },
+    });
+  });
+
+  it("is a function call when structured output was not requested (stream)", () => {
+    const acc = createAnthropicStreamAccumulator({ structuredOutput: false });
+    const send = (event: unknown) =>
+      convertAnthropicStreamEvent(event as Anthropic.MessageStreamEvent, acc);
+    send({
+      type: "content_block_start",
+      index: 0,
+      content_block: { type: "tool_use", id: "toolu_1", name: "json_output" },
+    });
+    send({
+      type: "content_block_delta",
+      index: 0,
+      delta: { type: "input_json_delta", partial_json: '{"a":1}' },
+    });
+    send({ type: "message_delta", delta: { stop_reason: "tool_use" } });
+    const response = send({ type: "message_stop" }).response;
+    expect(response?.content?.parts?.[0]?.functionCall?.name).toBe(
+      "json_output",
+    );
+  });
+});
+
+describe("no empty text parts", () => {
+  // ADK's shouldIncludeEventInContext drops any history event whose first part
+  // has `text === ""`, which removes the turn and its tool calls from the next
+  // request ("No function call event found for function responses ids").
+  const noEmptyText = (parts: Anthropic.MessageStreamEvent | unknown) =>
+    (parts as { text?: string }[]).every((p) => p.text !== "");
+
+  const send = (
+    acc: ReturnType<typeof createAnthropicStreamAccumulator>,
+    event: unknown,
+  ) => convertAnthropicStreamEvent(event as Anthropic.MessageStreamEvent, acc);
+
+  it("omits text on an empty thinking block (non-stream) and marks its signature", () => {
+    const result = convertAnthropicResponse(
+      createMessage({
+        content: [
+          { type: "thinking", thinking: "", signature: "SIG" },
+          { type: "tool_use", id: "toolu_1", name: "lookup", input: {} },
+        ] as Anthropic.Message["content"],
+        stop_reason: "tool_use",
+        usage: { input_tokens: 1, output_tokens: 1 },
+      }),
+    );
+
+    const parts = result.content?.parts ?? [];
+    expect(noEmptyText(parts)).toBe(true);
+    expect(parts[0]?.text).toBeUndefined();
+    expect(parts[0]?.thought).toBe(true);
+    expect(parts[0]?.thoughtSignature).toBe(
+      `${EMPTY_THINKING_SIGNATURE_PREFIX}SIG`,
+    );
+    expect(parts[1]?.functionCall?.name).toBe("lookup");
+  });
+
+  it("drops an empty text block and an empty thinking block without signature (non-stream)", () => {
+    const result = convertAnthropicResponse(
+      createMessage({
+        content: [
+          { type: "thinking", thinking: "", signature: "" },
+          { type: "text", text: "", citations: null },
+          { type: "text", text: "Hello", citations: null },
+        ] as Anthropic.Message["content"],
+        usage: { input_tokens: 1, output_tokens: 1 },
+      }),
+    );
+
+    expect(result.content?.parts).toEqual([{ text: "Hello" }]);
+  });
+
+  it("omits text on an empty streamed thinking block that has a signature", () => {
+    const acc = createAnthropicStreamAccumulator();
+    send(acc, {
+      type: "content_block_start",
+      index: 0,
+      content_block: { type: "thinking", thinking: "", signature: "" },
+    });
+    send(acc, {
+      type: "content_block_delta",
+      index: 0,
+      delta: { type: "signature_delta", signature: "SIG" },
+    });
+    send(acc, {
+      type: "content_block_start",
+      index: 1,
+      content_block: { type: "tool_use", id: "toolu_1", name: "lookup" },
+    });
+    send(acc, {
+      type: "content_block_delta",
+      index: 1,
+      delta: { type: "input_json_delta", partial_json: "{}" },
+    });
+    send(acc, {
+      type: "message_delta",
+      delta: { stop_reason: "tool_use" },
+      usage: { output_tokens: 3 },
+    });
+    const parts = send(acc, { type: "message_stop" }).response?.content?.parts;
+
+    expect(noEmptyText(parts)).toBe(true);
+    expect(parts?.[0]).toEqual({
+      thought: true,
+      thoughtSignature: `${EMPTY_THINKING_SIGNATURE_PREFIX}SIG`,
+    });
+    expect(parts?.[1]?.functionCall?.name).toBe("lookup");
+  });
+
+  it("emits no part for a streamed thinking block without text or signature", () => {
+    const acc = createAnthropicStreamAccumulator();
+    send(acc, {
+      type: "content_block_start",
+      index: 0,
+      content_block: { type: "thinking", thinking: "", signature: "" },
+    });
+    acc.text = "Answer";
+    const parts = send(acc, { type: "message_stop" }).response?.content?.parts;
+
+    expect(parts).toEqual([{ text: "Answer" }]);
+  });
+
+  it("does not emit partial responses for empty text or thinking deltas", () => {
+    const acc = createAnthropicStreamAccumulator();
+    send(acc, {
+      type: "content_block_start",
+      index: 0,
+      content_block: { type: "thinking", thinking: "", signature: "" },
+    });
+
+    const thinking = send(acc, {
+      type: "content_block_delta",
+      index: 0,
+      delta: { type: "thinking_delta", thinking: "" },
+    });
+    const text = send(acc, {
+      type: "content_block_delta",
+      index: 1,
+      delta: { type: "text_delta", text: "" },
+    });
+
+    expect(thinking.response).toBeUndefined();
+    expect(text.response).toBeUndefined();
+  });
+
+  it("keeps a streamed redacted_thinking block in the final response", () => {
+    const acc = createAnthropicStreamAccumulator();
+    const start = send(acc, {
+      type: "content_block_start",
+      index: 0,
+      content_block: { type: "redacted_thinking", data: "ENC" },
+    });
+    acc.text = "Done";
+    const final = send(acc, { type: "message_stop" }).response?.content?.parts;
+
+    // The partial is still emitted for live consumers...
+    expect(start.response?.partial).toBe(true);
+    // ...and the stored final event carries the block, after no empty text.
+    expect(final).toEqual([
+      { thought: true, thoughtSignature: `${THINKING_SIGNATURE_PREFIX}ENC` },
+      { text: "Done" },
+    ]);
+  });
+
+  it("ignores a redacted_thinking block with no payload", () => {
+    const result = convertAnthropicResponse(
+      createMessage({
+        content: [
+          { type: "redacted_thinking", data: "" },
+          { type: "text", text: "Hi", citations: null },
+        ] as Anthropic.Message["content"],
+        usage: { input_tokens: 1, output_tokens: 1 },
+      }),
+    );
+
+    expect(result.content?.parts).toEqual([{ text: "Hi" }]);
   });
 });

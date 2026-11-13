@@ -1,0 +1,61 @@
+# Codex-only dynamic workflow
+
+This example pins `@openai/codex-sdk` to `0.167.2`, the version supported by
+the bridge’s contained exec transport. `CodexAgent` uses the shared SDK run
+loop and saves its thread id in ADK session state for subsequent turns.
+
+## What it shows
+
+This smoke example runs a first-class `ScriptWorkflowAgent` whose three direct
+subagents are all `CodexAgent` instances:
+
+```text
+CodexPlanner -> CodexImplementer -> CodexReviewer
+```
+
+The QuickJS script controls the sequence. Agent work stays on the host side: the
+script yields `ctx.run(...)`, the workflow runtime invokes the corresponding ADK
+agent, and the result is passed back into the script before the next step.
+
+The implementer has `workspace-write`; the other two agents are read-only. Each
+agent's working directory is the target, and Codex's own sandbox keeps writes
+inside it. The agents set no `allowedPaths`: Codex runs its file tools without
+asking the bridge, so the Codex drivers refuse `allowedPaths` with
+`EXTERNAL_AGENT_PATHS_UNENFORCEABLE`. For safety, point the example at a
+disposable Git worktree, never at your primary checkout.
+
+## Requirements
+
+- Bun and Node.js 22 or newer.
+- `OPENAI_API_KEY` or `CODEX_API_KEY`, or a readable `~/.codex/auth.json`
+- `WORKFLOW_TARGET`: path of a disposable Git worktree
+- Git
+
+## Run
+
+This example is a standalone project: install its own dependencies first. From
+the repository root:
+
+```bash
+bun install --cwd examples/codex-workflow
+git worktree add /tmp/adk-llm-bridge-codex-smoke HEAD
+WORKFLOW_TARGET=/tmp/adk-llm-bridge-codex-smoke \
+  bun run --cwd examples/codex-workflow smoke
+```
+
+To run it against the library in this checkout instead of the published
+package, see [Running Examples Locally](../../DEVELOPMENT.md#running-examples-locally)
+(`KEEP_EXAMPLES_DIR=1 scripts/check-examples.sh codex-workflow` keeps an
+installed copy to run from).
+
+Authentication may come from `CODEX_API_KEY`, `OPENAI_API_KEY`, or a readable
+`~/.codex/auth.json`. The workflow disables network access for agent tools; this
+does not disable the Codex service connection itself.
+
+A successful run prints completion for `plan`, `implement`, and `review`, then
+verifies two explicit acknowledgements. Inspect the isolated change with:
+
+```bash
+git -C /tmp/adk-llm-bridge-codex-smoke status --short
+git -C /tmp/adk-llm-bridge-codex-smoke diff
+```
