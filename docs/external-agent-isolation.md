@@ -1330,6 +1330,14 @@ the result carries `metadata.durationMs`. Tool spans carry
 same `metadata.mcp` to `mcp_tool_call` items. No server config is ever on an
 event or span.
 
+A child process may print a stdout line that is already shaped like a bridge
+event (`output`, `tool_call`, `tool_result`). Its `metadata` object is kept
+under `metadata.childMetadata` and reaches the ADK event as
+`customMetadata.childMetadata`, never at the top level: a child cannot set or
+shadow `costUsd`, `externalAgentModel`, `externalAgentTools`, `title`,
+`externalAgent` or any other key the bridge writes. Treat `childMetadata` as
+untrusted.
+
 ### Transcripts on disk
 
 Agent runtimes keep session transcripts, and a transcript holds each tool

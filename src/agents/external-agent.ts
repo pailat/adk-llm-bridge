@@ -1728,6 +1728,18 @@ function isStateOnlyEvent(event: Event): boolean {
   );
 }
 
+/**
+ * The `customMetadata` of the ADK event built from one driver event.
+ *
+ * @remarks
+ * The driver event's `metadata` is copied first, then the bridge's own
+ * `title` (the driver's `title` when it set one) and `externalAgent: true`
+ * stamp. Metadata a child process printed on a bridge-shaped stdout line is
+ * already under `childMetadata` (`EXTERNAL_AGENT_CHILD_METADATA_KEY`) when
+ * the driver yields it, so it lands at `customMetadata.childMetadata` and can
+ * set neither these keys nor the ones written later (`costUsd`,
+ * `externalAgentModel`, `externalAgentTools`, ...).
+ */
 function metadataForExternalEvent(
   agentName: string,
   event: ExternalAgentEvent,

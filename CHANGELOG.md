@@ -408,6 +408,16 @@ upgrade from 0.5.3.
 
 ### Security
 
+- **A child process cannot set the bridge's `customMetadata` keys.** The
+  `metadata` of a bridge-shaped stdout line (`output`, `tool_call`,
+  `tool_result`) now lands under `customMetadata.childMetadata` only
+  (`ClaudeCliDriver`, `CodexCliDriver` and `SubprocessJsonlDriver.parseLine`),
+  so a child can no longer forge or shadow `costUsd`, `externalAgentModel`,
+  `externalAgentTools`, `title`, `externalAgent` or any other key the bridge
+  writes; read a child's own keys from `customMetadata.childMetadata` (the key
+  is exported as `EXTERNAL_AGENT_CHILD_METADATA_KEY` from
+  `adk-llm-bridge/agents`).
+
 - `SubprocessJsonlDriver.parseLine` now ignores child-emitted `started`,
   `state_delta`, `completed` and transport-envelope lines, returning an empty
   `output` event with none of the child payload. Its event return type stays
@@ -417,7 +427,9 @@ upgrade from 0.5.3.
   turn completion or Workflow node output. Legitimate empty outputs still
   pass through. Other
   recognized event records keep their fields unchanged, including
-  `turnComplete`. Subclasses yield driver-owned events from their own `run` instead. Codex's
+  `turnComplete`, except `metadata`: a JSON object moves under
+  `childMetadata` (`EXTERNAL_AGENT_CHILD_METADATA_KEY`) and any other value
+  is dropped. Subclasses yield driver-owned events from their own `run` instead. Codex's
   internal transport envelopes use a private symbol and cannot be forged
   through child JSON stdout.
 

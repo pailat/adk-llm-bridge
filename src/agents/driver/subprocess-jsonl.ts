@@ -17,6 +17,7 @@ import {
   asRecord,
   assertKnownDriverOptions,
   bridgeEvent,
+  childMetadata,
   isSearchableExecutable,
 } from "./shared.js";
 import { windowsExecutableKind } from "./spawn.js";
@@ -402,7 +403,11 @@ export class SubprocessJsonlDriver implements ExternalAgentDriver {
    * `ExternalAgent` recognizes the internal placeholder by identity and
    * skips it before delegation, tracing or ADK processing. It produces no
    * message, turn completion or node output; real empty outputs still pass.
-   * Other recognized event records retain their fields unchanged.
+   * Other recognized event records retain their fields unchanged, except
+   * `metadata`: a JSON object is kept under its `childMetadata` key only
+   * (`EXTERNAL_AGENT_CHILD_METADATA_KEY`), so the child cannot set
+   * or shadow a `customMetadata` key the bridge writes, and any other value
+   * is dropped.
    * A subclass emits driver-owned events by yielding them from its own
    * `run`, never by accepting child lines.
    *
@@ -423,6 +428,14 @@ export class SubprocessJsonlDriver implements ExternalAgentDriver {
     if (!isExternalAgentEvent(parsed.value)) {
       throw new Error("Invalid external agent JSONL event");
     }
-    return parsed.value;
+    const event = parsed.value;
+    if (!("metadata" in event)) return event;
+    const { metadata, ...rest } = event as ExternalAgentEvent & {
+      metadata?: unknown;
+    };
+    const namespaced = childMetadata(metadata);
+    return (
+      namespaced ? { ...rest, metadata: namespaced } : rest
+    ) as ExternalAgentEvent;
   }
 }
