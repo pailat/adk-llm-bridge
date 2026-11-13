@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import {
   BaseAgent,
   BaseLlm,
@@ -16,7 +16,9 @@ import {
   ParallelAgent,
   PluginManager,
   REQUEST_CONFIRMATION_FUNCTION_CALL_NAME,
+  resetIdProvider,
   SequentialAgent,
+  setIdProvider,
 } from "@google/adk";
 import { type Content, FinishReason } from "@google/genai";
 import { z } from "zod";
@@ -990,6 +992,68 @@ describe("ToolGateway parent context without a session", () => {
       expect(worker.seen?.invocationId).toBe("inv-1");
     });
   }
+});
+
+describe("ToolGateway ids from ADK's id provider", () => {
+  afterEach(() => resetIdProvider());
+
+  class ContextCapturingAgent extends BaseAgent {
+    seen?: InvocationContext;
+
+    constructor() {
+      super({ name: "worker" });
+    }
+
+    protected async *runAsyncImpl(context: InvocationContext) {
+      this.seen = context;
+      yield createEvent({
+        invocationId: context.invocationId,
+        author: this.name,
+        content: { role: "model", parts: [{ text: "ok" }] },
+      });
+    }
+
+    protected async *runLiveImpl() {}
+  }
+
+  test("a sub-agent delegation's call id is adk-run-subagent-<id>", async () => {
+    let n = 0;
+    setIdProvider(() => `id-${++n}`);
+    const worker = new TextAgent("worker");
+    const root = new TextAgent("root");
+    const emitted: Event[] = [];
+    const gateway = new ToolGateway({
+      rootAgent: root,
+      subAgents: [worker],
+      parentContext: parentContext(root),
+      eventSink: (event) => emitted.push(event),
+    });
+
+    await gateway.runSubAgent({ agentName: "worker", task: "do it" });
+
+    const callId = emitted[0]?.content?.parts?.[0]?.functionCall?.id;
+    expect(callId).toMatch(/^adk-run-subagent-id-\d+$/);
+    expect(emitted[1]?.content?.parts?.[0]?.functionResponse?.id).toBe(callId);
+  });
+
+  test("a parent context without an invocation id gives the child e-<id>", async () => {
+    let n = 0;
+    setIdProvider(() => `id-${++n}`);
+    const worker = new ContextCapturingAgent();
+    const gateway = new ToolGateway({
+      rootAgent: worker,
+      subAgents: [worker],
+      parentContext: {} as unknown as InvocationContext,
+    });
+
+    const result = await gateway.runSubAgent({
+      agentName: "worker",
+      task: "go",
+    });
+
+    expect(result.error).toBeUndefined();
+    expect(worker.seen?.invocationId).toMatch(/^e-id-\d+$/);
+  });
 });
 
 describe("permission inheritance through intermediate ADK agents", () => {

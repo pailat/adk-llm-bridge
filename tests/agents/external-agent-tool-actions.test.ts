@@ -12,6 +12,8 @@ import {
   LoopAgent,
   PluginManager,
   REQUEST_CONFIRMATION_FUNCTION_CALL_NAME,
+  resetIdProvider,
+  setIdProvider,
   type ToolUnion,
 } from "@google/adk";
 import { z } from "zod";
@@ -713,6 +715,76 @@ describe("bridged ADK tools: requestConfirmation inside execute", () => {
         ),
       ),
     ).toBe(false);
+  });
+
+  test("a resumed call without a function call id gets adk-bridge-<id> from ADK's id provider", async () => {
+    let n = 0;
+    setIdProvider(() => `id-${++n}`);
+    try {
+      const runs: Array<boolean | undefined> = [];
+      const callIds: Array<string | undefined> = [];
+      const deploy = tool("deploy", (_args, context) => {
+        const decision = context?.toolConfirmation;
+        runs.push(decision?.confirmed);
+        callIds.push(context?.functionCallId);
+        if (!decision) {
+          context?.requestConfirmation({ hint: "Deploy to production?" });
+          return { status: "waiting" };
+        }
+        return { deployed: decision.confirmed };
+      });
+      // The resumed runtime calls the tool without a function call id.
+      const second: ExternalAgentDriver = {
+        providerId: CLAUDE_PROVIDER.id,
+        async *run(request) {
+          await request.adkTools?.execute(
+            "adk_tool__deploy",
+            {},
+            request.context,
+          );
+          yield { type: "output", content: "done" };
+        },
+      };
+      let current: ExternalAgentDriver = new ToolCallingDriver([
+        { name: "deploy" },
+      ]);
+      const agent = externalAgent(
+        "worker",
+        { providerId: CLAUDE_PROVIDER.id, run: (r) => current.run(r) },
+        {
+          tools: [deploy],
+          permissions: { mode: "ask" },
+          confirmation: { adk: true },
+        },
+      );
+      const { runner, sessionId, events } = await run(agent);
+      const request = events
+        .flatMap((event) => event.content?.parts ?? [])
+        .find(
+          (part) =>
+            part.functionCall?.name === REQUEST_CONFIRMATION_FUNCTION_CALL_NAME,
+        )?.functionCall;
+      expect(request).toBeDefined();
+
+      current = second;
+      await turn(runner, sessionId, {
+        role: "user",
+        parts: [
+          {
+            functionResponse: {
+              id: request?.id,
+              name: REQUEST_CONFIRMATION_FUNCTION_CALL_NAME,
+              response: { confirmed: true },
+            },
+          },
+        ],
+      });
+
+      expect(runs).toEqual([undefined, true]);
+      expect(callIds[1]).toMatch(/^adk-bridge-id-\d+$/);
+    } finally {
+      resetIdProvider();
+    }
   });
 
   test("a malformed retry leaves the human's answer for the well-formed one", async () => {
