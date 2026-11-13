@@ -581,15 +581,16 @@ changed for code written against a 0.7.0 pre-release build:
   recognized event records keep their original fields unchanged, including
   `turnComplete`. Yield lifecycle and state events from the subclass's own `run` method, rather
   than passing them through from child stdout.
-- **Child metadata moves under `childMetadata`.** The `metadata` object of
-  a bridge-shaped `output`, `tool_call` or `tool_result` line a child process
+- **Child metadata moves under `childMetadata`.** The `metadata` object of a
+  bridge-shaped `output`, `tool_call` or `tool_result` line a child process
   prints (read by `ClaudeCliDriver`, `CodexCliDriver` and
   `SubprocessJsonlDriver.parseLine`) is now kept under one key, so it reaches
   the ADK event as `customMetadata.childMetadata` instead of being spread at
   the top level. A child can no longer set or shadow a key the bridge writes
   (`costUsd`, `externalAgentModel`, `title`, `externalAgent`, ...). If you
-  read a key your child prints, read it from `customMetadata.childMetadata`;
-  a child's `title` no longer replaces the bridge's title. Metadata a driver
+  read a key your child prints, read it from `customMetadata.childMetadata`
+  (`EXTERNAL_AGENT_CHILD_METADATA_KEY` from `adk-llm-bridge/agents`); a
+  child's `title` no longer replaces the bridge's title. Metadata a driver
   sets itself is unchanged.
 - **Codex CLI driver and the shared run loop.** `CodexCliDriver` (the
   fallback for hosts without `@openai/codex-sdk`) keeps working without the SDK

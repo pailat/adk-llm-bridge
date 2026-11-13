@@ -414,7 +414,9 @@ upgrade from 0.5.3.
   (`ClaudeCliDriver`, `CodexCliDriver` and `SubprocessJsonlDriver.parseLine`),
   so a child can no longer forge or shadow `costUsd`, `externalAgentModel`,
   `externalAgentTools`, `title`, `externalAgent` or any other key the bridge
-  writes; read a child's own keys from `customMetadata.childMetadata`.
+  writes; read a child's own keys from `customMetadata.childMetadata` (the key
+  is exported as `EXTERNAL_AGENT_CHILD_METADATA_KEY` from
+  `adk-llm-bridge/agents`).
 
 - `SubprocessJsonlDriver.parseLine` now ignores child-emitted `started`,
   `state_delta`, `completed` and transport-envelope lines, returning an empty

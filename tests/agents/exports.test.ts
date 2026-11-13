@@ -78,6 +78,7 @@ describe("agents public exports", () => {
     expect(agents.EXTERNAL_AGENT_NOT_CONFIGURED).toBe(
       "EXTERNAL_AGENT_NOT_CONFIGURED",
     );
+    expect(agents.EXTERNAL_AGENT_CHILD_METADATA_KEY).toBe("childMetadata");
     expect(agents.EXTERNAL_AGENT_CONFIRMATION_UNUSED).toBe(
       "EXTERNAL_AGENT_CONFIRMATION_UNUSED",
     );

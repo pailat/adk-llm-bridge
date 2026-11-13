@@ -24,7 +24,7 @@ import { ClaudeCliDriver } from "../../../src/agents/driver/claude-cli.js";
 import { CodexCliDriver } from "../../../src/agents/driver/codex-cli.js";
 import { bridgeEvent } from "../../../src/agents/driver/shared.js";
 import { SubprocessJsonlDriver } from "../../../src/agents/driver/subprocess-jsonl.js";
-import * as events from "../../../src/agents/events.js";
+import * as agents from "../../../src/agents/index.js";
 import {
   ExternalAgent,
   type ExternalAgentDriver,
@@ -86,9 +86,9 @@ const EXTERNAL_AGENT_CHILD_METADATA_KEY = "childMetadata";
 const namespaced = { [EXTERNAL_AGENT_CHILD_METADATA_KEY]: forged };
 
 describe("child metadata is namespaced where child lines are read", () => {
-  test("the namespace key constant is childMetadata", () => {
+  test("the namespace key is exported as childMetadata", () => {
     expect(
-      (events as Record<string, unknown>).EXTERNAL_AGENT_CHILD_METADATA_KEY,
+      (agents as Record<string, unknown>).EXTERNAL_AGENT_CHILD_METADATA_KEY,
     ).toBe("childMetadata");
   });
 
