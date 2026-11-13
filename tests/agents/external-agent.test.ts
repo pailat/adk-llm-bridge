@@ -21,6 +21,7 @@ import {
   type ExternalAgentRunRequest,
 } from "../../src/agents/index.js";
 import { CODEX_PROVIDER } from "../../src/agents/provider/schema.js";
+import { useCleanEnv } from "../helpers/env.js";
 import { withDeadline } from "./helpers.js";
 
 // installTraceCapture() sets a process-global tracer provider; always undo it.
@@ -148,6 +149,8 @@ async function collect(
 }
 
 describe("ExternalAgent ADK event formatting", () => {
+  useCleanEnv(["OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT"]);
+
   test("passes runtime bridge context to the configured driver", async () => {
     const driver = new StaticDriver([{ type: "completed", exitCode: 0 }]);
     const subAgent = new ExternalAgent({
@@ -254,6 +257,8 @@ describe("ExternalAgent ADK event formatting", () => {
   });
 
   test("traces synthetic ADK llm_request with native ADK model attributes", async () => {
+    process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT =
+      "SPAN_ONLY";
     const spans = installTraceCapture();
     const agent = new ExternalAgent({
       name: "codex_agent",
@@ -284,6 +289,8 @@ describe("ExternalAgent ADK event formatting", () => {
   });
 
   test("uses the configured and reported model ids, never the provider id", async () => {
+    process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT =
+      "SPAN_ONLY";
     const spans = installTraceCapture();
     const driver = Object.assign(
       new StaticDriver([
@@ -929,18 +936,16 @@ describe("ExternalAgent telemetry", () => {
     return spans;
   }
 
-  test("captures message content by default", async () => {
+  test("redacts message content by default", async () => {
     const spans = await runWithSpans(undefined);
-    expect(spans[0]?.attributes["gcp.vertex.agent.llm_request"]).toContain(
-      "private prompt",
-    );
-    expect(spans[0]?.attributes["gcp.vertex.agent.llm_response"]).toContain(
-      "secret",
-    );
+    expect(spans[0]?.attributes["gcp.vertex.agent.llm_request"]).toBe("{}");
+    expect(spans[0]?.attributes["gcp.vertex.agent.llm_response"]).toBe("{}");
   });
 
-  for (const value of ["false", "0"]) {
-    test(`redacts message content when ${ENV}=${value}`, async () => {
+  // ADK 2.5 reads this variable for live spans only; it never turns content
+  // on for the bridge's spans, whatever its value.
+  for (const value of ["true", "1", "false", "0"]) {
+    test(`redacts message content when only ${ENV}=${value} is set`, async () => {
       const spans = await runWithSpans(value);
       expect(spans[0]?.attributes["gcp.vertex.agent.llm_request"]).toBe("{}");
       expect(spans[0]?.attributes["gcp.vertex.agent.llm_response"]).toBe("{}");
@@ -1355,6 +1360,8 @@ describe("ExternalAgent telemetry privacy (no content in span names or titles)",
     ["OTEL NO_CONTENT", { otel: "NO_CONTENT" }],
     ["OTEL EVENT_ONLY", { otel: "EVENT_ONLY" }],
     ["legacy ADK variable set to false", { legacy: "false" }],
+    ["legacy ADK variable set to true", { legacy: "true" }],
+    ["default", {}],
   ] as const) {
     test(`${label}: no secret in any span name or attribute`, async () => {
       const spans = await traceRun(env);
@@ -1381,8 +1388,8 @@ describe("ExternalAgent telemetry privacy (no content in span names or titles)",
   });
 
   for (const [label, env] of [
-    ["default", {}],
     ["OTEL SPAN_ONLY", { otel: "SPAN_ONLY" }],
+    ["OTEL SPAN_AND_EVENT", { otel: "SPAN_AND_EVENT" }],
   ] as const) {
     test(`${label}: tool detail stays in span names and titles`, async () => {
       const spans = await traceRun(env);

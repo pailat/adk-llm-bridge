@@ -421,7 +421,12 @@ describe("content never reaches spans", () => {
       { OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT: "EVENT_ONLY" },
     ],
     ["ADK legacy off", { ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS: "false" }],
-    ["capture on (default)", {}],
+    ["ADK legacy on", { ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS: "true" }],
+    ["no capture variable", {}],
+    [
+      "SPAN_AND_EVENT",
+      { OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT: "SPAN_AND_EVENT" },
+    ],
   ];
   const keys = [
     "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT",
