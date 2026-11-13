@@ -33,6 +33,21 @@ export interface ExternalAgentStartedEvent {
   timestamp?: number;
 }
 
+/**
+ * Key of the `metadata` a child process printed, in an event's `metadata` and
+ * in the ADK event's `customMetadata`.
+ *
+ * @remarks
+ * A child process can print a stdout line that is already shaped like a
+ * bridge event (`output`, `tool_call` or `tool_result`) with its own
+ * `metadata` object. The drivers keep that object, unchanged, under this one
+ * key and never at the top level, so a child cannot set or shadow a key the
+ * bridge writes to `customMetadata` (`costUsd`, `externalAgentModel`,
+ * `title`, `externalAgent`, ...). Read it as `customMetadata.childMetadata`
+ * and treat it as untrusted.
+ */
+export const EXTERNAL_AGENT_CHILD_METADATA_KEY = "childMetadata";
+
 /** Key of {@link ExternalAgentModelInfo} in the `customMetadata` of an ADK event. */
 export const EXTERNAL_AGENT_MODEL_METADATA_KEY = "externalAgentModel";
 
@@ -103,7 +118,11 @@ export interface ExternalAgentOutputEvent {
   partial?: boolean;
   /** The text ends the model turn. */
   turnComplete?: boolean;
-  /** Driver-specific data attached to the output. */
+  /**
+   * Driver-specific data attached to the output. `ExternalAgent` copies it
+   * into the ADK event's `customMetadata`. Metadata a child process printed
+   * is under {@link EXTERNAL_AGENT_CHILD_METADATA_KEY} only.
+   */
   metadata?: Record<string, unknown>;
   /** Epoch milliseconds when the event was produced. */
   timestamp?: number;
@@ -118,7 +137,11 @@ export interface ExternalAgentToolCallEvent {
   input?: unknown;
   /** Id that pairs the call with its {@link ExternalAgentToolResultEvent}. */
   callId?: string;
-  /** Driver-specific data attached to the call. */
+  /**
+   * Driver-specific data attached to the call. `ExternalAgent` copies it
+   * into the ADK event's `customMetadata`. Metadata a child process printed
+   * is under {@link EXTERNAL_AGENT_CHILD_METADATA_KEY} only.
+   */
   metadata?: Record<string, unknown>;
   /** Epoch milliseconds when the event was produced. */
   timestamp?: number;
@@ -135,7 +158,11 @@ export interface ExternalAgentToolResultEvent {
   callId?: string;
   /** Error message when the tool call failed. */
   error?: string;
-  /** Driver-specific data attached to the result. */
+  /**
+   * Driver-specific data attached to the result. `ExternalAgent` copies it
+   * into the ADK event's `customMetadata`. Metadata a child process printed
+   * is under {@link EXTERNAL_AGENT_CHILD_METADATA_KEY} only.
+   */
   metadata?: Record<string, unknown>;
   /** Epoch milliseconds when the event was produced. */
   timestamp?: number;

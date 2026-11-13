@@ -408,6 +408,14 @@ upgrade from 0.5.3.
 
 ### Security
 
+- **A child process cannot set the bridge's `customMetadata` keys.** The
+  `metadata` of a bridge-shaped stdout line (`output`, `tool_call`,
+  `tool_result`) now lands under `customMetadata.childMetadata` only
+  (`ClaudeCliDriver`, `CodexCliDriver` and `SubprocessJsonlDriver.parseLine`),
+  so a child can no longer forge or shadow `costUsd`, `externalAgentModel`,
+  `externalAgentTools`, `title`, `externalAgent` or any other key the bridge
+  writes; read a child's own keys from `customMetadata.childMetadata`.
+
 - `SubprocessJsonlDriver.parseLine` now ignores child-emitted `started`,
   `state_delta`, `completed` and transport-envelope lines, returning an empty
   `output` event with none of the child payload. Its event return type stays

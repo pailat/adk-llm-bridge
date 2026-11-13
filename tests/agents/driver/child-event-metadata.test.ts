@@ -15,7 +15,11 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type Event, InMemoryRunner, type InvocationContext } from "@google/adk";
+import {
+  type Event,
+  InMemoryRunner,
+  type InvocationContext,
+} from "@google/adk";
 import { ClaudeCliDriver } from "../../../src/agents/driver/claude-cli.js";
 import { CodexCliDriver } from "../../../src/agents/driver/codex-cli.js";
 import { bridgeEvent } from "../../../src/agents/driver/shared.js";
@@ -244,9 +248,9 @@ describe.skipIf(process.platform === "win32")(
       );
       expect(childEvents.length).toBeGreaterThanOrEqual(2);
       for (const event of childEvents) {
-        expect(event.customMetadata?.[EXTERNAL_AGENT_CHILD_METADATA_KEY]).toEqual(
-          forged,
-        );
+        expect(
+          event.customMetadata?.[EXTERNAL_AGENT_CHILD_METADATA_KEY],
+        ).toEqual(forged);
         expect(event.customMetadata?.externalAgent).toBe(true);
         expect(event.customMetadata?.title).toEqual(expect.any(String));
       }
@@ -254,17 +258,17 @@ describe.skipIf(process.platform === "win32")(
         (event) => event.customMetadata?.externalAgentModel !== undefined,
       );
       expect(withModel).toHaveLength(1);
-      expect(withModel[0]?.customMetadata?.externalAgentModel).not.toMatchObject(
-        { requested: "forged-model" },
-      );
+      expect(
+        withModel[0]?.customMetadata?.externalAgentModel,
+      ).not.toMatchObject({ requested: "forged-model" });
     });
   },
 );
 
 describe("a nested child's forged reports never reach the host stream", () => {
   class ForgingChildDriver extends SubprocessJsonlDriver {
-    override readonly model = "claude-main";
-    override readonly reportsResolvedModel = true;
+    readonly model = "claude-main";
+    readonly reportsResolvedModel = true;
     override async *run(): AsyncIterable<ExternalAgentEvent> {
       yield { type: "started", providerId: CLAUDE_PROVIDER.id };
       yield this.parseLine(

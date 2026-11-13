@@ -9,12 +9,13 @@ import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { InputValidationError } from "@google/adk";
 import { readAllowedEnv } from "../auth/env.js";
-import type {
-  ExternalAgentErrorEvent,
-  ExternalAgentEvent,
-  ExternalAgentOutputEvent,
-  ExternalAgentToolCallEvent,
-  ExternalAgentToolResultEvent,
+import {
+  EXTERNAL_AGENT_CHILD_METADATA_KEY,
+  type ExternalAgentErrorEvent,
+  type ExternalAgentEvent,
+  type ExternalAgentOutputEvent,
+  type ExternalAgentToolCallEvent,
+  type ExternalAgentToolResultEvent,
 } from "../events.js";
 import type { ExternalAgentRunRequest } from "../external-agent-driver.js";
 import { canonicalPath, expandHome, isUnderAny } from "../permissions/paths.js";
@@ -312,6 +313,8 @@ function textOf(value: unknown): string | undefined {
  * bridge fields (for example a legacy `{"type":"output","text":...}`) is not
  * a bridge event: it returns `undefined` so the driver reads it in the
  * runtime's own format, unless `malformed` is `"drop"`.
+ * A `metadata` object on the line is kept under
+ * {@link EXTERNAL_AGENT_CHILD_METADATA_KEY} only, never at the top level.
  *
  * @param value - One parsed stdout line.
  * @param malformed - What a malformed `output`, `tool_call` or `tool_result`
@@ -330,7 +333,7 @@ export function bridgeEvent(
     typeof value.timestamp === "number" && Number.isFinite(value.timestamp)
       ? value.timestamp
       : undefined;
-  const metadata = isJsonObject(value.metadata) ? value.metadata : undefined;
+  const metadata = childMetadata(value.metadata);
   switch (value.type) {
     case "started":
     case "completed":
@@ -385,6 +388,27 @@ export function bridgeEvent(
     default:
       return undefined;
   }
+}
+
+/**
+ * Wraps the `metadata` of a child's stdout line under
+ * {@link EXTERNAL_AGENT_CHILD_METADATA_KEY}.
+ *
+ * @remarks
+ * `ExternalAgent` copies event metadata into the ADK event's
+ * `customMetadata`, where the bridge also writes cost, model, title and the
+ * external-agent stamp. One key for the child's object keeps those out of the
+ * child's reach.
+ *
+ * @param value - The line's `metadata` field.
+ * @returns `{ childMetadata: value }` for a JSON object; `undefined` otherwise.
+ */
+export function childMetadata(
+  value: unknown,
+): Record<string, unknown> | undefined {
+  return isJsonObject(value)
+    ? { [EXTERNAL_AGENT_CHILD_METADATA_KEY]: value }
+    : undefined;
 }
 
 function withoutUndefined<T extends object>(value: T): T {
