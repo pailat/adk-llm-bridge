@@ -2,7 +2,7 @@
 
 0.7.0 follows 0.5.3. This guide covers the upgrade from 0.5.3 to 0.7.0.
 
-The full list of changes is in the [CHANGELOG](../CHANGELOG.md#070---2026-11-09).
+The full list of changes is in the [CHANGELOG](../CHANGELOG.md#070---2026-11-13).
 
 ## 1. Runtime and peers
 
