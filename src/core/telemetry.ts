@@ -1,8 +1,8 @@
 /**
  * OpenTelemetry helpers shared by every LLM provider.
  *
- * ADK wraps each model call in a span (`call_llm` in ADK 2.4, renamed
- * `generate_content {model}` in ADK 2.5) and always labels it
+ * ADK wraps each model call in a span (`generate_content {model}`) and
+ * always labels it
  * `gen_ai.system="gcp.vertex.agent"`, so a trace cannot tell OpenAI from
  * Anthropic from OpenRouter, and a provider failure that we convert into an
  * error response leaves the span `OK`. These helpers enrich the **active**
@@ -161,8 +161,8 @@ export function annotateCacheUsage(
 }
 
 /**
- * Annotates the active model-call span (ADK 2.4 `call_llm`, ADK 2.5
- * `generate_content {model}`; found as the active span, never by name) with
+ * Annotates ADK's active model-call span (`generate_content {model}`; found
+ * as the active span, never by name) with
  * provider-level GenAI attributes:
  * `gen_ai.provider.name` (see {@link genAiProviderName}), `gen_ai.response.model`, `gen_ai.response.id`,
  * `server.address` and `server.port`. Undefined values are skipped, so it is

@@ -434,7 +434,7 @@ describe("AdkSessionServiceWorkflowCheckpointStore options and capabilities", ()
       leases: false,
       multiProcess: false,
     });
-    // The same object with the field ADK 2.4 sets is trusted.
+    // The same object with the field ADK sets is trusted.
     Object.assign(renamed, { staleSession: "reject" });
     expect(store(renamed).capabilities.compareAndSet).toBe("atomic");
   });

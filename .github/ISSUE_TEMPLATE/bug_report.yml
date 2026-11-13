@@ -48,7 +48,7 @@ body:
     id: adk-version
     attributes:
       label: "@google/adk version"
-      placeholder: 2.4.0
+      placeholder: 2.5.0
     validations:
       required: true
   - type: dropdown

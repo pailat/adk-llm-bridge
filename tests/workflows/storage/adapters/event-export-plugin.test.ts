@@ -368,7 +368,10 @@ describe("WorkflowEventExportPlugin in a real Runner", () => {
       sessionService: sessions,
       plugins: [plugin],
     });
-    const { id } = await sessions.createSession({ appName: "app", userId: "u" });
+    const { id } = await sessions.createSession({
+      appName: "app",
+      userId: "u",
+    });
 
     const read: Event[] = [];
     for await (const event of runner.runAsync({

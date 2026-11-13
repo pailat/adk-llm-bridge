@@ -41,7 +41,7 @@ body:
     id: version
     attributes:
       label: adk-llm-bridge and @google/adk versions
-      placeholder: adk-llm-bridge 0.7.0, @google/adk 2.4.0
+      placeholder: adk-llm-bridge 0.7.0, @google/adk 2.5.0
   - type: dropdown
     id: runtime
     attributes:

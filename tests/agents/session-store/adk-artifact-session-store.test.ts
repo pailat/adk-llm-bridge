@@ -250,7 +250,7 @@ describe("A1 append and load", () => {
 });
 
 describe("evidence: nested artifact filenames on the File service", () => {
-  test("a filename with slashes lists and versions like a flat one in @google/adk 2.4.0", async () => {
+  test("a filename with slashes lists and versions like a flat one in @google/adk", async () => {
     const base = new FileArtifactService(tempDir());
     await base.saveArtifact({
       ...SCOPE,

@@ -441,8 +441,8 @@ export class OpenAICompatibleLlm extends BaseProviderLlm {
   }
 
   /**
-   * Labels the active model-call span (`call_llm` in ADK 2.4,
-   * `generate_content {model}` in ADK 2.5) with this provider's identity.
+   * Labels ADK's active model-call span (`generate_content {model}`) with
+   * this provider's identity.
    */
   private annotateSpan(
     result: Pick<OpenAI.ChatCompletion, "id" | "model">,
