@@ -6,10 +6,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.7.0] - 2026-11-09
 
-0.7.0 is the first npm release after 0.5.3: 0.6.0 was published on GitHub only.
-It contains everything from [0.6.0](#060---2026-06-20) plus the changes below.
-See [docs/migration-0.7.md](./docs/migration-0.7.md) to upgrade from 0.5.3 or
-from the 0.6.0 tag.
+0.7.0 follows 0.5.3. See [docs/migration-0.7.md](./docs/migration-0.7.md) to
+upgrade from 0.5.3.
 
 ### Breaking
 
@@ -374,8 +372,8 @@ from the 0.6.0 tag.
 - **New `interrupted` workflow step status and `step_interrupted` event.**
   `WorkflowCheckpointStepStatus` and `WorkflowEvent` each gain a member, so an
   exhaustive `switch` over either stops compiling until it handles the new
-  case. Workflow checkpoints are new in 0.7.0 (0.6.0 has no workflows), so
-  no earlier release reads them. A step stopped by an abort or by the
+  case. Workflow checkpoints are new in 0.7.0, so no earlier release reads
+  them. A step stopped by an abort or by the
   workflow execution timeout is stored as `interrupted`, and a re-run without
   `retryFailedSteps` or `resumePolicy: "retry"` fails with
   `WORKFLOW_INDETERMINATE_STEP`. Checkpoints written before keep an aborted
@@ -392,9 +390,7 @@ from the 0.6.0 tag.
   throws `InputValidationError` naming the driver and the option when it is
   set to anything but `true` or `false`. Before, the driver read the value as
   truthy, so an untyped host that passed the string `"false"` (an env var, a
-  JSON file) turned the escape hatch ON. Most of these options are new in
-  0.7.0; `skipGitRepoCheck` and `webSearchEnabled` on `CodexSdkDriver` exist in
-  0.6.0 and only a non-boolean from untyped JavaScript is refused.
+  JSON file) turned the escape hatch ON.
 - **Unknown options are refused where a typo drops a host limit** (`ExternalAgentWorkflowFactory`
   and `FileSystemWorkflowCheckpointStore`, both new in 0.7.0; see
   [Unknown options](./docs/external-agent-isolation.md#unknown-options)):
@@ -712,6 +708,18 @@ from the 0.6.0 tag.
 
 ### Added
 
+- **External agents** (`adk-llm-bridge/agents`). Wraps full external coding
+  agents as native ADK agents, keeping multi-agent orchestration, tool calling
+  and streaming: Anthropic Claude through the Claude Agent SDK or the `claude`
+  CLI (`ClaudeAgent`), OpenAI Codex through the Codex SDK or CLI
+  (`CodexAgent`), and fx (`FxAgent`). It includes a driver abstraction (SDK,
+  CLI and subprocess modes), credential providers, permission-policy mapping,
+  runtime sessions, a tool gateway and a native ADK event stream
+  (`ExternalAgentEvent`). New examples: `basic-agent-claude`,
+  `basic-agent-codex`, `codex-workflow` and the combined `external-agents`
+  showcase. A Gemini CLI external agent is not included; use Antigravity or
+  Gemini models through ADK. See [External agents](./README.md#external-agents)
+  and [Migrating to 0.7.0](./docs/migration-0.7.md#6-external-agents-adk-llm-bridgeagents).
 - **Claude sessions on ADK artifacts (experimental).** `adkArtifactSessionStore()`
   from the new `adk-llm-bridge/agents/session-store/adk-artifacts` subpath keeps
   Claude transcripts in the ADK artifact service of the run (in-memory, file or
@@ -1453,7 +1461,7 @@ from the 0.6.0 tag.
   case) or kept in insertion order. This covers checkpoint input/source hashes
   and revisions, artifact digests and revisions, change-set and intent digests,
   external agent revisions and git worktree directory names. Digests stored
-  by 0.7.0 pre-release builds are still accepted when read (0.6.0 and earlier
+  by 0.7.0 pre-release builds are still accepted when read (0.5.3 and earlier
   have no workflows and wrote none of these digests), so existing checkpoints
   (including the file store), artifacts, change sets, agent revisions and
   worktrees keep resuming and verifying; only new digests use the canonical
@@ -1565,12 +1573,6 @@ from the 0.6.0 tag.
 - `LEGACY_RECOVERABLE_ERROR_CODES` in `adk-llm-bridge/agents` is
   `@deprecated`: use `normalizeRecoverableErrorCode()`, which maps every code
   in it.
-
-### Removed
-
-- The Gemini CLI external agent (`GeminiCliAgent`, `GeminiCliDriver`), which
-  the v0.6.0 GitHub release had, is removed. Use Antigravity or Gemini models
-  through ADK instead.
 
 ### Fixed
 
@@ -2287,43 +2289,6 @@ from the 0.6.0 tag.
   changes" note: 0.8 is planned to replace the CLI drivers' `args` denylist
   with an allowlist, so other flags would need `allowPolicyOverrideArgs`.
 
-## [0.6.0] - 2026-06-20
-
-Released on GitHub only; first npm release containing it is 0.7.0.
-
-### Added
-
-- **External agents bridge** (`adk-llm-bridge/agents`). A new subsystem that wraps
-  full external coding agents as native ADK agents, preserving multi-agent
-  orchestration, tool calling, and streaming:
-  - Anthropic Claude via the Claude Agent SDK (`ClaudeAgent`).
-  - OpenAI Codex via the Codex SDK/CLI (`CodexAgent`).
-  - Google Gemini via the Gemini CLI (`GeminiCliAgent`).
-  - A driver abstraction (SDK / CLI / subprocess modes), credential providers,
-    permission-policy mapping, runtime sessions, a tool gateway, and a native
-    ADK event stream (`ExternalAgentEvent`).
-- Examples: `basic-agent-claude`, `basic-agent-codex`, `basic-agent-gemini`, and
-  the combined `external-agents` showcase.
-
-### Changed
-
-- SDK pins: `@openai/codex-sdk` `^0.141.0` and
-  `@anthropic-ai/claude-agent-sdk` `^0.3.183`.
-
-### Fixed
-
-- **Codex driver:** availability detection now keys on `CODEX_API_KEY` /
-  `$CODEX_HOME/auth.json` instead of a `codex` binary on `PATH` (the SDK bundles
-  its own); errors are classified (auth/billing/missing-binary non-recoverable,
-  transport/rate-limit recoverable); the thread id is captured from
-  `thread.started` so resumability survives a mid-turn failure; and proxy/cert/
-  `CODEX_HOME`/`CODEX_ACCESS_TOKEN` vars are forwarded through the replacement env.
-- **Claude driver:** a read-only policy maps to `permissionMode: "default"`
-  (no longer the interactive `"plan"` mode); `settingSources` defaults to `[]`
-  (SDK isolation) so host `~/.claude`/project settings no longer leak in; the
-  spawned CLI is cancelled via `abortController` + `interrupt()`/`return()` on
-  early break or error; and errors are classified from the SDK's typed subtypes.
-
 ## [0.5.3] - 2026-06-19
 
 ### Added
@@ -2423,8 +2388,6 @@ Released on GitHub only; first npm release containing it is 0.7.0.
   `bunup`, which emits correct ESM import specifiers).
 
 [0.7.0]: https://github.com/pailat/adk-llm-bridge/releases/tag/v0.7.0
-[0.6.1]: https://github.com/pailat/adk-llm-bridge/releases/tag/v0.6.1
-[0.6.0]: https://github.com/pailat/adk-llm-bridge/releases/tag/v0.6.0
 [0.5.3]: https://github.com/pailat/adk-llm-bridge/releases/tag/v0.5.3
 [0.5.2]: https://github.com/pailat/adk-llm-bridge/releases/tag/v0.5.2
 [#73]: https://github.com/pailat/adk-llm-bridge/issues/73

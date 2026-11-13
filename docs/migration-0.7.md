@@ -1,9 +1,6 @@
 # Migrating to 0.7.0
 
-0.7.0 is the first npm release after 0.5.3. Version 0.6.0 was published on
-GitHub only, so npm users go straight from 0.5.3 to 0.7.0. This guide covers
-that whole step. If you installed the 0.6.0 GitHub tag, see
-[Coming from the 0.6.0 tag](#coming-from-the-060-tag) at the end.
+0.7.0 follows 0.5.3. This guide covers the upgrade from 0.5.3 to 0.7.0.
 
 The full list of changes is in the [CHANGELOG](../CHANGELOG.md#070---2026-11-09).
 
@@ -270,8 +267,9 @@ configuration, not message content. Do not put prompt text or secrets in
 
 ## 6. External agents (`adk-llm-bridge/agents`)
 
-External agents were added in 0.6.0 (GitHub only), so for npm users they are
-new in 0.7.0. If you already use them, these changes apply:
+External agents are new in 0.7.0, so there is nothing to migrate from 0.5.3.
+The points below are the behaviors to know when you adopt them, and what
+changed for code written against a 0.7.0 pre-release build:
 
 - **Bridged ADK tools run tool callbacks.** Runner plugins
   (`beforeToolCallback`, `afterToolCallback`, `onToolErrorCallback`) now run
@@ -633,9 +631,9 @@ new in 0.7.0. If you already use them, these changes apply:
   `CLAUDE_AGENT_SDK_ERROR` for these should match the new codes. The message
   is `<subtype>: <SDK text>`.
 - **Claude Agent SDK peer range.** The optional peer
-  `@anthropic-ai/claude-agent-sdk` is declared as `>=0.3.319 <0.4` (it was
-  `^0.3.183` in the 0.6.0 tag). If you use `ClaudeAgent` or
-  `ClaudeAgentSdkDriver`, install a version in that range.
+  `@anthropic-ai/claude-agent-sdk` is declared as `>=0.3.319 <0.4`. If you
+  use `ClaudeAgent` or `ClaudeAgentSdkDriver`, install a version in that
+  range.
 - **Missing SDKs and binaries.** A missing `@anthropic-ai/claude-agent-sdk`,
   `@openai/codex-sdk`, or `claude`/`codex` binary is now an error
   event (`EXTERNAL_AGENT_DEPENDENCY_MISSING` or `MISSING_BINARY`) with the
@@ -931,7 +929,7 @@ the run's ADK artifact service. Without an artifact service the run ends with
 
 ### fx agent
 
-New in 0.7.0, nothing to migrate from 0.5.3 or 0.6.0. `FxAgent` and
+New in 0.7.0, nothing to migrate from 0.5.3. `FxAgent` and
 `FxCliDriver` run the fx
 coding agent (`fx ask --json`, fx 0.0.16) as an external agent. A model is
 required by default (`requireExplicitModel` is `true` for fx only). fx has no
@@ -1047,7 +1045,7 @@ If you call `AgentInvocationGateway` (or `ToolGateway`) directly:
 
 ## 8. Workflows (`adk-llm-bridge/workflows`)
 
-Workflows are new in 0.7.0 (they were not in the 0.6.0 tag), so there is
+Workflows are new in 0.7.0, so there is
 nothing to migrate. Two things to know if you write exhaustive switches or keep
 checkpoints:
 
@@ -1419,14 +1417,3 @@ The config types now follow one scheme: `<Provider>ProviderConfig` for a
 model's config and `<Provider>RegisterOptions` for a `register*()` function.
 `setConfig`, `getConfig` and `resetConfig` were already deprecated in favor
 of `setProviderConfig`, `getProviderConfig` and `resetProviderConfig`.
-
-## Coming from the 0.6.0 tag
-
-0.6.0 added external agents and was released on GitHub only. Everything above
-applies. The external-agent APIs are not new to you: sections 6 and 7 list the
-changes in their behavior. The runtime and peer changes in section 1 apply
-from 0.6.0 as well: 0.6.0 still supported ADK below 2.
-
-The 0.6.0 tag also had a Gemini CLI external agent (`GeminiCliAgent`,
-`GeminiCliDriver`). It is removed in 0.7.0; use Antigravity or Gemini models
-through ADK instead.
