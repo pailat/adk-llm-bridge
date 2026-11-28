@@ -14,7 +14,7 @@ Brief description of the changes and why they are needed.
 - [ ] The PR title follows [Conventional Commits](https://www.conventionalcommits.org/)
 - [ ] I ran `bun run ci` and all checks pass
 - [ ] I added or updated tests
-- [ ] I added a `CHANGELOG.md` entry for user-visible changes
+- [ ] I added a `changes/unreleased/<slug>.md` fragment for user-visible changes (or labeled the PR `skip-changelog`)
 - [ ] I followed the [code comment standard](https://github.com/pailat/adk-llm-bridge/blob/main/docs/contributing/comments.md) (TSDoc on exports, no internal tracking ids, no license headers)
 - [ ] I updated the documentation if needed
 

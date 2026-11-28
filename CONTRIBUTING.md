@@ -63,8 +63,37 @@ gh pr create --base main
 - CI passes (typecheck, lint, comment check, tests, build).
 - A clear description of the change.
 - Tests for new functionality.
-- A `CHANGELOG.md` entry in the upcoming version section for user-visible changes.
+- A changelog fragment for user-visible changes (see below).
 - Documentation updates if needed.
+
+### Changelog fragments
+
+Do not edit `CHANGELOG.md` in a pull request: parallel pull requests would
+all conflict on its Unreleased section. Add a file
+`changes/unreleased/<slug>.md` instead, named after the change
+(`changes/unreleased/acme-provider-retries.md`), with one or more sections
+written exactly as they will appear in `CHANGELOG.md`:
+
+```markdown
+### Added
+
+- **`AcmeLlm`** retries a 429 response with backoff.
+
+### Fixed
+
+- A streamed tool call without arguments no longer throws.
+```
+
+The sections are `Breaking`, `Added`, `Changed`, `Deprecated`, `Removed`,
+`Fixed`, `Security`, `Docs` and `Known limitations`. At release time
+`bun scripts/changelog.ts release X.Y.Z` merges every fragment into the new
+version's section (see the
+[release checklist](DEVELOPMENT.md#release-checklist)), and
+`bun scripts/changelog.ts preview` prints the notes the next release gets.
+
+The Changelog workflow fails a pull request that changes `src/` without adding
+a fragment. When the change is not user visible (an internal refactor, a
+comment fix), label the pull request `skip-changelog` instead.
 
 ### Title format
 
@@ -80,7 +109,7 @@ Use [Conventional Commits](https://www.conventionalcommits.org/):
 | `chore` | Maintenance | `chore: update dependencies` |
 
 Mark breaking changes with `!` (`feat(agents)!: ...`) and explain them in the
-`CHANGELOG.md` entry.
+changelog fragment.
 
 ### Merge strategy
 

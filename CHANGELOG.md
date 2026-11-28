@@ -6,15 +6,6 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Added
-
-- **`checkChangedPaths(changedPaths, allowedPaths)`** also takes a plain list
-  of paths, so a host checks a `tests@1` result with
-  `checkChangedPaths(result.testPaths, lane.allowedPaths)` instead of wrapping
-  it as `{ changedPaths: result.testPaths }`. A refusal's `index` is the
-  path's index in the list. Passing a result with `changedPaths` works as
-  before.
-
 ## [0.7.1] - 2026-11-28
 
 ### Added

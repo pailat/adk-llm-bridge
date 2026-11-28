@@ -267,7 +267,15 @@ publishing and provenance, and creates the GitHub release from `CHANGELOG.md`.
 2. Set the `adk-llm-bridge` range in every `examples/*/package.json` to
    `^X.Y.Z` (`tests/docs/examples-dependencies.test.ts` checks it against
    `package.json`).
-3. Add a `CHANGELOG.md` section `## [X.Y.Z]` for the new version.
+3. Assemble the changelog fragments into `CHANGELOG.md`:
+   ```bash
+   bun scripts/changelog.ts preview      # the notes the release gets
+   bun scripts/changelog.ts release X.Y.Z  # --date YYYY-MM-DD, default today
+   ```
+   It moves the Unreleased entries and every `changes/unreleased/*.md`
+   fragment (merged by section, fragments in file name order) under
+   `## [X.Y.Z] - date`, adds the `[X.Y.Z]:` link and deletes the fragments.
+   Review the result and edit it by hand if needed.
 4. Run `bun run ci`.
 5. On Linux, run the suite 20 times in a row (about 4 minutes a run):
    ```bash
