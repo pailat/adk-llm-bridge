@@ -27,9 +27,13 @@ export type { CodexAgentConfig } from "./codex-agent.js";
 export { CODEX_AGENT_DEFINITION, CodexAgent } from "./codex-agent.js";
 export type {
   ClaudeAgentSdkDriverConfig,
+  ClaudeEffort,
+  ClaudeMaxBudgetUsd,
   ClaudeSessionStoreFlush,
 } from "./driver/claude-agent-sdk.js";
 export {
+  CLAUDE_MAX_BUDGET_INVALID,
+  CLAUDE_OUTPUT_SCHEMA_MISMATCH,
   CLAUDE_SESSION_STORE_MIRROR_ERROR,
   CLAUDE_SESSION_STORE_UNAVAILABLE,
   ClaudeAgentSdkDriver,

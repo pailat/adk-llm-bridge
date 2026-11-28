@@ -528,7 +528,7 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
    * as the string `"false"`.
    * @throws InputValidationError when `args` is not an array of strings.
    * @throws {@link ExternalAgentPolicyError} with code
-   * `EXTERNAL_AGENT_OPTION_UNSUPPORTED` when `sessionStore`,
+   * `EXTERNAL_AGENT_OPTION_UNSUPPORTED` when `outputSchema`, `sessionStore`,
    * `sessionStoreFlush` or `sessionStoreLoadTimeoutMs` is given, or when
    * an `args` entry overrides a policy or isolation flag and
    * `allowPolicyOverrideArgs` is not set.
@@ -540,6 +540,18 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
    * alias; `EXTERNAL_AGENT_MODEL_INVALID` also covers `smallFastModel`.
    */
   constructor(config: ClaudeCliDriverConfig = {}) {
+    // Before the key check: a schema meant for the SDK driver gets its own
+    // refusal, not an unknown-option one.
+    if (
+      typeof config === "object" &&
+      config !== null &&
+      (config as Record<string, unknown>).outputSchema !== undefined
+    ) {
+      throw new ExternalAgentPolicyError(
+        EXTERNAL_AGENT_OPTION_UNSUPPORTED,
+        "ClaudeCliDriver does not support outputSchema: the driver does not send a schema to the Claude CLI or check the answer against one. Use ClaudeAgentSdkDriver (the ClaudeAgent default) or remove outputSchema.",
+      );
+    }
     assertKnownDriverOptions("ClaudeCliDriver", config, CLAUDE_CLI_OPTION_KEYS);
     for (const option of [
       "sessionStore",

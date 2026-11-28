@@ -1409,7 +1409,10 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
           ...(event.partial
             ? {}
             : {
-                output: this.nodeOutput(event.content),
+                output: this.nodeOutput(
+                  event.content,
+                  event.metadata?.structuredOutput === true,
+                ),
                 nodeInfo: { messageAsOutput: true },
               }),
         });
@@ -1464,9 +1467,20 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
    * the text is parsed as JSON; if parsing fails the raw text is kept and ADK's
    * output validation reports the mismatch. Integers beyond
    * `Number.MAX_SAFE_INTEGER` stay exact, as strings, in objects, arrays and
-   * scalars alike.
+   * scalars alike. A driver's structured output (`metadata.structuredOutput`,
+   * for example from `ClaudeAgentSdkDriver`'s `outputSchema`) is the JSON of
+   * a value the SDK already parsed, so it is read back with `JSON.parse`:
+   * its numbers stay numbers, and an integer beyond `Number.MAX_SAFE_INTEGER`
+   * is the rounded number the SDK gave.
    */
-  private nodeOutput(text: string): unknown {
+  private nodeOutput(text: string, structured = false): unknown {
+    if (structured && text.trim()) {
+      try {
+        return JSON.parse(text);
+      } catch {
+        return text;
+      }
+    }
     if (this.outputSchema && text.trim()) {
       const parsed = parseJson(text);
       return parsed.ok ? parsed.value : text;
