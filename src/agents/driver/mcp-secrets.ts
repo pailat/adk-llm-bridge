@@ -46,7 +46,7 @@ const SHELL_ENV_HIDDEN_PLATFORMS: ReadonlySet<NodeJS.Platform> = new Set([
 export interface McpSecretRunContext {
   /** The host platform (injectable for tests). */
   platform: NodeJS.Platform;
-  /** Whether a shell tool (`Bash`, `PowerShell`) is offered. */
+  /** Whether a shell tool (`Bash`, `PowerShell`, `Monitor`) is offered. */
   shellOffered: boolean;
   /**
    * Whether the shell runs inside Claude Code's no-network sandbox (the

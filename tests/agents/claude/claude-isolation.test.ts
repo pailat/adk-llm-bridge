@@ -83,7 +83,7 @@ describe("planClaudeIsolation", () => {
     expect(plan.tools).not.toContain("WebFetch");
     expect(plan.tools).not.toContain("WebSearch");
     expect(plan.tools).toContain("Bash");
-    expect(plan.disallowedTools).toEqual(["WebFetch", "WebSearch"]);
+    expect(plan.disallowedTools).toEqual(["WebFetch", "WebSearch", "Monitor"]);
     expect(plan.sandbox).toEqual(CLAUDE_NO_NETWORK_SANDBOX);
     expect(plan.networkSandbox).toBe("enforced");
   });
@@ -164,7 +164,7 @@ describe("ClaudeCliDriver isolation flags", () => {
     );
     expect(args).toContain("--tools=Read,Glob,Grep,TodoWrite");
     expect(args).toContain(
-      "--disallowedTools=Edit,Write,MultiEdit,NotebookEdit,Bash,PowerShell,WebFetch,WebSearch",
+      "--disallowedTools=Edit,Write,MultiEdit,NotebookEdit,Bash,PowerShell,Monitor,WebFetch,WebSearch",
     );
   });
 
@@ -1415,6 +1415,77 @@ describe("shell tools are recognized whatever their case", () => {
       expect(plan.tools).toEqual([canonical, "Read"]);
     });
   }
+
+  test("Monitor is removed when the network is off: the sandbox is not shown to cover it", () => {
+    const plan = planClaudeIsolation(
+      { mode: "workspace-write" },
+      {
+        tools: ["Read", "monitor"],
+        inheritHostConfig: false,
+        allowUnsandboxedShell: false,
+        workingDirectory: "/repo",
+      },
+    );
+    expect(plan.tools).toEqual(["Read"]);
+    expect(plan.disallowedTools).toContain("Monitor");
+    expect(plan.shellOffered).toBe(false);
+    expect(plan.networkSandbox).toBeUndefined();
+  });
+
+  test("Monitor is removed under allowedPaths, even with the network on", () => {
+    const plan = planClaudeIsolation(
+      { mode: "workspace-write", allowNetwork: true, allowedPaths: ["/repo"] },
+      {
+        tools: ["Read", "Monitor"],
+        inheritHostConfig: false,
+        allowUnsandboxedShell: false,
+        workingDirectory: "/repo",
+      },
+    );
+    expect(plan.tools).toEqual(["Read"]);
+    expect(plan.disallowedTools).toContain("Monitor");
+    expect(plan.shellPathsUnenforceable).toBeUndefined();
+  });
+
+  test("Monitor stays with the network on and no allowedPaths", () => {
+    const plan = planClaudeIsolation(
+      { mode: "workspace-write", allowNetwork: true },
+      {
+        tools: ["Read", "Monitor"],
+        inheritHostConfig: false,
+        allowUnsandboxedShell: false,
+        workingDirectory: "/repo",
+      },
+    );
+    expect(plan.tools).toEqual(["Read", "Monitor"]);
+    expect(plan.disallowedTools).toBeUndefined();
+  });
+
+  test("inheritHostConfig without a pinned list disallows Monitor when the network is off", () => {
+    const plan = planClaudeIsolation(
+      { mode: "workspace-write" },
+      {
+        inheritHostConfig: true,
+        allowUnsandboxedShell: false,
+        workingDirectory: "/repo",
+      },
+    );
+    expect(plan.disallowedTools).toContain("Monitor");
+  });
+
+  test("read-only removes Monitor with the other shell tools", () => {
+    const plan = planClaudeIsolation(
+      { mode: "read-only", allowNetwork: false },
+      {
+        tools: ["Read", "Monitor"],
+        inheritHostConfig: false,
+        allowUnsandboxedShell: false,
+        workingDirectory: "/repo",
+      },
+    );
+    expect(plan.tools).toEqual(["Read"]);
+    expect(plan.disallowedTools).toContain("Monitor");
+  });
 
   test("an unknown name is passed on unchanged and offers no shell", () => {
     const plan = planClaudeIsolation(

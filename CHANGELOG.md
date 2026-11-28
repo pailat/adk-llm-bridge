@@ -14,6 +14,41 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   it as `{ changedPaths: result.testPaths }`. A refusal's `index` is the
   path's index in the list. Passing a result with `changedPaths` works as
   before.
+- **`toolArgsAllowlist`** on `ClaudeAgentSdkDriver` narrows the shell
+  commands an agent may run with Claude Code permission rules, such as
+  `["Bash(git log:*)", "Bash(bun test)"]`, so a host no longer needs a
+  wrapper script for it. The list is closed: a `Bash` command that matches no
+  rule is denied, and so is every `PowerShell` or `Monitor` call (`Monitor`
+  runs a shell command too). Tool names match in any case, in rules and in
+  calls, so a call reported as `bash` is checked like `Bash`. A command with
+  a shell operator (`;`, `&`, `|`, `$`, a backtick, a redirect, a
+  parenthesis, a backslash, a line break) never matches. A `PreToolUse` hook
+  checks each call, so the list holds in every permission mode; it is part
+  of the options `buildOptions` and `buildOptionsForRun` return, so a host
+  that calls `query()` itself gets it too. A listed command that runs
+  workspace files (`bun test`, `git status`, `git commit` with its hooks)
+  gives the full shell when the agent can also write those files, and a
+  prefix rule on a command with a write option (`git log --output`) is
+  itself a way to write them. Off by default. A malformed rule refuses the
+  driver with the new `EXTERNAL_AGENT_TOOL_ARGS_RULE_INVALID` code. Loaded
+  settings run commands the list cannot see (hooks, skill `!` lines), so a
+  `toolArgsAllowlist` with a non-empty `settingSources` or
+  `inheritHostConfig` refuses the driver with the new
+  `EXTERNAL_AGENT_TOOL_ARGS_SETTINGS_UNCHECKED` code. See
+  [Narrowing shell commands](docs/external-agent-isolation.md#narrowing-shell-commands).
+
+### Fixed
+
+- **`Monitor` is removed where the sandbox would hold the policy.** It runs
+  a shell command, and Claude Code's sandbox is not shown to cover it, so
+  the Claude drivers remove it without `allowNetwork: true`, with
+  `allowedPaths`, `readPaths` or `pathBounds`, and under `read-only`, and
+  the network guard denies a `Monitor` call without `allowNetwork: true`
+  even when the `Bash` sandbox is on. Before, a run offering `Monitor` ran
+  it unsandboxed.
+- **The network guard matches shell tool names in any case**, so a call
+  reported as `bash` or `monitor` is denied without `allowNetwork: true`
+  like `Bash`.
 
 ### Fixed
 

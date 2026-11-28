@@ -243,7 +243,11 @@ describe("Claude drivers default to no network", () => {
       const plan = planClaudeIsolation(policy, ISOLATED);
       expect(plan.tools).not.toContain("WebFetch");
       expect(plan.tools).not.toContain("WebSearch");
-      expect(plan.disallowedTools).toEqual(["WebFetch", "WebSearch"]);
+      expect(plan.disallowedTools).toEqual([
+        "WebFetch",
+        "WebSearch",
+        "Monitor",
+      ]);
       expect(plan.sandbox).toEqual(CLAUDE_NO_NETWORK_SANDBOX);
       expect(plan.networkSandbox).toBe("enforced");
     });
@@ -263,7 +267,11 @@ describe("Claude drivers default to no network", () => {
       request(UNSET, CLAUDE_PROVIDER),
     ) as Record<string, unknown>;
     expect(options.sandbox).toEqual(CLAUDE_NO_NETWORK_SANDBOX);
-    expect(options.disallowedTools).toEqual(["WebFetch", "WebSearch"]);
+    expect(options.disallowedTools).toEqual([
+      "WebFetch",
+      "WebSearch",
+      "Monitor",
+    ]);
   });
 
   test("Claude CLI puts the no-network sandbox in --settings when unset", () => {
@@ -274,7 +282,7 @@ describe("Claude drivers default to no network", () => {
     expect(
       JSON.parse(settings?.slice("--settings=".length) ?? "{}").sandbox,
     ).toEqual(CLAUDE_NO_NETWORK_SANDBOX);
-    expect(args).toContain("--disallowedTools=WebFetch,WebSearch");
+    expect(args).toContain("--disallowedTools=WebFetch,WebSearch,Monitor");
   });
 });
 

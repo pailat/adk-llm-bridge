@@ -213,6 +213,27 @@ export const EXTERNAL_AGENT_TOOL_NOT_READ_ONLY =
   "EXTERNAL_AGENT_TOOL_NOT_READ_ONLY";
 
 /**
+ * A `toolArgsAllowlist` entry is malformed: not a string, not
+ * `Bash(<command>)` or `Bash(<prefix>:*)`, an empty or padded command, a
+ * `*` anywhere but a final `:*`, a shell operator (`;`, `&`, `|`, `$`, a
+ * backtick, `<`, `>`, a parenthesis, a backslash or a line break), or a tool
+ * that has no argument rules. Thrown when the driver is built.
+ */
+export const EXTERNAL_AGENT_TOOL_ARGS_RULE_INVALID =
+  "EXTERNAL_AGENT_TOOL_ARGS_RULE_INVALID";
+
+/**
+ * A `toolArgsAllowlist` is combined with settings that Claude Code loads
+ * (`settingSources` not empty, or `inheritHostConfig`). Those settings can
+ * run commands that are not tool calls (command hooks, the `!` lines of
+ * skills and slash commands), so the list would not see them, and an agent
+ * that can write the settings files could add such commands. Thrown when the
+ * driver is built.
+ */
+export const EXTERNAL_AGENT_TOOL_ARGS_SETTINGS_UNCHECKED =
+  "EXTERNAL_AGENT_TOOL_ARGS_SETTINGS_UNCHECKED";
+
+/**
  * The driver config is not a plain object, has a symbol key, or has a key the
  * driver does not know (whatever its value, `undefined` included). Thrown
  * when the driver is built, before any other check, so a misspelled or
@@ -328,6 +349,8 @@ export type ExternalAgentPolicyErrorCode =
   | typeof EXTERNAL_AGENT_SUBAGENTS_UNSUPPORTED
   | typeof EXTERNAL_AGENT_READ_ONLY_TOOL_UNKNOWN
   | typeof EXTERNAL_AGENT_TOOL_NOT_READ_ONLY
+  | typeof EXTERNAL_AGENT_TOOL_ARGS_RULE_INVALID
+  | typeof EXTERNAL_AGENT_TOOL_ARGS_SETTINGS_UNCHECKED
   | typeof EXTERNAL_AGENT_OPTION_UNKNOWN
   | typeof EXTERNAL_AGENT_MCP_SERVER_INVALID
   | typeof EXTERNAL_AGENT_MCP_SECRET_LITERAL

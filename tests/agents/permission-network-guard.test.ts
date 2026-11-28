@@ -37,6 +37,7 @@ describe("guardPermissionRequest under allowNetwork: false", () => {
     for (const name of [
       "Bash",
       "PowerShell",
+      "Monitor",
       "shell",
       "exec_command",
       "run_shell_command",
@@ -44,6 +45,31 @@ describe("guardPermissionRequest under allowNetwork: false", () => {
       expect(
         guardPermissionRequest(NO_NETWORK, req(name, { command: "ls" })),
       ).toMatchObject({ behavior: "deny" });
+    }
+  });
+
+  test("denies shell tools whatever the casing the runtime reports", () => {
+    for (const name of ["bash", "BASH", "powershell", "monitor", "Shell"]) {
+      expect(
+        guardPermissionRequest(NO_NETWORK, req(name, { command: "ls" })),
+      ).toMatchObject({ behavior: "deny" });
+    }
+  });
+
+  test("denies Monitor even when the Bash sandbox is enforced, unless waived", () => {
+    for (const name of ["Monitor", "monitor"]) {
+      expect(
+        guardPermissionRequest(
+          NO_NETWORK,
+          req(name, { command: "ls" }, { networkSandbox: "enforced" }),
+        ),
+      ).toMatchObject({ behavior: "deny" });
+      expect(
+        guardPermissionRequest(
+          NO_NETWORK,
+          req(name, { command: "ls" }, { networkSandbox: "waived" }),
+        ),
+      ).toBeUndefined();
     }
   });
 

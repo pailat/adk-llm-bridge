@@ -122,11 +122,13 @@ const NETWORK_TOOLS = new Set([
  * Tools that run shell commands, across runtimes. Without `allowNetwork: true`
  * they are denied unless the request says the runtime sandbox keeps them off
  * the network (or the driver opted out); see
- * {@link PermissionRequest.networkSandbox}.
+ * {@link PermissionRequest.networkSandbox}. Lowercase: a runtime may report
+ * `bash` for `Bash`, so names are compared in lowercase.
  */
-const SHELL_TOOLS = new Set([
-  "Bash",
-  "PowerShell",
+const SHELL_TOOLS: ReadonlySet<string> = new Set([
+  "bash",
+  "powershell",
+  "monitor",
   "shell",
   "local_shell",
   "exec_command",
@@ -134,6 +136,15 @@ const SHELL_TOOLS = new Set([
   "unified_exec",
   "run_shell_command",
 ]);
+
+/**
+ * Shell tools the runtime sandbox is not shown to cover, in lowercase:
+ * Claude Code's `Monitor` runs its `command` as a shell command or script,
+ * and its `sandbox` settings are documented for `Bash`. Without
+ * `allowNetwork: true` they are denied even when the sandbox is enforced,
+ * unless the driver opted out (`waived`).
+ */
+const UNSANDBOXED_SHELL_TOOLS: ReadonlySet<string> = new Set(["monitor"]);
 
 /**
  * Input keys that carry a file path in the file tools of Claude Code
@@ -585,9 +596,13 @@ function denyWithoutNetwork(
       message: `Denied: MCP tool ${name} may reach the network, which this agent's policy does not allow.`,
     };
   }
+  const shell = name.trim().toLowerCase();
+  const sandboxed =
+    request.networkSandbox === "enforced" &&
+    !UNSANDBOXED_SHELL_TOOLS.has(shell);
   if (
-    SHELL_TOOLS.has(name) &&
-    request.networkSandbox !== "enforced" &&
+    SHELL_TOOLS.has(shell) &&
+    !sandboxed &&
     request.networkSandbox !== "waived"
   ) {
     return {

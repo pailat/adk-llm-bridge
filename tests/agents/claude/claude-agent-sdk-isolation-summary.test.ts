@@ -208,6 +208,7 @@ describe("read-only removes write, shell and web tools from the list", () => {
       "NotebookEdit",
       "Bash",
       "PowerShell",
+      "Monitor",
       "WebFetch",
       "WebSearch",
     ]);
@@ -239,7 +240,11 @@ describe("read-only removes write, shell and web tools from the list", () => {
     expect(options.tools).not.toContain("WebFetch");
     expect(options.tools).not.toContain("WebSearch");
     expect(options.tools).toContain("Edit");
-    expect(options.disallowedTools).toEqual(["WebFetch", "WebSearch"]);
+    expect(options.disallowedTools).toEqual([
+      "WebFetch",
+      "WebSearch",
+      "Monitor",
+    ]);
   });
 
   test("read-only also disallows write tools when inheriting the host preset", () => {
