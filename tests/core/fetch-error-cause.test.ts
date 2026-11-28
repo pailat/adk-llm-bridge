@@ -31,14 +31,23 @@ function setFetch(llm: object, fetch: FakeFetch) {
   (llm as any).client.fetch = fetch;
 }
 
+function setAnthropicFetch(llm: AnthropicLlm, fetch: FakeFetch) {
+  // biome-ignore lint/suspicious/noExplicitAny: test access to private transport
+  (llm as any).transportFetch = fetch;
+}
+
 function openAiWith(
   fetch: FakeFetch,
-  options: { maxRetries?: number; errorMode?: "throw" | "response" } = {},
+  options: {
+    maxRetries?: number;
+    errorMode?: "throw" | "response";
+    host?: string;
+  } = {},
 ) {
   const llm = new OpenAICompatibleLlm(
     { model: "acme-model", errorMode: options.errorMode },
     {
-      baseURL: `https://api.acme.test/v1?token=${QUERY_SECRET}`,
+      baseURL: `https://${options.host ?? "api.acme.test"}/v1?token=${QUERY_SECRET}`,
       apiKey: API_KEY,
       timeout: 5000,
       maxRetries: options.maxRetries ?? 0,
@@ -51,15 +60,47 @@ function openAiWith(
   return llm;
 }
 
-function anthropicWith(fetch: FakeFetch) {
+function anthropicWith(fetch: FakeFetch, maxRetries = 0) {
   const llm = new AnthropicLlm({
     model: "claude-sonnet-5-5",
     apiKey: API_KEY,
     baseURL: "https://anthropic.acme.test",
-    maxRetries: 0,
+    maxRetries,
   });
-  setFetch(llm, fetch);
+  setAnthropicFetch(llm, fetch);
   return llm;
+}
+
+/** Records every error `fetch` throws. */
+function recording(fetch: FakeFetch, into: unknown[]): FakeFetch {
+  return async (url, init) => {
+    try {
+      return await fetch(url, init);
+    } catch (e) {
+      into.push(e);
+      throw e;
+    }
+  };
+}
+
+/** An undici-like connect timeout: `TypeError: fetch failed`. */
+function connectTimeout(): FakeFetch {
+  return async () => {
+    throw new TypeError("fetch failed", {
+      cause: Object.assign(
+        new Error("Connect Timeout Error (attempted address: acme:443)"),
+        { name: "ConnectTimeoutError", code: "UND_ERR_CONNECT_TIMEOUT" },
+      ),
+    });
+  };
+}
+
+function missingFile(): FakeFetch {
+  return async () => {
+    throw new TypeError("fetch failed", {
+      cause: Object.assign(new Error("open /acme/ca.pem"), { code: "ENOENT" }),
+    });
+  };
 }
 
 async function thrown(
@@ -232,6 +273,75 @@ describe("an error thrown inside fetch", () => {
     expect(error.detail).toContain("anthropic.acme.test");
     expectNoSecret(error);
   });
+
+  it("keeps an AbortError cause on Anthropic", async () => {
+    const thrownByFetch: unknown[] = [];
+    const error = await thrown(
+      anthropicWith(
+        recording(async () => {
+          throw new DOMException("The operation was aborted.", "AbortError");
+        }, thrownByFetch),
+      ),
+    );
+
+    expect(error.code).toBe("ANTHROPIC_ERROR");
+    expect(thrownByFetch).toHaveLength(1);
+    expect(causes(error)).toContain(thrownByFetch[0]);
+    expect(error.detail).toContain("timed out");
+    expect(error.detail).toContain("AbortError");
+    expect(error.detail).toContain("anthropic.acme.test");
+    expectNoSecret(error);
+  });
+
+  it("keeps a connect timeout cause on a streamed Anthropic call", async () => {
+    const thrownByFetch: unknown[] = [];
+    const error = await thrown(
+      anthropicWith(recording(connectTimeout(), thrownByFetch)),
+      true,
+    );
+
+    expect(causes(error)).toContain(thrownByFetch[0]);
+    expect(error.detail).toContain("ConnectTimeoutError");
+    expect(error.detail).toContain("UND_ERR_CONNECT_TIMEOUT");
+    expect(error.detail).toContain("anthropic.acme.test");
+    expectNoSecret(error);
+  });
+
+  it("names the last attempt's cause after Anthropic retries", async () => {
+    const thrownByFetch: unknown[] = [];
+    const error = await thrown(
+      anthropicWith(recording(connectTimeout(), thrownByFetch), 1),
+    );
+
+    expect(thrownByFetch).toHaveLength(2);
+    expect(causes(error)).toContain(thrownByFetch[1]);
+  });
+
+  it("does not cross causes between concurrent Anthropic calls", async () => {
+    const abort = new DOMException("The operation was aborted.", "AbortError");
+    const late = new TypeError("fetch failed", {
+      cause: Object.assign(new Error("slow"), {
+        name: "ConnectTimeoutError",
+        code: "UND_ERR_CONNECT_TIMEOUT",
+      }),
+    });
+    let first = true;
+    const llm = anthropicWith(async () => {
+      if (first) {
+        first = false;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        throw late;
+      }
+      throw abort;
+    });
+
+    const [slow, fast] = await Promise.all([thrown(llm), thrown(llm)]);
+
+    expect(causes(slow)).toContain(late);
+    expect(causes(slow)).not.toContain(abort);
+    expect(causes(fast)).toContain(abort);
+    expect(causes(fast)).not.toContain(late);
+  });
 });
 
 describe("retry classification of a fetch failure", () => {
@@ -259,6 +369,34 @@ describe("retry classification of a fetch failure", () => {
         true,
       );
     }
+  });
+
+  it("leaves out a host or code that would change the verdict", async () => {
+    const cases: [FakeFetch, string][] = [
+      [refused(), "payments.acme.test"],
+      [refused(), "oauth.acme.test"],
+      [missingFile(), "api.acme.test"],
+    ];
+    for (const [fetch, host] of cases) {
+      const error = await thrown(openAiWith(fetch, { host }));
+      expect(classifyRecoverable({ message: error.detail }).recoverable).toBe(
+        true,
+      );
+      expect(causes(error).length).toBeGreaterThanOrEqual(2);
+      expect(error.detail).toContain("TypeError");
+    }
+  });
+
+  it("keeps the parts that do not change the verdict", async () => {
+    const payments = await thrown(
+      openAiWith(refused(), { host: "payments.acme.test" }),
+    );
+    expect(payments.detail).toContain("ECONNREFUSED");
+    expect(payments.detail).not.toContain("payments");
+
+    const enoent = await thrown(openAiWith(missingFile()));
+    expect(enoent.detail).not.toContain("ENOENT");
+    expect(enoent.detail).toContain("api.acme.test");
   });
 
   it("does not change an HTTP error", async () => {

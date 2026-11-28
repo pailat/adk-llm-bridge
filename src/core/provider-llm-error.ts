@@ -1,3 +1,5 @@
+import { classifyRecoverable } from "../agents/runtime/error-classification.js";
+
 /**
  * Code of a reply with no choice (an OpenAI-compatible response whose
  * `choices` is empty).
@@ -114,7 +116,8 @@ const SAFE_CODE = /^[A-Z][A-Z0-9_]{0,63}$/;
  * error on `cause`. This appends what tells the failures apart: the `name` and
  * `code` of each error in the `cause` chain, and the host of the request. Cause
  * messages, URLs and headers are left out, since they can carry an API key, a
- * bearer token or a query string.
+ * bearer token or a query string. A name, code or host that would change
+ * whether `classifyRecoverable` calls the message recoverable is left out too.
  *
  * @param error - A caught value.
  * @param host - Hostname the request was sent to, if known.
@@ -127,7 +130,7 @@ export function describeProviderFailure(error: unknown, host?: string): string {
   if (!(error instanceof Error) || httpStatusOf(error) !== undefined) {
     return message;
   }
-  const chain: string[] = [];
+  const chain: { name: string; code?: string }[] = [];
   const seen = new Set<unknown>([error]);
   let current: unknown = error.cause;
   while (
@@ -138,16 +141,32 @@ export function describeProviderFailure(error: unknown, host?: string): string {
   ) {
     seen.add(current);
     const { name, code } = current as { name?: unknown; code?: unknown };
-    const parts = [
-      typeof name === "string" && SAFE_NAME.test(name) ? name : "Error",
-    ];
-    if (typeof code === "string" && SAFE_CODE.test(code)) parts.push(code);
-    chain.push(parts.join(" "));
+    chain.push({
+      name: typeof name === "string" && SAFE_NAME.test(name) ? name : "Error",
+      code: typeof code === "string" && SAFE_CODE.test(code) ? code : undefined,
+    });
     current = (current as { cause?: unknown }).cause;
   }
   if (chain.length === 0) return message;
+
+  // Callers classify the text with `classifyRecoverable`, so a part is kept
+  // only when it leaves the verdict of `message` unchanged: a host such as
+  // `payments.acme.test` would read as billing, a code such as `ENOENT` as a
+  // missing binary.
+  const verdict = classifyRecoverable({ message }).recoverable;
+  const render = (entries: string[], hostPart: string) =>
+    `${message} (cause: ${entries.join(", ")}${hostPart})`;
+  const keeps = (entries: string[], hostPart: string) =>
+    classifyRecoverable({ message: render(entries, hostPart) }).recoverable ===
+    verdict;
+  const entries: string[] = [];
+  for (const { name, code } of chain) {
+    const bare = keeps([...entries, name], "") ? name : "Error";
+    const withCode = code ? `${bare} ${code}` : bare;
+    entries.push(code && keeps([...entries, withCode], "") ? withCode : bare);
+  }
   const hostPart = host ? `; host: ${host}` : "";
-  return `${message} (cause: ${chain.join(", ")}${hostPart})`;
+  return render(entries, hostPart && keeps(entries, hostPart) ? hostPart : "");
 }
 
 /**

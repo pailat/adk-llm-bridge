@@ -16,8 +16,11 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   request's hostname, for example
   `Connection error. (cause: TypeError, Error ECONNREFUSED; host: api.openai.com)`.
   Cause messages, URLs, query strings and headers are left out, so no API key
-  or token reaches the message. The original error stays on `cause`; `code`,
-  `status` and SDK retries are unchanged.
+  or token reaches the message, and a part that would change whether
+  `classifyRecoverable` calls the message recoverable (a host such as
+  `payments.example.com`, a code such as `ENOENT`) is left out. The original
+  error is on `cause`, also for Anthropic's `Request timed out.`, which the
+  SDK throws without one; `code`, `status` and SDK retries are unchanged.
 
 ## [0.7.0] - 2026-11-13
 
