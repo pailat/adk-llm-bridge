@@ -32,8 +32,11 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   permission callback allows it without asking the host. It is not reported
   as a `tool_call` or `tool_result`. The driver's own second check is never
   stricter than JSON Schema: it leaves `format`, `pattern`,
-  `patternProperties`, object or array `const` and `enum` values to the SDK,
-  and reads `oneOf` as `anyOf`.
+  `patternProperties`, object or array `const` and `enum` values, any
+  non-empty `not`, `maxContains` next to `contains` and integrality to the
+  SDK, doubles `maxLength`, and reads `oneOf` as `anyOf`. The SDK parses the
+  structured value with `JSON.parse`, so an integer beyond
+  `Number.MAX_SAFE_INTEGER` arrives rounded; declare such fields as strings.
 
 ## [0.7.0] - 2026-11-13
 

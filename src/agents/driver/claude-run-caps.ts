@@ -249,6 +249,10 @@ function isEmptySchema(value: unknown): boolean {
  *   narrow the schema, so the whole keyword goes.
  * - `maxContains` next to `contains`: a relaxed `contains` matches more
  *   items, so the ceiling could refuse a valid array.
+ * - `maxLength`, doubled: older zod 4 releases count UTF-16 units, and a
+ *   code point is at most two of them.
+ * - `type: "integer"`, read as `number`: zod's `.int()` accepts only safe
+ *   integers, and JSON Schema accepts any integral number.
  */
 export function looserSchema(schema: unknown): unknown {
   if (Array.isArray(schema)) return schema.map(looserSchema);
@@ -265,6 +269,13 @@ export function looserSchema(schema: unknown): unknown {
   if ("const" in rest && !isPrimitive(rest.const)) delete rest.const;
   if ("not" in rest && !isEmptySchema(rest.not)) delete rest.not;
   if ("contains" in rest) delete rest.maxContains;
+  if (typeof rest.maxLength === "number") rest.maxLength *= 2;
+  if (rest.type === "integer") rest.type = "number";
+  if (Array.isArray(rest.type)) {
+    rest.type = [
+      ...new Set(rest.type.map((t) => (t === "integer" ? "number" : t))),
+    ];
+  }
   if (Array.isArray(rest.enum) && !rest.enum.every(isPrimitive)) {
     delete rest.enum;
   }

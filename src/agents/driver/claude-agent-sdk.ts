@@ -378,8 +378,13 @@ export interface ClaudeAgentSdkDriverConfig {
    * `CLAUDE_OUTPUT_SCHEMA_MISMATCH` error and exit code 1; the SDK giving up
    * after its own retries is `MAX_STRUCTURED_OUTPUT_RETRIES`. A value that
    * is not a plain JSON object is refused when the driver is built.
-   * The driver's own check reads only structure; `format` is left to the
-   * SDK. An isolated run accepts the `StructuredOutput` tool that Claude
+   * The driver's own check is never stricter than JSON Schema: it leaves
+   * `format`, `pattern`, `patternProperties`, object or array `const` and
+   * `enum` values, any non-empty `not`, `maxContains` next to `contains`
+   * and integrality to the SDK, doubles `maxLength`, and reads `oneOf` as
+   * `anyOf`. The SDK has already parsed the value with `JSON.parse`, so an
+   * integer beyond `Number.MAX_SAFE_INTEGER` arrives rounded, not exact as
+   * on the text path; declare such fields as strings. An isolated run accepts the `StructuredOutput` tool that Claude
    * Code adds for the schema. That tool's calls are not `tool_call` events.
    * `ClaudeCliDriver` refuses this option (`EXTERNAL_AGENT_OPTION_UNSUPPORTED`).
    *

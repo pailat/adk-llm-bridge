@@ -1449,7 +1449,8 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
    * `Number.MAX_SAFE_INTEGER` stay exact, as strings, in objects, arrays and
    * scalars alike. A driver's structured output (`metadata.structuredOutput`,
    * for example from `ClaudeAgentSdkDriver`'s `outputSchema`) is parsed the
-   * same way without an agent `outputSchema`.
+   * same way without an agent `outputSchema`, but its integers beyond
+   * `Number.MAX_SAFE_INTEGER` are already rounded: the SDK parsed them.
    */
   private nodeOutput(text: string, structured = false): unknown {
     if ((structured || this.outputSchema) && text.trim()) {

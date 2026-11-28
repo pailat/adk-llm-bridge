@@ -12,6 +12,7 @@ import {
   type ClaudeAgentSdkDriverConfig,
 } from "../../../src/agents/driver/claude-agent-sdk.js";
 import { ClaudeCliDriver } from "../../../src/agents/driver/claude-cli.js";
+import { looserSchema } from "../../../src/agents/driver/claude-run-caps.js";
 import {
   EXTERNAL_AGENT_OPTION_UNSUPPORTED,
   ExternalAgentPolicyError,
@@ -473,6 +474,40 @@ describe("ClaudeAgentSdkDriver native outputSchema", () => {
       },
       { tags: ["a", "b"] },
     ],
+    // zod counts UTF-16 units where JSON Schema counts code points.
+    [
+      "a maxLength met in code points",
+      {
+        type: "object",
+        properties: { tag: { type: "string", maxLength: 2 } },
+        required: ["tag"],
+      },
+      { tag: "😀😀" },
+    ],
+    [
+      "a propertyNames maxLength met in code points",
+      { type: "object", propertyNames: { maxLength: 2 } },
+      { "😀😀": "Acme" },
+    ],
+    // zod's `.int()` accepts only safe integers.
+    [
+      "an integer beyond 2^53",
+      {
+        type: "object",
+        properties: { id: { type: "integer" } },
+        required: ["id"],
+      },
+      { id: 2 ** 64 },
+    ],
+    [
+      "an integer beyond 2^53 in a type array",
+      {
+        type: "object",
+        properties: { id: { type: ["integer", "null"] } },
+        required: ["id"],
+      },
+      { id: 2 ** 64 },
+    ],
   ])("a valid value for %s is not refused", async (_name, schema, value) => {
     const fake = new ScriptedSdk();
     fake.scripts.push([
@@ -483,6 +518,29 @@ describe("ClaudeAgentSdkDriver native outputSchema", () => {
     expect(errorsOf(events)).toEqual([]);
     expect(outputs(events)).toEqual([JSON.stringify(value)]);
     expect(exitCodes(events)).toEqual([0]);
+  });
+
+  test("the looser schema doubles maxLength and reads integer as number", () => {
+    // zod 4.6 counts code points, older zod 4 releases count UTF-16 units.
+    expect(
+      looserSchema({
+        type: "object",
+        properties: {
+          tag: { type: "string", maxLength: 2 },
+          id: { type: ["integer", "number", "null"] },
+          n: { type: "integer" },
+        },
+        propertyNames: { maxLength: 3 },
+      }),
+    ).toEqual({
+      type: "object",
+      properties: {
+        tag: { type: "string", maxLength: 4 },
+        id: { type: ["number", "null"] },
+        n: { type: "number" },
+      },
+      propertyNames: { maxLength: 6 },
+    });
   });
 
   test("a value missing a oneOf branch's required key is still refused", async () => {
