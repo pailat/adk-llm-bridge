@@ -72,6 +72,35 @@ describe("parseFragment", () => {
     ).toThrow(/e\.md: section "Added" appears twice/);
   });
 
+  test("refuses a malformed heading after a valid section", () => {
+    for (const heading of [
+      "## Fixed",
+      "###Fixed",
+      "#### Fixed",
+      "## [9.9.9]",
+      "# Acme",
+      "###",
+    ]) {
+      expect(() =>
+        parseFragment("f.md", `### Added\n\n- x\n\n${heading}\n\n- y\n`),
+      ).toThrow(/f\.md: malformed heading/);
+    }
+  });
+
+  test("refuses a malformed heading before any section", () => {
+    expect(() => parseFragment("g.md", "## Added\n\n- x\n")).toThrow(
+      /g\.md: malformed heading "## Added"/,
+    );
+  });
+
+  test("keeps indented lines starting with # as entry text", () => {
+    const fragment = parseFragment(
+      "h.md",
+      "### Added\n\n- An Acme example:\n\n  ```sh\n  # comment\n  ```\n",
+    );
+    expect(fragment.sections.get("Added")).toContain("  # comment");
+  });
+
   test("accepts both docs headings past releases used", () => {
     expect([
       ...parseFragment("docs.md", "### Docs\n\n- x\n").sections.keys(),

@@ -6,7 +6,8 @@
  *
  * A fragment is `changes/unreleased/<slug>.md` with one or more Keep a
  * Changelog sections (`### Added`, `### Fixed`...), each a list of entries
- * written exactly as they would appear in `CHANGELOG.md`.
+ * written exactly as they would appear in `CHANGELOG.md`. Any other
+ * unindented line starting with `#` is an error.
  *
  * Usage:
  * - `bun scripts/changelog.ts preview`: print the notes the next release gets
@@ -80,6 +81,13 @@ function parseSections(name: string, text: string): Map<string, string> {
   };
   for (const line of text.split("\n")) {
     const heading = /^### (.+?)\s*$/.exec(line)?.[1];
+    if (heading === undefined && line.startsWith("#")) {
+      // A `##` line would close the release in CHANGELOG.md, a `####` one
+      // would file its entries under the previous section: only `### ` heads.
+      throw new Error(
+        `${name}: malformed heading "${line.trimEnd()}" (use "### <section>")`,
+      );
+    }
     if (heading !== undefined) {
       close();
       if (!(SECTIONS as readonly string[]).includes(heading)) {
