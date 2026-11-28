@@ -147,7 +147,7 @@ function texts(events: readonly Event[]): string[] {
   );
 }
 
-function tool(name: string, execute: () => unknown): FunctionTool {
+function tool(name: string, execute: () => unknown): BaseTool {
   return new FunctionTool({
     name,
     description: name,

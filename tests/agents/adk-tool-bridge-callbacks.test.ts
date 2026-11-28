@@ -64,7 +64,7 @@ function recordingTool(
   execute: (args: { q?: string }, context?: Context) => unknown = (args) => ({
     echoed: args.q,
   }),
-): FunctionTool {
+): BaseTool {
   return new FunctionTool({
     name: "lookup",
     description: "lookup",
