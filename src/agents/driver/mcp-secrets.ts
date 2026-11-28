@@ -67,6 +67,11 @@ export interface McpSecretRunContext {
   readPtraceScope: () => string | undefined;
   /** The runtime child's final environment, for the debug-switch check. */
   childEnv: Readonly<Record<string, string | undefined>>;
+  /**
+   * The driver's `toolEnv` names, set or not: an `{ env }` secret may not
+   * use one, since the runtime's tools would get it.
+   */
+  toolEnvNames?: readonly string[];
 }
 
 /**
@@ -233,9 +238,10 @@ function unenforceable(message: string): never {
  * 3. Windows and a shell is offered: same-user processes can read process
  *    memory;
  * 4. a debug switch is in the runtime's environment;
- * 5. an `{ env }` reference names a variable that the runtime's own
- *    environment also holds (a credential variable through the provider's
- *    `envAllowlist`): the runtime's tools inherit it.
+ * 5. an `{ env }` reference names a `toolEnv` name of the driver (set or
+ *    not, ignoring case), or a variable that the runtime's own environment
+ *    also holds (a credential variable through the provider's
+ *    `envAllowlist`, or a `toolEnv` value): the runtime's tools inherit it.
  *
  * @param servers - The checked declared servers.
  * @param run - The run's tools, platform, policy and child environment.
@@ -278,8 +284,16 @@ export function checkMcpSecretsEnforceable(
       "Windows: same-user processes can read process memory, so the agent's shell could read any MCP secret. Drop the shell tools, or use a server that needs no secret.",
     );
   }
+  const toolEnvNames = new Set(
+    (run.toolEnvNames ?? []).map((name) => name.toUpperCase()),
+  );
   for (const server of servers) {
     for (const { field, key, value } of secretValues(server)) {
+      if ("env" in value && toolEnvNames.has(value.env.toUpperCase())) {
+        unenforceable(
+          `MCP server ${server.name}: ${field} ${JSON.stringify(key)} uses { env: ${JSON.stringify(value.env)} }, but the driver's toolEnv also passes that variable to the runtime, whose tools inherit it. Remove it from toolEnv, or use another variable or { resolve }.`,
+        );
+      }
       if ("env" in value && run.childEnv[value.env]) {
         unenforceable(
           `MCP server ${server.name}: ${field} ${JSON.stringify(key)} uses { env: ${JSON.stringify(value.env)} }, but that variable is also in the runtime's own environment, which its tools inherit. Use a variable the runtime does not get, or { resolve }.`,

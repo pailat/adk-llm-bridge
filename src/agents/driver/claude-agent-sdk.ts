@@ -80,6 +80,12 @@ import {
   reserveClaudeSpillPath,
 } from "./claude-spill-guard.js";
 import {
+  type CheckedClaudeToolEnv,
+  type ClaudeToolEnv,
+  checkClaudeToolEnv,
+  claudeToolEnvValues,
+} from "./claude-tool-env.js";
+import {
   checkMcpSecretsEnforceable,
   hasMcpSecrets,
   mcpSecretHost,
@@ -560,6 +566,21 @@ export interface ClaudeAgentSdkDriverConfig {
   allowBackgroundTasks?: boolean;
 
   /**
+   * Opt-in: variables the host passes to the tools of the run (a `gh` token,
+   * a git credential helper, a proxy or CA bundle), apart from the model
+   * credential. Only the listed names are read from `source` (the driver
+   * `env` by default), and only set, non-empty values reach Claude Code; a
+   * credential variable of the same name wins. Model names, debug switches
+   * and names the runtime reads itself are refused when the driver is
+   * built, and a run is refused with `EXTERNAL_AGENT_MCP_SECRET_UNENFORCEABLE`
+   * when an MCP `{ env }` secret uses a `toolEnv` name. Unset, the child
+   * environment is exactly what it is without the option.
+   *
+   * @defaultValue undefined (off)
+   */
+  toolEnv?: ClaudeToolEnv;
+
+  /**
    * Opt-in: refuse a run with `MISSING_BINARY` instead of letting the SDK
    * fall back to the Claude Code binary bundled with its install, when no
    * executable was found outside the directories the agent can write and
@@ -847,6 +868,7 @@ export class ClaudeAgentSdkDriver {
   readonly #allowUnsandboxedShell: boolean;
   readonly #allowLocalBinding: boolean;
   readonly #allowBackgroundTasks: boolean;
+  readonly #toolEnv: CheckedClaudeToolEnv | undefined;
   readonly #strictBinaryResolution: boolean;
   // Maps an ADK session id -> the SDK session id captured from the
   // first turn's system/init (or result) message. Subsequent turns of the same
@@ -916,6 +938,7 @@ export class ClaudeAgentSdkDriver {
       config.smallFastModel,
       config.requireExplicitModel ?? false,
     );
+    this.#toolEnv = checkClaudeToolEnv("ClaudeAgentSdkDriver", config.toolEnv);
     this.#mcpServers = checkClaudeMcpServers(config.mcpServers);
     this.#mcpConnectTimeoutMs = checkMcpConnectTimeout(
       config.mcpConnectTimeoutMs,
@@ -2115,8 +2138,9 @@ export class ClaudeAgentSdkDriver {
   /**
    * Environment of the `claude` subprocess: only `PATH`, `HOME`, `USER`,
    * `SHELL` (with a fallback shell), the Claude config directories and the
-   * client-app marker, plus the credential variables the provider allowlists
-   * when the credential is an `env` one, and
+   * client-app marker, the `toolEnv` variables when the option is set, the
+   * credential variables the provider allowlists when the credential is an
+   * `env` one (they win over `toolEnv`), and
    * `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` unless `allowBackgroundTasks`.
    * Nothing else is inherited. {@link ClaudeAgentSdkDriver.run} adds the
    * run's private temp directory (`CLAUDE_CODE_TMPDIR`, `TMPDIR`).
@@ -2145,7 +2169,12 @@ export class ClaudeAgentSdkDriver {
     copyIfPresent(this.#env, env, "XDG_CONFIG_HOME");
     env.CLAUDE_AGENT_SDK_CLIENT_APP = "adk-llm-bridge";
 
-    Object.assign(env, credentialEnv(request));
+    const credentials = credentialEnv(request);
+    Object.assign(
+      env,
+      claudeToolEnvValues(this.#toolEnv, this.#env, credentials),
+      credentials,
+    );
     applyBackgroundTaskSetting(env, this.#allowBackgroundTasks);
     if (hasMcpSecrets(this.#mcpServers)) {
       // An MCP result too large to inline stays inline (truncated) instead of
@@ -2201,6 +2230,7 @@ export class ClaudeAgentSdkDriver {
       workingDirectory: request.workingDirectory ?? process.cwd(),
       readPtraceScope: mcpSecretHost.readPtraceScope,
       childEnv: this.buildEnv(request),
+      toolEnvNames: this.#toolEnv?.names ?? [],
     });
     return stdio;
   }

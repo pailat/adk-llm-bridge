@@ -630,7 +630,10 @@ The library is pure. It decides what a spec may ask for. The host enforces it.
    granted.
 5. **Supply environment values.** `env` names variables. The host passes the
    values of the listed names from its own configuration. The spec holds no
-   value, and the library reads no environment.
+   value, and the library reads no environment. For a Claude lane, pass them
+   with the driver's `toolEnv` option (`{ names: spec.env, source }`), not
+   as a credential: see
+   [Tool environment](external-agent-isolation.md#tool-environment-claude).
 6. **Run the QA commands.** Run each command as an argument list, in the
    project root, without a shell. Publication waits until every command
    succeeds.

@@ -38,6 +38,7 @@ export const CLAUDE_AGENT_SDK_OPTION_KEYS = Object.freeze([
   "smallFastModel",
   "strictBinaryResolution",
   "systemPrompt",
+  "toolEnv",
   "tools",
 ] as const);
 
@@ -64,6 +65,7 @@ export const CLAUDE_CLI_OPTION_KEYS = Object.freeze([
   "smallFastModel",
   "spawn",
   "systemPrompt",
+  "toolEnv",
   "tools",
 ] as const);
 
