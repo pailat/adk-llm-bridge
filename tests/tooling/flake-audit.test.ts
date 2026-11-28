@@ -3,6 +3,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -12,12 +13,33 @@ import {
   failedTests,
   logDir,
   parseArgs,
+  parseTimeout,
   runSuite,
   summarize,
 } from "../../scripts/flake-audit.js";
 
 const scratch = mkdtempSync(join(tmpdir(), "flake-audit-test-"));
 afterAll(() => rmSync(scratch, { recursive: true, force: true }));
+
+/**
+ * Whether a process is still running. A killed process its new parent has
+ * not reaped yet stays as a zombie (state Z), which counts as stopped.
+ */
+function running(pid: number): boolean {
+  if (!existsSync("/proc/self/stat")) {
+    try {
+      return process.kill(pid, 0);
+    } catch {
+      return false;
+    }
+  }
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    return !/^\d+ \(.*\) [ZX] /.test(stat);
+  } catch {
+    return false;
+  }
+}
 
 describe("flake audit", () => {
   test("failedTests reads the (fail) lines with the file they belong to", () => {
@@ -137,21 +159,51 @@ describe("flake audit", () => {
     expect(logDir({ FLAKE_AUDIT_DIR: "" }).startsWith(tmpdir())).toBe(true);
   });
 
-  test("runSuite stops a run that never exits and keeps its output", () => {
-    const result = runSuite(
-      [
-        process.execPath,
-        "-e",
-        "console.log('acme started'); setInterval(() => {}, 1000);",
-      ],
-      { timeoutMs: 500 },
+  test("runSuite stops the whole run, children too, and keeps its output", async () => {
+    // The child keeps the output pipes open and outlives the shell unless
+    // the whole process group is killed.
+    const pidFile = join(scratch, "acme-child.pid");
+    const started = performance.now();
+    const result = await runSuite(
+      ["sh", "-c", `sleep 30 & echo $! > ${pidFile}; echo acme started; wait`],
+      { timeoutMs: 3_000 },
     );
+    expect(performance.now() - started).toBeLessThan(15_000);
     expect(result.timedOut).toBe(true);
     expect(result.exitCode).not.toBe(0);
     expect(result.output).toContain("acme started");
+    const child = Number(readFileSync(pidFile, "utf8"));
+    expect(running(child)).toBe(false);
+  }, 30_000);
+
+  test("parseTimeout reads seconds and rejects anything but a positive number", () => {
+    expect(parseTimeout(undefined)).toBe(900_000);
+    expect(parseTimeout("")).toBe(900_000);
+    expect(parseTimeout("1.5")).toBe(1_500);
+    for (const bad of ["15m", "0", "-3", "Infinity"]) {
+      expect(() => parseTimeout(bad)).toThrow(/FLAKE_AUDIT_RUN_TIMEOUT_S/);
+    }
   });
 
-  test("runSuite names failing tests even when the parent forces colour", () => {
+  test("failedTests reads past a test's own 'N tests failed:' line", () => {
+    const output = [
+      "tests/acme/reporter.test.ts:",
+      "2 tests failed:",
+      "(fail) Acme reporter > prints a summary [1.00ms]",
+      "tests/acme/widget.test.ts:",
+      "(fail) Acme widget > saves the order [1.00ms]",
+      "",
+      "2 tests failed:",
+      "(fail) Acme reporter > prints a summary [1.00ms]",
+      "(fail) Acme widget > saves the order [1.00ms]",
+    ].join("\n");
+    expect(failedTests(output)).toEqual([
+      "tests/acme/reporter.test.ts > Acme reporter > prints a summary",
+      "tests/acme/widget.test.ts > Acme widget > saves the order",
+    ]);
+  });
+
+  test("runSuite names failing tests even when the parent forces colour", async () => {
     const dir = join(scratch, "suite");
     mkdirSync(dir, { recursive: true });
     writeFileSync(
@@ -164,7 +216,7 @@ describe("flake audit", () => {
         "});",
       ].join("\n"),
     );
-    const result = runSuite([process.execPath, "test", dir], {
+    const result = await runSuite([process.execPath, "test", dir], {
       timeoutMs: 60_000,
       env: { ...process.env, FORCE_COLOR: "1" },
     });
@@ -175,5 +227,5 @@ describe("flake audit", () => {
     expect(failedTests(result.output)[0]).toEndWith(
       "acme.test.ts > acme writes without a newline",
     );
-  });
+  }, 90_000);
 });

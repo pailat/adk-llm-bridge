@@ -50,8 +50,11 @@ const REPEAT_BLOCK = /^\s*\d+ tests? failed:$/;
 export function failedTests(output: string): string[] {
   const names = new Set<string>();
   let file: string | undefined;
-  for (const line of output.split("\n")) {
-    if (REPEAT_BLOCK.test(line)) break;
+  const lines = output.split("\n");
+  // Tests share stderr with the report and may print a line like Bun's own,
+  // so only the last one starts the repeat block.
+  const repeatAt = lines.findLastIndex((line) => REPEAT_BLOCK.test(line));
+  for (const line of repeatAt === -1 ? lines : lines.slice(0, repeatAt)) {
     const header = FILE_HEADER.exec(line);
     if (header) {
       file = header[1];
@@ -125,45 +128,92 @@ export function logDir(env: Record<string, string | undefined>): string {
   return mkdtempSync(join(base, "flake-audit-"));
 }
 
+/** The per-run time limit in ms, from `$FLAKE_AUDIT_RUN_TIMEOUT_S` seconds. */
+export function parseTimeout(value: string | undefined): number {
+  if (value === undefined || value === "") return 900_000;
+  const seconds = Number(value);
+  if (!Number.isFinite(seconds) || seconds <= 0) {
+    throw new Error(
+      "FLAKE_AUDIT_RUN_TIMEOUT_S takes a positive number of seconds",
+    );
+  }
+  return seconds * 1000;
+}
+
+/** How long to wait for the pipes to close once the run's group is killed. */
+const PIPE_GRACE_MS = 5_000;
+
+async function drain(
+  stream: ReadableStream<Uint8Array>,
+  chunks: Uint8Array[],
+): Promise<void> {
+  for await (const chunk of stream) chunks.push(chunk);
+}
+
+/** Kills every process in the run's group; quiet when none is left. */
+function killGroup(pid: number): void {
+  try {
+    process.kill(-pid, "SIGKILL");
+  } catch {}
+}
+
 /**
  * Runs one command to completion or until `timeoutMs`, with colour off so
- * the report keeps its plain `(fail)` lines. Bun writes the report to
- * stderr; the output is stdout, then stderr from a new line.
+ * the report keeps its plain `(fail)` lines. The command gets its own
+ * process group, killed as a whole when the run ends, so processes the
+ * tests started neither keep the run alive nor leak into the next one.
+ * Bun writes the report to stderr; the output is stdout, then stderr from a
+ * new line.
  */
-export function runSuite(
+export async function runSuite(
   cmd: string[],
   options: {
     timeoutMs: number;
     env?: Record<string, string | undefined>;
   },
-): { exitCode: number; timedOut: boolean; output: string } {
+): Promise<{ exitCode: number; timedOut: boolean; output: string }> {
   const { FORCE_COLOR: _forced, ...parentEnv } = options.env ?? process.env;
   const env = { ...parentEnv, NO_COLOR: "1" };
-  const proc = Bun.spawnSync(cmd, {
+  const proc = Bun.spawn(cmd, {
     stdout: "pipe",
     stderr: "pipe",
     env,
-    timeout: options.timeoutMs,
-    killSignal: "SIGKILL",
+    detached: true,
   });
-  const stdout = proc.stdout.toString();
-  const stderr = proc.stderr.toString();
+  const out: Uint8Array[] = [];
+  const err: Uint8Array[] = [];
+  const reads = Promise.all([drain(proc.stdout, out), drain(proc.stderr, err)]);
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    killGroup(proc.pid);
+  }, options.timeoutMs);
+  const exitCode = await proc.exited;
+  clearTimeout(timer);
+  killGroup(proc.pid);
+  let grace: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([
+    reads,
+    new Promise((resolve) => {
+      grace = setTimeout(resolve, PIPE_GRACE_MS);
+    }),
+  ]);
+  clearTimeout(grace);
+  const stdout = Buffer.concat(out).toString();
+  const stderr = Buffer.concat(err).toString();
   const glue = stdout === "" || stdout.endsWith("\n") ? "" : "\n";
-  return {
-    exitCode: proc.exitCode ?? 1,
-    timedOut: proc.exitedDueToTimeout === true,
-    output: stdout + glue + stderr,
-  };
+  return { exitCode, timedOut, output: stdout + glue + stderr };
 }
 
 if (import.meta.main) {
   const { runs, testArgs } = parseArgs(process.argv.slice(2));
-  const timeoutMs = Number(process.env.FLAKE_AUDIT_RUN_TIMEOUT_S || 900) * 1000;
+  const timeoutMs = parseTimeout(process.env.FLAKE_AUDIT_RUN_TIMEOUT_S);
   const dir = logDir(process.env);
+  console.log(`Logs: ${dir}`);
   const results: RunResult[] = [];
   for (let run = 1; run <= runs; run++) {
     const started = performance.now();
-    const { exitCode, timedOut, output } = runSuite(
+    const { exitCode, timedOut, output } = await runSuite(
       [process.execPath, "test", ...testArgs],
       { timeoutMs },
     );
