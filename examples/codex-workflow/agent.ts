@@ -48,7 +48,13 @@ function requireTarget(): string {
 }
 
 function hasReadableCodexAuthJson(): boolean {
-  const codexHome = process.env.CODEX_HOME || join(homedir(), ".codex");
+  // Off Windows $HOME first, as Codex and the driver's run env use it;
+  // os.homedir() under Bun keeps the home the process started with. On
+  // Windows Codex uses the user profile, which os.homedir() returns, while
+  // Git Bash or MSYS may point $HOME elsewhere.
+  const userHome =
+    process.platform === "win32" ? homedir() : process.env.HOME || homedir();
+  const codexHome = process.env.CODEX_HOME || join(userHome, ".codex");
   try {
     accessSync(join(codexHome, "auth.json"), constants.R_OK);
     return true;
@@ -57,9 +63,10 @@ function hasReadableCodexAuthJson(): boolean {
   }
 }
 
-function codexCredentialsAvailable(): boolean {
+export function codexCredentialsAvailable(): boolean {
   return Boolean(
     process.env.CODEX_API_KEY ||
+      process.env.CODEX_ACCESS_TOKEN ||
       process.env.OPENAI_API_KEY ||
       process.env.CODEX_EXECUTABLE ||
       process.env.CODEX_CLI_PATH ||
@@ -181,7 +188,7 @@ export function createWorkflow(target: string): ScriptWorkflowAgent {
 export async function main(): Promise<void> {
   if (!codexCredentialsAvailable()) {
     console.log(
-      "Set CODEX_API_KEY/OPENAI_API_KEY or sign in so ~/.codex/auth.json exists.",
+      "Set CODEX_API_KEY/CODEX_ACCESS_TOKEN/OPENAI_API_KEY or sign in so ~/.codex/auth.json exists.",
     );
     return;
   }

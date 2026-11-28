@@ -15,6 +15,24 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   path's index in the list. Passing a result with `changedPaths` works as
   before.
 
+### Fixed
+
+- **The `basic-agent-codex` and `codex-workflow` credential guards** look for
+  `auth.json` under `$HOME/.codex` when `CODEX_HOME` is unset, the home Codex
+  and the driver's run env use. Under Bun `os.homedir()` keeps the home the
+  process started with, so a `HOME` changed at runtime was ignored. On
+  Windows they keep using `os.homedir()` (the user profile, as Codex does),
+  since Git Bash or MSYS may point `HOME` elsewhere. Both guards also accept
+  `CODEX_ACCESS_TOKEN`, a credential the Codex provider passes through.
+  `codex-workflow` now exports `codexCredentialsAvailable()`.
+- **The Codex example path tests and credential guard tests** run on a temp
+  `HOME` and `CODEX_HOME`, an empty `PATH` and no Codex variables
+  (`withHermeticCodexEnv` in `tests/helpers/env.ts`), so a signed-in
+  developer machine with a `codex` binary gets the same results as CI. The
+  path tests also import the examples and build their agents in that env,
+  with the variables the examples read (such as
+  `ARCHITECTURE_ANALYSIS_PATHS`) unset.
+
 ## [0.7.1] - 2026-11-28
 
 ### Added

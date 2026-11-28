@@ -35,7 +35,8 @@ const adkRuntime = await import(
 // CodexSdkDriver (the default for CODEX_AGENT_DEFINITION), which talks to the
 // @openai/codex-sdk package. The SDK ships its OWN bundled `codex` binary, so a
 // `codex` on PATH is NOT the availability signal — what matters is a usable
-// credential: a CODEX_API_KEY, a readable ~/.codex/auth.json, or an explicit
+// credential: a CODEX_API_KEY or CODEX_ACCESS_TOKEN, a readable
+// ~/.codex/auth.json, or an explicit
 // CODEX_EXECUTABLE/CODEX_CLI_PATH.
 
 const credentialProvider = new EnvCredentialProvider();
@@ -81,7 +82,13 @@ const SMOKE_PROMPT =
  * presence is a valid availability signal even without a `codex` on PATH.
  */
 function hasReadableCodexAuthJson(): boolean {
-  const home = process.env.CODEX_HOME || join(homedir(), ".codex");
+  // Off Windows $HOME first, as Codex and the driver's run env use it;
+  // os.homedir() under Bun keeps the home the process started with. On
+  // Windows Codex uses the user profile, which os.homedir() returns, while
+  // Git Bash or MSYS may point $HOME elsewhere.
+  const userHome =
+    process.platform === "win32" ? homedir() : process.env.HOME || homedir();
+  const home = process.env.CODEX_HOME || join(userHome, ".codex");
   try {
     accessSync(join(home, "auth.json"), constants.R_OK);
     return true;
@@ -96,6 +103,7 @@ export function codexCredentialsAvailable(): boolean {
   // mapped onto CODEX_API_KEY below so the guard and the driver agree.
   return Boolean(
     process.env.CODEX_API_KEY ||
+      process.env.CODEX_ACCESS_TOKEN ||
       process.env.OPENAI_API_KEY ||
       process.env.CODEX_EXECUTABLE ||
       process.env.CODEX_CLI_PATH ||
@@ -106,7 +114,7 @@ export function codexCredentialsAvailable(): boolean {
 export async function main(): Promise<void> {
   if (!codexCredentialsAvailable()) {
     console.log(
-      "set CODEX_API_KEY, or sign in so ~/.codex/auth.json exists " +
+      "set CODEX_API_KEY or CODEX_ACCESS_TOKEN, or sign in so ~/.codex/auth.json exists " +
         "(or set CODEX_EXECUTABLE/CODEX_CLI_PATH) to run this example",
     );
     process.exit(0);
