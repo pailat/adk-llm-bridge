@@ -1085,21 +1085,25 @@ describe("basic-agent-codex and codex-workflow credential guards", () => {
   });
 
   // Codex and the driver's run env take the home from $HOME; os.homedir()
-  // under Bun keeps the home the process started with.
+  // under Bun keeps the home the process started with. On Windows the guards
+  // read the user profile instead, which the "on Windows" tests below cover.
   for (const example of [CODEX_EXAMPLE, CODEX_WORKFLOW_EXAMPLE]) {
-    test(`${example.split("/").at(-2)} without CODEX_HOME reads $HOME/.codex/auth.json`, async () => {
-      const { codexCredentialsAvailable } = (await import(example)) as {
-        codexCredentialsAvailable(): boolean;
-      };
-      await withHermeticCodexEnv(({ home }) => {
-        delete process.env.CODEX_HOME;
-        expect(codexCredentialsAvailable()).toBe(false);
+    test.skipIf(process.platform === "win32")(
+      `${example.split("/").at(-2)} without CODEX_HOME reads $HOME/.codex/auth.json`,
+      async () => {
+        const { codexCredentialsAvailable } = (await import(example)) as {
+          codexCredentialsAvailable(): boolean;
+        };
+        await withHermeticCodexEnv(({ home }) => {
+          delete process.env.CODEX_HOME;
+          expect(codexCredentialsAvailable()).toBe(false);
 
-        mkdirSync(join(home, ".codex"));
-        writeFileSync(join(home, ".codex", "auth.json"), "{}");
-        expect(codexCredentialsAvailable()).toBe(true);
-      });
-    });
+          mkdirSync(join(home, ".codex"));
+          writeFileSync(join(home, ".codex", "auth.json"), "{}");
+          expect(codexCredentialsAvailable()).toBe(true);
+        });
+      },
+    );
   }
 
   for (const example of [CODEX_EXAMPLE, CODEX_WORKFLOW_EXAMPLE]) {
@@ -1139,6 +1143,36 @@ describe("basic-agent-codex and codex-workflow credential guards", () => {
           profile.mockRestore();
         }
       });
+    });
+
+    test(`${example.split("/").at(-2)} no-credential hint names CODEX_ACCESS_TOKEN`, async () => {
+      const { main } = (await import(example)) as {
+        main(): Promise<void>;
+      };
+      const log = spyOn(console, "log").mockImplementation(() => undefined);
+      const exit = spyOn(process, "exit").mockImplementation(() => {
+        throw new Error("exit");
+      });
+      // On Windows the guards read os.homedir(), so point it at the temp home
+      // too, or a signed-in profile would let main() run Codex.
+      const profile = spyOn(os, "homedir");
+      try {
+        await withHermeticCodexEnv(async ({ home }) => {
+          profile.mockReturnValue(home);
+          await main().catch((error: unknown) => {
+            if (!(error instanceof Error && error.message === "exit")) {
+              throw error;
+            }
+          });
+        });
+        expect(log.mock.calls.flat().join("\n")).toContain(
+          "CODEX_ACCESS_TOKEN",
+        );
+      } finally {
+        profile.mockRestore();
+        log.mockRestore();
+        exit.mockRestore();
+      }
     });
   }
 

@@ -35,7 +35,8 @@ const adkRuntime = await import(
 // CodexSdkDriver (the default for CODEX_AGENT_DEFINITION), which talks to the
 // @openai/codex-sdk package. The SDK ships its OWN bundled `codex` binary, so a
 // `codex` on PATH is NOT the availability signal — what matters is a usable
-// credential: a CODEX_API_KEY, a readable ~/.codex/auth.json, or an explicit
+// credential: a CODEX_API_KEY or CODEX_ACCESS_TOKEN, a readable
+// ~/.codex/auth.json, or an explicit
 // CODEX_EXECUTABLE/CODEX_CLI_PATH.
 
 const credentialProvider = new EnvCredentialProvider();
@@ -113,7 +114,7 @@ export function codexCredentialsAvailable(): boolean {
 export async function main(): Promise<void> {
   if (!codexCredentialsAvailable()) {
     console.log(
-      "set CODEX_API_KEY, or sign in so ~/.codex/auth.json exists " +
+      "set CODEX_API_KEY or CODEX_ACCESS_TOKEN, or sign in so ~/.codex/auth.json exists " +
         "(or set CODEX_EXECUTABLE/CODEX_CLI_PATH) to run this example",
     );
     process.exit(0);

@@ -188,7 +188,7 @@ export function createWorkflow(target: string): ScriptWorkflowAgent {
 export async function main(): Promise<void> {
   if (!codexCredentialsAvailable()) {
     console.log(
-      "Set CODEX_API_KEY/OPENAI_API_KEY or sign in so ~/.codex/auth.json exists.",
+      "Set CODEX_API_KEY/CODEX_ACCESS_TOKEN/OPENAI_API_KEY or sign in so ~/.codex/auth.json exists.",
     );
     return;
   }

@@ -119,9 +119,9 @@ describe("withHermeticCodexEnv", () => {
   });
 
   test("removes its temp root when setting up a directory fails", async () => {
-    const tmp = mkdtempSync(join(tmpdir(), "acme-hermetic-tmp-"));
-    const savedTmp = process.env.TMPDIR;
-    process.env.TMPDIR = tmp;
+    // Capture the root it creates instead of trusting os.tmpdir() to follow a
+    // TMPDIR changed at runtime.
+    const mkdtemp = spyOn(fs, "mkdtempSync");
     const mkdir = spyOn(fs, "mkdirSync").mockImplementation(() => {
       throw new Error("ENOSPC: no space left on device");
     });
@@ -129,12 +129,13 @@ describe("withHermeticCodexEnv", () => {
       await expect(withHermeticCodexEnv(() => undefined)).rejects.toThrow(
         "ENOSPC",
       );
-      expect(readdirSync(tmp)).toEqual([]);
+      expect(mkdtemp).toHaveBeenCalledTimes(1);
+      const root = String(mkdtemp.mock.results[0]?.value);
+      expect(root).toContain("hermetic-codex-");
+      expect(existsSync(root)).toBe(false);
     } finally {
       mkdir.mockRestore();
-      if (savedTmp === undefined) delete process.env.TMPDIR;
-      else process.env.TMPDIR = savedTmp;
-      rmSync(tmp, { recursive: true, force: true });
+      mkdtemp.mockRestore();
     }
   });
 
