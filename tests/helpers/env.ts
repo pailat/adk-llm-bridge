@@ -35,31 +35,34 @@ export interface HermeticCodexDirs {
  * environment is restored and the directories removed afterwards, even when
  * `fn` throws.
  *
+ * @param options.unset - More variables to unset inside `fn`, such as the
+ *   ones an example module reads when it is imported.
+ *
  * @remarks
  * `PATH` holds no system tools inside `fn`, so `fn` must not spawn any.
  */
 export async function withHermeticCodexEnv<T>(
   fn: (dirs: HermeticCodexDirs) => T | Promise<T>,
+  options: { unset?: readonly string[] } = {},
 ): Promise<T> {
+  const keys = [...HERMETIC_KEYS, ...(options.unset ?? [])];
   const root = realpathSync(mkdtempSync(join(tmpdir(), "hermetic-codex-")));
-  const dirs: HermeticCodexDirs = {
-    home: join(root, "home"),
-    codexHome: join(root, "codex-home"),
-    bin: join(root, "bin"),
-  };
-  for (const dir of Object.values(dirs)) mkdirSync(dir);
-
-  const saved = Object.fromEntries(
-    HERMETIC_KEYS.map((key) => [key, process.env[key]]),
-  );
-  for (const key of HERMETIC_KEYS) delete process.env[key];
-  process.env.HOME = dirs.home;
-  process.env.CODEX_HOME = dirs.codexHome;
-  process.env.PATH = dirs.bin;
+  const saved = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
   try {
+    const dirs: HermeticCodexDirs = {
+      home: join(root, "home"),
+      codexHome: join(root, "codex-home"),
+      bin: join(root, "bin"),
+    };
+    for (const dir of Object.values(dirs)) mkdirSync(dir);
+
+    for (const key of keys) delete process.env[key];
+    process.env.HOME = dirs.home;
+    process.env.CODEX_HOME = dirs.codexHome;
+    process.env.PATH = dirs.bin;
     return await fn(dirs);
   } finally {
-    for (const key of HERMETIC_KEYS) {
+    for (const key of keys) {
       const value = saved[key];
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;

@@ -24,6 +24,27 @@ const BASIC_CODEX = "../../examples/basic-agent-codex/agent.ts";
 const CODEX_WORKFLOW = "../../examples/codex-workflow/agent.ts";
 const EXTERNAL_AGENTS = "../../examples/external-agents/agent.ts";
 
+/** Variables the examples read when they are imported or build agents. */
+const EXAMPLE_ENV_KEYS = [
+  "ARCHITECTURE_ANALYSIS_PATHS",
+  "WORKFLOW_TARGET",
+  "OPENROUTER_API_KEY",
+  "OPENROUTER_MODEL",
+  "CLAUDE_CODE_EXECUTABLE",
+  "CLAUDE_CODE_PATH",
+  "SMOKE_PROMPT",
+] as const;
+
+/**
+ * Runs a whole test (example import, agent construction and driver run) on a
+ * temp HOME/CODEX_HOME, an empty PATH and none of the Codex or example
+ * variables, so a developer machine sees what CI sees. The examples still
+ * read `process.cwd()`, which is the repository root in both.
+ */
+function hermetic(fn: () => Promise<void>): Promise<void> {
+  return withHermeticCodexEnv(fn, { unset: EXAMPLE_ENV_KEYS });
+}
+
 interface ExampleAgent {
   name: string;
   permissions?: ExternalAgentPermissionPolicy;
@@ -36,9 +57,7 @@ class SdkNotLoaded extends Error {}
 
 /**
  * Runs the driver up to the point where it would load the Codex SDK and
- * reports whether it got there, plus any error code it emitted first. It runs
- * on a temp HOME/CODEX_HOME, an empty PATH and no Codex variables, so the
- * result is the same on a signed-in developer machine and in CI.
+ * reports whether it got there, plus any error code it emitted first.
  */
 async function preStart(
   agent: ExampleAgent,
@@ -51,16 +70,14 @@ async function preStart(
     throw new SdkNotLoaded("stub: the test never loads the Codex SDK");
   };
   const codes: unknown[] = [];
-  await withHermeticCodexEnv(async () => {
-    for await (const event of agent.driver.run({
-      permissions,
-      instruction: "",
-      messages: [],
-      context: {},
-    })) {
-      if (event.type === "error") codes.push(event.code);
-    }
-  });
+  for await (const event of agent.driver.run({
+    permissions,
+    instruction: "",
+    messages: [],
+    context: {},
+  })) {
+    if (event.type === "error") codes.push(event.code);
+  }
   return { reachedSdk, codes };
 }
 
@@ -74,48 +91,62 @@ function expectNoPathRefusal(result: {
 
 describe("shipped Codex examples are not refused for their paths", () => {
   test("basic-agent-codex", async () => {
-    const { rootAgent } = (await import(BASIC_CODEX)) as {
-      rootAgent: ExampleAgent;
-    };
+    await hermetic(async () => {
+      const { rootAgent } = (await import(BASIC_CODEX)) as {
+        rootAgent: ExampleAgent;
+      };
 
-    expectNoPathRefusal(await preStart(rootAgent, rootAgent.permissions));
+      expectNoPathRefusal(await preStart(rootAgent, rootAgent.permissions));
+    });
   });
 
   test("codex-workflow planner, implementer and reviewer", async () => {
     const target = realpathSync(mkdtempSync(join(tmpdir(), "codex-wf-")));
     try {
-      const { createWorkflow } = (await import(CODEX_WORKFLOW)) as {
-        createWorkflow(target: string): { subAgents: ExampleAgent[] };
-      };
-      const steps = createWorkflow(target).subAgents;
+      await hermetic(async () => {
+        const { createWorkflow } = (await import(CODEX_WORKFLOW)) as {
+          createWorkflow(target: string): { subAgents: ExampleAgent[] };
+        };
+        const steps = createWorkflow(target).subAgents;
 
-      expect(steps.map((step) => step.name)).toEqual([
-        "CodexPlanner",
-        "CodexImplementer",
-        "CodexReviewer",
-      ]);
-      for (const step of steps) {
-        expectNoPathRefusal(await preStart(step, step.permissions));
-      }
+        expect(steps.map((step) => step.name)).toEqual([
+          "CodexPlanner",
+          "CodexImplementer",
+          "CodexReviewer",
+        ]);
+        for (const step of steps) {
+          expectNoPathRefusal(await preStart(step, step.permissions));
+        }
+      });
     } finally {
       rmSync(target, { recursive: true, force: true });
     }
   });
 
   test("external-agents Codex sub-agent with the bounds it inherits from the Claude root", async () => {
-    const { rootAgent } = (await import(EXTERNAL_AGENTS)) as {
-      rootAgent: ExampleAgent & { subAgents: ExampleAgent[] };
-    };
-    const codex = rootAgent.subAgents.find(
-      (agent) => agent.name === "CodexBillingSpecialist",
-    );
-    if (!codex) throw new Error("CodexBillingSpecialist not found");
-    const effective = deriveSubAgentPermissionPolicy(
-      rootAgent.permissions,
-      codex.permissions,
-    );
+    // A developer's shell may set this; an invalid entry throws on import.
+    const saved = process.env.ARCHITECTURE_ANALYSIS_PATHS;
+    process.env.ARCHITECTURE_ANALYSIS_PATHS = "acme/relative-is-invalid";
+    try {
+      await hermetic(async () => {
+        const { rootAgent } = (await import(EXTERNAL_AGENTS)) as {
+          rootAgent: ExampleAgent & { subAgents: ExampleAgent[] };
+        };
+        const codex = rootAgent.subAgents.find(
+          (agent) => agent.name === "CodexBillingSpecialist",
+        );
+        if (!codex) throw new Error("CodexBillingSpecialist not found");
+        const effective = deriveSubAgentPermissionPolicy(
+          rootAgent.permissions,
+          codex.permissions,
+        );
 
-    expect(effective.pathBounds?.length).toBeGreaterThan(0);
-    expectNoPathRefusal(await preStart(codex, effective));
+        expect(effective.pathBounds?.length).toBeGreaterThan(0);
+        expectNoPathRefusal(await preStart(codex, effective));
+      });
+    } finally {
+      if (saved === undefined) delete process.env.ARCHITECTURE_ANALYSIS_PATHS;
+      else process.env.ARCHITECTURE_ANALYSIS_PATHS = saved;
+    }
   });
 });

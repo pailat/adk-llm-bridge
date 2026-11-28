@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import {
   chmodSync,
   mkdirSync,
@@ -7,6 +7,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
+import * as os from "node:os";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { CodexAgent } from "../../../src/agents/codex-agent.js";
@@ -1059,9 +1060,10 @@ async function importCodexExample(): Promise<{
   return await import(CODEX_EXAMPLE);
 }
 
-// Each test runs on a temp HOME/CODEX_HOME, an empty PATH and no Codex
-// variables, so a signed-in developer machine sees what CI sees.
-describe("basic-agent-codex credential guard", () => {
+// Each guard test runs on a temp HOME/CODEX_HOME, an empty PATH and no Codex
+// variables, so a signed-in developer machine sees what CI sees. The driver
+// tests pass their own env and never read the machine's.
+describe("basic-agent-codex and codex-workflow credential guards", () => {
   test("returns true for a readable auth.json with no PATH binary, false for none", async () => {
     const { codexCredentialsAvailable } = await importCodexExample();
 
@@ -1096,6 +1098,46 @@ describe("basic-agent-codex credential guard", () => {
         mkdirSync(join(home, ".codex"));
         writeFileSync(join(home, ".codex", "auth.json"), "{}");
         expect(codexCredentialsAvailable()).toBe(true);
+      });
+    });
+  }
+
+  for (const example of [CODEX_EXAMPLE, CODEX_WORKFLOW_EXAMPLE]) {
+    test(`${example.split("/").at(-2)} accepts CODEX_ACCESS_TOKEN`, async () => {
+      const { codexCredentialsAvailable } = (await import(example)) as {
+        codexCredentialsAvailable(): boolean;
+      };
+      await withHermeticCodexEnv(() => {
+        process.env.CODEX_ACCESS_TOKEN = "acme-access-token";
+        expect(codexCredentialsAvailable()).toBe(true);
+      });
+    });
+
+    // On Windows os.homedir() and Codex use the user profile, not $HOME
+    // (which Git Bash or MSYS may point elsewhere).
+    test(`${example.split("/").at(-2)} on Windows ignores $HOME for auth.json`, async () => {
+      const { codexCredentialsAvailable } = (await import(example)) as {
+        codexCredentialsAvailable(): boolean;
+      };
+      const platform = Object.getOwnPropertyDescriptor(process, "platform");
+      if (!platform) throw new Error("process.platform has no descriptor");
+      await withHermeticCodexEnv(({ home, codexHome }) => {
+        delete process.env.CODEX_HOME;
+        mkdirSync(join(home, ".codex"));
+        writeFileSync(join(home, ".codex", "auth.json"), "{}");
+        // The empty CODEX_HOME dir stands in for the Windows user profile.
+        const profile = spyOn(os, "homedir").mockReturnValue(codexHome);
+        Object.defineProperty(process, "platform", { value: "win32" });
+        try {
+          expect(codexCredentialsAvailable()).toBe(false);
+
+          mkdirSync(join(codexHome, ".codex"));
+          writeFileSync(join(codexHome, ".codex", "auth.json"), "{}");
+          expect(codexCredentialsAvailable()).toBe(true);
+        } finally {
+          Object.defineProperty(process, "platform", platform);
+          profile.mockRestore();
+        }
       });
     });
   }

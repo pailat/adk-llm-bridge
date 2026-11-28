@@ -3,7 +3,8 @@
  * signed-in `auth.json`, a `codex` binary on PATH and Codex credential
  * variables. Each test plants such a machine in `process.env` first.
  */
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
+import * as fs from "node:fs";
 import {
   chmodSync,
   existsSync,
@@ -115,5 +116,42 @@ describe("withHermeticCodexEnv", () => {
       expect(process.env.HOME).toBe(machine.home);
       expect(process.env.CODEX_API_KEY).toBe("acme-codex-key");
     });
+  });
+
+  test("removes its temp root when setting up a directory fails", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "acme-hermetic-tmp-"));
+    const savedTmp = process.env.TMPDIR;
+    process.env.TMPDIR = tmp;
+    const mkdir = spyOn(fs, "mkdirSync").mockImplementation(() => {
+      throw new Error("ENOSPC: no space left on device");
+    });
+    try {
+      await expect(withHermeticCodexEnv(() => undefined)).rejects.toThrow(
+        "ENOSPC",
+      );
+      expect(readdirSync(tmp)).toEqual([]);
+    } finally {
+      mkdir.mockRestore();
+      if (savedTmp === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = savedTmp;
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("also unsets the extra variables it is given, and restores them", async () => {
+    const saved = process.env.ACME_EXAMPLE_PATHS;
+    process.env.ACME_EXAMPLE_PATHS = "/acme/machine-only";
+    try {
+      await withHermeticCodexEnv(
+        () => {
+          expect(process.env.ACME_EXAMPLE_PATHS).toBeUndefined();
+        },
+        { unset: ["ACME_EXAMPLE_PATHS"] },
+      );
+      expect(process.env.ACME_EXAMPLE_PATHS).toBe("/acme/machine-only");
+    } finally {
+      if (saved === undefined) delete process.env.ACME_EXAMPLE_PATHS;
+      else process.env.ACME_EXAMPLE_PATHS = saved;
+    }
   });
 });

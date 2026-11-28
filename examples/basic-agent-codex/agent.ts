@@ -81,10 +81,13 @@ const SMOKE_PROMPT =
  * presence is a valid availability signal even without a `codex` on PATH.
  */
 function hasReadableCodexAuthJson(): boolean {
-  // $HOME first, as Codex and the driver's run env use it; os.homedir()
-  // under Bun keeps the home the process started with.
-  const home =
-    process.env.CODEX_HOME || join(process.env.HOME || homedir(), ".codex");
+  // Off Windows $HOME first, as Codex and the driver's run env use it;
+  // os.homedir() under Bun keeps the home the process started with. On
+  // Windows Codex uses the user profile, which os.homedir() returns, while
+  // Git Bash or MSYS may point $HOME elsewhere.
+  const userHome =
+    process.platform === "win32" ? homedir() : process.env.HOME || homedir();
+  const home = process.env.CODEX_HOME || join(userHome, ".codex");
   try {
     accessSync(join(home, "auth.json"), constants.R_OK);
     return true;
@@ -99,6 +102,7 @@ export function codexCredentialsAvailable(): boolean {
   // mapped onto CODEX_API_KEY below so the guard and the driver agree.
   return Boolean(
     process.env.CODEX_API_KEY ||
+      process.env.CODEX_ACCESS_TOKEN ||
       process.env.OPENAI_API_KEY ||
       process.env.CODEX_EXECUTABLE ||
       process.env.CODEX_CLI_PATH ||
