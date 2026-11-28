@@ -75,7 +75,9 @@ also rejects integers beyond `Number.MAX_SAFE_INTEGER`.
 ## Changed paths
 
 `checkChangedPaths` reads the `changedPaths` of a result, such as
-`implement@1`, and compares each one with the lane's allowed paths:
+`implement@1`, and compares each one with the lane's allowed paths. A
+`tests@1` result names its paths `testPaths`, so pass them as
+`checkChangedPaths({ changedPaths: result.testPaths }, lane.allowedPaths)`.
 
 - An allowed path covers the entry it names and everything below it; `.`
   covers the whole project. `src/billing` covers `src/billing/a.ts` but not
@@ -93,8 +95,10 @@ also rejects integers beyond `Number.MAX_SAFE_INTEGER`.
   - contains a control, format or invisible character (a newline, a bidi
     override, a zero-width mark);
   - has a segment a host could read as `..`: `.. ` or `...` (Windows strips
-    trailing dots and spaces), fullwidth dots (NFKC), `%2e%2e`, ideographic
-    full stops, or `..` between slash look-alikes such as U+2215.
+    trailing dots and spaces), fullwidth dots (NFKC), any percent-encoded
+    form once decoded (`%2e%2e`, `..%20`, overlong `%c0%ae`, double-encoded
+    `%252e`), ideographic full stops, or `..` between slash look-alikes such
+    as U+2215.
 
   The last two are the checks the run spec applies to allowed paths.
 - A path no allowed path covers is refused with

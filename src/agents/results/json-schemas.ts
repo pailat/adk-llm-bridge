@@ -27,7 +27,8 @@ function deepFreeze<Value>(value: Value): Value {
 /**
  * Builds the documents. They are written out by hand, not generated, so a
  * library upgrade cannot change a released version. They use only `type`,
- * `enum`, `properties`, `required`, `additionalProperties` and `items`, and
+ * `enum`, `properties`, `required`, `additionalProperties`, `items` and
+ * `minimum`, and
  * declare no `$schema`: Claude Code checks `--json-schema` with a draft-07
  * validator that rejects a 2020-12 `$schema`.
  */

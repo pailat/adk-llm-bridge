@@ -15,7 +15,7 @@
  * marks, the byte order mark), other default-ignorable code points, line and
  * paragraph separators, and lone surrogates, which have no UTF-8 encoding.
  * They are invisible or change how a path is displayed, and HFS+ ignores the
- * default-ignorable ones, so `.g‌it` names `.git` there
+ * default-ignorable ones, so `.g\u{200c}it` names `.git` there
  * (CVE-2014-9390).
  */
 const HIDDEN_CHARACTER =
@@ -44,16 +44,28 @@ const TRAVERSAL_PROBLEM = "must not traverse parent directories";
  * fraction slash, the division slash, the set minus and the big solidi.
  * A host that maps text to a legacy code page can turn them into ASCII.
  */
-const SEPARATOR_LOOK_ALIKES = /[⁄∕∖⧵⧸⧹]/gu;
+const SEPARATOR_LOOK_ALIKES =
+  /[\u{2044}\u{2215}\u{2216}\u{29f5}\u{29f8}\u{29f9}]/gu;
 
 /** The ideographic full stop, which URL host parsing reads as `.`. */
-const DOT_LOOK_ALIKES = /。/gu;
+const DOT_LOOK_ALIKES = /\u{3002}/gu;
 
 /** A percent-encoded `.`. */
 const PERCENT_DOT = /%2e/giu;
 
 /** A percent-encoded slash or backslash. */
 const PERCENT_SEPARATOR = /%(?:2f|5c)/giu;
+
+/** A percent-encoded ASCII character, such as `%2e` or `%20`. */
+const PERCENT_ASCII = /%([0-7][0-9a-f])/giu;
+
+/**
+ * An overlong UTF-8 encoding of an ASCII character, percent-encoded, such
+ * as `%c0%ae` or `%e0%80%ae` for `.`. Lenient decoders read them as ASCII.
+ * The captured bit is the seventh bit of the character.
+ */
+const PERCENT_OVERLONG_ASCII =
+  /%(?:c([01])|e0%8([01])|f0%80%8([01]))%([89ab][0-9a-f])/giu;
 
 /**
  * A segment that names the parent directory on some host: `..` followed by
@@ -74,14 +86,17 @@ export function hiddenCharacterProblem(path: string): string | undefined {
 
 /**
  * Reports a segment that a host could read as `..` in the
- * {@link widenedReading} of a path.
+ * {@link widenedReading} of a path once every percent-encoded ASCII
+ * character is decoded too, so `..%20`, `%c0%ae%c0%ae` and `%252e%252e`
+ * are traversals.
  *
  * @param path - A path that already passed the shared grammar.
  * @returns The traversal reason of the shared grammar, or `undefined`.
  * @internal
  */
 export function traversalAliasProblem(path: string): string | undefined {
-  for (const segment of widenedReading(path).split("/")) {
+  const reading = percentDecoded(widenedReading(path)).replaceAll("\\", "/");
+  for (const segment of reading.split("/")) {
     if (PARENT_ALIAS.test(segment)) return TRAVERSAL_PROBLEM;
   }
   return undefined;
@@ -104,4 +119,29 @@ export function widenedReading(path: string): string {
     .replace(PERCENT_DOT, ".")
     .replace(PERCENT_SEPARATOR, "/")
     .replaceAll("\\", "/");
+}
+
+/**
+ * Decodes every percent-encoded ASCII character, overlong forms included,
+ * until none is left, so `%20`, `%c0%ae` and the double-encoded `%252e`
+ * all decode. Each pass shortens the text, so the loop ends.
+ */
+function percentDecoded(text: string): string {
+  let current = text;
+  for (;;) {
+    const next = current
+      .replace(
+        PERCENT_OVERLONG_ASCII,
+        (_match, two, three, four, last: string) =>
+          String.fromCharCode(
+            (Number(two ?? three ?? four) << 6) |
+              (Number.parseInt(last, 16) & 0x3f),
+          ),
+      )
+      .replace(PERCENT_ASCII, (_match, hex: string) =>
+        String.fromCharCode(Number.parseInt(hex, 16)),
+      );
+    if (next === current) return current;
+    current = next;
+  }
 }

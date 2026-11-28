@@ -17,9 +17,11 @@ import {
  *   or a drive prefix such as `C:`, so `a:b/c` too), uses a backslash,
  *   contains NUL, has a `..` segment or names the root. Or, as the run spec
  *   checks allowed paths: it contains a control, format or invisible
- *   character, or has a segment a host could read as `..`, such as `.. ` (Windows strips trailing dots and spaces),
- *   fullwidth dots (NFKC), `%2e%2e`, ideographic full stops, or `..` between
- *   slash look-alikes such as U+2215.
+ *   character, or has a segment a host could read as `..`, such as `.. `
+ *   (Windows strips trailing dots and spaces), fullwidth dots (NFKC), any
+ *   percent-encoded form once decoded (`%2e%2e`, `..%20`, overlong `%c0%ae`,
+ *   double-encoded `%252e`), ideographic full stops, or `..` between slash
+ *   look-alikes such as U+2215.
  * - `CHANGED_PATH_OUTSIDE_ALLOWED_PATHS`: no allowed path covers it.
  *
  * @experimental
@@ -69,7 +71,8 @@ export interface ChangedPathRefusal {
  * refusal does to the run.
  *
  * @param result - A result with `changedPaths`, such as a parsed
- * `implement@1`.
+ * `implement@1`. For a `tests@1` result pass
+ * `{ changedPaths: result.testPaths }`.
  * @param allowedPaths - The lane's allowed paths, in canonical form with
  * forward slashes, as in a run spec lane's `allowedPaths`.
  * @returns The refusals; empty when every path is allowed.

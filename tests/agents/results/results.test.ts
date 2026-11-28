@@ -315,22 +315,34 @@ describe("checkChangedPaths", () => {
     const bad = [
       "src/billing/.. /auth/token.ts",
       "src/billing/... /auth/token.ts",
-      "src/billing/．．/auth/x.ts",
+      "src/billing/\u{ff0e}\u{ff0e}/auth/x.ts",
       "src/billing/%2e%2e/auth/x.ts",
-      "src/billing/。。/auth/x.ts",
-      "src/billing/x∕..∕auth/x.ts",
+      "src/billing/\u{3002}\u{3002}/auth/x.ts",
+      "src/billing/x\u{2215}..\u{2215}auth/x.ts",
+      "src/billing/..%20/auth/token.ts",
+      "src/billing/%2e%2e%20/auth/token.ts",
+      "src/billing/%c0%ae%c0%ae/auth/token.ts",
+      "src/billing/%e0%80%ae%e0%80%ae/auth/token.ts",
+      "src/billing/%252e%252e/auth/token.ts",
+      "src/billing/x%c0%af..%c0%afauth/token.ts",
     ];
     const refusals = checkChangedPaths(result(bad), ["src/billing"]);
     expect(refusals.map((refusal) => [refusal.code, refusal.index])).toEqual(
       bad.map((_, index) => ["CHANGED_PATH_INVALID", index]),
     );
+    const good = [
+      "src/billing/a%20b.ts",
+      "src/billing/.%20env",
+      "src/billing/%2e",
+    ];
+    expect(checkChangedPaths(result(good), ["src/billing"])).toEqual([]);
   });
 
   test("refuses a path with control, format or invisible characters", () => {
     const bad = [
       "src/billing/a.ts\nrefusals: none",
-      "src/billing/‮sts.a",
-      "src/billing/.g‌it/config",
+      "src/billing/\u{202e}sts.a",
+      "src/billing/.g\u{200c}it/config",
     ];
     const refusals = checkChangedPaths(result(bad), ["src/billing"]);
     expect(refusals.map((refusal) => refusal.code)).toEqual(
