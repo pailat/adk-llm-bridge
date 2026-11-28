@@ -138,6 +138,7 @@ import {
   strictBinaryRefusal,
 } from "./strict-binary.js";
 import {
+  assertToolArgsSettingsChecked,
   parseToolArgsAllowlist,
   type ToolArgsAllowlist,
   toolArgsDenial,
@@ -524,17 +525,21 @@ export interface ClaudeAgentSdkDriverConfig {
    * call was denied and the run goes on. The hook is in the options
    * {@link ClaudeAgentSdkDriver.buildOptions} and `buildOptionsForRun`
    * return. The list names commands, not what they run: a listed command
-   * that runs workspace files (`bun test`, `git commit` and its hooks) gives
-   * the full shell when the agent can also write them, and commands Claude
-   * Code runs from loaded settings (hooks, skill `!` lines) are not tool
-   * calls, so they are not checked. A command holding a shell
-   * operator (`;`, `&`, `|`, `$`, a backtick, `<`, `>`, a parenthesis, a
-   * backslash or a line break) never matches, so `git log && rm -rf .` is
-   * denied. A prefix rule admits any arguments after it, options included
-   * (`git log --output=<file>` writes a file): list exact commands where
-   * that matters. `[]` denies every shell command. Only `Bash` takes rules;
-   * narrow other tools with {@link tools}. A malformed rule refuses the
-   * driver with `EXTERNAL_AGENT_TOOL_ARGS_RULE_INVALID`.
+   * that runs workspace files (`bun test`, `git status`, `git commit` and
+   * its hooks) gives the full shell when the agent can also write them. A
+   * prefix rule admits any arguments after it, options included, so a
+   * prefix rule on a command with a write option (`git log --output=<file>`)
+   * is itself a file-write tool: do not combine one with a command that
+   * runs workspace files; list exact commands instead. A command holding a
+   * shell operator (`;`, `&`, `|`, `$`, a backtick, `<`, `>`, a
+   * parenthesis, a backslash or a line break) never matches, so
+   * `git log && rm -rf .` is denied. `[]` denies every shell command. Only
+   * `Bash` takes rules; narrow other tools with {@link tools}. A malformed
+   * rule refuses the driver with `EXTERNAL_AGENT_TOOL_ARGS_RULE_INVALID`.
+   * Commands Claude Code runs from loaded settings (hooks, skill `!` lines)
+   * are not tool calls, so the list cannot check them: combined with a
+   * non-empty {@link settingSources} or {@link inheritHostConfig}, it
+   * refuses the driver with `EXTERNAL_AGENT_TOOL_ARGS_SETTINGS_UNCHECKED`.
    *
    * @defaultValue none: shell commands are not narrowed
    */
@@ -926,8 +931,10 @@ export class ClaudeAgentSdkDriver {
    * `model` is absent or a router alias, or `smallFastModel` is absent or an
    * alias, and `EXTERNAL_AGENT_MCP_SERVER_INVALID` or
    * `EXTERNAL_AGENT_MCP_SECRET_LITERAL` for a malformed `mcpServers` or
-   * `mcpConnectTimeoutMs`, and `EXTERNAL_AGENT_TOOL_ARGS_RULE_INVALID` for a
-   * malformed `toolArgsAllowlist`.
+   * `mcpConnectTimeoutMs`, `EXTERNAL_AGENT_TOOL_ARGS_RULE_INVALID` for a
+   * malformed `toolArgsAllowlist`, and
+   * `EXTERNAL_AGENT_TOOL_ARGS_SETTINGS_UNCHECKED` for a `toolArgsAllowlist`
+   * with a non-empty `settingSources` or `inheritHostConfig`.
    */
   constructor(config: ClaudeAgentSdkDriverConfig = {}) {
     assertKnownDriverOptions(
@@ -1011,6 +1018,14 @@ export class ClaudeAgentSdkDriver {
       config.toolArgsAllowlist,
     );
     this.#inheritHostConfig = config.inheritHostConfig ?? false;
+    assertToolArgsSettingsChecked(
+      "ClaudeAgentSdkDriver",
+      this.#toolArgsAllowlist,
+      {
+        settingSources: this.#settingSources,
+        inheritHostConfig: this.#inheritHostConfig,
+      },
+    );
     this.#allowUnsandboxedShell = config.allowUnsandboxedShell ?? false;
     this.#allowLocalBinding = config.allowLocalBinding ?? false;
     this.#allowBackgroundTasks = config.allowBackgroundTasks ?? false;
@@ -1255,7 +1270,7 @@ export class ClaudeAgentSdkDriver {
       if (shellPaths) {
         throw new ExternalAgentPolicyError(
           EXTERNAL_AGENT_PATHS_UNENFORCEABLE,
-          `Claude Agent SDK cannot enforce allowedPaths: ${shellPaths}. Set the working directory inside allowedPaths, remove the shell tools (tools without Bash), or drop allowedPaths.`,
+          `Claude Agent SDK cannot enforce allowedPaths: ${shellPaths}. Set the working directory inside allowedPaths, remove the shell tools (tools without Bash, PowerShell or Monitor), or drop allowedPaths.`,
         );
       }
       // Inside the try: a missing SDK package becomes an error event, like

@@ -55,14 +55,25 @@ const CLAUDE_WRITE_TOOLS: readonly string[] = [
 const CLAUDE_NETWORK_TOOLS: readonly string[] = ["WebFetch", "WebSearch"];
 
 /**
- * Tools that run shell commands. `Monitor` runs its `command` as a shell
- * command or script, so it gets the no-network sandbox like `Bash`.
+ * Tools that run shell commands. `Monitor` is one too, but it is offered only
+ * when no sandbox is needed (see {@link CLAUDE_UNSANDBOXED_SHELL_TOOLS}), so
+ * it never counts toward an enforced sandbox; it still counts wherever any
+ * shell matters (the MCP secret checks).
  */
 const CLAUDE_SHELL_TOOLS: ReadonlySet<string> = new Set([
   "Bash",
   "PowerShell",
   "Monitor",
 ]);
+
+/**
+ * Tools that run shell commands where the Claude Code sandbox is not shown
+ * to apply: `Monitor` runs its `command` as a shell command or script, and
+ * the `sandbox` settings are documented for `Bash`. Removed, like the web
+ * tools, whenever the sandbox would be what keeps commands off the network
+ * or inside `allowedPaths`.
+ */
+const CLAUDE_UNSANDBOXED_SHELL_TOOLS: readonly string[] = ["Monitor"];
 
 /** Tools that read files by path. */
 const CLAUDE_FILE_READ_TOOLS: ReadonlySet<string> = new Set([
@@ -212,7 +223,12 @@ export interface ClaudeIsolationPlan {
    * default tool list is trimmed without a refusal.
    */
   unenforceableWebTools: string[] | undefined;
-  /** Whether a shell tool (`Bash`, `PowerShell`) is offered. */
+  /**
+   * Whether a shell tool (`Bash`, `PowerShell`, `Monitor`) is offered.
+   * `Monitor` is removed whenever the sandbox matters, so when this is true
+   * under a no-network or `allowedPaths` policy, the shell is `Bash` or
+   * `PowerShell`.
+   */
   shellOffered: boolean;
   /**
    * Whether a file-read tool (`Read`, `Glob`, `Grep`, `LS`, `NotebookRead`)
@@ -235,6 +251,9 @@ export interface ClaudeIsolationPlan {
  *   Built-in tool names are matched case-insensitively and passed on in
  *   their canonical spelling (`bash` becomes `Bash`), so a shell named in
  *   any case gets the sandbox.
+ * - `Monitor` runs shell commands that the sandbox is not shown to cover, so
+ *   it is removed without `allowNetwork: true` and with `allowedPaths`,
+ *   `readPaths` or `pathBounds`.
  * - Without `allowNetwork: true`, a shell tool on offer turns on the
  *   no-network sandbox, unless `allowUnsandboxedShell` is set. It denies
  *   binding local ports too, unless `allowLocalBinding` is set.
@@ -264,6 +283,9 @@ export function planClaudeIsolation(
   }
   if (!networkAllowed(policy)) {
     for (const name of CLAUDE_NETWORK_TOOLS) removed.add(name);
+  }
+  if (!networkAllowed(policy) || policySetsPaths(policy)) {
+    for (const name of CLAUDE_UNSANDBOXED_SHELL_TOOLS) removed.add(name);
   }
   const base =
     options.tools ??

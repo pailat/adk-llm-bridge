@@ -52,8 +52,13 @@ that reached a tool, so it stops the run on every call outside the set.
 Built-in names in `tools` are passed on in their canonical spelling (`bash`
 becomes `Bash`), so the shell sandbox, the web-tool refusal and the
 `read-only` removals see a shell or web tool named in any case. `Monitor`
-runs a shell command too, so it counts as a shell tool: it gets the
-no-network sandbox and `read-only` removes it. The per-message check compares built-in tool names by canonical name, so an
+runs a shell command too, but Claude Code's `sandbox` settings are
+documented for `Bash`, and the bridge has not shown that they cover
+`Monitor`. So, like the web tools, `Monitor` is removed whenever the sandbox
+would be what holds the policy: without `allowNetwork: true`, with
+`allowedPaths`, `readPaths` or `pathBounds`, and under `read-only`. The
+network guard denies a `Monitor` call without `allowNetwork: true` even when
+the `Bash` sandbox is on. The per-message check compares built-in tool names by canonical name, so an
 offered tool reported as `bash` for `Bash` is never flagged. Everything else
 outside the offered set is flagged and stops the run: a built-in that was not
 offered, any `mcp__` tool outside the expected servers (MCP names are never
@@ -437,8 +442,10 @@ rules:
 
 ```ts
 new ClaudeAgentSdkDriver({
-  tools: ["Read", "Edit", "Bash"],
-  toolArgsAllowlist: ["Bash(bun test:*)", "Bash(git log:*)", "Bash(git status)"],
+  // Read-only file tools and exact rules: no listed command writes a file,
+  // so none can change what another listed command runs.
+  tools: ["Read", "Grep", "Bash"],
+  toolArgsAllowlist: ["Bash(git status)", "Bash(git diff)", "Bash(bun test)"],
 });
 ```
 
@@ -462,26 +469,34 @@ new ClaudeAgentSdkDriver({
   call was denied, and the run goes on. The hook is part of the options
   `buildOptions` and `buildOptionsForRun` return, so a host that calls
   `query()` with them itself gets the same check.
-- A prefix rule admits any arguments, options included (`git log
-  --output=<file>` writes a file). Use exact rules where that matters.
 - The list names commands, not what they run. A listed command that runs
   files from the workspace gives the agent the full shell when it can also
   write those files. With `Write` or `Edit` offered, `Bash(bun test)` runs a
   `*.test.ts` the agent wrote, `Bash(git commit:*)` runs
-  `.git/hooks/pre-commit`, and `Bash(bun run build)` runs `package.json`
+  `.git/hooks/pre-commit`, `Bash(git status)` runs a `core.fsmonitor`
+  command from `.git/config`, and `Bash(bun run build)` runs `package.json`
   scripts. Pair such commands with read-only file tools, or keep the files
   they run outside `allowedPaths`. The no-network sandbox and `allowedPaths`
   still bound what such code reaches.
+- A prefix rule admits any arguments, options included, so a prefix rule on
+  a command that has a write option is a file-write tool. `git log
+  --output=<file> --format=…` writes any bytes the model picks (`%n` is a
+  line break, `%xNN` any byte) without a shell operator; `git diff
+  --output` does the same. Such a prefix rule cannot be combined with a
+  command that runs workspace files (`bun test`, `git status`, `git commit`
+  and the like), even with read-only file tools: the agent writes
+  `.git/config` or a `*.test.ts` with `git log --output`, then runs the
+  other command. Use exact rules for those commands (`Bash(git log
+  --oneline -20)`), or keep the files the other command runs outside
+  `allowedPaths`.
 - Only tool calls are checked. Commands Claude Code runs itself from the
   settings it loads are not tool calls, so the list does not see them:
   command hooks in settings, and the `` !`command` `` lines of skills and
-  slash commands. With `settingSources` that include `project` or `local`,
-  or with `inheritHostConfig`, those settings come from `.claude/` in the
-  working directory (or the host's own). Whether Claude Code picks up a
-  file the agent writes there during the run was not checked against a live
-  Claude Code. So when you load project or local settings, keep `.claude/`
-  out of what the agent can write (outside `allowedPaths`, or no write
-  tools). The isolated default loads no settings.
+  slash commands. An agent that can write those settings files could add
+  such a command. So the driver refuses a `toolArgsAllowlist` combined with
+  any loaded settings, a non-empty `settingSources` or `inheritHostConfig`,
+  with `EXTERNAL_AGENT_TOOL_ARGS_SETTINGS_UNCHECKED`. The isolated default
+  loads no settings.
 - A malformed rule refuses the driver with
   `EXTERNAL_AGENT_TOOL_ARGS_RULE_INVALID`: not a string, a tool other than
   `Bash`, an empty or padded command, a `*` other than a final `:*`, or a
@@ -1937,7 +1952,7 @@ because the tool was not offered. The other codes in the table (`CLAUDE_*`,
 | `EXTERNAL_AGENT_TOOL_RESULT_TOO_LARGE` | `EXTERNAL_AGENT_TOOL_RESULT_TOO_LARGE` | No | The user's answer to a paused long-running call is over 64 KiB (UTF-8 bytes of JSON), or the answers of one turn total over 256 KiB. The runtime does not start; the answers are not marked used, so a smaller one for the same call id can follow. |
 | `EXTERNAL_AGENT_ISOLATION_VIOLATED` | `EXTERNAL_AGENT_ISOLATION_VIOLATED` | No | The runtime reported tools or MCP servers outside the isolated set. |
 | `EXTERNAL_AGENT_NETWORK_UNENFORCEABLE` | `EXTERNAL_AGENT_NETWORK_UNENFORCEABLE` | No | The network cannot be kept off (the policy does not set `allowNetwork: true`), or a Claude agent's `tools` name a web tool while the network is off; see the tables above. The message names the remedy: `allowNetwork: true`, or `allowUnenforcedNetwork: true` on the driver; for web tools named in a Claude agent's `tools`, `allowNetwork: true` or removing them (`allowUnenforcedNetwork` does not lift that refusal). |
-| `EXTERNAL_AGENT_PATHS_UNENFORCEABLE` | `EXTERNAL_AGENT_PATHS_UNENFORCEABLE` | No | The policy sets `allowedPaths` (or a parent agent passed `pathBounds`) and the driver cannot check tool paths: Claude CLI, Codex and fx (remedy: `ClaudeAgentSdkDriver`, no `allowedPaths`, or `allowUnenforcedPaths: true` on the driver). On the Claude Agent SDK: a shell tool is on offer and the working directory is outside `allowedPaths` or the shell is unsandboxed (remedy: a working directory inside `allowedPaths`, or `tools` without `Bash`). |
+| `EXTERNAL_AGENT_PATHS_UNENFORCEABLE` | `EXTERNAL_AGENT_PATHS_UNENFORCEABLE` | No | The policy sets `allowedPaths` (or a parent agent passed `pathBounds`) and the driver cannot check tool paths: Claude CLI, Codex and fx (remedy: `ClaudeAgentSdkDriver`, no `allowedPaths`, or `allowUnenforcedPaths: true` on the driver). On the Claude Agent SDK: a shell tool is on offer and the working directory is outside `allowedPaths` or the shell is unsandboxed (remedy: a working directory inside `allowedPaths`, or `tools` without `Bash` or `PowerShell`). |
 | `EXTERNAL_AGENT_DEPENDENCY_MISSING` | `EXTERNAL_AGENT_DEPENDENCY_MISSING` | No | An optional SDK package is not installed. |
 | `EXTERNAL_AGENT_BACKGROUND_TASK_PENDING` | `EXTERNAL_AGENT_BACKGROUND_TASK_PENDING` | No | A Claude run (SDK or CLI driver) reached its result while Claude Code still reported a background task (from `system/background_tasks_changed`; ambient tasks do not count). The task's work is not done; the run ends with exit code 1. Background tasks are off by default (`CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`); `allowBackgroundTasks: true` turns them on. |
 | `EXTERNAL_AGENT_NO_TURN` | `EXTERNAL_AGENT_NO_TURN` | Yes | A Claude Agent SDK run whose stream ended after only "model-less" results (success, `num_turns` 0, empty `result`): Claude Code never ran the input. The run ends with exit code 1 instead of an empty success; a new run of the same input can work. A model-less result followed by a real turn is not an error: the driver reads past it. |
@@ -1949,6 +1964,7 @@ because the tool was not offered. The other codes in the table (`CLAUDE_*`,
 | `EXTERNAL_AGENT_MODEL_OVERRIDE` | `EXTERNAL_AGENT_MODEL_OVERRIDE` | No | Something other than `model` would set or route the model: thrown for model-setting `args` or Codex SDK `config` keys (even with `allowPolicyOverrideArgs`); an error event for a model variable in the run's environment. |
 | `EXTERNAL_AGENT_OPTION_UNKNOWN` | `EXTERNAL_AGENT_OPTION_UNKNOWN` | No | Thrown when a built-in driver's config is not a plain object or has a key the driver does not know (a typo, or an option of another driver: the message says which driver supports it). |
 | `EXTERNAL_AGENT_TOOL_ARGS_RULE_INVALID` | `EXTERNAL_AGENT_TOOL_ARGS_RULE_INVALID` | No | Thrown when `ClaudeAgentSdkDriver` is built with a malformed `toolArgsAllowlist` entry; see [Narrowing shell commands](#narrowing-shell-commands). |
+| `EXTERNAL_AGENT_TOOL_ARGS_SETTINGS_UNCHECKED` | `EXTERNAL_AGENT_TOOL_ARGS_SETTINGS_UNCHECKED` | No | Thrown when `ClaudeAgentSdkDriver` is built with a `toolArgsAllowlist` and loaded settings (a non-empty `settingSources`, or `inheritHostConfig`), whose hooks and skill `!` lines the list cannot check (remedy: no loaded settings, or no `toolArgsAllowlist`); see [Narrowing shell commands](#narrowing-shell-commands). |
 | `EXTERNAL_AGENT_MCP_SERVER_INVALID` | `EXTERNAL_AGENT_MCP_SERVER_INVALID` | No | Thrown for a malformed `mcpServers` entry (name, type, key, URL, `tools`, `readOnly` without `tools`, `timeoutMs`, header or env name) or `mcpConnectTimeoutMs`. |
 | `EXTERNAL_AGENT_MCP_SECRET_LITERAL` | `EXTERNAL_AGENT_MCP_SECRET_LITERAL` | No | Thrown for a header or env value given as a bare string, or as `{ public }` under a sensitive name. |
 | `EXTERNAL_AGENT_MCP_SERVER_NETWORK_REQUIRED` | `EXTERNAL_AGENT_MCP_SERVER_NETWORK_REQUIRED` | No | A declared http or sse server is not on loopback and the policy does not set `allowNetwork: true`. |

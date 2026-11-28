@@ -26,18 +26,29 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   checks each call, so the list holds in every permission mode; it is part
   of the options `buildOptions` and `buildOptionsForRun` return, so a host
   that calls `query()` itself gets it too. A listed command that runs
-  workspace files (`bun test`, `git commit` with its hooks) gives the full
-  shell when the agent can also write those files, and commands Claude Code
-  runs from loaded settings (hooks, skill `!` lines) are not checked. Off by
-  default. A malformed rule refuses the driver with
-  the new `EXTERNAL_AGENT_TOOL_ARGS_RULE_INVALID` code. See
+  workspace files (`bun test`, `git status`, `git commit` with its hooks)
+  gives the full shell when the agent can also write those files, and a
+  prefix rule on a command with a write option (`git log --output`) is
+  itself a way to write them. Off by default. A malformed rule refuses the
+  driver with the new `EXTERNAL_AGENT_TOOL_ARGS_RULE_INVALID` code. Loaded
+  settings run commands the list cannot see (hooks, skill `!` lines), so a
+  `toolArgsAllowlist` with a non-empty `settingSources` or
+  `inheritHostConfig` refuses the driver with the new
+  `EXTERNAL_AGENT_TOOL_ARGS_SETTINGS_UNCHECKED` code. See
   [Narrowing shell commands](docs/external-agent-isolation.md#narrowing-shell-commands).
 
 ### Fixed
 
-- **`Monitor` counts as a shell tool** in the Claude isolation plan and the
-  network guard, since it runs a shell command: a run that offers it gets
-  the no-network sandbox, and `read-only` removes it.
+- **`Monitor` is removed where the sandbox would hold the policy.** It runs
+  a shell command, and Claude Code's sandbox is not shown to cover it, so
+  the Claude drivers remove it without `allowNetwork: true`, with
+  `allowedPaths`, `readPaths` or `pathBounds`, and under `read-only`, and
+  the network guard denies a `Monitor` call without `allowNetwork: true`
+  even when the `Bash` sandbox is on. Before, a run offering `Monitor` ran
+  it unsandboxed.
+- **The network guard matches shell tool names in any case**, so a call
+  reported as `bash` or `monitor` is denied without `allowNetwork: true`
+  like `Bash`.
 
 ## [0.7.1] - 2026-11-28
 

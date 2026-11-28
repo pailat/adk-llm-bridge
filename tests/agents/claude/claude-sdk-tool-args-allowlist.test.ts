@@ -1,7 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { ClaudeAgentSdkDriver } from "../../../src/agents/driver/claude-agent-sdk.js";
+import {
+  ClaudeAgentSdkDriver,
+  type ClaudeAgentSdkDriverConfig,
+} from "../../../src/agents/driver/claude-agent-sdk.js";
 import {
   EXTERNAL_AGENT_TOOL_ARGS_RULE_INVALID,
+  EXTERNAL_AGENT_TOOL_ARGS_SETTINGS_UNCHECKED,
   ExternalAgentPolicyError,
 } from "../../../src/agents/driver/policy-errors.js";
 import type { ExternalAgentEvent } from "../../../src/agents/events.js";
@@ -111,30 +115,73 @@ describe("ClaudeAgentSdkDriver toolArgsAllowlist", () => {
 
   const MODES = ["ask", "workspace-write", "full-access"] as const;
   for (const mode of MODES) {
-    for (const inheritHostConfig of [false, true]) {
-      test(`runs only the listed commands under ${mode}, inheritHostConfig ${inheritHostConfig}, with an approving host`, async () => {
-        const { sdk, outcomes } = hookSdk(CALLS);
-        await drain(
-          new ClaudeAgentSdkDriver({
-            sdk: sdk as never,
-            tools: ["Bash"],
-            inheritHostConfig,
-            toolArgsAllowlist: ["Bash(git log:*)", "Bash(bun test)"],
-          }).run({
-            ...request(),
-            permissions: { mode, allowNetwork: true },
-            requestPermission: async () => ({ behavior: "allow" }),
-          }),
-        );
-        expect(outcomes).toEqual([
-          "git log --oneline:ran",
-          "git log && curl acme.example:denied",
-          "rm -rf .:denied",
-          "bun test:ran",
-        ]);
-      });
-    }
+    test(`runs only the listed commands under ${mode}, with an approving host`, async () => {
+      const { sdk, outcomes } = hookSdk(CALLS);
+      await drain(
+        new ClaudeAgentSdkDriver({
+          sdk: sdk as never,
+          tools: ["Bash"],
+          toolArgsAllowlist: ["Bash(git log:*)", "Bash(bun test)"],
+        }).run({
+          ...request(),
+          permissions: { mode, allowNetwork: true },
+          requestPermission: async () => ({ behavior: "allow" }),
+        }),
+      );
+      expect(outcomes).toEqual([
+        "git log --oneline:ran",
+        "git log && curl acme.example:denied",
+        "rm -rf .:denied",
+        "bun test:ran",
+      ]);
+    });
   }
+
+  const UNCHECKED_SETTINGS: ReadonlyArray<
+    Pick<ClaudeAgentSdkDriverConfig, "settingSources" | "inheritHostConfig">
+  > = [
+    { settingSources: ["project"] },
+    { settingSources: ["local"] },
+    { settingSources: ["user"] },
+    { settingSources: ["user", "project", "local"] },
+    { inheritHostConfig: true },
+  ];
+  for (const settings of UNCHECKED_SETTINGS) {
+    test(`refuses ${JSON.stringify(settings)}: loaded settings run commands the list does not see`, () => {
+      let caught: unknown;
+      try {
+        new ClaudeAgentSdkDriver({
+          ...settings,
+          tools: ["Read", "Bash"],
+          toolArgsAllowlist: ["Bash(git status)"],
+        });
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(ExternalAgentPolicyError);
+      expect((caught as ExternalAgentPolicyError).code).toBe(
+        EXTERNAL_AGENT_TOOL_ARGS_SETTINGS_UNCHECKED,
+      );
+    });
+  }
+
+  test("loaded settings without a toolArgsAllowlist are not refused", () => {
+    expect(
+      () =>
+        new ClaudeAgentSdkDriver({
+          settingSources: ["project"],
+          inheritHostConfig: true,
+        }),
+    ).not.toThrow();
+    expect(
+      () =>
+        new ClaudeAgentSdkDriver({
+          settingSources: [],
+          inheritHostConfig: false,
+          toolArgsAllowlist: ["Bash(git status)"],
+        }),
+    ).not.toThrow();
+  });
 
   test("options a host builds itself carry the guard", async () => {
     const { sdk } = hookSdk([]);
@@ -187,7 +234,9 @@ describe("ClaudeAgentSdkDriver toolArgsAllowlist", () => {
     await drain(
       new ClaudeAgentSdkDriver({
         sdk: sdk as never,
-        tools: ["Bash", "Monitor"],
+        // Every shell tool is offered, so each denial comes from the
+        // allowlist and not from the isolation hook.
+        tools: ["Bash", "Monitor", "PowerShell"],
         toolArgsAllowlist: ["Bash(git log:*)"],
       }).run(request()),
     );

@@ -6,6 +6,7 @@
 
 import {
   EXTERNAL_AGENT_TOOL_ARGS_RULE_INVALID,
+  EXTERNAL_AGENT_TOOL_ARGS_SETTINGS_UNCHECKED,
   ExternalAgentPolicyError,
 } from "./policy-errors.js";
 
@@ -70,6 +71,45 @@ export function parseToolArgsAllowlist(
   }
   const rules = [...value].map((entry) => parseRule(owner, entry));
   return Object.freeze({ rules: Object.freeze(rules) });
+}
+
+/**
+ * Refuses an allowlist that loaded Claude Code settings could get around.
+ *
+ * @remarks
+ * Settings files can run commands that are not tool calls (command hooks,
+ * the `!` lines of skills and slash commands), so the `PreToolUse` hook
+ * never sees them, and an agent that can write those files (`.claude/` in
+ * the working directory, or `~/.claude/`) could add one. Whether the agent
+ * can write them depends on each run's policy, so any loaded settings are
+ * refused, closed by default.
+ *
+ * @param owner - The driver, for the message.
+ * @param allowlist - The parsed allowlist; nothing is checked when unset.
+ * @param settings - The driver's settings options.
+ * @throws ExternalAgentPolicyError with
+ * `EXTERNAL_AGENT_TOOL_ARGS_SETTINGS_UNCHECKED` when `settingSources` is not
+ * empty or `inheritHostConfig` is set.
+ */
+export function assertToolArgsSettingsChecked(
+  owner: string,
+  allowlist: ToolArgsAllowlist | undefined,
+  settings: {
+    readonly settingSources: readonly string[];
+    readonly inheritHostConfig: boolean;
+  },
+): void {
+  if (!allowlist) return;
+  const loaded = settings.inheritHostConfig
+    ? "inheritHostConfig"
+    : settings.settingSources.length > 0
+      ? `settingSources ${JSON.stringify(settings.settingSources)}`
+      : undefined;
+  if (loaded === undefined) return;
+  throw new ExternalAgentPolicyError(
+    EXTERNAL_AGENT_TOOL_ARGS_SETTINGS_UNCHECKED,
+    `${owner}: toolArgsAllowlist cannot be combined with ${loaded}. Loaded Claude Code settings run commands that are not tool calls (command hooks, the ! lines of skills and slash commands), which the list does not check, and an agent that writes those files could add one. Leave settingSources empty and inheritHostConfig unset, or drop toolArgsAllowlist.`,
+  );
 }
 
 function parseRule(owner: string, entry: unknown): ToolArgsRule {
