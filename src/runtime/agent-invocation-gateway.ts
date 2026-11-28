@@ -64,9 +64,10 @@ export interface AgentInvocationUsage {
    * Summed `customMetadata.costUsd`: US dollars the providers reported
    * charging for the run's model calls (AI Gateway and OpenRouter `usage.cost`;
    * for a BYOK gateway call, the upstream or market cost the gateway
-   * reports, see `COST_METADATA_KEY`). Absent when no event reported one,
-   * which includes `ExternalAgent` runs: their cost is on their own usage
-   * report and spans, not on the event.
+   * reports, see `COST_METADATA_KEY`; an `ExternalAgent` run's reported
+   * cost when it covers that run only, see `ExternalAgentRunReport`). Absent
+   * when no event reported one, which includes an `ExternalAgent` run whose
+   * runtime reported a session total.
    */
   costUsd?: number;
   /** Function calls requested on non-partial events. */

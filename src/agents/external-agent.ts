@@ -17,7 +17,10 @@ import {
   type ToolUnion,
 } from "@google/adk";
 import type { Content } from "@google/genai";
-import { withCacheCreation } from "../converters/cache-usage.js";
+import {
+  COST_METADATA_KEY,
+  withCacheCreation,
+} from "../converters/cache-usage.js";
 import { parseJson } from "../utils/json.js";
 import { LogCode, warn } from "../utils/log.js";
 import type { ExternalAgentCredentialProvider } from "./auth/credential-provider.js";
@@ -47,11 +50,13 @@ import {
   EXTERNAL_AGENT_CONFIRMATION_UNUSED,
   EXTERNAL_AGENT_ERROR,
   EXTERNAL_AGENT_MODEL_METADATA_KEY,
+  EXTERNAL_AGENT_RUN_METADATA_KEY,
   EXTERNAL_AGENT_TOOL_CREDENTIAL_REQUIRED,
   EXTERNAL_AGENT_TOOL_RESULT_TOO_LARGE,
   type ExternalAgentCompletedEvent,
   type ExternalAgentEvent,
   type ExternalAgentModelInfo,
+  type ExternalAgentRunReport,
   type ExternalAgentStartedEvent,
 } from "./events.js";
 import type { ExternalAgentDriver } from "./external-agent-driver.js";
@@ -1103,6 +1108,10 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
                   [EXTERNAL_AGENT_TOOLS_METADATA_KEY]: toolsReport,
                 };
               }
+              carrier.customMetadata = withRunReport(
+                carrier.customMetadata,
+                event,
+              );
             }
             const usageMetadata = usageMetadataFor(event.usage);
             if (heldFinal && usageMetadata) {
@@ -1752,6 +1761,33 @@ function metadataForExternalEvent(
         ? metadata.title
         : readableExternalEventTitle(agentName, event),
     externalAgent: true,
+  };
+}
+
+/**
+ * `metadata` with the run's {@link ExternalAgentRunReport}, and with its
+ * cost under `costUsd` when the cost covers this run only. Unchanged when
+ * the runtime reported neither a cost nor a turn count.
+ */
+function withRunReport(
+  metadata: Record<string, unknown> | undefined,
+  completed: ExternalAgentCompletedEvent,
+): Record<string, unknown> | undefined {
+  const costUsd = completed.usage?.totalCostUsd;
+  const turns = completed.numTurns;
+  if (costUsd === undefined && turns === undefined) return metadata;
+  const scope = completed.usage?.scope;
+  const report: ExternalAgentRunReport = {
+    ...(costUsd !== undefined ? { costUsd } : {}),
+    ...(turns !== undefined ? { turns } : {}),
+    ...(scope ? { scope } : {}),
+  };
+  return {
+    ...metadata,
+    [EXTERNAL_AGENT_RUN_METADATA_KEY]: report,
+    ...(costUsd !== undefined && scope !== "session"
+      ? { [COST_METADATA_KEY]: costUsd }
+      : {}),
   };
 }
 

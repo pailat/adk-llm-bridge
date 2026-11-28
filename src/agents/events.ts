@@ -51,6 +51,30 @@ export const EXTERNAL_AGENT_CHILD_METADATA_KEY = "childMetadata";
 /** Key of {@link ExternalAgentModelInfo} in the `customMetadata` of an ADK event. */
 export const EXTERNAL_AGENT_MODEL_METADATA_KEY = "externalAgentModel";
 
+/** Key of {@link ExternalAgentRunReport} in the `customMetadata` of an ADK event. */
+export const EXTERNAL_AGENT_RUN_METADATA_KEY = "externalAgentRun";
+
+/**
+ * Cost and turns of one external agent run, from its `completed` event.
+ *
+ * @remarks
+ * `ExternalAgent` writes it to `customMetadata.externalAgentRun` of the event
+ * that carries the run's model info (the held final event, or the last error
+ * event when the run has no final text), only when the runtime reported a
+ * cost or a turn count. When the cost covers this run only (`scope` is not
+ * `"session"`), the same event also gets `customMetadata.costUsd`, so the
+ * invocation gateway's `usage.costUsd` includes it. A session total is not
+ * written there, because adding it to earlier runs would count them twice.
+ */
+export interface ExternalAgentRunReport {
+  /** `usage.totalCostUsd` of the run; see `scope`. */
+  costUsd?: number;
+  /** `numTurns` of the run. */
+  turns?: number;
+  /** `usage.scope` of the run, when the driver reported it. */
+  scope?: "run" | "session";
+}
+
 /**
  * The model of one external agent run, as far as a trusted runtime tells.
  *
