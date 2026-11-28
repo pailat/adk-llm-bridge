@@ -48,7 +48,10 @@ function requireTarget(): string {
 }
 
 function hasReadableCodexAuthJson(): boolean {
-  const codexHome = process.env.CODEX_HOME || join(homedir(), ".codex");
+  // $HOME first, as Codex and the driver's run env use it; os.homedir()
+  // under Bun keeps the home the process started with.
+  const codexHome =
+    process.env.CODEX_HOME || join(process.env.HOME || homedir(), ".codex");
   try {
     accessSync(join(codexHome, "auth.json"), constants.R_OK);
     return true;
@@ -57,7 +60,7 @@ function hasReadableCodexAuthJson(): boolean {
   }
 }
 
-function codexCredentialsAvailable(): boolean {
+export function codexCredentialsAvailable(): boolean {
   return Boolean(
     process.env.CODEX_API_KEY ||
       process.env.OPENAI_API_KEY ||

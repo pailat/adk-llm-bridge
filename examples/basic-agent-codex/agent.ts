@@ -81,7 +81,10 @@ const SMOKE_PROMPT =
  * presence is a valid availability signal even without a `codex` on PATH.
  */
 function hasReadableCodexAuthJson(): boolean {
-  const home = process.env.CODEX_HOME || join(homedir(), ".codex");
+  // $HOME first, as Codex and the driver's run env use it; os.homedir()
+  // under Bun keeps the home the process started with.
+  const home =
+    process.env.CODEX_HOME || join(process.env.HOME || homedir(), ".codex");
   try {
     accessSync(join(home, "auth.json"), constants.R_OK);
     return true;

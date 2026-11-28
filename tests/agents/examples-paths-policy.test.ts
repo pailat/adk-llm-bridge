@@ -13,6 +13,7 @@ import {
   type ExternalAgentEvent,
   type ExternalAgentPermissionPolicy,
 } from "../../src/agents/index.js";
+import { withHermeticCodexEnv } from "../helpers/env.js";
 import { resolveBridgeToSource } from "../helpers/example-modules.js";
 
 resolveBridgeToSource();
@@ -35,7 +36,9 @@ class SdkNotLoaded extends Error {}
 
 /**
  * Runs the driver up to the point where it would load the Codex SDK and
- * reports whether it got there, plus any error code it emitted first.
+ * reports whether it got there, plus any error code it emitted first. It runs
+ * on a temp HOME/CODEX_HOME, an empty PATH and no Codex variables, so the
+ * result is the same on a signed-in developer machine and in CI.
  */
 async function preStart(
   agent: ExampleAgent,
@@ -48,14 +51,16 @@ async function preStart(
     throw new SdkNotLoaded("stub: the test never loads the Codex SDK");
   };
   const codes: unknown[] = [];
-  for await (const event of agent.driver.run({
-    permissions,
-    instruction: "",
-    messages: [],
-    context: {},
-  })) {
-    if (event.type === "error") codes.push(event.code);
-  }
+  await withHermeticCodexEnv(async () => {
+    for await (const event of agent.driver.run({
+      permissions,
+      instruction: "",
+      messages: [],
+      context: {},
+    })) {
+      if (event.type === "error") codes.push(event.code);
+    }
+  });
   return { reachedSdk, codes };
 }
 

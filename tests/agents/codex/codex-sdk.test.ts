@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import {
   chmodSync,
   mkdirSync,
@@ -16,6 +16,7 @@ import {
   mapPolicyToCodexSdkThreadOptions,
 } from "../../../src/agents/driver/codex-sdk.js";
 import { CODEX_PROVIDER } from "../../../src/agents/provider/schema.js";
+import { withHermeticCodexEnv } from "../../helpers/env.js";
 import { resolveBridgeToSource } from "../../helpers/example-modules.js";
 import { withDeadline } from "../helpers.js";
 
@@ -1050,6 +1051,7 @@ describe("CodexSdkDriver", () => {
 // project; its `adk-llm-bridge/agents` import loads `src/`.
 resolveBridgeToSource();
 const CODEX_EXAMPLE = "../../../examples/basic-agent-codex/agent.ts";
+const CODEX_WORKFLOW_EXAMPLE = "../../../examples/codex-workflow/agent.ts";
 
 async function importCodexExample(): Promise<{
   codexCredentialsAvailable(): boolean;
@@ -1057,71 +1059,46 @@ async function importCodexExample(): Promise<{
   return await import(CODEX_EXAMPLE);
 }
 
+// Each test runs on a temp HOME/CODEX_HOME, an empty PATH and no Codex
+// variables, so a signed-in developer machine sees what CI sees.
 describe("basic-agent-codex credential guard", () => {
-  const CRED_KEYS = [
-    "CODEX_API_KEY",
-    "OPENAI_API_KEY",
-    "CODEX_EXECUTABLE",
-    "CODEX_CLI_PATH",
-    "CODEX_HOME",
-  ] as const;
-
-  const tempDirs: string[] = [];
-  function makeTempDir(prefix: string): string {
-    const dir = mkdtempSync(join(tmpdir(), prefix));
-    tempDirs.push(dir);
-    return dir;
-  }
-  afterEach(() => {
-    for (const dir of tempDirs.splice(0)) {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  async function withClearedEnv<T>(fn: () => T | Promise<T>): Promise<T> {
-    const saved: Record<string, string | undefined> = {};
-    for (const key of CRED_KEYS) {
-      saved[key] = process.env[key];
-      delete process.env[key];
-    }
-    try {
-      return await fn();
-    } finally {
-      for (const key of CRED_KEYS) {
-        if (saved[key] === undefined) {
-          delete process.env[key];
-        } else {
-          process.env[key] = saved[key];
-        }
-      }
-    }
-  }
-
   test("returns true for a readable auth.json with no PATH binary, false for none", async () => {
     const { codexCredentialsAvailable } = await importCodexExample();
 
-    await withClearedEnv(async () => {
-      // No credential at all → false (an absent CODEX_HOME points at
-      // ~/.codex/auth.json which does not exist in CI).
-      process.env.CODEX_HOME = makeTempDir("codex-empty-home-");
+    await withHermeticCodexEnv(({ codexHome }) => {
       expect(codexCredentialsAvailable()).toBe(false);
 
       // A readable auth.json under $CODEX_HOME → true, even with no PATH binary.
-      const home = makeTempDir("codex-home-");
-      writeFileSync(join(home, "auth.json"), '{"OPENAI_API_KEY":"x"}');
-      process.env.CODEX_HOME = home;
+      writeFileSync(join(codexHome, "auth.json"), '{"OPENAI_API_KEY":"x"}');
       expect(codexCredentialsAvailable()).toBe(true);
     });
   });
 
   test("returns true when CODEX_API_KEY is set", async () => {
     const { codexCredentialsAvailable } = await importCodexExample();
-    await withClearedEnv(() => {
-      process.env.CODEX_HOME = makeTempDir("codex-empty-");
+    await withHermeticCodexEnv(() => {
       process.env.CODEX_API_KEY = "key-abc";
       expect(codexCredentialsAvailable()).toBe(true);
     });
   });
+
+  // Codex and the driver's run env take the home from $HOME; os.homedir()
+  // under Bun keeps the home the process started with.
+  for (const example of [CODEX_EXAMPLE, CODEX_WORKFLOW_EXAMPLE]) {
+    test(`${example.split("/").at(-2)} without CODEX_HOME reads $HOME/.codex/auth.json`, async () => {
+      const { codexCredentialsAvailable } = (await import(example)) as {
+        codexCredentialsAvailable(): boolean;
+      };
+      await withHermeticCodexEnv(({ home }) => {
+        delete process.env.CODEX_HOME;
+        expect(codexCredentialsAvailable()).toBe(false);
+
+        mkdirSync(join(home, ".codex"));
+        writeFileSync(join(home, ".codex", "auth.json"), "{}");
+        expect(codexCredentialsAvailable()).toBe(true);
+      });
+    });
+  }
 
   test("driver credential resolution has no OPENAI_API_KEY fallback", () => {
     // Only OPENAI_API_KEY present in env — the driver must NOT pick it up as the
