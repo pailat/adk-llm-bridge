@@ -1,7 +1,6 @@
 {
   "id": "tests@1",
   "jsonSchema": {
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
     "title": "tests@1",
     "description": "Result of a tests lane: the tests it wrote and whether they fail before the implementation, as they should.",
     "type": "object",

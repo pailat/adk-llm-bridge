@@ -12,8 +12,10 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   subpath `adk-llm-bridge/agents/results` exports frozen JSON Schemas and zod
   parsers for `implement@1`, `tests@1`, `review@1` and `gate@1`,
   `parseAgentResult`, and `checkChangedPaths`, which refuses changed paths
-  outside a lane's allowed paths. The run spec does not use them, so
-  `runSpecHash` is unchanged. See
+  outside a lane's allowed paths. The documents declare no `$schema`, so
+  Claude Code's `--json-schema` accepts them; Codex strict output does not
+  accept `implement@1` or `review@1`, which have optional properties. The run
+  spec does not use them, so `runSpecHash` is unchanged. See
   [docs/agent-result-schemas.md](./docs/agent-result-schemas.md).
 
 ## [0.7.0] - 2026-11-13

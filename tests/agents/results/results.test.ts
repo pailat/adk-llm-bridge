@@ -67,6 +67,56 @@ describe("agent result schemas", () => {
     }
   });
 
+  test("no document declares a $schema dialect and each uses only portable keywords", () => {
+    // Claude Code checks --json-schema with a default draft-07 Ajv, which
+    // throws on a 2020-12 `$schema`, so no document may name a dialect.
+    const portable = new Set([
+      "title",
+      "description",
+      "type",
+      "enum",
+      "properties",
+      "required",
+      "additionalProperties",
+      "items",
+    ]);
+    for (const id of AGENT_RESULT_SCHEMA_IDS) {
+      const stack: unknown[] = [agentResultJsonSchemas[id]];
+      while (stack.length > 0) {
+        const node = stack.pop() as Record<string, unknown>;
+        expect(Object.hasOwn(node, "$schema")).toBe(false);
+        for (const [key, value] of Object.entries(node)) {
+          expect(portable.has(key)).toBe(true);
+          if (key === "properties") {
+            stack.push(...Object.values(value as Record<string, unknown>));
+          } else if (key === "items") {
+            stack.push(value);
+          }
+        }
+      }
+    }
+  });
+
+  test("only the documents with no optional property meet strict structured output", () => {
+    // OpenAI strict mode, which Codex uses, needs every property in
+    // `required`. The docs list the documents that do not meet it.
+    const strict = AGENT_RESULT_SCHEMA_IDS.filter((id) => {
+      const stack: unknown[] = [agentResultJsonSchemas[id]];
+      while (stack.length > 0) {
+        const node = stack.pop() as Record<string, unknown>;
+        if (node.properties !== undefined) {
+          const keys = Object.keys(node.properties as object);
+          const required = (node.required ?? []) as string[];
+          if (!keys.every((key) => required.includes(key))) return false;
+          stack.push(...Object.values(node.properties as object));
+        }
+        if (node.items !== undefined) stack.push(node.items);
+      }
+      return true;
+    });
+    expect(strict).toEqual(["tests@1", "gate@1"]);
+  });
+
   for (const golden of goldens) {
     describe(golden.id, () => {
       const jsonSchema = agentResultJsonSchemas[golden.id];

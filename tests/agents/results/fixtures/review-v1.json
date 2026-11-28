@@ -1,7 +1,6 @@
 {
   "id": "review@1",
   "jsonSchema": {
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
     "title": "review@1",
     "description": "Result of a review lane: the verdict and the findings behind it.",
     "type": "object",

@@ -30,8 +30,9 @@ import {
   parseAgentResult,
 } from "adk-llm-bridge/agents/results";
 
-// Ask the agent for the shape, for example as a driver's outputSchema.
-const outputSchema = agentResultJsonSchemas["implement@1"];
+// Ask the agent for the shape, for example through Claude Code's --json-schema.
+// See "Agent compatibility" below before you pass one to Codex.
+const jsonSchema = agentResultJsonSchemas["implement@1"];
 
 // Check what came back.
 const parsed = parseAgentResult("implement@1", structuredOutput);
@@ -46,7 +47,7 @@ if (!parsed.ok) {
 | Export | What it is |
 |--------|------------|
 | `AGENT_RESULT_SCHEMA_IDS` | The ids, frozen |
-| `agentResultJsonSchemas` | JSON Schema (draft 2020-12) per id, deeply frozen; each `title` is its id |
+| `agentResultJsonSchemas` | JSON Schema per id, with no `$schema`, deeply frozen; each `title` is its id |
 | `agentResultSchemas` | zod parser per id |
 | `ImplementResultV1Schema`, `TestsResultV1Schema`, `ReviewResultV1Schema`, `GateResultV1Schema` | The zod parsers by name |
 | `parseAgentResult(id, value)` | `{ ok: true, value }` or `{ ok: false, issues }`; throws `TypeError` for an unknown id |
@@ -54,10 +55,20 @@ if (!parsed.ok) {
 | `CHANGED_PATH_REFUSAL_CODES` | `CHANGED_PATH_INVALID`, `CHANGED_PATH_OUTSIDE_ALLOWED_PATHS` |
 
 The JSON Schemas are written out by hand and use only `type`, `enum`,
-`properties`, `required`, `additionalProperties` and `items`, the keywords
-structured output support commonly accepts. They have no length or number
-bounds. The parser accepts the same values, except that it also rejects
-integers beyond `Number.MAX_SAFE_INTEGER`.
+`properties`, `required`, `additionalProperties` and `items`. They have no
+length or number bounds. The parser accepts the same values, except that it
+also rejects integers beyond `Number.MAX_SAFE_INTEGER`.
+
+### Agent compatibility
+
+- **No `$schema`.** Each document is valid under draft-07 and 2020-12 and
+  names neither. Claude Code checks `--json-schema` with a draft-07 validator
+  that rejects a 2020-12 `$schema`, so do not add one.
+- **Strict structured output.** Codex's `outputSchema` uses OpenAI strict
+  mode, which needs every property listed in `required`. `tests@1` and
+  `gate@1` meet it. `implement@1` (`notes`) and `review@1` (a finding's
+  `line`) have optional properties, so Codex does not accept them as they
+  are.
 
 ## Changed paths
 

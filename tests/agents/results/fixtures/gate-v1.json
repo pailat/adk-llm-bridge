@@ -1,7 +1,6 @@
 {
   "id": "gate@1",
   "jsonSchema": {
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
     "title": "gate@1",
     "description": "Result of a gate: whether it passed and the checks it ran.",
     "type": "object",

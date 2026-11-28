@@ -1,7 +1,5 @@
 import type { AgentResultSchemaId } from "./schemas.js";
 
-const DRAFT_2020_12 = "https://json-schema.org/draft/2020-12/schema";
-
 /** Lane outcome shared by `implement@1` and `tests@1`. */
 function laneStatus(): Record<string, unknown> {
   return {
@@ -28,9 +26,10 @@ function deepFreeze<Value>(value: Value): Value {
 
 /**
  * Builds the documents. They are written out by hand, not generated, so a
- * library upgrade cannot change a released version, and they use only the
- * keywords structured output support commonly accepts: `type`, `enum`,
- * `properties`, `required`, `additionalProperties` and `items`.
+ * library upgrade cannot change a released version. They use only `type`,
+ * `enum`, `properties`, `required`, `additionalProperties` and `items`, and
+ * declare no `$schema`: Claude Code checks `--json-schema` with a draft-07
+ * validator that rejects a 2020-12 `$schema`.
  */
 function buildJsonSchemas(): Record<
   AgentResultSchemaId,
@@ -38,7 +37,6 @@ function buildJsonSchemas(): Record<
 > {
   return {
     "implement@1": {
-      $schema: DRAFT_2020_12,
       title: "implement@1",
       description:
         "Result of an implement lane: whether the work is done, what it did and which paths it changed.",
@@ -58,7 +56,6 @@ function buildJsonSchemas(): Record<
       additionalProperties: false,
     },
     "tests@1": {
-      $schema: DRAFT_2020_12,
       title: "tests@1",
       description:
         "Result of a tests lane: the tests it wrote and whether they fail before the implementation, as they should.",
@@ -81,7 +78,6 @@ function buildJsonSchemas(): Record<
       additionalProperties: false,
     },
     "review@1": {
-      $schema: DRAFT_2020_12,
       title: "review@1",
       description:
         "Result of a review lane: the verdict and the findings behind it.",
@@ -123,7 +119,6 @@ function buildJsonSchemas(): Record<
       additionalProperties: false,
     },
     "gate@1": {
-      $schema: DRAFT_2020_12,
       title: "gate@1",
       description: "Result of a gate: whether it passed and the checks it ran.",
       type: "object",
@@ -162,11 +157,16 @@ function buildJsonSchemas(): Record<
 }
 
 /**
- * JSON Schema (draft 2020-12) of each standard result, by schema id.
+ * JSON Schema of each standard result, by schema id.
  *
  * @remarks
- * Pass one as a driver's `outputSchema` so the agent returns that shape, then
- * check the output with `parseAgentResult`. The two accept the same values,
+ * Each document is valid under draft-07 and 2020-12 and declares no
+ * `$schema`. Ask the agent for the shape with one, for example through
+ * Claude Code's `--json-schema`, then check the output with
+ * `parseAgentResult`. `implement@1` (`notes`) and `review@1` (a finding's
+ * `line`) have optional properties, so strict structured output that needs
+ * every property in `required`, such as Codex's `outputSchema`, does not
+ * accept them; `tests@1` and `gate@1` have none. The two accept the same values,
  * except that the parser also rejects integers beyond
  * `Number.MAX_SAFE_INTEGER`. Each document's `title` is its schema id. A released
  * version never changes. The map and every document are deeply frozen; copy

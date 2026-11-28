@@ -1,7 +1,6 @@
 {
   "id": "implement@1",
   "jsonSchema": {
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
     "title": "implement@1",
     "description": "Result of an implement lane: whether the work is done, what it did and which paths it changed.",
     "type": "object",
