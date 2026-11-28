@@ -84,6 +84,7 @@ import {
   type ClaudeToolEnv,
   checkClaudeToolEnv,
   claudeToolEnvValues,
+  readClaudeToolEnvSource,
 } from "./claude-tool-env.js";
 import {
   checkMcpSecretsEnforceable,
@@ -869,6 +870,12 @@ export class ClaudeAgentSdkDriver {
   readonly #allowLocalBinding: boolean;
   readonly #allowBackgroundTasks: boolean;
   readonly #toolEnv: CheckedClaudeToolEnv | undefined;
+  // The toolEnv source read once per run, by request: every env the run
+  // builds (checks, options, session reads) holds the same values.
+  readonly #toolEnvSnapshots = new WeakMap<
+    object,
+    Readonly<Record<string, string | undefined>> | undefined
+  >();
   readonly #strictBinaryResolution: boolean;
   // Maps an ADK session id -> the SDK session id captured from the
   // first turn's system/init (or result) message. Subsequent turns of the same
@@ -1198,6 +1205,12 @@ export class ClaudeAgentSdkDriver {
       if (name !== BRIDGE_MCP_SERVER) mcpEvents.servers.add(name);
     }
     try {
+      // One read of the toolEnv source for the whole run, inside the try so
+      // a source that throws ends the run with an error event.
+      this.#toolEnvSnapshots.set(
+        request,
+        readClaudeToolEnvSource(this.#toolEnv, this.#env),
+      );
       // A session store factory that cannot build its store ends the run
       // here, before the SDK is loaded: a store that fails inside append()
       // would only be reported as mirror_error and the run would go on
@@ -1708,6 +1721,7 @@ export class ClaudeAgentSdkDriver {
         };
       }
     } finally {
+      this.#toolEnvSnapshots.delete(request);
       if (query) {
         await this.disposeQuery(query, completed);
       }
@@ -2143,7 +2157,9 @@ export class ClaudeAgentSdkDriver {
    * `env` one (they win over `toolEnv`), and
    * `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` unless `allowBackgroundTasks`.
    * Nothing else is inherited. {@link ClaudeAgentSdkDriver.run} adds the
-   * run's private temp directory (`CLAUDE_CODE_TMPDIR`, `TMPDIR`).
+   * run's private temp directory (`CLAUDE_CODE_TMPDIR`, `TMPDIR`). Inside a
+   * run the `toolEnv` values come from the run's one read of the source; a
+   * direct call outside a run reads the source again.
    *
    * @param request - The run request.
    * @returns The environment to pass to the SDK.
@@ -2172,7 +2188,12 @@ export class ClaudeAgentSdkDriver {
     const credentials = credentialEnv(request);
     Object.assign(
       env,
-      claudeToolEnvValues(this.#toolEnv, this.#env, credentials),
+      claudeToolEnvValues(
+        this.#toolEnv,
+        this.#env,
+        credentials,
+        this.#toolEnvSnapshots.get(request),
+      ),
       credentials,
     );
     applyBackgroundTaskSetting(env, this.#allowBackgroundTasks);

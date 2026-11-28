@@ -1535,8 +1535,9 @@ new ClaudeAgentSdkDriver({
 - **Only the listed names.** Each name must match the run-spec env grammar
   (`[A-Za-z_][A-Za-z0-9_]{0,127}`) and appear once. Only set, non-empty
   string values are copied; the source is never copied whole. `source` is a
-  record or a function, called each time the driver builds the child
-  environment. A credential variable of the same name wins.
+  record or a function. A function is called once per run, and every check
+  of the run sees the values the child gets, so a host can mint one token
+  per run. A credential variable of the same name wins.
 - **`proxyPassthrough: true`** also copies `HTTPS_PROXY`, `HTTP_PROXY`,
   `NO_PROXY` (both cases), `SSL_CERT_FILE`, `SSL_CERT_DIR` and
   `NODE_EXTRA_CA_CERTS`: the Codex SDK driver's list without `CODEX_HOME`,

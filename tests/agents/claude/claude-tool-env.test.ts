@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { join } from "node:path";
 import { InputValidationError } from "@google/adk";
 import {
   ClaudeAgentSdkDriver,
@@ -235,6 +237,65 @@ describe("toolEnv copies the listed names", () => {
     for await (const event of driver.run(REQUEST)) events.push(event);
     expect(events.some((event) => event.type === "error")).toBe(false);
     expect(env?.GH_TOKEN).toBe("gh-acme-token");
+  });
+
+  test("an SDK run reads a source function once and delivers that value", async () => {
+    // allowedPaths and a declared MCP server make the run build the env for
+    // the model check, the MCP secret check, the options and the session
+    // reads: a source that mints a token per call must still mint one.
+    const work = realpathSync.native(
+      mkdtempSync(join(import.meta.dir, ".tool-env-scratch-")),
+    );
+    try {
+      let calls = 0;
+      let delivered: Record<string, string | undefined> | undefined;
+      const driver = new ClaudeAgentSdkDriver({
+        env: HOST,
+        pathToClaudeCodeExecutable: "/fake/claude",
+        toolEnv: {
+          names: ["GH_TOKEN"],
+          source: () => {
+            calls += 1;
+            return { GH_TOKEN: `gh-acme-mint-${calls}` };
+          },
+        },
+        mcpServers: {
+          acme_tools: {
+            type: "stdio",
+            command: "/bin/sh",
+            args: ["-v"],
+            env: { MODE: { public: "fast" } },
+          },
+        },
+        sdk: {
+          query: ((input: { options?: { env?: typeof delivered } }) => {
+            delivered = input.options?.env;
+            return (async function* () {})();
+          }) as never,
+        },
+      });
+      const request = {
+        ...REQUEST,
+        workingDirectory: work,
+        permissions: {
+          mode: "workspace-write" as const,
+          allowedPaths: [work],
+        },
+      };
+      for await (const _event of driver.run(request)) {
+        // Drain the run.
+      }
+      expect(delivered?.GH_TOKEN).toBe("gh-acme-mint-1");
+      expect(calls).toBe(1);
+      // A later run reads the source again.
+      for await (const _event of driver.run(request)) {
+        // Drain the run.
+      }
+      expect(delivered?.GH_TOKEN).toBe("gh-acme-mint-2");
+      expect(calls).toBe(2);
+    } finally {
+      rmSync(work, { recursive: true, force: true });
+    }
   });
 });
 

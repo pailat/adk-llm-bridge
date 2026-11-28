@@ -34,9 +34,9 @@ export interface ClaudeToolEnv {
    */
   names?: readonly string[];
   /**
-   * Where the values come from. A function is called each time the driver
-   * builds the child environment, so a host can hand out a fresh token per
-   * run.
+   * Where the values come from. A function is called once per run (and on
+   * each direct `buildEnv` call outside a run), so a host can hand out a
+   * fresh token per run; every check of the run sees the value delivered.
    *
    * @defaultValue the driver's `env` option (`process.env` when unset)
    */
@@ -200,6 +200,27 @@ export function checkClaudeToolEnv(
 }
 
 /**
+ * Reads the `toolEnv` source once: calls a source function, or returns the
+ * source record (the driver env when unset). A run takes one snapshot and
+ * builds every child environment of the run from it, so a function that
+ * mints a token is called once per run.
+ *
+ * @param toolEnv - The checked option, or `undefined` when it is off.
+ * @param driverEnv - The driver's `env`, the default source.
+ * @returns The source values, or `undefined` when the option is off or
+ * lists no name (the source is then not read).
+ */
+export function readClaudeToolEnvSource(
+  toolEnv: CheckedClaudeToolEnv | undefined,
+  driverEnv: Readonly<Record<string, string | undefined>>,
+): Readonly<Record<string, string | undefined>> | undefined {
+  if (toolEnv === undefined || toolEnv.names.length === 0) return undefined;
+  return typeof toolEnv.source === "function"
+    ? toolEnv.source()
+    : (toolEnv.source ?? driverEnv);
+}
+
+/**
  * The `toolEnv` variables of one child environment.
  *
  * @remarks
@@ -211,18 +232,18 @@ export function checkClaudeToolEnv(
  * @param toolEnv - The checked option, or `undefined` when it is off.
  * @param driverEnv - The driver's `env`, the default source.
  * @param skip - Variables the child gets from elsewhere, which win.
+ * @param snapshot - The run's source snapshot from
+ * {@link readClaudeToolEnvSource}; the source is read here when unset.
  * @returns The variables to add (empty when the option is off).
  */
 export function claudeToolEnvValues(
   toolEnv: CheckedClaudeToolEnv | undefined,
   driverEnv: Readonly<Record<string, string | undefined>>,
   skip: Readonly<Record<string, string>>,
+  snapshot?: Readonly<Record<string, string | undefined>>,
 ): Record<string, string> {
   if (toolEnv === undefined || toolEnv.names.length === 0) return {};
-  const source =
-    typeof toolEnv.source === "function"
-      ? toolEnv.source()
-      : (toolEnv.source ?? driverEnv);
+  const source = snapshot ?? readClaudeToolEnvSource(toolEnv, driverEnv);
   const out: Record<string, string> = {};
   for (const name of toolEnv.names) {
     if (Object.hasOwn(skip, name)) continue;
