@@ -23,7 +23,11 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   that resume nothing (`ClaudeCliDriver`, `CodexCliDriver`, a Claude SDK
   run with an MCP server secret) return no `sessionId`. A failed or
   aborted run returns it only when the driver named the session before it
-  stopped. Only the agent's own run report counts: a delegated sub-agent's
+  stopped: a new session, or a resumed Claude SDK session when the run
+  threw. A resumed session that is aborted is not returned, for any
+  driver, so the caller keeps the id it passed. Under default delegation
+  (`finalAnswer: "subagent"`), `text` is the sub-agent's answer after the
+  agent's transfer, nested transfers included. Only the agent's own run report counts: a delegated sub-agent's
   session and turns are never the agent's, and `usage.costUsd` sums the
   run-scoped costs of the agent and its sub-agents (a session total is the
   agent's own). `signal` aborts the run, and the driver stops its child
@@ -47,7 +51,9 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `sessionId`) when the `completed` event has any of them. That event is
   the held final text, else the held error (which now gets the run's token
   usage too), else a content-less event of its own when the run ended on a
-  tool result and reported tokens, a cost, a turn count or a session. A
+  tool result and reported tokens, a cost, a turn count or a session (put
+  ahead of a delegated sub-agent's final answer, which stays the last
+  event, as ADK's `AgentTool` reads it). A
   cost that covers that run only also goes to `customMetadata.costUsd`, so
   `AgentInvocationGateway`'s `usage.costUsd` (and a Workflow step's usage)
   no longer leaves `ExternalAgent` cost out, even for a run that reported

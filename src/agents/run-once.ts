@@ -85,8 +85,11 @@ export interface AgentRunOutcome {
   structured?: unknown;
   /**
    * Text of the final answer: the agent's last event with content, when it
-   * is text. Empty when the run ended on a tool call or result, or had no
-   * text (a tool's output or an error message is never the answer).
+   * is text. When that event is the agent's transfer to a sub-agent (default
+   * delegation, where the sub-agent's turn is the final answer), the
+   * sub-agent's last text after it. Empty when the run ended on a tool call
+   * or result, or had no text (a tool's output or an error message is never
+   * the answer).
    */
   text: string;
   /** Cost, turns and tokens of the run. */
@@ -105,9 +108,12 @@ export interface AgentRunOutcome {
    * server secret): when you passed a `sessionId` and get none or another
    * one back, that session was not resumed. A run that failed or was
    * aborted returns the session only when the driver named it before it
-   * stopped (Claude SDK: from its first message; Codex SDK: a new thread,
-   * not a resumed one, after an abort). Its absence there does not mean the
-   * session is gone: the id you passed is still yours to retry with.
+   * stopped: a new session (Claude SDK: from its first message; Codex SDK:
+   * a new thread), or a resumed Claude SDK session when the run threw. A
+   * resumed session that is aborted is not returned, for any driver: the
+   * abort ends the run before the driver reports the session it kept. Its
+   * absence there does not mean the session is gone: the id you passed is
+   * still yours to retry with.
    */
   sessionId?: string;
   /**
@@ -277,15 +283,31 @@ interface FinalAnswer {
  * that event is text: not a function call or result (tool output is not the
  * answer), not thought, not an error. `undefined` when the run ended on
  * something else or had no text. Content-less events (state, usage, errors)
- * are skipped.
+ * are skipped. When the agent's last such event is its transfer to another
+ * agent (`actions.transferToAgent`, as in default delegation, where the
+ * coordinator writes nothing after it), the answer is the target's, read
+ * the same way from the events after the transfer, nested transfers
+ * included.
  */
 function finalAnswer(
   agent: ExternalAgent,
   events: readonly Event[],
 ): FinalAnswer | undefined {
-  for (let index = events.length - 1; index >= 0; index--) {
+  return finalAnswerOf(agent.name, events, 0);
+}
+
+function finalAnswerOf(
+  author: string,
+  events: readonly Event[],
+  start: number,
+): FinalAnswer | undefined {
+  for (let index = events.length - 1; index >= start; index--) {
     const event = events[index];
-    if (!event || event.partial || event.author !== agent.name) continue;
+    if (!event || event.partial || event.author !== author) continue;
+    const target = event.actions?.transferToAgent;
+    if (target && target !== author && !event.errorCode) {
+      return finalAnswerOf(target, events, index + 1);
+    }
     const parts = event.content?.parts ?? [];
     if (parts.length === 0) continue;
     if (event.errorCode) return undefined;

@@ -755,6 +755,11 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
     // The run's last error event is held the same way, so the model info can
     // ride on it when the run has no final text.
     let heldError: Event | undefined;
+    // A delegated sub-agent's last surfaced text is held the same way, so a
+    // report carrier of this agent's own (when the sub-agent's turn is the
+    // final answer and this agent writes none) goes ahead of it, and the
+    // answer stays the last event, which ADK's AgentTool reads.
+    let heldDelegated: Event | undefined;
     let startedEvent: ExternalAgentStartedEvent | undefined;
     // Events queued and events the consumer has taken back control after.
     // The Runner stores a non-partial event before it asks for the next one,
@@ -777,6 +782,10 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
         ? Promise.resolve()
         : new Promise((resolve) => drainWaiters.push(resolve));
     const flushHeld = () => {
+      if (heldDelegated) {
+        enqueue(heldDelegated);
+        heldDelegated = undefined;
+      }
       if (heldFinal) {
         enqueue(heldFinal);
         heldFinal = undefined;
@@ -807,7 +816,14 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
         },
         // Sub-agents trace their own model calls (one span per call); the
         // delegation itself is traced by `traceDelegation`.
-        eventSink: (event) => push(event),
+        eventSink: (event) => {
+          if (isDelegatedText(event, this.name)) {
+            flushHeld();
+            heldDelegated = event;
+            return;
+          }
+          push(event);
+        },
         traceDelegation: (info, run) => tracer.traceDelegation(info, run),
         waitForTimeline,
       });
@@ -1098,7 +1114,8 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
             // error. Without either (the run ended on a tool result, or had
             // no text at all), an event of its own carries it, so the run's
             // cost and tokens are not lost; an event already pushed is never
-            // changed.
+            // changed. A held sub-agent answer is released after it, so that
+            // answer stays the last event.
             const ownCarrier =
               !heldFinal && !heldError && (usageMetadata || hasRunReport(event))
                 ? createEvent({
@@ -1819,6 +1836,22 @@ function withRunReport(
       ? { [COST_METADATA_KEY]: costUsd }
       : {}),
   };
+}
+
+/**
+ * Whether a surfaced sub-agent event is a final text: another author's
+ * non-partial event with text and no call, result or error. Such an event
+ * may be the run's final answer, so it is held like this agent's own text.
+ */
+function isDelegatedText(event: Event, agentName: string): boolean {
+  if (event.author === agentName || event.partial || event.errorMessage) {
+    return false;
+  }
+  const parts = event.content?.parts ?? [];
+  return (
+    parts.some((part) => typeof part.text === "string" && part.text) &&
+    !parts.some((part) => part.functionCall || part.functionResponse)
+  );
 }
 
 /**

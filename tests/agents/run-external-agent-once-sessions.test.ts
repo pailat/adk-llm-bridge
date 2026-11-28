@@ -4,6 +4,7 @@
  * outcome reads only the agent's own run report.
  */
 import { describe, expect, test } from "bun:test";
+import { InvocationContext, PluginManager } from "@google/adk";
 import { ClaudeAgent } from "../../src/agents/claude-agent.js";
 import { FxCliDriver } from "../../src/agents/driver/fx-cli.js";
 import {
@@ -11,6 +12,7 @@ import {
   CodexCliDriver,
   type CodexCliSpawn,
   CodexSdkDriver,
+  EXTERNAL_AGENT_RUN_METADATA_KEY,
   ExternalAgent,
   type ExternalAgentDriver,
   type ExternalAgentEvent,
@@ -19,6 +21,7 @@ import {
 } from "../../src/agents/index.js";
 import { FX_PROVIDER } from "../../src/agents/provider/fx.js";
 import { CLAUDE_PROVIDER } from "../../src/agents/provider/schema.js";
+import { AgentInvocationGateway } from "../../src/runtime/agent-invocation-gateway.js";
 import { baseConfig, FX_SUCCESS, recordingSpawn } from "./fx/helpers.js";
 import { noHostMcpServers } from "./helpers.js";
 
@@ -209,15 +212,28 @@ describe("Codex-shaped completed events (exit code and usage only)", () => {
 });
 
 /** A child that reports its own cost, turns and session. */
-function child(): ExternalAgent {
+function child(
+  answer = "written",
+  subAgents: ExternalAgent[] = [],
+): ExternalAgent {
   return new ExternalAgent({
-    name: "acme_writer",
+    name: subAgents.length > 0 ? "acme_editor" : "acme_writer",
     provider: CLAUDE_PROVIDER,
     permissions: { mode: "workspace-write", allowNetwork: false },
+    subAgents,
     driver: {
       providerId: CLAUDE_PROVIDER.id,
-      async *run() {
-        yield { type: "output", content: "written" };
+      async *run(request: ExternalAgentRunRequest) {
+        if (subAgents.length > 0) {
+          await request.toolGateway?.runSubAgent({
+            agentName: "acme_writer",
+            task: "write it",
+          });
+          // Dropped: the writer's turn is the editor's final answer.
+          yield { type: "output", content: "editor done" };
+        } else {
+          yield { type: "output", content: answer };
+        }
         yield {
           type: "completed",
           exitCode: 0,
@@ -230,18 +246,31 @@ function child(): ExternalAgent {
   });
 }
 
-function parent(completed: ExternalAgentEvent): ExternalAgent {
+function parent(
+  completed: ExternalAgentEvent,
+  options: {
+    subAgent?: ExternalAgent;
+    delegation?: "subagent" | "coordinator";
+    outputSchema?: Record<string, unknown>;
+  } = {},
+): ExternalAgent {
+  const subAgent = options.subAgent ?? child();
   return new ExternalAgent({
     name: "acme_lead",
     provider: CLAUDE_PROVIDER,
     permissions: { mode: "read-only", allowNetwork: false },
-    subAgents: [child()],
-    delegation: { finalAnswer: "coordinator" },
+    subAgents: [subAgent],
+    ...(options.delegation === "subagent"
+      ? {}
+      : { delegation: { finalAnswer: "coordinator" } }),
+    ...(options.outputSchema
+      ? { outputSchema: options.outputSchema as never }
+      : {}),
     driver: {
       providerId: CLAUDE_PROVIDER.id,
       async *run(request: ExternalAgentRunRequest) {
         await request.toolGateway?.runSubAgent({
-          agentName: "acme_writer",
+          agentName: subAgent.name,
           task: "write it",
         });
         yield { type: "output", content: "lead done" };
@@ -277,6 +306,122 @@ describe("sub-agent run reports are not the agent's own", () => {
     expect(outcome.sessionId).toBeUndefined();
     expect(outcome.usage.turns).toBeUndefined();
     expect(outcome.usage.costUsd).toBeCloseTo(0.1, 10);
+  });
+});
+
+describe("default delegation: the sub-agent's turn is the final answer", () => {
+  const leadCompleted: ExternalAgentEvent = {
+    type: "completed",
+    exitCode: 0,
+    numTurns: 2,
+    usage: { inputTokens: 5, outputTokens: 1, totalCostUsd: 0.2 },
+  };
+
+  test("text is the sub-agent's answer and usage keeps the lead's report", async () => {
+    const outcome = await runExternalAgentOnce(
+      parent(leadCompleted, { delegation: "subagent" }),
+      { prompt: "lead" },
+    );
+    expect(outcome.errorKind).toBeUndefined();
+    expect(outcome.text).toBe("written");
+    expect(outcome.usage.turns).toBe(2);
+    expect(outcome.usage.costUsd).toBeCloseTo(0.3, 10);
+  });
+
+  test("under an outputSchema the sub-agent's JSON answer is structured", async () => {
+    const outcome = await runExternalAgentOnce(
+      parent(leadCompleted, {
+        delegation: "subagent",
+        subAgent: child('{"status":"ok"}'),
+        outputSchema: { type: "object" },
+      }),
+      { prompt: "lead" },
+    );
+    expect(outcome.errorKind).toBeUndefined();
+    expect(outcome.structured).toEqual({ status: "ok" });
+  });
+
+  test("a nested transfer follows to the innermost answer", async () => {
+    const outcome = await runExternalAgentOnce(
+      parent(leadCompleted, {
+        delegation: "subagent",
+        subAgent: child("written", [child()]),
+      }),
+      { prompt: "lead" },
+    );
+    expect(outcome.errorKind).toBeUndefined();
+    expect(outcome.text).toBe("written");
+  });
+
+  test("the lead's run report does not replace the answer as the last event", async () => {
+    // ADK AgentTool reads the last event's content as the agent's result.
+    const agent = parent(leadCompleted, { delegation: "subagent" });
+    const result = await new AgentInvocationGateway({
+      resolveAgent: () => agent,
+    }).run({
+      agentName: agent.name,
+      input: { role: "user", parts: [{ text: "lead" }] },
+      parentContext: new InvocationContext({
+        invocationId: "inv-acme-lead",
+        agent,
+        session: {
+          id: "s-acme-lead",
+          appName: "acme",
+          userId: "user",
+          state: {},
+          events: [],
+          lastUpdateTime: 1,
+        },
+        pluginManager: new PluginManager(),
+      }),
+    });
+    const last = result.events.at(-1);
+    expect(last?.author).toBe("acme_writer");
+    expect(last?.content?.parts?.[0]?.text).toBe("written");
+    const report = result.events.find(
+      (event) =>
+        event.author === "acme_lead" &&
+        event.customMetadata?.[EXTERNAL_AGENT_RUN_METADATA_KEY] !== undefined,
+    );
+    expect(report).toBeDefined();
+    expect(result.usage.costUsd).toBeCloseTo(0.3, 10);
+  });
+});
+
+describe("Claude SDK: a resumed run that is aborted", () => {
+  test("returns no sessionId: the id passed in stays the caller's", async () => {
+    const controller = new AbortController();
+    const agent = new ClaudeAgent({
+      name: "acme_coder",
+      driverOptions: {
+        sdk: {
+          query: ({ options }) => {
+            const { resume, abortController } = options as {
+              resume?: string;
+              abortController?: AbortController;
+            };
+            return (async function* () {
+              yield { type: "system", subtype: "init", session_id: resume };
+              await new Promise<void>((resolve) => {
+                abortController?.signal.addEventListener(
+                  "abort",
+                  () => resolve(),
+                  { once: true },
+                );
+                controller.abort();
+              });
+            })() as never;
+          },
+        },
+      },
+    });
+    const outcome = await runExternalAgentOnce(agent, {
+      prompt: "continue",
+      sessionId: "sdk-acme-41",
+      signal: controller.signal,
+    });
+    expect(outcome.errorKind).toBe("aborted");
+    expect(outcome.sessionId).toBeUndefined();
   });
 });
 
