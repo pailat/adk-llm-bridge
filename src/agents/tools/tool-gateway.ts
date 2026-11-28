@@ -11,6 +11,12 @@ import {
 } from "@google/adk";
 import { type Content, FinishReason } from "@google/genai";
 import {
+  CACHE_CREATION_METADATA_KEY,
+  COST_METADATA_KEY,
+  COST_SOURCE_METADATA_KEY,
+  MARKET_COST_METADATA_KEY,
+} from "../../converters/cache-usage.js";
+import {
   type AgentInvocationErrorKind,
   AgentInvocationGateway,
   type AgentInvocationInterruptKind,
@@ -25,12 +31,28 @@ import {
 } from "../event-titles.js";
 import {
   EXTERNAL_AGENT_MODEL_METADATA_KEY,
+  EXTERNAL_AGENT_RUN_METADATA_KEY,
   EXTERNAL_AGENT_TRANSFER_FAILED,
 } from "../events.js";
 import { delegatePermissions } from "../permissions/inheritance.js";
 import { snapshotPermissionPolicy } from "../permissions/policy.js";
 import type { ExternalAgentPermissionPolicy } from "../permissions/schema.js";
 import { EXTERNAL_AGENT_TOOLS_METADATA_KEY } from "./adk-tool-bridge.js";
+
+/**
+ * A native-shape sub-agent event's customMetadata keeps only these keys: the
+ * child's model, tools and run reports, its cost (with what that cost is)
+ * and its cache writes, which the host must still see and count.
+ */
+const SURFACED_METADATA_KEYS = [
+  EXTERNAL_AGENT_MODEL_METADATA_KEY,
+  EXTERNAL_AGENT_TOOLS_METADATA_KEY,
+  EXTERNAL_AGENT_RUN_METADATA_KEY,
+  COST_METADATA_KEY,
+  COST_SOURCE_METADATA_KEY,
+  MARKET_COST_METADATA_KEY,
+  CACHE_CREATION_METADATA_KEY,
+] as const;
 
 /** A request to run one ADK sub-agent. */
 export interface RunSubAgentInput {
@@ -543,11 +565,17 @@ export class ToolGateway {
     if (hasRenderableContent) {
       return true;
     }
-    // Keep content-less events that still carry a control signal: a child's
-    // `escalate` must reach enclosing LoopAgents.
+    // Keep content-less events that still carry a control signal (a child's
+    // `escalate` must reach enclosing LoopAgents) or an ExternalAgent's own
+    // report carrier (it always has the model key), whose usage the host
+    // counts. Any other content-less event, usage or not, is a blank bubble.
+    const customMetadata = (
+      event as Event & { customMetadata?: Record<string, unknown> }
+    ).customMetadata;
     return (
       Object.keys(event.actions?.stateDelta ?? {}).length > 0 ||
-      event.actions?.escalate === true
+      event.actions?.escalate === true ||
+      SURFACED_METADATA_KEYS.some((key) => customMetadata?.[key] !== undefined)
     );
   }
 
@@ -577,18 +605,15 @@ export class ToolGateway {
       // Native sub-agent events carry no customMetadata. Strip any leaked from
       // nested ExternalAgent/CodexAgent self-stamping (metadataForExternalEvent)
       // so the surfaced timeline matches native exactly, except the child's
-      // own model and tools reports: the host must still see them, and the
-      // event's `author` (the child) keeps them attributable. Preserve all
-      // other fields (content/actions/finishReason/turnComplete/...) via
-      // spread.
+      // own model, tools and run reports and its cost and cache writes: the
+      // host must still see and count them, and the event's `author` (the
+      // child) keeps them attributable. Preserve all other fields
+      // (content/actions/finishReason/turnComplete/...) via spread.
       const { customMetadata, ...rest } = event as Event & {
         customMetadata?: Record<string, unknown>;
       };
       const reports = Object.fromEntries(
-        [
-          EXTERNAL_AGENT_MODEL_METADATA_KEY,
-          EXTERNAL_AGENT_TOOLS_METADATA_KEY,
-        ].flatMap((key) =>
+        SURFACED_METADATA_KEYS.flatMap((key) =>
           customMetadata?.[key] === undefined
             ? []
             : [[key, customMetadata[key]]],

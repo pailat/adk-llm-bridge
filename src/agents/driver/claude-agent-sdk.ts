@@ -1116,6 +1116,8 @@ export class ClaudeAgentSdkDriver {
     const toolNames = new Map<string, string>();
 
     const persistedIds = new Set<string>();
+    // The SDK session this run kept for the next turn, reported on `completed`.
+    let keptSession: string | undefined;
     let completed = false;
     let failed = false;
     let emittedOutput = false;
@@ -1503,6 +1505,7 @@ export class ClaudeAgentSdkDriver {
         if (adkSessionId && !offDisk) {
           const captured = extractSdkSessionId(message);
           if (captured) {
+            keptSession = captured;
             this.#sdkSessionsFor(request).set(adkSessionId, captured);
             if (
               stateKey &&
@@ -1615,6 +1618,7 @@ export class ClaudeAgentSdkDriver {
             if (!event.model && initModel) {
               event = { ...event, model: initModel, modelFromInit: true };
             }
+            if (keptSession) event = { ...event, sessionId: keptSession };
             const pending = backgroundTasks.pending();
             if (event.exitCode === 0 && pending.length > 0) {
               yield backgroundTaskPendingEvent(pending, "Claude Agent SDK");
@@ -1733,6 +1737,9 @@ export class ClaudeAgentSdkDriver {
         type: "completed",
         exitCode: failed ? 1 : 0,
         ...(initModel ? { model: initModel } : {}),
+        // A run that threw or was aborted after the SDK named its session
+        // still kept it: a resumed one is not written to state again.
+        ...(keptSession ? { sessionId: keptSession } : {}),
         timestamp: Date.now(),
       };
     }

@@ -119,6 +119,7 @@ export class CodexThreadTracker {
   readonly #stateKey: string | undefined;
   readonly #savedThreadId: string | undefined;
   #reported: string | undefined;
+  #kept: string | undefined;
 
   /**
    * @param stateKey - The key to save the id under; `undefined` disables
@@ -136,6 +137,7 @@ export class CodexThreadTracker {
    */
   observe(threadId: string | undefined | null): ExternalAgentEvent | undefined {
     if (!this.#stateKey || !threadId) return undefined;
+    this.#kept = threadId;
     if (threadId === this.#savedThreadId || threadId === this.#reported) {
       return undefined;
     }
@@ -145,6 +147,15 @@ export class CodexThreadTracker {
       stateDelta: { [this.#stateKey]: threadId },
       timestamp: Date.now(),
     };
+  }
+
+  /**
+   * The thread the run is on, the resumed one included, once the stream or
+   * the thread named it: the id the next run resumes. `undefined` while no
+   * id was seen, and always when reporting is disabled (nothing to resume).
+   */
+  get kept(): string | undefined {
+    return this.#kept;
   }
 }
 

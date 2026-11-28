@@ -466,6 +466,16 @@ export class CodexSdkDriver {
     return this.#model;
   }
 
+  /**
+   * The `session.state` key this driver resumes an agent's thread from.
+   *
+   * @param agentName - The agent's name.
+   * @returns The key, as `threadStateKey` builds it.
+   */
+  threadStateKeyFor(agentName: string): string {
+    return this.#threadStateKey(agentName);
+  }
+
   /** `false`: Codex reports no model on any event. */
   get reportsResolvedModel(): boolean {
     return false;
@@ -915,6 +925,9 @@ export async function* runCodexTurn(
   let failed = false;
   let terminalEvent: ExternalAgentEvent | undefined;
   let cleanup: () => Promise<void> = async () => {};
+  // The thread the run is on, reported on `completed` so a caller that
+  // resumed a thread learns it was kept (no `state_delta` repeats it).
+  let tracker: CodexThreadTracker | undefined;
   try {
     const { client, threadOptions, verifyThread } = options.open();
     const turn = prepareCodexTurn({
@@ -934,10 +947,7 @@ export async function* runCodexTurn(
     // The `thread.started` event carries the id before the first turn
     // completes, so the `state_delta` goes out at once and a turn that fails
     // midway is still resumable.
-    const tracker = new CodexThreadTracker(
-      options.stateKey,
-      turn.savedThreadId,
-    );
+    tracker = new CodexThreadTracker(options.stateKey, turn.savedThreadId);
 
     // One failure surfaces as a stream `error` followed by `turn.failed`.
     // Hold the stream error back until the next event: when that is the
@@ -1002,7 +1012,7 @@ export async function* runCodexTurn(
 
     if (terminalEvent) {
       completed = true;
-      yield terminalEvent;
+      yield withKeptThread(terminalEvent, tracker.kept);
     }
   } catch (error) {
     if (endedByAbort()) {
@@ -1023,12 +1033,21 @@ export async function* runCodexTurn(
   }
 
   if (!completed) {
-    yield {
-      type: "completed",
-      exitCode: failed ? 1 : 0,
-      timestamp: Date.now(),
-    };
+    yield withKeptThread(
+      { type: "completed", exitCode: failed ? 1 : 0, timestamp: Date.now() },
+      tracker?.kept,
+    );
   }
+}
+
+/** A `completed` event with the thread the run kept as its `sessionId`. */
+function withKeptThread(
+  event: ExternalAgentEvent,
+  threadId: string | undefined,
+): ExternalAgentEvent {
+  return event.type === "completed" && threadId
+    ? { ...event, sessionId: threadId }
+    : event;
 }
 
 /** Names of the MCP servers set in the driver's own `config.mcp_servers`. */

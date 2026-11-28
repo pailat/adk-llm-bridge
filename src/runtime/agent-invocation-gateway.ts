@@ -64,9 +64,10 @@ export interface AgentInvocationUsage {
    * Summed `customMetadata.costUsd`: US dollars the providers reported
    * charging for the run's model calls (AI Gateway and OpenRouter `usage.cost`;
    * for a BYOK gateway call, the upstream or market cost the gateway
-   * reports, see `COST_METADATA_KEY`). Absent when no event reported one,
-   * which includes `ExternalAgent` runs: their cost is on their own usage
-   * report and spans, not on the event.
+   * reports, see `COST_METADATA_KEY`; an `ExternalAgent` run's reported
+   * cost when it covers that run only, see `ExternalAgentRunReport`). Absent
+   * when no event reported one, which includes an `ExternalAgent` run whose
+   * runtime reported a session total.
    */
   costUsd?: number;
   /** Function calls requested on non-partial events. */
@@ -1740,6 +1741,12 @@ function emptyUsage(): AgentInvocationUsage {
 }
 
 function addUsage(usage: AgentInvocationUsage, event: Event): void {
+  // A cost counts without token counters too: an external runtime can
+  // report what it charged and no tokens.
+  const cost = event.customMetadata?.[COST_METADATA_KEY];
+  if (typeof cost === "number" && Number.isFinite(cost) && cost >= 0) {
+    usage.costUsd = (usage.costUsd ?? 0) + cost;
+  }
   const meta = event.usageMetadata;
   if (!meta) return;
   const prompt = meta.promptTokenCount ?? 0;
@@ -1751,10 +1758,6 @@ function addUsage(usage: AgentInvocationUsage, event: Event): void {
   const written = event.customMetadata?.[CACHE_CREATION_METADATA_KEY];
   if (typeof written === "number" && Number.isFinite(written) && written >= 0) {
     usage.cacheCreationTokens = (usage.cacheCreationTokens ?? 0) + written;
-  }
-  const cost = event.customMetadata?.[COST_METADATA_KEY];
-  if (typeof cost === "number" && Number.isFinite(cost) && cost >= 0) {
-    usage.costUsd = (usage.costUsd ?? 0) + cost;
   }
   usage.llmCalls++;
 }

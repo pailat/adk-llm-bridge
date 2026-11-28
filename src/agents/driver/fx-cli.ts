@@ -1283,6 +1283,10 @@ export class FxCliDriver extends SubprocessJsonlDriver {
           );
           if (signal?.aborted) return;
           yield* sessionEvents;
+          // A resumed session is not saved again, so `completed` names it.
+          const kept = keptFxSession(request, result);
+          yield kept ? { ...event, sessionId: kept } : event;
+          continue;
         }
         yield event;
       }
@@ -1325,6 +1329,19 @@ function savedSessionId(request: ExternalAgentRunRequest): string | undefined {
   )?.session?.state;
   const saved = state?.[fxSessionStateKey(request.agent.name)];
   return typeof saved === "string" && saved.length > 0 ? saved : undefined;
+}
+
+/**
+ * The fx session the run kept for the next turn: the id fx reported, when
+ * it is a plain token saved under the agent's state key. `undefined` when
+ * nothing resumes it (no agent, no id, or an id that is not a token).
+ */
+function keptFxSession(
+  request: ExternalAgentRunRequest,
+  result: FxResult,
+): string | undefined {
+  const id = stringValue(result.session_id);
+  return request.agent && id && isFxSessionId(id) ? id : undefined;
 }
 
 function sessionStoreWarning(

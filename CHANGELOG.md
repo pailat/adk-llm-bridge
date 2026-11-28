@@ -8,6 +8,70 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`runExternalAgentOnce(agent, { prompt, signal, sessionId })`** runs an
+  `ExternalAgent` for one prompt without an ADK `Runner` or a parent
+  `InvocationContext`. It returns an `AgentRunOutcome`:
+  `{ structured, text, usage: { costUsd, turns, tokens, scope }, sessionId, errorKind, cause }`.
+  `sessionId` is the session id the driver reported for the run: the id
+  stored under the session state key the agent's driver reads, whatever the
+  provider id (`claude_sdk_session:<agent>` for `ClaudeAgentSdkDriver`, the
+  `CodexSdkDriver`'s `threadStateKey`, `codex_thread:<agent>` by default,
+  `fx_session:<agent>` for `FxCliDriver`), or on a resume the session the driver says it kept
+  (`ClaudeAgentSdkDriver`, `CodexSdkDriver`, `FxCliDriver`). Passing it
+  back resumes that session, so the ids chain across any number of runs,
+  also from a new agent instance and through the driver's `sessionStore`
+  (such as `SqliteSessionStore`). A passed id is not echoed back: drivers
+  that resume nothing (`ClaudeCliDriver`, `CodexCliDriver`, a Claude SDK
+  run with an MCP server secret) return no `sessionId`. A failed or
+  aborted run returns it only when the driver named the session before it
+  stopped: a new session, or a resumed Claude SDK session when the run
+  threw. A resumed session that is aborted is not returned, for any
+  driver, so the caller keeps the id it passed. Under default delegation
+  (`finalAnswer: "subagent"`), `text` is the sub-agent's answer after the
+  agent's transfer, nested transfers included, from any agent below the
+  target (a SequentialAgent's children), even when the agent then used a
+  built-in tool (Read, Bash...). Only the agent's own run report counts: a delegated sub-agent's
+  session and turns are never the agent's, and `usage.costUsd` sums the
+  run-scoped costs of the agent and its sub-agents (a session total is the
+  agent's own, and so are `usage.tokens` then). `signal` aborts the run, and the driver stops its child
+  process. `text` is the agent's last event with content when it is text,
+  never a tool's output or an error message. `structured` is that answer
+  parsed as JSON when the agent has an `outputSchema` or the driver marks
+  it as structured output (`metadata.structuredOutput`, as
+  `ClaudeAgentSdkDriver`'s `outputSchema` does); a Codex SDK driver
+  `outputSchema` is not marked, so set the agent's `outputSchema` too.
+  Failures are not thrown: `errorKind` is one of the gateway's kinds, or
+  `interrupted` (the run waits for an approval or a long-running tool) or
+  `invalid-output` (no JSON answer under an output schema), and `cause`
+  holds the message, and the code of the error event the failure is (not
+  of an earlier one when the run then threw, timed out or was aborted). An error event the run
+  went on after (a permission denial, a session store mirror error) is not
+  a failure when the runtime exited with 0 and an answer follows it.
+- **`ExternalAgent` reports a run's cost, turns, exit code and session on
+  its events.** The event that carries the run's usage and model info gets
+  `customMetadata.externalAgentRun` (`EXTERNAL_AGENT_RUN_METADATA_KEY`, an
+  `ExternalAgentRunReport` of `costUsd`, `turns`, `scope`, `exitCode` and
+  `sessionId`) when the `completed` event has any of them. That event is
+  the held final text, else the held error (which now gets the run's token
+  usage too), else a content-less event of its own when the run ended on a
+  tool result and reported tokens, a cost, a turn count or a session (put
+  ahead of a delegated sub-agent's final answer, which stays the last
+  event, as ADK's `AgentTool` reads it). A
+  cost that covers that run only also goes to `customMetadata.costUsd`, so
+  `AgentInvocationGateway`'s `usage.costUsd` (and a Workflow step's usage)
+  no longer leaves `ExternalAgent` cost out, even for a run that reported
+  no tokens. A session total is not added there, so resumed sessions are
+  not counted twice. A delegated sub-agent's events keep their run report,
+  cost (with `costSource` and `marketCostUsd`) and cache writes on the host
+  timeline, and its content-less report carrier surfaces there too, so they
+  are counted. A coordinator's streamed partial chunks and its built-in tool
+  calls and results no longer release a held sub-agent answer early. `CodexSdkDriver.threadStateKeyFor(agentName)`
+  returns the key the driver resumes a thread from.
+  `ExternalAgentCompletedEvent` has a new `sessionId`:
+  `ClaudeAgentSdkDriver`, `CodexSdkDriver` and `FxCliDriver` set it to the
+  session the run kept, a resumed one included, and the Claude SDK driver
+  also sets it when the run throws or is aborted after the SDK named it.
+
 - `ClaudeAgentSdkDriver` takes run caps: `maxBudgetUsd` (a number, or a
   function the driver reads when each `query()` call starts), `effort` and
   `maxThinkingTokens`. Values that are not valid are refused when the driver
