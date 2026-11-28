@@ -213,6 +213,16 @@ export const EXTERNAL_AGENT_TOOL_NOT_READ_ONLY =
   "EXTERNAL_AGENT_TOOL_NOT_READ_ONLY";
 
 /**
+ * A `toolArgsAllowlist` entry is malformed: not a string, not
+ * `Bash(<command>)` or `Bash(<prefix>:*)`, an empty or padded command, a
+ * `*` anywhere but a final `:*`, a shell operator (`;`, `&`, `|`, `$`, a
+ * backtick, `<`, `>`, a parenthesis, a backslash or a line break), or a tool
+ * that has no argument rules. Thrown when the driver is built.
+ */
+export const EXTERNAL_AGENT_TOOL_ARGS_RULE_INVALID =
+  "EXTERNAL_AGENT_TOOL_ARGS_RULE_INVALID";
+
+/**
  * The driver config is not a plain object, has a symbol key, or has a key the
  * driver does not know (whatever its value, `undefined` included). Thrown
  * when the driver is built, before any other check, so a misspelled or
@@ -328,6 +338,7 @@ export type ExternalAgentPolicyErrorCode =
   | typeof EXTERNAL_AGENT_SUBAGENTS_UNSUPPORTED
   | typeof EXTERNAL_AGENT_READ_ONLY_TOOL_UNKNOWN
   | typeof EXTERNAL_AGENT_TOOL_NOT_READ_ONLY
+  | typeof EXTERNAL_AGENT_TOOL_ARGS_RULE_INVALID
   | typeof EXTERNAL_AGENT_OPTION_UNKNOWN
   | typeof EXTERNAL_AGENT_MCP_SERVER_INVALID
   | typeof EXTERNAL_AGENT_MCP_SECRET_LITERAL

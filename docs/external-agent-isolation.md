@@ -427,6 +427,43 @@ Declarative workflow agents (`permissions` in a workflow definition) accept
 only `mode`, `allowNetwork` and `allowedPaths`, and reject `readPaths`. Give
 such a step a code-defined agent instead.
 
+### Narrowing shell commands
+
+`tools` offers `Bash` or not, and the no-network sandbox and `allowedPaths`
+bound what a command reaches, but not which commands run. To narrow that,
+give `ClaudeAgentSdkDriver` a `toolArgsAllowlist` of Claude Code permission
+rules:
+
+```ts
+new ClaudeAgentSdkDriver({
+  tools: ["Read", "Edit", "Bash"],
+  toolArgsAllowlist: ["Bash(bun test:*)", "Bash(git log:*)", "Bash(git status)"],
+});
+```
+
+- `Bash(<prefix>:*)` allows `<prefix>` alone or followed by a space and any
+  arguments, so `Bash(git log:*)` allows `git log -5` but not `git logout`.
+  `Bash(<command>)` allows exactly that command. The command is trimmed first.
+- The list is closed. A `Bash` call that matches no rule is denied, and so is
+  every `PowerShell` call. `[]` denies every shell command. Unset (the
+  default), commands are not narrowed.
+- A command with a shell operator never matches: `;`, `&`, `|`, `$`, a
+  backtick, `<`, `>`, a parenthesis, a backslash or a line break. So
+  `git log && curl …` and `git log $(…)` are denied.
+- A `PreToolUse` hook checks every call, so the list holds in every
+  permission mode and an approval cannot override it. The model is told the
+  call was denied, and the run goes on.
+- A prefix rule admits any arguments, options included (`git log
+  --output=<file>` writes a file). Use exact rules where that matters.
+- A malformed rule refuses the driver with
+  `EXTERNAL_AGENT_TOOL_ARGS_RULE_INVALID`: not a string, a tool other than
+  `Bash`, an empty or padded command, a `*` other than a final `:*`, or a
+  shell operator in the rule.
+
+Only `ClaudeAgentSdkDriver` takes this option. The Claude CLI, Codex and fx
+drivers run shell commands without asking the bridge, so they refuse it as an
+unknown option (`EXTERNAL_AGENT_OPTION_UNKNOWN`).
+
 ## Bridged ADK tools
 
 ADK tools given to an external agent (`tools`) are hosted by the Claude Agent
@@ -1884,6 +1921,7 @@ because the tool was not offered. The other codes in the table (`CLAUDE_*`,
 | `EXTERNAL_AGENT_MODEL_REQUIRED` | `EXTERNAL_AGENT_MODEL_REQUIRED` | No | Thrown when a driver with `requireExplicitModel: true` has no `model`, or a router or default alias (`default`, `best`, `opusplan`; Codex and fx have none), or a Claude driver has no `smallFastModel` or one that is an alias instead of a full id. |
 | `EXTERNAL_AGENT_MODEL_OVERRIDE` | `EXTERNAL_AGENT_MODEL_OVERRIDE` | No | Something other than `model` would set or route the model: thrown for model-setting `args` or Codex SDK `config` keys (even with `allowPolicyOverrideArgs`); an error event for a model variable in the run's environment. |
 | `EXTERNAL_AGENT_OPTION_UNKNOWN` | `EXTERNAL_AGENT_OPTION_UNKNOWN` | No | Thrown when a built-in driver's config is not a plain object or has a key the driver does not know (a typo, or an option of another driver: the message says which driver supports it). |
+| `EXTERNAL_AGENT_TOOL_ARGS_RULE_INVALID` | `EXTERNAL_AGENT_TOOL_ARGS_RULE_INVALID` | No | Thrown when `ClaudeAgentSdkDriver` is built with a malformed `toolArgsAllowlist` entry; see [Narrowing shell commands](#narrowing-shell-commands). |
 | `EXTERNAL_AGENT_MCP_SERVER_INVALID` | `EXTERNAL_AGENT_MCP_SERVER_INVALID` | No | Thrown for a malformed `mcpServers` entry (name, type, key, URL, `tools`, `readOnly` without `tools`, `timeoutMs`, header or env name) or `mcpConnectTimeoutMs`. |
 | `EXTERNAL_AGENT_MCP_SECRET_LITERAL` | `EXTERNAL_AGENT_MCP_SECRET_LITERAL` | No | Thrown for a header or env value given as a bare string, or as `{ public }` under a sensitive name. |
 | `EXTERNAL_AGENT_MCP_SERVER_NETWORK_REQUIRED` | `EXTERNAL_AGENT_MCP_SERVER_NETWORK_REQUIRED` | No | A declared http or sse server is not on loopback and the policy does not set `allowNetwork: true`. |

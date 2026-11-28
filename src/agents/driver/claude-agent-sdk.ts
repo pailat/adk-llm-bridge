@@ -137,6 +137,11 @@ import {
   type StrictBinaryCheck,
   strictBinaryRefusal,
 } from "./strict-binary.js";
+import {
+  parseToolArgsAllowlist,
+  type ToolArgsAllowlist,
+  toolArgsDenial,
+} from "./tool-args-allowlist.js";
 
 /**
  * Most SDK sessions for which the driver keeps the last usage counters; the
@@ -506,6 +511,28 @@ export interface ClaudeAgentSdkDriverConfig {
    */
   tools?: readonly string[];
   /**
+   * Opt-in: the only shell commands the agent may run, as Claude Code
+   * permission rules. `Bash(git log:*)` allows `git log` and `git log`
+   * followed by a space and any arguments; `Bash(bun test)` allows exactly
+   * `bun test`. The list is closed: a `Bash` call whose command (trimmed)
+   * matches no rule is denied, and so is every `PowerShell` call.
+   *
+   * @remarks
+   * A `PreToolUse` hook checks each call, so the list holds in every
+   * permission mode and no approval overrides it; the model is told the
+   * call was denied and the run goes on. A command holding a shell
+   * operator (`;`, `&`, `|`, `$`, a backtick, `<`, `>`, a parenthesis, a
+   * backslash or a line break) never matches, so `git log && rm -rf .` is
+   * denied. A prefix rule admits any arguments after it, options included
+   * (`git log --output=<file>` writes a file): list exact commands where
+   * that matters. `[]` denies every shell command. Only `Bash` takes rules;
+   * narrow other tools with {@link tools}. A malformed rule refuses the
+   * driver with `EXTERNAL_AGENT_TOOL_ARGS_RULE_INVALID`.
+   *
+   * @defaultValue none: shell commands are not narrowed
+   */
+  toolArgsAllowlist?: readonly string[];
+  /**
    * Opt-in: let the agent inherit the host's Claude Code configuration. When
    * `true` the driver does not pin the tool set (the SDK default `claude_code`
    * preset applies unless `tools` is set), does not pass `strictMcpConfig`,
@@ -843,6 +870,7 @@ export class ClaudeAgentSdkDriver {
   readonly #sessionStoreLoadTimeoutMs?: number;
   readonly #systemPrompt?: string;
   readonly #tools?: readonly string[];
+  readonly #toolArgsAllowlist?: ToolArgsAllowlist;
   readonly #inheritHostConfig: boolean;
   readonly #allowUnsandboxedShell: boolean;
   readonly #allowLocalBinding: boolean;
@@ -891,7 +919,8 @@ export class ClaudeAgentSdkDriver {
    * `model` is absent or a router alias, or `smallFastModel` is absent or an
    * alias, and `EXTERNAL_AGENT_MCP_SERVER_INVALID` or
    * `EXTERNAL_AGENT_MCP_SECRET_LITERAL` for a malformed `mcpServers` or
-   * `mcpConnectTimeoutMs`.
+   * `mcpConnectTimeoutMs`, and `EXTERNAL_AGENT_TOOL_ARGS_RULE_INVALID` for a
+   * malformed `toolArgsAllowlist`.
    */
   constructor(config: ClaudeAgentSdkDriverConfig = {}) {
     assertKnownDriverOptions(
@@ -970,6 +999,10 @@ export class ClaudeAgentSdkDriver {
     this.#sessionStoreLoadTimeoutMs = config.sessionStoreLoadTimeoutMs;
     this.#systemPrompt = config.systemPrompt;
     this.#tools = config.tools ? [...config.tools] : undefined;
+    this.#toolArgsAllowlist = parseToolArgsAllowlist(
+      "ClaudeAgentSdkDriver",
+      config.toolArgsAllowlist,
+    );
     this.#inheritHostConfig = config.inheritHostConfig ?? false;
     this.#allowUnsandboxedShell = config.allowUnsandboxedShell ?? false;
     this.#allowLocalBinding = config.allowLocalBinding ?? false;
@@ -1285,6 +1318,21 @@ export class ClaudeAgentSdkDriver {
                 ),
               }
             : {}),
+        };
+      }
+      const toolArgs = this.#toolArgsAllowlist;
+      if (toolArgs) {
+        // A hook, not allowedTools: Claude Code's allow rules only skip the
+        // prompt, so a command they do not list would still run when the
+        // host approves it or the mode bypasses prompts.
+        options = {
+          ...options,
+          hooks: withPreToolUseGuard(options.hooks, {
+            unnamedReason:
+              "Denied: a tool call without a name cannot be checked against this agent's toolArgsAllowlist.",
+            deny: (toolName, toolInput) =>
+              toolArgsDenial(toolArgs, toolName, toolInput),
+          }),
         };
       }
       if (policySetsPaths(request.permissions)) {

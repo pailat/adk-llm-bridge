@@ -14,6 +14,16 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   it as `{ changedPaths: result.testPaths }`. A refusal's `index` is the
   path's index in the list. Passing a result with `changedPaths` works as
   before.
+- **`toolArgsAllowlist`** on `ClaudeAgentSdkDriver` narrows the shell
+  commands an agent may run with Claude Code permission rules, such as
+  `["Bash(git log:*)", "Bash(bun test)"]`, so a host no longer needs a
+  wrapper script for it. The list is closed: a `Bash` command that matches no
+  rule is denied, and so is every `PowerShell` call. A command with a shell
+  operator (`;`, `&`, `|`, `$`, a backtick, a redirect, a line break) never
+  matches. A `PreToolUse` hook checks each call, so the list holds in every
+  permission mode. Off by default. A malformed rule refuses the driver with
+  the new `EXTERNAL_AGENT_TOOL_ARGS_RULE_INVALID` code. See
+  [Narrowing shell commands](docs/external-agent-isolation.md#narrowing-shell-commands).
 
 ## [0.7.1] - 2026-11-28
 
