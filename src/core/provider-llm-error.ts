@@ -103,8 +103,12 @@ export class ProviderLlmError extends Error {
 const MAX_CAUSE_DEPTH = 5;
 /** An error `name` that is an identifier, e.g. `TypeError` or `AbortError`. */
 const SAFE_NAME = /^[A-Za-z_$][\w$]{0,63}$/;
-/** A system or library error `code`, e.g. `ECONNREFUSED` or `UND_ERR_SOCKET`. */
-const SAFE_CODE = /^[A-Z][A-Z0-9_]{0,63}$/;
+/**
+ * A system or library error `code`: upper snake case from Node and undici
+ * (`ECONNREFUSED`, `UND_ERR_SOCKET`) or letters-only PascalCase from Bun's own
+ * `fetch` (`ConnectionRefused`, `FailedToOpenSocket`).
+ */
+const SAFE_CODE = /^(?:[A-Z][A-Z0-9_]{0,63}|[A-Z][A-Za-z]{0,63})$/;
 
 /**
  * Describes a caught provider failure without secrets.

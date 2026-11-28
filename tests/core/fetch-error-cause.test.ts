@@ -172,6 +172,19 @@ function notFound(): FakeFetch {
   };
 }
 
+/** Bun's own `fetch` throws its error directly, with a PascalCase `code`. */
+function bunRefused(): FakeFetch {
+  return async () => {
+    throw Object.assign(
+      new Error("Unable to connect. Is the computer able to access the url?"),
+      {
+        code: "ConnectionRefused",
+        path: `https://api.acme.test/v1?token=${QUERY_SECRET}`,
+      },
+    );
+  };
+}
+
 class AcmeFetchError extends Error {
   readonly code = "ACME_PROXY_DOWN";
   constructor() {
@@ -244,6 +257,23 @@ describe("an error thrown inside fetch", () => {
     expect(error.detail).toContain("AcmeFetchError");
     expect(error.detail).toContain("ACME_PROXY_DOWN");
     expect(error.detail).not.toContain("proxy refused");
+    expectNoSecret(error);
+  });
+
+  it("names the PascalCase code of Bun's own fetch error", async () => {
+    const error = await thrown(openAiWith(bunRefused()));
+
+    expect(causes(error).length).toBeGreaterThanOrEqual(2);
+    expect(error.detail).toContain("ConnectionRefused");
+    expect(error.detail).toContain("api.acme.test");
+    expectNoSecret(error);
+  });
+
+  it("names the PascalCase code of Bun's fetch error on Anthropic", async () => {
+    const error = await thrown(anthropicWith(bunRefused()));
+
+    expect(error.detail).toContain("ConnectionRefused");
+    expect(error.detail).toContain("anthropic.acme.test");
     expectNoSecret(error);
   });
 
@@ -363,7 +393,7 @@ describe("retry classification of a fetch failure", () => {
   });
 
   it("stays recoverable for the shared classifier", async () => {
-    for (const fetch of [refused(), notFound()]) {
+    for (const fetch of [refused(), notFound(), bunRefused()]) {
       const error = await thrown(openAiWith(fetch));
       expect(classifyRecoverable({ message: error.detail }).recoverable).toBe(
         true,

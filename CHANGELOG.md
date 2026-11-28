@@ -14,8 +14,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `ProviderLlmError` `detail` (and `errorMessage` in `errorMode: "response"`)
   now appends the `name` and `code` of each error in the `cause` chain and the
   request's hostname, for example
-  `Connection error. (cause: TypeError, Error ECONNREFUSED; host: api.openai.com)`.
-  Cause messages, URLs, query strings and headers are left out, so no API key
+  `Connection error. (cause: TypeError, Error ECONNREFUSED; host: api.openai.com)`,
+  or `Error ConnectionRefused` from Bun's own `fetch`. Cause messages, URLs, query strings and headers are left out, so no API key
   or token reaches the message, and a part that would change whether
   `classifyRecoverable` calls the message recoverable (a host such as
   `payments.example.com`, a code such as `ENOENT`) is left out. The original
