@@ -28,7 +28,9 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `proxyPassthrough: true` copies the Codex proxy and certificate variables
   plus `NODE_EXTRA_CA_CERTS` (`CLAUDE_TOOL_ENV_PROXY_PASSTHROUGH`) from the
   driver's `env`, as Codex does, unless `source` sets them. A source
-  function is called once per run. See
+  function is called once per run, and one that throws ends the run with an
+  `error` event (`CLAUDE_TOOL_ENV_SOURCE_FAILED` on the CLI driver) and
+  `completed`, without spawning. See
   [Tool environment](docs/external-agent-isolation.md#tool-environment-claude)
   and host duty 5 of the run spec.
 

@@ -13,6 +13,7 @@ import {
 } from "../../../src/agents/driver/claude-cli.js";
 import {
   CLAUDE_TOOL_ENV_PROXY_PASSTHROUGH,
+  CLAUDE_TOOL_ENV_SOURCE_FAILED,
   type ClaudeToolEnv,
 } from "../../../src/agents/driver/claude-tool-env.js";
 import type { ExternalAgentEvent } from "../../../src/agents/events.js";
@@ -230,6 +231,28 @@ describe("toolEnv copies the listed names", () => {
       expect(env.NO_PROXY).toBe("localhost");
     });
 
+    test(`${name}: a listed proxy name still falls back to the driver env`, () => {
+      const env = build({
+        names: ["GH_TOKEN", "HTTPS_PROXY", "NO_PROXY"],
+        source: () => ({
+          GH_TOKEN: "gh-acme-from-source",
+          NO_PROXY: "run.acme.test",
+        }),
+        proxyPassthrough: true,
+      }).buildEnv(REQUEST);
+      expect(env.GH_TOKEN).toBe("gh-acme-from-source");
+      expect(env.HTTPS_PROXY).toBe(HOST.HTTPS_PROXY as string);
+      expect(env.NO_PROXY).toBe("run.acme.test");
+    });
+
+    test(`${name}: a listed proxy name reads only the source without passthrough`, () => {
+      const env = build({
+        names: ["HTTPS_PROXY"],
+        source: () => ({}),
+      }).buildEnv(REQUEST);
+      expect(env).not.toHaveProperty("HTTPS_PROXY");
+    });
+
     test(`${name}: names alone do not pass the proxy variables`, () => {
       const env = build({ names: ["GH_TOKEN"] }).buildEnv(REQUEST);
       for (const key of CLAUDE_TOOL_ENV_PROXY_PASSTHROUGH) {
@@ -262,6 +285,42 @@ describe("toolEnv copies the listed names", () => {
     expect(events.some((event) => event.type === "error")).toBe(false);
     expect(env?.GH_TOKEN).toBe("gh-acme-token");
   });
+
+  for (const [name, build] of BUILDERS) {
+    test(`${name}: a throwing source ends the run with an error and completed`, async () => {
+      let spawned = false;
+      const toolEnv = {
+        names: ["GH_TOKEN"],
+        source: () => {
+          throw new Error("Acme token service is down");
+        },
+      };
+      const driver =
+        name === "ClaudeCliDriver"
+          ? cli(toolEnv, HOST, () => {
+              spawned = true;
+            })
+          : build(toolEnv);
+      const events: ExternalAgentEvent[] = [];
+      for await (const event of driver.run(REQUEST)) events.push(event);
+      expect(spawned).toBe(false);
+      expect(events[0]?.type).toBe("started");
+      const error = events.find((event) => event.type === "error");
+      expect(error).toBeDefined();
+      expect(error?.type === "error" && error.message).toContain(
+        "Acme token service is down",
+      );
+      if (name === "ClaudeCliDriver") {
+        expect(error?.type === "error" && error.recoverable).toBe(false);
+        expect(error?.type === "error" && error.code).toBe(
+          CLAUDE_TOOL_ENV_SOURCE_FAILED,
+        );
+      }
+      const last = events.at(-1);
+      expect(last?.type).toBe("completed");
+      expect(last?.type === "completed" && last.exitCode).toBe(1);
+    });
+  }
 
   test("an SDK run reads a source function once and delivers that value", async () => {
     // allowedPaths and a declared MCP server make the run build the env for

@@ -70,6 +70,13 @@ export const CLAUDE_TOOL_ENV_PROXY_PASSTHROUGH: readonly string[] =
     "NODE_EXTRA_CA_CERTS",
   ]);
 
+/**
+ * Code of the non-recoverable `error` event a `ClaudeCliDriver` run reports
+ * when its `toolEnv.source` function throws. The run ends before the child
+ * process is started.
+ */
+export const CLAUDE_TOOL_ENV_SOURCE_FAILED = "CLAUDE_TOOL_ENV_SOURCE_FAILED";
+
 /** The run-spec env grammar (`src/workflows/spec/schema.ts`). */
 const ENV_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/u;
 
@@ -107,8 +114,8 @@ export interface CheckedClaudeToolEnv {
   /** The listed names, read from the source. */
   readonly names: readonly string[];
   /**
-   * The `proxyPassthrough` names not listed in `names` (empty when it is
-   * off), read from the driver env unless the source sets them.
+   * Every `proxyPassthrough` name, listed in `names` or not (empty when it
+   * is off), read from the driver env unless the source sets them.
    */
   readonly proxyNames: readonly string[];
   /** The source, or `undefined` for the driver env. */
@@ -195,9 +202,7 @@ export function checkClaudeToolEnv(
       );
     }
   }
-  const proxyNames = proxyPassthrough
-    ? CLAUDE_TOOL_ENV_PROXY_PASSTHROUGH.filter((key) => !seen.has(key))
-    : [];
+  const proxyNames = proxyPassthrough ? CLAUDE_TOOL_ENV_PROXY_PASSTHROUGH : [];
   return Object.freeze({
     names: Object.freeze([...seen]),
     proxyNames: Object.freeze(proxyNames),
@@ -215,7 +220,9 @@ export function checkClaudeToolEnv(
 export function claudeToolEnvNames(
   toolEnv: CheckedClaudeToolEnv | undefined,
 ): readonly string[] {
-  return toolEnv === undefined ? [] : [...toolEnv.names, ...toolEnv.proxyNames];
+  return toolEnv === undefined
+    ? []
+    : [...new Set([...toolEnv.names, ...toolEnv.proxyNames])];
 }
 
 /**
@@ -278,8 +285,10 @@ export function claudeToolEnvValues(
   for (const name of toolEnv.names) {
     if (!Object.hasOwn(skip, name)) copy(name, source?.[name]);
   }
+  // A listed proxy name was read from the source above; this loop adds the
+  // driver env value when the source sets none.
   for (const name of toolEnv.proxyNames) {
-    if (Object.hasOwn(skip, name)) continue;
+    if (Object.hasOwn(skip, name) || Object.hasOwn(out, name)) continue;
     if (!copy(name, source?.[name])) copy(name, driverEnv[name]);
   }
   return out;

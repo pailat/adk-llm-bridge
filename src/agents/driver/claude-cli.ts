@@ -30,6 +30,7 @@ import {
 } from "./claude-run-env.js";
 import {
   type CheckedClaudeToolEnv,
+  CLAUDE_TOOL_ENV_SOURCE_FAILED,
   type ClaudeToolEnv,
   checkClaudeToolEnv,
   claudeToolEnvValues,
@@ -733,7 +734,23 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
     }
     const isolation = this.isolationPlan(request);
     const args = this.buildArgs(request);
-    const env = this.buildEnv(request);
+    let env: Record<string, string>;
+    try {
+      env = this.buildEnv(request);
+    } catch (error) {
+      // A toolEnv source function that throws (a token it cannot mint) ends
+      // the run like a refusal: nothing is spawned.
+      const detail = error instanceof Error ? error.message : String(error);
+      yield {
+        type: "error",
+        message: `ClaudeCliDriver: the child environment could not be built: ${detail}`,
+        code: CLAUDE_TOOL_ENV_SOURCE_FAILED,
+        recoverable: false,
+        timestamp: Date.now(),
+      };
+      yield { type: "completed", exitCode: 1, timestamp: Date.now() };
+      return;
+    }
 
     const envRefusal = modelEnvRefusal(
       "ClaudeCliDriver",

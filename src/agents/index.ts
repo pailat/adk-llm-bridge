@@ -70,7 +70,10 @@ export type {
   ClaudeToolEnv,
   ClaudeToolEnvSource,
 } from "./driver/claude-tool-env.js";
-export { CLAUDE_TOOL_ENV_PROXY_PASSTHROUGH } from "./driver/claude-tool-env.js";
+export {
+  CLAUDE_TOOL_ENV_PROXY_PASSTHROUGH,
+  CLAUDE_TOOL_ENV_SOURCE_FAILED,
+} from "./driver/claude-tool-env.js";
 export type {
   CodexCliDriverConfig,
   CodexCliSpawn,

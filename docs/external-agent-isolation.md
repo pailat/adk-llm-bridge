@@ -1546,7 +1546,13 @@ new ClaudeAgentSdkDriver({
   plus the CA variable Node-based tools read. Like Codex, it reads them from
   the host: the driver's `env`, even when `source` is set (a `source` that
   returns only secrets still gets the host's proxy). A set, non-empty value
-  in `source` wins, so a run can use its own proxy.
+  in `source` wins, so a run can use its own proxy. This holds when a proxy
+  name is also in `names` (for example from a run spec's `env`).
+- **A `source` function that throws** ends the run with an `error` event
+  and `completed` (exit code 1). Nothing is spawned. `ClaudeCliDriver`
+  reports the non-recoverable `CLAUDE_TOOL_ENV_SOURCE_FAILED`;
+  `ClaudeAgentSdkDriver` classifies the message as it does any other run
+  failure.
 - **Refused when the driver is built:**
   - a name that breaks the grammar or repeats: `InputValidationError`;
   - a model name (the rule of
