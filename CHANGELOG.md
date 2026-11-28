@@ -26,8 +26,10 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `StructuredOutput` tool that Claude Code adds for the schema, only when
   `outputSchema` is set. Its input is never read as paths, and the
   permission callback allows it without asking the host. It is not reported
-  as a `tool_call` or `tool_result`. The driver's own second check reads only
-  the schema's structure and leaves `format` keywords to the SDK.
+  as a `tool_call` or `tool_result`. The driver's own second check is never
+  stricter than JSON Schema: it leaves `format`, `pattern`,
+  `patternProperties`, object or array `const` and `enum` values to the SDK,
+  and reads `oneOf` as `anyOf`.
 
 ## [0.7.0] - 2026-11-13
 

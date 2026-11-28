@@ -214,29 +214,66 @@ const SUBSCHEMA_MAP_KEYWORDS = [
   "properties",
 ];
 
+/** Whether `value` is a JSON primitive (zod compares the rest by reference). */
+function isPrimitive(value: unknown): boolean {
+  return value === null || typeof value !== "object";
+}
+
 /**
- * A copy of `schema` without its `format` keywords, in every subschema.
- * Property names are kept: a property named `format` stays.
+ * A copy of `schema` that accepts at least every value `schema` accepts,
+ * with the keywords zod reads more strictly than JSON Schema relaxed, in
+ * every subschema. Property names are kept: a property named `format` or
+ * `pattern` stays.
  *
- * @remarks zod reads some formats more strictly than JSON Schema (it reads
- * `uri-reference` as an absolute URL), so the second check leaves formats
- * to the SDK.
+ * @remarks Relaxed, and so left to the SDK:
+ * - `format`: zod reads some formats more strictly (it reads
+ *   `uri-reference` as an absolute URL).
+ * - `pattern` and `patternProperties`, with any sibling
+ *   `additionalProperties`: zod compiles them without the `u` flag, so a
+ *   pattern such as `\p{L}` matches other text.
+ * - `oneOf`, read as `anyOf`: zod's exclusive union refuses a value that
+ *   matches more than one branch, which untyped branches and branches told
+ *   apart only by format or pattern always do.
+ * - A `const` that is an object or array, and an `enum` with such a member:
+ *   zod compares them by reference, so no value matches.
  */
-export function withoutFormats(schema: unknown): unknown {
-  if (Array.isArray(schema)) return schema.map(withoutFormats);
+export function looserSchema(schema: unknown): unknown {
+  if (Array.isArray(schema)) return schema.map(looserSchema);
   if (typeof schema !== "object" || schema === null) return schema;
-  const { format: _format, ...rest } = schema as Record<string, unknown>;
+  const {
+    format: _format,
+    pattern: _pattern,
+    ...rest
+  } = schema as Record<string, unknown>;
+  if ("patternProperties" in rest) {
+    delete rest.patternProperties;
+    delete rest.additionalProperties;
+  }
+  if ("const" in rest && !isPrimitive(rest.const)) delete rest.const;
+  if (Array.isArray(rest.enum) && !rest.enum.every(isPrimitive)) {
+    delete rest.enum;
+  }
+  if (Array.isArray(rest.oneOf)) {
+    const branches = rest.oneOf;
+    delete rest.oneOf;
+    if (rest.anyOf === undefined) {
+      rest.anyOf = branches;
+    } else {
+      const allOf = Array.isArray(rest.allOf) ? rest.allOf : [];
+      rest.allOf = [...allOf, { anyOf: branches }];
+    }
+  }
   for (const key of SUBSCHEMA_KEYWORDS) {
-    if (key in rest) rest[key] = withoutFormats(rest[key]);
+    if (key in rest) rest[key] = looserSchema(rest[key]);
   }
   for (const key of SUBSCHEMA_LIST_KEYWORDS) {
-    if (Array.isArray(rest[key])) rest[key] = withoutFormats(rest[key]);
+    if (Array.isArray(rest[key])) rest[key] = looserSchema(rest[key]);
   }
   for (const key of SUBSCHEMA_MAP_KEYWORDS) {
     const map = rest[key];
     if (typeof map === "object" && map !== null && !Array.isArray(map)) {
       rest[key] = Object.fromEntries(
-        Object.entries(map).map(([name, sub]) => [name, withoutFormats(sub)]),
+        Object.entries(map).map(([name, sub]) => [name, looserSchema(sub)]),
       );
     }
   }
@@ -246,17 +283,17 @@ export function withoutFormats(schema: unknown): unknown {
 /**
  * A check of values against `schema`, built with zod's JSON Schema reader.
  * The SDK already validates the value before it reports success; this is
- * the second check, of structure only: `format` keywords are left to the
- * SDK (see {@link withoutFormats}). When zod is missing or cannot read the
- * schema the check answers `undefined` and the SDK's validation stands
- * alone.
+ * the second check, and it is only ever looser than JSON Schema: keywords
+ * zod reads more strictly are left to the SDK (see {@link looserSchema}).
+ * When zod is missing or cannot read the schema the check answers
+ * `undefined` and the SDK's validation stands alone.
  */
 export async function structuredOutputCheck(
   schema: Record<string, unknown>,
 ): Promise<StructuredOutputCheck> {
   try {
     const { z } = await import("zod/v4");
-    const validator = z.fromJSONSchema(withoutFormats(schema) as never);
+    const validator = z.fromJSONSchema(looserSchema(schema) as never);
     return (value) => validator.safeParse(value).success;
   } catch {
     return () => undefined;

@@ -355,6 +355,122 @@ describe("ClaudeAgentSdkDriver native outputSchema", () => {
     });
   });
 
+  // The second check must never be stricter than JSON Schema. These schemas
+  // use keywords zod reads more strictly (exclusive unions, regexes without
+  // the u flag, object literals compared by reference); the SDK accepted
+  // each value, so the driver must not refuse it.
+  test.each<[string, Record<string, unknown>, unknown]>([
+    [
+      "an untyped-branch oneOf",
+      {
+        type: "object",
+        oneOf: [{ required: ["a"] }, { required: ["b"] }],
+      },
+      { a: "Acme" },
+    ],
+    [
+      "a format-discriminated oneOf",
+      {
+        type: "object",
+        properties: {
+          when: {
+            oneOf: [
+              { type: "string", format: "date" },
+              { type: "string", format: "email" },
+            ],
+          },
+        },
+        required: ["when"],
+      },
+      { when: "2026-01-31" },
+    ],
+    [
+      "a oneOf next to an anyOf",
+      {
+        type: "object",
+        anyOf: [{ required: ["a"] }, { required: ["c"] }],
+        oneOf: [{ required: ["a"] }, { required: ["b"] }],
+      },
+      { a: "Acme" },
+    ],
+    [
+      "a Unicode pattern",
+      {
+        type: "object",
+        properties: { name: { type: "string", pattern: "^\\p{L}+$" } },
+        required: ["name"],
+      },
+      { name: "abc" },
+    ],
+    [
+      "a Unicode patternProperties with additionalProperties false",
+      {
+        type: "object",
+        patternProperties: { "^\\p{L}+$": { type: "string" } },
+        additionalProperties: false,
+      },
+      { abc: "Acme" },
+    ],
+    [
+      "an object const",
+      {
+        type: "object",
+        properties: { meta: { const: { kind: "acme" } } },
+        required: ["meta"],
+      },
+      { meta: { kind: "acme" } },
+    ],
+    [
+      "an enum with an array member",
+      {
+        type: "object",
+        properties: { pair: { enum: [[1, 2], "none"] } },
+        required: ["pair"],
+      },
+      { pair: [1, 2] },
+    ],
+  ])("a valid value for %s is not refused", async (_name, schema, value) => {
+    const fake = new ScriptedSdk();
+    fake.scripts.push([
+      init("s-1"),
+      success("s-1", { structured_output: value }),
+    ]);
+    const events = await run(fake.driver({ outputSchema: schema }));
+    expect(errorsOf(events)).toEqual([]);
+    expect(outputs(events)).toEqual([JSON.stringify(value)]);
+    expect(exitCodes(events)).toEqual([0]);
+  });
+
+  test("a value missing a oneOf branch's required key is still refused", async () => {
+    const fake = new ScriptedSdk();
+    fake.scripts.push([
+      init("s-1"),
+      success("s-1", { structured_output: { c: "Acme" } }),
+    ]);
+    const events = await run(
+      fake.driver({
+        outputSchema: {
+          type: "object",
+          oneOf: [
+            {
+              type: "object",
+              properties: { a: { type: "string" } },
+              required: ["a"],
+            },
+            {
+              type: "object",
+              properties: { b: { type: "string" } },
+              required: ["b"],
+            },
+          ],
+        },
+      }),
+    );
+    expect(errorsOf(events).map((e) => e.code)).toEqual([
+      CLAUDE_OUTPUT_SCHEMA_MISMATCH,
+    ]);
+  });
+
   test("the SDK giving up on the schema is MAX_STRUCTURED_OUTPUT_RETRIES", async () => {
     const fake = new ScriptedSdk();
     fake.scripts.push([
