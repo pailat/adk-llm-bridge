@@ -47,6 +47,10 @@ const parsedImplement = parseAgentResult("implement@1", {});
 if (parsedImplement.ok) {
   void checkChangedPaths(parsedImplement.value, ["src"]);
 }
+const parsedTests = parseAgentResult("tests@1", {});
+if (parsedTests.ok) {
+  void checkChangedPaths(parsedTests.value.testPaths, ["tests"]);
+}
 
 // Classes with `#private` members are nominal: a class declared once per entry
 // in the `.d.ts` files would make these cross-entry uses fail to compile.
