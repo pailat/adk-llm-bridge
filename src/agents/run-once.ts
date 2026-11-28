@@ -20,7 +20,7 @@ import type { ExternalAgent } from "./external-agent.js";
  * - `interrupted`: the run stopped waiting for a human or an external system
  *   (an approval, a long-running tool). A one-shot run cannot answer it.
  * - `invalid-output`: the agent has an `outputSchema` and its final answer
- *   is empty or not JSON.
+ *   (or the driver's structured output) is empty or not JSON.
  */
 export type AgentRunErrorKind =
   | AgentInvocationErrorKind
@@ -68,23 +68,40 @@ export interface AgentRunUsage {
 /** Result of {@link runExternalAgentOnce}; failures are reported, not thrown. */
 export interface AgentRunOutcome {
   /**
-   * The final answer parsed as JSON, when the agent has an `outputSchema`.
-   * Integers beyond `Number.MAX_SAFE_INTEGER` are strings of their digits.
-   * Not validated against the schema here: the driver checks it when it
-   * supports one.
+   * The final answer parsed as JSON, when the agent has an `outputSchema`
+   * (integers beyond `Number.MAX_SAFE_INTEGER` are strings of their digits)
+   * or the driver marked the answer as its structured output
+   * (`metadata.structuredOutput`, for example `ClaudeAgentSdkDriver`'s
+   * `outputSchema`; read with `JSON.parse`). Not validated against the
+   * schema here: the driver checks it when it supports one. A driver-level
+   * schema the driver does not mark (Codex SDK `outputSchema`) is not seen:
+   * set the agent's `outputSchema` too.
    */
   structured?: unknown;
-  /** Text of the final answer; empty when there is none. */
+  /**
+   * Text of the final answer: the agent's last event with content, when it
+   * is text. Empty when the run ended on a tool call or result, or had no
+   * text (a tool's output or an error message is never the answer).
+   */
   text: string;
   /** Cost, turns and tokens of the run. */
   usage: AgentRunUsage;
   /**
-   * The runtime's session id: the value the run stored under the agent's
-   * session state key (`claude_sdk_session:<agent>` for Claude). Pass it as
-   * `sessionId` to resume that session. Absent when the run reported none.
+   * The runtime's session id, as the driver reported it for this run: the
+   * value stored under the agent's session state key
+   * (`claude_sdk_session:<agent>` for Claude) or, on a resume, the session
+   * the driver says it kept (`ClaudeAgentSdkDriver`). Pass it as `sessionId`
+   * to resume that session. Absent when the driver reported none, which
+   * includes drivers that resume nothing (`ClaudeCliDriver`, a Claude SDK
+   * run with an MCP server secret): when you passed a `sessionId` and get
+   * none or another one back, that session was not resumed.
    */
   sessionId?: string;
-  /** Classification of the failure; absent on success. */
+  /**
+   * Classification of the failure; absent on success. An error event the
+   * run went on after (a permission denial, a session store mirror error)
+   * is not a failure when the runtime exited with 0 and an answer follows.
+   */
   errorKind?: AgentRunErrorKind;
   /** Details of the failure; present exactly when `errorKind` is. */
   cause?: AgentRunFailureCause;
@@ -161,7 +178,7 @@ export async function runExternalAgentOnce(
     input,
     parentContext,
   });
-  return toOutcome(agent, result, stateKey, options.sessionId);
+  return toOutcome(agent, result, stateKey);
 }
 
 function defaultSessionStateKey(agent: ExternalAgent): string | undefined {
@@ -187,18 +204,23 @@ function toOutcome(
   agent: ExternalAgent,
   result: AgentInvocationResult,
   stateKey: string | undefined,
-  resumedId: string | undefined,
 ): AgentRunOutcome {
+  const report = runReport(result.events);
+  // Only an id the driver reported for this run: a resumed id is not echoed
+  // back unless the driver says it kept that session.
   const stored = stateKey ? result.stateDelta?.[stateKey] : undefined;
   const sessionId =
-    typeof stored === "string" && stored.length > 0 ? stored : resumedId;
-  const text = result.output;
+    typeof stored === "string" && stored.length > 0
+      ? stored
+      : report.sessionId || undefined;
+  const answer = finalAnswer(agent, result.events);
+  const text = answer?.text ?? "";
   const base: AgentRunOutcome = {
     text,
-    usage: usageOf(result),
+    usage: usageOf(result, report),
     ...(sessionId ? { sessionId } : {}),
   };
-  if (result.error) {
+  if (result.error && !recovered(result, report, answer)) {
     return {
       ...base,
       errorKind: result.errorKind ?? "agent-error",
@@ -214,22 +236,114 @@ function toOutcome(
       },
     };
   }
-  if (!agent.outputSchema) return base;
-  const parsed = text.trim() ? parseJson(text) : undefined;
+  if (!agent.outputSchema && !answer?.structured) return base;
+  const parsed = text.trim()
+    ? parseAnswer(text, answer?.structured)
+    : undefined;
   if (!parsed?.ok) {
     return {
       ...base,
       errorKind: "invalid-output",
       cause: {
-        message: `${agent.name} has an outputSchema, but its final answer is not JSON.`,
+        message: `${agent.name} has an output schema, but its final answer is not JSON.`,
       },
     };
   }
   return { ...base, structured: parsed.value };
 }
 
-function usageOf(result: AgentInvocationResult): AgentRunUsage {
-  const report = runReport(result.events);
+/** The final answer of a run: its text, and whether the driver marked it structured. */
+interface FinalAnswer {
+  text: string;
+  structured: boolean;
+  index: number;
+}
+
+/**
+ * The visible text of the agent's last non-partial event with content, when
+ * that event is text: not a function call or result (tool output is not the
+ * answer), not thought, not an error. `undefined` when the run ended on
+ * something else or had no text. Content-less events (state, usage, errors)
+ * are skipped.
+ */
+function finalAnswer(
+  agent: ExternalAgent,
+  events: readonly Event[],
+): FinalAnswer | undefined {
+  for (let index = events.length - 1; index >= 0; index--) {
+    const event = events[index];
+    if (!event || event.partial || event.author !== agent.name) continue;
+    const parts = event.content?.parts ?? [];
+    if (parts.length === 0) continue;
+    if (event.errorCode) return undefined;
+    if (parts.some((part) => part.functionCall || part.functionResponse)) {
+      return undefined;
+    }
+    const text = parts
+      .filter((part) => part.thought !== true && typeof part.text === "string")
+      .map((part) => part.text)
+      .join("\n");
+    if (!text) return undefined;
+    return {
+      text,
+      structured: event.customMetadata?.structuredOutput === true,
+      index,
+    };
+  }
+  return undefined;
+}
+
+/**
+ * The answer parsed as JSON. A driver's structured output is the JSON of a
+ * value the runtime already parsed, so it is read with `JSON.parse`, as the
+ * agent's node output is; text under an `outputSchema` keeps integers beyond
+ * `Number.MAX_SAFE_INTEGER` exact, as strings.
+ */
+function parseAnswer(
+  text: string,
+  structured: boolean | undefined,
+): { ok: true; value: unknown } | { ok: false } {
+  if (!structured) return parseJson(text);
+  try {
+    return { ok: true, value: JSON.parse(text) };
+  } catch {
+    return { ok: false };
+  }
+}
+
+/**
+ * Whether the run's errors were non-fatal: the runtime ended with exit code
+ * 0, the error is the gateway's record of an error event (not a thrown
+ * error, an abort or a timeout), and a final answer follows every error
+ * event. A permission denial or a session store mirror error the run went
+ * on after is such a case; an error after the answer (for example the
+ * bridge failing the turn closed) is not.
+ */
+function recovered(
+  result: AgentInvocationResult,
+  report: ExternalAgentRunReport,
+  answer: FinalAnswer | undefined,
+): boolean {
+  if (report.exitCode !== 0 || !answer) return false;
+  if ((result.errorKind ?? "agent-error") !== "agent-error") return false;
+  let lastError = -1;
+  for (let index = result.events.length - 1; index >= 0; index--) {
+    if (result.events[index]?.errorMessage) {
+      lastError = index;
+      break;
+    }
+  }
+  return (
+    lastError >= 0 &&
+    result.events[lastError]?.errorMessage === result.error &&
+    answer.index > lastError
+  );
+}
+
+function usageOf(
+  result: AgentInvocationResult,
+  report: ExternalAgentRunReport,
+): AgentRunUsage {
   const { usage } = result;
   return {
     ...(report.costUsd !== undefined

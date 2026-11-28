@@ -12,26 +12,41 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `ExternalAgent` for one prompt without an ADK `Runner` or a parent
   `InvocationContext`. It returns an `AgentRunOutcome`:
   `{ structured, text, usage: { costUsd, turns, tokens, scope }, sessionId, errorKind, cause }`.
-  `sessionId` is the id the run stored under the agent's session state key
-  (`claude_sdk_session:<agent>` for Claude, `codex_thread:<agent>` for
-  Codex, `fx_session:<agent>` for fx). Passing it back resumes that session,
-  also from a new agent instance and through the driver's `sessionStore`
-  (such as `SqliteSessionStore`). `signal` aborts the run, and the driver
-  stops its child process. `structured` is the final answer parsed as JSON
-  when the agent has an `outputSchema`. Failures are not thrown:
-  `errorKind` is one of the gateway's kinds, or `interrupted` (the run waits
-  for an approval or a long-running tool) or `invalid-output` (no JSON
-  answer under an `outputSchema`), and `cause` holds the message and the
-  error event's code.
-- **`ExternalAgent` reports a run's cost and turns on its events.** The event
-  that carries the run's model info gets `customMetadata.externalAgentRun`
-  (`EXTERNAL_AGENT_RUN_METADATA_KEY`, an `ExternalAgentRunReport` of
-  `costUsd`, `turns` and `scope`) when the runtime reported a cost or a turn
-  count. A cost that covers that run only also goes to
-  `customMetadata.costUsd`, so `AgentInvocationGateway`'s `usage.costUsd`
-  (and a Workflow step's usage) no longer leaves `ExternalAgent` cost out. A
-  session total is not added there, so resumed sessions are not counted
-  twice.
+  `sessionId` is the session id the driver reported for the run: the id
+  stored under the agent's session state key (`claude_sdk_session:<agent>`
+  for Claude, `codex_thread:<agent>` for Codex, `fx_session:<agent>` for
+  fx), or on a resume the session `ClaudeAgentSdkDriver` says it kept.
+  Passing it back resumes that session, also from a new agent instance and
+  through the driver's `sessionStore` (such as `SqliteSessionStore`). A
+  passed id is not echoed back: drivers that resume nothing
+  (`ClaudeCliDriver`, a Claude SDK run with an MCP server secret) return
+  no `sessionId`. `signal` aborts the run, and the driver stops its child
+  process. `text` is the agent's last event with content when it is text,
+  never a tool's output or an error message. `structured` is that answer
+  parsed as JSON when the agent has an `outputSchema` or the driver marks
+  it as structured output (`metadata.structuredOutput`, as
+  `ClaudeAgentSdkDriver`'s `outputSchema` does); a Codex SDK driver
+  `outputSchema` is not marked, so set the agent's `outputSchema` too.
+  Failures are not thrown: `errorKind` is one of the gateway's kinds, or
+  `interrupted` (the run waits for an approval or a long-running tool) or
+  `invalid-output` (no JSON answer under an output schema), and `cause`
+  holds the message and the error event's code. An error event the run
+  went on after (a permission denial, a session store mirror error) is not
+  a failure when the runtime exited with 0 and an answer follows it.
+- **`ExternalAgent` reports a run's cost, turns, exit code and session on
+  its events.** The event that carries the run's usage and model info gets
+  `customMetadata.externalAgentRun` (`EXTERNAL_AGENT_RUN_METADATA_KEY`, an
+  `ExternalAgentRunReport` of `costUsd`, `turns`, `scope`, `exitCode` and
+  `sessionId`) when the runtime reported a cost, a turn count or a
+  session. That event is the held final text, else the held error (which
+  now gets the run's token usage too), else a content-less event of its
+  own when the run ended on a tool result. A cost that covers that run
+  only also goes to `customMetadata.costUsd`, so `AgentInvocationGateway`'s
+  `usage.costUsd` (and a Workflow step's usage) no longer leaves
+  `ExternalAgent` cost out. A session total is not added there, so resumed
+  sessions are not counted twice. `ExternalAgentCompletedEvent` has a new
+  `sessionId`, which `ClaudeAgentSdkDriver` sets to the SDK session it
+  kept.
 - **Standard agent result schemas** (experimental, needs zod >= 4): the new
   subpath `adk-llm-bridge/agents/results` exports frozen JSON Schemas and zod
   parsers for `implement@1`, `tests@1`, `review@1` and `gate@1`,

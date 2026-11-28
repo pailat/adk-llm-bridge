@@ -1093,7 +1093,23 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
             tracer.onDriverEvent(event);
             const modelInfo = modelInfoFor(this.driver, startedEvent, event);
             tracer.onModelInfo(modelInfo.info);
-            const carrier = heldFinal ?? heldError;
+            const usageMetadata = usageMetadataFor(event.usage);
+            // The usage rides on the held final text, else on the held
+            // error. Without either (the run ended on a tool result, or had
+            // no text at all), an event of its own carries it, so the run's
+            // cost and tokens are not lost; an event already pushed is never
+            // changed.
+            const ownCarrier =
+              !heldFinal && !heldError && (usageMetadata || hasRunReport(event))
+                ? createEvent({
+                    invocationId: context.invocationId,
+                    author: this.name,
+                    branch: context.branch,
+                    customMetadata: { externalAgent: true },
+                    timestamp: event.timestamp,
+                  })
+                : undefined;
+            const carrier = heldFinal ?? heldError ?? ownCarrier;
             if (carrier) {
               carrier.customMetadata = {
                 ...carrier.customMetadata,
@@ -1108,34 +1124,29 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
                   [EXTERNAL_AGENT_TOOLS_METADATA_KEY]: toolsReport,
                 };
               }
+              if (usageMetadata) carrier.usageMetadata = usageMetadata;
+              // genai usage metadata has no cache-write field either: it
+              // rides on customMetadata, merged with what the event carries.
+              if (typeof event.usage?.cacheCreationInputTokens === "number") {
+                carrier.customMetadata = withCacheCreation(
+                  carrier.customMetadata,
+                  event.usage.cacheCreationInputTokens,
+                );
+              }
+              // genai usage metadata has no scope field: a session total is
+              // labeled here so consumers do not add it to earlier runs.
+              if (event.usage?.scope) {
+                carrier.customMetadata = {
+                  ...carrier.customMetadata,
+                  externalAgentUsageScope: event.usage.scope,
+                };
+              }
               carrier.customMetadata = withRunReport(
                 carrier.customMetadata,
                 event,
               );
             }
-            const usageMetadata = usageMetadataFor(event.usage);
-            if (heldFinal && usageMetadata) {
-              heldFinal.usageMetadata = usageMetadata;
-            }
-            // genai usage metadata has no cache-write field either: it rides
-            // on customMetadata, merged with what the event already carries.
-            if (
-              heldFinal &&
-              typeof event.usage?.cacheCreationInputTokens === "number"
-            ) {
-              heldFinal.customMetadata = withCacheCreation(
-                heldFinal.customMetadata,
-                event.usage.cacheCreationInputTokens,
-              );
-            }
-            // genai usage metadata has no scope field: a session total is
-            // labeled here so consumers do not add it to earlier runs.
-            if (heldFinal && event.usage?.scope) {
-              heldFinal.customMetadata = {
-                ...heldFinal.customMetadata,
-                externalAgentUsageScope: event.usage.scope,
-              };
-            }
+            if (ownCarrier) enqueue(ownCarrier);
             break;
           }
           if (confirmationRequested || subAgentInterrupted || toolPending) {
@@ -1767,20 +1778,23 @@ function metadataForExternalEvent(
 /**
  * `metadata` with the run's {@link ExternalAgentRunReport}, and with its
  * cost under `costUsd` when the cost covers this run only. Unchanged when
- * the runtime reported neither a cost nor a turn count.
+ * {@link hasRunReport} is false.
  */
 function withRunReport(
   metadata: Record<string, unknown> | undefined,
   completed: ExternalAgentCompletedEvent,
 ): Record<string, unknown> | undefined {
+  if (!hasRunReport(completed)) return metadata;
   const costUsd = completed.usage?.totalCostUsd;
   const turns = completed.numTurns;
-  if (costUsd === undefined && turns === undefined) return metadata;
   const scope = completed.usage?.scope;
+  const { exitCode, sessionId } = completed;
   const report: ExternalAgentRunReport = {
     ...(costUsd !== undefined ? { costUsd } : {}),
     ...(turns !== undefined ? { turns } : {}),
     ...(scope ? { scope } : {}),
+    ...(exitCode !== undefined ? { exitCode } : {}),
+    ...(sessionId ? { sessionId } : {}),
   };
   return {
     ...metadata,
@@ -1789,6 +1803,19 @@ function withRunReport(
       ? { [COST_METADATA_KEY]: costUsd }
       : {}),
   };
+}
+
+/**
+ * Whether a `completed` event has a run report to write: the runtime
+ * reported a cost, a turn count or the session the run kept. An exit code
+ * alone is not one, so a run that reports nothing else keeps its events.
+ */
+function hasRunReport(completed: ExternalAgentCompletedEvent): boolean {
+  return (
+    completed.usage?.totalCostUsd !== undefined ||
+    completed.numTurns !== undefined ||
+    Boolean(completed.sessionId)
+  );
 }
 
 function readableExternalEventTitle(
