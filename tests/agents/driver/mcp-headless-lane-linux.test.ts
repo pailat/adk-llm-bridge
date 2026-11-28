@@ -87,6 +87,8 @@ interface FakeOptions {
   delayMs?: number;
   /** Keep a GET's SSE stream quiet this long between its two events. */
   sseGapMs?: number;
+  /** Answer every request with `302 Location: <redirectTo>`. */
+  redirectTo?: string;
 }
 
 /**
@@ -97,6 +99,8 @@ interface FakeOptions {
  */
 function fakeMcpServer(options: FakeOptions = {}) {
   const seen: Seen[] = [];
+  /** POSTs whose caller went away while the answer was still delayed. */
+  const aborted = { count: 0 };
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
@@ -106,6 +110,13 @@ function fakeMcpServer(options: FakeOptions = {}) {
       const path = new URL(req.url).pathname;
       const authorization = req.headers.get("authorization");
       const authorized = authorization === `Bearer ${MACHINE_TOKEN}`;
+      if (options.redirectTo) {
+        seen.push({ authorization, method: req.method, path });
+        return new Response(null, {
+          status: 302,
+          headers: { location: options.redirectTo },
+        });
+      }
       if (req.method !== "POST") {
         seen.push({ authorization, method: req.method, path });
         if (!authorized) return new Response("unauthorized", { status: 401 });
@@ -133,7 +144,14 @@ function fakeMcpServer(options: FakeOptions = {}) {
       };
       seen.push({ authorization, method: body.method, path });
       if (!authorized) return new Response("unauthorized", { status: 401 });
-      if (options.delayMs) await Bun.sleep(options.delayMs);
+      if (options.delayMs) {
+        let pending = true;
+        req.signal.addEventListener("abort", () => {
+          if (pending) aborted.count++;
+        });
+        await Bun.sleep(options.delayMs);
+        pending = false;
+      }
       const result =
         body.method === "initialize"
           ? {
@@ -156,7 +174,12 @@ function fakeMcpServer(options: FakeOptions = {}) {
       });
     },
   });
-  return { seen, server, url: `http://127.0.0.1:${server.port}/mcp` };
+  return {
+    aborted,
+    seen,
+    server,
+    url: `http://127.0.0.1:${server.port}/mcp`,
+  };
 }
 
 type StartMcpProxy = (
@@ -186,8 +209,11 @@ async function documentedProxy(): Promise<StartMcpProxy> {
 }
 
 /** The documented proxy in front of `upstream`, with the machine token. */
-async function loopbackProxy(upstream: string) {
-  const server = (await documentedProxy())(upstream, () => MACHINE_TOKEN);
+async function loopbackProxy(
+  upstream: string,
+  token: () => string = () => MACHINE_TOKEN,
+) {
+  const server = (await documentedProxy())(upstream, token);
   return { server, url: `http://127.0.0.1:${server.port}/mcp` };
 }
 
@@ -339,6 +365,12 @@ describe.skipIf(!LINUX)(
     afterAll(() => {
       upstream.server.stop(true);
     });
+    // As the page documents it: the token recipe runs with the network on,
+    // which also takes the shell out of the no-network sandbox.
+    const tokenRequest = () =>
+      laneRequest({
+        permissions: { mode: "workspace-write", allowNetwork: true },
+      });
     const registry = (): Record<string, ClaudeMcpServer> => ({
       pai: {
         type: "http",
@@ -355,8 +387,9 @@ describe.skipIf(!LINUX)(
       mcpSecretHost.readPtraceScope = () => "1";
       upstream.seen.length = 0;
       const { sdk, state } = connectingSdk();
-      const events = await collect(laneDriver(sdk, registry()));
+      const events = await collect(laneDriver(sdk, registry()), tokenRequest());
       expect(errorOf(events)).toBeUndefined();
+      expect(state.options?.sandbox).not.toEqual(CLAUDE_NO_NETWORK_SANDBOX);
       expect(upstream.seen.map((s) => s.method)).toEqual([
         "initialize",
         "tools/call",
@@ -392,6 +425,7 @@ describe.skipIf(!LINUX)(
               },
             },
           }),
+          tokenRequest(),
         );
         expect(errorOf(events)?.code).toBe(
           EXTERNAL_AGENT_MCP_SECRET_UNENFORCEABLE,
@@ -407,7 +441,9 @@ describe.skipIf(!LINUX)(
       mcpSecretHost.readPtraceScope = savedHost.readPtraceScope;
       const scope = savedHost.readPtraceScope();
       const { sdk } = connectingSdk();
-      const code = errorOf(await collect(laneDriver(sdk, registry())))?.code;
+      const code = errorOf(
+        await collect(laneDriver(sdk, registry()), tokenRequest()),
+      )?.code;
       if (scope === undefined || scope === "0") {
         expect(code).toBe(EXTERNAL_AGENT_MCP_SECRET_UNENFORCEABLE);
       } else {
@@ -418,7 +454,7 @@ describe.skipIf(!LINUX)(
     test("no transcript, no resume, no session store; large MCP results stay inline", async () => {
       mcpSecretHost.readPtraceScope = () => "1";
       const { sdk, state } = connectingSdk();
-      await collect(laneDriver(sdk, registry()));
+      await collect(laneDriver(sdk, registry()), tokenRequest());
       expect(state.options?.persistSession).toBe(false);
       expect(state.options?.resume).toBeUndefined();
       const env = state.options?.env as Record<string, string | undefined>;
@@ -682,6 +718,65 @@ describe.skipIf(!LINUX)("the documented loopback proxy itself", () => {
     expect(upstream.seen.map((s) => s.authorization)).toEqual([
       `Bearer ${MACHINE_TOKEN}`,
     ]);
+  });
+
+  test("an upstream redirect is not followed: 502, and the other host gets nothing", async () => {
+    const elsewhere = fakeMcpServer();
+    servers.push(elsewhere.server);
+    const { upstream, proxy } = await pair({ redirectTo: elsewhere.url });
+    const res = await fetch(proxy.url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: rpc("tools/call"),
+      redirect: "manual",
+    });
+    expect(res.status).toBe(502);
+    expect(upstream.seen.map((s) => s.method)).toEqual(["POST"]);
+    expect(elsewhere.seen).toEqual([]);
+  });
+
+  test("an agent that goes away cancels the upstream request", async () => {
+    const { upstream, proxy } = await pair({ delayMs: 10_000 });
+    const gone = new AbortController();
+    const call = fetch(proxy.url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: rpc("tools/call"),
+      signal: gone.signal,
+    }).catch(() => undefined);
+    while (upstream.seen.length === 0) await Bun.sleep(20);
+    gone.abort();
+    await call;
+    for (let i = 0; i < 100 && upstream.aborted.count === 0; i++) {
+      await Bun.sleep(20);
+    }
+    expect(upstream.aborted.count).toBe(1);
+  });
+
+  test("a failing upstream or token store is a plain 502 with no details", async () => {
+    const down = fakeMcpServer();
+    down.server.stop(true);
+    const live = fakeMcpServer();
+    servers.push(live.server);
+    const proxies = [
+      await loopbackProxy(down.url),
+      await loopbackProxy(live.url, () => {
+        throw new Error("acme token store is rotating");
+      }),
+      await loopbackProxy(live.url, () => "acme\r\nx-acme: 1"),
+    ];
+    servers.push(...proxies.map((p) => p.server));
+    for (const proxy of proxies) {
+      const res = await fetch(proxy.url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: rpc("tools/call"),
+      });
+      expect(res.status).toBe(502);
+      expect(res.headers.get("content-type") ?? "").not.toContain("html");
+      expect(await res.text()).not.toContain("acme");
+    }
+    expect(live.seen).toEqual([]);
   });
 
   test("a gzipping upstream: the client gets a body it can decode", async () => {

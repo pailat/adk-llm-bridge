@@ -89,6 +89,10 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   browsers (403 on a foreign `Host` or any `Origin`), keeps slow calls and
   quiet SSE streams open on both sides (`idleTimeout: 0` and an upstream
   `fetch` with `timeout: false`), and passes compressed answers on intact.
+  It never follows an upstream redirect, cancels the upstream request when
+  the agent goes away, and answers any failure with a plain 502. The
+  precheck also covers Windows, where a token lane with a shell is always
+  refused.
   The page says to keep every shell on the host in the no-network sandbox,
   since an unsandboxed shell can call the proxy directly, and to keep the
   proxy's token out of any environment, file or process the agent can read.

@@ -9,6 +9,7 @@ machine token, without handing the token to the agent. Two recipes:
 | Entry the agent sees | `https://…` with an `Authorization: { resolve }` header | `http://127.0.0.1:<port>` with no header |
 | Network | `allowNetwork: true` | `allowNetwork: false` |
 | Linux with a shell | needs `kernel.yama.ptrace_scope` ≥ 1 | none enforced; the host keeps the proxy's token unreadable |
+| Windows with a shell | always refused | none enforced; the host keeps the proxy's token unreadable |
 | Resume, `sessionStore` | refused | available |
 | MCP result over the inline limit | truncated inline | Claude Code's default handling |
 | Who holds the token | the bridge, for one run | a host proxy process |
@@ -19,7 +20,8 @@ only: the other drivers have no `mcpServers` in this release, so a host
 refuses a lane on them whose `mcp` is not empty.
 
 The behaviour on this page is checked on Linux, with a shell offered,
-against a fake HTTP MCP server on loopback by
+against a fake HTTP MCP server on loopback (the token recipe runs with
+`allowNetwork: true`, as below, but against that loopback server) by
 [`tests/agents/driver/mcp-headless-lane-linux.test.ts`](../tests/agents/driver/mcp-headless-lane-linux.test.ts).
 The full rules are in
 [Host MCP servers and secrets](external-agent-isolation.md#host-mcp-servers-and-secrets).
@@ -89,13 +91,19 @@ the run ends with `EXTERNAL_AGENT_MCP_SERVER_NETWORK_REQUIRED` before it
 starts. That also turns off the no-network shell sandbox (see
 [Network rules](external-agent-isolation.md#network-rules-http-sse)).
 
-### Precheck: `ptrace_scope` on Linux
+### Precheck: a shell on Linux or Windows
 
-On Linux, a run that offers a shell tool (`Bash`) with a declared secret is
-refused with `EXTERNAL_AGENT_MCP_SECRET_UNENFORCEABLE`, before the resolver
-runs, when `kernel.yama.ptrace_scope` is `0` or missing: other same-user
-processes could read the token from the `claude` process's memory. Check it
-when the host starts, so a lane fails early instead of on its first run:
+A run that offers a shell tool (`Bash` or `PowerShell`) with a declared
+secret is refused with `EXTERNAL_AGENT_MCP_SECRET_UNENFORCEABLE`, before the
+resolver runs, in two cases, because other same-user processes could read
+the token from the `claude` process's memory:
+
+- on Linux, when `kernel.yama.ptrace_scope` is `0` or missing;
+- on Windows, always. Such a lane needs the loopback-proxy recipe, or no
+  shell.
+
+Check it when the host starts, so a lane fails early instead of on its
+first run:
 
 ```ts
 import { readFileSync } from "node:fs";
@@ -108,17 +116,29 @@ function ptraceScope(): string | undefined {
   }
 }
 
-const scope = ptraceScope();
-if (process.platform === "linux" && (scope === undefined || scope === "0")) {
-  throw new Error(
-    "MCP token lanes with a shell need kernel.yama.ptrace_scope >= 1 " +
-      "(sysctl kernel.yama.ptrace_scope=1), or use the loopback-proxy recipe",
-  );
+function checkTokenLaneHost(tools: readonly string[]): void {
+  if (!tools.includes("Bash") && !tools.includes("PowerShell")) return;
+  if (process.platform === "win32") {
+    throw new Error(
+      "MCP token lanes with a shell are refused on Windows; " +
+        "use the loopback-proxy recipe or drop the shell",
+    );
+  }
+  if (process.platform !== "linux") return;
+  const scope = ptraceScope();
+  if (scope === undefined || scope === "0") {
+    throw new Error(
+      "MCP token lanes with a shell need kernel.yama.ptrace_scope >= 1 " +
+        "(sysctl kernel.yama.ptrace_scope=1), or use the loopback-proxy recipe",
+    );
+  }
 }
+
+checkTokenLaneHost(planAgent.tools); // e.g. ["Bash", "Read", "mcp__pai__timeline_get"]
 ```
 
-Without a shell tool the `ptrace_scope` term does not apply. `{ env }`
-values are refused whenever a shell is offered; use `{ resolve }`.
+Without a shell tool neither term applies. `{ env }` values are refused
+whenever a shell is offered; use `{ resolve }`.
 
 ### What a declared secret turns off
 
@@ -169,18 +189,27 @@ export function startMcpProxy(upstream: string, token: () => string) {
       if (new URL(req.url).pathname !== "/mcp") {
         return new Response("not found", { status: 404 });
       }
-      const headers = new Headers(req.headers);
-      headers.set("authorization", `Bearer ${token()}`);
-      headers.delete("host");
-      return fetch(upstream, {
-        method: req.method,
-        headers,
-        body: req.body,
-        // No idle cut-off upstream either (Bun's fetch default is 5 minutes).
-        timeout: false,
-        // Pass the body on as sent, matching its content-encoding header.
-        decompress: false,
-      });
+      try {
+        const headers = new Headers(req.headers);
+        headers.set("authorization", `Bearer ${token()}`);
+        headers.delete("host");
+        return await fetch(upstream, {
+          method: req.method,
+          headers,
+          body: req.body,
+          // Never re-send the token anywhere but the one upstream URL.
+          redirect: "error",
+          // The agent went away: cancel the upstream request too.
+          signal: req.signal,
+          // No idle cut-off upstream either (Bun's fetch default is 5 minutes).
+          timeout: false,
+          // Pass the body on as sent, matching its content-encoding header.
+          decompress: false,
+        });
+      } catch {
+        // Upstream down, a redirect, or a failing token store: no details.
+        return new Response("bad gateway", { status: 502 });
+      }
     },
   });
 }
@@ -199,24 +228,35 @@ const hostMcpServers = {
 } satisfies Record<string, ClaudeMcpServer>;
 ```
 
-The proxy forwards every streamable-HTTP method on `/mcp` (POST, the SSE
-GET, DELETE) and streams both bodies. It answers 403 to a request whose
-`Host` is not its own `127.0.0.1:<port>` or that carries an `Origin`
-header, and 404 on any other path. It replaces any `Authorization` header
-the client sent. `decompress:
-false` matters: Bun's `fetch` otherwise decodes a gzipped answer but keeps
-its `content-encoding` header, and the agent then cannot read it.
-`idleTimeout: 0` turns off `Bun.serve`'s 10-second idle default on the
-agent's side, and `timeout: false` turns off the upstream `fetch`'s own
-5-minute socket idle default, so a tool call or SSE stream that stays quiet
-longer is not cut on either side. The conformance
-test loads this exact function from the page.
-
-and the agent runs with the network off:
+The agent runs with the network off:
 
 ```ts
 permissions: { mode: "workspace-write", allowNetwork: false }
 ```
+
+The proxy forwards every streamable-HTTP method on `/mcp` (POST, the SSE
+GET, DELETE) and streams both bodies. It answers 403 to a request whose
+`Host` is not its own `127.0.0.1:<port>` or that carries an `Origin`
+header, and 404 on any other path. It replaces any `Authorization` header
+the client sent. The options of the upstream `fetch` each matter:
+
+- `redirect: "error"`: Bun's `fetch` follows redirects by default, so a
+  3xx from upstream would make the proxy re-send the request, with the
+  token, to another URL. The proxy answers 502 instead.
+- `signal: req.signal`: when the agent goes away (a cancelled run, a
+  closed SSE stream), the upstream request is cancelled too, instead of
+  holding a socket until the proxy exits.
+- `timeout: false`, with `idleTimeout: 0` on the server: turns off the
+  upstream `fetch`'s 5-minute and `Bun.serve`'s 10-second idle defaults, so
+  a tool call or SSE stream that stays quiet longer is not cut on either
+  side.
+- `decompress: false`: Bun's `fetch` otherwise decodes a gzipped answer
+  but keeps its `content-encoding` header, and the agent then cannot read
+  it.
+
+Any failure (upstream down, a redirect, a token store that throws) is a
+plain 502 with no details, never Bun's development error page with a stack
+trace. The conformance test loads this exact function from the page.
 
 Because the entry carries no `{ resolve }` or `{ env }` value:
 
@@ -246,10 +286,12 @@ The host keeps it out of the agent's reach
 ([host duty 14](workflow-run-spec.md#what-the-host-must-do-at-run-time)
 asks for a process the agent cannot read):
 
-- Do not put the token in the host's environment, nor in a file or
-  keychain the agent's `Read` or shell can reach. On Linux a file-read tool
-  without bounds can read `/proc/<pid>/environ` of a same-user process, and
-  a shell can read any file the user can.
+- Do not put the token in the host's environment, nor on the proxy's
+  command line, nor in a file or keychain the agent's `Read` or shell can
+  reach. On Linux a file-read tool without bounds can read
+  `/proc/<pid>/environ` of a same-user process, and a shell can read any
+  file the user can. Any local user, even with the proxy under another OS
+  user, can read its arguments from `/proc/<pid>/cmdline` or `ps`.
 - Confine reads with `allowedPaths` (and `readPaths`) that exclude `/proc`
   and the token's file. The example lane above offers `Read` without them;
   add them before giving it a token-holding host.
@@ -283,7 +325,8 @@ uses the machine token's access. Narrow that:
   `127.0.0.1:<port>` and no `Origin` header is present. Keep both checks in
   any proxy you write.
 - Forward only the MCP path, to the one upstream URL, and never take the
-  upstream from the request (the sample answers 404 on any other path).
+  upstream from the request nor from a redirect (the sample answers 404 on
+  any other path and 502 on an upstream redirect).
 
 Adding a per-run token for the proxy as a `{ resolve }` header turns resume
 and the session store back off: any declared secret does. A token in the URL
