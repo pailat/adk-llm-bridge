@@ -4,8 +4,15 @@
  * outcome reads only the agent's own run report.
  */
 import { describe, expect, test } from "bun:test";
-import { type Event, InvocationContext, PluginManager } from "@google/adk";
+import {
+  type BaseAgent,
+  type Event,
+  InvocationContext,
+  PluginManager,
+  SequentialAgent,
+} from "@google/adk";
 import { ClaudeAgent } from "../../src/agents/claude-agent.js";
+import { ClaudeAgentSdkDriver } from "../../src/agents/driver/claude-agent-sdk.js";
 import { FxCliDriver } from "../../src/agents/driver/fx-cli.js";
 import {
   CODEX_PROVIDER,
@@ -539,5 +546,188 @@ describe("cause names the error that ended the run", () => {
     );
     expect(outcome.errorKind).toBe("aborted");
     expect(outcome.cause?.code).not.toBe("PERMISSION_DENIED");
+  });
+});
+
+/** A leaf sub-agent named `name` that answers `answer`. */
+function leaf(name: string, answer: string): ExternalAgent {
+  return new ExternalAgent({
+    name,
+    provider: CLAUDE_PROVIDER,
+    permissions: { mode: "read-only", allowNetwork: false },
+    driver: {
+      providerId: CLAUDE_PROVIDER.id,
+      async *run() {
+        yield { type: "output", content: answer };
+        yield { type: "completed", exitCode: 0 };
+      },
+    },
+  });
+}
+
+/** A default-delegation lead that delegates once, then yields `after`. */
+function lead(subAgent: BaseAgent, after: ExternalAgentEvent[]): ExternalAgent {
+  return new ExternalAgent({
+    name: "acme_lead",
+    provider: CLAUDE_PROVIDER,
+    permissions: { mode: "read-only", allowNetwork: false },
+    subAgents: [subAgent],
+    driver: {
+      providerId: CLAUDE_PROVIDER.id,
+      async *run(request: ExternalAgentRunRequest) {
+        await request.toolGateway?.runSubAgent({
+          agentName: subAgent.name,
+          task: "write it",
+        });
+        yield* after;
+        yield {
+          type: "completed",
+          exitCode: 0,
+          usage: { inputTokens: 5, outputTokens: 1, totalCostUsd: 0.2 },
+        };
+      },
+    },
+  });
+}
+
+const READ_AFTER_DELEGATION: ExternalAgentEvent[] = [
+  {
+    type: "tool_call",
+    name: "Read",
+    input: { file_path: "report.md" },
+    callId: "call-acme-read",
+    metadata: { builtin: true },
+  },
+  {
+    type: "tool_result",
+    name: "Read",
+    result: "Acme report",
+    callId: "call-acme-read",
+    metadata: { builtin: true },
+  },
+  // Dropped: the writer's turn is still the final answer.
+  { type: "output", content: "lead done" },
+];
+
+describe("default delegation: the answer after the transfer", () => {
+  test("a built-in tool after the delegation keeps the sub-agent's answer", async () => {
+    const outcome = await runExternalAgentOnce(
+      lead(leaf("acme_writer", '{"report":"Acme"}'), READ_AFTER_DELEGATION),
+      { prompt: "lead" },
+    );
+    expect(outcome.errorKind).toBeUndefined();
+    expect(outcome.text).toBe('{"report":"Acme"}');
+  });
+
+  test("a built-in tool after the delegation keeps the answer as the last event", async () => {
+    const agent = lead(leaf("acme_writer", "Report"), READ_AFTER_DELEGATION);
+    const result = await new AgentInvocationGateway({
+      resolveAgent: () => agent,
+    }).run({
+      agentName: agent.name,
+      input: { role: "user", parts: [{ text: "lead" }] },
+      parentContext: new InvocationContext({
+        invocationId: "inv-acme-read",
+        agent,
+        session: {
+          id: "s-acme-read",
+          appName: "acme",
+          userId: "user",
+          state: {},
+          events: [],
+          lastUpdateTime: 1,
+        },
+        pluginManager: new PluginManager(),
+      }),
+    });
+    const last = result.events.at(-1);
+    expect(last?.author).toBe("acme_writer");
+    expect(last?.content?.parts?.[0]?.text).toBe("Report");
+  });
+
+  test("a lead whose last event is its own text after a built-in tool keeps it", async () => {
+    const outcome = await runExternalAgentOnce(
+      lead(leaf("acme_writer", "Report"), [
+        { type: "tool_call", name: "acme_tool", callId: "call-acme-tool" },
+        {
+          type: "tool_result",
+          name: "acme_tool",
+          callId: "call-acme-tool",
+          result: "x",
+        },
+        ...READ_AFTER_DELEGATION.slice(0, 2),
+      ]),
+      { prompt: "lead" },
+    );
+    // The lead went on working after the delegation and ended on a tool.
+    expect(outcome.text).toBe("");
+  });
+
+  test("a transfer to a composite agent returns its leaf's answer", async () => {
+    const pipeline = new SequentialAgent({
+      name: "acme_pipeline",
+      subAgents: [
+        leaf("acme_draft", "draft"),
+        leaf("acme_polish", '{"status":"polished"}'),
+      ],
+    });
+    const outcome = await runExternalAgentOnce(
+      lead(pipeline, [{ type: "output", content: "lead done" }]),
+      { prompt: "lead" },
+    );
+    expect(outcome.errorKind).toBeUndefined();
+    expect(outcome.text).toBe('{"status":"polished"}');
+  });
+});
+
+describe("usage under scope session", () => {
+  test("tokens are the agent's own session total, as costUsd is", async () => {
+    const outcome = await runExternalAgentOnce(
+      parent(
+        {
+          type: "completed",
+          exitCode: 0,
+          usage: {
+            inputTokens: 50,
+            outputTokens: 7,
+            totalCostUsd: 0.9,
+            scope: "session",
+          },
+        },
+        { delegation: "subagent" },
+      ),
+      { prompt: "lead" },
+    );
+    expect(outcome.usage.scope).toBe("session");
+    expect(outcome.usage.costUsd).toBeCloseTo(0.9, 10);
+    expect(outcome.usage.tokens.input).toBe(50);
+    expect(outcome.usage.tokens.output).toBe(7);
+  });
+});
+
+describe("the session state key follows the driver", () => {
+  test("a Claude SDK driver under a custom provider id resumes the sessionId", async () => {
+    const resumes: (string | undefined)[] = [];
+    const agent = new ExternalAgent({
+      name: "acme_coder",
+      provider: { ...CLAUDE_PROVIDER, id: "claude-work" },
+      permissions: { mode: "read-only", allowNetwork: false },
+      driver: new ClaudeAgentSdkDriver({
+        sdk: {
+          query: ({ options }) => {
+            const resume = (options as { resume?: string }).resume;
+            resumes.push(resume);
+            return (async function* () {
+              yield { type: "system", subtype: "init", session_id: resume };
+            })() as never;
+          },
+        },
+      }),
+    });
+    await runExternalAgentOnce(agent, {
+      prompt: "continue",
+      sessionId: "sdk-acme-51",
+    });
+    expect(resumes).toEqual(["sdk-acme-51"]);
   });
 });

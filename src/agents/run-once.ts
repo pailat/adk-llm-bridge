@@ -1,14 +1,18 @@
 import { type Event, InvocationContext, PluginManager } from "@google/adk";
 import type { Content } from "@google/genai";
+import { CACHE_CREATION_METADATA_KEY } from "../converters/cache-usage.js";
 import {
   type AgentInvocationErrorKind,
   AgentInvocationGateway,
   type AgentInvocationResult,
 } from "../runtime/agent-invocation-gateway.js";
 import { parseJson } from "../utils/json.js";
-import { claudeSdkSessionStateKey } from "./driver/claude-agent-sdk.js";
+import {
+  ClaudeAgentSdkDriver,
+  claudeSdkSessionStateKey,
+} from "./driver/claude-agent-sdk.js";
 import { CodexSdkDriver } from "./driver/codex-sdk.js";
-import { fxSessionStateKey } from "./driver/fx-cli.js";
+import { FxCliDriver, fxSessionStateKey } from "./driver/fx-cli.js";
 import {
   EXTERNAL_AGENT_RUN_METADATA_KEY,
   type ExternalAgentRunReport,
@@ -61,7 +65,11 @@ export interface AgentRunUsage {
   costUsd?: number;
   /** Model turns the agent's runtime reported. Absent when it reported none. */
   turns?: number;
-  /** Token counters, delegated sub-agents included; zeros when none were reported. */
+  /**
+   * Token counters, in the same scope as `costUsd`: with scope `"run"` (or
+   * none), delegated sub-agents included; with scope `"session"`, the
+   * agent's own session total only. Zeros when none were reported.
+   */
   tokens: AgentRunTokens;
   /**
    * The agent's own scope: `"session"` when its cost and tokens are the runtime session's total
@@ -87,8 +95,10 @@ export interface AgentRunOutcome {
   /**
    * Text of the final answer: the agent's last event with content, when it
    * is text. When that event is the agent's transfer to a sub-agent (default
-   * delegation, where the sub-agent's turn is the final answer), the
-   * sub-agent's last text after it. Empty when the run ended on a tool call
+   * delegation, where the sub-agent's turn is the final answer), the last
+   * text after it of the sub-agent or of an agent below it (a composite
+   * sub-agent's children); the agent's own built-in tool calls after the
+   * transfer do not change that. Empty when the run ended on a tool call
    * or result, or had no text (a tool's output or an error message is never
    * the answer).
    */
@@ -137,9 +147,11 @@ export interface RunExternalAgentOnceOptions {
   sessionId?: string;
   /**
    * Session state key the driver keeps its session id under. Defaults to
-   * the key of the agent's provider: `claude_sdk_session:<name>` (Claude),
-   * the `threadStateKey` of a `CodexSdkDriver` (`codex_thread:<name>` by default)
-   * and `fx_session:<name>` (fx).
+   * the key the agent's driver reads, whatever the provider's id:
+   * `claude_sdk_session:<name>` (`ClaudeAgentSdkDriver`), the
+   * `threadStateKey` of a `CodexSdkDriver` (`codex_thread:<name>` by
+   * default) and `fx_session:<name>` (`FxCliDriver`); for another driver,
+   * the key of the provider id `claude`, `codex` or `fx`.
    */
   sessionStateKey?: string;
   /** JSON-safe state the run's session starts with. */
@@ -202,13 +214,20 @@ export async function runExternalAgentOnce(
 }
 
 function defaultSessionStateKey(agent: ExternalAgent): string | undefined {
+  // The key the driver reads, whatever the provider's id is.
+  const { driver } = agent;
+  if (driver instanceof ClaudeAgentSdkDriver) {
+    return claudeSdkSessionStateKey(agent.name);
+  }
+  if (driver instanceof CodexSdkDriver) {
+    return driver.threadStateKeyFor(agent.name);
+  }
+  if (driver instanceof FxCliDriver) return fxSessionStateKey(agent.name);
   switch (agent.provider.id) {
     case "claude":
       return claudeSdkSessionStateKey(agent.name);
     case "codex":
-      return agent.driver instanceof CodexSdkDriver
-        ? agent.driver.threadStateKeyFor(agent.name)
-        : `codex_thread:${agent.name}`;
+      return `codex_thread:${agent.name}`;
     case "fx":
       return fxSessionStateKey(agent.name);
     default:
@@ -227,7 +246,8 @@ function toOutcome(
   result: AgentInvocationResult,
   stateKey: string | undefined,
 ): AgentRunOutcome {
-  const report = runReport(agent, result.events);
+  const own = runReport(agent, result.events);
+  const { report } = own;
   // Only an id the driver reported for this run: a resumed id is not echoed
   // back unless the driver says it kept that session.
   const stored = stateKey ? result.stateDelta?.[stateKey] : undefined;
@@ -239,7 +259,7 @@ function toOutcome(
   const text = answer?.text ?? "";
   const base: AgentRunOutcome = {
     text,
-    usage: usageOf(result, report),
+    usage: usageOf(result, own),
     ...(sessionId ? { sessionId } : {}),
   };
   if (result.error && !recovered(result, report, answer)) {
@@ -289,31 +309,46 @@ interface FinalAnswer {
  * are skipped. When the agent's last such event is its transfer to another
  * agent (`actions.transferToAgent`, as in default delegation, where the
  * coordinator writes nothing after it), the answer is the target's, read
- * the same way from the events after the transfer, nested transfers
- * included.
+ * the same way from the events after the transfer by any agent of the
+ * target's subtree (a SequentialAgent's events are its children's), nested
+ * transfers included. Calls and results of the runtime's own tools after
+ * the transfer do not end the sub-agent's answer, as they do not for the
+ * tool gateway; any other event does.
  */
 function finalAnswer(
   agent: ExternalAgent,
   events: readonly Event[],
 ): FinalAnswer | undefined {
-  return finalAnswerOf(agent.name, events, 0);
+  return finalAnswerOf(agent, new Set([agent.name]), events, 0);
 }
 
 function finalAnswerOf(
-  author: string,
+  agent: ExternalAgent,
+  authors: ReadonlySet<string>,
   events: readonly Event[],
   start: number,
 ): FinalAnswer | undefined {
+  // After a built-in tool event, only an earlier transfer gives the answer.
+  let afterBuiltin = false;
   for (let index = events.length - 1; index >= start; index--) {
     const event = events[index];
-    if (!event || event.partial || event.author !== author) continue;
+    if (!event || event.partial || !authors.has(event.author ?? "")) continue;
     const target = event.actions?.transferToAgent;
-    if (target && target !== author && !event.errorCode) {
-      return finalAnswerOf(target, events, index + 1);
+    if (target && !authors.has(target) && !event.errorCode) {
+      return finalAnswerOf(
+        agent,
+        subtreeNames(agent, target),
+        events,
+        index + 1,
+      );
     }
     const parts = event.content?.parts ?? [];
     if (parts.length === 0) continue;
-    if (event.errorCode) return undefined;
+    if (isBuiltinToolEvent(event)) {
+      afterBuiltin = true;
+      continue;
+    }
+    if (afterBuiltin || event.errorCode) return undefined;
     if (parts.some((part) => part.functionCall || part.functionResponse)) {
       return undefined;
     }
@@ -329,6 +364,30 @@ function finalAnswerOf(
     };
   }
   return undefined;
+}
+
+/** Names of the agent `name` and of every agent below it. */
+function subtreeNames(agent: ExternalAgent, name: string): Set<string> {
+  const names = new Set([name]);
+  const pending = [...(agent.rootAgent.findAgent(name)?.subAgents ?? [])];
+  for (let next = pending.pop(); next; next = pending.pop()) {
+    names.add(next.name);
+    pending.push(...next.subAgents);
+  }
+  return names;
+}
+
+/**
+ * A call or result of the runtime's own tools (Read, Bash...): the driver
+ * marks them `metadata.builtin`, which lands on `customMetadata`.
+ */
+function isBuiltinToolEvent(event: Event): boolean {
+  return (
+    event.customMetadata?.builtin === true &&
+    (event.content?.parts ?? []).some(
+      (part) => part.functionCall || part.functionResponse,
+    )
+  );
 }
 
 /**
@@ -380,26 +439,53 @@ function recovered(
 
 function usageOf(
   result: AgentInvocationResult,
-  report: ExternalAgentRunReport,
+  { report, event }: OwnRunReport,
 ): AgentRunUsage {
   const { usage } = result;
-  // The gateway sums every run-scoped cost, delegated sub-agents included;
-  // a session total is not in that sum, so it is the agent's own report.
-  const costUsd = report.scope === "session" ? report.costUsd : usage.costUsd;
+  // The gateway sums every run-scoped cost and token count, delegated
+  // sub-agents included. A session total is not a run's, so under scope
+  // "session" both are the agent's own report, as one scope.
+  const session = report.scope === "session";
+  const costUsd = session ? report.costUsd : usage.costUsd;
   return {
     ...(costUsd !== undefined ? { costUsd } : {}),
     ...(report.turns !== undefined ? { turns: report.turns } : {}),
-    tokens: {
-      input: usage.promptTokens,
-      output: usage.completionTokens,
-      cacheRead: usage.cachedTokens,
-      ...(usage.cacheCreationTokens !== undefined
-        ? { cacheCreation: usage.cacheCreationTokens }
-        : {}),
-      total: usage.totalTokens,
-    },
+    tokens: session ? ownTokens(event) : gatewayTokens(usage),
     ...(report.scope ? { scope: report.scope } : {}),
   };
+}
+
+function gatewayTokens(usage: AgentInvocationResult["usage"]): AgentRunTokens {
+  return {
+    input: usage.promptTokens,
+    output: usage.completionTokens,
+    cacheRead: usage.cachedTokens,
+    ...(usage.cacheCreationTokens !== undefined
+      ? { cacheCreation: usage.cacheCreationTokens }
+      : {}),
+    total: usage.totalTokens,
+  };
+}
+
+/** Tokens on the event that carries the agent's own run report. */
+function ownTokens(event: Event | undefined): AgentRunTokens {
+  const meta = event?.usageMetadata;
+  const input = meta?.promptTokenCount ?? 0;
+  const output = meta?.candidatesTokenCount ?? 0;
+  const written = event?.customMetadata?.[CACHE_CREATION_METADATA_KEY];
+  return {
+    input,
+    output,
+    cacheRead: meta?.cachedContentTokenCount ?? 0,
+    ...(typeof written === "number" ? { cacheCreation: written } : {}),
+    total: meta?.totalTokenCount ?? input + output,
+  };
+}
+
+/** The agent's own last run report and the event that carries it. */
+interface OwnRunReport {
+  report: ExternalAgentRunReport;
+  event?: Event;
 }
 
 /**
@@ -409,16 +495,16 @@ function usageOf(
 function runReport(
   agent: ExternalAgent,
   events: readonly Event[],
-): ExternalAgentRunReport {
+): OwnRunReport {
   for (let index = events.length - 1; index >= 0; index--) {
     const event = events[index];
     if (event?.author !== agent.name) continue;
     const value = event.customMetadata?.[EXTERNAL_AGENT_RUN_METADATA_KEY];
     if (value && typeof value === "object") {
-      return value as ExternalAgentRunReport;
+      return { report: value as ExternalAgentRunReport, event };
     }
   }
-  return {};
+  return { report: {} };
 }
 
 /**

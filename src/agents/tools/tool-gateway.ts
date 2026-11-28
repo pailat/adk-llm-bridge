@@ -566,16 +566,15 @@ export class ToolGateway {
       return true;
     }
     // Keep content-less events that still carry a control signal (a child's
-    // `escalate` must reach enclosing LoopAgents) or the child's usage and
-    // reports (an ExternalAgent's own carrier when it wrote no final text),
-    // which the host counts.
+    // `escalate` must reach enclosing LoopAgents) or an ExternalAgent's own
+    // report carrier (it always has the model key), whose usage the host
+    // counts. Any other content-less event, usage or not, is a blank bubble.
     const customMetadata = (
       event as Event & { customMetadata?: Record<string, unknown> }
     ).customMetadata;
     return (
       Object.keys(event.actions?.stateDelta ?? {}).length > 0 ||
       event.actions?.escalate === true ||
-      event.usageMetadata !== undefined ||
       SURFACED_METADATA_KEYS.some((key) => customMetadata?.[key] !== undefined)
     );
   }

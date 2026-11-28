@@ -407,6 +407,34 @@ describe("ToolGateway", () => {
     });
   });
 
+  test("native mode drops a content-less event that only has usage", async () => {
+    const worker = new FunctionResponseAgent([
+      createEvent({
+        invocationId: "inv-1",
+        author: "worker",
+        content: { role: "model", parts: [{ text: "answer" }] },
+      }),
+      createEvent({
+        invocationId: "inv-1",
+        author: "worker",
+        usageMetadata: { promptTokenCount: 3, totalTokenCount: 3 },
+      }),
+    ]);
+    const root = new TextAgent("root");
+    const emitted: Event[] = [];
+    const gateway = new ToolGateway({
+      rootAgent: root,
+      subAgents: [worker],
+      parentContext: parentContext(root),
+      eventSink: (event) => emitted.push(event),
+    });
+
+    await gateway.runSubAgent({ agentName: "worker", task: "do it" });
+
+    // #0 call, #1 transfer response, #2 answer: no blank bubble.
+    expect(emitted).toHaveLength(3);
+  });
+
   test("can hide subagent events for quiet summaries", async () => {
     const worker = new TextAgent("worker");
     const root = new TextAgent("root");

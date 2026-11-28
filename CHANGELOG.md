@@ -13,9 +13,10 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `InvocationContext`. It returns an `AgentRunOutcome`:
   `{ structured, text, usage: { costUsd, turns, tokens, scope }, sessionId, errorKind, cause }`.
   `sessionId` is the session id the driver reported for the run: the id
-  stored under the agent's session state key (`claude_sdk_session:<agent>`
-  for Claude, the `CodexSdkDriver`'s `threadStateKey`, `codex_thread:<agent>`
-  by default, for Codex, `fx_session:<agent>` for fx), or on a resume the session the driver says it kept
+  stored under the session state key the agent's driver reads, whatever the
+  provider id (`claude_sdk_session:<agent>` for `ClaudeAgentSdkDriver`, the
+  `CodexSdkDriver`'s `threadStateKey`, `codex_thread:<agent>` by default,
+  `fx_session:<agent>` for `FxCliDriver`), or on a resume the session the driver says it kept
   (`ClaudeAgentSdkDriver`, `CodexSdkDriver`, `FxCliDriver`). Passing it
   back resumes that session, so the ids chain across any number of runs,
   also from a new agent instance and through the driver's `sessionStore`
@@ -27,10 +28,12 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   threw. A resumed session that is aborted is not returned, for any
   driver, so the caller keeps the id it passed. Under default delegation
   (`finalAnswer: "subagent"`), `text` is the sub-agent's answer after the
-  agent's transfer, nested transfers included. Only the agent's own run report counts: a delegated sub-agent's
+  agent's transfer, nested transfers included, from any agent below the
+  target (a SequentialAgent's children), even when the agent then used a
+  built-in tool (Read, Bash...). Only the agent's own run report counts: a delegated sub-agent's
   session and turns are never the agent's, and `usage.costUsd` sums the
   run-scoped costs of the agent and its sub-agents (a session total is the
-  agent's own). `signal` aborts the run, and the driver stops its child
+  agent's own, and so are `usage.tokens` then). `signal` aborts the run, and the driver stops its child
   process. `text` is the agent's last event with content when it is text,
   never a tool's output or an error message. `structured` is that answer
   parsed as JSON when the agent has an `outputSchema` or the driver marks
@@ -60,9 +63,9 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   no tokens. A session total is not added there, so resumed sessions are
   not counted twice. A delegated sub-agent's events keep their run report,
   cost (with `costSource` and `marketCostUsd`) and cache writes on the host
-  timeline, and its content-less usage carrier surfaces there too, so they
-  are counted. A coordinator's streamed partial chunks no longer release a
-  held sub-agent answer early. `CodexSdkDriver.threadStateKeyFor(agentName)`
+  timeline, and its content-less report carrier surfaces there too, so they
+  are counted. A coordinator's streamed partial chunks and its built-in tool
+  calls and results no longer release a held sub-agent answer early. `CodexSdkDriver.threadStateKeyFor(agentName)`
   returns the key the driver resumes a thread from.
   `ExternalAgentCompletedEvent` has a new `sessionId`:
   `ClaudeAgentSdkDriver`, `CodexSdkDriver` and `FxCliDriver` set it to the

@@ -799,7 +799,13 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
       // A partial chunk (the coordinator streaming a re-narration that may
       // be dropped) does not release a held sub-agent answer either: the
       // Runner does not store it, and the answer must stay the last event.
-      if (!isStateOnlyEvent(event) && !(heldDelegated && event.partial)) {
+      // Nor does a call or result of the runtime's own tools (Read, Bash...):
+      // they leave the sub-agent's turn the final answer (see
+      // resetFinalAnswer below).
+      if (
+        !isStateOnlyEvent(event) &&
+        !(heldDelegated && (event.partial || isBuiltinToolEvent(event)))
+      ) {
         flushHeld();
       }
       enqueue(event);
@@ -1756,6 +1762,19 @@ function routeAdkToolActions(
 function asCallbackList<T>(value: T | readonly T[] | undefined): readonly T[] {
   if (value === undefined) return [];
   return Array.isArray(value) ? [...(value as readonly T[])] : [value as T];
+}
+
+/**
+ * A call or result of the runtime's own tools (Read, Bash...): the driver
+ * marks them `metadata.builtin`, which lands on `customMetadata`.
+ */
+function isBuiltinToolEvent(event: Event): boolean {
+  return (
+    event.customMetadata?.builtin === true &&
+    (event.content?.parts ?? []).some(
+      (part) => part.functionCall || part.functionResponse,
+    )
+  );
 }
 
 /**
