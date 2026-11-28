@@ -19,9 +19,12 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   no secret, the agent runs with `allowNetwork: false`, and resume and the
   session store stay on. The sample proxy forwards only `/mcp`, refuses
   browsers (403 on a foreign `Host` or any `Origin`), keeps slow calls and
-  quiet SSE streams open, and passes compressed answers on intact. The page
-  says to keep every shell on the host in the no-network sandbox, since an
-  unsandboxed shell can call the proxy directly. A Linux conformance test with a shell offered runs both recipes,
+  quiet SSE streams open on both sides (`idleTimeout: 0` and an upstream
+  `fetch` with `timeout: false`), and passes compressed answers on intact.
+  The page says to keep every shell on the host in the no-network sandbox,
+  since an unsandboxed shell can call the proxy directly, and to keep the
+  proxy's token out of any environment, file or process the agent can read.
+  A Linux conformance test with a shell offered runs both recipes,
   and the page's own proxy, against a fake HTTP MCP server.
 
 ## [0.7.0] - 2026-11-13

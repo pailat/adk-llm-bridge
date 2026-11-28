@@ -52,7 +52,23 @@ describe("MCP from a headless lane: the recipe page", () => {
     expect(proxy).toContain('pathname !== "/mcp"');
     expect(proxy).toContain("status: 404");
     expect(proxy).toContain("idleTimeout: 0");
+    // The upstream fetch has its own 5-minute idle default; a real wait that
+    // long is too slow for a test, so the option is checked here.
+    expect(proxy).toContain("timeout: false");
     expect(proxy).toContain("decompress: false");
+  });
+
+  test("the loopback recipe keeps the token where the agent cannot read it", () => {
+    const page = read(PAGE);
+    const start = page.indexOf("### Where the proxy keeps the token");
+    expect(start).toBeGreaterThan(-1);
+    const next = page.indexOf("\n#", start + 1);
+    const section = page.slice(start, next === -1 ? undefined : next);
+    expect(section).toContain("/proc/<pid>/environ");
+    expect(section).toContain("readPaths");
+    expect(section).toMatch(/separate\s+OS\s+user/);
+    expect(section).toContain("ptrace_scope");
+    expect(page).toMatch(/The driver enforces no `ptrace_scope` condition/);
   });
 
   test("the loopback proxy sample refuses browsers: own Host only, no Origin", () => {

@@ -8,7 +8,7 @@ machine token, without handing the token to the agent. Two recipes:
 | --- | --- | --- |
 | Entry the agent sees | `https://…` with an `Authorization: { resolve }` header | `http://127.0.0.1:<port>` with no header |
 | Network | `allowNetwork: true` | `allowNetwork: false` |
-| Linux with a shell | needs `kernel.yama.ptrace_scope` ≥ 1 | no condition |
+| Linux with a shell | needs `kernel.yama.ptrace_scope` ≥ 1 | none enforced; the host keeps the proxy's token unreadable |
 | Resume, `sessionStore` | refused | available |
 | MCP result over the inline limit | truncated inline | Claude Code's default handling |
 | Who holds the token | the bridge, for one run | a host proxy process |
@@ -176,6 +176,8 @@ export function startMcpProxy(upstream: string, token: () => string) {
         method: req.method,
         headers,
         body: req.body,
+        // No idle cut-off upstream either (Bun's fetch default is 5 minutes).
+        timeout: false,
         // Pass the body on as sent, matching its content-encoding header.
         decompress: false,
       });
@@ -204,7 +206,10 @@ header, and 404 on any other path. It replaces any `Authorization` header
 the client sent. `decompress:
 false` matters: Bun's `fetch` otherwise decodes a gzipped answer but keeps
 its `content-encoding` header, and the agent then cannot read it.
-`idleTimeout: 0` turns off `Bun.serve`'s 10-second idle default. The conformance
+`idleTimeout: 0` turns off `Bun.serve`'s 10-second idle default on the
+agent's side, and `timeout: false` turns off the upstream `fetch`'s own
+5-minute socket idle default, so a tool call or SSE stream that stays quiet
+longer is not cut on either side. The conformance
 test loads this exact function from the page.
 
 and the agent runs with the network off:
@@ -220,8 +225,10 @@ Because the entry carries no `{ resolve }` or `{ env }` value:
   `localhost` (see
   [Network rules](external-agent-isolation.md#network-rules-http-sse)).
   The shell stays in the no-network sandbox and web tools stay off.
-- **No `ptrace_scope` condition.** There is no secret in the `claude`
-  process to read.
+- **The driver enforces no `ptrace_scope` condition.** There is no secret
+  in the `claude` process to read. The token is still in the proxy, so the
+  host must keep it out of the agent's reach (see
+  [Where the proxy keeps the token](#where-the-proxy-keeps-the-token)).
 - **Resume and the session store stay on.** `resumeSessionId`,
   `runtimeSession.id`, the session id kept in ADK state and `sessionStore`
   all work as without MCP, so a fix round can resume the implementer's
@@ -231,6 +238,25 @@ Because the entry carries no `{ resolve }` or `{ env }` value:
   result as it does without the bridge, which may save it under the session
   folder. Pagination (4tas8fc2) is still the way to get a 76,000-character
   result whole.
+
+### Where the proxy keeps the token
+
+The bridge never sees the proxy's token, so it checks nothing about it.
+The host keeps it out of the agent's reach
+([host duty 14](workflow-run-spec.md#what-the-host-must-do-at-run-time)
+asks for a process the agent cannot read):
+
+- Do not put the token in the host's environment, nor in a file or
+  keychain the agent's `Read` or shell can reach. On Linux a file-read tool
+  without bounds can read `/proc/<pid>/environ` of a same-user process, and
+  a shell can read any file the user can.
+- Confine reads with `allowedPaths` (and `readPaths`) that exclude `/proc`
+  and the token's file. The example lane above offers `Read` without them;
+  add them before giving it a token-holding host.
+- Run the proxy as a separate OS user, or in a process the agent cannot
+  read. Otherwise, on Linux with a shell offered, keep
+  `kernel.yama.ptrace_scope` at 1 or higher, so that the shell cannot read
+  the proxy's memory.
 
 ### Who may call the proxy
 
