@@ -10,7 +10,11 @@ import { BaseLlm, InputValidationError } from "@google/adk";
 import { getProviderConfig } from "../config.js";
 import type { BaseProviderConfig, ErrorMode } from "../types.js";
 import { LogCode, warnOnce } from "../utils/log.js";
-import { httpStatusOf, ProviderLlmError } from "./provider-llm-error.js";
+import {
+  describeProviderFailure,
+  httpStatusOf,
+  ProviderLlmError,
+} from "./provider-llm-error.js";
 
 /**
  * Whether `model` matches one of `patterns` on the whole name, the way ADK's
@@ -260,8 +264,18 @@ export abstract class BaseProviderLlm extends BaseLlm {
       errorCode:
         code ??
         (status !== undefined ? `API_ERROR_${status}` : `${prefix}_ERROR`),
-      errorMessage: error instanceof Error ? error.message : String(error),
+      errorMessage: describeProviderFailure(error, this.requestHost()),
       turnComplete: true,
     };
+  }
+
+  /**
+   * Hostname the provider sends requests to, named in the message of a failure
+   * thrown inside `fetch`.
+   *
+   * @returns The hostname, or `undefined` (the default) to leave it out.
+   */
+  protected requestHost(): string | undefined {
+    return undefined;
   }
 }
