@@ -164,7 +164,7 @@ describe("ClaudeCliDriver isolation flags", () => {
     );
     expect(args).toContain("--tools=Read,Glob,Grep,TodoWrite");
     expect(args).toContain(
-      "--disallowedTools=Edit,Write,MultiEdit,NotebookEdit,Bash,PowerShell,WebFetch,WebSearch",
+      "--disallowedTools=Edit,Write,MultiEdit,NotebookEdit,Bash,PowerShell,Monitor,WebFetch,WebSearch",
     );
   });
 
@@ -1415,6 +1415,35 @@ describe("shell tools are recognized whatever their case", () => {
       expect(plan.tools).toEqual([canonical, "Read"]);
     });
   }
+
+  test("Monitor runs shell commands, so it gets the no-network sandbox", () => {
+    const plan = planClaudeIsolation(
+      { mode: "workspace-write" },
+      {
+        tools: ["Read", "monitor"],
+        inheritHostConfig: false,
+        allowUnsandboxedShell: false,
+        workingDirectory: "/repo",
+      },
+    );
+    expect(plan.tools).toEqual(["Read", "Monitor"]);
+    expect(plan.sandbox).toBeDefined();
+    expect(plan.networkSandbox).toBe("enforced");
+  });
+
+  test("read-only removes Monitor with the other shell tools", () => {
+    const plan = planClaudeIsolation(
+      { mode: "read-only", allowNetwork: false },
+      {
+        tools: ["Read", "Monitor"],
+        inheritHostConfig: false,
+        allowUnsandboxedShell: false,
+        workingDirectory: "/repo",
+      },
+    );
+    expect(plan.tools).toEqual(["Read"]);
+    expect(plan.disallowedTools).toContain("Monitor");
+  });
 
   test("an unknown name is passed on unchanged and offers no shell", () => {
     const plan = planClaudeIsolation(

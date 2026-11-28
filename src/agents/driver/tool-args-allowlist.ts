@@ -86,8 +86,9 @@ function parseRule(owner: string, entry: unknown): ToolArgsRule {
       `entry ${JSON.stringify(entry)} is not Bash(<command>) or Bash(<prefix>:*).`,
     );
   }
-  const [, tool, spec = ""] = shape;
-  if (tool !== "Bash") {
+  const [, tool = "", spec = ""] = shape;
+  // Claude Code matches tool names in any case, so `bash(...)` is `Bash`.
+  if (tool.toLowerCase() !== "bash") {
     throw invalid(
       owner,
       `entry ${JSON.stringify(entry)} names ${tool}, which has no argument rules; only Bash does. Narrow other tools with tools.`,
@@ -95,6 +96,8 @@ function parseRule(owner: string, entry: unknown): ToolArgsRule {
   }
   const prefix = spec.endsWith(":*");
   const command = prefix ? spec.slice(0, -2) : spec;
+  // Any padding is refused, Unicode blanks included, so a rule's command
+  // never starts or ends with a character bash keeps in a word.
   if (command === "" || command.trim() !== command) {
     throw invalid(
       owner,
@@ -132,8 +135,11 @@ function invalid(owner: string, detail: string): ExternalAgentPolicyError {
  *
  * @remarks
  * Only shell tools are checked; every other tool is left to `tools` and the
- * permission policy. A `Bash` call runs only when its `command`, trimmed,
- * matches a rule and holds no shell operator. A shell tool with no rule form
+ * permission policy. A `Bash` call runs only when its `command`, with
+ * leading and trailing spaces and tabs removed, matches a rule and holds no
+ * shell operator. Only spaces and tabs are removed: bash splits words on
+ * nothing else, so a form feed or a no-break space stays part of the
+ * command, which then does not match. A shell tool with no rule form
  * (`PowerShell`, `Monitor`) is always denied, so it cannot run what `Bash`
  * may not. Tool names are matched case-insensitively and trimmed, so a call
  * reported as `bash` is checked like `Bash`.
@@ -157,14 +163,19 @@ export function toolArgsDenial(
   if (typeof raw !== "string") {
     return "Denied: a Bash call without a command cannot be checked against this agent's toolArgsAllowlist.";
   }
-  const command = raw.trim();
+  const command = trimShellBlanks(raw);
   if (
     !SHELL_OPERATORS.test(command) &&
     allowlist.rules.some((rule) => matches(rule, command))
   ) {
     return undefined;
   }
-  return `Denied: the command is not in this agent's toolArgsAllowlist (allowed: ${describe(allowlist)}). Commands with ;, &, |, $, backticks, redirects or line breaks never match.`;
+  return `Denied: the command is not in this agent's toolArgsAllowlist (allowed: ${describe(allowlist)}). Commands with ;, &, |, $, backticks, redirects, parentheses, backslashes or line breaks never match.`;
+}
+
+/** Removes leading and trailing spaces and tabs, the blanks bash splits on. */
+function trimShellBlanks(value: string): string {
+  return value.replace(/^[ \t]+|[ \t]+$/gu, "");
 }
 
 function matches(rule: ToolArgsRule, command: string): boolean {

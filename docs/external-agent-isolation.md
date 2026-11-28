@@ -51,8 +51,9 @@ that reached a tool, so it stops the run on every call outside the set.
 
 Built-in names in `tools` are passed on in their canonical spelling (`bash`
 becomes `Bash`), so the shell sandbox, the web-tool refusal and the
-`read-only` removals see a shell or web tool named in any case. The
-per-message check compares built-in tool names by canonical name, so an
+`read-only` removals see a shell or web tool named in any case. `Monitor`
+runs a shell command too, so it counts as a shell tool: it gets the
+no-network sandbox and `read-only` removes it. The per-message check compares built-in tool names by canonical name, so an
 offered tool reported as `bash` for `Bash` is never flagged. Everything else
 outside the offered set is flagged and stops the run: a built-in that was not
 offered, any `mcp__` tool outside the expected servers (MCP names are never
@@ -443,21 +444,44 @@ new ClaudeAgentSdkDriver({
 
 - `Bash(<prefix>:*)` allows `<prefix>` alone or followed by a space and any
   arguments, so `Bash(git log:*)` allows `git log -5` but not `git logout`.
-  `Bash(<command>)` allows exactly that command. The command is trimmed first.
+  `Bash(<command>)` allows exactly that command. Leading and trailing spaces
+  and tabs are removed from the command first, and nothing else: a form feed
+  or a no-break space stays in the command, so it does not match.
 - The list is closed. A `Bash` call that matches no rule is denied, and so is
   every `PowerShell` or `Monitor` call (`Monitor` runs its `command` as a
   shell command or script). `[]` denies every shell command. Unset (the
   default), commands are not narrowed.
-- Tool names match in any case, so a call reported as `bash` or `BASH` is
+- Tool names match in any case, in rules and in calls: `bash(git log:*)` is
+  the rule `Bash(git log:*)`, and a call reported as `bash` or `BASH` is
   checked like `Bash`.
 - A command with a shell operator never matches: `;`, `&`, `|`, `$`, a
   backtick, `<`, `>`, a parenthesis, a backslash or a line break. So
   `git log && curl …` and `git log $(…)` are denied.
 - A `PreToolUse` hook checks every call, so the list holds in every
   permission mode and an approval cannot override it. The model is told the
-  call was denied, and the run goes on.
+  call was denied, and the run goes on. The hook is part of the options
+  `buildOptions` and `buildOptionsForRun` return, so a host that calls
+  `query()` with them itself gets the same check.
 - A prefix rule admits any arguments, options included (`git log
   --output=<file>` writes a file). Use exact rules where that matters.
+- The list names commands, not what they run. A listed command that runs
+  files from the workspace gives the agent the full shell when it can also
+  write those files. With `Write` or `Edit` offered, `Bash(bun test)` runs a
+  `*.test.ts` the agent wrote, `Bash(git commit:*)` runs
+  `.git/hooks/pre-commit`, and `Bash(bun run build)` runs `package.json`
+  scripts. Pair such commands with read-only file tools, or keep the files
+  they run outside `allowedPaths`. The no-network sandbox and `allowedPaths`
+  still bound what such code reaches.
+- Only tool calls are checked. Commands Claude Code runs itself from the
+  settings it loads are not tool calls, so the list does not see them:
+  command hooks in settings, and the `` !`command` `` lines of skills and
+  slash commands. With `settingSources` that include `project` or `local`,
+  or with `inheritHostConfig`, those settings come from `.claude/` in the
+  working directory (or the host's own). Whether Claude Code picks up a
+  file the agent writes there during the run was not checked against a live
+  Claude Code. So when you load project or local settings, keep `.claude/`
+  out of what the agent can write (outside `allowedPaths`, or no write
+  tools). The isolated default loads no settings.
 - A malformed rule refuses the driver with
   `EXTERNAL_AGENT_TOOL_ARGS_RULE_INVALID`: not a string, a tool other than
   `Bash`, an empty or padded command, a `*` other than a final `:*`, or a

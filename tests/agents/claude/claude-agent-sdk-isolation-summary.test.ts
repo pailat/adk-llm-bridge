@@ -208,6 +208,7 @@ describe("read-only removes write, shell and web tools from the list", () => {
       "NotebookEdit",
       "Bash",
       "PowerShell",
+      "Monitor",
       "WebFetch",
       "WebSearch",
     ]);

@@ -521,7 +521,13 @@ export interface ClaudeAgentSdkDriverConfig {
    * @remarks
    * A `PreToolUse` hook checks each call, so the list holds in every
    * permission mode and no approval overrides it; the model is told the
-   * call was denied and the run goes on. A command holding a shell
+   * call was denied and the run goes on. The hook is in the options
+   * {@link ClaudeAgentSdkDriver.buildOptions} and `buildOptionsForRun`
+   * return. The list names commands, not what they run: a listed command
+   * that runs workspace files (`bun test`, `git commit` and its hooks) gives
+   * the full shell when the agent can also write them, and commands Claude
+   * Code runs from loaded settings (hooks, skill `!` lines) are not tool
+   * calls, so they are not checked. A command holding a shell
    * operator (`;`, `&`, `|`, `$`, a backtick, `<`, `>`, a parenthesis, a
    * backslash or a line break) never matches, so `git log && rm -rf .` is
    * denied. A prefix rule admits any arguments after it, options included
@@ -1321,21 +1327,6 @@ export class ClaudeAgentSdkDriver {
             : {}),
         };
       }
-      const toolArgs = this.#toolArgsAllowlist;
-      if (toolArgs) {
-        // A hook, not allowedTools: Claude Code's allow rules only skip the
-        // prompt, so a command they do not list would still run when the
-        // host approves it or the mode bypasses prompts.
-        options = {
-          ...options,
-          hooks: withPreToolUseGuard(options.hooks, {
-            unnamedReason:
-              "Denied: a tool call without a name cannot be checked against this agent's toolArgsAllowlist.",
-            deny: (toolName, toolInput) =>
-              toolArgsDenial(toolArgs, toolName, toolInput),
-          }),
-        };
-      }
       if (policySetsPaths(request.permissions)) {
         sessionReads = {
           sessionId: undefined,
@@ -1879,9 +1870,29 @@ export class ClaudeAgentSdkDriver {
       loadTimeoutMs: this.#sessionStoreLoadTimeoutMs,
       canUseTool: this.buildCanUseTool(request),
       ...this.buildToolIsolation(request),
+      hooks: this.buildToolArgsHooks(),
     };
 
     return removeUndefined(options) as ClaudeAgentSdkOptions;
+  }
+
+  /**
+   * The `toolArgsAllowlist` guard, built here and not in `run()` so that
+   * options a host gets from `buildOptions` or `buildOptionsForRun` and
+   * passes to `query()` itself carry it too. A hook, not `allowedTools`:
+   * Claude Code's allow rules only skip the prompt, so a command they do not
+   * list would still run when the host approves it or the mode bypasses
+   * prompts.
+   */
+  private buildToolArgsHooks(): ClaudeAgentSdkOptions["hooks"] {
+    const toolArgs = this.#toolArgsAllowlist;
+    if (!toolArgs) return undefined;
+    return withPreToolUseGuard(undefined, {
+      unnamedReason:
+        "Denied: a tool call without a name cannot be checked against this agent's toolArgsAllowlist.",
+      deny: (toolName, toolInput) =>
+        toolArgsDenial(toolArgs, toolName, toolInput),
+    });
   }
 
   /**

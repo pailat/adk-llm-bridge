@@ -48,13 +48,21 @@ const CLAUDE_WRITE_TOOLS: readonly string[] = [
   "NotebookEdit",
   "Bash",
   "PowerShell",
+  "Monitor",
 ];
 
 /** Tools that reach the network on their own. */
 const CLAUDE_NETWORK_TOOLS: readonly string[] = ["WebFetch", "WebSearch"];
 
-/** Tools that run shell commands. */
-const CLAUDE_SHELL_TOOLS: ReadonlySet<string> = new Set(["Bash", "PowerShell"]);
+/**
+ * Tools that run shell commands. `Monitor` runs its `command` as a shell
+ * command or script, so it gets the no-network sandbox like `Bash`.
+ */
+const CLAUDE_SHELL_TOOLS: ReadonlySet<string> = new Set([
+  "Bash",
+  "PowerShell",
+  "Monitor",
+]);
 
 /** Tools that read files by path. */
 const CLAUDE_FILE_READ_TOOLS: ReadonlySet<string> = new Set([

@@ -19,13 +19,25 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `["Bash(git log:*)", "Bash(bun test)"]`, so a host no longer needs a
   wrapper script for it. The list is closed: a `Bash` command that matches no
   rule is denied, and so is every `PowerShell` or `Monitor` call (`Monitor`
-  runs a shell command too). Tool names match in any case, so a call
-  reported as `bash` is checked like `Bash`. A command with a shell
-  operator (`;`, `&`, `|`, `$`, a backtick, a redirect, a line break) never
-  matches. A `PreToolUse` hook checks each call, so the list holds in every
-  permission mode. Off by default. A malformed rule refuses the driver with
+  runs a shell command too). Tool names match in any case, in rules and in
+  calls, so a call reported as `bash` is checked like `Bash`. A command with
+  a shell operator (`;`, `&`, `|`, `$`, a backtick, a redirect, a
+  parenthesis, a backslash, a line break) never matches. A `PreToolUse` hook
+  checks each call, so the list holds in every permission mode; it is part
+  of the options `buildOptions` and `buildOptionsForRun` return, so a host
+  that calls `query()` itself gets it too. A listed command that runs
+  workspace files (`bun test`, `git commit` with its hooks) gives the full
+  shell when the agent can also write those files, and commands Claude Code
+  runs from loaded settings (hooks, skill `!` lines) are not checked. Off by
+  default. A malformed rule refuses the driver with
   the new `EXTERNAL_AGENT_TOOL_ARGS_RULE_INVALID` code. See
   [Narrowing shell commands](docs/external-agent-isolation.md#narrowing-shell-commands).
+
+### Fixed
+
+- **`Monitor` counts as a shell tool** in the Claude isolation plan and the
+  network guard, since it runs a shell command: a run that offers it gets
+  the no-network sandbox, and `read-only` removes it.
 
 ## [0.7.1] - 2026-11-28
 

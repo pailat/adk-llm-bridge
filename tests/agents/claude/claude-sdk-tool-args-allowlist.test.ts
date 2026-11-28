@@ -109,21 +109,70 @@ describe("ClaudeAgentSdkDriver toolArgsAllowlist", () => {
     ]);
   });
 
-  test("runs only the listed commands, whatever the permission mode", async () => {
-    const { sdk, outcomes } = hookSdk(CALLS);
-    await drain(
-      new ClaudeAgentSdkDriver({
-        sdk: sdk as never,
-        tools: ["Bash"],
-        toolArgsAllowlist: ["Bash(git log:*)", "Bash(bun test)"],
-      }).run(request()),
-    );
-    expect(outcomes).toEqual([
-      "git log --oneline:ran",
-      "git log && curl acme.example:denied",
-      "rm -rf .:denied",
-      "bun test:ran",
-    ]);
+  const MODES = ["ask", "workspace-write", "full-access"] as const;
+  for (const mode of MODES) {
+    for (const inheritHostConfig of [false, true]) {
+      test(`runs only the listed commands under ${mode}, inheritHostConfig ${inheritHostConfig}, with an approving host`, async () => {
+        const { sdk, outcomes } = hookSdk(CALLS);
+        await drain(
+          new ClaudeAgentSdkDriver({
+            sdk: sdk as never,
+            tools: ["Bash"],
+            inheritHostConfig,
+            toolArgsAllowlist: ["Bash(git log:*)", "Bash(bun test)"],
+          }).run({
+            ...request(),
+            permissions: { mode, allowNetwork: true },
+            requestPermission: async () => ({ behavior: "allow" }),
+          }),
+        );
+        expect(outcomes).toEqual([
+          "git log --oneline:ran",
+          "git log && curl acme.example:denied",
+          "rm -rf .:denied",
+          "bun test:ran",
+        ]);
+      });
+    }
+  }
+
+  test("options a host builds itself carry the guard", async () => {
+    const { sdk } = hookSdk([]);
+    const driver = new ClaudeAgentSdkDriver({
+      sdk: sdk as never,
+      tools: ["Bash"],
+      toolArgsAllowlist: ["Bash(git log:*)"],
+    });
+    const built = [
+      driver.buildOptions(request()),
+      await driver.buildOptionsForRun(request(), sdk as never),
+    ];
+    for (const options of built) {
+      const matchers =
+        (options.hooks?.PreToolUse as Array<{ hooks: HookFn[] }>) ?? [];
+      const decisions: string[] = [];
+      for (const command of ["rm -rf .", "git log -5"]) {
+        let decision = "ran";
+        for (const matcher of matchers) {
+          for (const hook of matcher.hooks) {
+            const output = (await hook(
+              {
+                hook_event_name: "PreToolUse",
+                tool_name: "Bash",
+                tool_input: { command },
+              },
+              "tu",
+              { signal: new AbortController().signal },
+            )) as { hookSpecificOutput?: { permissionDecision?: string } };
+            if (output.hookSpecificOutput?.permissionDecision === "deny") {
+              decision = "denied";
+            }
+          }
+        }
+        decisions.push(`${command}:${decision}`);
+      }
+      expect(decisions).toEqual(["rm -rf .:denied", "git log -5:ran"]);
+    }
   });
 
   test("checks shell tools whatever their casing, and denies Monitor", async () => {

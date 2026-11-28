@@ -127,6 +127,8 @@ const NETWORK_TOOLS = new Set([
 const SHELL_TOOLS = new Set([
   "Bash",
   "PowerShell",
+  // Claude Code's Monitor runs its `command` as a shell command or script.
+  "Monitor",
   "shell",
   "local_shell",
   "exec_command",

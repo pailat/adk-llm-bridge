@@ -60,6 +60,15 @@ describe("parseToolArgsAllowlist", () => {
     expect(error.message).toStartWith("Acme: toolArgsAllowlist");
   });
 
+  test.each(["bash(git log:*)", "BASH(git log:*)"])(
+    "accepts the tool name %p in any case",
+    (entry) => {
+      expect(rules(entry)).toEqual({
+        rules: [{ tool: "Bash", kind: "prefix", value: "git log" }],
+      });
+    },
+  );
+
   test("the message names the malformed entry", () => {
     expect(refusal(["Bash(git log:*)", "Bash(rm -rf /:*"]).message).toContain(
       "Bash(rm -rf /:*",
@@ -96,9 +105,21 @@ describe("toolArgsDenial", () => {
     ["a redirect", "git log > /etc/acme"],
     ["a newline", "git log\nrm -rf ."],
     ["an env prefix", "GIT_PAGER=sh git log"],
+    ["a trailing form feed", "bun test\f"],
+    ["a trailing vertical tab", "bun test\v"],
+    ["a leading no-break space", " bun test"],
+    ["a trailing BOM", "bun test﻿"],
   ])("denies %s", (_label, command) => {
     const reason = toolArgsDenial(allowlist, "Bash", { command });
     expect(reason).toContain("toolArgsAllowlist");
+  });
+
+  test("the denial names every operator that never matches", () => {
+    const reason = toolArgsDenial(allowlist, "Bash", {
+      command: "git log --grep=\\bfix",
+    });
+    expect(reason).toContain("parentheses");
+    expect(reason).toContain("backslashes");
   });
 
   test("denies a Bash call without a string command", () => {

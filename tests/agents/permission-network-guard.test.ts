@@ -37,6 +37,7 @@ describe("guardPermissionRequest under allowNetwork: false", () => {
     for (const name of [
       "Bash",
       "PowerShell",
+      "Monitor",
       "shell",
       "exec_command",
       "run_shell_command",
