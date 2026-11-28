@@ -60,6 +60,7 @@ Optional peers, only for the features that use them:
 |---|---|
 | zod schemas (ADK 2.5 requires zod 4) | `zod@^4` |
 | Run spec, `adk-llm-bridge/workflows/spec` (experimental) | `zod@^4`; zod >= 4 is required by this subpath only |
+| Agent result schemas, `adk-llm-bridge/agents/results` (experimental) | `zod@^4`; required by this subpath only |
 | `ClaudeAgent` | `@anthropic-ai/claude-agent-sdk@">=0.3.319 <0.4"` |
 | `CodexAgent` | `@openai/codex-sdk@0.167.2` (exact); `CodexCliDriver` runs without it |
 | `FxAgent` | the `fx` CLI on `PATH` (no peer dependency) |
@@ -67,6 +68,8 @@ Optional peers, only for the features that use them:
 
 Import only the documented subpaths: `adk-llm-bridge` (providers),
 `adk-llm-bridge/agents` (external agents),
+`adk-llm-bridge/agents/results` (experimental standard result schemas, needs
+zod >= 4, see [docs/agent-result-schemas.md](./docs/agent-result-schemas.md)),
 `adk-llm-bridge/agents/session-store/sqlite` (Claude session store),
 `adk-llm-bridge/workflows`
 (workflows), `adk-llm-bridge/workflows/node` (Node host adapters),

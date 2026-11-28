@@ -38,6 +38,7 @@ const reusedModules = new Set(
     "workflows/orchestration/contracts",
     "workflows/orchestration/json",
     "workflows/internal/portable-path",
+    "workflows/internal/path-readings",
     "workflows/internal/identifiers",
     "workflows/internal/canonical-hash",
     "workflows/internal/immutable-json",
@@ -93,10 +94,13 @@ describe("spec module packaging", () => {
     expect(offenders).toEqual([]);
   });
 
-  test("no file outside the spec module imports zod", () => {
+  test("no file outside the zod entries imports zod", () => {
+    // The agent results entry, like the spec entry, declares zod as its peer.
+    const resultsRoot = join(srcRoot, "agents", "results");
     const withZod = sourceFiles(srcRoot)
       .filter((file) => specifiers(file).includes("zod"))
       .filter((file) => !insideSpec(file))
+      .filter((file) => !file.startsWith(resultsRoot + sep))
       .map((file) => relative(srcRoot, file));
     // Entries that must load without the optional peer cannot import it.
     expect(withZod).toEqual([]);

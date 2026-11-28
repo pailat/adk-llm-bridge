@@ -4,6 +4,11 @@ import {
   ExternalAgentDefinitionRegistry,
   FxAgent,
 } from "../../../dist/agents/index.js";
+import {
+  agentResultJsonSchemas,
+  checkChangedPaths,
+  parseAgentResult,
+} from "../../../dist/agents/results/index.js";
 import { OpenAI, OpenRouter } from "../../../dist/index.js";
 import type { SqliteWorkflowCheckpointStore } from "../../../dist/workflows/checkpoint/sqlite/index.js";
 import type { SqliteWorkflowEventExporter } from "../../../dist/workflows/events/sqlite/index.js";
@@ -35,6 +40,13 @@ void defineWorkflow;
 void defineScriptWorkflow;
 void RunSpecSchema;
 void validateRunSpec;
+void agentResultJsonSchemas;
+
+// The parsed type follows the schema id, and feeds checkChangedPaths.
+const parsedImplement = parseAgentResult("implement@1", {});
+if (parsedImplement.ok) {
+  void checkChangedPaths(parsedImplement.value, ["src"]);
+}
 
 // Classes with `#private` members are nominal: a class declared once per entry
 // in the `.d.ts` files would make these cross-entry uses fail to compile.

@@ -40,6 +40,16 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `Number.MAX_SAFE_INTEGER` arrives rounded (still a number in the node
   output); declare such fields as strings.
 
+- **Standard agent result schemas** (experimental, needs zod >= 4): the new
+  subpath `adk-llm-bridge/agents/results` exports frozen JSON Schemas and zod
+  parsers for `implement@1`, `tests@1`, `review@1` and `gate@1`,
+  `parseAgentResult`, and `checkChangedPaths`, which refuses changed paths
+  outside a lane's allowed paths. The documents declare no `$schema`, so
+  Claude Code's `--json-schema` accepts them; Codex strict output does not
+  accept `implement@1` or `review@1`, which have optional properties. The run
+  spec does not use them, so `runSpecHash` is unchanged. See
+  [docs/agent-result-schemas.md](./docs/agent-result-schemas.md).
+
 ### Fixed
 
 - **An error thrown inside `fetch` says what failed.** A refused connection,

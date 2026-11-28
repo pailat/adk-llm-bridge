@@ -1,0 +1,92 @@
+{
+  "id": "gate@1",
+  "jsonSchema": {
+    "title": "gate@1",
+    "description": "Result of a gate: whether it passed and the checks it ran.",
+    "type": "object",
+    "properties": {
+      "passed": {
+        "description": "True when every check the gate requires passed.",
+        "type": "boolean"
+      },
+      "checks": {
+        "description": "Checks the gate ran, in the order it ran them.",
+        "type": "array",
+        "items": {
+          "description": "One check the gate ran.",
+          "type": "object",
+          "properties": {
+            "id": {
+              "description": "Id of the check, such as the name of its command.",
+              "type": "string"
+            },
+            "exitCode": {
+              "description": "Exit code of the check's process. 0 means it passed.",
+              "type": "integer"
+            },
+            "durationMs": {
+              "description": "How long the check ran, in milliseconds.",
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": ["id", "exitCode", "durationMs"],
+          "additionalProperties": false
+        }
+      }
+    },
+    "required": ["passed", "checks"],
+    "additionalProperties": false
+  },
+  "valid": [
+    {
+      "name": "passed",
+      "result": {
+        "passed": true,
+        "checks": [
+          { "id": "typecheck", "exitCode": 0, "durationMs": 8123 },
+          { "id": "test", "exitCode": 0, "durationMs": 41250 }
+        ]
+      }
+    },
+    {
+      "name": "failed",
+      "result": {
+        "passed": false,
+        "checks": [{ "id": "lint", "exitCode": 1, "durationMs": 950 }]
+      }
+    },
+    {
+      "name": "no checks",
+      "result": { "passed": true, "checks": [] }
+    }
+  ],
+  "invalid": [
+    {
+      "name": "passed is a string",
+      "result": { "passed": "true", "checks": [] }
+    },
+    {
+      "name": "fractional exit code",
+      "result": {
+        "passed": false,
+        "checks": [{ "id": "lint", "exitCode": 1.5, "durationMs": 1 }]
+      }
+    },
+    {
+      "name": "missing durationMs",
+      "result": { "passed": false, "checks": [{ "id": "lint", "exitCode": 1 }] }
+    },
+    {
+      "name": "check id is a number",
+      "result": {
+        "passed": true,
+        "checks": [{ "id": 7, "exitCode": 0, "durationMs": 1 }]
+      }
+    },
+    {
+      "name": "unknown key",
+      "result": { "passed": true, "checks": [], "verdict": "accepted" }
+    }
+  ]
+}
