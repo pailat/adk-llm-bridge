@@ -283,6 +283,16 @@ describe("checkChangedPaths", () => {
     );
   });
 
+  test("Parameters still resolves to the result form", () => {
+    // `Parameters` reads the last overload; the plain list must not replace
+    // the result form for existing callers that derive types from it.
+    const [first]: Parameters<typeof checkChangedPaths> = [
+      result(["src/a.ts"]),
+      ["src"],
+    ];
+    expect(first.changedPaths).toEqual(["src/a.ts"]);
+  });
+
   test("refuses a path outside the allowed paths", () => {
     expect(
       checkChangedPaths(result(["src/billing/a.ts", "src/auth/token.ts"]), [

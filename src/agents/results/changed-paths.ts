@@ -56,6 +56,28 @@ export interface ChangedPathRefusal {
 }
 
 /**
+ * Checks a plain list of changed paths against the lane's allowed paths.
+ *
+ * @remarks
+ * The same check as for a result, for paths a result does not name
+ * `changedPaths`, such as the `testPaths` of a `tests@1` result. A refusal's
+ * `index` is the path's index in the list. Declared before the result form
+ * so that `Parameters<typeof checkChangedPaths>` still reads the result form.
+ *
+ * @param changedPaths - The changed paths, such as `result.testPaths`.
+ * @param allowedPaths - The lane's allowed paths, in canonical form with
+ * forward slashes, as in a run spec lane's `allowedPaths`.
+ * @returns The refusals; empty when every path is allowed.
+ * @throws TypeError when an allowed path is not canonical. That is the
+ * host's error, not the agent's.
+ *
+ * @experimental
+ */
+export function checkChangedPaths(
+  changedPaths: readonly string[],
+  allowedPaths: readonly string[],
+): ChangedPathRefusal[];
+/**
  * Checks a result's `changedPaths` against the lane's allowed paths.
  *
  * @remarks
@@ -84,37 +106,16 @@ export function checkChangedPaths(
   result: { readonly changedPaths: readonly string[] },
   allowedPaths: readonly string[],
 ): ChangedPathRefusal[];
-/**
- * Checks a plain list of changed paths against the lane's allowed paths.
- *
- * @remarks
- * The same check as for a result, for paths a result does not name
- * `changedPaths`, such as the `testPaths` of a `tests@1` result. A refusal's
- * `index` is the path's index in the list.
- *
- * @param changedPaths - The changed paths, such as `result.testPaths`.
- * @param allowedPaths - The lane's allowed paths, in canonical form with
- * forward slashes, as in a run spec lane's `allowedPaths`.
- * @returns The refusals; empty when every path is allowed.
- * @throws TypeError when an allowed path is not canonical. That is the
- * host's error, not the agent's.
- *
- * @experimental
- */
-export function checkChangedPaths(
-  changedPaths: readonly string[],
-  allowedPaths: readonly string[],
-): ChangedPathRefusal[];
 export function checkChangedPaths(
   resultOrPaths:
     | { readonly changedPaths: readonly string[] }
     | readonly string[],
   allowedPaths: readonly string[],
 ): ChangedPathRefusal[] {
-  const changedPaths: readonly string[] = Array.isArray(resultOrPaths)
-    ? resultOrPaths
-    : (resultOrPaths as { readonly changedPaths: readonly string[] })
-        .changedPaths;
+  const changedPaths =
+    "changedPaths" in resultOrPaths
+      ? resultOrPaths.changedPaths
+      : resultOrPaths;
   const allowed = allowedPaths.map((path) => {
     const problem = portablePathProblem(path, {
       canonical: true,
