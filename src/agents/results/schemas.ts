@@ -44,7 +44,7 @@ export const TestsResultV1Schema = z.strictObject({
  * @remarks
  * `verdict` is `approve`, `request_changes` or `block`. Each finding has a
  * `severity` (`high`, `medium` or `low`), a `path`, an optional integer
- * `line` and a `summary`. Unknown keys are rejected at both levels.
+ * `line` counted from 1 and a `summary`. Unknown keys are rejected at both levels.
  *
  * @experimental
  */
@@ -54,7 +54,7 @@ export const ReviewResultV1Schema = z.strictObject({
     z.strictObject({
       severity: z.enum(["high", "medium", "low"]),
       path: z.string(),
-      line: z.int().optional(),
+      line: z.int().min(1).optional(),
       summary: z.string(),
     }),
   ),
@@ -65,7 +65,7 @@ export const ReviewResultV1Schema = z.strictObject({
  *
  * @remarks
  * `passed` tells whether the gate passed; each check has an `id`, an integer
- * `exitCode` and an integer `durationMs`. Unknown keys are rejected at both
+ * `exitCode` and a non-negative integer `durationMs`. Unknown keys are rejected at both
  * levels.
  *
  * @experimental
@@ -76,7 +76,7 @@ export const GateResultV1Schema = z.strictObject({
     z.strictObject({
       id: z.string(),
       exitCode: z.int(),
-      durationMs: z.int(),
+      durationMs: z.int().min(0),
     }),
   ),
 });

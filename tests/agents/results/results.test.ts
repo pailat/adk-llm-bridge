@@ -79,6 +79,7 @@ describe("agent result schemas", () => {
       "required",
       "additionalProperties",
       "items",
+      "minimum",
     ]);
     for (const id of AGENT_RESULT_SCHEMA_IDS) {
       const stack: unknown[] = [agentResultJsonSchemas[id]];
@@ -187,6 +188,31 @@ describe("agent result schemas", () => {
     ]);
   });
 
+  test("a finding's line is counted from 1", () => {
+    const review = (line: number) => ({
+      verdict: "block",
+      findings: [{ severity: "high", path: "a.ts", line, summary: "x" }],
+    });
+    expect(parseAgentResult("review@1", review(1)).ok).toBe(true);
+    expect(parseAgentResult("review@1", review(0)).ok).toBe(false);
+    expect(parseAgentResult("review@1", review(-3)).ok).toBe(false);
+    expect(
+      jsonSchemaAccepts(agentResultJsonSchemas["review@1"], review(0)),
+    ).toBe(false);
+  });
+
+  test("a check's durationMs is not negative", () => {
+    const gate = (durationMs: number) => ({
+      passed: true,
+      checks: [{ id: "lint", exitCode: 0, durationMs }],
+    });
+    expect(parseAgentResult("gate@1", gate(0)).ok).toBe(true);
+    expect(parseAgentResult("gate@1", gate(-1)).ok).toBe(false);
+    expect(jsonSchemaAccepts(agentResultJsonSchemas["gate@1"], gate(-1))).toBe(
+      false,
+    );
+  });
+
   test("an unknown schema id is a programming error", () => {
     expect(() =>
       parseAgentResult("verify@1" as AgentResultSchemaId, {}),
@@ -229,7 +255,7 @@ describe("checkChangedPaths", () => {
         code: "CHANGED_PATH_OUTSIDE_ALLOWED_PATHS",
         index: 1,
         path: "src/auth/token.ts",
-        message: "src/auth/token.ts is outside the allowed paths",
+        message: '"src/auth/token.ts" is outside the allowed paths',
       },
     ]);
   });
@@ -272,6 +298,9 @@ describe("checkChangedPaths", () => {
       "src/../secrets.txt",
       ".",
       "a\0b",
+      "   ",
+      "a:notes/x.md",
+      "a".repeat(4097),
     ];
     const refusals = checkChangedPaths(result(bad), ["."]);
     expect(refusals.map((refusal) => [refusal.code, refusal.index])).toEqual(
@@ -280,6 +309,51 @@ describe("checkChangedPaths", () => {
     for (const refusal of refusals) {
       expect(refusal.message.length).toBeGreaterThan(0);
     }
+  });
+
+  test("refuses a segment a host could read as the parent directory", () => {
+    const bad = [
+      "src/billing/.. /auth/token.ts",
+      "src/billing/... /auth/token.ts",
+      "src/billing/．．/auth/x.ts",
+      "src/billing/%2e%2e/auth/x.ts",
+      "src/billing/。。/auth/x.ts",
+      "src/billing/x∕..∕auth/x.ts",
+    ];
+    const refusals = checkChangedPaths(result(bad), ["src/billing"]);
+    expect(refusals.map((refusal) => [refusal.code, refusal.index])).toEqual(
+      bad.map((_, index) => ["CHANGED_PATH_INVALID", index]),
+    );
+  });
+
+  test("refuses a path with control, format or invisible characters", () => {
+    const bad = [
+      "src/billing/a.ts\nrefusals: none",
+      "src/billing/‮sts.a",
+      "src/billing/.g‌it/config",
+    ];
+    const refusals = checkChangedPaths(result(bad), ["src/billing"]);
+    expect(refusals.map((refusal) => refusal.code)).toEqual(
+      bad.map(() => "CHANGED_PATH_INVALID"),
+    );
+    for (const refusal of refusals) {
+      expect(refusal.message.startsWith(JSON.stringify(refusal.path))).toBe(
+        true,
+      );
+    }
+  });
+
+  test("quotes the path in an outside refusal", () => {
+    const [refusal] = checkChangedPaths(result(["docs/a b.md"]), ["src"]);
+    expect(refusal?.message).toBe('"docs/a b.md" is outside the allowed paths');
+  });
+
+  test("compares case-sensitively", () => {
+    expect(
+      checkChangedPaths(result(["src/Billing/a.ts"]), ["src/billing"]).map(
+        (refusal) => refusal.code,
+      ),
+    ).toEqual(["CHANGED_PATH_OUTSIDE_ALLOWED_PATHS"]);
   });
 
   test("an allowed path that is not canonical is a programming error", () => {

@@ -107,6 +107,7 @@ function buildJsonSchemas(): Record<
               line: {
                 description: "Line the problem is on, counted from 1.",
                 type: "integer",
+                minimum: 1,
               },
               summary: text("What is wrong, for people."),
             },
@@ -143,6 +144,7 @@ function buildJsonSchemas(): Record<
               durationMs: {
                 description: "How long the check ran, in milliseconds.",
                 type: "integer",
+                minimum: 0,
               },
             },
             required: ["id", "exitCode", "durationMs"],

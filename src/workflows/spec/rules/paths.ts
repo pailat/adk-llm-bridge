@@ -1,3 +1,10 @@
+import {
+  HIDDEN_CHARACTER_PROBLEM,
+  HIDDEN_CHARACTERS,
+  hiddenCharacterProblem,
+  traversalAliasProblem,
+  widenedReading,
+} from "../../internal/path-readings.js";
 import { portablePathProblem } from "../../internal/portable-path.js";
 import {
   validateWorkflowPath,
@@ -28,46 +35,6 @@ const PROBLEM_CODES: Readonly<Record<string, RunSpecIssueCode>> = {
   "must be canonical": "RUN_SPEC_PATH_NOT_CANONICAL",
   "must identify an entry below the root": "RUN_SPEC_PATH_ROOT_NOT_ALLOWED",
 };
-
-/**
- * Characters a path may not contain beyond what the shared grammar rejects:
- * controls (newline, escape), format characters (bidi overrides, zero-width
- * marks, the byte order mark), other default-ignorable code points, line and
- * paragraph separators, and lone surrogates, which have no UTF-8 encoding.
- * They are invisible or change how a path is displayed, and HFS+ ignores the
- * default-ignorable ones, so `.g\u200cit` names `.git` there
- * (CVE-2014-9390).
- */
-const HIDDEN_CHARACTER =
-  /[\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}]/u;
-
-/** The same set, global, to drop those characters before a denied match. */
-const HIDDEN_CHARACTERS = new RegExp(HIDDEN_CHARACTER.source, "gu");
-
-/** Reason the shared grammar gives for `..`; it maps to the traversal code. */
-const TRAVERSAL_PROBLEM = "must not traverse parent directories";
-
-/**
- * Look-alikes of the slash and the backslash that NFKC leaves alone: the
- * fraction slash, the division slash, the set minus and the big solidi.
- * A host that maps text to a legacy code page can turn them into ASCII.
- */
-const SEPARATOR_LOOK_ALIKES = /[\u2044\u2215\u2216\u29f5\u29f8\u29f9]/gu;
-
-/** The ideographic full stop, which URL host parsing reads as `.`. */
-const DOT_LOOK_ALIKES = /\u3002/gu;
-
-/** A percent-encoded `.`. */
-const PERCENT_DOT = /%2e/giu;
-
-/** A percent-encoded slash or backslash. */
-const PERCENT_SEPARATOR = /%(?:2f|5c)/giu;
-
-/**
- * A segment that names the parent directory on some host: `..` followed by
- * dots or spaces, which Windows strips, so `.. ` opens `..`.
- */
-const PARENT_ALIAS = /^\.\.[. ]*$/u;
 
 /**
  * A segment shaped like a Windows 8.3 short name, such as `GIT~1`,
@@ -255,43 +222,6 @@ function problemIssue(
 ): RunSpecIssue {
   const code = PROBLEM_CODES[problem] ?? "RUN_SPEC_PATH_INVALID";
   return runSpecIssue(code, path, `${what} ${problem}`);
-}
-
-/** Reason given for a path with a character {@link HIDDEN_CHARACTER} matches. */
-const HIDDEN_CHARACTER_PROBLEM =
-  "must not contain control, format or invisible characters";
-
-function hiddenCharacterProblem(path: string): string | undefined {
-  return HIDDEN_CHARACTER.test(path) ? HIDDEN_CHARACTER_PROBLEM : undefined;
-}
-
-/**
- * Reports a segment that a host could read as `..`.
- *
- * @remarks
- * The path itself already passed the shared grammar; this looks at the
- * readings listed on {@link checkPathRules}.
- */
-function traversalAliasProblem(path: string): string | undefined {
-  for (const segment of widenedReading(path).split("/")) {
-    if (PARENT_ALIAS.test(segment)) return TRAVERSAL_PROBLEM;
-  }
-  return undefined;
-}
-
-/**
- * A path as a host that maps text to a legacy code page, or decodes percent
- * escapes, could read it: NFKC, dot and slash look-alikes, percent-encoded
- * dots and separators, and backslashes as separators.
- */
-function widenedReading(path: string): string {
-  return path
-    .normalize("NFKC")
-    .replace(SEPARATOR_LOOK_ALIKES, "/")
-    .replace(DOT_LOOK_ALIKES, ".")
-    .replace(PERCENT_DOT, ".")
-    .replace(PERCENT_SEPARATOR, "/")
-    .replaceAll("\\", "/");
 }
 
 /** Reports a path with more segments than `RUN_SPEC_LIMITS.maxPathSegments`. */

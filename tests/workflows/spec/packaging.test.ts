@@ -38,6 +38,7 @@ const reusedModules = new Set(
     "workflows/orchestration/contracts",
     "workflows/orchestration/json",
     "workflows/internal/portable-path",
+    "workflows/internal/path-readings",
     "workflows/internal/identifiers",
     "workflows/internal/canonical-hash",
     "workflows/internal/immutable-json",

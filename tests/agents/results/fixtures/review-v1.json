@@ -28,7 +28,8 @@
             },
             "line": {
               "description": "Line the problem is on, counted from 1.",
-              "type": "integer"
+              "type": "integer",
+              "minimum": 1
             },
             "summary": {
               "description": "What is wrong, for people.",

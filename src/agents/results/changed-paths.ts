@@ -1,4 +1,8 @@
 import {
+  hiddenCharacterProblem,
+  traversalAliasProblem,
+} from "../../workflows/internal/path-readings.js";
+import {
   normalizePortablePath,
   portablePathContains,
   portablePathProblem,
@@ -8,8 +12,14 @@ import {
  * Codes of the refusals {@link checkChangedPaths} returns.
  *
  * @remarks
- * - `CHANGED_PATH_INVALID`: the path is not a portable relative path (empty,
- *   absolute, with a backslash or NUL, with a `..` segment, or the root).
+ * - `CHANGED_PATH_INVALID`: the path is not a portable relative path. It is
+ *   empty or blank, longer than 4,096 characters, absolute (a leading `/`
+ *   or a drive prefix such as `C:`, so `a:b/c` too), uses a backslash,
+ *   contains NUL, has a `..` segment or names the root. Or, as the run spec
+ *   checks allowed paths: it contains a control, format or invisible
+ *   character, or has a segment a host could read as `..`, such as `.. ` (Windows strips trailing dots and spaces),
+ *   fullwidth dots (NFKC), `%2e%2e`, ideographic full stops, or `..` between
+ *   slash look-alikes such as U+2215.
  * - `CHANGED_PATH_OUTSIDE_ALLOWED_PATHS`: no allowed path covers it.
  *
  * @experimental
@@ -49,7 +59,12 @@ export interface ChangedPathRefusal {
  * @remarks
  * An allowed path covers the entry it names and everything below it; `.`
  * covers the whole project. A changed path is compared in canonical form, so
- * `./src/a.ts` and `src//a.ts` are both `src/a.ts`. Each refused path gets
+ * `./src/a.ts` and `src//a.ts` are both `src/a.ts`. The comparison is exact
+ * and case-sensitive, so `src/Billing/a.ts` is outside `src/billing` even on
+ * a file system that ignores case: folding would accept paths that are
+ * outside on a case-sensitive host. The host's denied path patterns and
+ * Windows short names (`GIT~1`) are not checked; a host that holds changed
+ * paths to them checks them itself. Each refused path gets
  * one refusal, in the order of `changedPaths`; the host decides what a
  * refusal does to the run.
  *
@@ -79,7 +94,10 @@ export function checkChangedPaths(
   });
   const refusals: ChangedPathRefusal[] = [];
   result.changedPaths.forEach((path, index) => {
-    const problem = portablePathProblem(path);
+    const problem =
+      portablePathProblem(path) ??
+      hiddenCharacterProblem(path) ??
+      traversalAliasProblem(path);
     if (problem !== undefined) {
       refusals.push({
         code: "CHANGED_PATH_INVALID",
@@ -95,7 +113,7 @@ export function checkChangedPaths(
         code: "CHANGED_PATH_OUTSIDE_ALLOWED_PATHS",
         index,
         path,
-        message: `${path} is outside the allowed paths`,
+        message: `${JSON.stringify(path)} is outside the allowed paths`,
       });
     }
   });
