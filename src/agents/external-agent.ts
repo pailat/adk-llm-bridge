@@ -796,7 +796,12 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
       }
     };
     const push = (event: Event) => {
-      if (!isStateOnlyEvent(event)) flushHeld();
+      // A partial chunk (the coordinator streaming a re-narration that may
+      // be dropped) does not release a held sub-agent answer either: the
+      // Runner does not store it, and the answer must stay the last event.
+      if (!isStateOnlyEvent(event) && !(heldDelegated && event.partial)) {
+        flushHeld();
+      }
       enqueue(event);
     };
     const rootAgent = this.rootAgent;

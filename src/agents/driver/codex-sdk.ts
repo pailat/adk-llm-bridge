@@ -466,6 +466,16 @@ export class CodexSdkDriver {
     return this.#model;
   }
 
+  /**
+   * The `session.state` key this driver resumes an agent's thread from.
+   *
+   * @param agentName - The agent's name.
+   * @returns The key, as `threadStateKey` builds it.
+   */
+  threadStateKeyFor(agentName: string): string {
+    return this.#threadStateKey(agentName);
+  }
+
   /** `false`: Codex reports no model on any event. */
   get reportsResolvedModel(): boolean {
     return false;

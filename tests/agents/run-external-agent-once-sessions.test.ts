@@ -4,7 +4,7 @@
  * outcome reads only the agent's own run report.
  */
 import { describe, expect, test } from "bun:test";
-import { InvocationContext, PluginManager } from "@google/adk";
+import { type Event, InvocationContext, PluginManager } from "@google/adk";
 import { ClaudeAgent } from "../../src/agents/claude-agent.js";
 import { FxCliDriver } from "../../src/agents/driver/fx-cli.js";
 import {
@@ -43,6 +43,7 @@ function codexTurn(id: string, text: string): Record<string, unknown>[] {
 function codexSdkAgent(
   stream: (id: string) => Record<string, unknown>[],
   resumed: string[],
+  threadStateKey?: (agentName: string) => string,
 ): ExternalAgent {
   const thread = (id: string) => ({
     id,
@@ -57,6 +58,7 @@ function codexSdkAgent(
     provider: CODEX_PROVIDER,
     permissions: READ_ONLY_NETWORK,
     driver: new CodexSdkDriver({
+      ...(threadStateKey ? { threadStateKey } : {}),
       sdk: {
         startThread: () => thread("thread-acme-1"),
         resumeThread: (id: string) => {
@@ -88,6 +90,19 @@ describe("a resumed session comes back on the outcome", () => {
     });
     expect(resumed).toEqual(["thread-acme-1", "thread-acme-1"]);
     expect(third.sessionId).toBe("thread-acme-1");
+  });
+
+  test("Codex SDK: a custom threadStateKey still resumes the returned thread", async () => {
+    const resumed: string[] = [];
+    const turn = (id: string) => codexTurn(id, `on ${id}`);
+    const key = (name: string) => `acme_thread:${name}`;
+    const outcome = await runExternalAgentOnce(
+      codexSdkAgent(turn, resumed, key),
+      { prompt: "continue", sessionId: "thread-acme-7" },
+    );
+    expect(outcome.errorKind).toBeUndefined();
+    expect(resumed).toEqual(["thread-acme-7"]);
+    expect(outcome.sessionId).toBe("thread-acme-7");
   });
 
   test("Codex CLI keeps no thread, so it returns no session id", async () => {
@@ -252,6 +267,7 @@ function parent(
     subAgent?: ExternalAgent;
     delegation?: "subagent" | "coordinator";
     outputSchema?: Record<string, unknown>;
+    stream?: boolean;
   } = {},
 ): ExternalAgent {
   const subAgent = options.subAgent ?? child();
@@ -273,6 +289,10 @@ function parent(
           agentName: subAgent.name,
           task: "write it",
         });
+        if (options.stream) {
+          yield { type: "output", content: "lead ", partial: true };
+          yield { type: "output", content: "done", partial: true };
+        }
         yield { type: "output", content: "lead done" };
         yield completed;
       },
@@ -385,6 +405,48 @@ describe("default delegation: the sub-agent's turn is the final answer", () => {
     );
     expect(report).toBeDefined();
     expect(result.usage.costUsd).toBeCloseTo(0.3, 10);
+  });
+
+  test("a streaming lead keeps the answer as the last event", async () => {
+    const agent = parent(leadCompleted, {
+      delegation: "subagent",
+      stream: true,
+    });
+    const events: Event[] = [];
+    for await (const event of agent.runAsync(
+      new InvocationContext({
+        invocationId: "inv-acme-stream",
+        agent,
+        session: {
+          id: "s-acme-stream",
+          appName: "acme",
+          userId: "user",
+          state: {},
+          events: [],
+          lastUpdateTime: 1,
+        },
+        pluginManager: new PluginManager(),
+      }),
+    )) {
+      events.push(event);
+    }
+    const last = events.filter((event) => !event.partial).at(-1);
+    expect(last?.author).toBe("acme_writer");
+    expect(last?.content?.parts?.[0]?.text).toBe("written");
+  });
+
+  test("a nested sub-agent's own report carrier still counts its cost", async () => {
+    // The editor's answer is the writer's turn, so the editor's own cost
+    // rides on a content-less event, which must still reach the lead.
+    const outcome = await runExternalAgentOnce(
+      parent(leadCompleted, {
+        delegation: "subagent",
+        subAgent: child("written", [child()]),
+      }),
+      { prompt: "lead" },
+    );
+    expect(outcome.errorKind).toBeUndefined();
+    expect(outcome.usage.costUsd).toBeCloseTo(0.4, 10);
   });
 });
 

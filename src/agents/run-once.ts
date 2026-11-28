@@ -7,6 +7,7 @@ import {
 } from "../runtime/agent-invocation-gateway.js";
 import { parseJson } from "../utils/json.js";
 import { claudeSdkSessionStateKey } from "./driver/claude-agent-sdk.js";
+import { CodexSdkDriver } from "./driver/codex-sdk.js";
 import { fxSessionStateKey } from "./driver/fx-cli.js";
 import {
   EXTERNAL_AGENT_RUN_METADATA_KEY,
@@ -137,7 +138,7 @@ export interface RunExternalAgentOnceOptions {
   /**
    * Session state key the driver keeps its session id under. Defaults to
    * the key of the agent's provider: `claude_sdk_session:<name>` (Claude),
-   * `codex_thread:<name>` (Codex, unless its driver sets `threadStateKey`)
+   * the `threadStateKey` of a `CodexSdkDriver` (`codex_thread:<name>` by default)
    * and `fx_session:<name>` (fx).
    */
   sessionStateKey?: string;
@@ -205,7 +206,9 @@ function defaultSessionStateKey(agent: ExternalAgent): string | undefined {
     case "claude":
       return claudeSdkSessionStateKey(agent.name);
     case "codex":
-      return `codex_thread:${agent.name}`;
+      return agent.driver instanceof CodexSdkDriver
+        ? agent.driver.threadStateKeyFor(agent.name)
+        : `codex_thread:${agent.name}`;
     case "fx":
       return fxSessionStateKey(agent.name);
     default:
