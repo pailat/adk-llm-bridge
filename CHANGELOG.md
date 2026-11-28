@@ -18,7 +18,9 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   commands an agent may run with Claude Code permission rules, such as
   `["Bash(git log:*)", "Bash(bun test)"]`, so a host no longer needs a
   wrapper script for it. The list is closed: a `Bash` command that matches no
-  rule is denied, and so is every `PowerShell` call. A command with a shell
+  rule is denied, and so is every `PowerShell` or `Monitor` call (`Monitor`
+  runs a shell command too). Tool names match in any case, so a call
+  reported as `bash` is checked like `Bash`. A command with a shell
   operator (`;`, `&`, `|`, `$`, a backtick, a redirect, a line break) never
   matches. A `PreToolUse` hook checks each call, so the list holds in every
   permission mode. Off by default. A malformed rule refuses the driver with

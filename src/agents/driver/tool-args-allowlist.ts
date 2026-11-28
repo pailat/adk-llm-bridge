@@ -28,8 +28,17 @@ export interface ToolArgsAllowlist {
   readonly rules: readonly ToolArgsRule[];
 }
 
-/** Claude Code tools that run shell commands. */
-const SHELL_TOOLS: ReadonlySet<string> = new Set(["Bash", "PowerShell"]);
+/**
+ * Claude Code tools that run shell commands, keyed by lowercase name (the
+ * model or SDK may report `bash` for `Bash`), to their canonical spelling.
+ * Only `Bash` has rules; the others are always denied. `Monitor` runs its
+ * `command` as a shell command or script.
+ */
+const SHELL_TOOLS: ReadonlyMap<string, string> = new Map([
+  ["bash", "Bash"],
+  ["powershell", "PowerShell"],
+  ["monitor", "Monitor"],
+]);
 
 /**
  * Characters that chain, substitute, redirect or escape in a shell command.
@@ -125,7 +134,9 @@ function invalid(owner: string, detail: string): ExternalAgentPolicyError {
  * Only shell tools are checked; every other tool is left to `tools` and the
  * permission policy. A `Bash` call runs only when its `command`, trimmed,
  * matches a rule and holds no shell operator. A shell tool with no rule form
- * (`PowerShell`) is always denied, so it cannot run what `Bash` may not.
+ * (`PowerShell`, `Monitor`) is always denied, so it cannot run what `Bash`
+ * may not. Tool names are matched case-insensitively and trimmed, so a call
+ * reported as `bash` is checked like `Bash`.
  *
  * @param allowlist - The parsed allowlist.
  * @param toolName - The tool name as the runtime reports it.
@@ -137,9 +148,10 @@ export function toolArgsDenial(
   toolName: string,
   input: Record<string, unknown>,
 ): string | undefined {
-  if (!SHELL_TOOLS.has(toolName)) return undefined;
-  if (toolName !== "Bash") {
-    return `Denied: ${toolName} has no rules in this agent's toolArgsAllowlist, so it cannot run.`;
+  const shell = SHELL_TOOLS.get(toolName.trim().toLowerCase());
+  if (shell === undefined) return undefined;
+  if (shell !== "Bash") {
+    return `Denied: ${shell} has no rules in this agent's toolArgsAllowlist, so it cannot run.`;
   }
   const raw = input.command;
   if (typeof raw !== "string") {

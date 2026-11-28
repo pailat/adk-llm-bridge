@@ -445,8 +445,11 @@ new ClaudeAgentSdkDriver({
   arguments, so `Bash(git log:*)` allows `git log -5` but not `git logout`.
   `Bash(<command>)` allows exactly that command. The command is trimmed first.
 - The list is closed. A `Bash` call that matches no rule is denied, and so is
-  every `PowerShell` call. `[]` denies every shell command. Unset (the
+  every `PowerShell` or `Monitor` call (`Monitor` runs its `command` as a
+  shell command or script). `[]` denies every shell command. Unset (the
   default), commands are not narrowed.
+- Tool names match in any case, so a call reported as `bash` or `BASH` is
+  checked like `Bash`.
 - A command with a shell operator never matches: `;`, `&`, `|`, `$`, a
   backtick, `<`, `>`, a parenthesis, a backslash or a line break. So
   `git log && curl …` and `git log $(…)` are denied.

@@ -113,6 +113,33 @@ describe("toolArgsDenial", () => {
     ).toContain("toolArgsAllowlist");
   });
 
+  test.each(["bash", "BASH", " Bash "])(
+    "matches the shell tool name %p case-insensitively",
+    (name) => {
+      expect(
+        toolArgsDenial(allowlist, name, { command: "rm -rf ." }),
+      ).toContain("toolArgsAllowlist");
+      expect(
+        toolArgsDenial(allowlist, name, { command: "git log -5" }),
+      ).toBeUndefined();
+    },
+  );
+
+  test.each(["powershell", "POWERSHELL"])("denies %p", (name) => {
+    expect(toolArgsDenial(allowlist, name, { command: "git log" })).toContain(
+      "toolArgsAllowlist",
+    );
+  });
+
+  test.each(["Monitor", "monitor", "MONITOR", " Monitor "])(
+    "denies %p, which runs a shell command",
+    (name) => {
+      expect(toolArgsDenial(allowlist, name, { command: "git log" })).toContain(
+        "toolArgsAllowlist",
+      );
+    },
+  );
+
   test("an empty allowlist denies every shell command", () => {
     expect(toolArgsDenial(rules(), "Bash", { command: "git log" })).toContain(
       "toolArgsAllowlist",

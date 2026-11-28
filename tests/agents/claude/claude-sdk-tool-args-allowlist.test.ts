@@ -126,6 +126,32 @@ describe("ClaudeAgentSdkDriver toolArgsAllowlist", () => {
     ]);
   });
 
+  test("checks shell tools whatever their casing, and denies Monitor", async () => {
+    const { sdk, outcomes } = hookSdk([
+      { tool: "bash", input: { command: "rm -rf ." } },
+      { tool: "BASH", input: { command: "rm -rf ." } },
+      { tool: "bash", input: { command: "git log -5" } },
+      { tool: "powershell", input: { command: "git log" } },
+      { tool: "Monitor", input: { command: "git log" } },
+      { tool: "monitor", input: { command: "git log" } },
+    ]);
+    await drain(
+      new ClaudeAgentSdkDriver({
+        sdk: sdk as never,
+        tools: ["Bash", "Monitor"],
+        toolArgsAllowlist: ["Bash(git log:*)"],
+      }).run(request()),
+    );
+    expect(outcomes).toEqual([
+      "rm -rf .:denied",
+      "rm -rf .:denied",
+      "git log -5:ran",
+      "git log:denied",
+      "git log:denied",
+      "git log:denied",
+    ]);
+  });
+
   test("a malformed rule refuses the driver with a typed error", () => {
     let caught: unknown;
     try {

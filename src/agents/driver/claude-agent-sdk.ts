@@ -515,7 +515,8 @@ export interface ClaudeAgentSdkDriverConfig {
    * permission rules. `Bash(git log:*)` allows `git log` and `git log`
    * followed by a space and any arguments; `Bash(bun test)` allows exactly
    * `bun test`. The list is closed: a `Bash` call whose command (trimmed)
-   * matches no rule is denied, and so is every `PowerShell` call.
+   * matches no rule is denied, and so is every `PowerShell` or `Monitor`
+   * call (`Monitor` runs a shell command too). Tool names match in any case.
    *
    * @remarks
    * A `PreToolUse` hook checks each call, so the list holds in every
