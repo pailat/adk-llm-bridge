@@ -11,12 +11,14 @@ const PAGE = "docs/mcp-headless-lane.md";
 const read = (path: string) => readFileSync(join(REPO_ROOT, path), "utf8");
 
 /** The text of the CHANGELOG's Unreleased section. */
-function unreleased(): string {
+/** The Unreleased section plus the newest release, so the check survives cutting a release. */
+function newestNotes(): string {
   const changelog = read("CHANGELOG.md");
   const start = changelog.indexOf("## [Unreleased]");
   expect(start).toBeGreaterThan(-1);
-  const next = changelog.indexOf("\n## [", start + 1);
-  return changelog.slice(start, next === -1 ? undefined : next);
+  const release = changelog.indexOf("\n## [", start + 1);
+  const after = release === -1 ? -1 : changelog.indexOf("\n## [", release + 1);
+  return changelog.slice(start, after === -1 ? undefined : after);
 }
 
 describe("MCP from a headless lane: the recipe page", () => {
@@ -126,7 +128,7 @@ describe("MCP from a headless lane: the recipe page", () => {
     ).toBe(true);
   });
 
-  test("the CHANGELOG's Unreleased section names the page", () => {
-    expect(unreleased()).toContain("docs/mcp-headless-lane.md");
+  test("the CHANGELOG's newest notes name the page", () => {
+    expect(newestNotes()).toContain("docs/mcp-headless-lane.md");
   });
 });

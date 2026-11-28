@@ -6,6 +6,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-11-28
+
 ### Added
 
 - **`runExternalAgentOnce(agent, { prompt, signal, sessionId })`** runs an
@@ -2598,6 +2600,7 @@ upgrade from 0.5.3.
 - `scripts/build.ts` and `scripts/fix-declaration-imports.mjs` (superseded by
   `bunup`, which emits correct ESM import specifiers).
 
+[0.7.1]: https://github.com/pailat/adk-llm-bridge/releases/tag/v0.7.1
 [0.7.0]: https://github.com/pailat/adk-llm-bridge/releases/tag/v0.7.0
 [0.5.3]: https://github.com/pailat/adk-llm-bridge/releases/tag/v0.5.3
 [0.5.2]: https://github.com/pailat/adk-llm-bridge/releases/tag/v0.5.2
