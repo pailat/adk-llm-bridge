@@ -55,6 +55,28 @@ describe("MCP from a headless lane: the recipe page", () => {
     expect(proxy).toContain("decompress: false");
   });
 
+  test("the loopback proxy sample refuses browsers: own Host only, no Origin", () => {
+    const proxy = read(PAGE).match(
+      /^export function startMcpProxy\([\s\S]*?^\}$/m,
+    )?.[0];
+    expect(proxy).toContain("fetch(req, server)");
+    expect(proxy).toContain("`127.0.0.1:$" + "{server.port}`");
+    expect(proxy).toContain('req.headers.has("origin")');
+    expect(proxy).toContain("status: 403");
+  });
+
+  test("who may call the proxy: no unsandboxed shell for a granted agent, on any lane", () => {
+    const page = read(PAGE);
+    const start = page.indexOf("### Who may call the proxy");
+    expect(start).toBeGreaterThan(-1);
+    const next = page.indexOf("\n#", start + 1);
+    const section = page.slice(start, next === -1 ? undefined : next);
+    expect(section).toContain("allowUnsandboxedShell: true");
+    expect(section).toContain("allowNetwork: true");
+    expect(section).toMatch(/any\s+lane\s+of\s+the\s+host/);
+    expect(section).toMatch(/DNS\s+rebinding/);
+  });
+
   test("the page states the truncation and points to the pagination task", () => {
     const page = read(PAGE);
     expect(page).toContain("ENABLE_MCP_LARGE_OUTPUT_FILES=0");

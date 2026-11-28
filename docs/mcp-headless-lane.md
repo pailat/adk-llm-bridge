@@ -155,7 +155,16 @@ export function startMcpProxy(upstream: string, token: () => string) {
     port: 0, // ephemeral
     // No idle cut-off: a slow tool call or a quiet SSE stream stays open.
     idleTimeout: 0,
-    async fetch(req) {
+    async fetch(req, server) {
+      // Only the agent, never a browser: a page that rebinds a name to
+      // 127.0.0.1 sends that name as Host, and any cross-origin request
+      // carries Origin. The MCP client sends neither.
+      if (
+        req.headers.get("host") !== `127.0.0.1:${server.port}` ||
+        req.headers.has("origin")
+      ) {
+        return new Response("forbidden", { status: 403 });
+      }
       // Only the MCP path; nothing else gets the token.
       if (new URL(req.url).pathname !== "/mcp") {
         return new Response("not found", { status: 404 });
@@ -189,8 +198,10 @@ const hostMcpServers = {
 ```
 
 The proxy forwards every streamable-HTTP method on `/mcp` (POST, the SSE
-GET, DELETE) and streams both bodies. It answers 404 on any other path,
-and replaces any `Authorization` header the client sent. `decompress:
+GET, DELETE) and streams both bodies. It answers 403 to a request whose
+`Host` is not its own `127.0.0.1:<port>` or that carries an `Origin`
+header, and 404 on any other path. It replaces any `Authorization` header
+the client sent. `decompress:
 false` matters: Bun's `fetch` otherwise decodes a gzipped answer but keeps
 its `content-encoding` header, and the agent then cannot read it.
 `idleTimeout: 0` turns off `Bun.serve`'s 10-second idle default. The conformance
@@ -229,9 +240,22 @@ uses the machine token's access. Narrow that:
 - Give the machine token a read-only scope.
 - Bind an ephemeral port per host, and listen only while an agent step that
   was granted the provider runs.
+- Keep every shell on the host in the no-network sandbox. Do not set
+  `allowUnsandboxedShell: true` or `allowNetwork: true` for an agent that
+  is granted the provider, nor for any other lane on the same host. Either
+  setting takes the shell out of the sandbox. An approved shell command can
+  then call the proxy directly and use every upstream tool the token
+  allows. That call skips the entry's `tools` allowlist and `readOnly`,
+  which only bind the agent's MCP client. This holds for a shell on any
+  lane of the host, not just the granted one.
 - Do not turn on `allowLocalBinding` for that agent: with it, shell commands
   may reach loopback servers directly (macOS only; Claude Code ignores it on
   Linux).
+- Refuse browsers. A web page open on the same machine can send requests to
+  a loopback port. With DNS rebinding it can also read the replies, under
+  its own host name. The sample answers 403 unless `Host` is exactly
+  `127.0.0.1:<port>` and no `Origin` header is present. Keep both checks in
+  any proxy you write.
 - Forward only the MCP path, to the one upstream URL, and never take the
   upstream from the request (the sample answers 404 on any other path).
 

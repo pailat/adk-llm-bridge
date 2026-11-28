@@ -613,6 +613,77 @@ describe.skipIf(!LINUX)("the documented loopback proxy itself", () => {
     expect(upstream.seen).toEqual([]);
   });
 
+  /**
+   * One raw HTTP/1.1 request, so the test, not the client library, sets
+   * `Host` (a browser after DNS rebinding sends its own name there).
+   * Returns the status code.
+   */
+  async function rawStatus(
+    port: number,
+    method: string,
+    headers: Record<string, string>,
+  ): Promise<number> {
+    const body = method === "POST" ? rpc("tools/call") : "";
+    const head = [
+      `${method} /mcp HTTP/1.1`,
+      ...Object.entries(headers).map(([name, value]) => `${name}: ${value}`),
+      "content-type: application/json",
+      `content-length: ${Buffer.byteLength(body)}`,
+      "connection: close",
+      "",
+      "",
+    ].join("\r\n");
+    let reply = "";
+    const { promise, resolve, reject } = Promise.withResolvers<void>();
+    await Bun.connect({
+      hostname: "127.0.0.1",
+      port,
+      socket: {
+        open(socket) {
+          socket.write(head + body);
+        },
+        data(_socket, chunk) {
+          reply += chunk.toString();
+        },
+        close() {
+          resolve();
+        },
+        error(_socket, error) {
+          reject(error);
+        },
+      },
+    });
+    await promise;
+    const status = reply.match(/^HTTP\/1\.1 (\d{3})/)?.[1];
+    if (!status) throw new Error(`no HTTP status in: ${reply.slice(0, 80)}`);
+    return Number(status);
+  }
+
+  test("a browser's request is 403 and never reaches upstream: foreign Host (DNS rebinding) or any Origin", async () => {
+    const { upstream, proxy } = await pair();
+    const port = proxy.server.port as number;
+    const own = `127.0.0.1:${port}`;
+    const refused: Array<Record<string, string>> = [
+      { host: `rebind.acme.example:${port}` },
+      { host: `localhost:${port}` },
+      { host: "127.0.0.1" },
+      { host: own, origin: "https://acme.example" },
+      { host: own, origin: `http://${own}` },
+      { host: own, origin: "null" },
+    ];
+    for (const headers of refused) {
+      for (const method of ["POST", "GET", "DELETE"]) {
+        expect(await rawStatus(port, method, headers)).toBe(403);
+      }
+    }
+    expect(upstream.seen).toEqual([]);
+    // The agent's own request (its Host, no Origin) still goes through.
+    expect(await rawStatus(port, "POST", { host: own })).toBe(200);
+    expect(upstream.seen.map((s) => s.authorization)).toEqual([
+      `Bearer ${MACHINE_TOKEN}`,
+    ]);
+  });
+
   test("a gzipping upstream: the client gets a body it can decode", async () => {
     const { proxy } = await pair({ gzip: true });
     const res = await fetch(proxy.url, {
