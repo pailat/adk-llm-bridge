@@ -1,6 +1,6 @@
 {
   "name": "adk-llm-bridge",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "Use OpenAI, Anthropic, xAI, OpenRouter and AI Gateway models (100+), external coding agents (Claude Code, Codex, fx) and durable workflows with Google ADK for TypeScript",
   "keywords": [
     "adk",

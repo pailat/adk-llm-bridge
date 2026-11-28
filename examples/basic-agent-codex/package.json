@@ -19,7 +19,7 @@
     "@google/genai": "^2.32.0",
     "@openai/codex-sdk": "0.167.2",
     "@opentelemetry/api": "^1.10.0",
-    "adk-llm-bridge": "^0.7.0"
+    "adk-llm-bridge": "^0.7.1"
   },
   "devDependencies": {
     "@types/bun": "^1.4.4",
