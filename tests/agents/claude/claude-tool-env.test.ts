@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import { InMemorySessionStore } from "@anthropic-ai/claude-agent-sdk";
 import { InputValidationError } from "@google/adk";
 import {
   ClaudeAgentSdkDriver,
@@ -562,4 +563,219 @@ describe("toolEnv refusals", () => {
     };
     expect(option.names).toEqual(["GH_TOKEN"]);
   });
+});
+
+describe("toolEnv run snapshots and source results", () => {
+  async function drain(
+    driver: { run(request: never): AsyncIterable<ExternalAgentEvent> },
+    request: unknown = REQUEST,
+  ): Promise<ExternalAgentEvent[]> {
+    const events: ExternalAgentEvent[] = [];
+    for await (const event of driver.run(request as never)) events.push(event);
+    return events;
+  }
+
+  function scratch(): string {
+    return realpathSync.native(
+      mkdtempSync(join(import.meta.dir, ".tool-env-scratch-")),
+    );
+  }
+
+  test("an SDK run copies the source values once: a later change is not seen", async () => {
+    // A shared cache the source returns by reference, and a driver env,
+    // both changed after the run's snapshot is taken.
+    const cache: Record<string, string | undefined> = {
+      GH_TOKEN: "gh-acme-a",
+    };
+    const host: Record<string, string | undefined> = { ...HOST };
+    let delivered: Record<string, string | undefined> | undefined;
+    const work = scratch();
+    try {
+      const driver = new ClaudeAgentSdkDriver({
+        env: host,
+        pathToClaudeCodeExecutable: "/fake/claude",
+        toolEnv: {
+          names: ["GH_TOKEN"],
+          source: () => cache,
+          proxyPassthrough: true,
+        },
+        sessionStore: () => {
+          // Built after the snapshot, before any env of the run.
+          cache.GH_TOKEN = "gh-acme-b";
+          host.HTTPS_PROXY = "http://other.acme.test:3128";
+          return new InMemorySessionStore();
+        },
+        sdk: {
+          query: ((input: { options?: { env?: typeof delivered } }) => {
+            delivered = input.options?.env;
+            return (async function* () {})();
+          }) as never,
+        },
+      });
+      await drain(driver, {
+        ...REQUEST,
+        workingDirectory: work,
+        permissions: { mode: "workspace-write", allowedPaths: [work] },
+      });
+      expect(delivered?.GH_TOKEN).toBe("gh-acme-a");
+      expect(delivered?.HTTPS_PROXY).toBe("http://proxy.acme.test:3128");
+    } finally {
+      rmSync(work, { recursive: true, force: true });
+    }
+  });
+
+  for (const [label, value] of [
+    ["null", null],
+    ["undefined", undefined],
+    ["a Promise", Promise.resolve({ GH_TOKEN: "gh-acme" })],
+    ["an array", ["GH_TOKEN"]],
+  ] as const) {
+    for (const [name] of BUILDERS) {
+      test(`${name}: a source returning ${label} fails the run once, not recoverable`, async () => {
+        let calls = 0;
+        let spawned = false;
+        const toolEnv = {
+          names: ["GH_TOKEN"],
+          source: () => {
+            calls += 1;
+            return value;
+          },
+        };
+        const driver =
+          name === "ClaudeCliDriver"
+            ? cli(toolEnv, HOST, () => {
+                spawned = true;
+              })
+            : sdk(toolEnv);
+        const events = await drain(driver);
+        expect(spawned).toBe(false);
+        expect(calls).toBe(1);
+        const error = events.find((event) => event.type === "error");
+        expect(error?.type === "error" && error.code).toBe(
+          CLAUDE_TOOL_ENV_SOURCE_FAILED,
+        );
+        expect(error?.type === "error" && error.recoverable).toBe(false);
+        expect(events.at(-1)?.type).toBe("completed");
+      });
+    }
+  }
+
+  test("ClaudeAgentSdkDriver: a throwing source is CLAUDE_TOOL_ENV_SOURCE_FAILED, not recoverable", async () => {
+    const events = await drain(
+      sdk({
+        names: ["GH_TOKEN"],
+        source: () => {
+          throw new Error("vault request timeout");
+        },
+      }),
+    );
+    const error = events.find((event) => event.type === "error");
+    expect(error?.type === "error" && error.code).toBe(
+      CLAUDE_TOOL_ENV_SOURCE_FAILED,
+    );
+    expect(error?.type === "error" && error.recoverable).toBe(false);
+    expect(error?.type === "error" && error.message).toContain(
+      "vault request timeout",
+    );
+  });
+
+  test("ClaudeAgentSdkDriver: a session store factory is still built once per request", async () => {
+    let built = 0;
+    const work = scratch();
+    try {
+      const driver = new ClaudeAgentSdkDriver({
+        env: HOST,
+        pathToClaudeCodeExecutable: "/fake/claude",
+        toolEnv: { names: ["GH_TOKEN"] },
+        sessionStore: () => {
+          built += 1;
+          return new InMemorySessionStore();
+        },
+        sdk: { query: (() => (async function* () {})()) as never },
+      });
+      const request = {
+        ...REQUEST,
+        workingDirectory: work,
+        permissions: { mode: "workspace-write", allowedPaths: [work] },
+      };
+      await drain(driver, request);
+      await drain(driver, request);
+      expect(built).toBe(1);
+    } finally {
+      rmSync(work, { recursive: true, force: true });
+    }
+  });
+
+  test("ClaudeCliDriver: an error outside the toolEnv source is not a source failure", async () => {
+    const request = {
+      ...REQUEST,
+      credential: {
+        kind: "env",
+        get env(): Record<string, string> {
+          throw new Error("Acme credential accessor failed");
+        },
+      },
+    };
+    let caught: unknown;
+    const events: ExternalAgentEvent[] = [];
+    try {
+      for await (const event of cli({ names: ["GH_TOKEN"] }).run(
+        request as never,
+      )) {
+        events.push(event);
+      }
+    } catch (error) {
+      caught = error;
+    }
+    const codes = events.map((event) =>
+      event.type === "error" ? event.code : undefined,
+    );
+    expect(codes).not.toContain(CLAUDE_TOOL_ENV_SOURCE_FAILED);
+    expect(String(caught ?? "")).toContain("Acme credential accessor failed");
+  });
+
+  for (const [name, build] of BUILDERS) {
+    for (const reserved of [
+      "NODE_TLS_REJECT_UNAUTHORIZED",
+      "NODE_PATH",
+      "node_path",
+      "NODE_DEBUG",
+      "UV_THREADPOOL_SIZE",
+    ]) {
+      test(`${name}: refuses the runtime name ${reserved}`, () => {
+        const error = thrown(() => build({ names: [reserved] }));
+        expect(error).toBeInstanceOf(ExternalAgentPolicyError);
+        expect((error as ExternalAgentPolicyError).code).toBe(
+          EXTERNAL_AGENT_OPTION_UNSUPPORTED,
+        );
+      });
+    }
+
+    test(`${name}: still accepts NODE_EXTRA_CA_CERTS as a listed name`, () => {
+      const env = build({ names: ["NODE_EXTRA_CA_CERTS"] }).buildEnv(REQUEST);
+      expect(env.NODE_EXTRA_CA_CERTS).toBe("/etc/acme/extra.pem");
+    });
+
+    test(`${name}: refuses a duplicate name that differs only in case`, () => {
+      const error = thrown(() => build({ names: ["GH_TOKEN", "gh_token"] }));
+      expect(error).toBeInstanceOf(InputValidationError);
+      expect((error as Error).message).toContain("more than once");
+    });
+
+    test(`${name}: a credential wins over a toolEnv name of other case`, () => {
+      const env = build({
+        names: ["gh_token"],
+        source: { gh_token: "tool-value" },
+      }).buildEnv({
+        ...REQUEST,
+        provider: {
+          ...CLAUDE_PROVIDER,
+          envAllowlist: [...(CLAUDE_PROVIDER.envAllowlist ?? []), "GH_TOKEN"],
+        },
+        credential: { kind: "env" as const, env: { GH_TOKEN: "cred-value" } },
+      });
+      expect(env.GH_TOKEN).toBe("cred-value");
+      expect(Object.hasOwn(env, "gh_token")).toBe(false);
+    });
+  }
 });

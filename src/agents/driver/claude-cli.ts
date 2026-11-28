@@ -30,10 +30,12 @@ import {
 } from "./claude-run-env.js";
 import {
   type CheckedClaudeToolEnv,
-  CLAUDE_TOOL_ENV_SOURCE_FAILED,
   type ClaudeToolEnv,
+  type ClaudeToolEnvSnapshot,
+  ClaudeToolEnvSourceError,
   checkClaudeToolEnv,
   claudeToolEnvValues,
+  readClaudeToolEnvSource,
 } from "./claude-tool-env.js";
 import { resolveCliLaunch, validateLaunchConfig } from "./launch.js";
 import { collectTail, type LineSource, readLines } from "./lines.js";
@@ -734,23 +736,24 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
     }
     const isolation = this.isolationPlan(request);
     const args = this.buildArgs(request);
-    let env: Record<string, string>;
+    let toolEnvSnapshot: ClaudeToolEnvSnapshot;
     try {
-      env = this.buildEnv(request);
+      toolEnvSnapshot = readClaudeToolEnvSource(this.#toolEnv, this.#env);
     } catch (error) {
-      // A toolEnv source function that throws (a token it cannot mint) ends
-      // the run like a refusal: nothing is spawned.
-      const detail = error instanceof Error ? error.message : String(error);
+      if (!(error instanceof ClaudeToolEnvSourceError)) throw error;
+      // A toolEnv source that fails (a token it cannot mint) ends the run
+      // like a refusal: nothing is spawned.
       yield {
         type: "error",
-        message: `ClaudeCliDriver: the child environment could not be built: ${detail}`,
-        code: CLAUDE_TOOL_ENV_SOURCE_FAILED,
+        message: `ClaudeCliDriver: ${error.message}`,
+        code: error.code,
         recoverable: false,
         timestamp: Date.now(),
       };
       yield { type: "completed", exitCode: 1, timestamp: Date.now() };
       return;
     }
+    const env = this.#buildEnv(request, toolEnvSnapshot);
 
     const envRefusal = modelEnvRefusal(
       "ClaudeCliDriver",
@@ -1087,6 +1090,16 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
    * @returns The environment to pass to the process.
    */
   buildEnv(request: ExternalAgentRunRequest): Record<string, string> {
+    return this.#buildEnv(
+      request,
+      readClaudeToolEnvSource(this.#toolEnv, this.#env),
+    );
+  }
+
+  #buildEnv(
+    request: ExternalAgentRunRequest,
+    toolEnvSnapshot: ClaudeToolEnvSnapshot,
+  ): Record<string, string> {
     // The config directories let Claude Code use its existing local
     // OAuth/native login cache without the bridge storing secrets.
     const env = buildChildEnv(
@@ -1096,7 +1109,7 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
     );
     // Base and credential names are never toolEnv names (the base ones are
     // refused, the credential ones skipped), so no value is overwritten.
-    Object.assign(env, claudeToolEnvValues(this.#toolEnv, this.#env, env));
+    Object.assign(env, claudeToolEnvValues(toolEnvSnapshot, env));
     applyBackgroundTaskSetting(env, this.#allowBackgroundTasks);
     return env;
   }

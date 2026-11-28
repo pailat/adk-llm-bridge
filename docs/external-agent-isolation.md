@@ -1534,12 +1534,16 @@ new ClaudeAgentSdkDriver({
 - **Off by default.** Without `toolEnv` the child environment is exactly
   what it was before the option existed.
 - **Only the listed names.** Each name must match the run-spec env grammar
-  (`[A-Za-z_][A-Za-z0-9_]{0,127}`) and appear once. Only set, non-empty
-  string values are copied; the source is never copied whole. `source` is a
-  record or a function. A function is called once per run (two runs that
-  share one request object each call it once), and every check of the run
-  sees the values the child gets, so a host can mint one token per run. A
-  credential variable of the same name wins.
+  (`[A-Za-z_][A-Za-z0-9_]{0,127}`) and appear once, compared without
+  regard to case (Windows treats `GH_TOKEN` and `gh_token` as one
+  variable). Only set, non-empty string values are copied; the source is
+  never copied whole. `source` is a record or a function. A function is
+  called once per run (two runs that share one request object each call it
+  once) and must return a plain object synchronously. The run copies the
+  values of its names once, so every check of the run sees the values the
+  child gets, even when the source object or the driver `env` changes
+  during the run, and a host can mint one token per run. A credential
+  variable of the same name, in any case, wins.
 - **`proxyPassthrough: true`** also copies `HTTPS_PROXY`, `HTTP_PROXY`,
   `NO_PROXY` (both cases), `SSL_CERT_FILE`, `SSL_CERT_DIR` and
   `NODE_EXTRA_CA_CERTS`: the Codex SDK driver's list without `CODEX_HOME`,
@@ -1548,11 +1552,11 @@ new ClaudeAgentSdkDriver({
   returns only secrets still gets the host's proxy). A set, non-empty value
   in `source` wins, so a run can use its own proxy. This holds when a proxy
   name is also in `names` (for example from a run spec's `env`).
-- **A `source` function that throws** ends the run with an `error` event
-  and `completed` (exit code 1). Nothing is spawned. `ClaudeCliDriver`
-  reports the non-recoverable `CLAUDE_TOOL_ENV_SOURCE_FAILED`;
-  `ClaudeAgentSdkDriver` classifies the message as it does any other run
-  failure.
+- **A `source` function that throws, or returns anything but a plain
+  object** (a Promise, `null`, `undefined`, an array), ends the run with
+  the non-recoverable `CLAUDE_TOOL_ENV_SOURCE_FAILED` `error` event and
+  `completed` (exit code 1), on both drivers. Nothing is spawned, and the
+  function is not called again in that run.
 - **Refused when the driver is built:**
   - a name that breaks the grammar or repeats: `InputValidationError`;
   - a model name (the rule of
@@ -1563,8 +1567,11 @@ new ClaudeAgentSdkDriver({
   - a name the driver sets or the runtime reads itself (`PATH`, `HOME`,
     `USER`, `SHELL`, `XDG_CONFIG_HOME`, `TMPDIR`,
     `ENABLE_MCP_LARGE_OUTPUT_FILES`, `ANTHROPIC_*`, `CLAUDE_*`,
-    `NODE_OPTIONS`, `BUN_OPTIONS`, `LD_PRELOAD`, `LD_LIBRARY_PATH`,
-    `LD_AUDIT`, `DYLD_*`): `EXTERNAL_AGENT_OPTION_UNSUPPORTED`.
+    `NODE_*` except `NODE_EXTRA_CA_CERTS` (so `NODE_OPTIONS`, `NODE_PATH`
+    and `NODE_TLS_REJECT_UNAUTHORIZED`, which would turn off TLS checks on
+    the model traffic), `UV_*`, `BUN_OPTIONS`, `LD_PRELOAD`,
+    `LD_LIBRARY_PATH`, `LD_AUDIT`, `DYLD_*`):
+    `EXTERNAL_AGENT_OPTION_UNSUPPORTED`.
 - **Refused at run time:** an MCP `{ env }` secret that uses a `toolEnv`
   name, with `EXTERNAL_AGENT_MCP_SECRET_UNENFORCEABLE` (see
   [When a secret is refused](#when-a-secret-is-refused)).

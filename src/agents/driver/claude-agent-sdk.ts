@@ -82,6 +82,8 @@ import {
 import {
   type CheckedClaudeToolEnv,
   type ClaudeToolEnv,
+  type ClaudeToolEnvSnapshot,
+  ClaudeToolEnvSourceError,
   checkClaudeToolEnv,
   claudeToolEnvNames,
   claudeToolEnvValues,
@@ -875,10 +877,10 @@ export class ClaudeAgentSdkDriver {
   // the request (see run): every env the run builds (checks, options,
   // session reads) holds the same values, even when two runs share one
   // request object.
-  readonly #toolEnvSnapshots = new WeakMap<
-    object,
-    Readonly<Record<string, string | undefined>> | undefined
-  >();
+  readonly #toolEnvSnapshots = new WeakMap<object, ClaudeToolEnvSnapshot>();
+  // The request a run's copy was made from: the session store factory is
+  // cached by it, so a retry with the same request reuses its store.
+  readonly #runOrigins = new WeakMap<object, ExternalAgentRunRequest>();
   readonly #strictBinaryResolution: boolean;
   // Maps an ADK session id -> the SDK session id captured from the
   // first turn's system/init (or result) message. Subsequent turns of the same
@@ -1099,6 +1101,7 @@ export class ClaudeAgentSdkDriver {
     // A copy per run: the toolEnv snapshot is keyed by it, so concurrent
     // runs of one request object never share or delete each other's.
     const runRequest = { ...request };
+    this.#runOrigins.set(runRequest, request);
     try {
       for await (const event of this.#run(runRequest, scrubber)) {
         yield scrubber.scrubDeep(event).value;
@@ -1685,7 +1688,17 @@ export class ClaudeAgentSdkDriver {
       if (!startedEmitted) {
         yield startedEvent();
       }
-      if (error instanceof SessionStoreUnavailableError) {
+      if (error instanceof ClaudeToolEnvSourceError) {
+        // Not classified by its text: a source message that says "timeout"
+        // must not make the host retry a source that cannot be read.
+        yield {
+          type: "error",
+          message: `ClaudeAgentSdkDriver: ${error.message}`,
+          code: error.code,
+          recoverable: false,
+          timestamp: Date.now(),
+        };
+      } else if (error instanceof SessionStoreUnavailableError) {
         yield {
           type: "error",
           message: error.message,
@@ -1801,7 +1814,9 @@ export class ClaudeAgentSdkDriver {
     if (typeof configured !== "function") {
       return configured;
     }
-    const cached = this.#resolvedStores.get(request);
+    // Keyed by the caller's request, not the run's copy of it.
+    const key = this.#runOrigins.get(request) ?? request;
+    const cached = this.#resolvedStores.get(key);
     if (cached) {
       return cached;
     }
@@ -1811,7 +1826,7 @@ export class ClaudeAgentSdkDriver {
     } catch (error) {
       throw new SessionStoreUnavailableError(error);
     }
-    this.#resolvedStores.set(request, store);
+    this.#resolvedStores.set(key, store);
     return store;
   }
 
@@ -2192,16 +2207,10 @@ export class ClaudeAgentSdkDriver {
     env.CLAUDE_AGENT_SDK_CLIENT_APP = "adk-llm-bridge";
 
     const credentials = credentialEnv(request);
-    Object.assign(
-      env,
-      claudeToolEnvValues(
-        this.#toolEnv,
-        this.#env,
-        credentials,
-        this.#toolEnvSnapshots.get(request),
-      ),
-      credentials,
-    );
+    const snapshot = this.#toolEnvSnapshots.has(request)
+      ? (this.#toolEnvSnapshots.get(request) as ClaudeToolEnvSnapshot)
+      : readClaudeToolEnvSource(this.#toolEnv, this.#env);
+    Object.assign(env, claudeToolEnvValues(snapshot, credentials), credentials);
     applyBackgroundTaskSetting(env, this.#allowBackgroundTasks);
     if (hasMcpSecrets(this.#mcpServers)) {
       // An MCP result too large to inline stays inline (truncated) instead of
