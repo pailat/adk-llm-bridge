@@ -405,6 +405,58 @@ describe("an error thrown inside fetch", () => {
     expect(error.detail).toContain("api.acme.test");
   });
 
+  it("keeps the name and code of a cause whose own cause throws", () => {
+    const cause = new Proxy(
+      { name: "TypeError", code: "ECONNREFUSED" },
+      {
+        get(target, key) {
+          if (key === "cause") throw new Error("acme");
+          return Reflect.get(target, key);
+        },
+      },
+    );
+    const error = new Error("Connection error.", { cause });
+
+    expect(describeProviderFailure(error, "api.acme.test")).toBe(
+      "Connection error. (cause: TypeError ECONNREFUSED; host: api.acme.test)",
+    );
+  });
+
+  function withCode(code: string) {
+    return new Error("Connection error.", {
+      cause: new TypeError("fetch failed", {
+        cause: Object.assign(new Error("acme"), { code }),
+      }),
+    });
+  }
+
+  it.each([
+    "KEY_AKIAACMEEXAMPLE7KEY",
+    "SK_LIVE_51ACMEXYZ",
+    "TOKEN_ACMESECRETVALUE",
+    "ERR_ACME7SECRET",
+    "ERR_ACMESECRETVALUEXYZ",
+  ])("leaves out the upper snake code %s, shaped like a secret", (code) => {
+    expect(describeProviderFailure(withCode(code), "api.acme.test")).toBe(
+      "Connection error. (cause: TypeError, Error; host: api.acme.test)",
+    );
+  });
+
+  it.each([
+    "ERR_HTTP2_STREAM_ERROR",
+    "ERR_SSL_TLSV1_ALERT_PROTOCOL_VERSION",
+    "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+    "DEPTH_ZERO_SELF_SIGNED_CERT",
+    "SELF_SIGNED_CERT_IN_CHAIN",
+    "CERT_HAS_EXPIRED",
+    "EAI_AGAIN",
+    "UND_ERR_SOCKET",
+  ])("keeps the library code %s", (code) => {
+    expect(describeProviderFailure(withCode(code), "api.acme.test")).toBe(
+      `Connection error. (cause: TypeError, Error ${code}; host: api.acme.test)`,
+    );
+  });
+
   it("does not report an earlier attempt's fetch error", async () => {
     let calls = 0;
     const stale: unknown[] = [];

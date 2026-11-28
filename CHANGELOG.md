@@ -18,8 +18,9 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   or `Error ConnectionRefused` from Bun's own `fetch`. Cause messages, URLs,
   query strings and headers are left out; a name is kept only when it ends in
   `Error` or `Exception` and a code only when it is shaped like a system or
-  library code (`ECONNREFUSED`, `UND_ERR_SOCKET`, `ConnectionRefused`), so a
-  token-like value is reported as plain `Error`. A part that would make
+  library code (`ECONNREFUSED`, `UND_ERR_SOCKET`, `ConnectionRefused`; upper
+  snake words of at most 12 capitals, with no digit inside), so a token-like
+  value is reported as plain `Error`. A part that would make
   `classifyRecoverable` give the message another code than `TRANSPORT_ERROR`
   (a host such as `payments.example.com` or `ratelimit.example.com`, a code
   such as `ENOENT`) is left out, and a `cause` that throws when read ends the

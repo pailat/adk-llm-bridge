@@ -108,13 +108,15 @@ const MAX_CAUSE_DEPTH = 5;
 const SAFE_NAME = /^[A-Z][A-Za-z]{0,48}(?:Error|Exception)$/;
 /**
  * A system or library error `code`, by shape: an errno code (`ECONNREFUSED`),
- * upper snake case of two or more words (`UND_ERR_SOCKET`, `EAI_AGAIN`,
- * `CERT_HAS_EXPIRED`), or capitalized words from Bun's own `fetch`
- * (`ConnectionRefused`, `FailedToOpenSocket`). A token-like value (digits
- * mixed with capitals, lower-case runs, no word breaks) is left out.
+ * upper snake case of two to eight words of at most 12 capitals each, a word
+ * after the first ending in at most one digit (`UND_ERR_SOCKET`, `EAI_AGAIN`,
+ * `ERR_HTTP2_STREAM_ERROR`), or capitalized words from Bun's own `fetch`
+ * (`ConnectionRefused`, `FailedToOpenSocket`). A token-like value (a digit
+ * inside or leading a word, a capital run longer than a word, lower-case
+ * runs, no word breaks) is left out.
  */
 const SAFE_CODE =
-  /^(?:E[A-Z]{2,15}|[A-Z]{2,}(?:_[A-Z][A-Z0-9]*){1,7}|[A-Z][a-z]+(?:[A-Z][a-z]+){1,5})$/;
+  /^(?:E[A-Z]{2,15}|[A-Z]{2,12}(?:_[A-Z]{1,12}[0-9]?){1,7}|[A-Z][a-z]+(?:[A-Z][a-z]+){1,5})$/;
 /** Code `classifyRecoverable` gives a timeout or connection failure. */
 const TRANSPORT_ERROR = "TRANSPORT_ERROR";
 
@@ -195,17 +197,14 @@ function causeChain(error: Error): { name: string; code?: string }[] {
       chain.length < MAX_CAUSE_DEPTH
     ) {
       seen.add(current);
-      const { name, code, cause } = current as {
-        name?: unknown;
-        code?: unknown;
-        cause?: unknown;
-      };
+      const { name, code } = current as { name?: unknown; code?: unknown };
       chain.push({
         name: typeof name === "string" && SAFE_NAME.test(name) ? name : "Error",
         code:
           typeof code === "string" && SAFE_CODE.test(code) ? code : undefined,
       });
-      current = cause;
+      // Read after the push, so a throwing `cause` keeps this entry.
+      current = (current as { cause?: unknown }).cause;
     }
   } catch {
     // A cause that cannot be read ends the chain.
