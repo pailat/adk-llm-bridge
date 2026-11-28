@@ -51,6 +51,18 @@ import {
   type SDKUserMessage,
 } from "./claude-message-mapper.js";
 import {
+  CLAUDE_STRUCTURED_OUTPUT_TOOL,
+  type ClaudeEffort,
+  ClaudeMaxBudgetInvalidError,
+  type ClaudeMaxBudgetUsd,
+  type ClaudeRunCaps,
+  checkClaudeRunCaps,
+  resolveClaudeMaxBudget,
+  type StructuredOutputCheck,
+  structuredOutputCheck,
+  structuredOutputEvent,
+} from "./claude-run-caps.js";
+import {
   applyBackgroundTaskSetting,
   backgroundTaskPendingEvent,
   ClaudeBackgroundTaskTracker,
@@ -151,6 +163,10 @@ type ClaudeAgentSdkOptions = {
   pathToClaudeCodeExecutable?: string;
   settingSources?: ClaudeAgentSdkSettingSource[];
   maxTurns?: number;
+  maxBudgetUsd?: number;
+  effort?: ClaudeEffort;
+  maxThinkingTokens?: number;
+  outputFormat?: { type: "json_schema"; schema: Record<string, unknown> };
   model?: string;
   systemPrompt?:
     | string
@@ -315,6 +331,66 @@ export interface ClaudeAgentSdkDriverConfig {
   settingSources?: ClaudeAgentSdkSettingSource[];
   /** Maximum agent turns per run (SDK `maxTurns`). */
   maxTurns?: number;
+  /**
+   * Spend cap of each run in US dollars (SDK `maxBudgetUsd`): a number, or a
+   * function the driver calls when each `query()` call starts, for a cap that
+   * shrinks as a larger budget is spent. A run that goes over it ends with
+   * the non-recoverable `MAX_BUDGET_EXCEEDED` error and exit code 1.
+   *
+   * @remarks
+   * A number must be finite and above 0; anything else is refused when the
+   * driver is built. A function that throws or returns such a value ends
+   * the run with `CLAUDE_MAX_BUDGET_INVALID` before `query()` is called.
+   *
+   * @defaultValue no cap
+   */
+  maxBudgetUsd?: ClaudeMaxBudgetUsd;
+  /**
+   * Reasoning effort of each run (SDK `effort`): `"low"`, `"medium"`,
+   * `"high"`, `"xhigh"` or `"max"`. Anything else is refused when the driver
+   * is built.
+   *
+   * @defaultValue the model's default effort
+   */
+  effort?: ClaudeEffort;
+  /**
+   * Passed to the SDK's `maxThinkingTokens` option. A non-negative integer:
+   * 0 turns thinking off; anything else is refused when the driver is built.
+   *
+   * @remarks The SDK marks this option deprecated. On models with adaptive
+   * thinking (such as Opus 4.6) it is only on or off: any positive value
+   * means adaptive thinking, not a token limit. To limit spend, use
+   * `effort` and `maxBudgetUsd`.
+   *
+   * @defaultValue the SDK's default
+   */
+  maxThinkingTokens?: number;
+  /**
+   * JSON Schema the run's answer must match. The SDK gets it as
+   * `outputFormat: { type: "json_schema" }`, and the structured value it
+   * returns is the run's only `output` event (its JSON, with
+   * `metadata.structuredOutput: true`), so it becomes the node output of an
+   * `ExternalAgent` in a Workflow. Assistant text is not emitted as output.
+   *
+   * @remarks
+   * A successful result without a value, or with one that does not match
+   * the schema, ends the run with the non-recoverable
+   * `CLAUDE_OUTPUT_SCHEMA_MISMATCH` error and exit code 1; the SDK giving up
+   * after its own retries is `MAX_STRUCTURED_OUTPUT_RETRIES`. A value that
+   * is not a plain JSON object is refused when the driver is built.
+   * The driver's own check is never stricter than JSON Schema: it leaves
+   * `format`, `pattern`, `patternProperties`, object or array `const` and
+   * `enum` values, any non-empty `not`, `maxContains` next to `contains`
+   * and integrality to the SDK, doubles `maxLength`, and reads `oneOf` as
+   * `anyOf`. The SDK has already parsed the value with `JSON.parse`, so an
+   * integer beyond `Number.MAX_SAFE_INTEGER` arrives rounded, not exact as
+   * on the text path; declare such fields as strings. An isolated run accepts the `StructuredOutput` tool that Claude
+   * Code adds for the schema. That tool's calls are not `tool_call` events.
+   * `ClaudeCliDriver` refuses this option (`EXTERNAL_AGENT_OPTION_UNSUPPORTED`).
+   *
+   * @defaultValue none: the answer is text
+   */
+  outputSchema?: Record<string, unknown>;
   /**
    * Model id passed to the SDK; also reported as `gen_ai.request.model`. A
    * string of 1 to 256 characters without whitespace or control characters,
@@ -630,6 +706,12 @@ function validateSessionStoreTuning(config: ClaudeAgentSdkDriverConfig): void {
  */
 export const DEFAULT_CLAUDE_SDK_TOOLS: readonly string[] = DEFAULT_CLAUDE_TOOLS;
 
+export type { ClaudeEffort, ClaudeMaxBudgetUsd } from "./claude-run-caps.js";
+export {
+  CLAUDE_MAX_BUDGET_INVALID,
+  CLAUDE_OUTPUT_SCHEMA_MISMATCH,
+} from "./claude-run-caps.js";
+
 /**
  * Code of the recoverable `error` event a Claude Agent SDK run reports when
  * the SDK dropped a transcript batch that its `sessionStore` rejected or timed
@@ -743,6 +825,9 @@ export class ClaudeAgentSdkDriver {
   readonly #executableSearchPaths: string[];
   readonly #settingSources: ClaudeAgentSdkSettingSource[];
   readonly #maxTurns?: number;
+  readonly #caps: ClaudeRunCaps;
+  /** The check of structured values, built on the first run that needs it. */
+  #outputCheck?: Promise<StructuredOutputCheck>;
   readonly #model?: string;
   readonly #requireExplicitModel: boolean;
   readonly #smallFastModel?: string;
@@ -794,7 +879,10 @@ export class ClaudeAgentSdkDriver {
    * server other than `adk_bridge` and `inheritHostConfig` is not `true`,
    * when `maxTurns` is not a positive integer, when `sessionStoreFlush` is not
    * `"batched"` or `"eager"`, when `sessionStoreLoadTimeoutMs` is not a
-   * positive integer, or when either is given without `sessionStore`.
+   * positive integer, or when either is given without `sessionStore`; also
+   * when `maxBudgetUsd` is neither a finite number above 0 nor a function,
+   * `effort` is not an SDK effort level, `maxThinkingTokens` is not a
+   * non-negative integer, or `outputSchema` is not a plain JSON object.
    * @throws {@link ExternalAgentPolicyError} with code
    * `EXTERNAL_AGENT_OPTION_UNKNOWN` for a config that is not a plain object
    * or has an unknown key, `EXTERNAL_AGENT_MODEL_INVALID` when `model` is not
@@ -845,6 +933,10 @@ export class ClaudeAgentSdkDriver {
     // explicit allowlist.
     this.#settingSources = config.settingSources ?? [];
     this.#maxTurns = config.maxTurns;
+    this.#caps = checkClaudeRunCaps(
+      "ClaudeAgentSdkDriver",
+      config as Readonly<Record<string, unknown>>,
+    );
     this.#debugEvents = config.debugEvents ?? false;
     this.#requiredMcpServers = [...new Set(config.requiredMcpServers ?? [])];
     const declaredNames = new Set(this.#mcpServers.map((s) => s.name));
@@ -1027,6 +1119,8 @@ export class ClaudeAgentSdkDriver {
     let completed = false;
     let failed = false;
     let emittedOutput = false;
+    // Set when the driver has an outputSchema.
+    let outputCheck: StructuredOutputCheck | undefined;
     // Whether this run saw any turn activity (assistant, stream or user
     // message), and the model-less results it read before any.
     let sawTurn = false;
@@ -1084,6 +1178,10 @@ export class ClaudeAgentSdkDriver {
       // would only be reported as mirror_error and the run would go on
       // without its transcript.
       this.resolveSessionStore(request);
+      if (this.#caps.outputSchema) {
+        this.#outputCheck ??= structuredOutputCheck(this.#caps.outputSchema);
+        outputCheck = await this.#outputCheck;
+      }
       // A model variable in the child environment would change the model
       // the runtime runs: refuse before anything else.
       const envRefusal = modelEnvRefusal(
@@ -1142,7 +1240,14 @@ export class ClaudeAgentSdkDriver {
       const expectation: ClaudeIsolationExpectation | undefined =
         isolation.isolated
           ? {
-              tools: isolation.tools ?? [],
+              // With an outputSchema the runtime adds its own tool, which
+              // the model calls to give the answer.
+              tools: [
+                ...(isolation.tools ?? []),
+                ...(this.#caps.outputSchema
+                  ? [CLAUDE_STRUCTURED_OUTPUT_TOOL]
+                  : []),
+              ],
               mcpServers: [
                 ...Object.keys(options.mcpServers ?? {}),
                 ...this.#requiredMcpServers,
@@ -1193,7 +1298,10 @@ export class ClaudeAgentSdkDriver {
             options.hooks,
             request.permissions,
             request.workingDirectory,
-            built.bridgeTools,
+            // The StructuredOutput input is the answer, not paths.
+            this.#caps.outputSchema
+              ? [...(built.bridgeTools ?? []), CLAUDE_STRUCTURED_OUTPUT_TOOL]
+              : built.bridgeTools,
             sessionReads,
           ),
           ...(options.canUseTool
@@ -1410,10 +1518,50 @@ export class ClaudeAgentSdkDriver {
             }
           }
         }
+        // With an outputSchema the structured value is the only output; a
+        // success without a matching one fails instead of ending with text.
+        // A success flagged `is_error` (an API error such as an overload)
+        // has no value: report its own text, classified, not a mismatch.
+        let schemaMismatch: ExternalAgentEvent | undefined;
+        if (
+          outputCheck &&
+          isSuccessResult(message) &&
+          asRecord(message).is_error === true
+        ) {
+          const text =
+            stringValue(asRecord(message).result) ||
+            "Claude Agent SDK result: success with is_error";
+          const classification = classifyRecoverable({
+            message: text,
+            fallbackCode: "CLAUDE_AGENT_SDK_RESULT_ERROR",
+          });
+          schemaMismatch = {
+            type: "error",
+            message: text,
+            code: classification.code,
+            recoverable: classification.recoverable,
+            timestamp: Date.now(),
+          };
+        } else if (outputCheck && isSuccessResult(message)) {
+          const structured = structuredOutputEvent(
+            asRecord(message),
+            outputCheck,
+          );
+          if (structured.ok) {
+            emittedOutput = true;
+            yield structured.event;
+          } else {
+            schemaMismatch = structured.event;
+          }
+        }
         // If the turn produced no streamed assistant text, fall back to
         // the aggregated `result.result` on a successful result message so the
         // run does not complete with silent-empty output.
-        if (!emittedOutput && isSuccessResultWithText(message)) {
+        if (
+          !outputCheck &&
+          !emittedOutput &&
+          isSuccessResultWithText(message)
+        ) {
           const text = stringValue(asRecord(message).result);
           if (text) {
             emittedOutput = true;
@@ -1427,6 +1575,21 @@ export class ClaudeAgentSdkDriver {
           mcpEvents,
         );
         for (let event of events) {
+          if (
+            outputCheck &&
+            (event.type === "output" ||
+              ((event.type === "tool_call" || event.type === "tool_result") &&
+                event.name === CLAUDE_STRUCTURED_OUTPUT_TOOL))
+          ) {
+            // Assistant text is not the answer of a structured run, and the
+            // runtime's StructuredOutput call carries the answer that the
+            // result's value already gives.
+            continue;
+          }
+          if (schemaMismatch && event.type === "completed") {
+            yield schemaMismatch;
+            event = { ...event, exitCode: 1 };
+          }
           if (
             event.type === "tool_result" &&
             event.callId !== undefined &&
@@ -1486,6 +1649,8 @@ export class ClaudeAgentSdkDriver {
         };
       } else if (error instanceof ExternalAgentPolicyError) {
         yield policyErrorEvent(error);
+      } else if (error instanceof ClaudeMaxBudgetInvalidError) {
+        yield error.event();
       } else if (error instanceof McpServerUnavailableError) {
         yield {
           type: "error",
@@ -1608,12 +1773,21 @@ export class ClaudeAgentSdkDriver {
    * @param request - The run request.
    * @param resume - SDK session id to resume; defaults to the configured
    * `resumeSessionId`.
+   * @remarks A `maxBudgetUsd` function is called on every call of this
+   * method (and of `buildOptionsForRun`), so inspecting the options calls
+   * it too; `run()` calls it once per `query()` call.
    * @returns The options object.
+   * @throws `ClaudeMaxBudgetInvalidError` when a `maxBudgetUsd` function
+   * throws or returns anything but a finite number above 0 (a run reports
+   * it as `CLAUDE_MAX_BUDGET_INVALID`).
    */
   buildOptions(
     request: ExternalAgentRunRequest,
     resume: string | undefined = this.#resumeSessionId,
   ): ClaudeAgentSdkOptions {
+    // A function is read here, once per query() call, and first: a refusal
+    // leaves no abort listener behind.
+    const maxBudgetUsd = resolveClaudeMaxBudget(this.#caps.maxBudgetUsd);
     const permission = mapPolicyToClaudeSdkPermission(request.permissions);
     const options: ClaudeAgentSdkOptions = {
       cwd: request.workingDirectory,
@@ -1627,6 +1801,15 @@ export class ClaudeAgentSdkDriver {
       pathToClaudeCodeExecutable: this.resolveClaudeExecutable(request).path,
       settingSources: this.#settingSources,
       maxTurns: this.#maxTurns,
+      maxBudgetUsd,
+      effort: this.#caps.effort,
+      maxThinkingTokens: this.#caps.maxThinkingTokens,
+      outputFormat: this.#caps.outputSchema
+        ? {
+            type: "json_schema",
+            schema: structuredClone(this.#caps.outputSchema),
+          }
+        : undefined,
       model: this.#model,
       systemPrompt: this.buildSystemPrompt(request),
       allowDangerouslySkipPermissions:
@@ -1729,6 +1912,11 @@ export class ClaudeAgentSdkDriver {
           ? { workingDirectory: request.workingDirectory }
           : {},
       );
+    // The runtime's StructuredOutput tool only hands the answer back: it
+    // reads and writes nothing, so it is allowed in every mode.
+    const structuredOutput = (toolName: string) =>
+      this.#caps.outputSchema !== undefined &&
+      toolName === CLAUDE_STRUCTURED_OUTPUT_TOOL;
     if (!requestPermission) {
       if (!policy?.readPaths) {
         return undefined;
@@ -1736,6 +1924,7 @@ export class ClaudeAgentSdkDriver {
       // No host answers prompts: approve the reads inside `readPaths` and
       // deny the rest, as the SDK does without a callback.
       return async (toolName, input, options) =>
+        structuredOutput(toolName) ||
         readsInReadPaths(toolName, input, options.blockedPath)
           ? { behavior: "allow", updatedInput: input }
           : {
@@ -1747,7 +1936,10 @@ export class ClaudeAgentSdkDriver {
     // Tell the guard whether shell commands are kept off the network.
     const { networkSandbox } = this.isolationPlan(request);
     return async (toolName, input, options) => {
-      if (readsInReadPaths(toolName, input, options.blockedPath)) {
+      if (
+        structuredOutput(toolName) ||
+        readsInReadPaths(toolName, input, options.blockedPath)
+      ) {
         return { behavior: "allow", updatedInput: input };
       }
       try {
@@ -3691,11 +3883,15 @@ function mcpToolServer(
     : { server: best, tool: name.slice(`mcp__${best}__`.length) };
 }
 
+function isSuccessResult(message: ClaudeAgentSdkMessage): boolean {
+  const record = asRecord(message);
+  return record.type === "result" && record.subtype === "success";
+}
+
 function isSuccessResultWithText(message: ClaudeAgentSdkMessage): boolean {
   const record = asRecord(message);
   return (
-    record.type === "result" &&
-    record.subtype === "success" &&
+    isSuccessResult(message) &&
     typeof record.result === "string" &&
     record.result.length > 0
   );

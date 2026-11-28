@@ -12,7 +12,10 @@ import { getProviderConfig } from "../../config.js";
 import { BaseProviderLlm } from "../../core/base-provider-llm.js";
 import { resolveConfig } from "../../core/config-resolver.js";
 import type { ProviderDefinition } from "../../core/provider-definition.js";
-import { PROVIDER_ERROR_INCOMPLETE_STREAM } from "../../core/provider-llm-error.js";
+import {
+  hostnameOf,
+  PROVIDER_ERROR_INCOMPLETE_STREAM,
+} from "../../core/provider-llm-error.js";
 import {
   annotateCacheUsage,
   annotateLlmSpan,
@@ -70,6 +73,41 @@ import {
   createAnthropicStreamAccumulator,
 } from "./converters/response.js";
 
+/** The last error `fetch` threw during one provider call. */
+interface FetchFailure {
+  error?: unknown;
+}
+
+/**
+ * The {@link FetchFailure} of the provider call that is running. Each call has
+ * its own, so concurrent calls do not see each other's errors.
+ *
+ * @remarks Read through `process.getBuiltinModule` rather than imported, so
+ * the package entry loads in a runtime without Node built-ins (a browser, a
+ * worker). There it is `undefined`, and a timeout keeps the SDK's error
+ * without a `cause`.
+ */
+type AsyncHooks = typeof import("node:async_hooks");
+const fetchFailures:
+  | import("node:async_hooks").AsyncLocalStorage<FetchFailure>
+  | undefined = (() => {
+  try {
+    const hooks = (
+      globalThis as {
+        process?: { getBuiltinModule?: (id: string) => unknown };
+      }
+    ).process?.getBuiltinModule?.("node:async_hooks") as AsyncHooks | undefined;
+    return hooks ? new hooks.AsyncLocalStorage<FetchFailure>() : undefined;
+  } catch {
+    return undefined;
+  }
+})();
+
+/** Runs `fn` with `failure` as the {@link FetchFailure} of its `fetch` calls. */
+function withFetchFailure<T>(failure: FetchFailure, fn: () => T): T {
+  return fetchFailures ? fetchFailures.run(failure, fn) : fn();
+}
+
 /**
  * Anthropic (Claude) LLM provider.
  *
@@ -112,6 +150,12 @@ export class AnthropicLlm extends BaseProviderLlm {
    */
   private readonly client: AnthropicSDK;
 
+  /** The `fetch` the client's requests go through. */
+  private transportFetch: (
+    input: string | URL | Request,
+    init?: RequestInit,
+  ) => Promise<Response> = (input, init) => globalThis.fetch(input, init);
+
   /**
    * Maximum tokens to generate in responses.
    */
@@ -128,6 +172,7 @@ export class AnthropicLlm extends BaseProviderLlm {
    *   base URL (from `baseURL`, the global config or `ANTHROPIC_BASE_URL`) is
    *   not a valid absolute URL, or `timeout`, `maxRetries` or `maxTokens` is
    *   set and is not an integer. An integer below the minimum is clamped.
+   * @throws Error When the runtime has no global `fetch`.
    *
    * @example
    * ```typescript
@@ -155,11 +200,33 @@ export class AnthropicLlm extends BaseProviderLlm {
     // Unset stays undefined: prompt caching is then automatic, per request.
     this.promptCaching = config.promptCaching ?? globalConfig.promptCaching;
 
+    // The SDK checks for a global `fetch` only when it is not given one, and
+    // it is given the wrapper below.
+    if (typeof globalThis.fetch !== "function") {
+      throw new Error(
+        "`fetch` is not defined as a global; polyfill it: `globalThis.fetch = fetch`",
+      );
+    }
     this.client = new AnthropicSDK({
       apiKey: resolved.apiKey,
       baseURL: resolved.baseURL,
       timeout: resolved.timeout,
       maxRetries: resolved.maxRetries,
+      // On a timeout or abort the SDK throws `APIConnectionTimeoutError`
+      // without the error `fetch` threw; record it to restore it as `cause`.
+      // A fetch that succeeds clears it, so a later error without a cause is
+      // not given an earlier attempt's.
+      fetch: async (input, init) => {
+        const failure = fetchFailures?.getStore();
+        try {
+          const response = await this.transportFetch(input, init);
+          if (failure) failure.error = undefined;
+          return response;
+        } catch (error) {
+          if (failure) failure.error = error;
+          throw error;
+        }
+      },
     });
 
     // Opt in to ADK's Claude handling: ContentRequestProcessor keeps the
@@ -167,6 +234,11 @@ export class AnthropicLlm extends BaseProviderLlm {
     // symbol or by a /^claude-/ model name. The symbol also covers aliases such
     // as `us.anthropic.claude-...` that the name check misses.
     (this as unknown as Record<symbol, boolean>)[CLAUDE_MODEL_SYMBOL] = true;
+  }
+
+  /** Hostname of the client's base URL. */
+  protected override requestHost(): string | undefined {
+    return hostnameOf(this.client.baseURL);
   }
 
   /**
@@ -194,6 +266,7 @@ export class AnthropicLlm extends BaseProviderLlm {
   ): AsyncGenerator<LlmResponse, void> {
     annotateLlmSpan({ provider: "anthropic", baseURL: this.client.baseURL });
     let incomplete = false;
+    const failure: FetchFailure = {};
     try {
       // Anthropic rejects an empty `messages` array, and recent Claude models
       // reject a conversation that ends with an assistant turn.
@@ -213,6 +286,7 @@ export class AnthropicLlm extends BaseProviderLlm {
           toolChoice,
           abortSignal,
           structuredOutput,
+          failure,
         );
         incomplete = !completed && !abortSignal?.aborted;
       } else {
@@ -225,10 +299,22 @@ export class AnthropicLlm extends BaseProviderLlm {
           toolChoice,
           abortSignal,
           structuredOutput,
+          failure,
         );
       }
     } catch (error) {
       if (abortSignal?.aborted) return;
+      if (
+        error instanceof AnthropicSDK.APIConnectionError &&
+        error.cause === undefined &&
+        failure.error !== undefined
+      ) {
+        Object.defineProperty(error, "cause", {
+          value: failure.error,
+          configurable: true,
+          writable: true,
+        });
+      }
       recordLlmError(error);
       // A request the bridge refuses before calling the API (a reserved tool
       // name) is a configuration error, not a provider failure: surface it as
@@ -359,24 +445,27 @@ export class AnthropicLlm extends BaseProviderLlm {
     toolChoice?: AnthropicSDK.ToolChoice,
     abortSignal?: AbortSignal,
     structuredOutput = false,
+    failure: FetchFailure = {},
   ): Promise<LlmResponse> {
     // The raw body is parsed here, not by the SDK: `JSON.parse` would round
     // integers beyond `Number.MAX_SAFE_INTEGER` in tool inputs (19-digit ids);
     // `parseJson` keeps them exact, as strings, like the streaming path.
-    const raw = await this.client.messages
-      .create(
-        this.buildRequestParams(
-          messages,
-          system,
-          tools,
-          params,
-          toolChoice,
-          model,
-          structuredOutput,
-        ),
-        abortSignal ? { signal: abortSignal } : undefined,
-      )
-      .asResponse();
+    const raw = await withFetchFailure(failure, () =>
+      this.client.messages
+        .create(
+          this.buildRequestParams(
+            messages,
+            system,
+            tools,
+            params,
+            toolChoice,
+            model,
+            structuredOutput,
+          ),
+          abortSignal ? { signal: abortSignal } : undefined,
+        )
+        .asResponse(),
+    );
     const body = parseJson(await raw.text());
     const value = body.ok ? body.value : undefined;
     if (
@@ -416,18 +505,23 @@ export class AnthropicLlm extends BaseProviderLlm {
     toolChoice?: AnthropicSDK.ToolChoice,
     abortSignal?: AbortSignal,
     structuredOutput = false,
+    failure: FetchFailure = {},
   ): AsyncGenerator<LlmResponse, boolean> {
-    const stream = this.client.messages.stream(
-      this.buildRequestParams(
-        messages,
-        system,
-        tools,
-        params,
-        toolChoice,
-        model,
-        structuredOutput,
+    // The SDK sends the request from here, so its `fetch` runs in `failure`'s
+    // context.
+    const stream = withFetchFailure(failure, () =>
+      this.client.messages.stream(
+        this.buildRequestParams(
+          messages,
+          system,
+          tools,
+          params,
+          toolChoice,
+          model,
+          structuredOutput,
+        ),
+        abortSignal ? { signal: abortSignal } : undefined,
       ),
-      abortSignal ? { signal: abortSignal } : undefined,
     );
 
     const acc = createAnthropicStreamAccumulator({ structuredOutput });
