@@ -4,6 +4,26 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `ClaudeAgentSdkDriver` takes run caps: `maxBudgetUsd` (a number, or a
+  function the driver reads when each `query()` call starts), `effort` and
+  `maxThinkingTokens`. Values that are not valid are refused when the driver
+  is built. A budget function that throws or returns a value that is not
+  valid ends the run with `CLAUDE_MAX_BUDGET_INVALID`, and `query()` is not
+  called. A run that goes over its budget ends with the non-recoverable
+  `MAX_BUDGET_EXCEEDED` error.
+- `ClaudeAgentSdkDriver` takes `outputSchema`, a JSON Schema that the SDK
+  gets as `outputFormat: { type: "json_schema" }`. The structured value is
+  the run's only `output` event (`metadata.structuredOutput: true`), and
+  `ExternalAgent` parses it into the Workflow node output. A success with no
+  value, or with a value that does not match the schema, ends the run with
+  the non-recoverable `CLAUDE_OUTPUT_SCHEMA_MISMATCH` error, never with the
+  raw text. `ClaudeCliDriver` refuses `outputSchema` with
+  `EXTERNAL_AGENT_OPTION_UNSUPPORTED`.
+
 ## [0.7.0] - 2026-11-13
 
 0.7.0 follows 0.5.3. See [docs/migration-0.7.md](./docs/migration-0.7.md) to
