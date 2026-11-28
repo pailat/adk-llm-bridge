@@ -4,6 +4,22 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Documentation
+
+- **MCP from a headless lane** ([docs/mcp-headless-lane.md](./docs/mcp-headless-lane.md)):
+  two recipes for a `ClaudeAgentSdkDriver` lane that reaches a
+  token-protected HTTP MCP server through `mcp: ["pai"]` and
+  `selectMcpServers`. The token recipe puts the machine token behind a
+  `{ resolve }` header, with a `kernel.yama.ptrace_scope` precheck on Linux;
+  it turns off resume and the session store and truncates MCP results over
+  `MAX_MCP_OUTPUT_TOKENS` inline. The loopback-proxy recipe names only an
+  `http://127.0.0.1:<port>` proxy that adds the header, so the entry carries
+  no secret, the agent runs with `allowNetwork: false`, and resume and the
+  session store stay on. A Linux conformance test with a shell offered runs
+  both against a fake HTTP MCP server.
+
 ## [0.7.0] - 2026-11-13
 
 0.7.0 follows 0.5.3. See [docs/migration-0.7.md](./docs/migration-0.7.md) to

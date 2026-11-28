@@ -14,6 +14,7 @@ Guides and references for `adk-llm-bridge`. The package overview is in the
 | [OpenAI-compatible feature matrix](openai-compatible-feature-matrix.md) | Which ADK features each provider supports and how they degrade |
 | [Provider requests and responses](provider-requests-and-responses.md) | The model sent, `LLMRegistry` matching, finish reasons, tool-call ids, telemetry names, a keyless sample |
 | [External agent isolation](external-agent-isolation.md) | Host configuration, network off by default per driver, the confirmation guard |
+| [MCP from a headless lane](mcp-headless-lane.md) | Reach a token-protected HTTP MCP server from a headless Claude lane: a `{ resolve }` header, or a loopback proxy that keeps resume on |
 | [Persisting Claude sessions](claude-session-store.md) | Mirror Claude Agent SDK sessions to durable storage, SQLite included (experimental) |
 | [Runtime conformance](runtime-conformance.md) | How local runtimes (Ollama, vLLM, LM Studio) are tested |
 | [Span names and ADK 2.5](telemetry-span-names.md) | Which spans ADK creates (ADK 2.5 names) and which the bridge creates (ADK 2.4 names), and the content capture rule |
