@@ -31,6 +31,7 @@ import type {
   ReasoningCapability,
 } from "./provider-definition.js";
 import {
+  hostnameOf,
   PROVIDER_ERROR_INCOMPLETE_STREAM,
   PROVIDER_ERROR_NO_CHOICE,
 } from "./provider-llm-error.js";
@@ -282,6 +283,11 @@ export class OpenAICompatibleLlm extends BaseProviderLlm {
   /** Returns the provider error prefix. */
   protected getErrorPrefix(): string {
     return this._errorPrefix;
+  }
+
+  /** Hostname of the client's base URL. */
+  protected override requestHost(): string | undefined {
+    return hostnameOf(this.client.baseURL);
   }
 
   /** Returns provider-specific request options. */
