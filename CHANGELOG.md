@@ -4,6 +4,18 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Standard agent result schemas** (experimental, needs zod >= 4): the new
+  subpath `adk-llm-bridge/agents/results` exports frozen JSON Schemas and zod
+  parsers for `implement@1`, `tests@1`, `review@1` and `gate@1`,
+  `parseAgentResult`, and `checkChangedPaths`, which refuses changed paths
+  outside a lane's allowed paths. The run spec does not use them, so
+  `runSpecHash` is unchanged. See
+  [docs/agent-result-schemas.md](./docs/agent-result-schemas.md).
+
 ## [0.7.0] - 2026-11-13
 
 0.7.0 follows 0.5.3. See [docs/migration-0.7.md](./docs/migration-0.7.md) to

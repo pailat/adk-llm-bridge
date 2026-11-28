@@ -1,0 +1,103 @@
+{
+  "id": "implement@1",
+  "jsonSchema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "implement@1",
+    "description": "Result of an implement lane: whether the work is done, what it did and which paths it changed.",
+    "type": "object",
+    "properties": {
+      "status": {
+        "description": "done when the work is complete, blocked when it cannot go on without outside help, failed when it was attempted and did not succeed.",
+        "type": "string",
+        "enum": ["done", "blocked", "failed"]
+      },
+      "summary": {
+        "description": "What the lane did, or why it stopped, for people.",
+        "type": "string"
+      },
+      "changedPaths": {
+        "description": "Paths the lane changed, relative to the project root, with forward slashes.",
+        "type": "array",
+        "items": { "type": "string" }
+      },
+      "notes": {
+        "description": "Anything else the next step should know.",
+        "type": "string"
+      }
+    },
+    "required": ["status", "summary", "changedPaths"],
+    "additionalProperties": false
+  },
+  "valid": [
+    {
+      "name": "done with changed paths",
+      "result": {
+        "status": "done",
+        "summary": "Added the invoice export to the Acme billing page.",
+        "changedPaths": [
+          "src/billing/export.ts",
+          "tests/billing/export.test.ts"
+        ]
+      }
+    },
+    {
+      "name": "blocked with notes and no changes",
+      "result": {
+        "status": "blocked",
+        "summary": "The Acme ledger API key is not configured.",
+        "changedPaths": [],
+        "notes": "Set ACME_LEDGER_KEY in the host environment."
+      }
+    },
+    {
+      "name": "failed",
+      "result": {
+        "status": "failed",
+        "summary": "The migration does not compile.",
+        "changedPaths": ["db/migrations/0042_acme_orders.sql"]
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "name": "unknown status",
+      "result": {
+        "status": "partial",
+        "summary": "Half done.",
+        "changedPaths": []
+      }
+    },
+    {
+      "name": "missing changedPaths",
+      "result": { "status": "done", "summary": "Done." }
+    },
+    {
+      "name": "missing summary",
+      "result": { "status": "done", "changedPaths": [] }
+    },
+    {
+      "name": "changed path is not a string",
+      "result": { "status": "done", "summary": "Done.", "changedPaths": [42] }
+    },
+    {
+      "name": "notes is not a string",
+      "result": {
+        "status": "done",
+        "summary": "Done.",
+        "changedPaths": [],
+        "notes": null
+      }
+    },
+    {
+      "name": "unknown key",
+      "result": {
+        "status": "done",
+        "summary": "Done.",
+        "changedPaths": [],
+        "cost": 1
+      }
+    },
+    { "name": "not an object", "result": ["done"] },
+    { "name": "null", "result": null }
+  ]
+}

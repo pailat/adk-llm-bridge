@@ -1,0 +1,84 @@
+{
+  "id": "tests@1",
+  "jsonSchema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "tests@1",
+    "description": "Result of a tests lane: the tests it wrote and whether they fail before the implementation, as they should.",
+    "type": "object",
+    "properties": {
+      "status": {
+        "description": "done when the work is complete, blocked when it cannot go on without outside help, failed when it was attempted and did not succeed.",
+        "type": "string",
+        "enum": ["done", "blocked", "failed"]
+      },
+      "testPaths": {
+        "description": "Test files the lane wrote or changed, relative to the project root, with forward slashes.",
+        "type": "array",
+        "items": { "type": "string" }
+      },
+      "failingAsExpected": {
+        "description": "True when the new tests fail for the reason the missing implementation explains.",
+        "type": "boolean"
+      }
+    },
+    "required": ["status", "testPaths", "failingAsExpected"],
+    "additionalProperties": false
+  },
+  "valid": [
+    {
+      "name": "done and failing as expected",
+      "result": {
+        "status": "done",
+        "testPaths": ["tests/billing/export.test.ts"],
+        "failingAsExpected": true
+      }
+    },
+    {
+      "name": "blocked with no tests",
+      "result": {
+        "status": "blocked",
+        "testPaths": [],
+        "failingAsExpected": false
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "name": "failingAsExpected is a string",
+      "result": {
+        "status": "done",
+        "testPaths": [],
+        "failingAsExpected": "yes"
+      }
+    },
+    {
+      "name": "missing failingAsExpected",
+      "result": { "status": "done", "testPaths": [] }
+    },
+    {
+      "name": "unknown status",
+      "result": {
+        "status": "green",
+        "testPaths": [],
+        "failingAsExpected": true
+      }
+    },
+    {
+      "name": "testPaths is a string",
+      "result": {
+        "status": "done",
+        "testPaths": "tests/a.test.ts",
+        "failingAsExpected": true
+      }
+    },
+    {
+      "name": "implement key",
+      "result": {
+        "status": "done",
+        "testPaths": [],
+        "failingAsExpected": true,
+        "changedPaths": []
+      }
+    }
+  ]
+}

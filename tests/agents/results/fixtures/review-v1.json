@@ -1,0 +1,139 @@
+{
+  "id": "review@1",
+  "jsonSchema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "review@1",
+    "description": "Result of a review lane: the verdict and the findings behind it.",
+    "type": "object",
+    "properties": {
+      "verdict": {
+        "description": "approve when the change can merge, request_changes when another change round should fix the findings, block when the change must not go on.",
+        "type": "string",
+        "enum": ["approve", "request_changes", "block"]
+      },
+      "findings": {
+        "description": "Problems the review found. Empty when there are none.",
+        "type": "array",
+        "items": {
+          "description": "One problem the review found.",
+          "type": "object",
+          "properties": {
+            "severity": {
+              "description": "How much the problem matters.",
+              "type": "string",
+              "enum": ["high", "medium", "low"]
+            },
+            "path": {
+              "description": "File the problem is in, relative to the project root, with forward slashes.",
+              "type": "string"
+            },
+            "line": {
+              "description": "Line the problem is on, counted from 1.",
+              "type": "integer"
+            },
+            "summary": {
+              "description": "What is wrong, for people.",
+              "type": "string"
+            }
+          },
+          "required": ["severity", "path", "summary"],
+          "additionalProperties": false
+        }
+      }
+    },
+    "required": ["verdict", "findings"],
+    "additionalProperties": false
+  },
+  "valid": [
+    {
+      "name": "approve with no findings",
+      "result": { "verdict": "approve", "findings": [] }
+    },
+    {
+      "name": "request changes with a line",
+      "result": {
+        "verdict": "request_changes",
+        "findings": [
+          {
+            "severity": "medium",
+            "path": "src/billing/export.ts",
+            "line": 12,
+            "summary": "The Acme invoice total is rounded before tax."
+          },
+          {
+            "severity": "low",
+            "path": "README.md",
+            "summary": "The export is not documented."
+          }
+        ]
+      }
+    },
+    {
+      "name": "block",
+      "result": {
+        "verdict": "block",
+        "findings": [
+          {
+            "severity": "high",
+            "path": "src/auth.ts",
+            "line": 1,
+            "summary": "Tokens are logged."
+          }
+        ]
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "name": "unknown verdict",
+      "result": { "verdict": "lgtm", "findings": [] }
+    },
+    {
+      "name": "unknown severity",
+      "result": {
+        "verdict": "block",
+        "findings": [
+          { "severity": "critical", "path": "a.ts", "summary": "Bad." }
+        ]
+      }
+    },
+    {
+      "name": "fractional line",
+      "result": {
+        "verdict": "request_changes",
+        "findings": [
+          { "severity": "low", "path": "a.ts", "line": 1.5, "summary": "Bad." }
+        ]
+      }
+    },
+    {
+      "name": "line is a string",
+      "result": {
+        "verdict": "request_changes",
+        "findings": [
+          { "severity": "low", "path": "a.ts", "line": "12", "summary": "Bad." }
+        ]
+      }
+    },
+    {
+      "name": "finding without path",
+      "result": {
+        "verdict": "request_changes",
+        "findings": [{ "severity": "low", "summary": "Bad." }]
+      }
+    },
+    {
+      "name": "unknown finding key",
+      "result": {
+        "verdict": "request_changes",
+        "findings": [
+          { "severity": "low", "path": "a.ts", "summary": "Bad.", "fix": "x" }
+        ]
+      }
+    },
+    {
+      "name": "missing findings",
+      "result": { "verdict": "approve" }
+    }
+  ]
+}

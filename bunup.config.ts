@@ -4,6 +4,7 @@ export default defineConfig({
   entry: [
     "src/index.ts",
     "src/agents/index.ts",
+    "src/agents/results/index.ts",
     "src/agents/session-store/sqlite/index.ts",
     "src/agents/session-store/adk-artifacts/index.ts",
     "src/workflows/index.ts",
