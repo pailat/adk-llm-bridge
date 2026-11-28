@@ -71,6 +71,18 @@ describe("parseFragment", () => {
       parseFragment("e.md", "### Added\n\n- x\n\n### Added\n\n- y\n"),
     ).toThrow(/e\.md: section "Added" appears twice/);
   });
+
+  test("accepts both docs headings past releases used", () => {
+    expect([
+      ...parseFragment("docs.md", "### Docs\n\n- x\n").sections.keys(),
+    ]).toEqual(["Docs"]);
+    expect([
+      ...parseFragment(
+        "documentation.md",
+        "### Documentation\n\n- y\n",
+      ).sections.keys(),
+    ]).toEqual(["Documentation"]);
+  });
 });
 
 describe("unreleasedNotes", () => {
@@ -82,6 +94,14 @@ describe("unreleasedNotes", () => {
     expect(notes).toBe(
       "### Added\n\n- Feature from a.\n\n### Fixed\n\n- Inline fix.\n- Fix from b.\n",
     );
+  });
+
+  test("reads a Documentation section merged under Unreleased", () => {
+    expect(
+      unreleasedNotes(changelog("### Documentation\n\n- The Acme page.\n\n"), [
+        parseFragment("a.md", "### Fixed\n\n- A fix.\n"),
+      ]),
+    ).toBe("### Fixed\n\n- A fix.\n\n### Documentation\n\n- The Acme page.\n");
   });
 
   test("is empty when nothing is unreleased", () => {
@@ -155,31 +175,63 @@ describe("releaseInPlace", () => {
   });
 });
 
+describe("readFragments", () => {
+  test("refuses a directory, whose notes a release would drop", () => {
+    const repo = join(scratch, "nested");
+    mkdirSync(join(repo, FRAGMENT_DIR, "acme"), { recursive: true });
+    writeFileSync(
+      join(repo, FRAGMENT_DIR, "acme", "fix.md"),
+      "### Fixed\n\n- An Acme fix.\n",
+    );
+    expect(() => readFragments(repo)).toThrow(
+      `${FRAGMENT_DIR}/acme: a directory; put fragments directly in ${FRAGMENT_DIR}`,
+    );
+  });
+});
+
 describe("checkFragments", () => {
   const fragment = `${FRAGMENT_DIR}/acme.md`;
 
-  test("a source change needs a fragment", () => {
-    expect(checkFragments(["src/index.ts"], {})).toEqual({
+  test("a source change needs an added fragment", () => {
+    expect(checkFragments(["src/index.ts"], { added: [] })).toEqual({
       ok: false,
       reason: expect.stringContaining(FRAGMENT_DIR),
     });
-    expect(checkFragments(["src/index.ts", fragment], {}).ok).toBe(true);
+    expect(
+      checkFragments(["src/index.ts", fragment], { added: [fragment] }).ok,
+    ).toBe(true);
   });
 
   test("a change outside src does not", () => {
-    expect(checkFragments(["docs/a.md", "tests/a.test.ts"], {}).ok).toBe(true);
+    expect(
+      checkFragments(["docs/a.md", "tests/a.test.ts"], { added: [] }).ok,
+    ).toBe(true);
   });
 
   test("an explicit opt-out with a reason passes, a blank one does not", () => {
     expect(
-      checkFragments(["src/index.ts"], { skip: "internal refactor" }).ok,
+      checkFragments(["src/index.ts"], {
+        added: [],
+        skip: "internal refactor",
+      }).ok,
     ).toBe(true);
-    expect(checkFragments(["src/index.ts"], { skip: " " }).ok).toBe(false);
+    expect(checkFragments(["src/index.ts"], { added: [], skip: " " }).ok).toBe(
+      false,
+    );
   });
 
-  test("a deleted fragment does not count", () => {
+  test("a fragment the change only edits, renames or deletes does not count", () => {
+    expect(checkFragments(["src/index.ts", fragment], { added: [] }).ok).toBe(
+      false,
+    );
+  });
+
+  test("a nested or non-markdown file does not count", () => {
+    const nested = `${FRAGMENT_DIR}/acme/fix.md`;
+    const text = `${FRAGMENT_DIR}/acme.txt`;
     expect(
-      checkFragments(["src/index.ts", fragment], { exists: () => false }).ok,
+      checkFragments(["src/index.ts", nested, text], { added: [nested, text] })
+        .ok,
     ).toBe(false);
   });
 });
@@ -285,6 +337,45 @@ describe("the check command", () => {
       rmSync(join(repo, FRAGMENT_DIR, "old.md"));
     });
     expect(check().exitCode).toBe(1);
+  });
+
+  test("exits 1 when the branch only edits another pending fragment", () => {
+    branch("edited-fragment", () => {
+      write("src/acme.ts", "export const acme = 7;\n");
+      write(
+        `${FRAGMENT_DIR}/old.md`,
+        "### Added\n\n- An old Acme entry, reworded.\n",
+      );
+    });
+    expect(check().exitCode).toBe(1);
+  });
+
+  test("exits 1 when the branch only renames another pending fragment", () => {
+    branch("renamed-fragment", () => {
+      write("src/acme.ts", "export const acme = 8;\n");
+      git("mv", `${FRAGMENT_DIR}/old.md`, `${FRAGMENT_DIR}/renamed.md`);
+    });
+    expect(check().exitCode).toBe(1);
+  });
+
+  test("exits 1 when the fragment is nested in a directory", () => {
+    branch("nested-fragment", () => {
+      write("src/acme.ts", "export const acme = 9;\n");
+      write(`${FRAGMENT_DIR}/acme/fix.md`, "### Fixed\n\n- An Acme fix.\n");
+    });
+    const run = check();
+    expect(run.exitCode).toBe(1);
+    expect(run.stderr.toString()).toContain("a directory");
+  });
+
+  test("exits 1 when a file moves out of src without a fragment", () => {
+    branch("moved-out", () => {
+      write("lib/acme.ts", "export const acme = 1;\n");
+      rmSync(join(repo, "src/acme.ts"));
+    });
+    const run = check();
+    expect(run.exitCode).toBe(1);
+    expect(run.stderr.toString()).toContain("src/acme.ts");
   });
 
   test("exits 1 when a fragment does not parse", () => {

@@ -85,14 +85,17 @@ written exactly as they will appear in `CHANGELOG.md`:
 ```
 
 The sections are `Breaking`, `Added`, `Changed`, `Deprecated`, `Removed`,
-`Fixed`, `Security`, `Docs` and `Known limitations`. At release time
+`Fixed`, `Security`, `Docs`, `Documentation` and `Known limitations`. Put the
+file directly in `changes/unreleased/`: a release reads no subdirectory, and
+the check refuses one. At release time
 `bun scripts/changelog.ts release X.Y.Z` merges every fragment into the new
 version's section (see the
 [release checklist](DEVELOPMENT.md#release-checklist)), and
 `bun scripts/changelog.ts preview` prints the notes the next release gets.
 
-The Changelog workflow fails a pull request that changes `src/` without adding
-a fragment. When the change is not user visible (an internal refactor, a
+The Changelog workflow fails a pull request that changes `src/` (moving a file
+out of it included) without adding a fragment of its own: editing or renaming
+another pull request's fragment does not count. When the change is not user visible (an internal refactor, a
 comment fix), label the pull request `skip-changelog` instead.
 
 ### Title format

@@ -15,7 +15,8 @@
  *   notes under `## [X.Y.Z] - date`, add the version's link and delete the
  *   fragments. The date defaults to today.
  * - `bun scripts/changelog.ts check --base <ref> [--skip <reason>]`: exit 1
- *   when the changes since `<ref>` touch `src/` but add no fragment, unless
+ *   when the changes since `<ref>` touch `src/` but add no fragment (editing
+ *   or renaming one does not count), unless
  *   an opt-out reason is given (also read from `$CHANGELOG_SKIP`). Every
  *   fragment must parse.
  */
@@ -42,6 +43,8 @@ export const SECTIONS = [
   "Fixed",
   "Security",
   "Docs",
+  // 0.7.1 named its docs section this way; both stay valid, as headings.
+  "Documentation",
   "Known limitations",
 ] as const;
 
@@ -101,11 +104,29 @@ function parseSections(name: string, text: string): Map<string, string> {
   return sections;
 }
 
-/** The fragments under `root`, sorted by file name. */
+/** Whether `path` (relative to the root) names a fragment a release reads. */
+function isFragmentPath(path: string): boolean {
+  const prefix = `${FRAGMENT_DIR}/`;
+  if (!path.startsWith(prefix) || !path.endsWith(".md")) return false;
+  return !path.slice(prefix.length).includes("/");
+}
+
+/**
+ * The fragments under `root`, sorted by file name. A directory there is an
+ * error: a release reads only the files directly in {@link FRAGMENT_DIR}.
+ */
 export function readFragments(root: string): Fragment[] {
   const dir = join(root, FRAGMENT_DIR);
   if (!existsSync(dir)) return [];
-  return readdirSync(dir)
+  const entries = readdirSync(dir, { withFileTypes: true });
+  const nested = entries.find((entry) => entry.isDirectory());
+  if (nested !== undefined) {
+    throw new Error(
+      `${FRAGMENT_DIR}/${nested.name}: a directory; put fragments directly in ${FRAGMENT_DIR}`,
+    );
+  }
+  return entries
+    .map((entry) => entry.name)
     .filter((file) => file.endsWith(".md"))
     .sort()
     .map((file) =>
@@ -207,27 +228,23 @@ export interface CheckResult {
 }
 
 /**
- * Whether `changed` (paths relative to the root) carries a fragment when it
- * changes user-visible source. `skip` is an explicit opt-out reason;
- * `exists` tells a fragment that is still there from a deleted one.
+ * Whether a change carries a fragment when it changes user-visible source.
+ * `changed` holds every path the change touches, both sides of a move
+ * included; `added` the paths it creates, a rename not among them, so editing
+ * or moving another pull request's fragment does not count. `skip` is an
+ * explicit opt-out reason. Paths are relative to the root.
  */
 export function checkFragments(
   changed: string[],
-  options: { skip?: string; exists?: (path: string) => boolean },
+  options: { added: string[]; skip?: string },
 ): CheckResult {
-  const exists = options.exists ?? (() => true);
   const source = changed.filter((path) =>
     USER_VISIBLE.some((prefix) => path.startsWith(prefix)),
   );
   if (source.length === 0) {
     return { ok: true, reason: "no user-visible source change" };
   }
-  const fragments = changed.filter(
-    (path) =>
-      path.startsWith(`${FRAGMENT_DIR}/`) &&
-      path.endsWith(".md") &&
-      exists(path),
-  );
+  const fragments = options.added.filter(isFragmentPath);
   if (fragments.length > 0) {
     return { ok: true, reason: `fragment ${fragments.join(", ")}` };
   }
@@ -275,16 +292,18 @@ function main(args: string[]): number {
       return 2;
     }
     readFragments(root);
-    const changed = execFileSync(
-      "git",
-      ["diff", "--name-only", `${base}...HEAD`],
-      { cwd: root, encoding: "utf8" },
-    )
-      .split("\n")
-      .filter(Boolean);
-    const result = checkFragments(changed, {
+    const diff = (...flags: string[]) =>
+      execFileSync("git", ["diff", "--name-only", ...flags, `${base}...HEAD`], {
+        cwd: root,
+        encoding: "utf8",
+      })
+        .split("\n")
+        .filter(Boolean);
+    // Without renames a move lists its source too, so leaving src/ counts.
+    // With them a moved fragment is a rename, not an addition.
+    const result = checkFragments(diff("--no-renames"), {
+      added: diff("--find-renames", "--diff-filter=A"),
       skip: option(args, "--skip") ?? process.env.CHANGELOG_SKIP,
-      exists: (path) => existsSync(join(root, path)),
     });
     (result.ok ? console.log : console.error)(`changelog: ${result.reason}`);
     return result.ok ? 0 : 1;
