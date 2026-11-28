@@ -160,10 +160,18 @@ describe("delegation keeps each child's reports", () => {
   });
 
   test("nothing else of the child's metadata leaks onto the timeline", async () => {
+    // The run report, cost and cache writes stay so the host counts them.
+    const kept = new Set([
+      "externalAgentModel",
+      "externalAgentTools",
+      "externalAgentRun",
+      "costUsd",
+      "cacheCreationTokenCount",
+    ]);
     const events = await collect(coordinator(writer()));
     for (const event of events.filter((e) => e.author === "writer")) {
       const keys = Object.keys(event.customMetadata ?? {}).filter(
-        (key) => key !== "externalAgentModel" && key !== "externalAgentTools",
+        (key) => !kept.has(key),
       );
       expect(keys).toEqual([]);
     }

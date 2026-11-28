@@ -596,8 +596,11 @@ describe("ExternalAgent spans: one agent with a built-in tool", () => {
 
       expect(textOf(events[0])).toBe("A");
       expect(events[1]?.errorCode).toBe("E");
-      // Already pushed when completed arrived: never changed afterwards.
-      expect(events.every((event) => !event.usageMetadata)).toBe(true);
+      // Already pushed when completed arrived: never changed afterwards. The
+      // error is still held, so the run's usage rides on it.
+      expect(events[0]?.usageMetadata).toBeUndefined();
+      expect(events[1]?.usageMetadata).toBeDefined();
+      expect(events).toHaveLength(2);
     });
 
     test("without completed the text is delivered at driver end, without usage", async () => {

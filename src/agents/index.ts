@@ -27,9 +27,13 @@ export type { CodexAgentConfig } from "./codex-agent.js";
 export { CODEX_AGENT_DEFINITION, CodexAgent } from "./codex-agent.js";
 export type {
   ClaudeAgentSdkDriverConfig,
+  ClaudeEffort,
+  ClaudeMaxBudgetUsd,
   ClaudeSessionStoreFlush,
 } from "./driver/claude-agent-sdk.js";
 export {
+  CLAUDE_MAX_BUDGET_INVALID,
+  CLAUDE_OUTPUT_SCHEMA_MISMATCH,
   CLAUDE_SESSION_STORE_MIRROR_ERROR,
   CLAUDE_SESSION_STORE_UNAVAILABLE,
   ClaudeAgentSdkDriver,
@@ -129,6 +133,7 @@ export type {
   ExternalAgentModelInfo,
   ExternalAgentModelUsage,
   ExternalAgentOutputEvent,
+  ExternalAgentRunReport,
   ExternalAgentStartedEvent,
   ExternalAgentStateDeltaEvent,
   ExternalAgentToolCallEvent,
@@ -140,6 +145,7 @@ export {
   EXTERNAL_AGENT_CONFIRMATION_UNUSED,
   EXTERNAL_AGENT_ERROR,
   EXTERNAL_AGENT_NOT_CONFIGURED,
+  EXTERNAL_AGENT_RUN_METADATA_KEY,
   EXTERNAL_AGENT_TOOL_CREDENTIAL_REQUIRED,
   EXTERNAL_AGENT_TOOL_RESULT_TOO_LARGE,
   EXTERNAL_AGENT_TRANSFER_FAILED,
@@ -181,6 +187,15 @@ export type {
   ExternalAgentProviderDefinition,
   ExternalAgentProviderId,
 } from "./provider/schema.js";
+export type {
+  AgentRunErrorKind,
+  AgentRunFailureCause,
+  AgentRunOutcome,
+  AgentRunTokens,
+  AgentRunUsage,
+  RunExternalAgentOnceOptions,
+} from "./run-once.js";
+export { runExternalAgentOnce } from "./run-once.js";
 export type { AgentRuntimeCapabilities } from "./runtime/capabilities.js";
 export type {
   ClassifyRecoverableInput,

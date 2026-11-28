@@ -42,6 +42,10 @@
       "types": "./dist/agents/index.d.ts",
       "import": "./dist/agents/index.js"
     },
+    "./agents/results": {
+      "types": "./dist/agents/results/index.d.ts",
+      "import": "./dist/agents/results/index.js"
+    },
     "./agents/session-store/sqlite": {
       "types": "./dist/agents/session-store/sqlite/index.d.ts",
       "import": "./dist/agents/session-store/sqlite/index.js"

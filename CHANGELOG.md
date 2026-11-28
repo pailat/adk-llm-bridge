@@ -4,6 +4,167 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`runExternalAgentOnce(agent, { prompt, signal, sessionId })`** runs an
+  `ExternalAgent` for one prompt without an ADK `Runner` or a parent
+  `InvocationContext`. It returns an `AgentRunOutcome`:
+  `{ structured, text, usage: { costUsd, turns, tokens, scope }, sessionId, errorKind, cause }`.
+  `sessionId` is the session id the driver reported for the run: the id
+  stored under the session state key the agent's driver reads, whatever the
+  provider id (`claude_sdk_session:<agent>` for `ClaudeAgentSdkDriver`, the
+  `CodexSdkDriver`'s `threadStateKey`, `codex_thread:<agent>` by default,
+  `fx_session:<agent>` for `FxCliDriver`), or on a resume the session the driver says it kept
+  (`ClaudeAgentSdkDriver`, `CodexSdkDriver`, `FxCliDriver`). Passing it
+  back resumes that session, so the ids chain across any number of runs,
+  also from a new agent instance and through the driver's `sessionStore`
+  (such as `SqliteSessionStore`). A passed id is not echoed back: drivers
+  that resume nothing (`ClaudeCliDriver`, `CodexCliDriver`, a Claude SDK
+  run with an MCP server secret) return no `sessionId`. A failed or
+  aborted run returns it only when the driver named the session before it
+  stopped: a new session, or a resumed Claude SDK session when the run
+  threw. A resumed session that is aborted is not returned, for any
+  driver, so the caller keeps the id it passed. Under default delegation
+  (`finalAnswer: "subagent"`), `text` is the sub-agent's answer after the
+  agent's transfer, nested transfers included, from any agent below the
+  target (a SequentialAgent's children), even when the agent then used a
+  built-in tool (Read, Bash...). Only the agent's own run report counts: a delegated sub-agent's
+  session and turns are never the agent's, and `usage.costUsd` sums the
+  run-scoped costs of the agent and its sub-agents (a session total is the
+  agent's own, and so are `usage.tokens` then). `signal` aborts the run, and the driver stops its child
+  process. `text` is the agent's last event with content when it is text,
+  never a tool's output or an error message. `structured` is that answer
+  parsed as JSON when the agent has an `outputSchema` or the driver marks
+  it as structured output (`metadata.structuredOutput`, as
+  `ClaudeAgentSdkDriver`'s `outputSchema` does); a Codex SDK driver
+  `outputSchema` is not marked, so set the agent's `outputSchema` too.
+  Failures are not thrown: `errorKind` is one of the gateway's kinds, or
+  `interrupted` (the run waits for an approval or a long-running tool) or
+  `invalid-output` (no JSON answer under an output schema), and `cause`
+  holds the message, and the code of the error event the failure is (not
+  of an earlier one when the run then threw, timed out or was aborted). An error event the run
+  went on after (a permission denial, a session store mirror error) is not
+  a failure when the runtime exited with 0 and an answer follows it.
+- **`ExternalAgent` reports a run's cost, turns, exit code and session on
+  its events.** The event that carries the run's usage and model info gets
+  `customMetadata.externalAgentRun` (`EXTERNAL_AGENT_RUN_METADATA_KEY`, an
+  `ExternalAgentRunReport` of `costUsd`, `turns`, `scope`, `exitCode` and
+  `sessionId`) when the `completed` event has any of them. That event is
+  the held final text, else the held error (which now gets the run's token
+  usage too), else a content-less event of its own when the run ended on a
+  tool result and reported tokens, a cost, a turn count or a session (put
+  ahead of a delegated sub-agent's final answer, which stays the last
+  event, as ADK's `AgentTool` reads it). A
+  cost that covers that run only also goes to `customMetadata.costUsd`, so
+  `AgentInvocationGateway`'s `usage.costUsd` (and a Workflow step's usage)
+  no longer leaves `ExternalAgent` cost out, even for a run that reported
+  no tokens. A session total is not added there, so resumed sessions are
+  not counted twice. A delegated sub-agent's events keep their run report,
+  cost (with `costSource` and `marketCostUsd`) and cache writes on the host
+  timeline, and its content-less report carrier surfaces there too, so they
+  are counted. A coordinator's streamed partial chunks and its built-in tool
+  calls and results no longer release a held sub-agent answer early. `CodexSdkDriver.threadStateKeyFor(agentName)`
+  returns the key the driver resumes a thread from.
+  `ExternalAgentCompletedEvent` has a new `sessionId`:
+  `ClaudeAgentSdkDriver`, `CodexSdkDriver` and `FxCliDriver` set it to the
+  session the run kept, a resumed one included, and the Claude SDK driver
+  also sets it when the run throws or is aborted after the SDK named it.
+
+- `ClaudeAgentSdkDriver` takes run caps: `maxBudgetUsd` (a number, or a
+  function the driver reads when each `query()` call starts), `effort` and
+  `maxThinkingTokens`. Values that are not valid are refused when the driver
+  is built. A budget function that throws or returns a value that is not
+  valid ends the run with `CLAUDE_MAX_BUDGET_INVALID`, and `query()` is not
+  called. A run that goes over its budget ends with the non-recoverable
+  `MAX_BUDGET_EXCEEDED` error. `maxThinkingTokens` goes to the SDK's
+  deprecated option of the same name: on models with adaptive thinking
+  (such as Opus 4.6) any positive value turns adaptive thinking on and sets
+  no token limit, and 0 turns thinking off, so `effort` and `maxBudgetUsd` are the controls that limit
+  spend.
+- `ClaudeAgentSdkDriver` takes `outputSchema`, a JSON Schema that the SDK
+  gets as `outputFormat: { type: "json_schema" }`. The structured value is
+  the run's only `output` event (`metadata.structuredOutput: true`), and
+  `ExternalAgent` parses it into the Workflow node output. A success with no
+  value, or with a value that does not match the schema, ends the run with
+  the non-recoverable `CLAUDE_OUTPUT_SCHEMA_MISMATCH` error, never with the
+  raw text. A success that Claude Code flags `is_error` (an API error) ends
+  with its own text and classified code instead. `ClaudeCliDriver` refuses `outputSchema` with
+  `EXTERNAL_AGENT_OPTION_UNSUPPORTED`. An isolated run accepts the
+  `StructuredOutput` tool that Claude Code adds for the schema, only when
+  `outputSchema` is set. Its input is never read as paths, and the
+  permission callback allows it without asking the host. It is not reported
+  as a `tool_call` or `tool_result`. The driver's own second check is never
+  stricter than JSON Schema: it leaves `format`, `pattern`,
+  `patternProperties`, object or array `const` and `enum` values, any
+  non-empty `not`, `maxContains` next to `contains` and integrality to the
+  SDK, doubles `maxLength`, and reads `oneOf` as `anyOf`. The SDK parses the
+  structured value with `JSON.parse`, so an integer beyond
+  `Number.MAX_SAFE_INTEGER` arrives rounded (still a number in the node
+  output); declare such fields as strings.
+
+- **Standard agent result schemas** (experimental, needs zod >= 4): the new
+  subpath `adk-llm-bridge/agents/results` exports frozen JSON Schemas and zod
+  parsers for `implement@1`, `tests@1`, `review@1` and `gate@1`,
+  `parseAgentResult`, and `checkChangedPaths`, which refuses changed paths
+  outside a lane's allowed paths. The documents declare no `$schema`, so
+  Claude Code's `--json-schema` accepts them; Codex strict output does not
+  accept `implement@1` or `review@1`, which have optional properties. The run
+  spec does not use them, so `runSpecHash` is unchanged. See
+  [docs/agent-result-schemas.md](./docs/agent-result-schemas.md).
+
+### Fixed
+
+- **An error thrown inside `fetch` says what failed.** A refused connection,
+  DNS or TLS failure, abort, or a custom `fetch` that throws used to surface as
+  the SDK's bare `Connection error.` or `Request timed out.`. The
+  `ProviderLlmError` `detail` (and `errorMessage` in `errorMode: "response"`)
+  now appends the `name` and `code` of each error in the `cause` chain and the
+  request's hostname, for example
+  `Connection error. (cause: TypeError, Error ECONNREFUSED; host: api.openai.com)`,
+  or `Error ConnectionRefused` from Bun's own `fetch`. Cause messages, URLs,
+  query strings and headers are left out; a name is kept only when it ends in
+  `Error` or `Exception` and a code only when it is shaped like a system or
+  library code (`ECONNREFUSED`, `UND_ERR_SOCKET`, `ConnectionRefused`; upper
+  snake words of at most 12 capitals, with no digit inside), so a token-like
+  value is reported as plain `Error`. A part that would make
+  `classifyRecoverable` give the message another code than `TRANSPORT_ERROR`
+  (a host such as `payments.example.com` or `ratelimit.example.com`, a code
+  such as `ENOENT`) is left out, and a `cause` that throws when read ends the
+  summary instead of the error handler. The original error is on `cause`, also
+  for Anthropic's `Request timed out.`, which the SDK throws without one (where
+  `process.getBuiltinModule` is available); the provider error's `code`,
+  `status` and SDK retries are unchanged. `AnthropicLlm` now throws when it is
+  built in a runtime with no global `fetch`.
+
+### Documentation
+
+- **MCP from a headless lane** ([docs/mcp-headless-lane.md](./docs/mcp-headless-lane.md)):
+  two recipes for a `ClaudeAgentSdkDriver` lane that reaches a
+  token-protected HTTP MCP server through `mcp: ["pai"]` and
+  `selectMcpServers`. The token recipe puts the machine token behind a
+  `{ resolve }` header, with a `kernel.yama.ptrace_scope` precheck on Linux;
+  it turns off resume and the session store and truncates MCP results over
+  `MAX_MCP_OUTPUT_TOKENS` inline. The loopback-proxy recipe names only an
+  `http://127.0.0.1:<port>` proxy that adds the header, so the entry carries
+  no secret, the agent runs with `allowNetwork: false`, and resume and the
+  session store stay on. The sample proxy forwards only `/mcp` and only
+  MCP's own request headers, refuses browsers (403 on a foreign `Host` or
+  any `Origin` or `Sec-Fetch-*` header), keeps slow calls and
+  quiet SSE streams open on both sides (`idleTimeout: 0` and an upstream
+  `fetch` with `timeout: false`), and passes compressed answers on intact.
+  It never follows an upstream redirect, cancels the upstream request when
+  the agent goes away, and answers any failure with a plain 502. The
+  precheck also covers Windows, where a token lane with a shell is always
+  refused.
+  The page says to keep every shell on the host in the no-network sandbox,
+  since an unsandboxed shell can call the proxy directly, and to keep the
+  proxy's token out of any environment, file or process the agent can read.
+  The token recipe says the same of its resolver's source.
+  A Linux conformance test with a shell offered runs both recipes,
+  and the page's own proxy, against a fake HTTP MCP server.
+
 ## [0.7.0] - 2026-11-13
 
 0.7.0 follows 0.5.3. See [docs/migration-0.7.md](./docs/migration-0.7.md) to

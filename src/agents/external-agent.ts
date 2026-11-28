@@ -17,7 +17,10 @@ import {
   type ToolUnion,
 } from "@google/adk";
 import type { Content } from "@google/genai";
-import { withCacheCreation } from "../converters/cache-usage.js";
+import {
+  COST_METADATA_KEY,
+  withCacheCreation,
+} from "../converters/cache-usage.js";
 import { parseJson } from "../utils/json.js";
 import { LogCode, warn } from "../utils/log.js";
 import type { ExternalAgentCredentialProvider } from "./auth/credential-provider.js";
@@ -47,11 +50,13 @@ import {
   EXTERNAL_AGENT_CONFIRMATION_UNUSED,
   EXTERNAL_AGENT_ERROR,
   EXTERNAL_AGENT_MODEL_METADATA_KEY,
+  EXTERNAL_AGENT_RUN_METADATA_KEY,
   EXTERNAL_AGENT_TOOL_CREDENTIAL_REQUIRED,
   EXTERNAL_AGENT_TOOL_RESULT_TOO_LARGE,
   type ExternalAgentCompletedEvent,
   type ExternalAgentEvent,
   type ExternalAgentModelInfo,
+  type ExternalAgentRunReport,
   type ExternalAgentStartedEvent,
 } from "./events.js";
 import type { ExternalAgentDriver } from "./external-agent-driver.js";
@@ -750,6 +755,11 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
     // The run's last error event is held the same way, so the model info can
     // ride on it when the run has no final text.
     let heldError: Event | undefined;
+    // A delegated sub-agent's last surfaced text is held the same way, so a
+    // report carrier of this agent's own (when the sub-agent's turn is the
+    // final answer and this agent writes none) goes ahead of it, and the
+    // answer stays the last event, which ADK's AgentTool reads.
+    let heldDelegated: Event | undefined;
     let startedEvent: ExternalAgentStartedEvent | undefined;
     // Events queued and events the consumer has taken back control after.
     // The Runner stores a non-partial event before it asks for the next one,
@@ -772,6 +782,10 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
         ? Promise.resolve()
         : new Promise((resolve) => drainWaiters.push(resolve));
     const flushHeld = () => {
+      if (heldDelegated) {
+        enqueue(heldDelegated);
+        heldDelegated = undefined;
+      }
       if (heldFinal) {
         enqueue(heldFinal);
         heldFinal = undefined;
@@ -782,7 +796,18 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
       }
     };
     const push = (event: Event) => {
-      if (!isStateOnlyEvent(event)) flushHeld();
+      // A partial chunk (the coordinator streaming a re-narration that may
+      // be dropped) does not release a held sub-agent answer either: the
+      // Runner does not store it, and the answer must stay the last event.
+      // Nor does a call or result of the runtime's own tools (Read, Bash...):
+      // they leave the sub-agent's turn the final answer (see
+      // resetFinalAnswer below).
+      if (
+        !isStateOnlyEvent(event) &&
+        !(heldDelegated && (event.partial || isBuiltinToolEvent(event)))
+      ) {
+        flushHeld();
+      }
       enqueue(event);
     };
     const rootAgent = this.rootAgent;
@@ -802,7 +827,14 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
         },
         // Sub-agents trace their own model calls (one span per call); the
         // delegation itself is traced by `traceDelegation`.
-        eventSink: (event) => push(event),
+        eventSink: (event) => {
+          if (isDelegatedText(event, this.name)) {
+            flushHeld();
+            heldDelegated = event;
+            return;
+          }
+          push(event);
+        },
         traceDelegation: (info, run) => tracer.traceDelegation(info, run),
         waitForTimeline,
       });
@@ -1088,7 +1120,24 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
             tracer.onDriverEvent(event);
             const modelInfo = modelInfoFor(this.driver, startedEvent, event);
             tracer.onModelInfo(modelInfo.info);
-            const carrier = heldFinal ?? heldError;
+            const usageMetadata = usageMetadataFor(event.usage);
+            // The usage rides on the held final text, else on the held
+            // error. Without either (the run ended on a tool result, or had
+            // no text at all), an event of its own carries it, so the run's
+            // cost and tokens are not lost; an event already pushed is never
+            // changed. A held sub-agent answer is released after it, so that
+            // answer stays the last event.
+            const ownCarrier =
+              !heldFinal && !heldError && (usageMetadata || hasRunReport(event))
+                ? createEvent({
+                    invocationId: context.invocationId,
+                    author: this.name,
+                    branch: context.branch,
+                    customMetadata: { externalAgent: true },
+                    timestamp: event.timestamp,
+                  })
+                : undefined;
+            const carrier = heldFinal ?? heldError ?? ownCarrier;
             if (carrier) {
               carrier.customMetadata = {
                 ...carrier.customMetadata,
@@ -1103,30 +1152,29 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
                   [EXTERNAL_AGENT_TOOLS_METADATA_KEY]: toolsReport,
                 };
               }
-            }
-            const usageMetadata = usageMetadataFor(event.usage);
-            if (heldFinal && usageMetadata) {
-              heldFinal.usageMetadata = usageMetadata;
-            }
-            // genai usage metadata has no cache-write field either: it rides
-            // on customMetadata, merged with what the event already carries.
-            if (
-              heldFinal &&
-              typeof event.usage?.cacheCreationInputTokens === "number"
-            ) {
-              heldFinal.customMetadata = withCacheCreation(
-                heldFinal.customMetadata,
-                event.usage.cacheCreationInputTokens,
+              if (usageMetadata) carrier.usageMetadata = usageMetadata;
+              // genai usage metadata has no cache-write field either: it
+              // rides on customMetadata, merged with what the event carries.
+              if (typeof event.usage?.cacheCreationInputTokens === "number") {
+                carrier.customMetadata = withCacheCreation(
+                  carrier.customMetadata,
+                  event.usage.cacheCreationInputTokens,
+                );
+              }
+              // genai usage metadata has no scope field: a session total is
+              // labeled here so consumers do not add it to earlier runs.
+              if (event.usage?.scope) {
+                carrier.customMetadata = {
+                  ...carrier.customMetadata,
+                  externalAgentUsageScope: event.usage.scope,
+                };
+              }
+              carrier.customMetadata = withRunReport(
+                carrier.customMetadata,
+                event,
               );
             }
-            // genai usage metadata has no scope field: a session total is
-            // labeled here so consumers do not add it to earlier runs.
-            if (heldFinal && event.usage?.scope) {
-              heldFinal.customMetadata = {
-                ...heldFinal.customMetadata,
-                externalAgentUsageScope: event.usage.scope,
-              };
-            }
+            if (ownCarrier) enqueue(ownCarrier);
             break;
           }
           if (confirmationRequested || subAgentInterrupted || toolPending) {
@@ -1389,7 +1437,10 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
           ...(event.partial
             ? {}
             : {
-                output: this.nodeOutput(event.content),
+                output: this.nodeOutput(
+                  event.content,
+                  event.metadata?.structuredOutput === true,
+                ),
                 nodeInfo: { messageAsOutput: true },
               }),
         });
@@ -1444,9 +1495,20 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
    * the text is parsed as JSON; if parsing fails the raw text is kept and ADK's
    * output validation reports the mismatch. Integers beyond
    * `Number.MAX_SAFE_INTEGER` stay exact, as strings, in objects, arrays and
-   * scalars alike.
+   * scalars alike. A driver's structured output (`metadata.structuredOutput`,
+   * for example from `ClaudeAgentSdkDriver`'s `outputSchema`) is the JSON of
+   * a value the SDK already parsed, so it is read back with `JSON.parse`:
+   * its numbers stay numbers, and an integer beyond `Number.MAX_SAFE_INTEGER`
+   * is the rounded number the SDK gave.
    */
-  private nodeOutput(text: string): unknown {
+  private nodeOutput(text: string, structured = false): unknown {
+    if (structured && text.trim()) {
+      try {
+        return JSON.parse(text);
+      } catch {
+        return text;
+      }
+    }
     if (this.outputSchema && text.trim()) {
       const parsed = parseJson(text);
       return parsed.ok ? parsed.value : text;
@@ -1703,6 +1765,19 @@ function asCallbackList<T>(value: T | readonly T[] | undefined): readonly T[] {
 }
 
 /**
+ * A call or result of the runtime's own tools (Read, Bash...): the driver
+ * marks them `metadata.builtin`, which lands on `customMetadata`.
+ */
+function isBuiltinToolEvent(event: Event): boolean {
+  return (
+    event.customMetadata?.builtin === true &&
+    (event.content?.parts ?? []).some(
+      (part) => part.functionCall || part.functionResponse,
+    )
+  );
+}
+
+/**
  * An event that only carries a `stateDelta` or an `artifactDelta`: no content,
  * no error, and no control action (escalate, transfer, skip summarization, long-running ids),
  * so its position relative to the held final text does not matter.
@@ -1753,6 +1828,69 @@ function metadataForExternalEvent(
         : readableExternalEventTitle(agentName, event),
     externalAgent: true,
   };
+}
+
+/**
+ * `metadata` with the run's {@link ExternalAgentRunReport}, and with its
+ * cost under `costUsd` when the cost covers this run only. Unchanged when
+ * the `completed` event has none of the report's fields.
+ */
+function withRunReport(
+  metadata: Record<string, unknown> | undefined,
+  completed: ExternalAgentCompletedEvent,
+): Record<string, unknown> | undefined {
+  const costUsd = completed.usage?.totalCostUsd;
+  const turns = completed.numTurns;
+  const scope = completed.usage?.scope;
+  const { exitCode, sessionId } = completed;
+  if (!hasRunReport(completed) && exitCode === undefined && !scope) {
+    return metadata;
+  }
+  const report: ExternalAgentRunReport = {
+    ...(costUsd !== undefined ? { costUsd } : {}),
+    ...(turns !== undefined ? { turns } : {}),
+    ...(scope ? { scope } : {}),
+    ...(exitCode !== undefined ? { exitCode } : {}),
+    ...(sessionId ? { sessionId } : {}),
+  };
+  return {
+    ...metadata,
+    [EXTERNAL_AGENT_RUN_METADATA_KEY]: report,
+    ...(costUsd !== undefined && scope !== "session"
+      ? { [COST_METADATA_KEY]: costUsd }
+      : {}),
+  };
+}
+
+/**
+ * Whether a surfaced sub-agent event is a final text: another author's
+ * non-partial event with text and no call, result or error. Such an event
+ * may be the run's final answer, so it is held like this agent's own text.
+ */
+function isDelegatedText(event: Event, agentName: string): boolean {
+  if (event.author === agentName || event.partial || event.errorMessage) {
+    return false;
+  }
+  const parts = event.content?.parts ?? [];
+  return (
+    parts.some((part) => typeof part.text === "string" && part.text) &&
+    !parts.some((part) => part.functionCall || part.functionResponse)
+  );
+}
+
+/**
+ * Whether a `completed` event's run report needs an event of its own when
+ * no text or error carries it: the runtime reported a cost, a turn count or
+ * the session the run kept. An exit code alone does not, so a run that
+ * reports nothing else keeps its events; an existing carrier still gets
+ * the exit code and usage scope.
+ */
+function hasRunReport(completed: ExternalAgentCompletedEvent): boolean {
+  return (
+    completed.usage?.totalCostUsd !== undefined ||
+    completed.numTurns !== undefined ||
+    Boolean(completed.sessionId)
+  );
 }
 
 function readableExternalEventTitle(

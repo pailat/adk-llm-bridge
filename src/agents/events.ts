@@ -51,6 +51,38 @@ export const EXTERNAL_AGENT_CHILD_METADATA_KEY = "childMetadata";
 /** Key of {@link ExternalAgentModelInfo} in the `customMetadata` of an ADK event. */
 export const EXTERNAL_AGENT_MODEL_METADATA_KEY = "externalAgentModel";
 
+/** Key of {@link ExternalAgentRunReport} in the `customMetadata` of an ADK event. */
+export const EXTERNAL_AGENT_RUN_METADATA_KEY = "externalAgentRun";
+
+/**
+ * Cost, turns, exit code and kept session of one external agent run, from
+ * its `completed` event.
+ *
+ * @remarks
+ * `ExternalAgent` writes it to `customMetadata.externalAgentRun` of the event
+ * that carries the run's usage and model info (the held final event, else
+ * the last error event, else a content-less event of its own when the run
+ * ended on a tool result or had no text), when the `completed` event has
+ * any of its fields. An event of its own is added only for token usage, a
+ * cost, a turn count or a session id: an exit code or a usage scope alone
+ * rides only on an existing carrier. When the cost covers this run only (`scope` is not
+ * `"session"`), the same event also gets `customMetadata.costUsd`, so the
+ * invocation gateway's `usage.costUsd` includes it. A session total is not
+ * written there, because adding it to earlier runs would count them twice.
+ */
+export interface ExternalAgentRunReport {
+  /** `usage.totalCostUsd` of the run; see `scope`. */
+  costUsd?: number;
+  /** `numTurns` of the run. */
+  turns?: number;
+  /** `usage.scope` of the run, when the driver reported it. */
+  scope?: "run" | "session";
+  /** `exitCode` of the run's `completed` event, when the driver set one. */
+  exitCode?: number;
+  /** `sessionId` of the run's `completed` event, when the driver set one. */
+  sessionId?: string;
+}
+
 /**
  * The model of one external agent run, as far as a trusted runtime tells.
  *
@@ -278,6 +310,12 @@ export interface ExternalAgentCompletedEvent {
   numTurns?: number;
   /** Run duration the runtime reports, in milliseconds. */
   durationMs?: number;
+  /**
+   * The runtime session the run continued or started, when the driver keeps
+   * it so the next run can resume it. Absent when the driver resumes nothing
+   * (for example a Claude SDK run with an MCP server secret).
+   */
+  sessionId?: string;
   /** Epoch milliseconds when the event was produced. */
   timestamp?: number;
 }

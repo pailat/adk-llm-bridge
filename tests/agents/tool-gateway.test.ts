@@ -367,6 +367,74 @@ describe("ToolGateway", () => {
     expect(emitted[2].actions.stateDelta).toEqual({ codexThread: "t-1" });
   });
 
+  test("native mode surfaces a content-less usage carrier with its cost source", async () => {
+    const worker = new FunctionResponseAgent([
+      createEvent({
+        invocationId: "inv-1",
+        author: "worker",
+        content: { role: "model", parts: [{ text: "answer" }] },
+      }),
+      createEvent({
+        invocationId: "inv-1",
+        author: "worker",
+        usageMetadata: { promptTokenCount: 3, totalTokenCount: 3 },
+        customMetadata: {
+          externalAgent: true,
+          costUsd: 0.25,
+          costSource: "marketCost",
+          marketCostUsd: 0.25,
+        },
+      }),
+    ]);
+    const root = new TextAgent("root");
+    const emitted: Event[] = [];
+    const gateway = new ToolGateway({
+      rootAgent: root,
+      subAgents: [worker],
+      parentContext: parentContext(root),
+      eventSink: (event) => emitted.push(event),
+    });
+
+    await gateway.runSubAgent({ agentName: "worker", task: "do it" });
+
+    // #0 call, #1 transfer response, #2 answer, #3 usage carrier.
+    expect(emitted).toHaveLength(4);
+    expect(emitted[3].usageMetadata?.promptTokenCount).toBe(3);
+    expect(emitted[3].customMetadata).toEqual({
+      costUsd: 0.25,
+      costSource: "marketCost",
+      marketCostUsd: 0.25,
+    });
+  });
+
+  test("native mode drops a content-less event that only has usage", async () => {
+    const worker = new FunctionResponseAgent([
+      createEvent({
+        invocationId: "inv-1",
+        author: "worker",
+        content: { role: "model", parts: [{ text: "answer" }] },
+      }),
+      createEvent({
+        invocationId: "inv-1",
+        author: "worker",
+        usageMetadata: { promptTokenCount: 3, totalTokenCount: 3 },
+      }),
+    ]);
+    const root = new TextAgent("root");
+    const emitted: Event[] = [];
+    const gateway = new ToolGateway({
+      rootAgent: root,
+      subAgents: [worker],
+      parentContext: parentContext(root),
+      eventSink: (event) => emitted.push(event),
+    });
+
+    await gateway.runSubAgent({ agentName: "worker", task: "do it" });
+
+    // #0 call, #1 transfer response, #2 answer: no blank bubble.
+    expect(emitted).toHaveLength(3);
+  });
+
   test("can hide subagent events for quiet summaries", async () => {
     const worker = new TextAgent("worker");
     const root = new TextAgent("root");
