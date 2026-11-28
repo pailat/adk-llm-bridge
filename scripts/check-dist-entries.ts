@@ -11,8 +11,8 @@
  * 2. Each entry, and `adk-llm-bridge/package.json`, imports under Node from a
  *    consumer that has the required peers but none of the optional ones, by
  *    package name, so the `exports` map is exercised too. The one exception
- *    is a declared map of entry to required optional peers (the spec entry
- *    needs zod): those entries import only from a consumer that has exactly
+ *    is a declared map of entry to required optional peers (the spec and
+ *    agent results entries need zod): those entries import only from a consumer that has exactly
  *    those peers, and every other entry is still checked without them.
  * 3. A name exported by more than one entry is the same value in each, so
  *    singletons such as error classes and registries are shared. The storage
@@ -109,6 +109,7 @@ if (declaredIn.size === 0) failures.push("no class declarations found in dist");
  * consumer that has the listed peers.
  */
 const entryOptionalPeers: Readonly<Record<string, readonly string[]>> = {
+  "./agents/results": ["zod"],
   "./workflows/spec": ["zod"],
 };
 for (const [key, peers] of Object.entries(entryOptionalPeers)) {

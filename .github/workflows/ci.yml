@@ -159,9 +159,10 @@ jobs:
             await import('adk-llm-bridge/package.json', { with: { type: 'json' } });
             console.log('entries import with optional peers absent on', process.version, '| present transitively:', transitive.join('; ') || 'none');
           "
-      # The spec entry needs zod, an optional peer: install it explicitly so the
-      # entry is exercised with zod present and never relies on a transitive copy.
-      - name: Import the spec entry with zod installed
+      # The spec and results entries need zod, an optional peer: install it
+      # explicitly so they are exercised with zod present and never rely on a
+      # transitive copy.
+      - name: Import the zod entries with zod installed
         working-directory: ${{ runner.temp }}/consumer
         run: |
           npm install --no-audit --no-fund zod@^4
@@ -169,7 +170,9 @@ jobs:
             await import('zod');
             const spec = await import('adk-llm-bridge/workflows/spec');
             if (typeof spec.validateRunSpec !== 'function') throw new Error('validateRunSpec is missing');
-            console.log('spec entry imports with zod on', process.version);
+            const results = await import('adk-llm-bridge/agents/results');
+            if (typeof results.parseAgentResult !== 'function') throw new Error('parseAgentResult is missing');
+            console.log('spec and results entries import with zod on', process.version);
           "
 
   # The examples are standalone projects that depend on the published package.
