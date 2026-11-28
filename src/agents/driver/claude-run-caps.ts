@@ -27,6 +27,12 @@ export const CLAUDE_MAX_BUDGET_INVALID = "CLAUDE_MAX_BUDGET_INVALID";
 export const CLAUDE_OUTPUT_SCHEMA_MISMATCH = "CLAUDE_OUTPUT_SCHEMA_MISMATCH";
 
 /**
+ * The tool Claude Code adds to a session with an `outputSchema`; the model
+ * calls it to give the structured answer. `system/init` lists it.
+ */
+export const CLAUDE_STRUCTURED_OUTPUT_TOOL = "StructuredOutput";
+
+/**
  * Reasoning effort levels of the Claude Agent SDK (its `EffortLevel`).
  *
  * @experimental Follows the Claude Agent SDK's `EffortLevel`.
@@ -183,18 +189,74 @@ export function resolveClaudeMaxBudget(
 /** Tells whether a value matches the schema; `undefined` when unknown. */
 export type StructuredOutputCheck = (value: unknown) => boolean | undefined;
 
+/** Keywords whose value is one subschema. */
+const SUBSCHEMA_KEYWORDS = [
+  "additionalItems",
+  "additionalProperties",
+  "contains",
+  "else",
+  "if",
+  "items",
+  "not",
+  "propertyNames",
+  "then",
+  "unevaluatedItems",
+  "unevaluatedProperties",
+];
+/** Keywords whose value is a list of subschemas. */
+const SUBSCHEMA_LIST_KEYWORDS = ["allOf", "anyOf", "oneOf", "prefixItems"];
+/** Keywords whose value maps names to subschemas. */
+const SUBSCHEMA_MAP_KEYWORDS = [
+  "$defs",
+  "definitions",
+  "dependentSchemas",
+  "patternProperties",
+  "properties",
+];
+
+/**
+ * A copy of `schema` without its `format` keywords, in every subschema.
+ * Property names are kept: a property named `format` stays.
+ *
+ * @remarks zod reads some formats more strictly than JSON Schema (it reads
+ * `uri-reference` as an absolute URL), so the second check leaves formats
+ * to the SDK.
+ */
+export function withoutFormats(schema: unknown): unknown {
+  if (Array.isArray(schema)) return schema.map(withoutFormats);
+  if (typeof schema !== "object" || schema === null) return schema;
+  const { format: _format, ...rest } = schema as Record<string, unknown>;
+  for (const key of SUBSCHEMA_KEYWORDS) {
+    if (key in rest) rest[key] = withoutFormats(rest[key]);
+  }
+  for (const key of SUBSCHEMA_LIST_KEYWORDS) {
+    if (Array.isArray(rest[key])) rest[key] = withoutFormats(rest[key]);
+  }
+  for (const key of SUBSCHEMA_MAP_KEYWORDS) {
+    const map = rest[key];
+    if (typeof map === "object" && map !== null && !Array.isArray(map)) {
+      rest[key] = Object.fromEntries(
+        Object.entries(map).map(([name, sub]) => [name, withoutFormats(sub)]),
+      );
+    }
+  }
+  return rest;
+}
+
 /**
  * A check of values against `schema`, built with zod's JSON Schema reader.
  * The SDK already validates the value before it reports success; this is
- * the second check. When zod is missing or cannot read the schema the check
- * answers `undefined` and the SDK's validation stands alone.
+ * the second check, of structure only: `format` keywords are left to the
+ * SDK (see {@link withoutFormats}). When zod is missing or cannot read the
+ * schema the check answers `undefined` and the SDK's validation stands
+ * alone.
  */
 export async function structuredOutputCheck(
   schema: Record<string, unknown>,
 ): Promise<StructuredOutputCheck> {
   try {
     const { z } = await import("zod/v4");
-    const validator = z.fromJSONSchema(schema as never);
+    const validator = z.fromJSONSchema(withoutFormats(schema) as never);
     return (value) => validator.safeParse(value).success;
   } catch {
     return () => undefined;

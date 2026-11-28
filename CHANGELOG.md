@@ -22,7 +22,12 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   value, or with a value that does not match the schema, ends the run with
   the non-recoverable `CLAUDE_OUTPUT_SCHEMA_MISMATCH` error, never with the
   raw text. `ClaudeCliDriver` refuses `outputSchema` with
-  `EXTERNAL_AGENT_OPTION_UNSUPPORTED`.
+  `EXTERNAL_AGENT_OPTION_UNSUPPORTED`. An isolated run accepts the
+  `StructuredOutput` tool that Claude Code adds for the schema, only when
+  `outputSchema` is set. Its input is never read as paths, and the
+  permission callback allows it without asking the host. It is not reported
+  as a `tool_call` or `tool_result`. The driver's own second check reads only
+  the schema's structure and leaves `format` keywords to the SDK.
 
 ## [0.7.0] - 2026-11-13
 

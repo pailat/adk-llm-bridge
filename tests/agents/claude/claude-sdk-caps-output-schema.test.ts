@@ -310,6 +310,51 @@ describe("ClaudeAgentSdkDriver native outputSchema", () => {
     expect(exitCodes(events)).toEqual([1]);
   });
 
+  // The SDK checks formats; the driver's second check reads structure only,
+  // so a valid relative reference is not refused as a URL.
+  const FORMAT_SCHEMA = {
+    type: "object",
+    properties: {
+      doc: { type: "string", format: "uri-reference" },
+      format: { type: "string" },
+    },
+    required: ["doc", "format"],
+    additionalProperties: false,
+  };
+
+  test("a relative uri-reference value is not refused", async () => {
+    const fake = new ScriptedSdk();
+    const value = { doc: "docs/acme.md", format: "pdf" };
+    fake.scripts.push([
+      init("s-1"),
+      success("s-1", { structured_output: value }),
+    ]);
+    const events = await run(fake.driver({ outputSchema: FORMAT_SCHEMA }));
+    expect(errorsOf(events)).toEqual([]);
+    expect(outputs(events)).toEqual([JSON.stringify(value)]);
+  });
+
+  test("a property named format is still required", async () => {
+    const fake = new ScriptedSdk();
+    fake.scripts.push([
+      init("s-1"),
+      success("s-1", { structured_output: { doc: "docs/acme.md" } }),
+    ]);
+    const events = await run(fake.driver({ outputSchema: FORMAT_SCHEMA }));
+    expect(errorsOf(events).map((e) => e.code)).toEqual([
+      CLAUDE_OUTPUT_SCHEMA_MISMATCH,
+    ]);
+  });
+
+  test("the schema sent to the SDK keeps its formats", () => {
+    const options = new ScriptedSdk()
+      .driver({ outputSchema: FORMAT_SCHEMA })
+      .buildOptions({ provider: CLAUDE_PROVIDER, context: {} as never });
+    expect(options).toMatchObject({
+      outputFormat: { type: "json_schema", schema: FORMAT_SCHEMA },
+    });
+  });
+
   test("the SDK giving up on the schema is MAX_STRUCTURED_OUTPUT_RETRIES", async () => {
     const fake = new ScriptedSdk();
     fake.scripts.push([

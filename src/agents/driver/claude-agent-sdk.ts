@@ -51,6 +51,7 @@ import {
   type SDKUserMessage,
 } from "./claude-message-mapper.js";
 import {
+  CLAUDE_STRUCTURED_OUTPUT_TOOL,
   type ClaudeEffort,
   ClaudeMaxBudgetInvalidError,
   type ClaudeMaxBudgetUsd,
@@ -372,6 +373,9 @@ export interface ClaudeAgentSdkDriverConfig {
    * `CLAUDE_OUTPUT_SCHEMA_MISMATCH` error and exit code 1; the SDK giving up
    * after its own retries is `MAX_STRUCTURED_OUTPUT_RETRIES`. A value that
    * is not a plain JSON object is refused when the driver is built.
+   * The driver's own check reads only structure; `format` is left to the
+   * SDK. An isolated run accepts the `StructuredOutput` tool that Claude
+   * Code adds for the schema. That tool's calls are not `tool_call` events.
    * `ClaudeCliDriver` refuses this option (`EXTERNAL_AGENT_OPTION_UNSUPPORTED`).
    *
    * @defaultValue none: the answer is text
@@ -1226,7 +1230,14 @@ export class ClaudeAgentSdkDriver {
       const expectation: ClaudeIsolationExpectation | undefined =
         isolation.isolated
           ? {
-              tools: isolation.tools ?? [],
+              // With an outputSchema the runtime adds its own tool, which
+              // the model calls to give the answer.
+              tools: [
+                ...(isolation.tools ?? []),
+                ...(this.#caps.outputSchema
+                  ? [CLAUDE_STRUCTURED_OUTPUT_TOOL]
+                  : []),
+              ],
               mcpServers: [
                 ...Object.keys(options.mcpServers ?? {}),
                 ...this.#requiredMcpServers,
@@ -1277,7 +1288,10 @@ export class ClaudeAgentSdkDriver {
             options.hooks,
             request.permissions,
             request.workingDirectory,
-            built.bridgeTools,
+            // The StructuredOutput input is the answer, not paths.
+            this.#caps.outputSchema
+              ? [...(built.bridgeTools ?? []), CLAUDE_STRUCTURED_OUTPUT_TOOL]
+              : built.bridgeTools,
             sessionReads,
           ),
           ...(options.canUseTool
@@ -1530,8 +1544,15 @@ export class ClaudeAgentSdkDriver {
           mcpEvents,
         );
         for (let event of events) {
-          if (outputCheck && event.type === "output") {
-            // Assistant text is not the answer of a structured run.
+          if (
+            outputCheck &&
+            (event.type === "output" ||
+              ((event.type === "tool_call" || event.type === "tool_result") &&
+                event.name === CLAUDE_STRUCTURED_OUTPUT_TOOL))
+          ) {
+            // Assistant text is not the answer of a structured run, and the
+            // runtime's StructuredOutput call carries the answer that the
+            // result's value already gives.
             continue;
           }
           if (schemaMismatch && event.type === "completed") {
@@ -1857,6 +1878,11 @@ export class ClaudeAgentSdkDriver {
           ? { workingDirectory: request.workingDirectory }
           : {},
       );
+    // The runtime's StructuredOutput tool only hands the answer back: it
+    // reads and writes nothing, so it is allowed in every mode.
+    const structuredOutput = (toolName: string) =>
+      this.#caps.outputSchema !== undefined &&
+      toolName === CLAUDE_STRUCTURED_OUTPUT_TOOL;
     if (!requestPermission) {
       if (!policy?.readPaths) {
         return undefined;
@@ -1864,6 +1890,7 @@ export class ClaudeAgentSdkDriver {
       // No host answers prompts: approve the reads inside `readPaths` and
       // deny the rest, as the SDK does without a callback.
       return async (toolName, input, options) =>
+        structuredOutput(toolName) ||
         readsInReadPaths(toolName, input, options.blockedPath)
           ? { behavior: "allow", updatedInput: input }
           : {
@@ -1875,7 +1902,10 @@ export class ClaudeAgentSdkDriver {
     // Tell the guard whether shell commands are kept off the network.
     const { networkSandbox } = this.isolationPlan(request);
     return async (toolName, input, options) => {
-      if (readsInReadPaths(toolName, input, options.blockedPath)) {
+      if (
+        structuredOutput(toolName) ||
+        readsInReadPaths(toolName, input, options.blockedPath)
+      ) {
         return { behavior: "allow", updatedInput: input };
       }
       try {
