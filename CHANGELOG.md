@@ -17,8 +17,10 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `MAX_MCP_OUTPUT_TOKENS` inline. The loopback-proxy recipe names only an
   `http://127.0.0.1:<port>` proxy that adds the header, so the entry carries
   no secret, the agent runs with `allowNetwork: false`, and resume and the
-  session store stay on. A Linux conformance test with a shell offered runs
-  both against a fake HTTP MCP server.
+  session store stay on. The sample proxy forwards only `/mcp`, keeps slow
+  calls and quiet SSE streams open, and passes compressed answers on
+  intact. A Linux conformance test with a shell offered runs both recipes,
+  and the page's own proxy, against a fake HTTP MCP server.
 
 ## [0.7.0] - 2026-11-13
 

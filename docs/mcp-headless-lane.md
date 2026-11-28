@@ -149,20 +149,34 @@ forwards to the remote server. The agent's entry names only the proxy and
 carries no secret:
 
 ```ts
-const proxy = Bun.serve({
-  hostname: "127.0.0.1",
-  port: 0, // ephemeral
-  async fetch(req) {
-    const headers = new Headers(req.headers);
-    headers.set("authorization", `Bearer ${machineTokens.current()}`);
-    headers.delete("host");
-    return fetch("https://mcp.acme.example/mcp", {
-      method: req.method,
-      headers,
-      body: req.body,
-    });
-  },
-});
+export function startMcpProxy(upstream: string, token: () => string) {
+  return Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0, // ephemeral
+    // No idle cut-off: a slow tool call or a quiet SSE stream stays open.
+    idleTimeout: 0,
+    async fetch(req) {
+      // Only the MCP path; nothing else gets the token.
+      if (new URL(req.url).pathname !== "/mcp") {
+        return new Response("not found", { status: 404 });
+      }
+      const headers = new Headers(req.headers);
+      headers.set("authorization", `Bearer ${token()}`);
+      headers.delete("host");
+      return fetch(upstream, {
+        method: req.method,
+        headers,
+        body: req.body,
+        // Pass the body on as sent, matching its content-encoding header.
+        decompress: false,
+      });
+    },
+  });
+}
+
+const proxy = startMcpProxy("https://mcp.acme.example/mcp", () =>
+  machineTokens.current(),
+);
 
 const hostMcpServers = {
   pai: {
@@ -173,6 +187,14 @@ const hostMcpServers = {
   },
 } satisfies Record<string, ClaudeMcpServer>;
 ```
+
+The proxy forwards every streamable-HTTP method on `/mcp` (POST, the SSE
+GET, DELETE) and streams both bodies. It answers 404 on any other path,
+and replaces any `Authorization` header the client sent. `decompress:
+false` matters: Bun's `fetch` otherwise decodes a gzipped answer but keeps
+its `content-encoding` header, and the agent then cannot read it.
+`idleTimeout: 0` turns off `Bun.serve`'s 10-second idle default. The conformance
+test loads this exact function from the page.
 
 and the agent runs with the network off:
 
@@ -211,7 +233,7 @@ uses the machine token's access. Narrow that:
   may reach loopback servers directly (macOS only; Claude Code ignores it on
   Linux).
 - Forward only the MCP path, to the one upstream URL, and never take the
-  upstream from the request.
+  upstream from the request (the sample answers 404 on any other path).
 
 Adding a per-run token for the proxy as a `{ resolve }` header turns resume
 and the session store back off: any declared secret does. A token in the URL

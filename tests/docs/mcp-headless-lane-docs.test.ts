@@ -43,6 +43,18 @@ describe("MCP from a headless lane: the recipe page", () => {
     expect(page).toContain("resumeSessionId");
   });
 
+  test("the loopback proxy sample: /mcp only, no idle cut-off, body passed as sent", () => {
+    // The Linux conformance test imports this function from the page.
+    const proxy = read(PAGE).match(
+      /^export function startMcpProxy\([\s\S]*?^\}$/m,
+    )?.[0];
+    expect(proxy).toBeDefined();
+    expect(proxy).toContain('pathname !== "/mcp"');
+    expect(proxy).toContain("status: 404");
+    expect(proxy).toContain("idleTimeout: 0");
+    expect(proxy).toContain("decompress: false");
+  });
+
   test("the page states the truncation and points to the pagination task", () => {
     const page = read(PAGE);
     expect(page).toContain("ENABLE_MCP_LARGE_OUTPUT_FILES=0");

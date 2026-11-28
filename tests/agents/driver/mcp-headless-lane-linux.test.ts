@@ -26,12 +26,20 @@ import {
   expect,
   test,
 } from "bun:test";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import {
   ClaudeAgentSdkDriver,
   type ClaudeAgentSdkDriverConfig,
 } from "../../../src/agents/driver/claude-agent-sdk.js";
+import { CLAUDE_NO_NETWORK_SANDBOX } from "../../../src/agents/driver/claude-isolation.js";
 import {
   type ClaudeMcpServer,
   selectMcpServers,
@@ -39,6 +47,7 @@ import {
 import { mcpSecretHost } from "../../../src/agents/driver/mcp-secrets.js";
 import {
   EXTERNAL_AGENT_MCP_SECRET_UNENFORCEABLE,
+  EXTERNAL_AGENT_NETWORK_UNENFORCEABLE,
   ExternalAgentPolicyError,
 } from "../../../src/agents/driver/policy-errors.js";
 import type { ExternalAgentEvent } from "../../../src/agents/events.js";
@@ -66,29 +75,65 @@ afterAll(() => {
 
 interface Seen {
   authorization: string | null;
+  /** The JSON-RPC method of a POST, else the HTTP method. */
   method: string;
+  path: string;
+}
+
+interface FakeOptions {
+  /** Gzip every JSON answer, with `content-encoding: gzip`. */
+  gzip?: boolean;
+  /** Wait this long before answering a POST. */
+  delayMs?: number;
+  /** Keep a GET's SSE stream quiet this long between its two events. */
+  sseGapMs?: number;
 }
 
 /**
  * A fake streamable-HTTP MCP server with one tool, `timeline_get`. It
  * records every request's `Authorization` header and refuses a request
- * without `Bearer <MACHINE_TOKEN>` with 401, as the real server does.
+ * without `Bearer <MACHINE_TOKEN>` with 401, as the real server does. A
+ * GET opens an SSE stream (one event), a DELETE ends the session.
  */
-function fakeMcpServer() {
+function fakeMcpServer(options: FakeOptions = {}) {
   const seen: Seen[] = [];
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
+    // The fake never cuts a slow answer itself; the proxy is under test.
+    idleTimeout: 0,
     async fetch(req) {
+      const path = new URL(req.url).pathname;
+      const authorization = req.headers.get("authorization");
+      const authorized = authorization === `Bearer ${MACHINE_TOKEN}`;
+      if (req.method !== "POST") {
+        seen.push({ authorization, method: req.method, path });
+        if (!authorized) return new Response("unauthorized", { status: 401 });
+        if (req.method === "GET") {
+          const gap = options.sseGapMs ?? 0;
+          const stream = new ReadableStream({
+            async start(controller) {
+              controller.enqueue(new TextEncoder().encode(": open\n\n"));
+              await Bun.sleep(gap);
+              controller.enqueue(
+                new TextEncoder().encode("event: message\ndata: {}\n\n"),
+              );
+              controller.close();
+            },
+          });
+          return new Response(stream, {
+            headers: { "content-type": "text/event-stream" },
+          });
+        }
+        return new Response(null, { status: 202 });
+      }
       const body = (await req.json()) as {
         id: number;
         method: string;
       };
-      const authorization = req.headers.get("authorization");
-      seen.push({ authorization, method: body.method });
-      if (authorization !== `Bearer ${MACHINE_TOKEN}`) {
-        return new Response("unauthorized", { status: 401 });
-      }
+      seen.push({ authorization, method: body.method, path });
+      if (!authorized) return new Response("unauthorized", { status: 401 });
+      if (options.delayMs) await Bun.sleep(options.delayMs);
       const result =
         body.method === "initialize"
           ? {
@@ -97,39 +142,53 @@ function fakeMcpServer() {
               serverInfo: { name: "acme-fake", version: "1.0.0" },
             }
           : { content: [{ type: "text", text: "timeline of Acme Rollout" }] };
-      return Response.json({ jsonrpc: "2.0", id: body.id, result });
+      const json = JSON.stringify({ jsonrpc: "2.0", id: body.id, result });
+      if (options.gzip) {
+        return new Response(Bun.gzipSync(json), {
+          headers: {
+            "content-type": "application/json",
+            "content-encoding": "gzip",
+          },
+        });
+      }
+      return new Response(json, {
+        headers: { "content-type": "application/json" },
+      });
     },
   });
   return { seen, server, url: `http://127.0.0.1:${server.port}/mcp` };
 }
 
+type StartMcpProxy = (
+  upstream: string,
+  token: () => string,
+) => ReturnType<typeof Bun.serve>;
+
 /**
- * The host-owned loopback proxy of the second recipe: it forwards each
- * request to the upstream server and adds the machine token itself. The
- * agent's entry names only the proxy.
+ * The host-owned loopback proxy of the second recipe, exactly as the page
+ * prints it: the `startMcpProxy` function is cut from
+ * docs/mcp-headless-lane.md and imported, so a change to the page is a
+ * change to what these tests run.
  */
-function loopbackProxy(upstream: string) {
-  const seen: Seen[] = [];
-  const server = Bun.serve({
-    hostname: "127.0.0.1",
-    port: 0,
-    async fetch(req) {
-      const body = await req.text();
-      seen.push({
-        authorization: req.headers.get("authorization"),
-        method: (JSON.parse(body) as { method: string }).method,
-      });
-      return fetch(upstream, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          authorization: `Bearer ${MACHINE_TOKEN}`,
-        },
-        body,
-      });
-    },
-  });
-  return { seen, server, url: `http://127.0.0.1:${server.port}/mcp` };
+async function documentedProxy(): Promise<StartMcpProxy> {
+  const page = readFileSync(
+    join(import.meta.dir, "../../../docs/mcp-headless-lane.md"),
+    "utf8",
+  );
+  const source = page.match(/^export function startMcpProxy\([\s\S]*?^\}$/m);
+  if (!source) {
+    throw new Error("docs/mcp-headless-lane.md prints no startMcpProxy");
+  }
+  const file = join(ROOT, "documented-proxy.ts");
+  writeFileSync(file, `${source[0]}\n`);
+  const module = (await import(file)) as { startMcpProxy: StartMcpProxy };
+  return module.startMcpProxy;
+}
+
+/** The documented proxy in front of `upstream`, with the machine token. */
+async function loopbackProxy(upstream: string) {
+  const server = (await documentedProxy())(upstream, () => MACHINE_TOKEN);
+  return { server, url: `http://127.0.0.1:${server.port}/mcp` };
 }
 
 type Options = Record<string, unknown>;
@@ -386,10 +445,10 @@ describe.skipIf(!LINUX)(
   "loopback-proxy recipe: no secret, network off, resume on",
   () => {
     let upstream: ReturnType<typeof fakeMcpServer>;
-    let proxy: ReturnType<typeof loopbackProxy>;
-    beforeAll(() => {
+    let proxy: Awaited<ReturnType<typeof loopbackProxy>>;
+    beforeAll(async () => {
       upstream = fakeMcpServer();
-      proxy = loopbackProxy(upstream.url);
+      proxy = await loopbackProxy(upstream.url);
     });
     afterAll(() => {
       proxy.server.stop(true);
@@ -418,11 +477,11 @@ describe.skipIf(!LINUX)(
       // No secret is declared, so ptrace_scope does not matter.
       mcpSecretHost.readPtraceScope = () => "0";
       upstream.seen.length = 0;
-      proxy.seen.length = 0;
       const { sdk, state } = connectingSdk();
       const events = await collect(laneDriver(sdk, registry()));
       expect(errorOf(events)).toBeUndefined();
-      expect(proxy.seen.map((s) => s.authorization)).toEqual([null, null]);
+      // The runtime got no header to send; the proxy added the token.
+      expect(state.payload?.pai?.headers).toBeUndefined();
       expect(upstream.seen.map((s) => s.authorization)).toEqual([
         `Bearer ${MACHINE_TOKEN}`,
         `Bearer ${MACHINE_TOKEN}`,
@@ -431,6 +490,27 @@ describe.skipIf(!LINUX)(
       expect(state.replies[1]?.text).toContain("Acme Rollout");
       expect(JSON.stringify(state.payload)).not.toContain(MACHINE_TOKEN);
       expect(JSON.stringify(state.options)).not.toContain(MACHINE_TOKEN);
+    });
+
+    test("allowNetwork false: the shell stays in the no-network sandbox and web tools stay off", async () => {
+      const { sdk, state } = connectingSdk();
+      const events = await collect(laneDriver(sdk, registry()));
+      expect(errorOf(events)).toBeUndefined();
+      expect(state.options?.sandbox).toEqual(CLAUDE_NO_NETWORK_SANDBOX);
+      expect(state.options?.disallowedTools).toEqual(
+        expect.arrayContaining(["WebFetch", "WebSearch"]),
+      );
+      // A lane that names a web tool is refused, not quietly trimmed.
+      const refused = connectingSdk();
+      const refusal = errorOf(
+        await collect(
+          laneDriver(refused.sdk, registry(), {
+            tools: ["Bash", "Read", "WebFetch"],
+          }),
+        ),
+      );
+      expect(refusal?.code).toBe(EXTERNAL_AGENT_NETWORK_UNENFORCEABLE);
+      expect(refused.state.options).toBeUndefined();
     });
 
     test("resume and the session store stay on; large results are not forced inline", async () => {
@@ -472,3 +552,110 @@ describe.skipIf(!LINUX)(
     });
   },
 );
+
+describe.skipIf(!LINUX)("the documented loopback proxy itself", () => {
+  const servers: Array<{ stop: (force?: boolean) => unknown }> = [];
+  afterEach(() => {
+    for (const server of servers.splice(0)) server.stop(true);
+  });
+  async function pair(options: FakeOptions = {}) {
+    const upstream = fakeMcpServer(options);
+    const proxy = await loopbackProxy(upstream.url);
+    servers.push(proxy.server, upstream.server);
+    return { upstream, proxy };
+  }
+  const rpc = (method: string) =>
+    JSON.stringify({ jsonrpc: "2.0", id: 1, method, params: {} });
+
+  test("streamable HTTP: POST (streamed body), GET (SSE) and DELETE reach upstream /mcp with the token", async () => {
+    const { upstream, proxy } = await pair();
+    const post = await fetch(proxy.url, {
+      method: "POST",
+      // A client's own header is replaced, never passed on.
+      headers: {
+        "content-type": "application/json",
+        authorization: "Bearer acme-agent-guess",
+      },
+      body: new Blob([rpc("tools/call")]).stream(),
+    });
+    expect(post.status).toBe(200);
+    expect(await post.text()).toContain("Acme Rollout");
+    const sse = await fetch(proxy.url, {
+      headers: { accept: "text/event-stream" },
+    });
+    expect(sse.status).toBe(200);
+    expect(sse.headers.get("content-type")).toBe("text/event-stream");
+    expect(await sse.text()).toContain("event: message");
+    const end = await fetch(proxy.url, { method: "DELETE" });
+    expect(end.status).toBe(202);
+    expect(upstream.seen).toEqual(
+      ["tools/call", "GET", "DELETE"].map((method) => ({
+        authorization: `Bearer ${MACHINE_TOKEN}`,
+        method,
+        path: "/mcp",
+      })),
+    );
+  });
+
+  test("any path but /mcp is 404 and never reaches upstream", async () => {
+    const { upstream, proxy } = await pair();
+    const base = proxy.url.replace(/\/mcp$/, "");
+    for (const path of ["/", "/admin", "/mcp/extra", "/mcpx"]) {
+      for (const method of ["GET", "POST"]) {
+        const res = await fetch(`${base}${path}`, {
+          method,
+          ...(method === "POST" ? { body: rpc("tools/call") } : {}),
+        });
+        expect(res.status).toBe(404);
+        expect(await res.text()).not.toContain(MACHINE_TOKEN);
+      }
+    }
+    expect(upstream.seen).toEqual([]);
+  });
+
+  test("a gzipping upstream: the client gets a body it can decode", async () => {
+    const { proxy } = await pair({ gzip: true });
+    const res = await fetch(proxy.url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "accept-encoding": "gzip",
+      },
+      body: rpc("tools/call"),
+    });
+    expect(res.status).toBe(200);
+    expect(JSON.stringify(await res.json())).toContain("Acme Rollout");
+  });
+
+  test("a gzipping upstream through the lane: the tool result arrives", async () => {
+    const { proxy } = await pair({ gzip: true });
+    const { sdk, state } = connectingSdk();
+    const events = await collect(
+      laneDriver(sdk, {
+        pai: { type: "http", url: proxy.url, tools: ["timeline_get"] },
+      }),
+    );
+    expect(errorOf(events)).toBeUndefined();
+    expect(state.replies.map((r) => r.status)).toEqual([200, 200]);
+    expect(state.replies[1]?.text).toContain("Acme Rollout");
+  });
+
+  // Past Bun.serve's 10 s idle default; both run at once to keep it short.
+  test("a tool call answered after 10 s and an SSE stream quiet for 10 s are not cut off", async () => {
+    const { proxy } = await pair({ delayMs: 11_000, sseGapMs: 11_000 });
+    const [call, stream] = await Promise.all([
+      fetch(proxy.url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: rpc("tools/call"),
+      }).then(async (res) => ({ status: res.status, text: await res.text() })),
+      fetch(proxy.url, { headers: { accept: "text/event-stream" } }).then(
+        async (res) => ({ status: res.status, text: await res.text() }),
+      ),
+    ]);
+    expect(call.status).toBe(200);
+    expect(call.text).toContain("Acme Rollout");
+    expect(stream.status).toBe(200);
+    expect(stream.text).toContain("event: message");
+  }, 30_000);
+});
