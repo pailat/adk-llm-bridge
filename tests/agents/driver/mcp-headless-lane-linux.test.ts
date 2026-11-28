@@ -38,6 +38,7 @@ import { join } from "node:path";
 import {
   ClaudeAgentSdkDriver,
   type ClaudeAgentSdkDriverConfig,
+  claudeSdkSessionStateKey,
 } from "../../../src/agents/driver/claude-agent-sdk.js";
 import { CLAUDE_NO_NETWORK_SANDBOX } from "../../../src/agents/driver/claude-isolation.js";
 import {
@@ -47,6 +48,7 @@ import {
 import { mcpSecretHost } from "../../../src/agents/driver/mcp-secrets.js";
 import {
   EXTERNAL_AGENT_MCP_SECRET_UNENFORCEABLE,
+  EXTERNAL_AGENT_MCP_SERVER_UNAVAILABLE,
   EXTERNAL_AGENT_NETWORK_UNENFORCEABLE,
   ExternalAgentPolicyError,
 } from "../../../src/agents/driver/policy-errors.js";
@@ -99,6 +101,8 @@ interface FakeOptions {
  */
 function fakeMcpServer(options: FakeOptions = {}) {
   const seen: Seen[] = [];
+  /** Every request's headers, in order. */
+  const headers: Headers[] = [];
   /** POSTs whose caller went away while the answer was still delayed. */
   const aborted = { count: 0 };
   const server = Bun.serve({
@@ -108,6 +112,7 @@ function fakeMcpServer(options: FakeOptions = {}) {
     idleTimeout: 0,
     async fetch(req) {
       const path = new URL(req.url).pathname;
+      headers.push(new Headers(req.headers));
       const authorization = req.headers.get("authorization");
       const authorized = authorization === `Bearer ${MACHINE_TOKEN}`;
       if (options.redirectTo) {
@@ -176,6 +181,7 @@ function fakeMcpServer(options: FakeOptions = {}) {
   });
   return {
     aborted,
+    headers,
     seen,
     server,
     url: `http://127.0.0.1:${server.port}/mcp`,
@@ -206,6 +212,38 @@ async function documentedProxy(): Promise<StartMcpProxy> {
   writeFileSync(file, `${source[0]}\n`);
   const module = (await import(file)) as { startMcpProxy: StartMcpProxy };
   return module.startMcpProxy;
+}
+
+interface Precheck {
+  checkTokenLaneHost: (tools: readonly string[] | undefined) => void;
+  offersShell: (tools: readonly string[] | undefined) => boolean;
+}
+
+/**
+ * The token recipe's startup precheck, exactly as the page prints it: the
+ * code block that defines `checkTokenLaneHost`, without its sample call.
+ */
+async function documentedPrecheck(): Promise<Precheck> {
+  const page = readFileSync(
+    join(import.meta.dir, "../../../docs/mcp-headless-lane.md"),
+    "utf8",
+  );
+  const block = page.match(
+    /```ts\n(import \{ readFileSync \}[\s\S]*?function checkTokenLaneHost[\s\S]*?)```/,
+  )?.[1];
+  if (!block) {
+    throw new Error("docs/mcp-headless-lane.md prints no checkTokenLaneHost");
+  }
+  const source = block
+    .split("\n")
+    .filter((line) => !line.startsWith("checkTokenLaneHost("))
+    .join("\n");
+  const file = join(ROOT, "documented-precheck.ts");
+  writeFileSync(
+    file,
+    `${source}\nexport { checkTokenLaneHost, offersShell };\n`,
+  );
+  return (await import(file)) as Precheck;
 }
 
 /** The documented proxy in front of `upstream`, with the machine token. */
@@ -474,6 +512,58 @@ describe.skipIf(!LINUX)(
         expect(code).toBe(EXTERNAL_AGENT_MCP_SECRET_UNENFORCEABLE);
       }
     });
+
+    test("the page's startup precheck sees a shell exactly where the driver does", async () => {
+      const { checkTokenLaneHost, offersShell } = await documentedPrecheck();
+      mcpSecretHost.readPtraceScope = () => "0";
+      for (const tools of [
+        ["bash", "Read"],
+        ["BASH"],
+        ["Bash"],
+        ["powershell"],
+        undefined,
+        ["Read"],
+        [],
+      ]) {
+        const { sdk } = connectingSdk();
+        const code = errorOf(
+          await collect(laneDriver(sdk, registry(), { tools }), tokenRequest()),
+        )?.code;
+        expect([tools, offersShell(tools)]).toEqual([
+          tools,
+          code === EXTERNAL_AGENT_MCP_SECRET_UNENFORCEABLE,
+        ]);
+      }
+      // No shell: nothing to check on any host.
+      expect(() => checkTokenLaneHost(["Read"])).not.toThrow();
+    });
+
+    test("a run refuses runtimeSession.id and ignores a session id kept in ADK state", async () => {
+      mcpSecretHost.readPtraceScope = () => "1";
+      const refused = connectingSdk();
+      const refusal = errorOf(
+        await collect(laneDriver(refused.sdk, registry()), {
+          ...tokenRequest(),
+          runtimeSession: { id: "s-acme-2" },
+        } as never),
+      );
+      expect(refusal?.code).toBe(EXTERNAL_AGENT_MCP_SECRET_UNENFORCEABLE);
+      expect(refused.state.options).toBeUndefined();
+
+      const key = claudeSdkSessionStateKey("acme-implementer");
+      const { sdk, state } = connectingSdk();
+      const events = await collect(laneDriver(sdk, registry()), {
+        ...tokenRequest(),
+        agent: { name: "acme-implementer" } as never,
+        context: {
+          input: "read the Acme Rollout timeline",
+          session: { state: { [key]: "s-acme-kept" } },
+        } as never,
+      });
+      expect(errorOf(events)).toBeUndefined();
+      expect(state.options?.resume).toBeUndefined();
+      expect(events.some((event) => event.type === "state_delta")).toBe(false);
+    });
   },
 );
 
@@ -564,6 +654,23 @@ describe.skipIf(!LINUX)(
       expect(env.ENABLE_MCP_LARGE_OUTPUT_FILES).toBeUndefined();
     });
 
+    test("a session id kept in ADK state is resumed too", async () => {
+      const key = claudeSdkSessionStateKey("acme-implementer");
+      const { sdk, state } = connectingSdk();
+      const events = await collect(
+        laneDriver(sdk, registry()),
+        laneRequest({
+          agent: { name: "acme-implementer" } as never,
+          context: {
+            input: "read the Acme Rollout timeline",
+            session: { state: { [key]: "s-acme-kept" } },
+          } as never,
+        }),
+      );
+      expect(errorOf(events)).toBeUndefined();
+      expect(state.options?.resume).toBe("s-acme-kept");
+    });
+
     test("a run-time runtimeSession.id is accepted too", async () => {
       const { sdk, state } = connectingSdk();
       const events = await collect(
@@ -584,7 +691,7 @@ describe.skipIf(!LINUX)(
       );
       expect(upstream.seen.map((s) => s.authorization)).toEqual([null]);
       expect(state.replies.map((r) => r.status)).toEqual([401]);
-      expect(errorOf(events)).toBeDefined();
+      expect(errorOf(events)?.code).toBe(EXTERNAL_AGENT_MCP_SERVER_UNAVAILABLE);
     });
   },
 );
@@ -631,6 +738,36 @@ describe.skipIf(!LINUX)("the documented loopback proxy itself", () => {
         path: "/mcp",
       })),
     );
+  });
+
+  test("only MCP headers reach upstream: hop-by-hop and caller-set headers are dropped", async () => {
+    const { upstream, proxy } = await pair();
+    const res = await fetch(proxy.url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+        "mcp-session-id": "acme-session-1",
+        "mcp-protocol-version": "2025-06-18",
+        "last-event-id": "acme-event-3",
+        cookie: "acme=forged",
+        "x-forwarded-for": "203.0.113.7",
+        te: "trailers",
+        "keep-alive": "timeout=5",
+      },
+      body: rpc("tools/call"),
+    });
+    expect(res.status).toBe(200);
+    const sent = upstream.headers[0];
+    expect(sent?.get("authorization")).toBe(`Bearer ${MACHINE_TOKEN}`);
+    expect(sent?.get("content-type")).toBe("application/json");
+    expect(sent?.get("accept")).toBe("application/json, text/event-stream");
+    expect(sent?.get("mcp-session-id")).toBe("acme-session-1");
+    expect(sent?.get("mcp-protocol-version")).toBe("2025-06-18");
+    expect(sent?.get("last-event-id")).toBe("acme-event-3");
+    for (const name of ["cookie", "x-forwarded-for", "te", "keep-alive"]) {
+      expect([name, sent?.get(name)]).toEqual([name, null]);
+    }
   });
 
   test("any path but /mcp is 404 and never reaches upstream", async () => {
@@ -706,6 +843,15 @@ describe.skipIf(!LINUX)("the documented loopback proxy itself", () => {
       { host: own, origin: "https://acme.example" },
       { host: own, origin: `http://${own}` },
       { host: own, origin: "null" },
+      // A cross-site <img> or <script> GET has the proxy's Host and no
+      // Origin, but a browser always sends Sec-Fetch-*; the MCP client never.
+      {
+        host: own,
+        "sec-fetch-site": "cross-site",
+        "sec-fetch-mode": "no-cors",
+      },
+      { host: own, "sec-fetch-mode": "no-cors" },
+      { host: own, "sec-fetch-site": "none" },
     ];
     for (const headers of refused) {
       for (const method of ["POST", "GET", "DELETE"]) {

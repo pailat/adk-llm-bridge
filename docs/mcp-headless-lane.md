@@ -53,8 +53,10 @@ entry (see
 ```ts
 import { ClaudeAgentSdkDriver, selectMcpServers } from "adk-llm-bridge/agents";
 
+const driverTools = ["Bash", "Read"];
+
 const driver = new ClaudeAgentSdkDriver({
-  tools: ["Bash", "Read"],
+  tools: driverTools,
   mcpServers: selectMcpServers(planAgent.mcp, hostMcpServers), // mcp: ["pai"]
   requiredMcpServers: ["pai"],
 });
@@ -91,6 +93,25 @@ the run ends with `EXTERNAL_AGENT_MCP_SERVER_NETWORK_REQUIRED` before it
 starts. That also turns off the no-network shell sandbox (see
 [Network rules](external-agent-isolation.md#network-rules-http-sse)).
 
+### Where the resolver gets the token
+
+The bridge keeps the resolved value out of the agent's options, but it
+cannot tell where `machineTokens.current()` reads it from. With the network
+on, the shell is out of the sandbox, so keep the source out of the agent's
+reach (see the resolver note in
+[Values: secret references](external-agent-isolation.md#values-secret-references)):
+
+- Do not read it from the host's environment
+  (`() => process.env.PAI_MACHINE_TOKEN`), nor from a file or keychain
+  entry the agent's `Read` or shell can reach. On Linux a file-read tool
+  without bounds can read `/proc/<pid>/environ` of a same-user process, and
+  a shell can read any file the user can.
+- Confine reads with `allowedPaths` (and `readPaths`) that exclude `/proc`
+  and the token's file. The example lane offers `Read` without them; add
+  them before giving it a token-holding host.
+- The robust source is a short-lived token minted per run by a process the
+  agent cannot read, which keeps the long-lived credential.
+
 ### Precheck: a shell on Linux or Windows
 
 A run that offers a shell tool (`Bash` or `PowerShell`) with a declared
@@ -116,8 +137,17 @@ function ptraceScope(): string | undefined {
   }
 }
 
-function checkTokenLaneHost(tools: readonly string[]): void {
-  if (!tools.includes("Bash") && !tools.includes("PowerShell")) return;
+/** As the driver sees it: names match case-insensitively, unset is the
+ * runtime default, which has a shell. */
+function offersShell(tools: readonly string[] | undefined): boolean {
+  if (tools === undefined) return true;
+  return tools.some((name) =>
+    ["bash", "powershell"].includes(name.toLowerCase()),
+  );
+}
+
+function checkTokenLaneHost(tools: readonly string[] | undefined): void {
+  if (!offersShell(tools)) return;
   if (process.platform === "win32") {
     throw new Error(
       "MCP token lanes with a shell are refused on Windows; " +
@@ -134,7 +164,7 @@ function checkTokenLaneHost(tools: readonly string[]): void {
   }
 }
 
-checkTokenLaneHost(planAgent.tools); // e.g. ["Bash", "Read", "mcp__pai__timeline_get"]
+checkTokenLaneHost(driverTools); // the list the driver gets as `tools`
 ```
 
 Without a shell tool neither term applies. `{ env }` values are refused
@@ -170,6 +200,14 @@ carries no secret:
 
 ```ts
 export function startMcpProxy(upstream: string, token: () => string) {
+  const FORWARDED_HEADERS = [
+    "accept",
+    "accept-encoding",
+    "content-type",
+    "last-event-id",
+    "mcp-protocol-version",
+    "mcp-session-id",
+  ];
   return Bun.serve({
     hostname: "127.0.0.1",
     port: 0, // ephemeral
@@ -177,11 +215,14 @@ export function startMcpProxy(upstream: string, token: () => string) {
     idleTimeout: 0,
     async fetch(req, server) {
       // Only the agent, never a browser: a page that rebinds a name to
-      // 127.0.0.1 sends that name as Host, and any cross-origin request
-      // carries Origin. The MCP client sends neither.
+      // 127.0.0.1 sends that name as Host, a cross-origin request carries
+      // Origin, and every browser request (an <img> too) carries
+      // Sec-Fetch-*. The MCP client sends none of them.
       if (
         req.headers.get("host") !== `127.0.0.1:${server.port}` ||
-        req.headers.has("origin")
+        req.headers.has("origin") ||
+        req.headers.has("sec-fetch-site") ||
+        req.headers.has("sec-fetch-mode")
       ) {
         return new Response("forbidden", { status: 403 });
       }
@@ -190,9 +231,14 @@ export function startMcpProxy(upstream: string, token: () => string) {
         return new Response("not found", { status: 404 });
       }
       try {
-        const headers = new Headers(req.headers);
+        // Only MCP's own headers go upstream: no hop-by-hop headers, no
+        // cookie or forwarding header the caller set.
+        const headers = new Headers();
+        for (const name of FORWARDED_HEADERS) {
+          const value = req.headers.get(name);
+          if (value !== null) headers.set(name, value);
+        }
         headers.set("authorization", `Bearer ${token()}`);
-        headers.delete("host");
         return await fetch(upstream, {
           method: req.method,
           headers,
@@ -236,9 +282,13 @@ permissions: { mode: "workspace-write", allowNetwork: false }
 
 The proxy forwards every streamable-HTTP method on `/mcp` (POST, the SSE
 GET, DELETE) and streams both bodies. It answers 403 to a request whose
-`Host` is not its own `127.0.0.1:<port>` or that carries an `Origin`
-header, and 404 on any other path. It replaces any `Authorization` header
-the client sent. The options of the upstream `fetch` each matter:
+`Host` is not its own `127.0.0.1:<port>`, or that carries an `Origin`,
+`Sec-Fetch-Site` or `Sec-Fetch-Mode` header, and 404 on any other path.
+Upstream it sends only MCP's own headers (`accept`, `accept-encoding`,
+`content-type`, `last-event-id`, `mcp-protocol-version`, `mcp-session-id`)
+and its own `Authorization`, never the client's. Hop-by-hop headers,
+cookies and forwarding headers stay behind. The options of the upstream
+`fetch` each matter:
 
 - `redirect: "error"`: Bun's `fetch` follows redirects by default, so a
   3xx from upstream would make the proxy re-send the request, with the
@@ -321,9 +371,12 @@ uses the machine token's access. Narrow that:
   Linux).
 - Refuse browsers. A web page open on the same machine can send requests to
   a loopback port. With DNS rebinding it can also read the replies, under
-  its own host name. The sample answers 403 unless `Host` is exactly
-  `127.0.0.1:<port>` and no `Origin` header is present. Keep both checks in
-  any proxy you write.
+  its own host name, and a plain `<img>` pointing at the port sends a GET
+  with the proxy's own `Host` and no `Origin`. The sample answers 403
+  unless `Host` is exactly `127.0.0.1:<port>` and no `Origin`,
+  `Sec-Fetch-Site` or `Sec-Fetch-Mode` header is present. Browsers send the
+  `Sec-Fetch-*` headers on every request, and the MCP client never does.
+  Keep these checks in any proxy you write.
 - Forward only the MCP path, to the one upstream URL, and never take the
   upstream from the request nor from a redirect (the sample answers 404 on
   any other path and 502 on an upstream redirect).

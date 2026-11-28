@@ -58,6 +58,20 @@ describe("MCP from a headless lane: the recipe page", () => {
     expect(proxy).toContain("decompress: false");
   });
 
+  test("the token recipe says where its resolver may get the token", () => {
+    const page = read(PAGE);
+    const start = page.indexOf("### Where the resolver gets the token");
+    expect(start).toBeGreaterThan(-1);
+    expect(start).toBeLessThan(page.indexOf("## Loopback-proxy recipe"));
+    const next = page.indexOf("\n#", start + 1);
+    const section = page.slice(start, next === -1 ? undefined : next);
+    expect(section).toContain("/proc/<pid>/environ");
+    expect(section).toContain("allowedPaths");
+    expect(section).toContain(
+      "external-agent-isolation.md#values-secret-references",
+    );
+  });
+
   test("the loopback recipe keeps the token where the agent cannot read it", () => {
     const page = read(PAGE);
     const start = page.indexOf("### Where the proxy keeps the token");
