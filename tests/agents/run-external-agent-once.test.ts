@@ -4,7 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { InvocationContext, PluginManager } from "@google/adk";
 import { ClaudeAgent } from "../../src/agents/claude-agent.js";
-import { claudeSdkSessionStateKey } from "../../src/agents/driver/claude-agent-sdk.js";
+import {
+  CLAUDE_OUTPUT_SCHEMA_MISMATCH,
+  claudeSdkSessionStateKey,
+} from "../../src/agents/driver/claude-agent-sdk.js";
 import type { ExternalAgentEvent } from "../../src/agents/events.js";
 import { ExternalAgent } from "../../src/agents/external-agent.js";
 import type { ExternalAgentDriver } from "../../src/agents/external-agent-driver.js";
@@ -40,7 +43,11 @@ afterEach(() => {
 function scriptedAgent(
   script: Script,
   captured: QueryOptions[] = [],
-  extra: { sessionStore?: SessionStore; outputSchema?: unknown } = {},
+  extra: {
+    sessionStore?: SessionStore;
+    outputSchema?: unknown;
+    driverOutputSchema?: Record<string, unknown>;
+  } = {},
 ): ClaudeAgent {
   return new ClaudeAgent({
     name: "acme_coder",
@@ -49,6 +56,9 @@ function scriptedAgent(
       : {}),
     driverOptions: {
       ...(extra.sessionStore ? { sessionStore: extra.sessionStore } : {}),
+      ...(extra.driverOutputSchema
+        ? { outputSchema: extra.driverOutputSchema }
+        : {}),
       sdk: {
         query: ({ options }) => {
           captured.push(options as QueryOptions);
@@ -370,6 +380,51 @@ describe("runExternalAgentOnce: answer, errors and usage", () => {
     expect(outcome.cause?.code).toBe("CLAUDE_OUTPUT_SCHEMA_MISMATCH");
     expect(outcome.structured).toBeUndefined();
     expect(outcome.text).toBe("");
+  });
+
+  const VERDICT_SCHEMA = {
+    type: "object",
+    properties: { verdict: { type: "string" }, count: { type: "integer" } },
+    required: ["verdict", "count"],
+    additionalProperties: false,
+  };
+
+  test("a ClaudeAgent driverOptions.outputSchema run returns structured_output as structured", async () => {
+    const agent = scriptedAgent(
+      async function* () {
+        yield { type: "system", subtype: "init", session_id: "sdk-acme-16" };
+        yield success("sdk-acme-16", "Acme verdict in prose", {
+          structured_output: { verdict: "pass", count: 2 },
+        });
+      },
+      [],
+      { driverOutputSchema: VERDICT_SCHEMA },
+    );
+    expect(agent.outputSchema).toBeUndefined();
+    const outcome = await runExternalAgentOnce(agent, { prompt: "grade" });
+    expect(outcome.errorKind).toBeUndefined();
+    expect(outcome.structured).toEqual({ verdict: "pass", count: 2 });
+    expect(outcome.text).toBe('{"verdict":"pass","count":2}');
+    expect(outcome.usage.costUsd).toBe(0.25);
+  });
+
+  test("a ClaudeAgent driverOptions.outputSchema mismatch is agent-error CLAUDE_OUTPUT_SCHEMA_MISMATCH", async () => {
+    const agent = scriptedAgent(
+      async function* () {
+        yield { type: "system", subtype: "init", session_id: "sdk-acme-17" };
+        yield success("sdk-acme-17", '{"verdict":"pass","count":2}', {
+          structured_output: { verdict: "pass" },
+        });
+      },
+      [],
+      { driverOutputSchema: VERDICT_SCHEMA },
+    );
+    const outcome = await runExternalAgentOnce(agent, { prompt: "grade" });
+    expect(outcome.errorKind).toBe("agent-error");
+    expect(outcome.cause?.code).toBe(CLAUDE_OUTPUT_SCHEMA_MISMATCH);
+    expect(outcome.structured).toBeUndefined();
+    expect(outcome.text).toBe("");
+    expect(outcome.usage.costUsd).toBe(0.25);
   });
 
   test("tool output is not the answer: a tool-only run under outputSchema is invalid-output", async () => {
