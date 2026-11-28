@@ -245,6 +245,44 @@ describe("checkChangedPaths", () => {
     expect(checkChangedPaths(parsed.value, ["src"])).toEqual([]);
   });
 
+  test("accepts a plain list of changed paths", () => {
+    expect(
+      checkChangedPaths(
+        ["tests/billing/export.test.ts", "src/auth/token.ts"],
+        ["tests/billing"],
+      ),
+    ).toEqual([
+      {
+        code: "CHANGED_PATH_OUTSIDE_ALLOWED_PATHS",
+        index: 1,
+        path: "src/auth/token.ts",
+        message: '"src/auth/token.ts" is outside the allowed paths',
+      },
+    ]);
+  });
+
+  test("accepts the testPaths of a parsed tests@1 result", () => {
+    const parsed = parseAgentResult("tests@1", {
+      status: "done",
+      testPaths: ["tests/billing/export.test.ts", "../acme/x.ts"],
+      failingAsExpected: true,
+    });
+    if (!parsed.ok) throw new Error("fixture must parse");
+    expect(
+      checkChangedPaths(parsed.value.testPaths, ["tests"]).map((refusal) => [
+        refusal.code,
+        refusal.index,
+      ]),
+    ).toEqual([["CHANGED_PATH_INVALID", 1]]);
+  });
+
+  test("a plain list and a result give the same refusals", () => {
+    const paths = ["src/a.ts", "docs/b.md", "src/../c.ts"];
+    expect(checkChangedPaths(paths, ["src"])).toEqual(
+      checkChangedPaths(result(paths), ["src"]),
+    );
+  });
+
   test("refuses a path outside the allowed paths", () => {
     expect(
       checkChangedPaths(result(["src/billing/a.ts", "src/auth/token.ts"]), [

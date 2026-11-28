@@ -52,7 +52,7 @@ if (!parsed.ok) {
 | `agentResultSchemas` | zod parser per id |
 | `ImplementResultV1Schema`, `TestsResultV1Schema`, `ReviewResultV1Schema`, `GateResultV1Schema` | The zod parsers by name |
 | `parseAgentResult(id, value)` | `{ ok: true, value }` or `{ ok: false, issues }`; throws `TypeError` for an unknown id |
-| `checkChangedPaths(result, allowedPaths)` | Refusals for the changed paths no allowed path covers |
+| `checkChangedPaths(result \| paths, allowedPaths)` | Refusals for the changed paths no allowed path covers; takes a result with `changedPaths` or a plain list of paths |
 | `CHANGED_PATH_REFUSAL_CODES` | `CHANGED_PATH_INVALID`, `CHANGED_PATH_OUTSIDE_ALLOWED_PATHS` |
 
 The JSON Schemas are written out by hand and use only `type`, `enum`,
@@ -75,9 +75,10 @@ also rejects integers beyond `Number.MAX_SAFE_INTEGER`.
 ## Changed paths
 
 `checkChangedPaths` reads the `changedPaths` of a result, such as
-`implement@1`, and compares each one with the lane's allowed paths. A
-`tests@1` result names its paths `testPaths`, so pass them as
-`checkChangedPaths({ changedPaths: result.testPaths }, lane.allowedPaths)`.
+`implement@1`, and compares each one with the lane's allowed paths. It also
+takes a plain list of paths: a `tests@1` result names its paths `testPaths`,
+so pass them as `checkChangedPaths(result.testPaths, lane.allowedPaths)`. A
+refusal's `index` is then the path's index in that list.
 
 - An allowed path covers the entry it names and everything below it; `.`
   covers the whole project. `src/billing` covers `src/billing/a.ts` but not
