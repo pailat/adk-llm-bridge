@@ -269,19 +269,26 @@ publishing and provenance, and creates the GitHub release from `CHANGELOG.md`.
    `package.json`).
 3. Add a `CHANGELOG.md` section `## [X.Y.Z]` for the new version.
 4. Run `bun run ci`.
-5. Check the examples against the packed build (see
+5. On Linux, run the suite 20 times in a row (about 4 minutes a run):
+   ```bash
+   bun scripts/flake-audit.ts            # --runs N to change the count
+   ```
+   It exits 1 if any run is red and names each failing test and the runs it
+   failed in. Every run must be green. If a test is quarantined (skipped)
+   instead of fixed, list it in the release notes.
+6. Check the examples against the packed build (see
    [Running Examples Locally](#running-examples-locally)):
    ```bash
    bun run check:examples
    ```
-6. Commit everything together on `main`: `chore(release): X.Y.Z`.
-7. Create an annotated tag on that commit and push it:
+7. Commit everything together on `main`: `chore(release): X.Y.Z`.
+8. Create an annotated tag on that commit and push it:
    ```bash
    git tag -a vX.Y.Z -m "vX.Y.Z"
    git push origin main && git push origin vX.Y.Z
    ```
-8. Wait for the Release workflow to finish.
-9. If a previously published version is broken, deprecate it:
+9. Wait for the Release workflow to finish.
+10. If a previously published version is broken, deprecate it:
    ```bash
    npm deprecate adk-llm-bridge@<broken> "Broken; upgrade to >=X.Y.Z. See #NN."
    ```
