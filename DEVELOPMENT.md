@@ -273,8 +273,11 @@ publishing and provenance, and creates the GitHub release from `CHANGELOG.md`.
    ```bash
    bun scripts/flake-audit.ts            # --runs N to change the count
    ```
-   It exits 1 if any run is red and names each failing test and the runs it
-   failed in. Every run must be green. If a test is quarantined (skipped)
+   It exits 1 if any run is red and names each failing test (file and test
+   name), the runs it failed in, and whether it failed in every run or only
+   some. A run that has not exited after 15 minutes
+   (`FLAKE_AUDIT_RUN_TIMEOUT_S`) is stopped and counted as red. Every run
+   must be green. If a test is quarantined (skipped)
    instead of fixed, list it in the release notes.
 6. Check the examples against the packed build (see
    [Running Examples Locally](#running-examples-locally)):
