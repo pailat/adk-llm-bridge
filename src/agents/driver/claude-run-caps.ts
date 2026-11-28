@@ -197,7 +197,6 @@ const SUBSCHEMA_KEYWORDS = [
   "else",
   "if",
   "items",
-  "not",
   "propertyNames",
   "then",
   "unevaluatedItems",
@@ -219,6 +218,16 @@ function isPrimitive(value: unknown): boolean {
   return value === null || typeof value !== "object";
 }
 
+/** Whether `value` is the schema `{}`, which matches every value. */
+function isEmptySchema(value: unknown): boolean {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value) &&
+    Object.keys(value).length === 0
+  );
+}
+
 /**
  * A copy of `schema` that accepts at least every value `schema` accepts,
  * with the keywords zod reads more strictly than JSON Schema relaxed, in
@@ -236,6 +245,10 @@ function isPrimitive(value: unknown): boolean {
  *   apart only by format or pattern always do.
  * - A `const` that is an object or array, and an `enum` with such a member:
  *   zod compares them by reference, so no value matches.
+ * - `not`, unless it is `{}`: relaxing the subschema it negates would
+ *   narrow the schema, so the whole keyword goes.
+ * - `maxContains` next to `contains`: a relaxed `contains` matches more
+ *   items, so the ceiling could refuse a valid array.
  */
 export function looserSchema(schema: unknown): unknown {
   if (Array.isArray(schema)) return schema.map(looserSchema);
@@ -250,6 +263,8 @@ export function looserSchema(schema: unknown): unknown {
     delete rest.additionalProperties;
   }
   if ("const" in rest && !isPrimitive(rest.const)) delete rest.const;
+  if ("not" in rest && !isEmptySchema(rest.not)) delete rest.not;
+  if ("contains" in rest) delete rest.maxContains;
   if (Array.isArray(rest.enum) && !rest.enum.every(isPrimitive)) {
     delete rest.enum;
   }

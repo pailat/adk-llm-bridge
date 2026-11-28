@@ -429,6 +429,50 @@ describe("ClaudeAgentSdkDriver native outputSchema", () => {
       },
       { pair: [1, 2] },
     ],
+    // Relaxing a subschema under `not` or `contains` narrows the outer
+    // schema, so those positions must not be relaxed.
+    [
+      "a not of a format",
+      {
+        type: "object",
+        properties: { contact: { type: "string", not: { format: "email" } } },
+        required: ["contact"],
+      },
+      { contact: "acme-desk" },
+    ],
+    [
+      "a not of a pattern",
+      {
+        type: "object",
+        properties: { code: { type: "string", not: { pattern: "^x" } } },
+        required: ["code"],
+      },
+      { code: "acme" },
+    ],
+    [
+      "a not of an object const",
+      {
+        type: "object",
+        properties: { meta: { not: { const: { kind: "acme" } } } },
+        required: ["meta"],
+      },
+      { meta: { kind: "other" } },
+    ],
+    [
+      "a contains of a pattern with maxContains",
+      {
+        type: "object",
+        properties: {
+          tags: {
+            type: "array",
+            contains: { type: "string", pattern: "^a" },
+            maxContains: 1,
+          },
+        },
+        required: ["tags"],
+      },
+      { tags: ["a", "b"] },
+    ],
   ])("a valid value for %s is not refused", async (_name, schema, value) => {
     const fake = new ScriptedSdk();
     fake.scripts.push([

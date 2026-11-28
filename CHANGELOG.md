@@ -14,7 +14,11 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   is built. A budget function that throws or returns a value that is not
   valid ends the run with `CLAUDE_MAX_BUDGET_INVALID`, and `query()` is not
   called. A run that goes over its budget ends with the non-recoverable
-  `MAX_BUDGET_EXCEEDED` error.
+  `MAX_BUDGET_EXCEEDED` error. `maxThinkingTokens` goes to the SDK's
+  deprecated option of the same name: on models with adaptive thinking
+  (such as Opus 4.6) any positive value turns adaptive thinking on and sets
+  no token limit, so `effort` and `maxBudgetUsd` are the controls that limit
+  spend.
 - `ClaudeAgentSdkDriver` takes `outputSchema`, a JSON Schema that the SDK
   gets as `outputFormat: { type: "json_schema" }`. The structured value is
   the run's only `output` event (`metadata.structuredOutput: true`), and

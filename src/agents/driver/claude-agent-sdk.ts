@@ -354,8 +354,13 @@ export interface ClaudeAgentSdkDriverConfig {
    */
   effort?: ClaudeEffort;
   /**
-   * Cap on the model's thinking tokens per turn (SDK `maxThinkingTokens`).
-   * A positive integer; anything else is refused when the driver is built.
+   * Passed to the SDK's `maxThinkingTokens` option. A positive integer;
+   * anything else is refused when the driver is built.
+   *
+   * @remarks The SDK marks this option deprecated. On models with adaptive
+   * thinking (such as Opus 4.6) it is only on or off: any positive value
+   * means adaptive thinking, not a token limit. To limit spend, use
+   * `effort` and `maxBudgetUsd`.
    *
    * @defaultValue the SDK's default
    */
