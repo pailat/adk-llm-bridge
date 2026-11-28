@@ -1737,6 +1737,9 @@ export class ClaudeAgentSdkDriver {
         type: "completed",
         exitCode: failed ? 1 : 0,
         ...(initModel ? { model: initModel } : {}),
+        // A run that threw or was aborted after the SDK named its session
+        // still kept it: a resumed one is not written to state again.
+        ...(keptSession ? { sessionId: keptSession } : {}),
         timestamp: Date.now(),
       };
     }

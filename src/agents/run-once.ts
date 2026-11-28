@@ -51,14 +51,19 @@ export interface AgentRunTokens {
 
 /** Usage of one run. */
 export interface AgentRunUsage {
-  /** US dollars the runtime reported; see `scope`. Absent when it reported none. */
+  /**
+   * US dollars the runtimes reported; see `scope`. With scope `"run"` (or
+   * none) it sums the run-scoped costs of the agent and of the sub-agents it
+   * delegated to. With scope `"session"` it is the agent's own session total
+   * only, sub-agents' costs not included. Absent when none was reported.
+   */
   costUsd?: number;
-  /** Model turns the runtime reported. Absent when it reported none. */
+  /** Model turns the agent's runtime reported. Absent when it reported none. */
   turns?: number;
-  /** Token counters; zeros when the runtime reported none. */
+  /** Token counters, delegated sub-agents included; zeros when none were reported. */
   tokens: AgentRunTokens;
   /**
-   * `"session"` when `costUsd` and `tokens` are the runtime session's total
+   * The agent's own scope: `"session"` when its cost and tokens are the runtime session's total
    * so far (a run that resumed a session this process did not run before),
    * `"run"` when they cover this run only. Absent when the driver did not say.
    */
@@ -87,14 +92,22 @@ export interface AgentRunOutcome {
   /** Cost, turns and tokens of the run. */
   usage: AgentRunUsage;
   /**
-   * The runtime's session id, as the driver reported it for this run: the
-   * value stored under the agent's session state key
-   * (`claude_sdk_session:<agent>` for Claude) or, on a resume, the session
-   * the driver says it kept (`ClaudeAgentSdkDriver`). Pass it as `sessionId`
-   * to resume that session. Absent when the driver reported none, which
-   * includes drivers that resume nothing (`ClaudeCliDriver`, a Claude SDK
-   * run with an MCP server secret): when you passed a `sessionId` and get
-   * none or another one back, that session was not resumed.
+   * The agent's runtime session id, as its driver reported it for this run:
+   * the value stored under the agent's session state key
+   * (`claude_sdk_session:<agent>` for Claude) or the session the driver says
+   * the run kept on its `completed` event, a resumed one included
+   * (`ClaudeAgentSdkDriver`, `CodexSdkDriver`, `FxCliDriver`). Pass it as
+   * `sessionId` to resume that session. A delegated sub-agent's session is
+   * never returned.
+   *
+   * On success it is absent only when the driver resumes nothing
+   * (`ClaudeCliDriver`, `CodexCliDriver`, a Claude SDK run with an MCP
+   * server secret): when you passed a `sessionId` and get none or another
+   * one back, that session was not resumed. A run that failed or was
+   * aborted returns the session only when the driver named it before it
+   * stopped (Claude SDK: from its first message; Codex SDK: a new thread,
+   * not a resumed one, after an abort). Its absence there does not mean the
+   * session is gone: the id you passed is still yours to retry with.
    */
   sessionId?: string;
   /**
@@ -205,7 +218,7 @@ function toOutcome(
   result: AgentInvocationResult,
   stateKey: string | undefined,
 ): AgentRunOutcome {
-  const report = runReport(result.events);
+  const report = runReport(agent, result.events);
   // Only an id the driver reported for this run: a resumed id is not echoed
   // back unless the driver says it kept that session.
   const stored = stateKey ? result.stateDelta?.[stateKey] : undefined;
@@ -224,7 +237,7 @@ function toOutcome(
     return {
       ...base,
       errorKind: result.errorKind ?? "agent-error",
-      cause: causeOf(result.events, result.error),
+      cause: causeOf(result),
     };
   }
   if (result.interrupt) {
@@ -345,12 +358,11 @@ function usageOf(
   report: ExternalAgentRunReport,
 ): AgentRunUsage {
   const { usage } = result;
+  // The gateway sums every run-scoped cost, delegated sub-agents included;
+  // a session total is not in that sum, so it is the agent's own report.
+  const costUsd = report.scope === "session" ? report.costUsd : usage.costUsd;
   return {
-    ...(report.costUsd !== undefined
-      ? { costUsd: report.costUsd }
-      : usage.costUsd !== undefined
-        ? { costUsd: usage.costUsd }
-        : {}),
+    ...(costUsd !== undefined ? { costUsd } : {}),
     ...(report.turns !== undefined ? { turns: report.turns } : {}),
     tokens: {
       input: usage.promptTokens,
@@ -365,11 +377,18 @@ function usageOf(
   };
 }
 
-/** The last run report on the run's events, or an empty one. */
-function runReport(events: readonly Event[]): ExternalAgentRunReport {
+/**
+ * The agent's own last run report, or an empty one. Reports of delegated
+ * sub-agents (other authors) are theirs, not the agent's.
+ */
+function runReport(
+  agent: ExternalAgent,
+  events: readonly Event[],
+): ExternalAgentRunReport {
   for (let index = events.length - 1; index >= 0; index--) {
-    const value =
-      events[index]?.customMetadata?.[EXTERNAL_AGENT_RUN_METADATA_KEY];
+    const event = events[index];
+    if (event?.author !== agent.name) continue;
+    const value = event.customMetadata?.[EXTERNAL_AGENT_RUN_METADATA_KEY];
     if (value && typeof value === "object") {
       return value as ExternalAgentRunReport;
     }
@@ -377,18 +396,22 @@ function runReport(events: readonly Event[]): ExternalAgentRunReport {
   return {};
 }
 
-function causeOf(
-  events: readonly Event[],
-  message: string,
-): AgentRunFailureCause {
-  for (let index = events.length - 1; index >= 0; index--) {
-    const event = events[index];
-    if (event?.errorCode) {
-      return {
-        message: event.errorMessage || message,
-        code: event.errorCode,
-      };
-    }
+/**
+ * The failure's cause. The code is the one of the error event the gateway
+ * reported (its last error event, when `error` is that event's message);
+ * a thrown error, an abort or a timeout has no code, even after an earlier
+ * error event.
+ */
+function causeOf(result: AgentInvocationResult): AgentRunFailureCause {
+  const message = result.error ?? "";
+  const kind = result.errorKind ?? "agent-error";
+  if (kind !== "agent-error" && kind !== "llm-calls-limit") return { message };
+  for (let index = result.events.length - 1; index >= 0; index--) {
+    const event = result.events[index];
+    if (!event?.errorMessage) continue;
+    return event.errorMessage === message && event.errorCode
+      ? { message, code: event.errorCode }
+      : { message };
   }
   return { message };
 }

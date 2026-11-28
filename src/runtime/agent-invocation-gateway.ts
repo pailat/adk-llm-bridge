@@ -1741,6 +1741,12 @@ function emptyUsage(): AgentInvocationUsage {
 }
 
 function addUsage(usage: AgentInvocationUsage, event: Event): void {
+  // A cost counts without token counters too: an external runtime can
+  // report what it charged and no tokens.
+  const cost = event.customMetadata?.[COST_METADATA_KEY];
+  if (typeof cost === "number" && Number.isFinite(cost) && cost >= 0) {
+    usage.costUsd = (usage.costUsd ?? 0) + cost;
+  }
   const meta = event.usageMetadata;
   if (!meta) return;
   const prompt = meta.promptTokenCount ?? 0;
@@ -1752,10 +1758,6 @@ function addUsage(usage: AgentInvocationUsage, event: Event): void {
   const written = event.customMetadata?.[CACHE_CREATION_METADATA_KEY];
   if (typeof written === "number" && Number.isFinite(written) && written >= 0) {
     usage.cacheCreationTokens = (usage.cacheCreationTokens ?? 0) + written;
-  }
-  const cost = event.customMetadata?.[COST_METADATA_KEY];
-  if (typeof cost === "number" && Number.isFinite(cost) && cost >= 0) {
-    usage.costUsd = (usage.costUsd ?? 0) + cost;
   }
   usage.llmCalls++;
 }

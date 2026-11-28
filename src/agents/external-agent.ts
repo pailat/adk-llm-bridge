@@ -1792,17 +1792,19 @@ function metadataForExternalEvent(
 /**
  * `metadata` with the run's {@link ExternalAgentRunReport}, and with its
  * cost under `costUsd` when the cost covers this run only. Unchanged when
- * {@link hasRunReport} is false.
+ * the `completed` event has none of the report's fields.
  */
 function withRunReport(
   metadata: Record<string, unknown> | undefined,
   completed: ExternalAgentCompletedEvent,
 ): Record<string, unknown> | undefined {
-  if (!hasRunReport(completed)) return metadata;
   const costUsd = completed.usage?.totalCostUsd;
   const turns = completed.numTurns;
   const scope = completed.usage?.scope;
   const { exitCode, sessionId } = completed;
+  if (!hasRunReport(completed) && exitCode === undefined && !scope) {
+    return metadata;
+  }
   const report: ExternalAgentRunReport = {
     ...(costUsd !== undefined ? { costUsd } : {}),
     ...(turns !== undefined ? { turns } : {}),
@@ -1820,9 +1822,11 @@ function withRunReport(
 }
 
 /**
- * Whether a `completed` event has a run report to write: the runtime
- * reported a cost, a turn count or the session the run kept. An exit code
- * alone is not one, so a run that reports nothing else keeps its events.
+ * Whether a `completed` event's run report needs an event of its own when
+ * no text or error carries it: the runtime reported a cost, a turn count or
+ * the session the run kept. An exit code alone does not, so a run that
+ * reports nothing else keeps its events; an existing carrier still gets
+ * the exit code and usage scope.
  */
 function hasRunReport(completed: ExternalAgentCompletedEvent): boolean {
   return (
