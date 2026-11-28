@@ -1246,7 +1246,8 @@ A run with a declared secret ends with
   without that sandbox, that is with `allowNetwork: true` (with or without
   `allowedPaths`) or `allowUnsandboxedShell: true`;
 - an `{ env }` variable is a name in the driver's
-  [`toolEnv`](#tool-environment-claude) (set or not, ignoring case);
+  [`toolEnv`](#tool-environment-claude), a `proxyPassthrough` one included
+  (set or not, ignoring case);
 - an `{ env }` variable is also in Claude Code's own environment (for
   example a credential variable added to the provider's `envAllowlist`), or a
   resolved value appears in one of that environment's values: Claude Code's
@@ -1535,13 +1536,17 @@ new ClaudeAgentSdkDriver({
 - **Only the listed names.** Each name must match the run-spec env grammar
   (`[A-Za-z_][A-Za-z0-9_]{0,127}`) and appear once. Only set, non-empty
   string values are copied; the source is never copied whole. `source` is a
-  record or a function. A function is called once per run, and every check
-  of the run sees the values the child gets, so a host can mint one token
-  per run. A credential variable of the same name wins.
+  record or a function. A function is called once per run (two runs that
+  share one request object each call it once), and every check of the run
+  sees the values the child gets, so a host can mint one token per run. A
+  credential variable of the same name wins.
 - **`proxyPassthrough: true`** also copies `HTTPS_PROXY`, `HTTP_PROXY`,
   `NO_PROXY` (both cases), `SSL_CERT_FILE`, `SSL_CERT_DIR` and
   `NODE_EXTRA_CA_CERTS`: the Codex SDK driver's list without `CODEX_HOME`,
-  plus the CA variable Node-based tools read.
+  plus the CA variable Node-based tools read. Like Codex, it reads them from
+  the host: the driver's `env`, even when `source` is set (a `source` that
+  returns only secrets still gets the host's proxy). A set, non-empty value
+  in `source` wins, so a run can use its own proxy.
 - **Refused when the driver is built:**
   - a name that breaks the grammar or repeats: `InputValidationError`;
   - a model name (the rule of

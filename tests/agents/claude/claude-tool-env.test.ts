@@ -206,6 +206,30 @@ describe("toolEnv copies the listed names", () => {
       expect(env).not.toHaveProperty("ACME_DB_PASSWORD");
     });
 
+    test(`${name}: proxyPassthrough reads the driver env when a source is set`, () => {
+      const env = build({
+        names: ["GH_TOKEN"],
+        source: () => ({ GH_TOKEN: "gh-acme-from-source" }),
+        proxyPassthrough: true,
+      }).buildEnv(REQUEST);
+      expect(env.GH_TOKEN).toBe("gh-acme-from-source");
+      for (const key of CLAUDE_TOOL_ENV_PROXY_PASSTHROUGH) {
+        expect(env[key]).toBe(HOST[key] as string);
+      }
+    });
+
+    test(`${name}: a non-empty source proxy value wins over the driver env`, () => {
+      const env = build({
+        source: {
+          HTTPS_PROXY: "http://run-proxy.acme.test:8080",
+          NO_PROXY: "",
+        },
+        proxyPassthrough: true,
+      }).buildEnv(REQUEST);
+      expect(env.HTTPS_PROXY).toBe("http://run-proxy.acme.test:8080");
+      expect(env.NO_PROXY).toBe("localhost");
+    });
+
     test(`${name}: names alone do not pass the proxy variables`, () => {
       const env = build({ names: ["GH_TOKEN"] }).buildEnv(REQUEST);
       for (const key of CLAUDE_TOOL_ENV_PROXY_PASSTHROUGH) {
@@ -293,6 +317,56 @@ describe("toolEnv copies the listed names", () => {
       }
       expect(delivered?.GH_TOKEN).toBe("gh-acme-mint-2");
       expect(calls).toBe(2);
+    } finally {
+      rmSync(work, { recursive: true, force: true });
+    }
+  });
+
+  test("two interleaved SDK runs of one request keep their own token", async () => {
+    const work = realpathSync.native(
+      mkdtempSync(join(import.meta.dir, ".tool-env-scratch-")),
+    );
+    try {
+      let calls = 0;
+      const delivered: (string | undefined)[] = [];
+      const driver = new ClaudeAgentSdkDriver({
+        env: HOST,
+        pathToClaudeCodeExecutable: "/fake/claude",
+        toolEnv: {
+          names: ["GH_TOKEN"],
+          source: () => {
+            calls += 1;
+            return { GH_TOKEN: `gh-acme-mint-${calls}` };
+          },
+        },
+        sdk: {
+          query: ((input: {
+            options?: { env?: Record<string, string | undefined> };
+          }) => {
+            delivered.push(input.options?.env?.GH_TOKEN);
+            return (async function* () {})();
+          }) as never,
+        },
+      });
+      const request = {
+        ...REQUEST,
+        workingDirectory: work,
+        permissions: {
+          mode: "workspace-write" as const,
+          allowedPaths: [work],
+        },
+      };
+      const drain = async () => {
+        for await (const _event of driver.run(request)) {
+          // Drain the run.
+        }
+      };
+      await Promise.all([drain(), drain()]);
+      expect(calls).toBe(2);
+      expect([...delivered].sort()).toEqual([
+        "gh-acme-mint-1",
+        "gh-acme-mint-2",
+      ]);
     } finally {
       rmSync(work, { recursive: true, force: true });
     }

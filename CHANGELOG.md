@@ -26,7 +26,9 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   when the driver is built, and a run whose MCP `{ env }` secret uses a
   `toolEnv` name ends with `EXTERNAL_AGENT_MCP_SECRET_UNENFORCEABLE`.
   `proxyPassthrough: true` copies the Codex proxy and certificate variables
-  plus `NODE_EXTRA_CA_CERTS` (`CLAUDE_TOOL_ENV_PROXY_PASSTHROUGH`). See
+  plus `NODE_EXTRA_CA_CERTS` (`CLAUDE_TOOL_ENV_PROXY_PASSTHROUGH`) from the
+  driver's `env`, as Codex does, unless `source` sets them. A source
+  function is called once per run. See
   [Tool environment](docs/external-agent-isolation.md#tool-environment-claude)
   and host duty 5 of the run spec.
 

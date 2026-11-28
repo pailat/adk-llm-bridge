@@ -83,6 +83,7 @@ import {
   type CheckedClaudeToolEnv,
   type ClaudeToolEnv,
   checkClaudeToolEnv,
+  claudeToolEnvNames,
   claudeToolEnvValues,
   readClaudeToolEnvSource,
 } from "./claude-tool-env.js";
@@ -870,8 +871,10 @@ export class ClaudeAgentSdkDriver {
   readonly #allowLocalBinding: boolean;
   readonly #allowBackgroundTasks: boolean;
   readonly #toolEnv: CheckedClaudeToolEnv | undefined;
-  // The toolEnv source read once per run, by request: every env the run
-  // builds (checks, options, session reads) holds the same values.
+  // The toolEnv source read once per run, keyed by the run's own copy of
+  // the request (see run): every env the run builds (checks, options,
+  // session reads) holds the same values, even when two runs share one
+  // request object.
   readonly #toolEnvSnapshots = new WeakMap<
     object,
     Readonly<Record<string, string | undefined>> | undefined
@@ -1093,8 +1096,11 @@ export class ClaudeAgentSdkDriver {
     // Every event leaves through the run's scrubber, which holds the MCP
     // secrets the run read; it is cleared when the run ends.
     const scrubber = new SecretScrubber();
+    // A copy per run: the toolEnv snapshot is keyed by it, so concurrent
+    // runs of one request object never share or delete each other's.
+    const runRequest = { ...request };
     try {
-      for await (const event of this.#run(request, scrubber)) {
+      for await (const event of this.#run(runRequest, scrubber)) {
         yield scrubber.scrubDeep(event).value;
       }
     } finally {
@@ -2251,7 +2257,7 @@ export class ClaudeAgentSdkDriver {
       workingDirectory: request.workingDirectory ?? process.cwd(),
       readPtraceScope: mcpSecretHost.readPtraceScope,
       childEnv: this.buildEnv(request),
-      toolEnvNames: this.#toolEnv?.names ?? [],
+      toolEnvNames: claudeToolEnvNames(this.#toolEnv),
     });
     return stdio;
   }

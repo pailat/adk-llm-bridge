@@ -43,8 +43,9 @@ export interface ClaudeToolEnv {
   source?: ClaudeToolEnvSource;
   /**
    * Also copy the proxy and CA variables in
-   * {@link CLAUDE_TOOL_ENV_PROXY_PASSTHROUGH} from the source, as the Codex
-   * SDK driver does.
+   * {@link CLAUDE_TOOL_ENV_PROXY_PASSTHROUGH} from the driver's `env`, as
+   * the Codex SDK driver copies them from its ambient environment. A set,
+   * non-empty value in `source` wins, so a run can use its own proxy.
    *
    * @defaultValue false
    */
@@ -103,8 +104,13 @@ const KNOWN_KEYS: ReadonlySet<string> = new Set([
 
 /** A checked `toolEnv`: what the driver keeps. */
 export interface CheckedClaudeToolEnv {
-  /** The names to copy, proxy variables included. */
+  /** The listed names, read from the source. */
   readonly names: readonly string[];
+  /**
+   * The `proxyPassthrough` names not listed in `names` (empty when it is
+   * off), read from the driver env unless the source sets them.
+   */
+  readonly proxyNames: readonly string[];
   /** The source, or `undefined` for the driver env. */
   readonly source?: ClaudeToolEnvSource;
 }
@@ -189,14 +195,27 @@ export function checkClaudeToolEnv(
       );
     }
   }
-  const all = new Set<string>(names as string[]);
-  if (proxyPassthrough) {
-    for (const key of CLAUDE_TOOL_ENV_PROXY_PASSTHROUGH) all.add(key);
-  }
+  const proxyNames = proxyPassthrough
+    ? CLAUDE_TOOL_ENV_PROXY_PASSTHROUGH.filter((key) => !seen.has(key))
+    : [];
   return Object.freeze({
-    names: Object.freeze([...all]),
+    names: Object.freeze([...seen]),
+    proxyNames: Object.freeze(proxyNames),
     ...(source !== undefined ? { source: source as ClaudeToolEnvSource } : {}),
   });
+}
+
+/**
+ * Every variable name a `toolEnv` can pass: the listed names and the
+ * `proxyPassthrough` ones. An MCP `{ env }` secret may use none of them.
+ *
+ * @param toolEnv - The checked option, or `undefined` when it is off.
+ * @returns The names (empty when the option is off).
+ */
+export function claudeToolEnvNames(
+  toolEnv: CheckedClaudeToolEnv | undefined,
+): readonly string[] {
+  return toolEnv === undefined ? [] : [...toolEnv.names, ...toolEnv.proxyNames];
 }
 
 /**
@@ -208,13 +227,15 @@ export function checkClaudeToolEnv(
  * @param toolEnv - The checked option, or `undefined` when it is off.
  * @param driverEnv - The driver's `env`, the default source.
  * @returns The source values, or `undefined` when the option is off or
- * lists no name (the source is then not read).
+ * passes no name (the source is then not read).
  */
 export function readClaudeToolEnvSource(
   toolEnv: CheckedClaudeToolEnv | undefined,
   driverEnv: Readonly<Record<string, string | undefined>>,
 ): Readonly<Record<string, string | undefined>> | undefined {
-  if (toolEnv === undefined || toolEnv.names.length === 0) return undefined;
+  if (toolEnv === undefined || claudeToolEnvNames(toolEnv).length === 0) {
+    return undefined;
+  }
   return typeof toolEnv.source === "function"
     ? toolEnv.source()
     : (toolEnv.source ?? driverEnv);
@@ -225,9 +246,11 @@ export function readClaudeToolEnvSource(
  *
  * @remarks
  * Security invariant: only the checked names are read, and only set,
- * non-empty string values are copied; the source is never copied whole.
- * Names in `skip` (the run's credential variables) are left out, so a
- * credential keeps its value.
+ * non-empty string values are copied; neither the source nor the driver env
+ * is copied whole. A listed name is read from the source; a
+ * `proxyPassthrough` name from the source when it sets one, else from the
+ * driver env. Names in `skip` (the run's credential variables) are left
+ * out, so a credential keeps its value.
  *
  * @param toolEnv - The checked option, or `undefined` when it is off.
  * @param driverEnv - The driver's `env`, the default source.
@@ -242,13 +265,22 @@ export function claudeToolEnvValues(
   skip: Readonly<Record<string, string>>,
   snapshot?: Readonly<Record<string, string | undefined>>,
 ): Record<string, string> {
-  if (toolEnv === undefined || toolEnv.names.length === 0) return {};
+  if (toolEnv === undefined || claudeToolEnvNames(toolEnv).length === 0) {
+    return {};
+  }
   const source = snapshot ?? readClaudeToolEnvSource(toolEnv, driverEnv);
   const out: Record<string, string> = {};
+  const copy = (name: string, value: unknown): boolean => {
+    if (typeof value !== "string" || value.length === 0) return false;
+    out[name] = value;
+    return true;
+  };
   for (const name of toolEnv.names) {
+    if (!Object.hasOwn(skip, name)) copy(name, source?.[name]);
+  }
+  for (const name of toolEnv.proxyNames) {
     if (Object.hasOwn(skip, name)) continue;
-    const value: unknown = source?.[name];
-    if (typeof value === "string" && value.length > 0) out[name] = value;
+    if (!copy(name, source?.[name])) copy(name, driverEnv[name]);
   }
   return out;
 }
