@@ -4,6 +4,32 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **An error thrown inside `fetch` says what failed.** A refused connection,
+  DNS or TLS failure, abort, or a custom `fetch` that throws used to surface as
+  the SDK's bare `Connection error.` or `Request timed out.`. The
+  `ProviderLlmError` `detail` (and `errorMessage` in `errorMode: "response"`)
+  now appends the `name` and `code` of each error in the `cause` chain and the
+  request's hostname, for example
+  `Connection error. (cause: TypeError, Error ECONNREFUSED; host: api.openai.com)`,
+  or `Error ConnectionRefused` from Bun's own `fetch`. Cause messages, URLs,
+  query strings and headers are left out; a name is kept only when it ends in
+  `Error` or `Exception` and a code only when it is shaped like a system or
+  library code (`ECONNREFUSED`, `UND_ERR_SOCKET`, `ConnectionRefused`; upper
+  snake words of at most 12 capitals, with no digit inside), so a token-like
+  value is reported as plain `Error`. A part that would make
+  `classifyRecoverable` give the message another code than `TRANSPORT_ERROR`
+  (a host such as `payments.example.com` or `ratelimit.example.com`, a code
+  such as `ENOENT`) is left out, and a `cause` that throws when read ends the
+  summary instead of the error handler. The original error is on `cause`, also
+  for Anthropic's `Request timed out.`, which the SDK throws without one (where
+  `process.getBuiltinModule` is available); the provider error's `code`,
+  `status` and SDK retries are unchanged. `AnthropicLlm` now throws when it is
+  built in a runtime with no global `fetch`.
+
 ## [0.7.0] - 2026-11-13
 
 0.7.0 follows 0.5.3. See [docs/migration-0.7.md](./docs/migration-0.7.md) to
