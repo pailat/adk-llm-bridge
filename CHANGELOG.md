@@ -14,6 +14,25 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   it as `{ changedPaths: result.testPaths }`. A refusal's `index` is the
   path's index in the list. Passing a result with `changedPaths` works as
   before.
+- **`toolEnv`** on `ClaudeAgentSdkDriver` and `ClaudeCliDriver`:
+  `{ names, source, proxyPassthrough }` passes variables the agent's tools
+  need (a `gh` token, a git credential helper, a proxy or CA bundle) to the
+  Claude Code child, so a host no longer dresses them up as a model
+  credential. Off by default, and the child environment is then unchanged.
+  Only names that match the run-spec env grammar are read, and only set,
+  non-empty values are copied; `source` defaults to the driver's `env`.
+  Model names (`EXTERNAL_AGENT_MODEL_OVERRIDE`), debug switches and names
+  the runtime reads itself (`EXTERNAL_AGENT_OPTION_UNSUPPORTED`) are refused
+  when the driver is built, and a run whose MCP `{ env }` secret uses a
+  `toolEnv` name ends with `EXTERNAL_AGENT_MCP_SECRET_UNENFORCEABLE`.
+  `proxyPassthrough: true` copies the Codex proxy and certificate variables
+  plus `NODE_EXTRA_CA_CERTS` (`CLAUDE_TOOL_ENV_PROXY_PASSTHROUGH`) from the
+  driver's `env`, as Codex does, unless `source` sets them. A source
+  function is called once per run, and one that throws ends the run with an
+  `error` event (`CLAUDE_TOOL_ENV_SOURCE_FAILED` on the CLI driver) and
+  `completed`, without spawning. See
+  [Tool environment](docs/external-agent-isolation.md#tool-environment-claude)
+  and host duty 5 of the run spec.
 
 ## [0.7.1] - 2026-11-28
 

@@ -28,6 +28,13 @@ import {
   ClaudeBackgroundTaskTracker,
   createClaudeRunTempDir,
 } from "./claude-run-env.js";
+import {
+  type CheckedClaudeToolEnv,
+  CLAUDE_TOOL_ENV_SOURCE_FAILED,
+  type ClaudeToolEnv,
+  checkClaudeToolEnv,
+  claudeToolEnvValues,
+} from "./claude-tool-env.js";
 import { resolveCliLaunch, validateLaunchConfig } from "./launch.js";
 import { collectTail, type LineSource, readLines } from "./lines.js";
 import {
@@ -426,6 +433,19 @@ export interface ClaudeCliDriverConfig {
   allowBackgroundTasks?: boolean;
 
   /**
+   * Opt-in: variables the host passes to the tools of the run, apart from
+   * the model credential, as in `ClaudeAgentSdkDriver`. Only the listed
+   * names are read from `source` (the driver `env` by default), and only
+   * set, non-empty values reach the process; a credential variable of the
+   * same name wins. Model names, debug switches and names the runtime reads
+   * itself are refused when the driver is built. Unset, the child
+   * environment is exactly what it is without the option.
+   *
+   * @defaultValue undefined (off)
+   */
+  toolEnv?: ClaudeToolEnv;
+
+  /**
    * Opt-in: run a policy with `allowedPaths` (or path bounds inherited from a
    * parent agent) although this driver cannot check tool paths against them.
    * Without it such a run is refused with
@@ -509,6 +529,7 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
   readonly #allowUnsandboxedShell: boolean;
   readonly #allowLocalBinding: boolean;
   readonly #allowBackgroundTasks: boolean;
+  readonly #toolEnv: CheckedClaudeToolEnv | undefined;
   readonly #allowUnenforcedPaths: boolean;
   readonly #model: string | undefined;
   readonly #requireExplicitModel: boolean;
@@ -589,6 +610,7 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
       config.smallFastModel,
       config.requireExplicitModel ?? false,
     );
+    const toolEnv = checkClaudeToolEnv("ClaudeCliDriver", config.toolEnv);
     super({
       providerId: CLAUDE_PROVIDER.id,
       command:
@@ -608,6 +630,7 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
     this.#allowUnsandboxedShell = config.allowUnsandboxedShell ?? false;
     this.#allowLocalBinding = config.allowLocalBinding ?? false;
     this.#allowBackgroundTasks = config.allowBackgroundTasks ?? false;
+    this.#toolEnv = toolEnv;
     this.#allowUnenforcedPaths = config.allowUnenforcedPaths ?? false;
     this.#model = model;
     this.#smallFastModel = smallFastModel;
@@ -711,7 +734,23 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
     }
     const isolation = this.isolationPlan(request);
     const args = this.buildArgs(request);
-    const env = this.buildEnv(request);
+    let env: Record<string, string>;
+    try {
+      env = this.buildEnv(request);
+    } catch (error) {
+      // A toolEnv source function that throws (a token it cannot mint) ends
+      // the run like a refusal: nothing is spawned.
+      const detail = error instanceof Error ? error.message : String(error);
+      yield {
+        type: "error",
+        message: `ClaudeCliDriver: the child environment could not be built: ${detail}`,
+        code: CLAUDE_TOOL_ENV_SOURCE_FAILED,
+        recoverable: false,
+        timestamp: Date.now(),
+      };
+      yield { type: "completed", exitCode: 1, timestamp: Date.now() };
+      return;
+    }
 
     const envRefusal = modelEnvRefusal(
       "ClaudeCliDriver",
@@ -1038,8 +1077,9 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
    * Environment of the child process: only `PATH`, `HOME`, `USER`, `SHELL` and
    * the Claude config directories from the driver's environment, plus the
    * credential variables the provider allowlists when the credential is an
-   * `env` one, and `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` unless
-   * `allowBackgroundTasks`. Nothing else is inherited.
+   * `env` one, the `toolEnv` variables when the option is set (a credential
+   * of the same name wins), and `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`
+   * unless `allowBackgroundTasks`. Nothing else is inherited.
    * {@link ClaudeCliDriver.run} adds the run's private temp directory
    * (`CLAUDE_CODE_TMPDIR`, `TMPDIR`).
    *
@@ -1054,6 +1094,9 @@ export class ClaudeCliDriver extends SubprocessJsonlDriver {
       ["PATH", "HOME", "USER", "SHELL", "CLAUDE_CONFIG_DIR", "XDG_CONFIG_HOME"],
       request,
     );
+    // Base and credential names are never toolEnv names (the base ones are
+    // refused, the credential ones skipped), so no value is overwritten.
+    Object.assign(env, claudeToolEnvValues(this.#toolEnv, this.#env, env));
     applyBackgroundTaskSetting(env, this.#allowBackgroundTasks);
     return env;
   }

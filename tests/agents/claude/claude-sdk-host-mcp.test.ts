@@ -846,6 +846,65 @@ describe("run-time order: no resolver runs before every check passed", () => {
     expectNoCanary(events);
   });
 
+  test("an { env } variable that toolEnv also passes fails the run", async () => {
+    const { sdk, state } = fakeSdk();
+    const events = await collect(
+      driverOf(sdk, {
+        mcpServers: {
+          docs: {
+            type: "http",
+            url: "http://127.0.0.1:1/",
+            headers: { Authorization: { env: "DOCS_TOKEN" } },
+          },
+        },
+        toolEnv: { names: ["DOCS_TOKEN"] },
+        env: { PATH: process.env.PATH, DOCS_TOKEN: CANARY },
+      }),
+    );
+    expect(errorOf(events)?.code).toBe(EXTERNAL_AGENT_MCP_SECRET_UNENFORCEABLE);
+    expect(errorOf(events)?.message).toContain("toolEnv");
+    expect(state.payloads).toEqual([]);
+    expectNoCanary(events);
+  });
+
+  test("a toolEnv name is refused as an { env } secret even when unset", async () => {
+    const events = await collect(
+      driverOf(fakeSdk().sdk, {
+        mcpServers: {
+          docs: {
+            type: "http",
+            url: "http://127.0.0.1:1/",
+            headers: { Authorization: { env: "DOCS_TOKEN" } },
+          },
+        },
+        toolEnv: { names: ["docs_token"], source: {} },
+        env: { PATH: process.env.PATH, DOCS_TOKEN: CANARY },
+      }),
+    );
+    expect(errorOf(events)?.code).toBe(EXTERNAL_AGENT_MCP_SECRET_UNENFORCEABLE);
+    expect(errorOf(events)?.message).toContain("toolEnv");
+    expectNoCanary(events);
+  });
+
+  test("a proxyPassthrough name is refused as an { env } secret", async () => {
+    const events = await collect(
+      driverOf(fakeSdk().sdk, {
+        mcpServers: {
+          docs: {
+            type: "http",
+            url: "http://127.0.0.1:1/",
+            headers: { Authorization: { env: "SSL_CERT_FILE" } },
+          },
+        },
+        toolEnv: { proxyPassthrough: true, source: {} },
+        env: { PATH: process.env.PATH },
+      }),
+    );
+    expect(errorOf(events)?.code).toBe(EXTERNAL_AGENT_MCP_SECRET_UNENFORCEABLE);
+    expect(errorOf(events)?.message).toContain("toolEnv");
+    expectNoCanary(events);
+  });
+
   test("a resolved value equal to a runtime env value is refused before delivery", async () => {
     const provider = {
       ...CLAUDE_PROVIDER,

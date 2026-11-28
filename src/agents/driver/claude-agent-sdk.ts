@@ -80,6 +80,14 @@ import {
   reserveClaudeSpillPath,
 } from "./claude-spill-guard.js";
 import {
+  type CheckedClaudeToolEnv,
+  type ClaudeToolEnv,
+  checkClaudeToolEnv,
+  claudeToolEnvNames,
+  claudeToolEnvValues,
+  readClaudeToolEnvSource,
+} from "./claude-tool-env.js";
+import {
   checkMcpSecretsEnforceable,
   hasMcpSecrets,
   mcpSecretHost,
@@ -560,6 +568,21 @@ export interface ClaudeAgentSdkDriverConfig {
   allowBackgroundTasks?: boolean;
 
   /**
+   * Opt-in: variables the host passes to the tools of the run (a `gh` token,
+   * a git credential helper, a proxy or CA bundle), apart from the model
+   * credential. Only the listed names are read from `source` (the driver
+   * `env` by default), and only set, non-empty values reach Claude Code; a
+   * credential variable of the same name wins. Model names, debug switches
+   * and names the runtime reads itself are refused when the driver is
+   * built, and a run is refused with `EXTERNAL_AGENT_MCP_SECRET_UNENFORCEABLE`
+   * when an MCP `{ env }` secret uses a `toolEnv` name. Unset, the child
+   * environment is exactly what it is without the option.
+   *
+   * @defaultValue undefined (off)
+   */
+  toolEnv?: ClaudeToolEnv;
+
+  /**
    * Opt-in: refuse a run with `MISSING_BINARY` instead of letting the SDK
    * fall back to the Claude Code binary bundled with its install, when no
    * executable was found outside the directories the agent can write and
@@ -847,6 +870,15 @@ export class ClaudeAgentSdkDriver {
   readonly #allowUnsandboxedShell: boolean;
   readonly #allowLocalBinding: boolean;
   readonly #allowBackgroundTasks: boolean;
+  readonly #toolEnv: CheckedClaudeToolEnv | undefined;
+  // The toolEnv source read once per run, keyed by the run's own copy of
+  // the request (see run): every env the run builds (checks, options,
+  // session reads) holds the same values, even when two runs share one
+  // request object.
+  readonly #toolEnvSnapshots = new WeakMap<
+    object,
+    Readonly<Record<string, string | undefined>> | undefined
+  >();
   readonly #strictBinaryResolution: boolean;
   // Maps an ADK session id -> the SDK session id captured from the
   // first turn's system/init (or result) message. Subsequent turns of the same
@@ -916,6 +948,7 @@ export class ClaudeAgentSdkDriver {
       config.smallFastModel,
       config.requireExplicitModel ?? false,
     );
+    this.#toolEnv = checkClaudeToolEnv("ClaudeAgentSdkDriver", config.toolEnv);
     this.#mcpServers = checkClaudeMcpServers(config.mcpServers);
     this.#mcpConnectTimeoutMs = checkMcpConnectTimeout(
       config.mcpConnectTimeoutMs,
@@ -1063,8 +1096,11 @@ export class ClaudeAgentSdkDriver {
     // Every event leaves through the run's scrubber, which holds the MCP
     // secrets the run read; it is cleared when the run ends.
     const scrubber = new SecretScrubber();
+    // A copy per run: the toolEnv snapshot is keyed by it, so concurrent
+    // runs of one request object never share or delete each other's.
+    const runRequest = { ...request };
     try {
-      for await (const event of this.#run(request, scrubber)) {
+      for await (const event of this.#run(runRequest, scrubber)) {
         yield scrubber.scrubDeep(event).value;
       }
     } finally {
@@ -1175,6 +1211,12 @@ export class ClaudeAgentSdkDriver {
       if (name !== BRIDGE_MCP_SERVER) mcpEvents.servers.add(name);
     }
     try {
+      // One read of the toolEnv source for the whole run, inside the try so
+      // a source that throws ends the run with an error event.
+      this.#toolEnvSnapshots.set(
+        request,
+        readClaudeToolEnvSource(this.#toolEnv, this.#env),
+      );
       // A session store factory that cannot build its store ends the run
       // here, before the SDK is loaded: a store that fails inside append()
       // would only be reported as mirror_error and the run would go on
@@ -1685,6 +1727,7 @@ export class ClaudeAgentSdkDriver {
         };
       }
     } finally {
+      this.#toolEnvSnapshots.delete(request);
       if (query) {
         await this.disposeQuery(query, completed);
       }
@@ -2115,11 +2158,14 @@ export class ClaudeAgentSdkDriver {
   /**
    * Environment of the `claude` subprocess: only `PATH`, `HOME`, `USER`,
    * `SHELL` (with a fallback shell), the Claude config directories and the
-   * client-app marker, plus the credential variables the provider allowlists
-   * when the credential is an `env` one, and
+   * client-app marker, the `toolEnv` variables when the option is set, the
+   * credential variables the provider allowlists when the credential is an
+   * `env` one (they win over `toolEnv`), and
    * `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` unless `allowBackgroundTasks`.
    * Nothing else is inherited. {@link ClaudeAgentSdkDriver.run} adds the
-   * run's private temp directory (`CLAUDE_CODE_TMPDIR`, `TMPDIR`).
+   * run's private temp directory (`CLAUDE_CODE_TMPDIR`, `TMPDIR`). Inside a
+   * run the `toolEnv` values come from the run's one read of the source; a
+   * direct call outside a run reads the source again.
    *
    * @param request - The run request.
    * @returns The environment to pass to the SDK.
@@ -2145,7 +2191,17 @@ export class ClaudeAgentSdkDriver {
     copyIfPresent(this.#env, env, "XDG_CONFIG_HOME");
     env.CLAUDE_AGENT_SDK_CLIENT_APP = "adk-llm-bridge";
 
-    Object.assign(env, credentialEnv(request));
+    const credentials = credentialEnv(request);
+    Object.assign(
+      env,
+      claudeToolEnvValues(
+        this.#toolEnv,
+        this.#env,
+        credentials,
+        this.#toolEnvSnapshots.get(request),
+      ),
+      credentials,
+    );
     applyBackgroundTaskSetting(env, this.#allowBackgroundTasks);
     if (hasMcpSecrets(this.#mcpServers)) {
       // An MCP result too large to inline stays inline (truncated) instead of
@@ -2201,6 +2257,7 @@ export class ClaudeAgentSdkDriver {
       workingDirectory: request.workingDirectory ?? process.cwd(),
       readPtraceScope: mcpSecretHost.readPtraceScope,
       childEnv: this.buildEnv(request),
+      toolEnvNames: claudeToolEnvNames(this.#toolEnv),
     });
     return stdio;
   }
