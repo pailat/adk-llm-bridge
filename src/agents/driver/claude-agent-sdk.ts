@@ -354,8 +354,8 @@ export interface ClaudeAgentSdkDriverConfig {
    */
   effort?: ClaudeEffort;
   /**
-   * Passed to the SDK's `maxThinkingTokens` option. A positive integer;
-   * anything else is refused when the driver is built.
+   * Passed to the SDK's `maxThinkingTokens` option. A non-negative integer:
+   * 0 turns thinking off; anything else is refused when the driver is built.
    *
    * @remarks The SDK marks this option deprecated. On models with adaptive
    * thinking (such as Opus 4.6) it is only on or off: any positive value
@@ -882,7 +882,7 @@ export class ClaudeAgentSdkDriver {
    * positive integer, or when either is given without `sessionStore`; also
    * when `maxBudgetUsd` is neither a finite number above 0 nor a function,
    * `effort` is not an SDK effort level, `maxThinkingTokens` is not a
-   * positive integer, or `outputSchema` is not a plain JSON object.
+   * non-negative integer, or `outputSchema` is not a plain JSON object.
    * @throws {@link ExternalAgentPolicyError} with code
    * `EXTERNAL_AGENT_OPTION_UNKNOWN` for a config that is not a plain object
    * or has an unknown key, `EXTERNAL_AGENT_MODEL_INVALID` when `model` is not
@@ -1520,8 +1520,29 @@ export class ClaudeAgentSdkDriver {
         }
         // With an outputSchema the structured value is the only output; a
         // success without a matching one fails instead of ending with text.
+        // A success flagged `is_error` (an API error such as an overload)
+        // has no value: report its own text, classified, not a mismatch.
         let schemaMismatch: ExternalAgentEvent | undefined;
-        if (outputCheck && isSuccessResult(message)) {
+        if (
+          outputCheck &&
+          isSuccessResult(message) &&
+          asRecord(message).is_error === true
+        ) {
+          const text =
+            stringValue(asRecord(message).result) ||
+            "Claude Agent SDK result: success with is_error";
+          const classification = classifyRecoverable({
+            message: text,
+            fallbackCode: "CLAUDE_AGENT_SDK_RESULT_ERROR",
+          });
+          schemaMismatch = {
+            type: "error",
+            message: text,
+            code: classification.code,
+            recoverable: classification.recoverable,
+            timestamp: Date.now(),
+          };
+        } else if (outputCheck && isSuccessResult(message)) {
           const structured = structuredOutputEvent(
             asRecord(message),
             outputCheck,
@@ -1752,6 +1773,9 @@ export class ClaudeAgentSdkDriver {
    * @param request - The run request.
    * @param resume - SDK session id to resume; defaults to the configured
    * `resumeSessionId`.
+   * @remarks A `maxBudgetUsd` function is called on every call of this
+   * method (and of `buildOptionsForRun`), so inspecting the options calls
+   * it too; `run()` calls it once per `query()` call.
    * @returns The options object.
    * @throws `ClaudeMaxBudgetInvalidError` when a `maxBudgetUsd` function
    * throws or returns anything but a finite number above 0 (a run reports

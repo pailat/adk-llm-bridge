@@ -1448,12 +1448,20 @@ export class ExternalAgent extends BaseAgent<ExternalAgentConfig> {
    * output validation reports the mismatch. Integers beyond
    * `Number.MAX_SAFE_INTEGER` stay exact, as strings, in objects, arrays and
    * scalars alike. A driver's structured output (`metadata.structuredOutput`,
-   * for example from `ClaudeAgentSdkDriver`'s `outputSchema`) is parsed the
-   * same way without an agent `outputSchema`, but its integers beyond
-   * `Number.MAX_SAFE_INTEGER` are already rounded: the SDK parsed them.
+   * for example from `ClaudeAgentSdkDriver`'s `outputSchema`) is the JSON of
+   * a value the SDK already parsed, so it is read back with `JSON.parse`:
+   * its numbers stay numbers, and an integer beyond `Number.MAX_SAFE_INTEGER`
+   * is the rounded number the SDK gave.
    */
   private nodeOutput(text: string, structured = false): unknown {
-    if ((structured || this.outputSchema) && text.trim()) {
+    if (structured && text.trim()) {
+      try {
+        return JSON.parse(text);
+      } catch {
+        return text;
+      }
+    }
+    if (this.outputSchema && text.trim()) {
       const parsed = parseJson(text);
       return parsed.ok ? parsed.value : text;
     }

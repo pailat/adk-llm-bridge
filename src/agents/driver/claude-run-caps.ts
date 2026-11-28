@@ -70,7 +70,7 @@ const isBudget = (value: unknown): value is number =>
  * @throws InputValidationError (from `@google/adk`) for a `maxBudgetUsd`
  * that is neither a finite number above 0 nor a function, an `effort` that
  * is not one of the SDK's levels, a `maxThinkingTokens` that is not a
- * positive integer, and an `outputSchema` that is not a JSON object.
+ * non-negative integer, and an `outputSchema` that is not a JSON object.
  */
 export function checkClaudeRunCaps(
   driver: string,
@@ -99,11 +99,11 @@ export function checkClaudeRunCaps(
       !(
         typeof maxThinkingTokens === "number" &&
         Number.isSafeInteger(maxThinkingTokens) &&
-        maxThinkingTokens > 0
+        maxThinkingTokens >= 0
       )
     ) {
       throw new InputValidationError(
-        `${driver}: maxThinkingTokens must be a positive integer.`,
+        `${driver}: maxThinkingTokens must be a non-negative integer (0 turns thinking off).`,
       );
     }
     caps.maxThinkingTokens = maxThinkingTokens;

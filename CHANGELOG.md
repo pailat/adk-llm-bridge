@@ -17,7 +17,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `MAX_BUDGET_EXCEEDED` error. `maxThinkingTokens` goes to the SDK's
   deprecated option of the same name: on models with adaptive thinking
   (such as Opus 4.6) any positive value turns adaptive thinking on and sets
-  no token limit, so `effort` and `maxBudgetUsd` are the controls that limit
+  no token limit, and 0 turns thinking off, so `effort` and `maxBudgetUsd` are the controls that limit
   spend.
 - `ClaudeAgentSdkDriver` takes `outputSchema`, a JSON Schema that the SDK
   gets as `outputFormat: { type: "json_schema" }`. The structured value is
@@ -25,7 +25,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `ExternalAgent` parses it into the Workflow node output. A success with no
   value, or with a value that does not match the schema, ends the run with
   the non-recoverable `CLAUDE_OUTPUT_SCHEMA_MISMATCH` error, never with the
-  raw text. `ClaudeCliDriver` refuses `outputSchema` with
+  raw text. A success that Claude Code flags `is_error` (an API error) ends
+  with its own text and classified code instead. `ClaudeCliDriver` refuses `outputSchema` with
   `EXTERNAL_AGENT_OPTION_UNSUPPORTED`. An isolated run accepts the
   `StructuredOutput` tool that Claude Code adds for the schema, only when
   `outputSchema` is set. Its input is never read as paths, and the
@@ -36,7 +37,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   non-empty `not`, `maxContains` next to `contains` and integrality to the
   SDK, doubles `maxLength`, and reads `oneOf` as `anyOf`. The SDK parses the
   structured value with `JSON.parse`, so an integer beyond
-  `Number.MAX_SAFE_INTEGER` arrives rounded; declare such fields as strings.
+  `Number.MAX_SAFE_INTEGER` arrives rounded (still a number in the node
+  output); declare such fields as strings.
 
 ## [0.7.0] - 2026-11-13
 

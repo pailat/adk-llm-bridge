@@ -184,6 +184,13 @@ describe("ClaudeAgentSdkDriver budget and effort caps", () => {
     expect(options).toMatchObject({ effort: "high", maxThinkingTokens: 8_000 });
   });
 
+  test("maxThinkingTokens 0 (thinking off) reaches query()", () => {
+    const options = new ScriptedSdk()
+      .driver({ maxThinkingTokens: 0 })
+      .buildOptions({ provider: CLAUDE_PROVIDER, context: {} as never });
+    expect(options).toMatchObject({ maxThinkingTokens: 0 });
+  });
+
   test("without the caps no key is passed (the SDK defaults apply)", () => {
     const options = new ScriptedSdk()
       .driver()
@@ -207,7 +214,6 @@ describe("ClaudeAgentSdkDriver budget and effort caps", () => {
     [{ maxBudgetUsd: null }, "maxBudgetUsd"],
     [{ effort: "extreme" }, "effort"],
     [{ effort: 3 }, "effort"],
-    [{ maxThinkingTokens: 0 }, "maxThinkingTokens"],
     [{ maxThinkingTokens: -5 }, "maxThinkingTokens"],
     [{ maxThinkingTokens: 1.5 }, "maxThinkingTokens"],
     [{ maxThinkingTokens: Number.POSITIVE_INFINITY }, "maxThinkingTokens"],
@@ -573,6 +579,23 @@ describe("ClaudeAgentSdkDriver native outputSchema", () => {
     ]);
   });
 
+  test("an API error sent as a success result keeps its text and class", async () => {
+    const fake = new ScriptedSdk();
+    fake.scripts.push([
+      init("s-1"),
+      success("s-1", { is_error: true, result: "API Error: 529 overloaded" }),
+    ]);
+    const events = await run(fake.driver({ outputSchema: SCHEMA }));
+    expect(outputs(events)).toEqual([]);
+    const errors = errorsOf(events);
+    expect(errors.map((e) => e.code)).toEqual([
+      "CLAUDE_AGENT_SDK_RESULT_ERROR",
+    ]);
+    expect(errors[0]?.message).toContain("API Error: 529 overloaded");
+    expect(errors[0]?.recoverable).toBe(true);
+    expect(exitCodes(events)).toEqual([1]);
+  });
+
   test("the SDK giving up on the schema is MAX_STRUCTURED_OUTPUT_RETRIES", async () => {
     const fake = new ScriptedSdk();
     fake.scripts.push([
@@ -611,10 +634,22 @@ describe("ClaudeAgentSdkDriver native outputSchema", () => {
   });
 
   test("the structured value becomes the Workflow node output", async () => {
+    expect(await nodeOutputOf({ customer: "Acme", total: 42 })).toEqual([
+      { customer: "Acme", total: 42 },
+    ]);
+  });
+
+  test("a large number in the structured value stays a number", async () => {
+    expect(await nodeOutputOf({ customer: "Acme", total: 1e16 })).toEqual([
+      { customer: "Acme", total: 1e16 },
+    ]);
+  });
+
+  async function nodeOutputOf(value: Message): Promise<unknown[]> {
     const fake = new ScriptedSdk();
     fake.scripts.push([
       init("s-1"),
-      success("s-1", { structured_output: { customer: "Acme", total: 42 } }),
+      success("s-1", { structured_output: value }),
     ]);
     const agent = new ExternalAgent({
       name: "acme_summary",
@@ -650,8 +685,8 @@ describe("ClaudeAgentSdkDriver native outputSchema", () => {
       if (event.errorCode) errors.push(event.errorMessage ?? event.errorCode);
     }
     expect(errors).toEqual([]);
-    expect(received).toEqual([{ customer: "Acme", total: 42 }]);
-  });
+    return received;
+  }
 
   test("the new codes are exported from adk-llm-bridge/agents", () => {
     expect(agents.CLAUDE_OUTPUT_SCHEMA_MISMATCH).toBe(
