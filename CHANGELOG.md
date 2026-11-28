@@ -15,12 +15,19 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   now appends the `name` and `code` of each error in the `cause` chain and the
   request's hostname, for example
   `Connection error. (cause: TypeError, Error ECONNREFUSED; host: api.openai.com)`,
-  or `Error ConnectionRefused` from Bun's own `fetch`. Cause messages, URLs, query strings and headers are left out, so no API key
-  or token reaches the message, and a part that would change whether
-  `classifyRecoverable` calls the message recoverable (a host such as
-  `payments.example.com`, a code such as `ENOENT`) is left out. The original
-  error is on `cause`, also for Anthropic's `Request timed out.`, which the
-  SDK throws without one; `code`, `status` and SDK retries are unchanged.
+  or `Error ConnectionRefused` from Bun's own `fetch`. Cause messages, URLs,
+  query strings and headers are left out; a name is kept only when it ends in
+  `Error` or `Exception` and a code only when it is shaped like a system or
+  library code (`ECONNREFUSED`, `UND_ERR_SOCKET`, `ConnectionRefused`), so a
+  token-like value is reported as plain `Error`. A part that would make
+  `classifyRecoverable` give the message another code than `TRANSPORT_ERROR`
+  (a host such as `payments.example.com` or `ratelimit.example.com`, a code
+  such as `ENOENT`) is left out, and a `cause` that throws when read ends the
+  summary instead of the error handler. The original error is on `cause`, also
+  for Anthropic's `Request timed out.`, which the SDK throws without one (where
+  `process.getBuiltinModule` is available); the provider error's `code`,
+  `status` and SDK retries are unchanged. `AnthropicLlm` now throws when it is
+  built in a runtime with no global `fetch`.
 
 ## [0.7.0] - 2026-11-13
 

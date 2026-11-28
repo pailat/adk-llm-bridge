@@ -5,7 +5,6 @@
  * directly to Anthropic's Messages API.
  */
 
-import { AsyncLocalStorage } from "node:async_hooks";
 import AnthropicSDK from "@anthropic-ai/sdk";
 import type { LlmRequest, LlmResponse } from "@google/adk";
 import { InputValidationError } from "@google/adk";
@@ -82,8 +81,32 @@ interface FetchFailure {
 /**
  * The {@link FetchFailure} of the provider call that is running. Each call has
  * its own, so concurrent calls do not see each other's errors.
+ *
+ * @remarks Read through `process.getBuiltinModule` rather than imported, so
+ * the package entry loads in a runtime without Node built-ins (a browser, a
+ * worker). There it is `undefined`, and a timeout keeps the SDK's error
+ * without a `cause`.
  */
-const fetchFailures = new AsyncLocalStorage<FetchFailure>();
+type AsyncHooks = typeof import("node:async_hooks");
+const fetchFailures:
+  | import("node:async_hooks").AsyncLocalStorage<FetchFailure>
+  | undefined = (() => {
+  try {
+    const hooks = (
+      globalThis as {
+        process?: { getBuiltinModule?: (id: string) => unknown };
+      }
+    ).process?.getBuiltinModule?.("node:async_hooks") as AsyncHooks | undefined;
+    return hooks ? new hooks.AsyncLocalStorage<FetchFailure>() : undefined;
+  } catch {
+    return undefined;
+  }
+})();
+
+/** Runs `fn` with `failure` as the {@link FetchFailure} of its `fetch` calls. */
+function withFetchFailure<T>(failure: FetchFailure, fn: () => T): T {
+  return fetchFailures ? fetchFailures.run(failure, fn) : fn();
+}
 
 /**
  * Anthropic (Claude) LLM provider.
@@ -149,6 +172,7 @@ export class AnthropicLlm extends BaseProviderLlm {
    *   base URL (from `baseURL`, the global config or `ANTHROPIC_BASE_URL`) is
    *   not a valid absolute URL, or `timeout`, `maxRetries` or `maxTokens` is
    *   set and is not an integer. An integer below the minimum is clamped.
+   * @throws Error When the runtime has no global `fetch`.
    *
    * @example
    * ```typescript
@@ -176,6 +200,13 @@ export class AnthropicLlm extends BaseProviderLlm {
     // Unset stays undefined: prompt caching is then automatic, per request.
     this.promptCaching = config.promptCaching ?? globalConfig.promptCaching;
 
+    // The SDK checks for a global `fetch` only when it is not given one, and
+    // it is given the wrapper below.
+    if (typeof globalThis.fetch !== "function") {
+      throw new Error(
+        "`fetch` is not defined as a global; polyfill it: `globalThis.fetch = fetch`",
+      );
+    }
     this.client = new AnthropicSDK({
       apiKey: resolved.apiKey,
       baseURL: resolved.baseURL,
@@ -183,11 +214,15 @@ export class AnthropicLlm extends BaseProviderLlm {
       maxRetries: resolved.maxRetries,
       // On a timeout or abort the SDK throws `APIConnectionTimeoutError`
       // without the error `fetch` threw; record it to restore it as `cause`.
+      // A fetch that succeeds clears it, so a later error without a cause is
+      // not given an earlier attempt's.
       fetch: async (input, init) => {
+        const failure = fetchFailures?.getStore();
         try {
-          return await this.transportFetch(input, init);
+          const response = await this.transportFetch(input, init);
+          if (failure) failure.error = undefined;
+          return response;
         } catch (error) {
-          const failure = fetchFailures.getStore();
           if (failure) failure.error = error;
           throw error;
         }
@@ -415,7 +450,7 @@ export class AnthropicLlm extends BaseProviderLlm {
     // The raw body is parsed here, not by the SDK: `JSON.parse` would round
     // integers beyond `Number.MAX_SAFE_INTEGER` in tool inputs (19-digit ids);
     // `parseJson` keeps them exact, as strings, like the streaming path.
-    const raw = await fetchFailures.run(failure, () =>
+    const raw = await withFetchFailure(failure, () =>
       this.client.messages
         .create(
           this.buildRequestParams(
@@ -474,7 +509,7 @@ export class AnthropicLlm extends BaseProviderLlm {
   ): AsyncGenerator<LlmResponse, boolean> {
     // The SDK sends the request from here, so its `fetch` runs in `failure`'s
     // context.
-    const stream = fetchFailures.run(failure, () =>
+    const stream = withFetchFailure(failure, () =>
       this.client.messages.stream(
         this.buildRequestParams(
           messages,

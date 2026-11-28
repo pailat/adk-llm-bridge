@@ -1,8 +1,12 @@
 import { describe, expect, it } from "bun:test";
+import AnthropicSDK from "@anthropic-ai/sdk";
 import type { LlmRequest, LlmResponse } from "@google/adk";
 import { classifyRecoverable } from "../../src/agents/runtime/error-classification.js";
 import { OpenAICompatibleLlm } from "../../src/core/openai-compatible-llm.js";
-import { ProviderLlmError } from "../../src/core/provider-llm-error.js";
+import {
+  describeProviderFailure,
+  ProviderLlmError,
+} from "../../src/core/provider-llm-error.js";
 import { AnthropicLlm } from "../../src/providers/anthropic/anthropic-llm.js";
 
 const API_KEY = "sk-acme-SECRETKEY123";
@@ -347,6 +351,111 @@ describe("an error thrown inside fetch", () => {
     expect(causes(error)).toContain(thrownByFetch[1]);
   });
 
+  it("survives a cause that throws when it is read", async () => {
+    const throwingCode = Object.defineProperty(
+      new Error("connect ECONNREFUSED"),
+      "code",
+      {
+        get() {
+          throw new TypeError("acme getter");
+        },
+      },
+    );
+    const error = new Error("Connection error.", {
+      cause: Object.assign(new TypeError("fetch failed"), {
+        code: "ECONNREFUSED",
+        cause: throwingCode,
+      }),
+    });
+    const llm = openAiWith(refused());
+
+    // biome-ignore lint/suspicious/noExplicitAny: test access to the protected builder
+    const response = (llm as any).createErrorResponse(error, "ACME");
+
+    expect(response.errorCode).toBe("ACME_ERROR");
+    expect(response.errorMessage).toBe(
+      "Connection error. (cause: TypeError ECONNREFUSED; host: api.acme.test)",
+    );
+  });
+
+  it("describes a failure whose cause is a revoked Proxy", () => {
+    const { proxy, revoke } = Proxy.revocable({}, {});
+    revoke();
+    const error = new Error("Connection error.", {
+      cause: new TypeError("fetch failed", { cause: proxy }),
+    });
+
+    expect(describeProviderFailure(error, "api.acme.test")).toBe(
+      "Connection error. (cause: TypeError; host: api.acme.test)",
+    );
+  });
+
+  it("leaves out a name or code shaped like a secret", async () => {
+    const error = await thrown(
+      openAiWith(async () => {
+        throw Object.assign(new Error("acme"), {
+          name: "ghp_acmeTOKEN1234567890",
+          code: "AKIAACMEEXAMPLE7KEY",
+        });
+      }),
+    );
+
+    expect(error.detail).not.toContain("ghp_");
+    expect(error.detail).not.toContain("AKIA");
+    expect(error.detail).toContain("api.acme.test");
+  });
+
+  it("does not report an earlier attempt's fetch error", async () => {
+    let calls = 0;
+    const stale: unknown[] = [];
+    const llm = anthropicWith(
+      recording(async () => {
+        calls++;
+        if (calls === 1) return refused()("", undefined);
+        return new Response("{}", {
+          headers: { "content-type": "application/json" },
+        });
+      }, stale),
+      1,
+    );
+    // biome-ignore lint/suspicious/noExplicitAny: test access to private client
+    (llm as any).client.middleware.push(
+      async (request: unknown, next: (r: unknown) => Promise<Response>) => {
+        await next(request);
+        throw new AnthropicSDK.APIConnectionTimeoutError();
+      },
+    );
+
+    const error = await thrown(llm);
+
+    expect(calls).toBe(2);
+    expect(stale).toHaveLength(1);
+    expect(causes(error)).not.toContain(stale[0]);
+  });
+
+  it("refuses to build without a global fetch, as the SDK does", () => {
+    const original = globalThis.fetch;
+    // biome-ignore lint/suspicious/noExplicitAny: removes the global for the test
+    (globalThis as any).fetch = undefined;
+    try {
+      expect(
+        () => new AnthropicLlm({ model: "claude-sonnet-5-5", apiKey: API_KEY }),
+      ).toThrow(/fetch/);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it("loads no Node built-in when the module is imported", async () => {
+    const source = await Bun.file(
+      new URL(
+        "../../src/providers/anthropic/anthropic-llm.ts",
+        import.meta.url,
+      ),
+    ).text();
+    expect(source).not.toMatch(/from "node:/);
+  });
+
   it("does not cross causes between concurrent Anthropic calls", async () => {
     const abort = new DOMException("The operation was aborted.", "AbortError");
     const late = new TypeError("fetch failed", {
@@ -427,6 +536,18 @@ describe("retry classification of a fetch failure", () => {
     const enoent = await thrown(openAiWith(missingFile()));
     expect(enoent.detail).not.toContain("ENOENT");
     expect(enoent.detail).toContain("api.acme.test");
+  });
+
+  it("leaves out a host that would change the classifier's code", async () => {
+    const error = await thrown(
+      openAiWith(refused(), { host: "ratelimit-proxy.acme.test" }),
+    );
+
+    expect(error.detail).toContain("ECONNREFUSED");
+    expect(error.detail).not.toContain("ratelimit");
+    expect(classifyRecoverable({ message: error.detail }).code).toBe(
+      "TRANSPORT_ERROR",
+    );
   });
 
   it("does not change an HTTP error", async () => {
