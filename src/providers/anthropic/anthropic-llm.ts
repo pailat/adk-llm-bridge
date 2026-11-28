@@ -12,7 +12,10 @@ import { getProviderConfig } from "../../config.js";
 import { BaseProviderLlm } from "../../core/base-provider-llm.js";
 import { resolveConfig } from "../../core/config-resolver.js";
 import type { ProviderDefinition } from "../../core/provider-definition.js";
-import { PROVIDER_ERROR_INCOMPLETE_STREAM } from "../../core/provider-llm-error.js";
+import {
+  hostnameOf,
+  PROVIDER_ERROR_INCOMPLETE_STREAM,
+} from "../../core/provider-llm-error.js";
 import {
   annotateCacheUsage,
   annotateLlmSpan,
@@ -167,6 +170,11 @@ export class AnthropicLlm extends BaseProviderLlm {
     // symbol or by a /^claude-/ model name. The symbol also covers aliases such
     // as `us.anthropic.claude-...` that the name check misses.
     (this as unknown as Record<symbol, boolean>)[CLAUDE_MODEL_SYMBOL] = true;
+  }
+
+  /** Hostname of the client's base URL. */
+  protected override requestHost(): string | undefined {
+    return hostnameOf(this.client.baseURL);
   }
 
   /**

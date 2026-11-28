@@ -97,6 +97,76 @@ export class ProviderLlmError extends Error {
   }
 }
 
+/** Deepest `cause` read by {@link describeProviderFailure}. */
+const MAX_CAUSE_DEPTH = 5;
+/** An error `name` that is an identifier, e.g. `TypeError` or `AbortError`. */
+const SAFE_NAME = /^[A-Za-z_$][\w$]{0,63}$/;
+/** A system or library error `code`, e.g. `ECONNREFUSED` or `UND_ERR_SOCKET`. */
+const SAFE_CODE = /^[A-Z][A-Z0-9_]{0,63}$/;
+
+/**
+ * Describes a caught provider failure without secrets.
+ *
+ * @remarks
+ * An error thrown inside `fetch` (refused connection, DNS or TLS failure,
+ * abort, a custom `fetch` that throws) reaches the provider as the SDK's
+ * generic `Connection error.` or `Request timed out.`, with the original
+ * error on `cause`. This appends what tells the failures apart: the `name` and
+ * `code` of each error in the `cause` chain, and the host of the request. Cause
+ * messages, URLs and headers are left out, since they can carry an API key, a
+ * bearer token or a query string.
+ *
+ * @param error - A caught value.
+ * @param host - Hostname the request was sent to, if known.
+ * @returns The message of `error`, followed by the summary when `error` has no
+ *   HTTP status and has a `cause`.
+ * @internal
+ */
+export function describeProviderFailure(error: unknown, host?: string): string {
+  const message = error instanceof Error ? error.message : String(error);
+  if (!(error instanceof Error) || httpStatusOf(error) !== undefined) {
+    return message;
+  }
+  const chain: string[] = [];
+  const seen = new Set<unknown>([error]);
+  let current: unknown = error.cause;
+  while (
+    current !== null &&
+    typeof current === "object" &&
+    !seen.has(current) &&
+    chain.length < MAX_CAUSE_DEPTH
+  ) {
+    seen.add(current);
+    const { name, code } = current as { name?: unknown; code?: unknown };
+    const parts = [
+      typeof name === "string" && SAFE_NAME.test(name) ? name : "Error",
+    ];
+    if (typeof code === "string" && SAFE_CODE.test(code)) parts.push(code);
+    chain.push(parts.join(" "));
+    current = (current as { cause?: unknown }).cause;
+  }
+  if (chain.length === 0) return message;
+  const hostPart = host ? `; host: ${host}` : "";
+  return `${message} (cause: ${chain.join(", ")}${hostPart})`;
+}
+
+/**
+ * Reads the hostname of a base URL, without its port, path, query or user
+ * info.
+ *
+ * @param url - A base URL.
+ * @returns The hostname, or `undefined` when `url` does not parse.
+ * @internal
+ */
+export function hostnameOf(url: string | undefined): string | undefined {
+  if (!url) return undefined;
+  try {
+    return new URL(url).hostname || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Reads the HTTP status of a caught provider SDK error.
  *
