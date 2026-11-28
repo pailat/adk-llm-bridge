@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { readFragments, unreleasedNotes } from "../../scripts/changelog.js";
+import { changelogWithFragments } from "../../scripts/changelog.js";
 
 // Reads files only. The behaviour the page states is tested in
 // tests/agents/driver/mcp-headless-lane-linux.test.ts.
@@ -10,26 +10,6 @@ const REPO_ROOT = resolve(import.meta.dir, "../..");
 const PAGE = "docs/mcp-headless-lane.md";
 
 const read = (path: string) => readFileSync(join(REPO_ROOT, path), "utf8");
-
-/**
- * The unreleased notes (the CHANGELOG's Unreleased section and the
- * changes/unreleased fragments) plus the newest release, so the check
- * survives cutting a release.
- */
-function newestNotes(): string {
-  const changelog = read("CHANGELOG.md");
-  const start = changelog.indexOf("## [Unreleased]");
-  expect(start).toBeGreaterThan(-1);
-  const release = changelog.indexOf("\n## [", start + 1);
-  const after = release === -1 ? -1 : changelog.indexOf("\n## [", release + 1);
-  return (
-    unreleasedNotes(changelog, readFragments(REPO_ROOT)) +
-    changelog.slice(
-      release === -1 ? start : release,
-      after === -1 ? undefined : after,
-    )
-  );
-}
 
 describe("MCP from a headless lane: the recipe page", () => {
   test("the page exists, is listed in the docs index and has one H1", () => {
@@ -138,7 +118,9 @@ describe("MCP from a headless lane: the recipe page", () => {
     ).toBe(true);
   });
 
-  test("the CHANGELOG's newest notes name the page", () => {
-    expect(newestNotes()).toContain("docs/mcp-headless-lane.md");
+  // The whole CHANGELOG plus pending fragments, so the check holds whichever
+  // release carries the entry and however many releases follow it.
+  test("the CHANGELOG or a pending fragment names the page", () => {
+    expect(changelogWithFragments(REPO_ROOT)).toContain(PAGE);
   });
 });

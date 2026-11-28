@@ -190,6 +190,16 @@ export function releaseInPlace(
   for (const fragment of fragments) rmSync(join(root, fragment.name));
 }
 
+/**
+ * Every note the repository at `root` holds: the notes still waiting in
+ * fragments, then the whole `CHANGELOG.md`. A docs test that looks for an
+ * entry reads this, so the entry is found before and after any release.
+ */
+export function changelogWithFragments(root: string): string {
+  const changelog = readFileSync(join(root, "CHANGELOG.md"), "utf8");
+  return `${unreleasedNotes(changelog, readFragments(root))}\n${changelog}`;
+}
+
 /** The outcome of {@link checkFragments}. */
 export interface CheckResult {
   ok: boolean;

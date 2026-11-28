@@ -10,6 +10,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
+  changelogWithFragments,
   checkFragments,
   FRAGMENT_DIR,
   parseFragment,
@@ -180,6 +181,120 @@ describe("checkFragments", () => {
     expect(
       checkFragments(["src/index.ts", fragment], { exists: () => false }).ok,
     ).toBe(false);
+  });
+});
+
+describe("changelogWithFragments", () => {
+  test("holds text found only in a fragment, and still holds it releases later", () => {
+    const repo = join(scratch, "docs-source");
+    mkdirSync(join(repo, FRAGMENT_DIR), { recursive: true });
+    writeFileSync(join(repo, "CHANGELOG.md"), changelog(""));
+    writeFileSync(
+      join(repo, FRAGMENT_DIR, "acme.md"),
+      "### Docs\n\n- The Acme page (docs/acme.md).\n",
+    );
+    expect(readFileSync(join(repo, "CHANGELOG.md"), "utf8")).not.toContain(
+      "docs/acme.md",
+    );
+    expect(changelogWithFragments(repo)).toContain("docs/acme.md");
+    expect(changelogWithFragments(repo)).toContain("The first Acme widget.");
+
+    releaseInPlace(repo, "0.2.0", "2026-02-02");
+    writeFileSync(
+      join(repo, FRAGMENT_DIR, "later.md"),
+      "### Fixed\n\n- A later Acme fix.\n",
+    );
+    releaseInPlace(repo, "0.3.0", "2026-03-03");
+    expect(changelogWithFragments(repo)).toContain("docs/acme.md");
+  });
+});
+
+describe("the check command", () => {
+  // A throwaway repository with a copy of the script, so the command runs its
+  // own git diff, environment lookup and exit code as CI does.
+  const repo = join(scratch, "check-repo");
+  const env: Record<string, string> = {
+    PATH: process.env.PATH ?? "",
+    HOME: scratch,
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_AUTHOR_NAME: "Acme Dev",
+    GIT_AUTHOR_EMAIL: "dev@acme.example",
+    GIT_COMMITTER_NAME: "Acme Dev",
+    GIT_COMMITTER_EMAIL: "dev@acme.example",
+  };
+  const git = (...args: string[]) => {
+    const run = Bun.spawnSync(["git", ...args], { cwd: repo, env });
+    if (run.exitCode !== 0) throw new Error(run.stderr.toString());
+  };
+  const write = (path: string, text: string) => {
+    mkdirSync(join(repo, path, ".."), { recursive: true });
+    writeFileSync(join(repo, path), text);
+  };
+  const check = (extraEnv: Record<string, string> = {}) =>
+    Bun.spawnSync(
+      [process.execPath, "scripts/changelog.ts", "check", "--base", "main"],
+      { cwd: repo, env: { ...env, ...extraEnv } },
+    );
+  /** A fresh branch off main holding `edit`'s changes in one commit. */
+  const branch = (name: string, edit: () => void) => {
+    git("checkout", "--quiet", "main");
+    git("checkout", "--quiet", "-b", name);
+    edit();
+    git("add", "--all");
+    git("commit", "--quiet", "-m", name);
+  };
+
+  mkdirSync(join(repo, "scripts"), { recursive: true });
+  writeFileSync(
+    join(repo, "scripts/changelog.ts"),
+    readFileSync(join(ROOT, "scripts/changelog.ts")),
+  );
+  write("src/acme.ts", "export const acme = 1;\n");
+  write(`${FRAGMENT_DIR}/old.md`, "### Added\n\n- An old Acme entry.\n");
+  git("init", "--quiet", "--initial-branch=main");
+  git("add", "--all");
+  git("commit", "--quiet", "-m", "initial");
+
+  test("exits 1 for a source change without a fragment", () => {
+    branch("no-fragment", () =>
+      write("src/acme.ts", "export const acme = 2;\n"),
+    );
+    const run = check();
+    expect(run.exitCode).toBe(1);
+    expect(run.stderr.toString()).toContain("without a fragment");
+  });
+
+  test("exits 0 when the branch adds a fragment", () => {
+    branch("with-fragment", () => {
+      write("src/acme.ts", "export const acme = 3;\n");
+      write(`${FRAGMENT_DIR}/acme.md`, "### Fixed\n\n- An Acme fix.\n");
+    });
+    expect(check().exitCode).toBe(0);
+  });
+
+  test("exits 0 with CHANGELOG_SKIP set, 1 with it blank", () => {
+    branch("skipped", () => write("src/acme.ts", "export const acme = 4;\n"));
+    expect(check({ CHANGELOG_SKIP: "internal refactor" }).exitCode).toBe(0);
+    expect(check({ CHANGELOG_SKIP: "" }).exitCode).toBe(1);
+  });
+
+  test("exits 1 when the only fragment change deletes one", () => {
+    branch("deleted-fragment", () => {
+      write("src/acme.ts", "export const acme = 5;\n");
+      rmSync(join(repo, FRAGMENT_DIR, "old.md"));
+    });
+    expect(check().exitCode).toBe(1);
+  });
+
+  test("exits 1 when a fragment does not parse", () => {
+    branch("bad-fragment", () => {
+      write("src/acme.ts", "export const acme = 6;\n");
+      write(`${FRAGMENT_DIR}/bad.md`, "### Improved\n\n- x\n");
+    });
+    const run = check();
+    expect(run.exitCode).toBe(1);
+    expect(run.stderr.toString()).toContain('unknown section "Improved"');
   });
 });
 
